@@ -3,6 +3,7 @@
 //! The public text form of each identifier is opaque and type-tagged. The
 //! random 128-bit representation is an implementation detail, not a UUID API.
 
+pub mod catalogue;
 pub mod types;
 
 use std::{fmt, str::FromStr};
@@ -142,6 +143,8 @@ macro_rules! define_id {
 
 define_id!(TypeId, "type");
 define_id!(FieldId, "field");
+define_id!(CatalogueRevisionId, "catalogue-revision");
+define_id!(ExpressionId, "expression");
 define_id!(ObjectId, "object");
 define_id!(FunctionId, "function");
 define_id!(ParameterId, "parameter");
@@ -166,6 +169,29 @@ mod tests {
         assert_eq!(ObjectId::from_canonical(&canonical), Ok(id));
         assert_eq!(canonical.parse::<ObjectId>(), Ok(id));
         assert!(!canonical.contains('-'));
+    }
+
+    #[test]
+    fn catalogue_identifiers_use_their_own_canonical_type_tags() {
+        let revision = CatalogueRevisionId::from_bytes([0x12; 16]);
+        let expression = ExpressionId::from_bytes([0x12; 16]);
+
+        assert_eq!(
+            revision.canonical(),
+            "catalogue-revision:289144gj289144gj289144gj28"
+        );
+        assert_eq!(
+            expression.canonical(),
+            "expression:289144gj289144gj289144gj28"
+        );
+        assert_eq!(
+            CatalogueRevisionId::from_canonical(&revision.canonical()),
+            Ok(revision)
+        );
+        assert_eq!(
+            ExpressionId::from_canonical(&expression.canonical()),
+            Ok(expression)
+        );
     }
 
     #[test]
