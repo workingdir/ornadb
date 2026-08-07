@@ -190,6 +190,19 @@ pub enum FunctionVolatility {
     Volatile,
 }
 
+/// One capability required by a function declaration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilitySpecification {
+    /// The capability name as written in source.
+    pub name: QualifiedName,
+    /// The exact argument source inside the optional parentheses.
+    ///
+    /// `Some` with an empty slice represents an explicitly empty argument list.
+    pub arguments: Option<SourceSlice>,
+    /// The span from the capability name through the optional closing parenthesis.
+    pub span: SourceSpan,
+}
+
 /// The body of a server function.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServerFunctionBody {
@@ -212,6 +225,8 @@ pub struct ServerFunctionDeclaration {
     pub transaction: Option<FunctionTransaction>,
     /// The optional volatility mode.
     pub volatility: Option<FunctionVolatility>,
+    /// The capabilities required by the function, in source order.
+    pub capabilities: Vec<CapabilitySpecification>,
     /// The retained server function body.
     pub body: ServerFunctionBody,
     /// The declaration span, including its terminating semicolon.
@@ -507,6 +522,101 @@ mod tests {
             parsed.server_functions()[1].volatility,
             Some(FunctionVolatility::Volatile),
         );
+    }
+
+    #[test]
+    fn parses_server_function_capabilities_after_execution_modifiers() {
+        let source = "CREATE SERVER FUNCTION security.rotate_key(p_key TEXT)\n\
+            RETURNS BOOL\n\
+            SECURITY DEFINER\n\
+            TRANSACTION ATOMIC\n\
+            VOLATILITY VOLATILE\n\
+            REQUIRES CAPABILITY sys.secret.read(p_key, audit(sys.time.now(), p_actor)),\n\
+                std.net.call(\n\
+                    endpoint => p_endpoint,\n\
+                    metadata => trace(request(1, 2))\n\
+                ),\n\
+                sys.job.submit,\n\
+                sys.job.noop()\n\
+            AS SELECT TRUE;";
+        let parsed = parse(source);
+
+        assert!(parsed.diagnostics().is_empty());
+        assert_eq!(parsed.syntax().text(), source);
+
+        let capabilities = &parsed.server_functions()[0].capabilities;
+        assert_eq!(capabilities.len(), 4);
+        assert_eq!(capabilities[0].name.parts[0].text, "sys");
+        assert_eq!(capabilities[0].name.parts[1].text, "secret");
+        assert_eq!(capabilities[0].name.parts[2].text, "read");
+        assert_eq!(
+            capabilities[0]
+                .arguments
+                .as_ref()
+                .map(|arguments| arguments.text.as_str()),
+            Some("p_key, audit(sys.time.now(), p_actor)"),
+        );
+        assert_eq!(
+            capabilities[1]
+                .arguments
+                .as_ref()
+                .map(|arguments| arguments.text.as_str()),
+            Some("\nendpoint => p_endpoint,\nmetadata => trace(request(1, 2))\n"),
+        );
+        assert!(capabilities[2].arguments.is_none());
+        assert_eq!(
+            capabilities[3]
+                .arguments
+                .as_ref()
+                .map(|arguments| arguments.text.as_str()),
+            Some(""),
+        );
+        assert_eq!(
+            capabilities[1]
+                .arguments
+                .as_ref()
+                .expect("arguments exist")
+                .span
+                .start,
+            source.find("\nendpoint").expect("arguments exist"),
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_server_function_capability_clauses() {
+        let sources = [
+            (
+                "CREATE SERVER FUNCTION security.bad() RETURNS BOOL REQUIRES CAPABILITY AS SELECT TRUE;",
+                "expected a capability",
+            ),
+            (
+                "CREATE SERVER FUNCTION security.bad() RETURNS BOOL REQUIRES CAPABILITY sys.secret.read(), AS SELECT TRUE;",
+                "trailing commas",
+            ),
+            (
+                "CREATE SERVER FUNCTION security.bad() RETURNS BOOL REQUIRES CAPABILITY sys.secret.read(p_key AS SELECT TRUE;",
+                "expected ')'",
+            ),
+        ];
+
+        for (source, expected_message) in sources {
+            let parsed = parse(source);
+
+            assert_eq!(parsed.syntax().text(), source);
+            assert!(parsed.server_functions().is_empty());
+            assert!(
+                parsed
+                    .diagnostics()
+                    .iter()
+                    .any(|diagnostic| diagnostic.code == "ORNA0001"),
+            );
+            assert!(
+                parsed
+                    .diagnostics()
+                    .iter()
+                    .any(|diagnostic| diagnostic.message.contains(expected_message)),
+            );
+        }
     }
 
     #[test]
