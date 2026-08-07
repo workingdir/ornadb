@@ -69,6 +69,16 @@ pub struct SchemaDeclaration {
 pub enum TypeSpecification {
     /// A named type, including source spellings such as `TEXT` and `BOOL`.
     Named(QualifiedName),
+    /// A standard large-object scalar written as multiple words.
+    ///
+    /// This is not a qualified name. Its source slice keeps every source byte
+    /// between the words, including comments and whitespace.
+    StandardLargeObject {
+        /// The standard scalar selected by the written phrase.
+        kind: StandardLargeObjectKind,
+        /// The exact written standard scalar phrase.
+        source: SourceSlice,
+    },
     /// A typed reference to an object type.
     Reference {
         /// The object type named by the reference.
@@ -83,9 +93,19 @@ impl TypeSpecification {
     pub fn span(&self) -> &SourceSpan {
         match self {
             Self::Named(name) => &name.span,
+            Self::StandardLargeObject { source, .. } => &source.span,
             Self::Reference { span, .. } => span,
         }
     }
+}
+
+/// The standard large-object scalar phrases recognised by Orna syntax.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StandardLargeObjectKind {
+    /// `CHARACTER LARGE OBJECT`.
+    Character,
+    /// `BINARY LARGE OBJECT`.
+    Binary,
 }
 
 /// A source slice retained for an expression that is not parsed in this slice.
@@ -313,7 +333,7 @@ pub fn parse(source: &str) -> Parse {
 mod tests {
     use super::{
         FunctionReturnType, FunctionSecurity, FunctionTransaction, FunctionVolatility,
-        OnDeletePolicy, ServerFunctionBody, TypeSpecification, parse,
+        OnDeletePolicy, ServerFunctionBody, StandardLargeObjectKind, TypeSpecification, parse,
     };
 
     #[test]
@@ -504,17 +524,30 @@ mod tests {
         assert_eq!(parsed.syntax().text(), source);
 
         let fields = &parsed.object_types()[0].fields;
-        assert_named_type(&fields[0].type_specification, "CHARACTER LARGE OBJECT");
-        assert_named_type(&fields[1].type_specification, "BINARY LARGE OBJECT");
+        assert_standard_large_object_type(
+            &fields[0].type_specification,
+            StandardLargeObjectKind::Character,
+            "CHARACTER LARGE OBJECT",
+        );
+        assert_standard_large_object_type(
+            &fields[1].type_specification,
+            StandardLargeObjectKind::Binary,
+            "BINARY LARGE OBJECT",
+        );
 
         let encode = &parsed.server_functions()[0];
-        assert_named_type(
+        assert_standard_large_object_type(
             &encode.parameters[0].type_specification,
+            StandardLargeObjectKind::Character,
             "CHARACTER LARGE OBJECT",
         );
         match &encode.return_type {
             FunctionReturnType::Single(type_specification) => {
-                assert_named_type(type_specification, "BINARY LARGE OBJECT");
+                assert_standard_large_object_type(
+                    type_specification,
+                    StandardLargeObjectKind::Binary,
+                    "BINARY LARGE OBJECT",
+                );
             }
             FunctionReturnType::Rows { .. } => panic!("files.encode must return one value"),
         }
@@ -522,10 +555,38 @@ mod tests {
         let describe = &parsed.server_functions()[1];
         match &describe.return_type {
             FunctionReturnType::Rows { columns, .. } => {
-                assert_named_type(&columns[0].type_specification, "CHARACTER LARGE OBJECT");
-                assert_named_type(&columns[1].type_specification, "BINARY LARGE OBJECT");
+                assert_standard_large_object_type(
+                    &columns[0].type_specification,
+                    StandardLargeObjectKind::Character,
+                    "CHARACTER LARGE OBJECT",
+                );
+                assert_standard_large_object_type(
+                    &columns[1].type_specification,
+                    StandardLargeObjectKind::Binary,
+                    "BINARY LARGE OBJECT",
+                );
             }
             FunctionReturnType::Single(_) => panic!("files.describe must return rows"),
+        }
+    }
+
+    #[test]
+    fn retains_exact_source_for_multiword_large_object_types() {
+        let source =
+            "CREATE TYPE files.document AS OBJECT (body cHaRaCtEr /* kept */ LaRgE ObJeCt);";
+        let parsed = parse(source);
+
+        assert!(parsed.diagnostics().is_empty());
+        assert_eq!(parsed.syntax().text(), source);
+
+        match &parsed.object_types()[0].fields[0].type_specification {
+            TypeSpecification::StandardLargeObject { kind, source } => {
+                assert_eq!(*kind, StandardLargeObjectKind::Character);
+                assert_eq!(source.text, "cHaRaCtEr /* kept */ LaRgE ObJeCt");
+            }
+            TypeSpecification::Named(_) | TypeSpecification::Reference { .. } => {
+                panic!("body must use the standard large object AST form")
+            }
         }
     }
 
@@ -608,7 +669,9 @@ mod tests {
                 assert_eq!(target.parts[0].text, "tasks");
                 assert_eq!(target.parts[1].text, "project");
             }
-            TypeSpecification::Named(_) => panic!("project must be a reference"),
+            TypeSpecification::Named(_) | TypeSpecification::StandardLargeObject { .. } => {
+                panic!("project must be a reference")
+            }
         }
 
         let completed = &object_type.fields[2];
@@ -670,7 +733,25 @@ mod tests {
                 assert_eq!(name.parts.len(), 1);
                 assert_eq!(name.parts[0].text, expected);
             }
-            TypeSpecification::Reference { .. } => panic!("field must use a named type"),
+            TypeSpecification::StandardLargeObject { .. } | TypeSpecification::Reference { .. } => {
+                panic!("field must use a named type")
+            }
+        }
+    }
+
+    fn assert_standard_large_object_type(
+        type_specification: &TypeSpecification,
+        expected_kind: StandardLargeObjectKind,
+        expected_source: &str,
+    ) {
+        match type_specification {
+            TypeSpecification::StandardLargeObject { kind, source } => {
+                assert_eq!(*kind, expected_kind);
+                assert_eq!(source.text, expected_source);
+            }
+            TypeSpecification::Named(_) | TypeSpecification::Reference { .. } => {
+                panic!("field must use a standard large object type")
+            }
         }
     }
 
@@ -690,7 +771,9 @@ mod tests {
                     assert_eq!(target.parts[2].text, third);
                 }
             }
-            TypeSpecification::Named(_) => panic!("type must be a reference"),
+            TypeSpecification::Named(_) | TypeSpecification::StandardLargeObject { .. } => {
+                panic!("type must be a reference")
+            }
         }
     }
 }
