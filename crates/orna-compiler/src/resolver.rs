@@ -434,8 +434,12 @@ fn check_parsed(parse_report: ParseReport, base: &CatalogueSnapshot) -> CheckRep
             object_types.push(definition);
         }
     }
-    let candidate = CatalogueSnapshot::new(CatalogueRevisionId::new(), object_types)
-        .expect("checked definitions satisfy catalogue invariants");
+    let candidate = CatalogueSnapshot::new_with_functions(
+        CatalogueRevisionId::new(),
+        object_types,
+        base.functions().to_vec(),
+    )
+    .expect("checked definitions satisfy catalogue invariants");
     CheckReport {
         parse_report,
         diagnostics,
@@ -653,8 +657,11 @@ fn diagnostic(
 #[cfg(test)]
 mod tests {
     use orna_core::{
-        CatalogueRevisionId,
-        catalogue::{CatalogueSnapshot, OnDeleteAction},
+        CatalogueRevisionId, FunctionId, FunctionRevisionId,
+        catalogue::{
+            CatalogueSnapshot, FunctionDefinition, FunctionDomain, FunctionReturn,
+            FunctionSecurity, FunctionVolatility, OnDeleteAction, QualifiedSemanticName,
+        },
         source::{SourceBundle, SourceUnit},
         types::{ResolvedType, StandardScalar},
     };
@@ -892,6 +899,45 @@ mod tests {
 
         assert_eq!(report.diagnostics()[0].code(), DiagnosticCode::TypeMismatch);
         assert!(report.candidate().is_none());
+    }
+
+    #[test]
+    fn object_overlay_preserves_existing_function_definitions() {
+        let function = FunctionDefinition::new(
+            FunctionId::new(),
+            QualifiedSemanticName::new(["sys", "health"]).unwrap(),
+            FunctionDomain::Server,
+            vec![],
+            FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Boolean)),
+            FunctionRevisionId::new(),
+            FunctionSecurity::Invoker,
+            None,
+            FunctionVolatility::Stable,
+        );
+        let function_id = function.id();
+        let base = CatalogueSnapshot::new_with_functions(
+            CatalogueRevisionId::new(),
+            vec![],
+            vec![function],
+        )
+        .unwrap();
+
+        let report = check(
+            &bundle([(
+                "people.orna",
+                "CREATE SCHEMA people; CREATE TYPE people.person AS OBJECT (name TEXT);",
+            )]),
+            &base,
+        );
+
+        assert!(report.diagnostics().is_empty());
+        assert!(
+            report
+                .candidate()
+                .unwrap()
+                .function_by_id(function_id)
+                .is_some()
+        );
     }
 
     #[test]
