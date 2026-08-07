@@ -3,6 +3,8 @@
 //! The public text form of each identifier is opaque and type-tagged. The
 //! random 128-bit representation is an implementation detail, not a UUID API.
 
+pub mod types;
+
 use std::{fmt, str::FromStr};
 
 const BASE32_ALPHABET: &[u8; 32] = b"0123456789abcdefghjkmnpqrstvwxyz";
