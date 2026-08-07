@@ -828,9 +828,53 @@ impl<'source> Parser<'source> {
 
         self.builder
             .start_node(SyntaxKind::NamedTypeSpecification.into());
-        let name = self.parse_qualified_name("expected a field type");
+        let name = self
+            .parse_multiword_standard_scalar()
+            .or_else(|| self.parse_qualified_name("expected a field type"));
         self.builder.finish_node();
         name.map(TypeSpecification::Named)
+    }
+
+    fn parse_multiword_standard_scalar(&mut self) -> Option<QualifiedName> {
+        let first = self.current()?.clone();
+        if !(first.is_word("CHARACTER") || first.is_word("BINARY"))
+            || !self
+                .peek_significant(1)
+                .is_some_and(|token| token.is_word("LARGE"))
+            || !self
+                .peek_significant(2)
+                .is_some_and(|token| token.is_word("OBJECT"))
+        {
+            return None;
+        }
+
+        self.builder.start_node(SyntaxKind::QualifiedName.into());
+        let start = first.range.start;
+        let first = self
+            .take_word(first.text)
+            .expect("first scalar token exists");
+        self.skip_trivia();
+        let large = self.take_word("LARGE").expect("LARGE scalar token exists");
+        self.skip_trivia();
+        let object = self
+            .take_word("OBJECT")
+            .expect("OBJECT scalar token exists");
+        self.builder.finish_node();
+
+        let text = format!("{} {} {}", first.text, large.text, object.text);
+        Some(QualifiedName {
+            parts: vec![NamePart {
+                text,
+                span: SourceSpan {
+                    start,
+                    end: object.range.end,
+                },
+            }],
+            span: SourceSpan {
+                start,
+                end: object.range.end,
+            },
+        })
     }
 
     fn parse_default_expression(&mut self) -> Option<SourceSlice> {

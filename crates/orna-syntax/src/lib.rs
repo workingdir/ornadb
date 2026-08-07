@@ -490,6 +490,46 @@ mod tests {
     }
 
     #[test]
+    fn parses_canonical_multiword_scalar_types_in_every_type_position() {
+        let source = "CREATE TYPE files.document AS OBJECT (body CHARACTER LARGE OBJECT, content BINARY LARGE OBJECT);\n\
+            CREATE SERVER FUNCTION files.encode(input CHARACTER LARGE OBJECT)\n\
+            RETURNS BINARY LARGE OBJECT\n\
+            AS SELECT input;\n\
+            CREATE SERVER FUNCTION files.describe()\n\
+            RETURNS ROWS (body CHARACTER LARGE OBJECT, content BINARY LARGE OBJECT)\n\
+            AS SELECT body, content FROM files.document;";
+        let parsed = parse(source);
+
+        assert!(parsed.diagnostics().is_empty());
+        assert_eq!(parsed.syntax().text(), source);
+
+        let fields = &parsed.object_types()[0].fields;
+        assert_named_type(&fields[0].type_specification, "CHARACTER LARGE OBJECT");
+        assert_named_type(&fields[1].type_specification, "BINARY LARGE OBJECT");
+
+        let encode = &parsed.server_functions()[0];
+        assert_named_type(
+            &encode.parameters[0].type_specification,
+            "CHARACTER LARGE OBJECT",
+        );
+        match &encode.return_type {
+            FunctionReturnType::Single(type_specification) => {
+                assert_named_type(type_specification, "BINARY LARGE OBJECT");
+            }
+            FunctionReturnType::Rows { .. } => panic!("files.encode must return one value"),
+        }
+
+        let describe = &parsed.server_functions()[1];
+        match &describe.return_type {
+            FunctionReturnType::Rows { columns, .. } => {
+                assert_named_type(&columns[0].type_specification, "CHARACTER LARGE OBJECT");
+                assert_named_type(&columns[1].type_specification, "BINARY LARGE OBJECT");
+            }
+            FunctionReturnType::Single(_) => panic!("files.describe must return rows"),
+        }
+    }
+
+    #[test]
     fn rejects_legacy_table_and_set_of_return_declarations() {
         let source = "CREATE SERVER FUNCTION tasks.table_result() RETURNS TABLE (task REF tasks.task) AS SELECT REF(t) FROM tasks.task t;\n\
             CREATE SERVER FUNCTION tasks.set_result() RETURNS SET OF REF tasks.task AS SELECT REF(t) FROM tasks.task t;";
