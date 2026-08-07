@@ -6,7 +6,7 @@
 use std::collections::{HashMap, HashSet};
 
 use orna_core::{
-    CatalogueRevisionId, ExpressionId, FieldId, FunctionId, TypeId,
+    CatalogueRevisionId, ExpressionId, FieldId, FunctionId, ParameterId, TypeId,
     catalogue::{
         CatalogueSnapshot, FieldDefinition, FunctionSecurity as CatalogueFunctionSecurity,
         FunctionTransaction as CatalogueFunctionTransaction,
@@ -17,7 +17,8 @@ use orna_core::{
     types::{ResolvedType, StandardScalar},
 };
 use orna_syntax::{
-    FunctionSecurity as SyntaxFunctionSecurity, FunctionTransaction as SyntaxFunctionTransaction,
+    FunctionReturnType, FunctionSecurity as SyntaxFunctionSecurity,
+    FunctionTransaction as SyntaxFunctionTransaction,
     FunctionVolatility as SyntaxFunctionVolatility, NamePart, ObjectTypeDeclaration,
     OnDeletePolicy, QualifiedName, ServerFunctionBody, ServerFunctionDeclaration, SourceSlice,
     SourceSpan, StandardLargeObjectKind, TypeSpecification,
@@ -223,7 +224,7 @@ struct Header<'a> {
     id: TypeId,
 }
 
-/// Resolved metadata for a SERVER function before signature and body planning.
+/// Resolved metadata for a SERVER function before compiler input resolution.
 ///
 /// This temporary input is deliberately private. It does not make a function
 /// executable or create a catalogue definition.
@@ -236,6 +237,75 @@ struct ServerFunctionHeader<'a> {
     security: CatalogueFunctionSecurity,
     transaction: Option<CatalogueFunctionTransaction>,
     volatility: CatalogueFunctionVolatility,
+}
+
+/// Exact source that needs expression or relational planning.
+///
+/// The compiler keeps this temporary value private until the relational stage
+/// replaces it with typed plans. It is not executable source.
+#[allow(dead_code)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct UnplannedSource {
+    source: String,
+    location: SourceLocation,
+}
+
+/// One resolved parameter before default-expression planning.
+#[allow(dead_code)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ResolvedServerFunctionParameter {
+    id: ParameterId,
+    name: String,
+    ordinal: u32,
+    resolved_type: ResolvedType,
+    default: Option<UnplannedSource>,
+    location: SourceLocation,
+}
+
+/// One resolved column in an unplanned rows result.
+#[allow(dead_code)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ResolvedServerFunctionReturnColumn {
+    name: String,
+    ordinal: u32,
+    resolved_type: ResolvedType,
+    location: SourceLocation,
+}
+
+/// The resolved result shape before relational planning.
+#[allow(dead_code)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ResolvedServerFunctionReturn {
+    Single(ResolvedType),
+    Rows(Vec<ResolvedServerFunctionReturnColumn>),
+}
+
+/// One unresolved capability requirement retained for a later capability pass.
+#[allow(dead_code)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ResolvedCapabilityInput {
+    name: QualifiedSemanticName,
+    arguments: Option<UnplannedSource>,
+    location: SourceLocation,
+}
+
+/// A complete SERVER function input before expression and relational planning.
+///
+/// This is compiler-owned and deliberately non-executable. The apply stage
+/// cannot consume it until later planning creates an executable function.
+#[allow(dead_code)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ResolvedServerFunctionInput {
+    id: FunctionId,
+    name: QualifiedSemanticName,
+    parameters: Vec<ResolvedServerFunctionParameter>,
+    return_type: ResolvedServerFunctionReturn,
+    security: CatalogueFunctionSecurity,
+    transaction: Option<CatalogueFunctionTransaction>,
+    volatility: CatalogueFunctionVolatility,
+    capabilities: Vec<ResolvedCapabilityInput>,
+    body: UnplannedSource,
+    location: SourceLocation,
 }
 
 fn check_parsed(parse_report: ParseReport, base: &CatalogueSnapshot) -> CheckReport {
@@ -417,15 +487,22 @@ fn check_parsed(parse_report: ParseReport, base: &CatalogueSnapshot) -> CheckRep
         });
     }
 
-    let function_headers =
-        resolve_server_function_headers(&parse_report, base, &known_schemas, &mut diagnostics);
+    let function_headers = if diagnostics.is_empty() {
+        resolve_server_function_headers(&parse_report, base, &known_schemas, &mut diagnostics)
+    } else {
+        Vec::new()
+    };
+    let function_inputs = if diagnostics.is_empty() {
+        resolve_server_function_inputs(&function_headers, &submitted_ids, base, &mut diagnostics)
+    } else {
+        Vec::new()
+    };
     if diagnostics.is_empty() {
-        for header in function_headers {
-            diagnostics.push(diagnostic(
+        for input in function_inputs {
+            diagnostics.push(DiagnosticCode::semantic(
                 DiagnosticCode::TypeMismatch,
                 "SERVER function body planning is not implemented",
-                header.logical_path,
-                server_function_body_span(&header.declaration.body),
+                input.body.location.clone(),
             ));
         }
     }
@@ -540,6 +617,176 @@ fn resolve_server_function_headers<'a>(
     headers
 }
 
+fn resolve_server_function_inputs(
+    headers: &[ServerFunctionHeader<'_>],
+    submitted_ids: &HashMap<QualifiedSemanticName, TypeId>,
+    base: &CatalogueSnapshot,
+    diagnostics: &mut Vec<CompilerDiagnostic>,
+) -> Vec<ResolvedServerFunctionInput> {
+    let mut inputs = Vec::with_capacity(headers.len());
+
+    for header in headers {
+        let diagnostics_before = diagnostics.len();
+        let name = semantic_name(&header.declaration.name);
+        let base_function = base.function_by_name(&name);
+        let mut parameter_names = HashSet::new();
+        let mut parameters = Vec::with_capacity(header.declaration.parameters.len());
+
+        for parameter in &header.declaration.parameters {
+            let parameter_name = semantic_part(&parameter.name);
+            if !parameter_names.insert(parameter_name.clone()) {
+                diagnostics.push(diagnostic(
+                    DiagnosticCode::DuplicateDefinition,
+                    format!("duplicate parameter definition {parameter_name} in {name}"),
+                    header.logical_path,
+                    &parameter.name.span,
+                ));
+                continue;
+            }
+
+            let Some(resolved_type) = resolve_type(
+                &parameter.type_specification,
+                submitted_ids,
+                base,
+                header.logical_path,
+                diagnostics,
+            ) else {
+                continue;
+            };
+            let id = base_function
+                .and_then(|function| function.parameter_by_name(&parameter_name))
+                .map_or_else(ParameterId::new, |parameter| parameter.id());
+            parameters.push(ResolvedServerFunctionParameter {
+                id,
+                name: parameter_name,
+                ordinal: parameter.order as u32,
+                resolved_type,
+                default: parameter
+                    .default_expression
+                    .as_ref()
+                    .map(|source| unplanned_source(header.logical_path, source)),
+                location: location(header.logical_path, &parameter.span),
+            });
+        }
+
+        let return_type = resolve_server_function_return(
+            &header.declaration.return_type,
+            submitted_ids,
+            base,
+            header.logical_path,
+            diagnostics,
+        );
+        if diagnostics.len() != diagnostics_before {
+            continue;
+        }
+
+        let Some(return_type) = return_type else {
+            continue;
+        };
+        inputs.push(ResolvedServerFunctionInput {
+            id: header.id,
+            name,
+            parameters,
+            return_type,
+            security: header.security,
+            transaction: header.transaction,
+            volatility: header.volatility,
+            capabilities: header
+                .declaration
+                .capabilities
+                .iter()
+                .map(|capability| ResolvedCapabilityInput {
+                    name: semantic_name(&capability.name),
+                    arguments: capability
+                        .arguments
+                        .as_ref()
+                        .map(|source| unplanned_source(header.logical_path, source)),
+                    location: location(header.logical_path, &capability.span),
+                })
+                .collect(),
+            body: unplanned_source(
+                header.logical_path,
+                server_function_body_source(&header.declaration.body),
+            ),
+            location: location(header.logical_path, &header.declaration.span),
+        });
+    }
+
+    inputs
+}
+
+fn resolve_server_function_return(
+    return_type: &FunctionReturnType,
+    submitted_ids: &HashMap<QualifiedSemanticName, TypeId>,
+    base: &CatalogueSnapshot,
+    logical_path: &str,
+    diagnostics: &mut Vec<CompilerDiagnostic>,
+) -> Option<ResolvedServerFunctionReturn> {
+    match return_type {
+        FunctionReturnType::Single(specification) => resolve_type(
+            specification,
+            submitted_ids,
+            base,
+            logical_path,
+            diagnostics,
+        )
+        .map(ResolvedServerFunctionReturn::Single),
+        FunctionReturnType::Rows { columns, span } => {
+            if columns.is_empty() {
+                diagnostics.push(diagnostic(
+                    DiagnosticCode::TypeMismatch,
+                    "ROWS return type must contain at least one column",
+                    logical_path,
+                    span,
+                ));
+                return None;
+            }
+
+            let diagnostics_before = diagnostics.len();
+            let mut names = HashSet::new();
+            let mut resolved_columns = Vec::with_capacity(columns.len());
+            for column in columns {
+                let name = semantic_part(&column.name);
+                if !names.insert(name.clone()) {
+                    diagnostics.push(diagnostic(
+                        DiagnosticCode::DuplicateDefinition,
+                        format!("duplicate ROWS return column definition {name}"),
+                        logical_path,
+                        &column.name.span,
+                    ));
+                    continue;
+                }
+                let Some(resolved_type) = resolve_type(
+                    &column.type_specification,
+                    submitted_ids,
+                    base,
+                    logical_path,
+                    diagnostics,
+                ) else {
+                    continue;
+                };
+                resolved_columns.push(ResolvedServerFunctionReturnColumn {
+                    name,
+                    ordinal: column.order as u32,
+                    resolved_type,
+                    location: location(logical_path, &column.span),
+                });
+            }
+            if diagnostics.len() != diagnostics_before {
+                return None;
+            }
+            Some(ResolvedServerFunctionReturn::Rows(resolved_columns))
+        }
+    }
+}
+
+fn unplanned_source(logical_path: &str, source: &SourceSlice) -> UnplannedSource {
+    UnplannedSource {
+        source: source.text.clone(),
+        location: location(logical_path, &source.span),
+    }
+}
+
 fn map_function_security(mode: Option<SyntaxFunctionSecurity>) -> CatalogueFunctionSecurity {
     match mode {
         Some(SyntaxFunctionSecurity::Definer) => CatalogueFunctionSecurity::Definer,
@@ -566,9 +813,9 @@ fn map_function_volatility(mode: Option<SyntaxFunctionVolatility>) -> CatalogueF
     }
 }
 
-fn server_function_body_span(body: &ServerFunctionBody) -> &SourceSpan {
+fn server_function_body_source(body: &ServerFunctionBody) -> &SourceSlice {
     match body {
-        ServerFunctionBody::SqlQuery(source) => &source.span,
+        ServerFunctionBody::SqlQuery(source) => source,
     }
 }
 
@@ -784,21 +1031,22 @@ fn diagnostic(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
 
     use orna_core::{
-        CatalogueRevisionId, FunctionId, FunctionRevisionId,
+        CatalogueRevisionId, FunctionId, FunctionRevisionId, ParameterId,
         catalogue::{
             CatalogueSnapshot, FunctionDefinition, FunctionDomain, FunctionReturn,
             FunctionSecurity, FunctionTransaction, FunctionVolatility, OnDeleteAction,
-            QualifiedSemanticName,
+            ParameterDefinition, QualifiedSemanticName,
         },
         source::{SourceBundle, SourceUnit},
         types::{ResolvedType, StandardScalar},
     };
 
     use super::{
-        ConstantValue, DiagnosticCode, check, parse_bundle, resolve_server_function_headers,
+        ConstantValue, DiagnosticCode, ResolvedServerFunctionReturn, check, parse_bundle,
+        resolve_server_function_headers, resolve_server_function_inputs,
     };
 
     fn empty_catalogue() -> CatalogueSnapshot {
@@ -1218,6 +1466,174 @@ mod tests {
         assert_eq!(headers[1].security, FunctionSecurity::Invoker);
         assert_eq!(headers[1].transaction, None);
         assert_eq!(headers[1].volatility, FunctionVolatility::Volatile);
+    }
+
+    #[test]
+    fn rejects_duplicate_server_function_parameters_and_rows_columns() {
+        let report = check(
+            &bundle([(
+                "functions.orna",
+                "CREATE SCHEMA people;\
+                 CREATE SERVER FUNCTION people.duplicate(p_value TEXT, P_VALUE INT)\
+                 RETURNS ROWS (value TEXT, VALUE INT) AS SELECT 'x';\
+                 CREATE SERVER FUNCTION people.empty() RETURNS ROWS () AS SELECT 'x';",
+            )]),
+            &empty_catalogue(),
+        );
+
+        let diagnostics = report.diagnostics();
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.code() == DiagnosticCode::DuplicateDefinition)
+                .count(),
+            2
+        );
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code() == DiagnosticCode::TypeMismatch
+                && diagnostic.message() == "ROWS return type must contain at least one column"
+        }));
+        assert!(diagnostics.iter().all(|diagnostic| {
+            diagnostic.message() != "SERVER function body planning is not implemented"
+        }));
+        assert!(report.checked_bundle().is_none());
+        assert!(report.candidate().is_none());
+    }
+
+    #[test]
+    fn server_function_inputs_preserve_signature_sources_and_parameter_ids() {
+        let existing_old_id = ParameterId::new();
+        let existing_other_id = ParameterId::new();
+        let existing = FunctionDefinition::new(
+            FunctionId::new(),
+            QualifiedSemanticName::new(["sys", "health"]).unwrap(),
+            FunctionDomain::Server,
+            vec![
+                ParameterDefinition::new(
+                    existing_old_id,
+                    "p_old",
+                    0,
+                    ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+                    None,
+                ),
+                ParameterDefinition::new(
+                    existing_other_id,
+                    "p_other",
+                    1,
+                    ResolvedType::scalar(StandardScalar::Integer),
+                    None,
+                ),
+            ],
+            FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Boolean)),
+            FunctionRevisionId::new(),
+            FunctionSecurity::Invoker,
+            None,
+            FunctionVolatility::Volatile,
+        );
+        let existing_id = existing.id();
+        let base = CatalogueSnapshot::new_with_functions(
+            CatalogueRevisionId::new(),
+            vec![],
+            vec![existing],
+        )
+        .unwrap();
+        let source = "CREATE SERVER FUNCTION Sys.Health(p_other INT, \
+            p_old TEXT DEFAULT sys.path.default(), p_new INT) \
+            RETURNS ROWS (label TEXT, count INT) SECURITY DEFINER \
+            TRANSACTION READ ONLY VOLATILITY STABLE \
+            REQUIRES CAPABILITY sys.fs.read(p_old), sys.jobs.noop(), sys.launch.start \
+            AS SELECT p_old || '!';";
+        let parsed = parse_bundle(&bundle([("functions.orna", source)]));
+        assert_eq!(parsed.diagnostics().len(), 0, "{:?}", parsed.diagnostics());
+        assert_eq!(parsed.units()[0].parsed().server_functions().len(), 1);
+        let known_schemas = HashSet::from([QualifiedSemanticName::new(["sys"]).unwrap()]);
+        let mut diagnostics = Vec::new();
+        let headers =
+            resolve_server_function_headers(&parsed, &base, &known_schemas, &mut diagnostics);
+        assert_eq!(headers.len(), 1);
+        let inputs =
+            resolve_server_function_inputs(&headers, &HashMap::new(), &base, &mut diagnostics);
+
+        assert!(diagnostics.is_empty());
+        assert_eq!(inputs.len(), 1);
+        let input = &inputs[0];
+        assert_eq!(input.id, existing_id);
+        assert_eq!(input.name.to_string(), "sys.health");
+        assert_eq!(input.parameters.len(), 3);
+        assert_eq!(input.parameters[0].id, existing_other_id);
+        assert_eq!(input.parameters[0].name, "p_other");
+        assert_eq!(input.parameters[0].ordinal, 0);
+        assert!(input.parameters[0].default.is_none());
+        assert_eq!(input.parameters[1].id, existing_old_id);
+        assert_eq!(input.parameters[1].name, "p_old");
+        assert_eq!(input.parameters[1].ordinal, 1);
+        assert_eq!(
+            input.parameters[1].default.as_ref().unwrap().source,
+            "sys.path.default()"
+        );
+        assert_eq!(
+            input.parameters[1]
+                .default
+                .as_ref()
+                .unwrap()
+                .location
+                .span()
+                .start(),
+            source.find("sys.path.default()").unwrap()
+        );
+        assert_eq!(
+            input.parameters[1].location.span().start(),
+            source.find("p_old").unwrap()
+        );
+        assert_eq!(input.parameters[2].ordinal, 2);
+        assert_ne!(input.parameters[2].id, existing_old_id);
+        assert_ne!(input.parameters[2].id, existing_other_id);
+        assert_eq!(
+            input.parameters[2].resolved_type,
+            ResolvedType::scalar(StandardScalar::Integer)
+        );
+        assert_eq!(input.security, FunctionSecurity::Definer);
+        assert_eq!(input.transaction, Some(FunctionTransaction::ReadOnly));
+        assert_eq!(input.volatility, FunctionVolatility::Stable);
+        assert_eq!(input.capabilities.len(), 3);
+        assert_eq!(input.capabilities[0].name.to_string(), "sys.fs.read");
+        assert_eq!(
+            input.capabilities[0].arguments.as_ref().unwrap().source,
+            "p_old"
+        );
+        assert_eq!(
+            input.capabilities[0].location.span().start(),
+            source.find("sys.fs.read").unwrap()
+        );
+        assert_eq!(input.capabilities[1].name.to_string(), "sys.jobs.noop");
+        assert_eq!(input.capabilities[1].arguments.as_ref().unwrap().source, "");
+        assert!(input.capabilities[2].arguments.is_none());
+        let ResolvedServerFunctionReturn::Rows(columns) = &input.return_type else {
+            panic!("sys.health must resolve to ROWS");
+        };
+        assert_eq!(columns.len(), 2);
+        assert_eq!(columns[0].name, "label");
+        assert_eq!(columns[0].ordinal, 0);
+        assert_eq!(
+            columns[0].resolved_type,
+            ResolvedType::scalar(StandardScalar::CharacterLargeObject)
+        );
+        assert_eq!(
+            columns[0].location.span().start(),
+            source.find("label TEXT").unwrap()
+        );
+        assert_eq!(columns[1].name, "count");
+        assert_eq!(columns[1].ordinal, 1);
+        assert_eq!(
+            columns[1].resolved_type,
+            ResolvedType::scalar(StandardScalar::Integer)
+        );
+        assert_eq!(input.body.source, "SELECT p_old || '!'");
+        assert_eq!(
+            input.body.location.span().start(),
+            source.find("SELECT").unwrap()
+        );
+        assert_eq!(input.location.span().start(), 0);
     }
 
     #[test]
