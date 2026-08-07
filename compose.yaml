@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: postgres:18.4-bookworm
+    environment:
+      POSTGRES_DB: ornadb_dev
+      POSTGRES_USER: ornadb_dev
+      POSTGRES_PASSWORD: ornadb_dev_password
+    ports:
+      - "127.0.0.1:55432:5432"
+    volumes:
+      - ornadb_postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready --username=ornadb_dev --dbname=ornadb_dev"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+      start_period: 5s
+
+volumes:
+  ornadb_postgres_data:
