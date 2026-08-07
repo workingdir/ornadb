@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/orna-core", "crates/orna-syntax"]
+members = ["crates/*"]
 resolver = "3"
 
 [workspace.package]
