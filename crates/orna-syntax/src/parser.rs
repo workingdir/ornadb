@@ -4,7 +4,8 @@ use crate::{
     Diagnostic, FunctionReturnType, FunctionSecurity, FunctionTransaction, FunctionVolatility,
     NamePart, ObjectFieldDeclaration, ObjectTypeDeclaration, OnDeletePolicy, Parse, QualifiedName,
     RowsColumnDeclaration, SchemaDeclaration, ServerFunctionBody, ServerFunctionDeclaration,
-    ServerFunctionParameter, SourceSlice, SourceSpan, SyntaxTree, TypeSpecification,
+    ServerFunctionParameter, SourceSlice, SourceSpan, StandardLargeObjectKind, SyntaxTree,
+    TypeSpecification,
     lexer::{Token, TokenKind, lex},
 };
 
@@ -35,6 +36,7 @@ pub(crate) enum SyntaxKind {
     RowsReturnType,
     RowsColumn,
     SqlQueryBody,
+    StandardLargeObjectTypeSpecification,
 }
 
 impl From<SyntaxKind> for rowan::SyntaxKind {
@@ -75,6 +77,7 @@ impl Language for OrnaLanguage {
             21 => SyntaxKind::RowsReturnType,
             22 => SyntaxKind::RowsColumn,
             23 => SyntaxKind::SqlQueryBody,
+            24 => SyntaxKind::StandardLargeObjectTypeSpecification,
             _ => panic!("unknown Orna syntax kind"),
         }
     }
@@ -826,21 +829,31 @@ impl<'source> Parser<'source> {
             });
         }
 
+        if let Some(specification) = self.parse_multiword_standard_scalar() {
+            return Some(specification);
+        }
+
         self.builder
             .start_node(SyntaxKind::NamedTypeSpecification.into());
-        let name = self
-            .parse_multiword_standard_scalar()
-            .or_else(|| self.parse_qualified_name("expected a field type"));
+        let specification = self
+            .parse_qualified_name("expected a field type")
+            .map(TypeSpecification::Named);
         self.builder.finish_node();
-        name.map(TypeSpecification::Named)
+        specification
     }
 
-    fn parse_multiword_standard_scalar(&mut self) -> Option<QualifiedName> {
+    fn parse_multiword_standard_scalar(&mut self) -> Option<TypeSpecification> {
         let first = self.current()?.clone();
-        if !(first.is_word("CHARACTER") || first.is_word("BINARY"))
-            || !self
-                .peek_significant(1)
-                .is_some_and(|token| token.is_word("LARGE"))
+        let kind = if first.is_word("CHARACTER") {
+            StandardLargeObjectKind::Character
+        } else if first.is_word("BINARY") {
+            StandardLargeObjectKind::Binary
+        } else {
+            return None;
+        };
+        if !self
+            .peek_significant(1)
+            .is_some_and(|token| token.is_word("LARGE"))
             || !self
                 .peek_significant(2)
                 .is_some_and(|token| token.is_word("OBJECT"))
@@ -848,31 +861,27 @@ impl<'source> Parser<'source> {
             return None;
         }
 
-        self.builder.start_node(SyntaxKind::QualifiedName.into());
+        self.builder
+            .start_node(SyntaxKind::StandardLargeObjectTypeSpecification.into());
         let start = first.range.start;
-        let first = self
-            .take_word(first.text)
+        self.take_word(first.text)
             .expect("first scalar token exists");
         self.skip_trivia();
-        let large = self.take_word("LARGE").expect("LARGE scalar token exists");
+        self.take_word("LARGE").expect("LARGE scalar token exists");
         self.skip_trivia();
         let object = self
             .take_word("OBJECT")
             .expect("OBJECT scalar token exists");
         self.builder.finish_node();
 
-        let text = format!("{} {} {}", first.text, large.text, object.text);
-        Some(QualifiedName {
-            parts: vec![NamePart {
-                text,
+        Some(TypeSpecification::StandardLargeObject {
+            kind,
+            source: SourceSlice {
+                text: self.source[start..object.range.end].to_owned(),
                 span: SourceSpan {
                     start,
                     end: object.range.end,
                 },
-            }],
-            span: SourceSpan {
-                start,
-                end: object.range.end,
             },
         })
     }
