@@ -54,6 +54,8 @@ pub enum DiagnosticCode {
     TypeMismatch,
     /// A `REF` declaration targets a scalar rather than an object type.
     InvalidReferenceTarget,
+    /// A declaration uses a valid construct outside this compiler domain.
+    DomainIncompatible,
 }
 
 impl DiagnosticCode {
@@ -66,6 +68,7 @@ impl DiagnosticCode {
             Self::DuplicateDefinition => "ORNA0103",
             Self::TypeMismatch => "ORNA0201",
             Self::InvalidReferenceTarget => "ORNA0203",
+            Self::DomainIncompatible => "ORNA0303",
         }
     }
 
