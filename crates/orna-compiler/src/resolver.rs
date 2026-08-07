@@ -16,7 +16,7 @@ use orna_core::{
 };
 use orna_syntax::{
     NamePart, ObjectTypeDeclaration, OnDeletePolicy, QualifiedName, SourceSlice, SourceSpan,
-    TypeSpecification,
+    StandardLargeObjectKind, TypeSpecification,
 };
 
 use crate::{
@@ -492,6 +492,13 @@ fn resolve_type(
             }
             None
         }
+        TypeSpecification::StandardLargeObject { kind, .. } => {
+            let scalar = match kind {
+                StandardLargeObjectKind::Character => StandardScalar::CharacterLargeObject,
+                StandardLargeObjectKind::Binary => StandardScalar::BinaryLargeObject,
+            };
+            Some(ResolvedType::scalar(scalar))
+        }
         TypeSpecification::Reference { target, .. } => {
             if resolve_closed_scalar(target).is_some() {
                 diagnostics.push(diagnostic(
@@ -767,6 +774,28 @@ mod tests {
         );
         assert_eq!(
             fields[5].resolved_type(),
+            ResolvedType::scalar(StandardScalar::BinaryLargeObject)
+        );
+    }
+
+    #[test]
+    fn resolves_canonical_multiword_large_object_scalars() {
+        let report = check(
+            &bundle([(
+                "schema.orna",
+                "CREATE SCHEMA files; CREATE TYPE files.document AS OBJECT (body cHaRaCtEr /* retained */ LaRgE ObJeCt, content bInArY LARGE object);",
+            )]),
+            &empty_catalogue(),
+        );
+
+        assert!(report.diagnostics().is_empty());
+        let fields = report.checked_bundle().unwrap().object_types()[0].fields();
+        assert_eq!(
+            fields[0].resolved_type(),
+            ResolvedType::scalar(StandardScalar::CharacterLargeObject)
+        );
+        assert_eq!(
+            fields[1].resolved_type(),
             ResolvedType::scalar(StandardScalar::BinaryLargeObject)
         );
     }
