@@ -3,9 +3,12 @@
 //! A snapshot contains resolved definitions for one active catalogue revision.
 //! It does not contain source syntax, physical storage state, or backend types.
 
-use std::{collections::HashMap, error::Error, fmt};
+use std::{collections::HashMap, error::Error, fmt, hash::Hash};
 
-use crate::{CatalogueRevisionId, ExpressionId, FieldId, TypeId, types::ResolvedType};
+use crate::{
+    CatalogueRevisionId, ExpressionId, FieldId, FunctionId, FunctionRevisionId, ParameterId,
+    TypeId, types::ResolvedType,
+};
 
 /// A resolved, qualified semantic name.
 ///
@@ -206,6 +209,245 @@ impl ObjectTypeDefinition {
     }
 }
 
+/// The execution location of a function.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FunctionDomain {
+    /// The function executes in the database server runtime.
+    Server,
+    /// The function executes in a client runtime.
+    Client,
+}
+
+/// The principal context used to execute a function.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FunctionSecurity {
+    /// Execute with the invoking principal's security context.
+    Invoker,
+    /// Execute with the function owner's security context.
+    Definer,
+}
+
+/// The transaction behaviour of a server function.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FunctionTransaction {
+    /// Execute within one atomic transaction.
+    Atomic,
+    /// Execute without writes.
+    ReadOnly,
+    /// Let the function manage transaction boundaries.
+    Manual,
+}
+
+/// The state-dependence contract of a function result.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FunctionVolatility {
+    /// The result is independent of database state.
+    Immutable,
+    /// The result is stable within one statement.
+    Stable,
+    /// The result can change for each call.
+    Volatile,
+}
+
+/// One resolved parameter of a function signature.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ParameterDefinition {
+    id: ParameterId,
+    name: String,
+    ordinal: u32,
+    resolved_type: ResolvedType,
+    default_expression: Option<ExpressionId>,
+}
+
+impl ParameterDefinition {
+    /// Creates a parameter definition from resolved semantic data.
+    pub fn new(
+        id: ParameterId,
+        name: impl Into<String>,
+        ordinal: u32,
+        resolved_type: ResolvedType,
+        default_expression: Option<ExpressionId>,
+    ) -> Self {
+        Self {
+            id,
+            name: name.into(),
+            ordinal,
+            resolved_type,
+            default_expression,
+        }
+    }
+
+    /// Returns this parameter's stable identity.
+    pub const fn id(&self) -> ParameterId {
+        self.id
+    }
+
+    /// Returns this parameter's resolved semantic name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Returns this parameter's zero-based declaration ordinal.
+    pub const fn ordinal(&self) -> u32 {
+        self.ordinal
+    }
+
+    /// Returns this parameter's resolved type descriptor.
+    pub const fn resolved_type(&self) -> ResolvedType {
+        self.resolved_type
+    }
+
+    /// Returns the identity of the resolved default expression, when present.
+    pub const fn default_expression(&self) -> Option<ExpressionId> {
+        self.default_expression
+    }
+}
+
+/// One named column in a `ROWS (...)` function result.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FunctionReturnColumnDefinition {
+    name: String,
+    ordinal: u32,
+    resolved_type: ResolvedType,
+}
+
+impl FunctionReturnColumnDefinition {
+    /// Creates a `ROWS (...)` result column from resolved semantic data.
+    pub fn new(name: impl Into<String>, ordinal: u32, resolved_type: ResolvedType) -> Self {
+        Self {
+            name: name.into(),
+            ordinal,
+            resolved_type,
+        }
+    }
+
+    /// Returns this result column's resolved semantic name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Returns this result column's zero-based declaration ordinal.
+    pub const fn ordinal(&self) -> u32 {
+        self.ordinal
+    }
+
+    /// Returns this result column's resolved type descriptor.
+    pub const fn resolved_type(&self) -> ResolvedType {
+        self.resolved_type
+    }
+}
+
+/// The resolved result shape of a function.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FunctionReturn {
+    /// A function returns one resolved semantic value.
+    Single(ResolvedType),
+    /// A function returns zero or more records with this named ordered shape.
+    Rows(Vec<FunctionReturnColumnDefinition>),
+}
+
+/// One resolved executable function signature.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FunctionDefinition {
+    id: FunctionId,
+    name: QualifiedSemanticName,
+    domain: FunctionDomain,
+    parameters: Vec<ParameterDefinition>,
+    return_type: FunctionReturn,
+    current_revision: FunctionRevisionId,
+    security: FunctionSecurity,
+    transaction: Option<FunctionTransaction>,
+    volatility: FunctionVolatility,
+}
+
+impl FunctionDefinition {
+    /// Creates a function definition from resolved semantic signature data.
+    ///
+    /// [`CatalogueSnapshot::new_with_functions`] validates the function's
+    /// signature invariants before it accepts this definition into a snapshot.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        id: FunctionId,
+        name: QualifiedSemanticName,
+        domain: FunctionDomain,
+        parameters: Vec<ParameterDefinition>,
+        return_type: FunctionReturn,
+        current_revision: FunctionRevisionId,
+        security: FunctionSecurity,
+        transaction: Option<FunctionTransaction>,
+        volatility: FunctionVolatility,
+    ) -> Self {
+        Self {
+            id,
+            name,
+            domain,
+            parameters,
+            return_type,
+            current_revision,
+            security,
+            transaction,
+            volatility,
+        }
+    }
+
+    /// Returns this function's stable identity.
+    pub const fn id(&self) -> FunctionId {
+        self.id
+    }
+
+    /// Returns this function's resolved qualified name.
+    pub fn name(&self) -> &QualifiedSemanticName {
+        &self.name
+    }
+
+    /// Returns the runtime domain that executes this function.
+    pub const fn domain(&self) -> FunctionDomain {
+        self.domain
+    }
+
+    /// Returns parameters in declaration ordinal order.
+    pub fn parameters(&self) -> &[ParameterDefinition] {
+        &self.parameters
+    }
+
+    /// Finds a parameter by its exact resolved semantic name.
+    pub fn parameter_by_name(&self, name: &str) -> Option<&ParameterDefinition> {
+        self.parameters
+            .iter()
+            .find(|parameter| parameter.name == name)
+    }
+
+    /// Finds a parameter by its stable identity.
+    pub fn parameter_by_id(&self, id: ParameterId) -> Option<&ParameterDefinition> {
+        self.parameters.iter().find(|parameter| parameter.id == id)
+    }
+
+    /// Returns this function's resolved result shape.
+    pub fn return_type(&self) -> &FunctionReturn {
+        &self.return_type
+    }
+
+    /// Returns the stable identity of the active function revision.
+    pub const fn current_revision(&self) -> FunctionRevisionId {
+        self.current_revision
+    }
+
+    /// Returns the function's security context mode.
+    pub const fn security(&self) -> FunctionSecurity {
+        self.security
+    }
+
+    /// Returns server transaction behaviour, when declared.
+    pub const fn transaction(&self) -> Option<FunctionTransaction> {
+        self.transaction
+    }
+
+    /// Returns the function's volatility contract.
+    pub const fn volatility(&self) -> FunctionVolatility {
+        self.volatility
+    }
+}
+
 /// An immutable set of resolved definitions for one catalogue revision.
 #[derive(Clone, Debug)]
 pub struct CatalogueSnapshot {
@@ -213,6 +455,9 @@ pub struct CatalogueSnapshot {
     object_types: Vec<ObjectTypeDefinition>,
     object_type_indices_by_name: HashMap<QualifiedSemanticName, usize>,
     object_type_indices_by_id: HashMap<TypeId, usize>,
+    functions: Vec<FunctionDefinition>,
+    function_indices_by_name: HashMap<QualifiedSemanticName, usize>,
+    function_indices_by_id: HashMap<FunctionId, usize>,
 }
 
 impl CatalogueSnapshot {
@@ -221,8 +466,19 @@ impl CatalogueSnapshot {
         revision: CatalogueRevisionId,
         object_types: Vec<ObjectTypeDefinition>,
     ) -> Result<Self, CatalogueSnapshotError> {
+        Self::new_with_functions(revision, object_types, Vec::new())
+    }
+
+    /// Validates and creates a snapshot with object types and functions.
+    pub fn new_with_functions(
+        revision: CatalogueRevisionId,
+        object_types: Vec<ObjectTypeDefinition>,
+        functions: Vec<FunctionDefinition>,
+    ) -> Result<Self, CatalogueSnapshotError> {
         let mut object_type_indices_by_name = HashMap::with_capacity(object_types.len());
         let mut object_type_indices_by_id = HashMap::with_capacity(object_types.len());
+        let mut function_indices_by_name = HashMap::with_capacity(functions.len());
+        let mut function_indices_by_id = HashMap::with_capacity(functions.len());
 
         for (type_index, object_type) in object_types.iter().enumerate() {
             if object_type_indices_by_name
@@ -244,11 +500,34 @@ impl CatalogueSnapshot {
             Self::validate_fields(object_type)?;
         }
 
+        for (function_index, function) in functions.iter().enumerate() {
+            if function_indices_by_name
+                .insert(function.name.clone(), function_index)
+                .is_some()
+            {
+                return Err(CatalogueSnapshotError::DuplicateFunctionName {
+                    name: function.name.clone(),
+                });
+            }
+
+            if function_indices_by_id
+                .insert(function.id, function_index)
+                .is_some()
+            {
+                return Err(CatalogueSnapshotError::DuplicateFunctionId { id: function.id });
+            }
+
+            Self::validate_function(function)?;
+        }
+
         Ok(Self {
             revision,
             object_types,
             object_type_indices_by_name,
             object_type_indices_by_id,
+            functions,
+            function_indices_by_name,
+            function_indices_by_id,
         })
     }
 
@@ -279,53 +558,196 @@ impl CatalogueSnapshot {
             .map(|index| &self.object_types[*index])
     }
 
+    /// Returns the function definitions in their snapshot order.
+    pub fn functions(&self) -> &[FunctionDefinition] {
+        &self.functions
+    }
+
+    /// Finds a function by its exact resolved qualified name.
+    pub fn function_by_name(&self, name: &QualifiedSemanticName) -> Option<&FunctionDefinition> {
+        self.function_indices_by_name
+            .get(name)
+            .map(|index| &self.functions[*index])
+    }
+
+    /// Finds a function by its stable identity.
+    pub fn function_by_id(&self, id: FunctionId) -> Option<&FunctionDefinition> {
+        self.function_indices_by_id
+            .get(&id)
+            .map(|index| &self.functions[*index])
+    }
+
     fn validate_fields(object_type: &ObjectTypeDefinition) -> Result<(), CatalogueSnapshotError> {
-        let mut field_ids = HashMap::with_capacity(object_type.fields.len());
-        let mut field_names = HashMap::with_capacity(object_type.fields.len());
-        let mut ordinals = HashMap::with_capacity(object_type.fields.len());
+        Self::validate_ordered_named_members(
+            object_type
+                .fields
+                .iter()
+                .map(|field| (field.id, field.name.as_str(), field.ordinal)),
+            |field| CatalogueSnapshotError::EmptyFieldName {
+                owner: object_type.id,
+                field,
+            },
+            |name| CatalogueSnapshotError::DuplicateFieldName {
+                owner: object_type.id,
+                name: name.to_owned(),
+            },
+            |id| CatalogueSnapshotError::DuplicateFieldId {
+                owner: object_type.id,
+                id,
+            },
+            |ordinal| CatalogueSnapshotError::DuplicateFieldOrdinal {
+                owner: object_type.id,
+                ordinal,
+            },
+            |field| CatalogueSnapshotError::FieldOrdinalOutOfRange {
+                owner: object_type.id,
+                field,
+            },
+            |field, expected, actual| CatalogueSnapshotError::FieldOrdinalOutOfSequence {
+                owner: object_type.id,
+                field,
+                expected,
+                actual,
+            },
+        )
+    }
 
-        for (index, field) in object_type.fields.iter().enumerate() {
-            if field.name.is_empty() {
-                return Err(CatalogueSnapshotError::EmptyFieldName {
-                    owner: object_type.id,
-                    field: field.id,
+    fn validate_function(function: &FunctionDefinition) -> Result<(), CatalogueSnapshotError> {
+        if function.domain == FunctionDomain::Client && function.transaction.is_some() {
+            return Err(CatalogueSnapshotError::ClientFunctionTransaction {
+                function: function.id,
+            });
+        }
+
+        Self::validate_parameters(function)?;
+        if let FunctionReturn::Rows(columns) = &function.return_type {
+            Self::validate_return_columns(function, columns)?;
+        }
+
+        Ok(())
+    }
+
+    fn validate_parameters(function: &FunctionDefinition) -> Result<(), CatalogueSnapshotError> {
+        Self::validate_ordered_named_members(
+            function
+                .parameters
+                .iter()
+                .map(|parameter| (parameter.id, parameter.name.as_str(), parameter.ordinal)),
+            |parameter| CatalogueSnapshotError::EmptyParameterName {
+                owner: function.id,
+                parameter,
+            },
+            |name| CatalogueSnapshotError::DuplicateParameterName {
+                owner: function.id,
+                name: name.to_owned(),
+            },
+            |id| CatalogueSnapshotError::DuplicateParameterId {
+                owner: function.id,
+                id,
+            },
+            |ordinal| CatalogueSnapshotError::DuplicateParameterOrdinal {
+                owner: function.id,
+                ordinal,
+            },
+            |parameter| CatalogueSnapshotError::ParameterOrdinalOutOfRange {
+                owner: function.id,
+                parameter,
+            },
+            |parameter, expected, actual| CatalogueSnapshotError::ParameterOrdinalOutOfSequence {
+                owner: function.id,
+                parameter,
+                expected,
+                actual,
+            },
+        )
+    }
+
+    fn validate_return_columns(
+        function: &FunctionDefinition,
+        columns: &[FunctionReturnColumnDefinition],
+    ) -> Result<(), CatalogueSnapshotError> {
+        if columns.is_empty() {
+            return Err(CatalogueSnapshotError::EmptyRowsReturn {
+                function: function.id,
+            });
+        }
+
+        let mut column_names = HashMap::with_capacity(columns.len());
+        let mut ordinals = HashMap::with_capacity(columns.len());
+
+        for (index, column) in columns.iter().enumerate() {
+            if column.name.is_empty() {
+                return Err(CatalogueSnapshotError::EmptyReturnColumnName {
+                    owner: function.id,
+                    ordinal: column.ordinal,
                 });
             }
 
-            if field_names.insert(field.name.as_str(), index).is_some() {
-                return Err(CatalogueSnapshotError::DuplicateFieldName {
-                    owner: object_type.id,
-                    name: field.name.clone(),
+            if column_names.insert(column.name.as_str(), index).is_some() {
+                return Err(CatalogueSnapshotError::DuplicateReturnColumnName {
+                    owner: function.id,
+                    name: column.name.clone(),
                 });
             }
 
-            if field_ids.insert(field.id, index).is_some() {
-                return Err(CatalogueSnapshotError::DuplicateFieldId {
-                    owner: object_type.id,
-                    id: field.id,
-                });
-            }
-
-            if ordinals.insert(field.ordinal, index).is_some() {
-                return Err(CatalogueSnapshotError::DuplicateFieldOrdinal {
-                    owner: object_type.id,
-                    ordinal: field.ordinal,
+            if ordinals.insert(column.ordinal, index).is_some() {
+                return Err(CatalogueSnapshotError::DuplicateReturnColumnOrdinal {
+                    owner: function.id,
+                    ordinal: column.ordinal,
                 });
             }
 
             let expected = u32::try_from(index).map_err(|_| {
-                CatalogueSnapshotError::FieldOrdinalOutOfRange {
-                    owner: object_type.id,
-                    field: field.id,
-                }
+                CatalogueSnapshotError::ReturnColumnOrdinalOutOfRange { owner: function.id }
             })?;
-            if field.ordinal != expected {
-                return Err(CatalogueSnapshotError::FieldOrdinalOutOfSequence {
-                    owner: object_type.id,
-                    field: field.id,
+            if column.ordinal != expected {
+                return Err(CatalogueSnapshotError::ReturnColumnOrdinalOutOfSequence {
+                    owner: function.id,
                     expected,
-                    actual: field.ordinal,
+                    actual: column.ordinal,
                 });
+            }
+        }
+
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn validate_ordered_named_members<'a, Id>(
+        members: impl IntoIterator<Item = (Id, &'a str, u32)>,
+        empty_name: impl Fn(Id) -> CatalogueSnapshotError,
+        duplicate_name: impl Fn(&str) -> CatalogueSnapshotError,
+        duplicate_id: impl Fn(Id) -> CatalogueSnapshotError,
+        duplicate_ordinal: impl Fn(u32) -> CatalogueSnapshotError,
+        ordinal_out_of_range: impl Fn(Id) -> CatalogueSnapshotError,
+        ordinal_out_of_sequence: impl Fn(Id, u32, u32) -> CatalogueSnapshotError,
+    ) -> Result<(), CatalogueSnapshotError>
+    where
+        Id: Copy + Eq + Hash,
+    {
+        let iterator = members.into_iter();
+        let (minimum, _) = iterator.size_hint();
+        let mut ids = HashMap::with_capacity(minimum);
+        let mut names = HashMap::with_capacity(minimum);
+        let mut ordinals = HashMap::with_capacity(minimum);
+
+        for (index, (id, name, ordinal)) in iterator.enumerate() {
+            if name.is_empty() {
+                return Err(empty_name(id));
+            }
+            if names.insert(name, index).is_some() {
+                return Err(duplicate_name(name));
+            }
+            if ids.insert(id, index).is_some() {
+                return Err(duplicate_id(id));
+            }
+            if ordinals.insert(ordinal, index).is_some() {
+                return Err(duplicate_ordinal(ordinal));
+            }
+
+            let expected = u32::try_from(index).map_err(|_| ordinal_out_of_range(id))?;
+            if ordinal != expected {
+                return Err(ordinal_out_of_sequence(id, expected, ordinal));
             }
         }
 
@@ -345,6 +767,107 @@ pub enum CatalogueSnapshotError {
     DuplicateObjectTypeId {
         /// The repeated identity.
         id: TypeId,
+    },
+    /// More than one function has the same resolved qualified name.
+    DuplicateFunctionName {
+        /// The repeated name.
+        name: QualifiedSemanticName,
+    },
+    /// More than one function has the same stable identity.
+    DuplicateFunctionId {
+        /// The repeated identity.
+        id: FunctionId,
+    },
+    /// A client function declares server transaction behaviour.
+    ClientFunctionTransaction {
+        /// The invalid client function identity.
+        function: FunctionId,
+    },
+    /// A function parameter has no semantic name.
+    EmptyParameterName {
+        /// The function that owns the invalid parameter.
+        owner: FunctionId,
+        /// The invalid parameter identity.
+        parameter: ParameterId,
+    },
+    /// More than one parameter in a function has the same semantic name.
+    DuplicateParameterName {
+        /// The owning function.
+        owner: FunctionId,
+        /// The repeated name.
+        name: String,
+    },
+    /// More than one parameter in a function has the same stable identity.
+    DuplicateParameterId {
+        /// The owning function.
+        owner: FunctionId,
+        /// The repeated identity.
+        id: ParameterId,
+    },
+    /// More than one parameter in a function has the same ordinal.
+    DuplicateParameterOrdinal {
+        /// The owning function.
+        owner: FunctionId,
+        /// The repeated ordinal.
+        ordinal: u32,
+    },
+    /// A function has more parameters than the ordinal representation allows.
+    ParameterOrdinalOutOfRange {
+        /// The owning function.
+        owner: FunctionId,
+        /// The parameter without a representable ordinal.
+        parameter: ParameterId,
+    },
+    /// Parameters must be contiguous and stored in declaration ordinal order.
+    ParameterOrdinalOutOfSequence {
+        /// The owning function.
+        owner: FunctionId,
+        /// The parameter that has the invalid ordinal.
+        parameter: ParameterId,
+        /// The expected zero-based ordinal.
+        expected: u32,
+        /// The actual ordinal.
+        actual: u32,
+    },
+    /// A `ROWS (...)` return shape must declare at least one named column.
+    EmptyRowsReturn {
+        /// The function with the empty row shape.
+        function: FunctionId,
+    },
+    /// A `ROWS (...)` return column has no semantic name.
+    EmptyReturnColumnName {
+        /// The function that owns the invalid result column.
+        owner: FunctionId,
+        /// The invalid column ordinal.
+        ordinal: u32,
+    },
+    /// More than one `ROWS (...)` return column has the same semantic name.
+    DuplicateReturnColumnName {
+        /// The owning function.
+        owner: FunctionId,
+        /// The repeated name.
+        name: String,
+    },
+    /// More than one `ROWS (...)` return column has the same ordinal.
+    DuplicateReturnColumnOrdinal {
+        /// The owning function.
+        owner: FunctionId,
+        /// The repeated ordinal.
+        ordinal: u32,
+    },
+    /// A function has more return columns than the ordinal representation allows.
+    ReturnColumnOrdinalOutOfRange {
+        /// The owning function.
+        owner: FunctionId,
+    },
+    /// Return columns must be contiguous and stored in declaration ordinal order.
+    ReturnColumnOrdinalOutOfSequence {
+        /// The owning function.
+        owner: FunctionId,
+        /// The expected zero-based ordinal.
+        expected: u32,
+        /// The actual ordinal.
+        actual: u32,
     },
     /// An object field has no semantic name.
     EmptyFieldName {
@@ -403,6 +926,95 @@ impl fmt::Display for CatalogueSnapshotError {
             Self::DuplicateObjectTypeId { id } => {
                 write!(formatter, "duplicate object type identity {id}")
             }
+            Self::DuplicateFunctionName { name } => {
+                write!(formatter, "duplicate function name {name}")
+            }
+            Self::DuplicateFunctionId { id } => {
+                write!(formatter, "duplicate function identity {id}")
+            }
+            Self::ClientFunctionTransaction { function } => {
+                write!(
+                    formatter,
+                    "client function {function} cannot declare server transaction behaviour"
+                )
+            }
+            Self::EmptyParameterName { owner, parameter } => {
+                write!(
+                    formatter,
+                    "parameter {parameter} in function {owner} has an empty name"
+                )
+            }
+            Self::DuplicateParameterName { owner, name } => {
+                write!(
+                    formatter,
+                    "duplicate parameter name {name} in function {owner}"
+                )
+            }
+            Self::DuplicateParameterId { owner, id } => {
+                write!(
+                    formatter,
+                    "duplicate parameter identity {id} in function {owner}"
+                )
+            }
+            Self::DuplicateParameterOrdinal { owner, ordinal } => {
+                write!(
+                    formatter,
+                    "duplicate parameter ordinal {ordinal} in function {owner}"
+                )
+            }
+            Self::ParameterOrdinalOutOfRange { owner, parameter } => {
+                write!(
+                    formatter,
+                    "parameter {parameter} in function {owner} has no representable ordinal"
+                )
+            }
+            Self::ParameterOrdinalOutOfSequence {
+                owner,
+                parameter,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "parameter {parameter} in function {owner} has ordinal {actual}, expected {expected}"
+            ),
+            Self::EmptyRowsReturn { function } => {
+                write!(
+                    formatter,
+                    "function {function} has an empty ROWS return shape"
+                )
+            }
+            Self::EmptyReturnColumnName { owner, ordinal } => {
+                write!(
+                    formatter,
+                    "return column {ordinal} in function {owner} has an empty name"
+                )
+            }
+            Self::DuplicateReturnColumnName { owner, name } => {
+                write!(
+                    formatter,
+                    "duplicate return column name {name} in function {owner}"
+                )
+            }
+            Self::DuplicateReturnColumnOrdinal { owner, ordinal } => {
+                write!(
+                    formatter,
+                    "duplicate return column ordinal {ordinal} in function {owner}"
+                )
+            }
+            Self::ReturnColumnOrdinalOutOfRange { owner } => {
+                write!(
+                    formatter,
+                    "a return column in function {owner} has no representable ordinal"
+                )
+            }
+            Self::ReturnColumnOrdinalOutOfSequence {
+                owner,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "return column in function {owner} has ordinal {actual}, expected {expected}"
+            ),
             Self::EmptyFieldName { owner, field } => {
                 write!(
                     formatter,
@@ -450,12 +1062,15 @@ impl Error for CatalogueSnapshotError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        CatalogueSnapshot, CatalogueSnapshotError, FieldDefinition, ObjectTypeDefinition,
-        OnDeleteAction, QualifiedSemanticName, SemanticNameError,
+    use crate::catalogue::{
+        CatalogueSnapshot, CatalogueSnapshotError, FieldDefinition, FunctionDefinition,
+        FunctionDomain, FunctionReturn, FunctionReturnColumnDefinition, FunctionSecurity,
+        FunctionTransaction, FunctionVolatility, ObjectTypeDefinition, OnDeleteAction,
+        ParameterDefinition, QualifiedSemanticName, SemanticNameError,
     };
     use crate::{
-        CatalogueRevisionId, ExpressionId, FieldId, TypeId,
+        CatalogueRevisionId, ExpressionId, FieldId, FunctionId, FunctionRevisionId, ParameterId,
+        TypeId,
         types::{ResolvedType, StandardScalar},
     };
 
@@ -482,6 +1097,45 @@ mod tests {
 
     fn snapshot(types: Vec<ObjectTypeDefinition>) -> CatalogueSnapshot {
         CatalogueSnapshot::new(CatalogueRevisionId::from_bytes([7; 16]), types).unwrap()
+    }
+
+    fn parameter(id: u8, name: &str, ordinal: u32) -> ParameterDefinition {
+        ParameterDefinition::new(
+            ParameterId::from_bytes([id; 16]),
+            name,
+            ordinal,
+            ResolvedType::scalar(StandardScalar::Integer),
+            None,
+        )
+    }
+
+    fn return_column(name: &str, ordinal: u32) -> FunctionReturnColumnDefinition {
+        FunctionReturnColumnDefinition::new(
+            name,
+            ordinal,
+            ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+        )
+    }
+
+    fn function(
+        id: u8,
+        name_parts: &[&str],
+        domain: FunctionDomain,
+        parameters: Vec<ParameterDefinition>,
+        return_type: FunctionReturn,
+        transaction: Option<FunctionTransaction>,
+    ) -> FunctionDefinition {
+        FunctionDefinition::new(
+            FunctionId::from_bytes([id; 16]),
+            name(name_parts),
+            domain,
+            parameters,
+            return_type,
+            FunctionRevisionId::from_bytes([id.saturating_add(20); 16]),
+            FunctionSecurity::Invoker,
+            transaction,
+            FunctionVolatility::Volatile,
+        )
     }
 
     #[test]
@@ -618,6 +1272,249 @@ mod tests {
                 actual: 1,
                 ..
             })
+        ));
+    }
+
+    #[test]
+    fn snapshot_resolves_function_signatures_by_exact_name_and_stable_id() {
+        let function_id = FunctionId::from_bytes([9; 16]);
+        let parameter_id = ParameterId::from_bytes([10; 16]);
+        let function = FunctionDefinition::new(
+            function_id,
+            name(&["tasks", "overdue"]),
+            FunctionDomain::Server,
+            vec![ParameterDefinition::new(
+                parameter_id,
+                "p_before",
+                0,
+                ResolvedType::scalar(StandardScalar::Timestamp),
+                Some(ExpressionId::from_bytes([11; 16])),
+            )],
+            FunctionReturn::Rows(vec![
+                FunctionReturnColumnDefinition::new(
+                    "title",
+                    0,
+                    ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+                ),
+                FunctionReturnColumnDefinition::new(
+                    "due_at",
+                    1,
+                    ResolvedType::scalar(StandardScalar::Timestamp),
+                ),
+            ]),
+            FunctionRevisionId::from_bytes([12; 16]),
+            FunctionSecurity::Definer,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Stable,
+        );
+        let catalogue = CatalogueSnapshot::new_with_functions(
+            CatalogueRevisionId::from_bytes([7; 16]),
+            vec![],
+            vec![function],
+        )
+        .unwrap();
+
+        let function = catalogue
+            .function_by_name(&name(&["tasks", "overdue"]))
+            .unwrap();
+        assert_eq!(catalogue.function_by_id(function_id), Some(function));
+        assert!(
+            catalogue
+                .function_by_name(&name(&["TASKS", "overdue"]))
+                .is_none()
+        );
+        assert_eq!(function.domain(), FunctionDomain::Server);
+        assert_eq!(
+            function.current_revision(),
+            FunctionRevisionId::from_bytes([12; 16])
+        );
+        assert_eq!(function.security(), FunctionSecurity::Definer);
+        assert_eq!(function.transaction(), Some(FunctionTransaction::ReadOnly));
+        assert_eq!(function.volatility(), FunctionVolatility::Stable);
+
+        let parameter = function.parameter_by_name("p_before").unwrap();
+        assert_eq!(function.parameter_by_id(parameter_id), Some(parameter));
+        assert_eq!(parameter.ordinal(), 0);
+        assert_eq!(
+            parameter.resolved_type(),
+            ResolvedType::scalar(StandardScalar::Timestamp)
+        );
+        assert_eq!(
+            parameter.default_expression(),
+            Some(ExpressionId::from_bytes([11; 16]))
+        );
+
+        let FunctionReturn::Rows(columns) = function.return_type() else {
+            panic!("tasks.overdue must return rows");
+        };
+        assert_eq!(columns.len(), 2);
+        assert_eq!(columns[0].name(), "title");
+        assert_eq!(columns[0].ordinal(), 0);
+        assert_eq!(
+            columns[1].resolved_type(),
+            ResolvedType::scalar(StandardScalar::Timestamp)
+        );
+    }
+
+    #[test]
+    fn snapshot_rejects_duplicate_function_and_parameter_identities() {
+        let first = function(
+            1,
+            &["tasks", "overdue"],
+            FunctionDomain::Server,
+            vec![],
+            FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Void)),
+            None,
+        );
+        let same_name = function(
+            2,
+            &["tasks", "overdue"],
+            FunctionDomain::Server,
+            vec![],
+            FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Void)),
+            None,
+        );
+        let same_id = function(
+            1,
+            &["tasks", "archive"],
+            FunctionDomain::Server,
+            vec![],
+            FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Void)),
+            None,
+        );
+        let duplicate_parameter_name = function(
+            3,
+            &["tasks", "assign"],
+            FunctionDomain::Server,
+            vec![parameter(1, "p_task", 0), parameter(2, "p_task", 1)],
+            FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Void)),
+            None,
+        );
+        let duplicate_parameter_id = function(
+            4,
+            &["tasks", "complete"],
+            FunctionDomain::Server,
+            vec![parameter(1, "p_task", 0), parameter(1, "p_actor", 1)],
+            FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Void)),
+            None,
+        );
+
+        assert!(matches!(
+            CatalogueSnapshot::new_with_functions(
+                CatalogueRevisionId::new(),
+                vec![],
+                vec![first.clone(), same_name]
+            ),
+            Err(CatalogueSnapshotError::DuplicateFunctionName { .. })
+        ));
+        assert!(matches!(
+            CatalogueSnapshot::new_with_functions(
+                CatalogueRevisionId::new(),
+                vec![],
+                vec![first, same_id]
+            ),
+            Err(CatalogueSnapshotError::DuplicateFunctionId { .. })
+        ));
+        assert!(matches!(
+            CatalogueSnapshot::new_with_functions(
+                CatalogueRevisionId::new(),
+                vec![],
+                vec![duplicate_parameter_name]
+            ),
+            Err(CatalogueSnapshotError::DuplicateParameterName { .. })
+        ));
+        assert!(matches!(
+            CatalogueSnapshot::new_with_functions(
+                CatalogueRevisionId::new(),
+                vec![],
+                vec![duplicate_parameter_id]
+            ),
+            Err(CatalogueSnapshotError::DuplicateParameterId { .. })
+        ));
+    }
+
+    #[test]
+    fn snapshot_rejects_invalid_function_transaction_and_rows_shapes() {
+        let client_transaction = function(
+            1,
+            &["studio", "main"],
+            FunctionDomain::Client,
+            vec![],
+            FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Void)),
+            Some(FunctionTransaction::Atomic),
+        );
+        let non_contiguous_parameters = function(
+            2,
+            &["tasks", "assign"],
+            FunctionDomain::Server,
+            vec![parameter(1, "p_task", 1)],
+            FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Void)),
+            None,
+        );
+        let duplicate_return_column = function(
+            3,
+            &["tasks", "overdue"],
+            FunctionDomain::Server,
+            vec![],
+            FunctionReturn::Rows(vec![return_column("title", 0), return_column("title", 1)]),
+            None,
+        );
+        let non_contiguous_return_column = function(
+            4,
+            &["tasks", "recent"],
+            FunctionDomain::Server,
+            vec![],
+            FunctionReturn::Rows(vec![return_column("title", 1)]),
+            None,
+        );
+        let empty_rows = function(
+            5,
+            &["tasks", "none"],
+            FunctionDomain::Server,
+            vec![],
+            FunctionReturn::Rows(vec![]),
+            None,
+        );
+
+        assert!(matches!(
+            CatalogueSnapshot::new_with_functions(
+                CatalogueRevisionId::new(),
+                vec![],
+                vec![client_transaction]
+            ),
+            Err(CatalogueSnapshotError::ClientFunctionTransaction { .. })
+        ));
+        assert!(matches!(
+            CatalogueSnapshot::new_with_functions(
+                CatalogueRevisionId::new(),
+                vec![],
+                vec![non_contiguous_parameters]
+            ),
+            Err(CatalogueSnapshotError::ParameterOrdinalOutOfSequence { .. })
+        ));
+        assert!(matches!(
+            CatalogueSnapshot::new_with_functions(
+                CatalogueRevisionId::new(),
+                vec![],
+                vec![duplicate_return_column]
+            ),
+            Err(CatalogueSnapshotError::DuplicateReturnColumnName { .. })
+        ));
+        assert!(matches!(
+            CatalogueSnapshot::new_with_functions(
+                CatalogueRevisionId::new(),
+                vec![],
+                vec![non_contiguous_return_column]
+            ),
+            Err(CatalogueSnapshotError::ReturnColumnOrdinalOutOfSequence { .. })
+        ));
+        assert!(matches!(
+            CatalogueSnapshot::new_with_functions(
+                CatalogueRevisionId::new(),
+                vec![],
+                vec![empty_rows]
+            ),
+            Err(CatalogueSnapshotError::EmptyRowsReturn { .. })
         ));
     }
 }
