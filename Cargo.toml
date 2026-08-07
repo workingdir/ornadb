@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/orna-core"]
+members = ["crates/orna-core", "crates/orna-syntax"]
 resolver = "3"
 
 [workspace.package]
@@ -8,4 +8,5 @@ rust-version = "1.95"
 license = "Apache-2.0"
 
 [workspace.dependencies]
+rowan = "0.16.1"
 uuid = { version = "1.18.1", features = ["v4"] }
