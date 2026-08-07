@@ -1,8 +1,10 @@
 use rowan::{GreenNode, GreenNodeBuilder, Language};
 
 use crate::{
-    Diagnostic, NamePart, ObjectFieldDeclaration, ObjectTypeDeclaration, OnDeletePolicy, Parse,
-    QualifiedName, SchemaDeclaration, SourceSlice, SourceSpan, SyntaxTree, TypeSpecification,
+    Diagnostic, FunctionReturnType, FunctionSecurity, FunctionTransaction, FunctionVolatility,
+    NamePart, ObjectFieldDeclaration, ObjectTypeDeclaration, OnDeletePolicy, Parse, QualifiedName,
+    RowsColumnDeclaration, SchemaDeclaration, ServerFunctionBody, ServerFunctionDeclaration,
+    ServerFunctionParameter, SourceSlice, SourceSpan, SyntaxTree, TypeSpecification,
     lexer::{Token, TokenKind, lex},
 };
 
@@ -28,6 +30,11 @@ pub(crate) enum SyntaxKind {
     LeftParenthesis,
     RightParenthesis,
     Comma,
+    CreateServerFunctionStatement,
+    FunctionParameter,
+    RowsReturnType,
+    RowsColumn,
+    SqlQueryBody,
 }
 
 impl From<SyntaxKind> for rowan::SyntaxKind {
@@ -63,6 +70,11 @@ impl Language for OrnaLanguage {
             16 => SyntaxKind::LeftParenthesis,
             17 => SyntaxKind::RightParenthesis,
             18 => SyntaxKind::Comma,
+            19 => SyntaxKind::CreateServerFunctionStatement,
+            20 => SyntaxKind::FunctionParameter,
+            21 => SyntaxKind::RowsReturnType,
+            22 => SyntaxKind::RowsColumn,
+            23 => SyntaxKind::SqlQueryBody,
             _ => panic!("unknown Orna syntax kind"),
         }
     }
@@ -84,6 +96,7 @@ struct Parser<'source> {
     diagnostics: Vec<Diagnostic>,
     schemas: Vec<SchemaDeclaration>,
     object_types: Vec<ObjectTypeDeclaration>,
+    server_functions: Vec<ServerFunctionDeclaration>,
 }
 
 impl<'source> Parser<'source> {
@@ -97,6 +110,7 @@ impl<'source> Parser<'source> {
             diagnostics,
             schemas: Vec::new(),
             object_types: Vec::new(),
+            server_functions: Vec::new(),
         }
     }
 
@@ -122,6 +136,7 @@ impl<'source> Parser<'source> {
             diagnostics: self.diagnostics,
             schemas: self.schemas,
             object_types: self.object_types,
+            server_functions: self.server_functions,
         }
     }
 
@@ -131,6 +146,14 @@ impl<'source> Parser<'source> {
             .is_some_and(|token| token.is_word("SCHEMA"))
         {
             self.parse_create_schema_statement();
+        } else if self
+            .peek_significant(1)
+            .is_some_and(|token| token.is_word("SERVER"))
+            && self
+                .peek_significant(2)
+                .is_some_and(|token| token.is_word("FUNCTION"))
+        {
+            self.parse_create_server_function_statement();
         } else if self
             .peek_significant(1)
             .is_some_and(|token| token.is_word("TYPE"))
@@ -172,6 +195,403 @@ impl<'source> Parser<'source> {
         }
 
         self.builder.finish_node();
+    }
+
+    fn parse_create_server_function_statement(&mut self) {
+        let statement_start = self.current().expect("CREATE token exists").range.start;
+        self.builder
+            .start_node(SyntaxKind::CreateServerFunctionStatement.into());
+
+        self.expect_word("CREATE");
+        self.skip_trivia();
+        if !self.expect_word("SERVER") {
+            self.recover_statement();
+            self.builder.finish_node();
+            return;
+        }
+        self.skip_trivia();
+        if !self.expect_word("FUNCTION") {
+            self.recover_statement();
+            self.builder.finish_node();
+            return;
+        }
+        self.skip_trivia();
+        let Some(name) =
+            self.parse_qualified_name("expected a function name after CREATE SERVER FUNCTION")
+        else {
+            self.recover_statement();
+            self.builder.finish_node();
+            return;
+        };
+        self.skip_trivia();
+        if self
+            .expect_kind(
+                TokenKind::LeftParenthesis,
+                "expected '(' after server function name",
+            )
+            .is_none()
+        {
+            self.recover_statement();
+            self.builder.finish_node();
+            return;
+        }
+        let Some(parameters) = self.parse_server_function_parameters() else {
+            self.recover_statement();
+            self.builder.finish_node();
+            return;
+        };
+        self.skip_trivia();
+        if !self.expect_word("RETURNS") {
+            self.recover_statement();
+            self.builder.finish_node();
+            return;
+        }
+        self.skip_trivia();
+        let Some(return_type) = self.parse_function_return_type() else {
+            self.recover_statement();
+            self.builder.finish_node();
+            return;
+        };
+
+        self.skip_trivia();
+        let security = if self
+            .current()
+            .is_some_and(|token| token.is_word("SECURITY"))
+        {
+            let security = self.parse_function_security();
+            if security.is_none() {
+                self.recover_statement();
+                self.builder.finish_node();
+                return;
+            }
+            security
+        } else {
+            None
+        };
+        self.skip_trivia();
+        let transaction = if self
+            .current()
+            .is_some_and(|token| token.is_word("TRANSACTION"))
+        {
+            let transaction = self.parse_function_transaction();
+            if transaction.is_none() {
+                self.recover_statement();
+                self.builder.finish_node();
+                return;
+            }
+            transaction
+        } else {
+            None
+        };
+        self.skip_trivia();
+        let volatility = if self
+            .current()
+            .is_some_and(|token| token.is_word("VOLATILITY"))
+        {
+            let volatility = self.parse_function_volatility();
+            if volatility.is_none() {
+                self.recover_statement();
+                self.builder.finish_node();
+                return;
+            }
+            volatility
+        } else {
+            None
+        };
+
+        self.skip_trivia();
+        if !self.expect_word("AS") {
+            self.recover_statement();
+            self.builder.finish_node();
+            return;
+        }
+        self.skip_trivia();
+        let Some(body) = self.parse_sql_query_body() else {
+            self.recover_statement();
+            self.builder.finish_node();
+            return;
+        };
+        self.skip_trivia();
+        let Some(semicolon) = self.expect_kind(
+            TokenKind::Semicolon,
+            "expected ';' after server function SQL query body",
+        ) else {
+            self.recover_statement();
+            self.builder.finish_node();
+            return;
+        };
+
+        self.server_functions.push(ServerFunctionDeclaration {
+            name,
+            parameters,
+            return_type,
+            security,
+            transaction,
+            volatility,
+            body,
+            span: SourceSpan {
+                start: statement_start,
+                end: semicolon.end,
+            },
+        });
+        self.builder.finish_node();
+    }
+
+    fn parse_server_function_parameters(&mut self) -> Option<Vec<ServerFunctionParameter>> {
+        self.parse_parenthesized_comma_list(
+            "expected ')' to close server function parameters",
+            "expected ',' or ')' after server function parameter",
+            "trailing commas are not allowed in server function parameters",
+            Self::parse_server_function_parameter,
+        )
+        .map(|(parameters, _)| parameters)
+    }
+
+    fn parse_server_function_parameter(&mut self, order: usize) -> Option<ServerFunctionParameter> {
+        self.builder
+            .start_node(SyntaxKind::FunctionParameter.into());
+        let result = (|| {
+            let name = self.expect_identifier("expected a server function parameter name")?;
+            let start = name.span.start;
+            self.skip_trivia();
+            let type_specification = self.parse_type_specification()?;
+            let mut end = type_specification.span().end;
+            self.skip_trivia();
+            let default_expression = if self.current().is_some_and(|token| token.is_word("DEFAULT"))
+            {
+                self.bump();
+                self.skip_trivia();
+                let expression = self.parse_default_expression()?;
+                end = expression.span.end;
+                Some(expression)
+            } else {
+                None
+            };
+            Some(ServerFunctionParameter {
+                name,
+                order,
+                type_specification,
+                default_expression,
+                span: SourceSpan { start, end },
+            })
+        })();
+        self.builder.finish_node();
+        result
+    }
+
+    fn parse_function_return_type(&mut self) -> Option<FunctionReturnType> {
+        if self.current().is_some_and(|token| token.is_word("TABLE")) {
+            self.error_current(
+                "ORNA0001",
+                "RETURNS TABLE is not supported; use RETURNS ROWS (...) for query-producing functions",
+            );
+            return None;
+        }
+        if self.current().is_some_and(|token| token.is_word("SET")) {
+            self.error_current(
+                "ORNA0001",
+                "RETURNS SET OF is not supported; use RETURNS ROWS (...) for query-producing functions",
+            );
+            return None;
+        }
+        if !self.current().is_some_and(|token| token.is_word("ROWS")) {
+            return self
+                .parse_type_specification()
+                .map(FunctionReturnType::Single);
+        }
+
+        self.builder.start_node(SyntaxKind::RowsReturnType.into());
+        let start = self.current().expect("ROWS token exists").range.start;
+        self.bump();
+        self.skip_trivia();
+        if self
+            .expect_kind(
+                TokenKind::LeftParenthesis,
+                "expected '(' after RETURNS ROWS",
+            )
+            .is_none()
+        {
+            self.builder.finish_node();
+            return None;
+        }
+        let result = self
+            .parse_parenthesized_comma_list(
+                "expected ')' to close RETURNS ROWS fields",
+                "expected ',' or ')' after RETURNS ROWS field",
+                "trailing commas are not allowed in RETURNS ROWS fields",
+                Self::parse_rows_column,
+            )
+            .map(|(columns, end)| FunctionReturnType::Rows {
+                columns,
+                span: SourceSpan { start, end },
+            });
+        self.builder.finish_node();
+        result
+    }
+
+    fn parse_rows_column(&mut self, order: usize) -> Option<RowsColumnDeclaration> {
+        self.builder.start_node(SyntaxKind::RowsColumn.into());
+        let result = (|| {
+            let name = self.expect_identifier("expected a RETURNS ROWS field name")?;
+            let start = name.span.start;
+            self.skip_trivia();
+            let type_specification = self.parse_type_specification()?;
+            let end = type_specification.span().end;
+            Some(RowsColumnDeclaration {
+                name,
+                order,
+                type_specification,
+                span: SourceSpan { start, end },
+            })
+        })();
+        self.builder.finish_node();
+        result
+    }
+
+    fn parse_parenthesized_comma_list<T>(
+        &mut self,
+        closing_message: &str,
+        continuation_message: &str,
+        trailing_comma_message: &str,
+        parse_item: impl FnMut(&mut Self, usize) -> Option<T>,
+    ) -> Option<(Vec<T>, usize)> {
+        let mut items = Vec::new();
+        let mut parse_item = parse_item;
+
+        loop {
+            self.skip_trivia();
+            if self
+                .current()
+                .is_some_and(|token| token.is_kind(TokenKind::RightParenthesis))
+            {
+                let end = self.current().expect("right parenthesis exists").range.end;
+                self.bump();
+                return Some((items, end));
+            }
+            if self.current().is_none() {
+                self.error_current("ORNA0001", closing_message);
+                return None;
+            }
+
+            items.push(parse_item(self, items.len())?);
+            self.skip_trivia();
+            if self
+                .current()
+                .is_some_and(|token| token.is_kind(TokenKind::Comma))
+            {
+                self.bump();
+                self.skip_trivia();
+                if self
+                    .current()
+                    .is_some_and(|token| token.is_kind(TokenKind::RightParenthesis))
+                {
+                    self.error_current("ORNA0001", trailing_comma_message);
+                    return None;
+                }
+                continue;
+            }
+            if self
+                .current()
+                .is_some_and(|token| token.is_kind(TokenKind::RightParenthesis))
+            {
+                let end = self.current().expect("right parenthesis exists").range.end;
+                self.bump();
+                return Some((items, end));
+            }
+
+            self.error_current("ORNA0001", continuation_message);
+            return None;
+        }
+    }
+
+    fn parse_function_security(&mut self) -> Option<FunctionSecurity> {
+        self.expect_word("SECURITY");
+        self.skip_trivia();
+        if self.take_word("INVOKER").is_some() {
+            Some(FunctionSecurity::Invoker)
+        } else if self.take_word("DEFINER").is_some() {
+            Some(FunctionSecurity::Definer)
+        } else {
+            self.error_current("ORNA0001", "expected INVOKER or DEFINER after SECURITY");
+            None
+        }
+    }
+
+    fn parse_function_transaction(&mut self) -> Option<FunctionTransaction> {
+        self.expect_word("TRANSACTION");
+        self.skip_trivia();
+        if self.take_word("ATOMIC").is_some() {
+            Some(FunctionTransaction::Atomic)
+        } else if self.take_word("MANUAL").is_some() {
+            Some(FunctionTransaction::Manual)
+        } else if self.take_word("READ").is_some() {
+            self.skip_trivia();
+            self.expect_word("ONLY")
+                .then_some(FunctionTransaction::ReadOnly)
+        } else {
+            self.error_current(
+                "ORNA0001",
+                "expected ATOMIC, READ ONLY, or MANUAL after TRANSACTION",
+            );
+            None
+        }
+    }
+
+    fn parse_function_volatility(&mut self) -> Option<FunctionVolatility> {
+        self.expect_word("VOLATILITY");
+        self.skip_trivia();
+        if self.take_word("IMMUTABLE").is_some() {
+            Some(FunctionVolatility::Immutable)
+        } else if self.take_word("STABLE").is_some() {
+            Some(FunctionVolatility::Stable)
+        } else if self.take_word("VOLATILE").is_some() {
+            Some(FunctionVolatility::Volatile)
+        } else {
+            self.error_current(
+                "ORNA0001",
+                "expected IMMUTABLE, STABLE, or VOLATILE after VOLATILITY",
+            );
+            None
+        }
+    }
+
+    fn parse_sql_query_body(&mut self) -> Option<ServerFunctionBody> {
+        self.builder.start_node(SyntaxKind::SqlQueryBody.into());
+        let result = (|| {
+            let first = self.current()?;
+            if first.is_kind(TokenKind::Semicolon) {
+                self.error_current("ORNA0001", "expected a SQL query after AS");
+                return None;
+            }
+            let start = first.range.start;
+            let mut end = start;
+            let mut parenthesis_depth = 0usize;
+
+            while let Some(token) = self.current().cloned() {
+                if token.is_kind(TokenKind::Semicolon) && parenthesis_depth == 0 {
+                    break;
+                }
+                match token.kind {
+                    TokenKind::LeftParenthesis => parenthesis_depth += 1,
+                    TokenKind::RightParenthesis if parenthesis_depth > 0 => parenthesis_depth -= 1,
+                    _ => {}
+                }
+                if !token.kind.is_trivia() {
+                    end = token.range.end;
+                }
+                self.bump();
+            }
+            if end == start {
+                self.error_current("ORNA0001", "expected a SQL query after AS");
+                return None;
+            }
+            Some(ServerFunctionBody::SqlQuery(SourceSlice {
+                text: self.source[start..end].to_owned(),
+                span: SourceSpan { start, end },
+            }))
+        })();
+        self.builder.finish_node();
+        result
     }
 
     fn parse_create_object_type_statement(&mut self) {
@@ -530,18 +950,26 @@ impl<'source> Parser<'source> {
         self.expect_word_token(expected).is_some()
     }
 
-    fn expect_word_token(&mut self, expected: &str) -> Option<Token<'source>> {
-        let Some(token) = self.current().cloned() else {
-            self.error_current("ORNA0001", &format!("expected keyword {expected}"));
-            return None;
-        };
+    fn take_word(&mut self, expected: &str) -> Option<Token<'source>> {
+        let token = self.current().cloned()?;
         if token.is_word(expected) {
             self.bump();
             Some(token)
         } else {
-            self.error_current("ORNA0001", &format!("expected keyword {expected}"));
             None
         }
+    }
+
+    fn expect_word_token(&mut self, expected: &str) -> Option<Token<'source>> {
+        if let Some(token) = self.take_word(expected) {
+            return Some(token);
+        }
+        if self.current().is_none() {
+            self.error_current("ORNA0001", &format!("expected keyword {expected}"));
+            return None;
+        }
+        self.error_current("ORNA0001", &format!("expected keyword {expected}"));
+        None
     }
 
     fn expect_identifier(&mut self, message: &str) -> Option<NamePart> {
