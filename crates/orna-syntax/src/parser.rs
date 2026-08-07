@@ -1,11 +1,11 @@
 use rowan::{GreenNode, GreenNodeBuilder, Language};
 
 use crate::{
-    Diagnostic, FunctionReturnType, FunctionSecurity, FunctionTransaction, FunctionVolatility,
-    NamePart, ObjectFieldDeclaration, ObjectTypeDeclaration, OnDeletePolicy, Parse, QualifiedName,
-    RowsColumnDeclaration, SchemaDeclaration, ServerFunctionBody, ServerFunctionDeclaration,
-    ServerFunctionParameter, SourceSlice, SourceSpan, StandardLargeObjectKind, SyntaxTree,
-    TypeSpecification,
+    CapabilitySpecification, Diagnostic, FunctionReturnType, FunctionSecurity, FunctionTransaction,
+    FunctionVolatility, NamePart, ObjectFieldDeclaration, ObjectTypeDeclaration, OnDeletePolicy,
+    Parse, QualifiedName, RowsColumnDeclaration, SchemaDeclaration, ServerFunctionBody,
+    ServerFunctionDeclaration, ServerFunctionParameter, SourceSlice, SourceSpan,
+    StandardLargeObjectKind, SyntaxTree, TypeSpecification,
     lexer::{Token, TokenKind, lex},
 };
 
@@ -37,6 +37,9 @@ pub(crate) enum SyntaxKind {
     RowsColumn,
     SqlQueryBody,
     StandardLargeObjectTypeSpecification,
+    CapabilityClause,
+    CapabilitySpecification,
+    CapabilityArguments,
 }
 
 impl From<SyntaxKind> for rowan::SyntaxKind {
@@ -78,6 +81,9 @@ impl Language for OrnaLanguage {
             22 => SyntaxKind::RowsColumn,
             23 => SyntaxKind::SqlQueryBody,
             24 => SyntaxKind::StandardLargeObjectTypeSpecification,
+            25 => SyntaxKind::CapabilityClause,
+            26 => SyntaxKind::CapabilitySpecification,
+            27 => SyntaxKind::CapabilityArguments,
             _ => panic!("unknown Orna syntax kind"),
         }
     }
@@ -303,6 +309,23 @@ impl<'source> Parser<'source> {
         };
 
         self.skip_trivia();
+        let capabilities = if self
+            .current()
+            .is_some_and(|token| token.is_word("REQUIRES"))
+        {
+            match self.parse_capability_clause() {
+                Some(capabilities) => capabilities,
+                None => {
+                    self.recover_statement();
+                    self.builder.finish_node();
+                    return;
+                }
+            }
+        } else {
+            Vec::new()
+        };
+
+        self.skip_trivia();
         if !self.expect_word("AS") {
             self.recover_statement();
             self.builder.finish_node();
@@ -331,6 +354,7 @@ impl<'source> Parser<'source> {
             security,
             transaction,
             volatility,
+            capabilities,
             body,
             span: SourceSpan {
                 start: statement_start,
@@ -556,6 +580,145 @@ impl<'source> Parser<'source> {
             );
             None
         }
+    }
+
+    fn parse_capability_clause(&mut self) -> Option<Vec<CapabilitySpecification>> {
+        self.builder.start_node(SyntaxKind::CapabilityClause.into());
+        let result = (|| {
+            self.expect_word("REQUIRES");
+            self.skip_trivia();
+            if !self.expect_word("CAPABILITY") {
+                return None;
+            }
+            self.skip_trivia();
+
+            let mut capabilities = Vec::new();
+            if self.current().is_none()
+                || self
+                    .current()
+                    .is_some_and(|token| token.is_kind(TokenKind::Semicolon) || token.is_word("AS"))
+            {
+                self.error_current(
+                    "ORNA0001",
+                    "expected a capability after REQUIRES CAPABILITY",
+                );
+                return None;
+            }
+            capabilities.push(self.parse_capability_specification()?);
+
+            loop {
+                self.skip_trivia();
+                if self
+                    .current()
+                    .is_some_and(|token| token.is_kind(TokenKind::Comma))
+                {
+                    self.bump();
+                    self.skip_trivia();
+                    if self.current().is_none()
+                        || self.current().is_some_and(|token| {
+                            token.is_kind(TokenKind::Semicolon) || token.is_word("AS")
+                        })
+                    {
+                        self.error_current(
+                            "ORNA0001",
+                            "trailing commas are not allowed in capability requirements",
+                        );
+                        return None;
+                    }
+                    capabilities.push(self.parse_capability_specification()?);
+                    continue;
+                }
+                if self.current().is_some_and(|token| token.is_word("AS")) {
+                    return Some(capabilities);
+                }
+                self.error_current(
+                    "ORNA0001",
+                    "expected ',' or AS after a capability requirement",
+                );
+                return None;
+            }
+        })();
+        self.builder.finish_node();
+        result
+    }
+
+    fn parse_capability_specification(&mut self) -> Option<CapabilitySpecification> {
+        self.builder
+            .start_node(SyntaxKind::CapabilitySpecification.into());
+        let result = (|| {
+            let name = self.parse_qualified_name("expected a capability name")?;
+            let start = name.span.start;
+            let mut end = name.span.end;
+
+            self.skip_trivia();
+            let arguments = if self
+                .current()
+                .is_some_and(|token| token.is_kind(TokenKind::LeftParenthesis))
+            {
+                Some(self.parse_capability_arguments()?)
+            } else {
+                None
+            };
+            if let Some((_, closing_end)) = &arguments {
+                end = *closing_end;
+            }
+
+            Some(CapabilitySpecification {
+                name,
+                arguments: arguments.map(|(arguments, _)| arguments),
+                span: SourceSpan { start, end },
+            })
+        })();
+        self.builder.finish_node();
+        result
+    }
+
+    fn parse_capability_arguments(&mut self) -> Option<(SourceSlice, usize)> {
+        self.builder
+            .start_node(SyntaxKind::CapabilityArguments.into());
+        let result = (|| {
+            let opening = self.current().cloned().expect("opening parenthesis exists");
+            self.bump();
+            let start = opening.range.end;
+            let mut depth = 1usize;
+
+            while let Some(token) = self.current().cloned() {
+                match token.kind {
+                    TokenKind::LeftParenthesis => {
+                        depth += 1;
+                        self.bump();
+                    }
+                    TokenKind::RightParenthesis => {
+                        depth -= 1;
+                        if depth == 0 {
+                            let end = token.range.start;
+                            self.bump();
+                            return Some((
+                                SourceSlice {
+                                    text: self.source[start..end].to_owned(),
+                                    span: SourceSpan { start, end },
+                                },
+                                token.range.end,
+                            ));
+                        }
+                        self.bump();
+                    }
+                    TokenKind::Semicolon => {
+                        self.error_current(
+                            "ORNA0001",
+                            "expected ')' to close capability arguments",
+                        );
+                        return None;
+                    }
+                    _ => self.bump(),
+                }
+            }
+
+            self.error_current("ORNA0001", "expected ')' to close capability arguments");
+            None
+        })();
+        self.builder.finish_node();
+        result
     }
 
     fn parse_sql_query_body(&mut self) -> Option<ServerFunctionBody> {
