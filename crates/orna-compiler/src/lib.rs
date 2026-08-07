@@ -7,6 +7,13 @@
 use orna_core::source::SourceBundle;
 use orna_syntax::{Diagnostic as SyntaxDiagnostic, Parse as SyntaxParse, SourceSpan};
 
+mod resolver;
+
+pub use resolver::{
+    CheckReport, CheckedBundle, CheckedDefault, CheckedField, CheckedObjectType, CheckedSchema,
+    ConstantValue, check,
+};
+
 /// Parses every source unit in a bundle without changing compiler state.
 pub fn parse_bundle(bundle: &SourceBundle) -> ParseReport {
     let mut units = Vec::with_capacity(bundle.len());
@@ -39,6 +46,14 @@ pub enum DiagnosticCode {
     UnexpectedToken,
     /// The source ends before a comment, quoted identifier, or string closes.
     UnterminatedSourceConstruct,
+    /// A referenced qualified name does not exist in the checking context.
+    UnknownQualifiedName,
+    /// More than one declaration has the same resolved semantic name.
+    DuplicateDefinition,
+    /// A declaration or constant does not satisfy its resolved type.
+    TypeMismatch,
+    /// A `REF` declaration targets a scalar rather than an object type.
+    InvalidReferenceTarget,
 }
 
 impl DiagnosticCode {
@@ -47,6 +62,10 @@ impl DiagnosticCode {
         match self {
             Self::UnexpectedToken => "ORNA0001",
             Self::UnterminatedSourceConstruct => "ORNA0002",
+            Self::UnknownQualifiedName => "ORNA0101",
+            Self::DuplicateDefinition => "ORNA0103",
+            Self::TypeMismatch => "ORNA0201",
+            Self::InvalidReferenceTarget => "ORNA0203",
         }
     }
 
@@ -55,6 +74,18 @@ impl DiagnosticCode {
             "ORNA0001" => Self::UnexpectedToken,
             "ORNA0002" => Self::UnterminatedSourceConstruct,
             _ => panic!("orna-syntax emitted a diagnostic outside the compiler syntax contract"),
+        }
+    }
+
+    fn semantic(
+        code: Self,
+        message: impl Into<String>,
+        location: SourceLocation,
+    ) -> CompilerDiagnostic {
+        CompilerDiagnostic {
+            code,
+            message: message.into(),
+            location,
         }
     }
 }
@@ -162,6 +193,10 @@ impl ParsedSourceUnit {
     /// Returns the exact source text represented by the private lossless CST.
     pub fn syntax_text(&self) -> String {
         self.parsed.syntax().text()
+    }
+
+    pub(crate) fn parsed(&self) -> &SyntaxParse {
+        &self.parsed
     }
 }
 
