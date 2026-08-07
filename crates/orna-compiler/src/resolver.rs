@@ -6,17 +6,21 @@
 use std::collections::{HashMap, HashSet};
 
 use orna_core::{
-    CatalogueRevisionId, ExpressionId, FieldId, TypeId,
+    CatalogueRevisionId, ExpressionId, FieldId, FunctionId, TypeId,
     catalogue::{
-        CatalogueSnapshot, FieldDefinition, ObjectTypeDefinition, OnDeleteAction,
+        CatalogueSnapshot, FieldDefinition, FunctionSecurity as CatalogueFunctionSecurity,
+        FunctionTransaction as CatalogueFunctionTransaction,
+        FunctionVolatility as CatalogueFunctionVolatility, ObjectTypeDefinition, OnDeleteAction,
         QualifiedSemanticName,
     },
     source::SourceBundle,
     types::{ResolvedType, StandardScalar},
 };
 use orna_syntax::{
-    NamePart, ObjectTypeDeclaration, OnDeletePolicy, QualifiedName, SourceSlice, SourceSpan,
-    StandardLargeObjectKind, TypeSpecification,
+    FunctionSecurity as SyntaxFunctionSecurity, FunctionTransaction as SyntaxFunctionTransaction,
+    FunctionVolatility as SyntaxFunctionVolatility, NamePart, ObjectTypeDeclaration,
+    OnDeletePolicy, QualifiedName, ServerFunctionBody, ServerFunctionDeclaration, SourceSlice,
+    SourceSpan, StandardLargeObjectKind, TypeSpecification,
 };
 
 use crate::{
@@ -219,6 +223,21 @@ struct Header<'a> {
     id: TypeId,
 }
 
+/// Resolved metadata for a SERVER function before signature and body planning.
+///
+/// This temporary input is deliberately private. It does not make a function
+/// executable or create a catalogue definition.
+#[allow(dead_code)]
+#[derive(Clone, Copy)]
+struct ServerFunctionHeader<'a> {
+    declaration: &'a ServerFunctionDeclaration,
+    logical_path: &'a str,
+    id: FunctionId,
+    security: CatalogueFunctionSecurity,
+    transaction: Option<CatalogueFunctionTransaction>,
+    volatility: CatalogueFunctionVolatility,
+}
+
 fn check_parsed(parse_report: ParseReport, base: &CatalogueSnapshot) -> CheckReport {
     let mut diagnostics = parse_report.diagnostics().to_vec();
     if !diagnostics.is_empty() {
@@ -230,6 +249,11 @@ fn check_parsed(parse_report: ParseReport, base: &CatalogueSnapshot) -> CheckRep
         .object_types()
         .iter()
         .filter_map(|object_type| namespace_of(object_type.name()))
+        .chain(
+            base.functions()
+                .iter()
+                .filter_map(|function| namespace_of(function.name())),
+        )
         .collect::<HashSet<_>>();
     let mut submitted_schemas = HashSet::new();
     for unit in parse_report.units() {
@@ -393,20 +417,16 @@ fn check_parsed(parse_report: ParseReport, base: &CatalogueSnapshot) -> CheckRep
         });
     }
 
-    if parse_report
-        .units()
-        .iter()
-        .any(|unit| !unit.parsed().server_functions().is_empty())
-    {
-        for unit in parse_report.units() {
-            for function in unit.parsed().server_functions() {
-                diagnostics.push(diagnostic(
-                    DiagnosticCode::TypeMismatch,
-                    "SERVER function resolution is not implemented in this compiler slice",
-                    unit.logical_path(),
-                    &function.span,
-                ));
-            }
+    let function_headers =
+        resolve_server_function_headers(&parse_report, base, &known_schemas, &mut diagnostics);
+    if diagnostics.is_empty() {
+        for header in function_headers {
+            diagnostics.push(diagnostic(
+                DiagnosticCode::TypeMismatch,
+                "SERVER function body planning is not implemented",
+                header.logical_path,
+                server_function_body_span(&header.declaration.body),
+            ));
         }
     }
 
@@ -448,6 +468,107 @@ fn check_parsed(parse_report: ParseReport, base: &CatalogueSnapshot) -> CheckRep
             object_types: checked_types,
         }),
         candidate: Some(candidate),
+    }
+}
+
+fn resolve_server_function_headers<'a>(
+    parse_report: &'a ParseReport,
+    base: &CatalogueSnapshot,
+    known_schemas: &HashSet<QualifiedSemanticName>,
+    diagnostics: &mut Vec<CompilerDiagnostic>,
+) -> Vec<ServerFunctionHeader<'a>> {
+    let mut headers = Vec::new();
+    let mut declarations_by_name = HashSet::new();
+
+    for unit in parse_report.units() {
+        for declaration in unit.parsed().server_functions() {
+            let name = semantic_name(&declaration.name);
+            if !declarations_by_name.insert(name.clone()) {
+                diagnostics.push(diagnostic(
+                    DiagnosticCode::DuplicateDefinition,
+                    format!("duplicate server function definition {name}"),
+                    unit.logical_path(),
+                    &declaration.name.span,
+                ));
+                continue;
+            }
+            let Some(namespace) = namespace_of(&name) else {
+                diagnostics.push(diagnostic(
+                    DiagnosticCode::UnknownQualifiedName,
+                    format!("server function {name} has no declared schema"),
+                    unit.logical_path(),
+                    &declaration.name.span,
+                ));
+                continue;
+            };
+            if !known_schemas.contains(&namespace) {
+                diagnostics.push(diagnostic(
+                    DiagnosticCode::UnknownQualifiedName,
+                    format!("unknown schema {namespace} for server function {name}"),
+                    unit.logical_path(),
+                    &declaration.name.span,
+                ));
+                continue;
+            }
+
+            let security = map_function_security(declaration.security);
+            let transaction = map_function_transaction(declaration.transaction);
+            let volatility = map_function_volatility(declaration.volatility);
+            if transaction == Some(CatalogueFunctionTransaction::Manual) {
+                diagnostics.push(diagnostic(
+                    DiagnosticCode::DomainIncompatible,
+                    "TRANSACTION MANUAL is outside the MVP SERVER function domain",
+                    unit.logical_path(),
+                    &declaration.span,
+                ));
+                continue;
+            }
+
+            headers.push(ServerFunctionHeader {
+                declaration,
+                logical_path: unit.logical_path(),
+                id: base
+                    .function_by_name(&name)
+                    .map_or_else(FunctionId::new, |function| function.id()),
+                security,
+                transaction,
+                volatility,
+            });
+        }
+    }
+
+    headers
+}
+
+fn map_function_security(mode: Option<SyntaxFunctionSecurity>) -> CatalogueFunctionSecurity {
+    match mode {
+        Some(SyntaxFunctionSecurity::Definer) => CatalogueFunctionSecurity::Definer,
+        Some(SyntaxFunctionSecurity::Invoker) | None => CatalogueFunctionSecurity::Invoker,
+    }
+}
+
+fn map_function_transaction(
+    mode: Option<SyntaxFunctionTransaction>,
+) -> Option<CatalogueFunctionTransaction> {
+    match mode {
+        Some(SyntaxFunctionTransaction::Atomic) => Some(CatalogueFunctionTransaction::Atomic),
+        Some(SyntaxFunctionTransaction::ReadOnly) => Some(CatalogueFunctionTransaction::ReadOnly),
+        Some(SyntaxFunctionTransaction::Manual) => Some(CatalogueFunctionTransaction::Manual),
+        None => None,
+    }
+}
+
+fn map_function_volatility(mode: Option<SyntaxFunctionVolatility>) -> CatalogueFunctionVolatility {
+    match mode {
+        Some(SyntaxFunctionVolatility::Immutable) => CatalogueFunctionVolatility::Immutable,
+        Some(SyntaxFunctionVolatility::Stable) => CatalogueFunctionVolatility::Stable,
+        Some(SyntaxFunctionVolatility::Volatile) | None => CatalogueFunctionVolatility::Volatile,
+    }
+}
+
+fn server_function_body_span(body: &ServerFunctionBody) -> &SourceSpan {
+    match body {
+        ServerFunctionBody::SqlQuery(source) => &source.span,
     }
 }
 
@@ -663,17 +784,22 @@ fn diagnostic(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use orna_core::{
         CatalogueRevisionId, FunctionId, FunctionRevisionId,
         catalogue::{
             CatalogueSnapshot, FunctionDefinition, FunctionDomain, FunctionReturn,
-            FunctionSecurity, FunctionVolatility, OnDeleteAction, QualifiedSemanticName,
+            FunctionSecurity, FunctionTransaction, FunctionVolatility, OnDeleteAction,
+            QualifiedSemanticName,
         },
         source::{SourceBundle, SourceUnit},
         types::{ResolvedType, StandardScalar},
     };
 
-    use super::{ConstantValue, DiagnosticCode, check};
+    use super::{
+        ConstantValue, DiagnosticCode, check, parse_bundle, resolve_server_function_headers,
+    };
 
     fn empty_catalogue() -> CatalogueSnapshot {
         CatalogueSnapshot::new(CatalogueRevisionId::new(), Vec::new()).unwrap()
@@ -917,17 +1043,181 @@ mod tests {
     }
 
     #[test]
-    fn rejects_server_functions_until_function_resolution_exists() {
+    fn rejects_server_function_bodies_until_planning_exists() {
         let report = check(
             &bundle([(
                 "functions.orna",
-                "CREATE SERVER FUNCTION people.find() RETURNS TEXT AS SELECT 'x';",
+                "CREATE SCHEMA people; CREATE SERVER FUNCTION people.find() RETURNS TEXT AS SELECT 'x';",
             )]),
             &empty_catalogue(),
         );
 
         assert_eq!(report.diagnostics()[0].code(), DiagnosticCode::TypeMismatch);
         assert!(report.candidate().is_none());
+    }
+
+    #[test]
+    fn rejects_invalid_server_function_headers_before_body_planning() {
+        let report = check(
+            &bundle([(
+                "functions.orna",
+                "CREATE SERVER FUNCTION find() RETURNS TEXT AS SELECT 'x';\
+                 CREATE SCHEMA people;\
+                 CREATE SERVER FUNCTION people.find() RETURNS TEXT TRANSACTION MANUAL AS SELECT 'x';",
+            )]),
+            &empty_catalogue(),
+        );
+
+        let diagnostics = report.diagnostics();
+        assert_eq!(diagnostics[0].code(), DiagnosticCode::UnknownQualifiedName);
+        assert_eq!(diagnostics[1].code(), DiagnosticCode::DomainIncompatible);
+        assert!(diagnostics.iter().all(|diagnostic| {
+            diagnostic.message() != "SERVER function body planning is not implemented"
+        }));
+        assert!(report.checked_bundle().is_none());
+        assert!(report.candidate().is_none());
+    }
+
+    #[test]
+    fn rejects_duplicate_server_function_names_after_normalisation() {
+        let report = check(
+            &bundle([(
+                "functions.orna",
+                "CREATE SCHEMA people;\
+                 CREATE SERVER FUNCTION People.Find() RETURNS TEXT AS SELECT 'x';\
+                 CREATE SERVER FUNCTION people.find() RETURNS TEXT AS SELECT 'y';",
+            )]),
+            &empty_catalogue(),
+        );
+
+        let diagnostics = report.diagnostics();
+        assert_eq!(diagnostics[0].code(), DiagnosticCode::DuplicateDefinition);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(report.checked_bundle().is_none());
+        assert!(report.candidate().is_none());
+    }
+
+    #[test]
+    fn fails_closed_at_a_clean_server_function_body() {
+        let source = "CREATE SCHEMA people; CREATE SERVER FUNCTION people.find() RETURNS TEXT AS SELECT 'x';";
+        let report = check(&bundle([("functions.orna", source)]), &empty_catalogue());
+
+        assert_eq!(report.diagnostics().len(), 1);
+        let diagnostic = &report.diagnostics()[0];
+        assert_eq!(diagnostic.code(), DiagnosticCode::TypeMismatch);
+        assert_eq!(
+            diagnostic.message(),
+            "SERVER function body planning is not implemented"
+        );
+        assert_eq!(
+            diagnostic.location().span().start(),
+            source.find("SELECT").unwrap()
+        );
+        assert!(report.checked_bundle().is_none());
+        assert!(report.candidate().is_none());
+    }
+
+    #[test]
+    fn does_not_add_body_planning_diagnostics_after_object_errors() {
+        let report = check(
+            &bundle([(
+                "functions.orna",
+                "CREATE SCHEMA people;\
+                 CREATE TYPE people.person AS OBJECT (manager REF missing.person);\
+                 CREATE SERVER FUNCTION people.find() RETURNS TEXT AS SELECT 'x';",
+            )]),
+            &empty_catalogue(),
+        );
+
+        assert_eq!(report.diagnostics().len(), 1);
+        assert_eq!(
+            report.diagnostics()[0].code(),
+            DiagnosticCode::UnknownQualifiedName
+        );
+        assert_ne!(
+            report.diagnostics()[0].message(),
+            "SERVER function body planning is not implemented"
+        );
+        assert!(report.checked_bundle().is_none());
+        assert!(report.candidate().is_none());
+    }
+
+    #[test]
+    fn recognises_schemas_from_base_server_functions() {
+        let base_function = FunctionDefinition::new(
+            FunctionId::new(),
+            QualifiedSemanticName::new(["sys", "health"]).unwrap(),
+            FunctionDomain::Server,
+            vec![],
+            FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Boolean)),
+            FunctionRevisionId::new(),
+            FunctionSecurity::Invoker,
+            None,
+            FunctionVolatility::Volatile,
+        );
+        let base = CatalogueSnapshot::new_with_functions(
+            CatalogueRevisionId::new(),
+            vec![],
+            vec![base_function],
+        )
+        .unwrap();
+
+        let report = check(
+            &bundle([(
+                "functions.orna",
+                "CREATE SERVER FUNCTION sys.probe() RETURNS BOOL AS SELECT TRUE;",
+            )]),
+            &base,
+        );
+
+        assert_eq!(report.diagnostics().len(), 1);
+        assert_eq!(report.diagnostics()[0].code(), DiagnosticCode::TypeMismatch);
+        assert_eq!(
+            report.diagnostics()[0].message(),
+            "SERVER function body planning is not implemented"
+        );
+    }
+
+    #[test]
+    fn server_function_headers_preserve_ids_and_map_modifiers() {
+        let existing = FunctionDefinition::new(
+            FunctionId::new(),
+            QualifiedSemanticName::new(["sys", "health"]).unwrap(),
+            FunctionDomain::Server,
+            vec![],
+            FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Boolean)),
+            FunctionRevisionId::new(),
+            FunctionSecurity::Invoker,
+            None,
+            FunctionVolatility::Volatile,
+        );
+        let existing_id = existing.id();
+        let base = CatalogueSnapshot::new_with_functions(
+            CatalogueRevisionId::new(),
+            vec![],
+            vec![existing],
+        )
+        .unwrap();
+        let parsed = parse_bundle(&bundle([(
+            "functions.orna",
+            "CREATE SERVER FUNCTION Sys.Health() RETURNS BOOL SECURITY DEFINER TRANSACTION READ ONLY VOLATILITY STABLE AS SELECT TRUE;\
+             CREATE SERVER FUNCTION sys.defaults() RETURNS BOOL AS SELECT TRUE;",
+        )]));
+        let known_schemas = HashSet::from([QualifiedSemanticName::new(["sys"]).unwrap()]);
+        let mut diagnostics = Vec::new();
+
+        let headers =
+            resolve_server_function_headers(&parsed, &base, &known_schemas, &mut diagnostics);
+
+        assert!(diagnostics.is_empty());
+        assert_eq!(headers.len(), 2);
+        assert_eq!(headers[0].id, existing_id);
+        assert_eq!(headers[0].security, FunctionSecurity::Definer);
+        assert_eq!(headers[0].transaction, Some(FunctionTransaction::ReadOnly));
+        assert_eq!(headers[0].volatility, FunctionVolatility::Stable);
+        assert_eq!(headers[1].security, FunctionSecurity::Invoker);
+        assert_eq!(headers[1].transaction, None);
+        assert_eq!(headers[1].volatility, FunctionVolatility::Volatile);
     }
 
     #[test]
