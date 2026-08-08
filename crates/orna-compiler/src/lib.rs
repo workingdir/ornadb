@@ -13,11 +13,13 @@ pub(crate) mod relational;
 mod resolver;
 
 pub use resolver::{
-    CheckReport, CheckedBundle, CheckedDefault, CheckedExpressionId, CheckedField, CheckedFieldId,
+    CheckReport, CheckedBundle, CheckedDefault, CheckedDefinitionReference,
+    CheckedDefinitionReferenceTarget, CheckedExpressionId, CheckedField, CheckedFieldId,
     CheckedFunctionId, CheckedObjectType, CheckedParameterId, CheckedSchema, CheckedSchemaId,
-    CheckedServerFunction, CheckedTypeId, ConstantValue, ProvisionalExpressionId,
-    ProvisionalFieldId, ProvisionalFunctionId, ProvisionalParameterId, ProvisionalSchemaId,
-    ProvisionalTypeId, check,
+    CheckedServerFunction, CheckedServerFunctionParameter, CheckedServerFunctionReturnColumn,
+    CheckedTypeId, ConstantValue, ProvisionalExpressionId, ProvisionalFieldId,
+    ProvisionalFunctionId, ProvisionalParameterId, ProvisionalSchemaId, ProvisionalTypeId,
+    SemanticType, check,
 };
 
 /// Resolves an identifier component with Orna quoted-name rules.
