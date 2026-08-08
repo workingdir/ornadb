@@ -540,30 +540,35 @@ async fn verify_constraints(
     let rows = transaction
         .query(
             "SELECT
-                constraint.conname AS name,
-                constraint.contype::text AS kind,
-                constraint.conkey,
+                catalogue_constraint.conname AS name,
+                catalogue_constraint.contype::text AS kind,
+                catalogue_constraint.conkey,
                 target.relname AS target_table,
                 target_namespace.nspname AS target_namespace,
-                constraint.confkey,
-                constraint.confdeltype::text AS delete_action,
-                constraint.confupdtype::text AS update_action,
-                constraint.confmatchtype::text AS match_type,
-                constraint.convalidated AS validated,
-                constraint.conenforced AS enforced,
-                constraint.conperiod AS period,
-                constraint.condeferrable AS deferrable,
-                constraint.condeferred AS deferred,
-                constraint.connoinherit AS no_inherit,
-                pg_catalog.pg_get_expr(constraint.conbin, constraint.conrelid) AS expression
-             FROM pg_catalog.pg_constraint AS constraint
-             JOIN pg_catalog.pg_class AS class ON class.oid = constraint.conrelid
+                catalogue_constraint.confkey,
+                catalogue_constraint.confdeltype::text AS delete_action,
+                catalogue_constraint.confupdtype::text AS update_action,
+                catalogue_constraint.confmatchtype::text AS match_type,
+                catalogue_constraint.convalidated AS validated,
+                catalogue_constraint.conenforced AS enforced,
+                catalogue_constraint.conperiod AS period,
+                catalogue_constraint.condeferrable AS deferrable,
+                catalogue_constraint.condeferred AS deferred,
+                catalogue_constraint.connoinherit AS no_inherit,
+                pg_catalog.pg_get_expr(
+                    catalogue_constraint.conbin,
+                    catalogue_constraint.conrelid
+                ) AS expression
+             FROM pg_catalog.pg_constraint AS catalogue_constraint
+             JOIN pg_catalog.pg_class AS class
+               ON class.oid = catalogue_constraint.conrelid
              JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = class.relnamespace
-             LEFT JOIN pg_catalog.pg_class AS target ON target.oid = constraint.confrelid
+             LEFT JOIN pg_catalog.pg_class AS target
+               ON target.oid = catalogue_constraint.confrelid
              LEFT JOIN pg_catalog.pg_namespace AS target_namespace ON target_namespace.oid = target.relnamespace
              WHERE namespace.nspname = '_orna_data'
                AND class.relname = $1
-             ORDER BY constraint.contype, constraint.conname",
+             ORDER BY catalogue_constraint.contype, catalogue_constraint.conname",
             &[&table.name],
         )
         .await
@@ -911,25 +916,28 @@ async fn verify_reference_triggers(
                 trigger.tgname AS name,
                 trigger.tgenabled::text AS enabled,
                 triggered.relname AS trigger_table,
-                constraint.contype::text AS constraint_kind,
-                constraint.conname AS constraint_name,
+                catalogue_constraint.contype::text AS constraint_kind,
+                catalogue_constraint.conname AS constraint_name,
                 source.relname AS source_table,
                 source_namespace.nspname AS source_namespace,
                 target.relname AS target_table,
                 target_namespace.nspname AS target_namespace,
-                COALESCE(trigger.tgrelid = constraint.conrelid, false) AS on_source,
-                COALESCE(trigger.tgrelid = constraint.confrelid, false) AS on_target,
-                COALESCE(trigger.tgconstrrelid = constraint.confrelid, false) AS constraint_target,
-                COALESCE(trigger.tgconstrrelid = constraint.conrelid, false) AS constraint_source
+                COALESCE(trigger.tgrelid = catalogue_constraint.conrelid, false) AS on_source,
+                COALESCE(trigger.tgrelid = catalogue_constraint.confrelid, false) AS on_target,
+                COALESCE(trigger.tgconstrrelid = catalogue_constraint.confrelid, false) AS constraint_target,
+                COALESCE(trigger.tgconstrrelid = catalogue_constraint.conrelid, false) AS constraint_source
              FROM pg_catalog.pg_trigger AS trigger
              JOIN pg_catalog.pg_class AS triggered ON triggered.oid = trigger.tgrelid
              JOIN pg_catalog.pg_namespace AS triggered_namespace
                ON triggered_namespace.oid = triggered.relnamespace
-             LEFT JOIN pg_catalog.pg_constraint AS constraint ON constraint.oid = trigger.tgconstraint
-             LEFT JOIN pg_catalog.pg_class AS source ON source.oid = constraint.conrelid
+             LEFT JOIN pg_catalog.pg_constraint AS catalogue_constraint
+               ON catalogue_constraint.oid = trigger.tgconstraint
+             LEFT JOIN pg_catalog.pg_class AS source
+               ON source.oid = catalogue_constraint.conrelid
              LEFT JOIN pg_catalog.pg_namespace AS source_namespace
                ON source_namespace.oid = source.relnamespace
-             LEFT JOIN pg_catalog.pg_class AS target ON target.oid = constraint.confrelid
+             LEFT JOIN pg_catalog.pg_class AS target
+               ON target.oid = catalogue_constraint.confrelid
              LEFT JOIN pg_catalog.pg_namespace AS target_namespace
                ON target_namespace.oid = target.relnamespace
              WHERE trigger.tgisinternal
@@ -1135,11 +1143,13 @@ async fn verify_external_dependants(
     let names = tables.cloned().collect::<Vec<_>>();
     let external_constraint = transaction
         .query_opt(
-            "SELECT constraint.conname AS name
-             FROM pg_catalog.pg_constraint AS constraint
-             JOIN pg_catalog.pg_class AS source ON source.oid = constraint.conrelid
+            "SELECT catalogue_constraint.conname AS name
+             FROM pg_catalog.pg_constraint AS catalogue_constraint
+             JOIN pg_catalog.pg_class AS source
+               ON source.oid = catalogue_constraint.conrelid
              JOIN pg_catalog.pg_namespace AS source_namespace ON source_namespace.oid = source.relnamespace
-             JOIN pg_catalog.pg_class AS target ON target.oid = constraint.confrelid
+             JOIN pg_catalog.pg_class AS target
+               ON target.oid = catalogue_constraint.confrelid
              JOIN pg_catalog.pg_namespace AS target_namespace ON target_namespace.oid = target.relnamespace
              WHERE target_namespace.nspname = '_orna_data'
                AND target.relname = ANY($1::text[])
