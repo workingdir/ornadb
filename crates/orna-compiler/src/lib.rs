@@ -44,10 +44,7 @@ pub(crate) fn semantic_diagnostic(
     DiagnosticCode::semantic(
         code,
         message,
-        SourceLocation {
-            logical_path: logical_path.to_owned(),
-            span: ByteSpan::from_syntax_span(span),
-        },
+        SourceLocation::from_syntax(logical_path, span),
     )
 }
 
@@ -164,6 +161,13 @@ pub struct SourceLocation {
 }
 
 impl SourceLocation {
+    pub(crate) fn from_syntax(logical_path: &str, span: &SourceSpan) -> Self {
+        Self {
+            logical_path: logical_path.to_owned(),
+            span: ByteSpan::from_syntax_span(span),
+        }
+    }
+
     /// Returns the logical path submitted with the source unit.
     pub fn logical_path(&self) -> &str {
         &self.logical_path
@@ -188,10 +192,7 @@ impl CompilerDiagnostic {
         Self {
             code: DiagnosticCode::from_syntax_code(diagnostic.code),
             message: diagnostic.message.clone(),
-            location: SourceLocation {
-                logical_path: logical_path.to_owned(),
-                span: ByteSpan::from_syntax_span(&diagnostic.span),
-            },
+            location: SourceLocation::from_syntax(logical_path, &diagnostic.span),
         }
     }
 

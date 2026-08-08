@@ -16,8 +16,8 @@ use orna_syntax::{NamePart, QueryExpression, SelectQuery, SourceSpan};
 
 use crate::resolver::{QueryCatalogue, SemanticType};
 use crate::{
-    CompilerDiagnostic, DiagnosticCode, normalise_name_part, normalise_qualified_name,
-    semantic_diagnostic,
+    CompilerDiagnostic, DiagnosticCode, SourceLocation, normalise_name_part,
+    normalise_qualified_name, semantic_diagnostic,
 };
 
 mod artifact;
@@ -37,6 +37,69 @@ pub(crate) struct RelationalQueryIr<T = TypeId, F = FieldId> {
     projections: Vec<ExpressionIr<T, F>>,
     selection: Option<ExpressionIr<T, F>>,
     ordering: Vec<OrderingIr<T, F>>,
+}
+
+/// A checked relational query and the source references that produced it.
+///
+/// The plan keeps no source data. References retain owned compiler locations
+/// for consumers that need source evidence before identity rewriting.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct QueryCheck<T = TypeId, F = FieldId> {
+    plan: RelationalQueryIr<T, F>,
+    references: Vec<QueryReference<T, F>>,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl<T, F> QueryCheck<T, F> {
+    pub(crate) fn plan(&self) -> &RelationalQueryIr<T, F> {
+        &self.plan
+    }
+
+    pub(crate) fn references(&self) -> &[QueryReference<T, F>] {
+        &self.references
+    }
+
+    fn into_plan(self) -> RelationalQueryIr<T, F> {
+        self.plan
+    }
+}
+
+/// One source reference that was resolved while checking a query.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct QueryReference<T = TypeId, F = FieldId> {
+    kind: QueryReferenceKind,
+    target: QueryReferenceTarget<T, F>,
+    location: SourceLocation,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl<T, F> QueryReference<T, F> {
+    pub(crate) const fn kind(&self) -> QueryReferenceKind {
+        self.kind
+    }
+
+    pub(crate) fn target(&self) -> &QueryReferenceTarget<T, F> {
+        &self.target
+    }
+
+    pub(crate) fn location(&self) -> &SourceLocation {
+        &self.location
+    }
+}
+
+/// The query construct that produced a source reference.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum QueryReferenceKind {
+    QueryObject,
+    ObjectReference,
+    QueryField,
+}
+
+/// The resolved catalogue identity for a query reference.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum QueryReferenceTarget<T = TypeId, F = FieldId> {
+    Object(T),
+    Field { owner: T, field: F },
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -228,7 +291,7 @@ pub(crate) fn check_query(
     catalogue: &CatalogueSnapshot,
     logical_path: &str,
 ) -> Result<RelationalQueryIr, Vec<CompilerDiagnostic>> {
-    check_query_in(query, catalogue, logical_path)
+    check_query_in(query, catalogue, logical_path).map(QueryCheck::into_plan)
 }
 
 /// Checks a parsed one-source `SELECT` query against one identity domain.
@@ -239,7 +302,7 @@ pub(crate) fn check_query_in<T, F>(
     query: &SelectQuery,
     catalogue: &impl QueryCatalogue<T, F>,
     logical_path: &str,
-) -> Result<RelationalQueryIr<T, F>, Vec<CompilerDiagnostic>>
+) -> Result<QueryCheck<T, F>, Vec<CompilerDiagnostic>>
 where
     T: Copy + Eq + fmt::Display,
     F: Copy,
@@ -261,6 +324,11 @@ where
         alias: normalise_name_part(&query.source_object.alias),
     };
     let mut diagnostics = Vec::new();
+    let mut references = vec![QueryReference {
+        kind: QueryReferenceKind::QueryObject,
+        target: QueryReferenceTarget::Object(source_object),
+        location: SourceLocation::from_syntax(logical_path, &query.source_object.object_type.span),
+    }];
 
     let projections = query
         .projections
@@ -272,6 +340,7 @@ where
                 catalogue,
                 logical_path,
                 &mut diagnostics,
+                &mut references,
             )
         })
         .collect::<Vec<_>>();
@@ -284,6 +353,7 @@ where
             catalogue,
             logical_path,
             &mut diagnostics,
+            &mut references,
         )?;
         if expression.value_type.semantic_type != SemanticType::scalar(StandardScalar::Boolean) {
             diagnostics.push(diagnostic(
@@ -307,6 +377,7 @@ where
                 catalogue,
                 logical_path,
                 &mut diagnostics,
+                &mut references,
             )
             .map(|expression| OrderingIr {
                 expression,
@@ -326,14 +397,17 @@ where
         return Err(diagnostics);
     }
 
-    Ok(RelationalQueryIr {
-        scan: ScanIr {
-            input,
-            object_type: context.object_type,
+    Ok(QueryCheck {
+        plan: RelationalQueryIr {
+            scan: ScanIr {
+                input,
+                object_type: context.object_type,
+            },
+            projections,
+            selection,
+            ordering,
         },
-        projections,
-        selection,
-        ordering,
+        references,
     })
 }
 
@@ -349,6 +423,7 @@ fn check_expression<T, F>(
     catalogue: &impl QueryCatalogue<T, F>,
     logical_path: &str,
     diagnostics: &mut Vec<CompilerDiagnostic>,
+    references: &mut Vec<QueryReference<T, F>>,
 ) -> Option<ExpressionIr<T, F>>
 where
     T: Copy + Eq + fmt::Display,
@@ -357,6 +432,11 @@ where
     match expression {
         QueryExpression::ObjectReference { alias, .. } => {
             check_alias(alias, context, logical_path, diagnostics)?;
+            references.push(QueryReference {
+                kind: QueryReferenceKind::ObjectReference,
+                target: QueryReferenceTarget::Object(context.object_type),
+                location: SourceLocation::from_syntax(logical_path, &alias.span),
+            });
             Some(ExpressionIr {
                 kind: ExpressionKind::ObjectReference {
                     input: context.input,
@@ -369,7 +449,14 @@ where
         }
         QueryExpression::FieldPath { root, members, .. } => {
             check_alias(root, context, logical_path, diagnostics)?;
-            check_field_path(members, context, catalogue, logical_path, diagnostics)
+            check_field_path(
+                members,
+                context,
+                catalogue,
+                logical_path,
+                diagnostics,
+                references,
+            )
         }
         QueryExpression::BooleanLiteral { value, .. } => Some(ExpressionIr {
             kind: ExpressionKind::BooleanLiteral { value: *value },
@@ -379,8 +466,22 @@ where
             },
         }),
         QueryExpression::Equality { left, right, span } => {
-            let left = check_expression(left, context, catalogue, logical_path, diagnostics);
-            let right = check_expression(right, context, catalogue, logical_path, diagnostics);
+            let left = check_expression(
+                left,
+                context,
+                catalogue,
+                logical_path,
+                diagnostics,
+                references,
+            );
+            let right = check_expression(
+                right,
+                context,
+                catalogue,
+                logical_path,
+                diagnostics,
+                references,
+            );
             let (Some(left), Some(right)) = (left, right) else {
                 return None;
             };
@@ -415,6 +516,7 @@ fn check_field_path<T, F>(
     catalogue: &impl QueryCatalogue<T, F>,
     logical_path: &str,
     diagnostics: &mut Vec<CompilerDiagnostic>,
+    references: &mut Vec<QueryReference<T, F>>,
 ) -> Option<ExpressionIr<T, F>>
 where
     T: Copy + Eq + fmt::Display,
@@ -445,6 +547,14 @@ where
             return None;
         };
 
+        references.push(QueryReference {
+            kind: QueryReferenceKind::QueryField,
+            target: QueryReferenceTarget::Field {
+                owner,
+                field: field.id(),
+            },
+            location: SourceLocation::from_syntax(logical_path, &member.span),
+        });
         steps.push(ResolvedFieldStep {
             owner,
             field: field.id(),
@@ -520,7 +630,10 @@ mod tests {
     };
     use orna_syntax::{ServerFunctionBody, parse};
 
-    use super::{ExpressionKind, NullOrder, SortDirection, check_query, check_query_in};
+    use super::{
+        ExpressionKind, NullOrder, QueryReferenceKind, QueryReferenceTarget, SortDirection,
+        check_query, check_query_in,
+    };
     use crate::DiagnosticCode;
     use crate::resolver::{QueryCatalogue, QueryField, SemanticType};
 
@@ -759,6 +872,125 @@ mod tests {
     }
 
     #[test]
+    fn records_ordered_source_evidence_for_each_resolved_query_reference() {
+        let query_source = "SELECT REF(t), t.assignee.name, t.assignee.name FROM tasks.task t WHERE t.completed = t.completed ORDER BY t.assignee.name DESC";
+        let query = query(query_source);
+        let check = check_query_in(&query, &catalogue(), "tasks.orna").unwrap();
+        let references = check.references();
+        let path_starts = query_source
+            .match_indices("t.assignee.name")
+            .map(|(start, _)| start)
+            .collect::<Vec<_>>();
+        let completed_starts = query_source
+            .match_indices("t.completed")
+            .map(|(start, _)| start)
+            .collect::<Vec<_>>();
+        let reference_start = query_source.find("REF(t)").unwrap() + 4;
+        let object_type_start = query_source.find("tasks.task").unwrap();
+        let expected = [
+            (
+                QueryReferenceKind::QueryObject,
+                QueryReferenceTarget::Object(TASK_TYPE),
+                object_type_start,
+                "tasks.task".len(),
+            ),
+            (
+                QueryReferenceKind::ObjectReference,
+                QueryReferenceTarget::Object(TASK_TYPE),
+                reference_start,
+                "t".len(),
+            ),
+            (
+                QueryReferenceKind::QueryField,
+                QueryReferenceTarget::Field {
+                    owner: TASK_TYPE,
+                    field: ASSIGNEE_FIELD,
+                },
+                path_starts[0] + 2,
+                "assignee".len(),
+            ),
+            (
+                QueryReferenceKind::QueryField,
+                QueryReferenceTarget::Field {
+                    owner: PERSON_TYPE,
+                    field: PERSON_NAME_FIELD,
+                },
+                path_starts[0] + 11,
+                "name".len(),
+            ),
+            (
+                QueryReferenceKind::QueryField,
+                QueryReferenceTarget::Field {
+                    owner: TASK_TYPE,
+                    field: ASSIGNEE_FIELD,
+                },
+                path_starts[1] + 2,
+                "assignee".len(),
+            ),
+            (
+                QueryReferenceKind::QueryField,
+                QueryReferenceTarget::Field {
+                    owner: PERSON_TYPE,
+                    field: PERSON_NAME_FIELD,
+                },
+                path_starts[1] + 11,
+                "name".len(),
+            ),
+            (
+                QueryReferenceKind::QueryField,
+                QueryReferenceTarget::Field {
+                    owner: TASK_TYPE,
+                    field: COMPLETED_FIELD,
+                },
+                completed_starts[0] + 2,
+                "completed".len(),
+            ),
+            (
+                QueryReferenceKind::QueryField,
+                QueryReferenceTarget::Field {
+                    owner: TASK_TYPE,
+                    field: COMPLETED_FIELD,
+                },
+                completed_starts[1] + 2,
+                "completed".len(),
+            ),
+            (
+                QueryReferenceKind::QueryField,
+                QueryReferenceTarget::Field {
+                    owner: TASK_TYPE,
+                    field: ASSIGNEE_FIELD,
+                },
+                path_starts[2] + 2,
+                "assignee".len(),
+            ),
+            (
+                QueryReferenceKind::QueryField,
+                QueryReferenceTarget::Field {
+                    owner: PERSON_TYPE,
+                    field: PERSON_NAME_FIELD,
+                },
+                path_starts[2] + 11,
+                "name".len(),
+            ),
+        ];
+
+        assert_eq!(references.len(), expected.len());
+        for (reference, (kind, target, start, length)) in references.iter().zip(expected) {
+            assert_eq!(reference.kind(), kind);
+            assert_eq!(reference.target(), &target);
+            assert_eq!(reference.location().logical_path(), "tasks.orna");
+            assert_eq!(
+                reference.location().span().start(),
+                query.span.start + start
+            );
+            assert_eq!(
+                reference.location().span().end(),
+                query.span.start + start + length
+            );
+        }
+    }
+
+    #[test]
     fn checks_a_query_with_non_core_copyable_identities() {
         #[derive(Clone, Copy, Debug, Eq, PartialEq)]
         struct TestTypeId(u8);
@@ -833,9 +1065,26 @@ mod tests {
             person_name: name(&["test", "person"]),
         };
         let query = query("SELECT t.person.name FROM test.task t");
-        let ir = check_query_in(&query, &catalogue, "test.orna").unwrap();
+        let check = check_query_in(&query, &catalogue, "test.orna").unwrap();
+        let ir = check.plan();
 
         assert_eq!(ir.scan().object_type(), TestTypeId(1));
+        assert_eq!(
+            check.references()[0].kind(),
+            QueryReferenceKind::QueryObject
+        );
+        assert_eq!(
+            check.references()[0].target(),
+            &QueryReferenceTarget::Object(TestTypeId(1))
+        );
+        assert_eq!(check.references()[1].kind(), QueryReferenceKind::QueryField);
+        assert_eq!(
+            check.references()[1].target(),
+            &QueryReferenceTarget::Field {
+                owner: TestTypeId(1),
+                field: TestFieldId(10),
+            }
+        );
         let ExpressionKind::FieldPath { steps, .. } = ir.projections()[0].kind() else {
             panic!("expected a field path");
         };
