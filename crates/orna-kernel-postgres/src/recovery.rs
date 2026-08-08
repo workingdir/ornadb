@@ -1,15 +1,21 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use orna_core::{
-    CatalogueRevisionId, SchemaId, SourceBundleId, SourceRevisionId, SourceUnitId,
+    CatalogueRevisionId, ExpressionId, FieldId, SchemaId, SourceBundleId, SourceRevisionId,
+    SourceUnitId, TypeId,
     canonical_hash::{
-        catalogue_digest, source_bundle_digest, source_revision_digest, source_unit_content_digest,
+        artifact_payload_digest, catalogue_digest, source_bundle_digest, source_revision_digest,
+        source_unit_content_digest,
     },
-    catalogue::{CatalogueSnapshot, QualifiedSemanticName, SchemaDefinition},
+    catalogue::{
+        CatalogueSnapshot, FieldDefinition, ObjectTypeDefinition, OnDeleteAction,
+        QualifiedSemanticName, SchemaDefinition,
+    },
     revision::{
-        ActiveDatabaseRevision, DefinitionIdentity, DefinitionOrigin, RevisionPair, Sha256Digest,
-        SourceOrigin, StoredSourceRevision, StoredSourceUnit,
+        ActiveDatabaseRevision, DefinitionIdentity, DefinitionOrigin, ExpressionArtifact,
+        RevisionPair, Sha256Digest, SourceOrigin, StoredSourceRevision, StoredSourceUnit,
     },
+    types::{ResolvedType, StandardScalar},
 };
 use tokio_postgres::{Client, IsolationLevel, Row, Transaction};
 
@@ -20,6 +26,7 @@ use crate::{
         DurableRecord, digest_bytes, exact_enum, identity_bytes, optional_identity_bytes,
         u32_from_i64, u64_from_i64,
     },
+    physical::{establish_trusted_search_path, verify_physical_catalogue},
 };
 
 const ACTIVE_RELATION: &str = "_orna_kernel.active_revision";
@@ -50,12 +57,30 @@ struct RecoveredSchema {
     origin: DefinitionOrigin,
 }
 
+struct RecoveredObjectType {
+    id: TypeId,
+    schema: SchemaId,
+    name: QualifiedSemanticName,
+    origin: DefinitionOrigin,
+}
+
+struct RecoveredField {
+    owner: TypeId,
+    definition: FieldDefinition,
+    origin: DefinitionOrigin,
+}
+
+struct RecoveredExpression {
+    artifact: ExpressionArtifact,
+    origin: DefinitionOrigin,
+}
+
 impl PostgresKernel {
     /// Reconstructs and validates the complete active durable database revision.
     ///
-    /// This recovery slice supports schemas without object types or functions.
-    /// It fails closed when the active revision contains later semantic or
-    /// physical members that this binary cannot reconstruct completely.
+    /// This recovery slice supports schemas, object types, fields, and
+    /// expression artifacts. It fails closed when the active revision contains
+    /// functions or other durable members it cannot reconstruct completely.
     pub async fn recover(&self) -> Result<ActiveDatabaseRevision, PostgresKernelError> {
         let mut session = self.open().await?;
         let recovery_result = recover_client(&mut session.client).await;
@@ -79,13 +104,18 @@ async fn recover_client(
         .await
         .map_err(PostgresKernelError::Database)?;
 
+    establish_trusted_search_path(&transaction).await?;
     require_current_migrations(&transaction).await?;
     let header = load_active_header(&transaction).await?;
     validate_revision_ancestry(&transaction, header.catalogue, header.source).await?;
     reject_unsupported_durable_state(&transaction, header.catalogue).await?;
     let units = load_source_units(&transaction, header.bundle).await?;
     let schemas = load_schemas(&transaction, header.catalogue).await?;
-    let active = assemble_revision(header, units, schemas)?;
+    let objects = load_object_types(&transaction, header.catalogue).await?;
+    let fields = load_fields(&transaction, header.catalogue).await?;
+    let expressions = load_expressions(&transaction, header.catalogue).await?;
+    let active = assemble_revision(header, units, schemas, objects, fields, expressions)?;
+    verify_physical_catalogue(&transaction, active.catalogue()).await?;
 
     transaction
         .commit()
@@ -465,12 +495,6 @@ async fn reject_unsupported_durable_state(
     let row = transaction
         .query_one(
             "SELECT
-                (SELECT count(*) FROM _orna_kernel.catalogue_object_types
-                 WHERE catalogue_revision_id = $1) AS catalogue_object_types,
-                (SELECT count(*) FROM _orna_kernel.catalogue_fields
-                 WHERE catalogue_revision_id = $1) AS catalogue_fields,
-                (SELECT count(*) FROM _orna_kernel.catalogue_expressions
-                 WHERE catalogue_revision_id = $1) AS catalogue_expressions,
                 (SELECT count(*) FROM _orna_kernel.catalogue_functions
                  WHERE catalogue_revision_id = $1) AS catalogue_functions,
                 (SELECT count(*) FROM _orna_kernel.catalogue_function_parameters
@@ -479,25 +503,12 @@ async fn reject_unsupported_durable_state(
                  WHERE catalogue_revision_id = $1) AS catalogue_function_return_columns,
                 (SELECT count(*) FROM _orna_kernel.function_revisions) AS function_revisions,
                 (SELECT count(*) FROM _orna_kernel.function_artifacts) AS function_artifacts,
-                (SELECT count(*) FROM _orna_kernel.definition_references) AS definition_references,
-                (SELECT count(*)
-                 FROM pg_class AS relation
-                 JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
-                 WHERE namespace.nspname = '_orna_data') AS data_relations",
+                (SELECT count(*) FROM _orna_kernel.definition_references) AS definition_references",
             &[&catalogue_bytes],
         )
         .await
         .map_err(PostgresKernelError::Database)?;
     let unsupported = [
-        (
-            "_orna_kernel.catalogue_object_types",
-            "catalogue_object_types",
-        ),
-        ("_orna_kernel.catalogue_fields", "catalogue_fields"),
-        (
-            "_orna_kernel.catalogue_expressions",
-            "catalogue_expressions",
-        ),
         ("_orna_kernel.catalogue_functions", "catalogue_functions"),
         (
             "_orna_kernel.catalogue_function_parameters",
@@ -513,7 +524,6 @@ async fn reject_unsupported_durable_state(
             "_orna_kernel.definition_references",
             "definition_references",
         ),
-        ("_orna_data", "data_relations"),
     ];
 
     for (relation, column) in unsupported {
@@ -531,7 +541,7 @@ async fn reject_unsupported_durable_state(
             return Err(PostgresKernelError::DurableInvariant {
                 relation,
                 record: catalogue.canonical(),
-                rule: "schema-only catalogue recovery cannot omit present durable records",
+                rule: "object catalogue recovery cannot omit present function durable records",
             });
         }
     }
@@ -642,6 +652,411 @@ fn decode_schema(
         definition: SchemaDefinition::new(id, name),
         origin: DefinitionOrigin::new(DefinitionIdentity::Schema(id), origin),
     })
+}
+
+async fn load_object_types(
+    transaction: &Transaction<'_>,
+    catalogue: CatalogueRevisionId,
+) -> Result<Vec<RecoveredObjectType>, PostgresKernelError> {
+    let rows = transaction
+        .query(
+            "SELECT catalogue_revision_id, type_id, schema_id, name_parts,
+                    source_unit_id, source_start, source_end
+             FROM _orna_kernel.catalogue_object_types
+             WHERE catalogue_revision_id = $1
+             ORDER BY type_id",
+            &[&catalogue.to_bytes().to_vec()],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?;
+
+    rows.iter()
+        .enumerate()
+        .map(|(index, row)| decode_object_type(row, index, catalogue))
+        .collect()
+}
+
+fn decode_object_type(
+    row: &Row,
+    row_index: usize,
+    expected_catalogue: CatalogueRevisionId,
+) -> Result<RecoveredObjectType, PostgresKernelError> {
+    const RELATION: &str = "_orna_kernel.catalogue_object_types";
+    let row_record = DurableRecord::new(RELATION, format!("row={row_index}"));
+    require_catalogue_identity(row, &row_record, expected_catalogue, "object type")?;
+    let id = TypeId::from_bytes(identity_bytes(
+        row_record.column(row, "type_id", "object type identity must be 16 bytes")?,
+        &row_record,
+        "object type identity must be 16 bytes",
+    )?);
+    let record = DurableRecord::new(RELATION, id.canonical());
+    let schema = SchemaId::from_bytes(identity_bytes(
+        record.column(row, "schema_id", "object schema identity must be 16 bytes")?,
+        &record,
+        "object schema identity must be 16 bytes",
+    )?);
+    let name_parts: Vec<String> = record.column(
+        row,
+        "name_parts",
+        "object name parts must be an exact PostgreSQL text array",
+    )?;
+    let name = QualifiedSemanticName::new(name_parts)
+        .map_err(|_| record.invariant("object name parts must form one exact semantic name"))?;
+    let origin = decode_origin(row, &record, DefinitionIdentity::ObjectType(id))?;
+
+    Ok(RecoveredObjectType {
+        id,
+        schema,
+        name,
+        origin,
+    })
+}
+
+async fn load_fields(
+    transaction: &Transaction<'_>,
+    catalogue: CatalogueRevisionId,
+) -> Result<BTreeMap<TypeId, Vec<RecoveredField>>, PostgresKernelError> {
+    let rows = transaction
+        .query(
+            "SELECT catalogue_revision_id, owner_type_id, field_id, name, ordinal,
+                    type_kind, scalar_type, target_type_id, nullable, is_unique,
+                    default_expression_id, on_delete,
+                    source_unit_id, source_start, source_end
+             FROM _orna_kernel.catalogue_fields
+             WHERE catalogue_revision_id = $1
+             ORDER BY owner_type_id, ordinal, field_id",
+            &[&catalogue.to_bytes().to_vec()],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?;
+
+    let mut fields = BTreeMap::<TypeId, Vec<RecoveredField>>::new();
+    for (index, row) in rows.iter().enumerate() {
+        let field = decode_field(row, index, catalogue)?;
+        fields.entry(field.owner).or_default().push(field);
+    }
+    Ok(fields)
+}
+
+#[derive(Clone, Copy)]
+enum FieldTypeKind {
+    Scalar,
+    Named,
+    Reference,
+}
+
+fn decode_field(
+    row: &Row,
+    row_index: usize,
+    expected_catalogue: CatalogueRevisionId,
+) -> Result<RecoveredField, PostgresKernelError> {
+    const RELATION: &str = "_orna_kernel.catalogue_fields";
+    let row_record = DurableRecord::new(RELATION, format!("row={row_index}"));
+    require_catalogue_identity(row, &row_record, expected_catalogue, "field")?;
+    let owner = TypeId::from_bytes(identity_bytes(
+        row_record.column(
+            row,
+            "owner_type_id",
+            "field owner identity must be 16 bytes",
+        )?,
+        &row_record,
+        "field owner identity must be 16 bytes",
+    )?);
+    let id = FieldId::from_bytes(identity_bytes(
+        row_record.column(row, "field_id", "field identity must be 16 bytes")?,
+        &row_record,
+        "field identity must be 16 bytes",
+    )?);
+    let record = DurableRecord::new(
+        RELATION,
+        format!("owner={} field={}", owner.canonical(), id.canonical()),
+    );
+    let name: String = record.column(row, "name", "field name must be PostgreSQL text")?;
+    if name.is_empty() {
+        return Err(record.invariant("field name must not be empty"));
+    }
+    let ordinal = u32_from_i64(
+        record.column(row, "ordinal", "field ordinal must fit u32")?,
+        &record,
+        "field ordinal must fit u32",
+    )?;
+    let kind_name: String = record.column(
+        row,
+        "type_kind",
+        "field type kind must be scalar, named, or reference",
+    )?;
+    let kind = exact_enum(
+        &kind_name,
+        &[
+            ("scalar", FieldTypeKind::Scalar),
+            ("named", FieldTypeKind::Named),
+            ("reference", FieldTypeKind::Reference),
+        ],
+        &record,
+        "field type kind must be scalar, named, or reference",
+    )?;
+    let scalar_name: Option<String> = record.column(
+        row,
+        "scalar_type",
+        "field scalar type must be null or an exact standard scalar name",
+    )?;
+    let target = optional_identity_bytes(
+        record.column(
+            row,
+            "target_type_id",
+            "field target identity must be null or 16 bytes",
+        )?,
+        &record,
+        "field target identity must be null or 16 bytes",
+    )?
+    .map(TypeId::from_bytes);
+    let resolved_type = decode_field_type(kind, scalar_name.as_deref(), target, &record)?;
+    let nullable: bool = record.column(row, "nullable", "field nullability must be boolean")?;
+    let unique: bool = record.column(row, "is_unique", "field uniqueness must be boolean")?;
+    let default_expression = optional_identity_bytes(
+        record.column(
+            row,
+            "default_expression_id",
+            "field default expression identity must be null or 16 bytes",
+        )?,
+        &record,
+        "field default expression identity must be null or 16 bytes",
+    )?
+    .map(ExpressionId::from_bytes);
+    let delete_name: Option<String> = record.column(
+        row,
+        "on_delete",
+        "field delete action must be null, restrict, set_null, or cascade",
+    )?;
+    let on_delete = decode_on_delete(delete_name.as_deref(), resolved_type, nullable, &record)?;
+    let origin = decode_origin(row, &record, DefinitionIdentity::Field { owner, field: id })?;
+
+    Ok(RecoveredField {
+        owner,
+        definition: FieldDefinition::new(
+            id,
+            name,
+            ordinal,
+            resolved_type,
+            nullable,
+            unique,
+            default_expression,
+            on_delete,
+        ),
+        origin,
+    })
+}
+
+fn decode_field_type(
+    kind: FieldTypeKind,
+    scalar: Option<&str>,
+    target: Option<TypeId>,
+    record: &DurableRecord,
+) -> Result<ResolvedType, PostgresKernelError> {
+    match (kind, scalar, target) {
+        (FieldTypeKind::Scalar, Some(name), None) => {
+            let scalar = exact_enum(
+                name,
+                &[
+                    ("boolean", StandardScalar::Boolean),
+                    ("integer", StandardScalar::Integer),
+                    ("bigint", StandardScalar::BigInt),
+                    ("float", StandardScalar::Float),
+                    ("decimal", StandardScalar::Decimal),
+                    (
+                        "character_large_object",
+                        StandardScalar::CharacterLargeObject,
+                    ),
+                    ("binary_large_object", StandardScalar::BinaryLargeObject),
+                    ("uuid", StandardScalar::Uuid),
+                    ("date", StandardScalar::Date),
+                    ("time", StandardScalar::Time),
+                    ("timestamp", StandardScalar::Timestamp),
+                    ("duration", StandardScalar::Duration),
+                    ("void", StandardScalar::Void),
+                ],
+                record,
+                "field scalar type must be an exact standard scalar name",
+            )?;
+            Ok(ResolvedType::scalar(scalar))
+        }
+        (FieldTypeKind::Reference, None, Some(target)) => Ok(ResolvedType::reference(target)),
+        (FieldTypeKind::Named, None, Some(_)) => {
+            Err(record.invariant("named field types are not supported by active recovery"))
+        }
+        _ => Err(record.invariant(
+            "field type kind, scalar type, and target identity must form one exact supported tuple",
+        )),
+    }
+}
+
+fn decode_on_delete(
+    value: Option<&str>,
+    resolved_type: ResolvedType,
+    nullable: bool,
+    record: &DurableRecord,
+) -> Result<Option<OnDeleteAction>, PostgresKernelError> {
+    if !matches!(resolved_type, ResolvedType::Reference { .. }) {
+        return value
+            .is_none()
+            .then_some(None)
+            .ok_or_else(|| record.invariant("only reference fields may declare a delete action"));
+    }
+    let action = match value {
+        None => None,
+        Some("restrict") => Some(OnDeleteAction::Restrict),
+        Some("set_null") => Some(OnDeleteAction::SetNull),
+        Some("cascade") => Some(OnDeleteAction::Cascade),
+        Some(_) => {
+            return Err(record.invariant(
+                "reference delete action must be null, restrict, set_null, or cascade",
+            ));
+        }
+    };
+    if action == Some(OnDeleteAction::SetNull) && !nullable {
+        return Err(record.invariant("SET NULL reference fields must be nullable"));
+    }
+    Ok(action)
+}
+
+async fn load_expressions(
+    transaction: &Transaction<'_>,
+    catalogue: CatalogueRevisionId,
+) -> Result<Vec<RecoveredExpression>, PostgresKernelError> {
+    let rows = transaction
+        .query(
+            "SELECT catalogue_revision_id, expression_id, format,
+                    format_version::bigint AS format_version, payload, content_hash,
+                    hash_algorithm, hash_contract_version,
+                    source_unit_id, source_start, source_end
+             FROM _orna_kernel.catalogue_expressions
+             WHERE catalogue_revision_id = $1
+             ORDER BY expression_id",
+            &[&catalogue.to_bytes().to_vec()],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?;
+
+    rows.iter()
+        .enumerate()
+        .map(|(index, row)| decode_expression(row, index, catalogue))
+        .collect()
+}
+
+fn decode_expression(
+    row: &Row,
+    row_index: usize,
+    expected_catalogue: CatalogueRevisionId,
+) -> Result<RecoveredExpression, PostgresKernelError> {
+    const RELATION: &str = "_orna_kernel.catalogue_expressions";
+    let row_record = DurableRecord::new(RELATION, format!("row={row_index}"));
+    require_catalogue_identity(row, &row_record, expected_catalogue, "expression")?;
+    let id = ExpressionId::from_bytes(identity_bytes(
+        row_record.column(row, "expression_id", "expression identity must be 16 bytes")?,
+        &row_record,
+        "expression identity must be 16 bytes",
+    )?);
+    let record = DurableRecord::new(RELATION, id.canonical());
+    require_hash_contract(
+        row,
+        &record,
+        "hash_algorithm",
+        "hash_contract_version",
+        "expression hash algorithm must be sha256",
+        "expression hash contract version must be 1",
+    )?;
+    let format: String =
+        record.column(row, "format", "expression format must be PostgreSQL text")?;
+    let version = u32_from_i64(
+        record.column(
+            row,
+            "format_version",
+            "expression format version must fit u32",
+        )?,
+        &record,
+        "expression format version must fit u32",
+    )?;
+    let payload: Vec<u8> =
+        record.column(row, "payload", "expression payload must be exact bytes")?;
+    let content_hash = Sha256Digest::from_bytes(digest_bytes(
+        record.column(row, "content_hash", "expression digest must be 32 bytes")?,
+        &record,
+        "expression digest must be 32 bytes",
+    )?);
+    let computed_hash =
+        artifact_payload_digest(&payload).map_err(PostgresKernelError::CanonicalHash)?;
+    if computed_hash != content_hash {
+        return Err(record.invariant("expression digest must match its exact artifact payload"));
+    }
+    let artifact = ExpressionArtifact::new(id, format, version, payload, content_hash)
+        .map_err(PostgresKernelError::RevisionInvariant)?;
+    let origin = decode_origin(row, &record, DefinitionIdentity::Expression(id))?;
+    Ok(RecoveredExpression { artifact, origin })
+}
+
+fn require_catalogue_identity(
+    row: &Row,
+    record: &DurableRecord,
+    expected: CatalogueRevisionId,
+    member: &'static str,
+) -> Result<(), PostgresKernelError> {
+    let catalogue = CatalogueRevisionId::from_bytes(identity_bytes(
+        record.column(
+            row,
+            "catalogue_revision_id",
+            "catalogue member revision identity must be 16 bytes",
+        )?,
+        record,
+        "catalogue member revision identity must be 16 bytes",
+    )?);
+    if catalogue != expected {
+        return Err(record.invariant(match member {
+            "object type" => "object type must belong to the selected catalogue revision",
+            "field" => "field must belong to the selected catalogue revision",
+            "expression" => "expression must belong to the selected catalogue revision",
+            _ => "catalogue member must belong to the selected catalogue revision",
+        }));
+    }
+    Ok(())
+}
+
+fn decode_origin(
+    row: &Row,
+    record: &DurableRecord,
+    identity: DefinitionIdentity,
+) -> Result<DefinitionOrigin, PostgresKernelError> {
+    let unit: Option<Vec<u8>> = record.column(
+        row,
+        "source_unit_id",
+        "definition origin must contain a source unit identity",
+    )?;
+    let start: Option<i64> = record.column(
+        row,
+        "source_start",
+        "definition origin start must be a non-negative bigint",
+    )?;
+    let end: Option<i64> = record.column(
+        row,
+        "source_end",
+        "definition origin end must be a non-negative bigint",
+    )?;
+    let (unit, start, end) = match (unit, start, end) {
+        (Some(unit), Some(start), Some(end)) => (unit, start, end),
+        _ => {
+            return Err(record
+                .invariant("definition origin must contain source unit, start, and end values"));
+        }
+    };
+    let unit = SourceUnitId::from_bytes(identity_bytes(
+        unit,
+        record,
+        "definition origin source unit identity must be 16 bytes",
+    )?);
+    let start = u32_from_i64(start, record, "definition origin start must fit u32")?;
+    let end = u32_from_i64(end, record, "definition origin end must fit u32")?;
+    let source =
+        SourceOrigin::new(unit, start, end).map_err(PostgresKernelError::RevisionInvariant)?;
+    Ok(DefinitionOrigin::new(identity, source))
 }
 
 async fn load_source_units(
@@ -760,6 +1175,9 @@ fn assemble_revision(
     header: RecoveredRevisionHeader,
     units: Vec<StoredSourceUnit>,
     schemas: Vec<RecoveredSchema>,
+    objects: Vec<RecoveredObjectType>,
+    mut fields: BTreeMap<TypeId, Vec<RecoveredField>>,
+    expressions: Vec<RecoveredExpression>,
 ) -> Result<ActiveDatabaseRevision, PostgresKernelError> {
     let bundle_record =
         DurableRecord::new("_orna_kernel.source_bundles", header.bundle.canonical());
@@ -788,18 +1206,73 @@ fn assemble_revision(
             .invariant("source revision digest must match its bundle, parent, and bundle digest"));
     }
 
-    let (schemas, origins) = schemas
+    let schema_names = schemas
+        .iter()
+        .map(|schema| (schema.definition.id(), schema.definition.name().clone()))
+        .collect::<BTreeMap<_, _>>();
+    let mut origins = Vec::new();
+    let schemas = schemas
         .into_iter()
-        .map(|schema| (schema.definition, schema.origin))
-        .unzip();
-    let catalogue = CatalogueSnapshot::new(header.catalogue, schemas, Vec::new())
+        .map(|schema| {
+            origins.push(schema.origin);
+            schema.definition
+        })
+        .collect::<Vec<_>>();
+    let mut object_definitions = Vec::with_capacity(objects.len());
+    for object in objects {
+        let record =
+            DurableRecord::new("_orna_kernel.catalogue_object_types", object.id.canonical());
+        let schema_name = schema_names.get(&object.schema).ok_or_else(|| {
+            record.invariant("object stored schema identity must identify a recovered schema")
+        })?;
+        let object_parts = object.name.parts();
+        let namespace = object_parts
+            .get(..object_parts.len().saturating_sub(1))
+            .filter(|parts| !parts.is_empty())
+            .ok_or_else(|| {
+                record.invariant("object qualified name must contain a schema namespace")
+            })?;
+        if namespace != schema_name.parts() {
+            return Err(record.invariant(
+                "object stored schema identity must equal the schema named by its namespace",
+            ));
+        }
+
+        let recovered_fields = fields.remove(&object.id).unwrap_or_default();
+        let mut definitions = Vec::with_capacity(recovered_fields.len());
+        for field in recovered_fields {
+            origins.push(field.origin);
+            definitions.push(field.definition);
+        }
+        origins.push(object.origin);
+        object_definitions.push(ObjectTypeDefinition::new(
+            object.id,
+            object.name,
+            definitions,
+        ));
+    }
+    if let Some((owner, _)) = fields.first_key_value() {
+        return Err(DurableRecord::new(
+            "_orna_kernel.catalogue_fields",
+            format!("owner={}", owner.canonical()),
+        )
+        .invariant("every recovered field owner must be an active object type"));
+    }
+
+    let mut expression_artifacts = Vec::with_capacity(expressions.len());
+    for expression in expressions {
+        origins.push(expression.origin);
+        expression_artifacts.push(expression.artifact);
+    }
+    let catalogue = CatalogueSnapshot::new(header.catalogue, schemas, object_definitions)
         .map_err(PostgresKernelError::CatalogueSnapshot)?;
+    validate_field_links(&catalogue, &expression_artifacts)?;
     let active = ActiveDatabaseRevision::new_with_history(
         RevisionPair::new(header.source, header.catalogue),
         source,
         catalogue,
         header.catalogue_hash,
-        Vec::new(),
+        expression_artifacts,
         Vec::new(),
         Vec::new(),
         origins,
@@ -820,10 +1293,47 @@ fn assemble_revision(
             header.catalogue.canonical(),
         );
         return Err(catalogue_record
-            .invariant("catalogue digest must match the exact recovered schema catalogue"));
+            .invariant("catalogue digest must match the exact recovered semantic catalogue"));
     }
 
     Ok(active)
+}
+
+fn validate_field_links(
+    catalogue: &CatalogueSnapshot,
+    expressions: &[ExpressionArtifact],
+) -> Result<(), PostgresKernelError> {
+    let expression_ids = expressions
+        .iter()
+        .map(ExpressionArtifact::id)
+        .collect::<BTreeSet<_>>();
+    for object in catalogue.object_types() {
+        for field in object.fields() {
+            let record = DurableRecord::new(
+                "_orna_kernel.catalogue_fields",
+                format!(
+                    "owner={} field={}",
+                    object.id().canonical(),
+                    field.id().canonical()
+                ),
+            );
+            if let ResolvedType::Reference { target } = field.resolved_type()
+                && catalogue.object_type_by_id(target).is_none()
+            {
+                return Err(
+                    record.invariant("every reference field target must be an active object type")
+                );
+            }
+            if let Some(expression) = field.default_expression()
+                && !expression_ids.contains(&expression)
+            {
+                return Err(record.invariant(
+                    "every field default must identify a recovered expression artifact",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -865,6 +1375,9 @@ mod tests {
             },
             Vec::new(),
             Vec::new(),
+            Vec::new(),
+            Default::default(),
+            Vec::new(),
         )
         .expect("exact empty revision");
 
@@ -899,6 +1412,9 @@ mod tests {
                     catalogue_hash: bundle_hash,
                 },
                 Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Default::default(),
                 Vec::new(),
             )
             .is_err()
@@ -939,6 +1455,9 @@ mod tests {
                 catalogue_hash,
             },
             units,
+            Vec::new(),
+            Vec::new(),
+            Default::default(),
             Vec::new(),
         )
         .expect("empty semantic revision with source");
