@@ -1550,12 +1550,12 @@ impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
             .ok_or_else(|| self.implementation_gap("only SELECT query bodies", "a SELECT query"))?;
 
         self.skip_trivia();
-        let mut projections = vec![self.parse_expression()?];
+        let mut projections = vec![self.parse_expression(false)?];
         loop {
             self.skip_trivia();
             if self.take_kind(TokenKind::Comma).is_some() {
                 self.skip_trivia();
-                projections.push(self.parse_expression()?);
+                projections.push(self.parse_expression(false)?);
                 continue;
             }
             break;
@@ -1581,7 +1581,13 @@ impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
         self.skip_trivia();
         let predicate = if self.take_word("WHERE").is_some() {
             self.skip_trivia();
-            let predicate = self.parse_expression()?;
+            if self.has_reversed_selector_operands() {
+                return Err(self.implementation_gap(
+                    "selector parameters on the left side of WHERE equality",
+                    "WHERE REF(alias) = selector_parameter",
+                ));
+            }
+            let predicate = self.parse_expression(true)?;
             if !matches!(predicate, QueryExpression::Equality { .. }) {
                 return Err(self.implementation_gap(
                     "WHERE predicates other than equality",
@@ -1593,8 +1599,22 @@ impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
             None
         };
 
+        let has_identity_selector_parameter = matches!(
+            &predicate,
+            Some(QueryExpression::Equality { right, .. })
+                if matches!(right.as_ref(), QueryExpression::ParameterRead { .. })
+        );
+
         self.skip_trivia();
-        let ordering = if self.take_word("ORDER").is_some() {
+        let ordering = if let Some(order) = self.take_word("ORDER") {
+            if has_identity_selector_parameter {
+                return Err(QueryParseError {
+                    code: "ORNA0001",
+                    message: "identity-selected SELECT queries do not allow ORDER BY; remove the ORDER BY clause"
+                        .to_owned(),
+                    span: order.span(),
+                });
+            }
             self.skip_trivia();
             if self.take_word("BY").is_none() {
                 return Err(self.expected("BY after ORDER"));
@@ -1657,7 +1677,7 @@ impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
     fn parse_ordering(&mut self) -> Result<Vec<OrderingExpression>, QueryParseError> {
         let mut ordering = Vec::new();
         loop {
-            let expression = self.parse_expression()?;
+            let expression = self.parse_expression(false)?;
             if !matches!(expression, QueryExpression::FieldPath { .. }) {
                 return Err(self.implementation_gap(
                     "ORDER BY expressions other than field paths",
@@ -1696,7 +1716,10 @@ impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
         }
     }
 
-    fn parse_expression(&mut self) -> Result<QueryExpression, QueryParseError> {
+    fn parse_expression(
+        &mut self,
+        allow_selector_parameter: bool,
+    ) -> Result<QueryExpression, QueryParseError> {
         let left = self.parse_primary_expression()?;
         self.skip_trivia();
         if self
@@ -1705,7 +1728,13 @@ impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
         {
             self.index += 1;
             self.skip_trivia();
-            let right = self.parse_primary_expression()?;
+            let right = if allow_selector_parameter
+                && matches!(&left, QueryExpression::ObjectReference { .. })
+            {
+                self.parse_selector_parameter_or_primary_expression()?
+            } else {
+                self.parse_primary_expression()?
+            };
             let span = SourceSpan {
                 start: left.span().start,
                 end: right.span().end,
@@ -1717,6 +1746,71 @@ impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
             });
         }
         Ok(left)
+    }
+
+    fn parse_selector_parameter_or_primary_expression(
+        &mut self,
+    ) -> Result<QueryExpression, QueryParseError> {
+        let Some(token) = self.current().cloned() else {
+            return Err(self.expected("a query expression"));
+        };
+        if !token.is_identifier()
+            || token.is_word("REF")
+            || token.is_word("TRUE")
+            || token.is_word("FALSE")
+        {
+            return self.parse_primary_expression();
+        }
+        if self
+            .tokens
+            .iter()
+            .skip(self.index + 1)
+            .find(|token| !token.kind.is_trivia())
+            .is_some_and(|token| token.kind == TokenKind::Dot)
+        {
+            return self.parse_field_path();
+        }
+
+        self.index += 1;
+        let parameter = NamePart {
+            text: token.text.to_owned(),
+            span: token.span(),
+        };
+        self.skip_trivia();
+        if self
+            .current()
+            .is_some_and(|token| token.kind == TokenKind::LeftParenthesis)
+        {
+            return Err(self.implementation_gap(
+                "function calls as identity selector parameters",
+                "a selector parameter name by itself",
+            ));
+        }
+        Ok(QueryExpression::ParameterRead { parameter })
+    }
+
+    fn has_reversed_selector_operands(&self) -> bool {
+        let mut significant = self
+            .tokens
+            .iter()
+            .skip(self.index)
+            .filter(|token| !token.kind.is_trivia());
+        let Some(left) = significant.next() else {
+            return false;
+        };
+        let Some(equals) = significant.next() else {
+            return false;
+        };
+        let Some(right) = significant.next() else {
+            return false;
+        };
+        left.is_identifier()
+            && !left.is_word("REF")
+            && !left.is_word("TRUE")
+            && !left.is_word("FALSE")
+            && equals.kind == TokenKind::Other
+            && equals.text == "="
+            && right.is_word("REF")
     }
 
     fn parse_primary_expression(&mut self) -> Result<QueryExpression, QueryParseError> {
