@@ -19,13 +19,14 @@ use orna_core::{
 use orna_syntax::{
     FunctionReturnType, FunctionSecurity as SyntaxFunctionSecurity,
     FunctionTransaction as SyntaxFunctionTransaction,
-    FunctionVolatility as SyntaxFunctionVolatility, NamePart, ObjectTypeDeclaration,
-    OnDeletePolicy, QualifiedName, ServerFunctionBody, ServerFunctionDeclaration, SourceSlice,
-    SourceSpan, StandardLargeObjectKind, TypeSpecification,
+    FunctionVolatility as SyntaxFunctionVolatility, ObjectTypeDeclaration, OnDeletePolicy,
+    QualifiedName, ServerFunctionBody, ServerFunctionDeclaration, SourceSlice, SourceSpan,
+    StandardLargeObjectKind, TypeSpecification,
 };
 
 use crate::{
-    ByteSpan, CompilerDiagnostic, DiagnosticCode, ParseReport, SourceLocation, parse_bundle,
+    ByteSpan, CompilerDiagnostic, DiagnosticCode, ParseReport, SourceLocation,
+    normalise_name_part as semantic_part, normalise_qualified_name as semantic_name, parse_bundle,
 };
 
 /// Checks one source bundle against an immutable catalogue snapshot.
@@ -1007,19 +1008,6 @@ fn as_field_definition(field: &CheckedField) -> FieldDefinition {
         field.default.as_ref().map(CheckedDefault::id),
         field.on_delete,
     )
-}
-
-fn semantic_name(name: &QualifiedName) -> QualifiedSemanticName {
-    QualifiedSemanticName::new(name.parts.iter().map(semantic_part))
-        .expect("parser produced a non-empty qualified name")
-}
-
-fn semantic_part(part: &NamePart) -> String {
-    if part.text.starts_with('"') {
-        part.text[1..part.text.len() - 1].replace("\"\"", "\"")
-    } else {
-        part.text.to_lowercase()
-    }
 }
 
 fn namespace_of(name: &QualifiedSemanticName) -> Option<QualifiedSemanticName> {

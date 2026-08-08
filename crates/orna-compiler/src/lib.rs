@@ -4,15 +4,53 @@
 //! units with compiler diagnostics. Semantic analysis and revision construction
 //! are separate stages.
 
-use orna_core::source::SourceBundle;
-use orna_syntax::{Diagnostic as SyntaxDiagnostic, Parse as SyntaxParse, SourceSpan};
+use orna_core::{catalogue::QualifiedSemanticName, source::SourceBundle};
+use orna_syntax::{
+    Diagnostic as SyntaxDiagnostic, NamePart, Parse as SyntaxParse, QualifiedName, SourceSpan,
+};
 
+#[allow(dead_code)]
+pub(crate) mod relational;
 mod resolver;
 
 pub use resolver::{
     CheckReport, CheckedBundle, CheckedDefault, CheckedField, CheckedObjectType, CheckedSchema,
     ConstantValue, check,
 };
+
+/// Resolves an identifier component with Orna quoted-name rules.
+///
+/// Unquoted identifiers are case-insensitive. Quoted identifiers retain their
+/// case and unescape doubled double quotes.
+pub(crate) fn normalise_name_part(part: &NamePart) -> String {
+    if part.text.starts_with('"') {
+        part.text[1..part.text.len() - 1].replace("\"\"", "\"")
+    } else {
+        part.text.to_lowercase()
+    }
+}
+
+/// Resolves a qualified source name with Orna identifier rules.
+pub(crate) fn normalise_qualified_name(name: &QualifiedName) -> QualifiedSemanticName {
+    QualifiedSemanticName::new(name.parts.iter().map(normalise_name_part))
+        .expect("parser produced a non-empty qualified name")
+}
+
+pub(crate) fn semantic_diagnostic(
+    code: DiagnosticCode,
+    message: impl Into<String>,
+    logical_path: &str,
+    span: &SourceSpan,
+) -> CompilerDiagnostic {
+    DiagnosticCode::semantic(
+        code,
+        message,
+        SourceLocation {
+            logical_path: logical_path.to_owned(),
+            span: ByteSpan::from_syntax_span(span),
+        },
+    )
+}
 
 /// Parses every source unit in a bundle without changing compiler state.
 pub fn parse_bundle(bundle: &SourceBundle) -> ParseReport {
