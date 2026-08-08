@@ -54,6 +54,7 @@ use crate::{
 };
 use crate::{
     mutation::{DeletePlanIr, MutationExpressionKind, MutationOperation, MutationPlanIr},
+    relational::supports_server_select_equality,
     resolver::CheckedFieldRename,
 };
 
@@ -450,6 +451,7 @@ fn validate_identity_selected_expression(
             validate_identity_selected_expression(left, scan, scan_input, object_types)?;
             validate_identity_selected_expression(right, scan, scan_input, object_types)?;
             if left.value_type().semantic_type() != right.value_type().semantic_type()
+                || !supports_server_select_equality(left.value_type().semantic_type())
                 || expression.value_type().semantic_type()
                     != SemanticType::Scalar(StandardScalar::Boolean)
                 || expression.value_type().nullable()
@@ -2222,9 +2224,9 @@ mod tests {
         CREATE TYPE tasks.person AS OBJECT (name TEXT NOT NULL);\n\
         CREATE TYPE tasks.task AS OBJECT (owner REF tasks.person);\n\
         CREATE SERVER FUNCTION tasks.matches(p_task REF tasks.task)\n\
-        RETURNS ROWS (same BOOL)\n\
+        RETURNS ROWS (name TEXT, same BOOL)\n\
         SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n\
-        AS SELECT t.owner.name = t.owner.name FROM tasks.task t WHERE REF(t) = p_task;\n";
+        AS SELECT t.owner.name, t.owner = t.owner FROM tasks.task t WHERE REF(t) = p_task;\n";
 
     const MUTATION_SOURCE: &str = "CREATE SCHEMA tasks;\n\
         CREATE TYPE tasks.person AS OBJECT (name TEXT NOT NULL);\n\
@@ -2629,8 +2631,8 @@ mod tests {
                 (
                     DefinitionReferenceKind::QueryField,
                     DefinitionReferenceTarget::Field {
-                        owner: person.id(),
-                        field: person.field_by_name("name").unwrap().id()
+                        owner: task.id(),
+                        field: task.field_by_name("owner").unwrap().id()
                     }
                 ),
                 (
@@ -3091,7 +3093,7 @@ mod tests {
             .unwrap();
         let owner_field = task.field_by_name("owner").unwrap();
         let name_field = person.field_by_name("name").unwrap();
-        let map_plan = |type_ids: [TypeId; 5]| {
+        let map_plan = |type_ids: [TypeId; 7]| {
             let mut type_index = 0;
             let mut field_index = 0;
             let field_ids = [
@@ -3100,7 +3102,7 @@ mod tests {
                 owner_field.id(),
                 name_field.id(),
             ];
-            checked_plan
+            let plan = checked_plan
                 .try_map_identities(
                     |_| {
                         let mapped = type_ids[type_index];
@@ -3115,9 +3117,20 @@ mod tests {
                     |_| Ok::<_, PrepareError>(function.id()),
                     |_| Ok::<_, PrepareError>(function.parameters()[0].id()),
                 )
-                .unwrap()
+                .unwrap();
+            assert_eq!(type_index, type_ids.len());
+            assert_eq!(field_index, field_ids.len());
+            plan
         };
-        let exact_types = [task.id(), task.id(), person.id(), task.id(), person.id()];
+        let exact_types = [
+            task.id(),
+            task.id(),
+            person.id(),
+            task.id(),
+            person.id(),
+            task.id(),
+            person.id(),
+        ];
         let plan = map_plan(exact_types);
         let references = identity_selected_query_reference_sequence(&plan, &function);
         let non_reference_task = ObjectTypeDefinition::new(
@@ -3146,8 +3159,15 @@ mod tests {
             })
         ));
 
-        let wrong_owner_plan =
-            map_plan([task.id(), person.id(), person.id(), task.id(), person.id()]);
+        let wrong_owner_plan = map_plan([
+            task.id(),
+            person.id(),
+            person.id(),
+            task.id(),
+            person.id(),
+            task.id(),
+            person.id(),
+        ]);
         assert!(matches!(
             identity_selected_query_plan(
                 &wrong_owner_plan,
