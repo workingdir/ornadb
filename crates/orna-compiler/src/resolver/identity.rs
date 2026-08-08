@@ -4,11 +4,6 @@
 //! cannot be converted into one. A later stage allocates durable core
 //! identities after it accepts the checked result.
 
-#![allow(
-    dead_code,
-    reason = "the resolver identity assignments are an isolated prerequisite for later checking work"
-)]
-
 use std::fmt;
 
 use orna_core::{ExpressionId, FieldId, FunctionId, ParameterId, SchemaId, TypeId};
@@ -129,7 +124,6 @@ pub(crate) struct CheckAssignments {
 }
 
 impl CheckAssignments {
-    #[allow(dead_code)]
     pub(crate) const fn new() -> Self {
         Self {
             next_schema: 0,
