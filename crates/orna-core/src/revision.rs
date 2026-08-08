@@ -540,7 +540,8 @@ impl FunctionRevisionRecord {
         self.revision_number
     }
 
-    /// Returns the declaration source range.
+    /// Returns the declaration range in the source revision that introduced
+    /// this immutable function revision.
     pub const fn declaration_origin(&self) -> SourceOrigin {
         self.declaration_origin
     }
@@ -675,7 +676,13 @@ impl ActiveDatabaseRevision {
         validate_pair(&pair, &source, &catalogue)?;
         validate_expressions(&expressions)?;
         validate_origins(&source, &catalogue, &expressions, &origins)?;
-        validate_function_revisions(&source, &catalogue, &origins, &function_revisions, true)?;
+        validate_function_revisions(
+            &source,
+            &catalogue,
+            &origins,
+            &function_revisions,
+            FunctionRevisionSet::RecoveredActive,
+        )?;
         validate_references(
             &source,
             &catalogue,
@@ -793,7 +800,7 @@ impl DeployableRevision {
             &candidate,
             &origins,
             &new_function_revisions,
-            false,
+            FunctionRevisionSet::NewCandidate,
         )?;
         validate_references(
             &source,
@@ -988,14 +995,16 @@ fn validate_function_revisions(
     catalogue: &CatalogueSnapshot,
     origins: &[DefinitionOrigin],
     revisions: &[FunctionRevisionRecord],
-    require_complete: bool,
+    set: FunctionRevisionSet,
 ) -> Result<(), RevisionInvariantError> {
     let mut revision_ids = HashSet::with_capacity(revisions.len());
     let mut function_numbers = HashSet::with_capacity(revisions.len());
     let mut function_ids = HashSet::with_capacity(revisions.len());
 
     for revision in revisions {
-        validate_source_origin(source, revision.declaration_origin)?;
+        if set == FunctionRevisionSet::NewCandidate {
+            validate_source_origin(source, revision.declaration_origin)?;
+        }
         if !revision_ids.insert(revision.id) {
             return Err(RevisionInvariantError::DuplicateFunctionRevisionId {
                 revision: revision.id,
@@ -1039,21 +1048,24 @@ fn validate_function_revisions(
                 },
             );
         }
-        if let Some(origin) = origins
-            .iter()
-            .find(|origin| origin.identity == DefinitionIdentity::Function(revision.function))
-            && origin.source != revision.declaration_origin
-        {
-            return Err(RevisionInvariantError::FunctionRevisionOriginMismatch {
-                function: revision.function,
-                revision: revision.id,
-                definition_origin: origin.source,
-                declaration_origin: revision.declaration_origin,
-            });
+        if set == FunctionRevisionSet::NewCandidate {
+            let identity = DefinitionIdentity::Function(revision.function);
+            let origin = origins
+                .iter()
+                .find(|origin| origin.identity == identity)
+                .ok_or(RevisionInvariantError::MissingDefinitionOrigin { identity })?;
+            if origin.source != revision.declaration_origin {
+                return Err(RevisionInvariantError::FunctionRevisionOriginMismatch {
+                    function: revision.function,
+                    revision: revision.id,
+                    definition_origin: origin.source,
+                    declaration_origin: revision.declaration_origin,
+                });
+            }
         }
     }
 
-    if require_complete {
+    if set == FunctionRevisionSet::RecoveredActive {
         for function in catalogue.functions() {
             if !function_ids.contains(&function.id()) {
                 return Err(RevisionInvariantError::MissingActiveFunctionRevision {
@@ -1064,6 +1076,12 @@ fn validate_function_revisions(
         }
     }
     Ok(())
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum FunctionRevisionSet {
+    RecoveredActive,
+    NewCandidate,
 }
 
 fn validate_references(
@@ -1694,6 +1712,45 @@ mod tests {
     }
 
     #[test]
+    fn retains_the_historical_origin_of_a_reused_function_revision() {
+        let source = source(None);
+        let catalogue = function_catalogue(FunctionRevisionId::from_bytes(id::<11>()));
+        let current_revision = function_revision();
+        let historical_origin = SourceOrigin::new(SourceUnitId::from_bytes(id::<99>()), 4, 23)
+            .expect("historical origin is ordered");
+        let reused_revision = FunctionRevisionRecord::new(
+            current_revision.function(),
+            current_revision.id(),
+            current_revision.revision_number(),
+            historical_origin,
+            current_revision.declaration_content_hash(),
+            current_revision.semantic_hash(),
+            current_revision.language_version(),
+            current_revision.artifact().clone(),
+        )
+        .unwrap();
+        let origins = function_origins(&current_revision);
+        let pair = RevisionPair::new(source.id(), catalogue.revision());
+
+        let active = ActiveDatabaseRevision::new(
+            pair,
+            source,
+            catalogue,
+            digest::<7>(),
+            vec![],
+            vec![reused_revision],
+            origins,
+            vec![],
+        )
+        .unwrap();
+
+        assert_eq!(
+            active.function_revisions()[0].declaration_origin(),
+            historical_origin
+        );
+    }
+
+    #[test]
     fn rejects_structural_revision_inconsistencies() {
         let duplicate = StoredSourceRevision::new(
             SourceBundleId::from_bytes(id::<1>()),
@@ -1769,8 +1826,8 @@ mod tests {
                 catalogue,
                 digest::<7>(),
                 vec![],
-                vec![bad_origin],
-                function_origins(&function_revision()),
+                vec![bad_origin.clone()],
+                function_origins(&bad_origin),
                 vec![]
             ),
             Err(RevisionInvariantError::SourceOriginNotCharacterBoundary { .. })
@@ -1798,6 +1855,33 @@ mod tests {
                 vec![]
             ),
             Err(RevisionInvariantError::DeployableSourceParentMismatch { .. })
+        ));
+
+        let current_revision = function_revision();
+        let moved_new_revision = FunctionRevisionRecord::new(
+            current_revision.function(),
+            current_revision.id(),
+            current_revision.revision_number(),
+            SourceOrigin::new(SourceUnitId::from_bytes(id::<4>()), 11, 29).unwrap(),
+            current_revision.declaration_content_hash(),
+            current_revision.semantic_hash(),
+            current_revision.language_version(),
+            current_revision.artifact().clone(),
+        )
+        .unwrap();
+        assert!(matches!(
+            DeployableRevision::new(
+                expected,
+                source(Some(expected.source())),
+                expected.catalogue(),
+                function_catalogue(current_revision.id()),
+                digest::<7>(),
+                function_origins(&current_revision),
+                vec![],
+                vec![moved_new_revision],
+                vec![],
+            ),
+            Err(RevisionInvariantError::FunctionRevisionOriginMismatch { .. })
         ));
 
         let duplicate_reference_source = source(Some(expected.source()));
