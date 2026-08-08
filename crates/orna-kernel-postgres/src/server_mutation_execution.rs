@@ -1196,7 +1196,12 @@ enum DeleteCommitFailure {
 
 fn delete_commit_failure(code: Option<&SqlState>) -> DeleteCommitFailure {
     match code {
-        Some(code) if code == &SqlState::FOREIGN_KEY_VIOLATION => DeleteCommitFailure::Restricted,
+        Some(code)
+            if code == &SqlState::FOREIGN_KEY_VIOLATION
+                || code == &SqlState::RESTRICT_VIOLATION =>
+        {
+            DeleteCommitFailure::Restricted
+        }
         Some(_) => DeleteCommitFailure::Rejected,
         None => DeleteCommitFailure::Unknown,
     }
@@ -4446,6 +4451,10 @@ mod tests {
     fn delete_commit_classification_hides_constraint_timing() {
         assert_eq!(
             delete_commit_failure(Some(&SqlState::FOREIGN_KEY_VIOLATION)),
+            DeleteCommitFailure::Restricted,
+        );
+        assert_eq!(
+            delete_commit_failure(Some(&SqlState::RESTRICT_VIOLATION)),
             DeleteCommitFailure::Restricted,
         );
         assert_eq!(
