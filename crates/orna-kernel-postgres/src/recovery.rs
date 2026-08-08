@@ -115,26 +115,34 @@ async fn recover_client(
         .await
         .map_err(PostgresKernelError::Database)?;
 
-    establish_trusted_search_path(&transaction).await?;
-    require_current_migrations(&transaction).await?;
-    let header = load_active_header(&transaction).await?;
-    let active_ancestry =
-        validate_revision_ancestry(&transaction, header.catalogue, header.source).await?;
-    let units = load_source_units(&transaction, header.bundle).await?;
-    let mut function_state =
-        load_function_state(&transaction, header.catalogue, &active_ancestry).await?;
-    let functions = std::mem::take(&mut function_state.functions);
-    let function_origins = std::mem::take(&mut function_state.origins);
-    let semantics =
-        load_catalogue_semantics(&transaction, header.catalogue, functions, function_origins)
-            .await?;
-    let active = assemble_revision(header, units, semantics, function_state)?;
-    verify_physical_catalogue(&transaction, active.catalogue()).await?;
+    let active = recover_active_revision(&transaction).await?;
 
     transaction
         .commit()
         .await
         .map_err(PostgresKernelError::Database)?;
+    Ok(active)
+}
+
+pub(crate) async fn recover_active_revision(
+    transaction: &Transaction<'_>,
+) -> Result<ActiveDatabaseRevision, PostgresKernelError> {
+    establish_trusted_search_path(transaction).await?;
+    require_current_migrations(transaction).await?;
+    let header = load_active_header(transaction).await?;
+    let active_ancestry =
+        validate_revision_ancestry(transaction, header.catalogue, header.source).await?;
+    let units = load_source_units(transaction, header.bundle).await?;
+    let mut function_state =
+        load_function_state(transaction, header.catalogue, &active_ancestry).await?;
+    let functions = std::mem::take(&mut function_state.functions);
+    let function_origins = std::mem::take(&mut function_state.origins);
+    let semantics =
+        load_catalogue_semantics(transaction, header.catalogue, functions, function_origins)
+            .await?;
+    let active = assemble_revision(header, units, semantics, function_state)?;
+    verify_physical_catalogue(transaction, active.catalogue()).await?;
+
     Ok(active)
 }
 
