@@ -1,4 +1,5 @@
-//! Backend-independent runtime values and ordered SERVER query results.
+//! Backend-independent runtime values, typed function arguments, and ordered
+//! SERVER results.
 //!
 //! This module defines the initial runtime subset only. It does not define a
 //! canonical or wire encoding. A later protocol slice must define that format.
@@ -6,7 +7,7 @@
 use std::{error::Error, fmt};
 
 use crate::{
-    ObjectId, TypeId,
+    ObjectId, ParameterId, TypeId,
     types::{ResolvedType, StandardScalar},
 };
 
@@ -58,6 +59,65 @@ impl RuntimeValue {
         matches!(self, Self::Null(_))
     }
 }
+
+/// One typed argument supplied to a server function.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FunctionArgument {
+    parameter: ParameterId,
+    value: RuntimeValue,
+}
+
+impl FunctionArgument {
+    /// Creates one argument, rejecting typed null values.
+    pub fn new(parameter: ParameterId, value: RuntimeValue) -> Result<Self, FunctionArgumentError> {
+        match &value {
+            RuntimeValue::Null(null) => Err(FunctionArgumentError::NullValue {
+                parameter,
+                resolved_type: null.resolved_type(),
+            }),
+            RuntimeValue::Boolean(_)
+            | RuntimeValue::Integer(_)
+            | RuntimeValue::BigInt(_)
+            | RuntimeValue::Float(_)
+            | RuntimeValue::Text(_)
+            | RuntimeValue::Bytes(_)
+            | RuntimeValue::Reference { .. } => Ok(Self { parameter, value }),
+        }
+    }
+
+    /// Returns the parameter identity bound to this argument.
+    pub const fn parameter(&self) -> ParameterId {
+        self.parameter
+    }
+
+    /// Returns the runtime value bound to this argument.
+    pub const fn value(&self) -> &RuntimeValue {
+        &self.value
+    }
+}
+
+/// An error from constructing a typed server-function argument.
+#[non_exhaustive]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FunctionArgumentError {
+    /// A typed null value is not a valid function argument in this slice.
+    NullValue {
+        /// The parameter identity supplied with the null value.
+        parameter: ParameterId,
+        /// The resolved type carried by the null value.
+        resolved_type: ResolvedType,
+    },
+}
+
+impl fmt::Display for FunctionArgumentError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NullValue { .. } => formatter.write_str("function argument value cannot be NULL"),
+        }
+    }
+}
+
+impl Error for FunctionArgumentError {}
 
 /// An opaque typed null value.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -348,6 +408,66 @@ mod tests {
 
     fn column(name: &str, resolved_type: ResolvedType, nullable: bool) -> ResultColumn {
         ResultColumn::new(name, resolved_type, nullable).unwrap()
+    }
+
+    #[test]
+    fn accepts_every_current_non_null_runtime_value_as_a_function_argument() {
+        let values = [
+            RuntimeValue::Boolean(true),
+            RuntimeValue::Integer(-7),
+            RuntimeValue::BigInt(8),
+            RuntimeValue::Float(RuntimeFloat::new(9.5).unwrap()),
+            RuntimeValue::Text("value".into()),
+            RuntimeValue::Bytes(vec![1, 2, 3]),
+            RuntimeValue::Reference {
+                target: TARGET,
+                object: OBJECT,
+            },
+        ];
+
+        for (index, value) in values.into_iter().enumerate() {
+            let parameter = ParameterId::from_bytes([index as u8; 16]);
+            let argument = FunctionArgument::new(parameter, value.clone()).unwrap();
+            assert_eq!(argument.parameter(), parameter);
+            assert_eq!(argument.value(), &value);
+        }
+    }
+
+    #[test]
+    fn rejects_typed_null_function_arguments_with_parameter_and_type() {
+        let parameter = ParameterId::from_bytes([0x43; 16]);
+        let resolved_type = ResolvedType::reference(TARGET);
+        let value = RuntimeValue::null(resolved_type).unwrap();
+
+        let error = FunctionArgument::new(parameter, value).unwrap_err();
+        assert_eq!(
+            error,
+            FunctionArgumentError::NullValue {
+                parameter,
+                resolved_type,
+            }
+        );
+        assert_eq!(error.to_string(), "function argument value cannot be NULL");
+        assert!(std::error::Error::source(&error).is_none());
+    }
+
+    #[test]
+    fn function_argument_clone_and_equality_preserve_parameter_and_reference_identity() {
+        let parameter = ParameterId::from_bytes([0x44; 16]);
+        let value = RuntimeValue::Reference {
+            target: TARGET,
+            object: OBJECT,
+        };
+        let argument = FunctionArgument::new(parameter, value.clone()).unwrap();
+        let clone = argument.clone();
+
+        assert_eq!(clone, argument);
+        assert_eq!(argument.parameter(), parameter);
+        assert_eq!(argument.value(), &value);
+
+        let other_parameter = ParameterId::from_bytes([0x45; 16]);
+        let other = FunctionArgument::new(other_parameter, value).unwrap();
+        assert_ne!(argument, other);
     }
 
     #[test]
