@@ -324,6 +324,7 @@ dependencies = [
 name = "orna-compiler"
 version = "0.1.0"
 dependencies = [
+ "orna-artifact",
  "orna-core",
  "orna-syntax",
 ]
