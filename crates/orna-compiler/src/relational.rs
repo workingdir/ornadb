@@ -5,6 +5,8 @@
 //! Unknown fields and aliases use `UnknownQualifiedName`, because the stable
 //! diagnostic set does not define a separate unknown-field code.
 
+use std::fmt;
+
 use orna_core::{
     FieldId, TypeId,
     catalogue::CatalogueSnapshot,
@@ -239,7 +241,7 @@ pub(crate) fn check_query_in<T, F>(
     logical_path: &str,
 ) -> Result<RelationalQueryIr<T, F>, Vec<CompilerDiagnostic>>
 where
-    T: Copy + Eq,
+    T: Copy + Eq + fmt::Display,
     F: Copy,
 {
     let source_name = normalise_qualified_name(&query.source_object.object_type);
@@ -349,7 +351,7 @@ fn check_expression<T, F>(
     diagnostics: &mut Vec<CompilerDiagnostic>,
 ) -> Option<ExpressionIr<T, F>>
 where
-    T: Copy + Eq,
+    T: Copy + Eq + fmt::Display,
     F: Copy,
 {
     match expression {
@@ -415,7 +417,7 @@ fn check_field_path<T, F>(
     diagnostics: &mut Vec<CompilerDiagnostic>,
 ) -> Option<ExpressionIr<T, F>>
 where
-    T: Copy + Eq,
+    T: Copy + Eq + fmt::Display,
     F: Copy,
 {
     let mut owner = context.object_type;
@@ -426,7 +428,7 @@ where
         let Some(object_type_name) = catalogue.object_type_name_by_id(owner) else {
             diagnostics.push(diagnostic(
                 DiagnosticCode::InvalidReferenceTarget,
-                "REF target type is not an object type",
+                format!("REF target type {owner} is not an object type"),
                 logical_path,
                 &member.span,
             ));
@@ -766,6 +768,12 @@ mod tests {
         struct TestCatalogue {
             task_name: QualifiedSemanticName,
             person_name: QualifiedSemanticName,
+        }
+
+        impl std::fmt::Display for TestTypeId {
+            fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(formatter, "{}", self.0)
+            }
         }
 
         impl QueryCatalogue<TestTypeId, TestFieldId> for TestCatalogue {
