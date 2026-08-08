@@ -54,7 +54,7 @@ use crate::{
 };
 use crate::{
     mutation::{MutationExpressionKind, MutationPlanIr},
-    resolver::CheckedServerFunctionBody,
+    resolver::{CheckedFieldRename, CheckedServerFunctionBody},
 };
 
 /// One encoded SERVER artifact with the language version that defines it.
@@ -95,7 +95,7 @@ pub fn prepare(
         });
     }
 
-    preflight(report, checked)?;
+    preflight(report, checked, active)?;
     let identities = IdentityMap::build(checked, active)?;
     let source = PreparedSource::new(report, expected_base.source())?;
     CandidateBuilder::new(report, checked, active, identities, source).build()
@@ -539,7 +539,11 @@ fn resolved_type_from_semantic(semantic_type: SemanticType<TypeId>) -> ResolvedT
     }
 }
 
-fn preflight(report: &CheckReport, checked: &CheckedBundle) -> Result<(), PrepareError> {
+fn preflight(
+    report: &CheckReport,
+    checked: &CheckedBundle,
+    active: &ActiveDatabaseRevision,
+) -> Result<(), PrepareError> {
     let units = report.parse_report().units();
     if u32::try_from(units.len()).is_err() {
         return Err(PrepareError::SourceUnitCountExceedsU32 { count: units.len() });
@@ -565,6 +569,7 @@ fn preflight(report: &CheckReport, checked: &CheckedBundle) -> Result<(), Prepar
     for location in checked_locations(checked) {
         validate_location(location, &sources)?;
     }
+    validate_field_renames(checked, active)?;
     for function in checked.server_functions() {
         if u32::try_from(function.references().len()).is_err() {
             return Err(PrepareError::ReferenceCountExceedsU32 {
@@ -583,6 +588,124 @@ fn preflight(report: &CheckReport, checked: &CheckedBundle) -> Result<(), Prepar
         }
     }
     Ok(())
+}
+
+fn validate_field_renames(
+    checked: &CheckedBundle,
+    active: &ActiveDatabaseRevision,
+) -> Result<(), PrepareError> {
+    let mut evidence = HashSet::new();
+    let mut renamed_fields = HashSet::new();
+    let mut consumed_names = HashSet::new();
+    let mut produced_names = HashSet::new();
+    for rename in checked.field_renames() {
+        let CheckedTypeId::Existing(owner) = rename.owner else {
+            return Err(PrepareError::InvalidCheckedBundle {
+                reason: "field rename has a provisional owner",
+            });
+        };
+        let CheckedFieldId::Existing(field) = rename.field else {
+            return Err(PrepareError::InvalidCheckedBundle {
+                reason: "field rename has a provisional field",
+            });
+        };
+        if rename.old_name == rename.new_name
+            || !evidence.insert((
+                owner,
+                field,
+                rename.old_name.as_str(),
+                rename.new_name.as_str(),
+            ))
+        {
+            return Err(PrepareError::InvalidCheckedBundle {
+                reason: "field rename evidence is duplicate or has equal names",
+            });
+        }
+        if !renamed_fields.insert((owner, field)) {
+            return Err(PrepareError::InvalidCheckedBundle {
+                reason: "multiple field renames bind one checked field",
+            });
+        }
+        if !consumed_names.insert((owner, rename.old_name.as_str())) {
+            return Err(PrepareError::InvalidCheckedBundle {
+                reason: "field rename consumes one old name more than once",
+            });
+        }
+        if !produced_names.insert((owner, rename.new_name.as_str())) {
+            return Err(PrepareError::InvalidCheckedBundle {
+                reason: "field rename produces one new name more than once",
+            });
+        }
+        let candidate_owner = checked
+            .object_types()
+            .iter()
+            .find(|object_type| object_type.id() == rename.owner)
+            .ok_or(PrepareError::InvalidCheckedBundle {
+                reason: "field rename owner is absent from the candidate catalogue",
+            })?;
+        if candidate_owner
+            .fields()
+            .iter()
+            .any(|value| value.name() == rename.old_name)
+        {
+            return Err(PrepareError::InvalidCheckedBundle {
+                reason: "field rename candidate still declares its old field",
+            });
+        }
+        let candidate = candidate_owner
+            .fields()
+            .iter()
+            .find(|value| value.id() == rename.field);
+        if candidate.is_none_or(|value| value.name() != rename.new_name) {
+            return Err(PrepareError::InvalidCheckedBundle {
+                reason: "field rename does not bind its candidate field",
+            });
+        }
+        let active_type = active.catalogue().object_type_by_id(owner).ok_or(
+            PrepareError::InvalidCheckedBundle {
+                reason: "field rename owner is absent from the active catalogue",
+            },
+        )?;
+        validate_active_field_rename(active_type, rename)?;
+    }
+    for rename in checked.field_renames() {
+        if checked.field_renames().iter().any(|other| {
+            other.owner == rename.owner
+                && (other.new_name == rename.old_name || other.old_name == rename.new_name)
+        }) {
+            return Err(PrepareError::InvalidCheckedBundle {
+                reason: "field rename chain or swap is not supported",
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_active_field_rename(
+    active: &ObjectTypeDefinition,
+    rename: &CheckedFieldRename,
+) -> Result<(), PrepareError> {
+    let CheckedFieldId::Existing(field) = rename.field else {
+        return Err(PrepareError::InvalidCheckedBundle {
+            reason: "field rename has a provisional field",
+        });
+    };
+    match (
+        active.field_by_name(&rename.old_name),
+        active.field_by_name(&rename.new_name),
+    ) {
+        (Some(old), None) if old.id() == field => Ok(()),
+        (None, Some(new)) if new.id() == field => Ok(()),
+        (Some(_), None) | (None, Some(_)) => Err(PrepareError::InvalidCheckedBundle {
+            reason: "field rename names do not resolve to its checked field",
+        }),
+        (Some(_), Some(_)) => Err(PrepareError::InvalidCheckedBundle {
+            reason: "field rename active catalogue contains both names",
+        }),
+        (None, None) => Err(PrepareError::InvalidCheckedBundle {
+            reason: "field rename active catalogue contains neither name",
+        }),
+    }
 }
 
 fn supports_definition_reference_kind(kind: DefinitionReferenceKind) -> bool {
@@ -796,7 +919,19 @@ impl IdentityMap {
                             .object_type_by_id(owner)
                             .and_then(|base| base.field_by_id(id))
                             .is_some_and(|base| base.name() == field.name());
-                        if !matches {
+                        let renamed = active
+                            .catalogue()
+                            .object_type_by_id(owner)
+                            .and_then(|base| base.field_by_id(id))
+                            .is_some_and(|base| {
+                                checked.field_renames().iter().any(|rename| {
+                                    rename.owner == object_type.id()
+                                        && rename.field == field.id()
+                                        && rename.old_name == base.name()
+                                        && rename.new_name == field.name()
+                                })
+                            });
+                        if !matches && !renamed {
                             return Err(existing_mismatch(DefinitionIdentity::Field {
                                 owner,
                                 field: id,
@@ -1554,6 +1689,68 @@ mod tests {
 
         assert_eq!(SUPPORTED_DEFINITION_REFERENCE_KINDS, kinds.as_slice());
         assert!(kinds.into_iter().all(supports_definition_reference_kind));
+    }
+
+    #[test]
+    fn active_field_rename_states_are_exact_and_fail_closed() {
+        let owner = TypeId::from_bytes([9; 16]);
+        let field_id = FieldId::from_bytes([10; 16]);
+        let other_id = FieldId::from_bytes([11; 16]);
+        let rename = CheckedFieldRename {
+            owner: CheckedTypeId::Existing(owner),
+            field: CheckedFieldId::Existing(field_id),
+            old_name: "email".to_owned(),
+            new_name: "primary_email".to_owned(),
+        };
+        let object =
+            |fields| ObjectTypeDefinition::new(owner, semantic_name(&["people", "person"]), fields);
+        let field = |id, name, ordinal| {
+            FieldDefinition::new(
+                id,
+                name,
+                ordinal,
+                ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+                false,
+                false,
+                None,
+                None,
+            )
+        };
+        assert!(
+            validate_active_field_rename(&object(vec![field(field_id, "email", 0)]), &rename)
+                .is_ok()
+        );
+        assert!(
+            validate_active_field_rename(
+                &object(vec![field(field_id, "primary_email", 0)]),
+                &rename
+            )
+            .is_ok()
+        );
+        assert!(matches!(
+            validate_active_field_rename(
+                &object(vec![
+                    field(field_id, "email", 0),
+                    field(other_id, "primary_email", 1)
+                ]),
+                &rename
+            ),
+            Err(PrepareError::InvalidCheckedBundle {
+                reason: "field rename active catalogue contains both names"
+            })
+        ));
+        assert!(matches!(
+            validate_active_field_rename(&object(vec![field(other_id, "email", 0)]), &rename),
+            Err(PrepareError::InvalidCheckedBundle {
+                reason: "field rename names do not resolve to its checked field"
+            })
+        ));
+        assert!(matches!(
+            validate_active_field_rename(&object(vec![field(other_id, "other", 0)]), &rename),
+            Err(PrepareError::InvalidCheckedBundle {
+                reason: "field rename active catalogue contains neither name"
+            })
+        ));
     }
 
     const CHANGED_SOURCE: &str = "CREATE SCHEMA tasks;\n\
@@ -2373,6 +2570,120 @@ mod tests {
             .unwrap(),
             prepared.catalogue_hash()
         );
+    }
+
+    #[test]
+    fn field_rename_preparation_preserves_field_and_function_identities_on_replay() {
+        let original_source = "CREATE SCHEMA people;\nCREATE TYPE people.person AS OBJECT (email TEXT NOT NULL);\nCREATE SERVER FUNCTION people.list_emails() RETURNS ROWS (email TEXT) AS SELECT p.email FROM people.person p;\n";
+        let renamed_source = "CREATE SCHEMA people;\nCREATE TYPE people.person AS OBJECT (primary_email TEXT NOT NULL);\nALTER TYPE people.person RENAME FIELD email TO primary_email;\nCREATE SERVER FUNCTION people.list_emails() RETURNS ROWS (email TEXT) AS SELECT p.primary_email FROM people.person p;\n";
+        let empty = empty_active();
+        let original = prepare(
+            &checked_report(original_source, empty.catalogue()),
+            empty.pair(),
+            &empty,
+        )
+        .unwrap();
+        let original_revision = original.new_function_revisions()[0].clone();
+        let original_field = original.candidate().object_types()[0].fields()[0].id();
+        let owner = original.candidate().object_types()[0].id();
+        let active = activate(&original, vec![original_revision.clone()], Vec::new());
+
+        let renamed = prepare(
+            &checked_report(renamed_source, active.catalogue()),
+            active.pair(),
+            &active,
+        )
+        .unwrap();
+        let field = &renamed.candidate().object_types()[0].fields()[0];
+        assert_eq!(field.name(), "primary_email");
+        assert_eq!(field.id(), original_field);
+        let field_origin = renamed
+            .origins()
+            .iter()
+            .find(|origin| {
+                origin.identity()
+                    == DefinitionIdentity::Field {
+                        owner,
+                        field: original_field,
+                    }
+            })
+            .unwrap()
+            .source();
+        let create_field = renamed_source.find("primary_email TEXT").unwrap();
+        assert_eq!(field_origin.byte_start() as usize, create_field);
+        assert_eq!(
+            field_origin.byte_end() as usize,
+            create_field + "primary_email TEXT NOT NULL".len()
+        );
+        assert_ne!(
+            field_origin.byte_start() as usize,
+            renamed_source.find("TO primary_email").unwrap() + 3
+        );
+        let reference = renamed
+            .references()
+            .iter()
+            .find(|reference| reference.kind() == DefinitionReferenceKind::QueryField)
+            .unwrap();
+        assert_eq!(
+            reference.target(),
+            DefinitionReferenceTarget::Field {
+                owner,
+                field: original_field
+            }
+        );
+        let dependent_token = renamed_source.find("p.primary_email").unwrap() + 2;
+        assert_eq!(
+            reference.source_origin().byte_start() as usize,
+            dependent_token
+        );
+        assert_eq!(
+            reference.source_origin().byte_end() as usize,
+            dependent_token + "primary_email".len()
+        );
+        assert_ne!(renamed.source().bundle(), active.source().bundle());
+        assert_ne!(
+            renamed.source().bundle_hash(),
+            active.source().bundle_hash()
+        );
+        assert_ne!(
+            renamed.source().revision_hash(),
+            active.source().revision_hash()
+        );
+        assert_ne!(renamed.catalogue_hash(), active.catalogue_hash());
+        assert!(renamed.new_function_revisions().is_empty());
+        assert_eq!(
+            renamed.candidate().functions()[0].current_revision(),
+            original_revision.id()
+        );
+        assert_eq!(
+            active.function_revisions(),
+            std::slice::from_ref(&original_revision)
+        );
+
+        let replay_active = activate(&renamed, vec![original_revision.clone()], Vec::new());
+        assert_eq!(
+            replay_active.function_revisions(),
+            std::slice::from_ref(&original_revision)
+        );
+        assert_eq!(
+            replay_active.function_revisions()[0].artifact(),
+            original_revision.artifact()
+        );
+        let replay = prepare(
+            &checked_report(renamed_source, replay_active.catalogue()),
+            replay_active.pair(),
+            &replay_active,
+        )
+        .unwrap();
+        assert_eq!(
+            replay.candidate().object_types()[0].fields()[0].id(),
+            original_field
+        );
+        assert_eq!(
+            replay.candidate().functions()[0].current_revision(),
+            original_revision.id()
+        );
+        assert!(replay.new_function_revisions().is_empty());
     }
 
     #[test]
