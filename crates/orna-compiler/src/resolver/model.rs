@@ -254,6 +254,20 @@ where
             }
         }
 
+        for object_type in &object_types {
+            for (_, field) in &object_type.fields {
+                if let SemanticType::Reference { target } = field.resolved_type
+                    && !object_type_indices_by_id.contains_key(&target)
+                {
+                    return Err(ResolutionCatalogueError::UnknownReferenceTarget {
+                        owner: object_type.id,
+                        field: field.id,
+                        target,
+                    });
+                }
+            }
+        }
+
         Ok(Self {
             object_types,
             object_type_indices_by_name,
@@ -340,6 +354,15 @@ pub(crate) enum ResolutionCatalogueError<T, F> {
         /// The repeated identity.
         id: F,
     },
+    /// A REF field targets an object type outside this catalogue.
+    UnknownReferenceTarget {
+        /// The owning object type.
+        owner: T,
+        /// The field with the invalid target.
+        field: F,
+        /// The missing target identity.
+        target: T,
+    },
 }
 
 impl<T: fmt::Debug, F: fmt::Debug> fmt::Display for ResolutionCatalogueError<T, F> {
@@ -360,6 +383,14 @@ impl<T: fmt::Debug, F: fmt::Debug> fmt::Display for ResolutionCatalogueError<T, 
             Self::DuplicateFieldId { owner, id } => {
                 write!(formatter, "duplicate field identity {id:?} on {owner:?}")
             }
+            Self::UnknownReferenceTarget {
+                owner,
+                field,
+                target,
+            } => write!(
+                formatter,
+                "field {field:?} on {owner:?} references unknown object type {target:?}"
+            ),
         }
     }
 }
@@ -505,6 +536,32 @@ mod tests {
             ResolutionCatalogueError::DuplicateFieldId {
                 owner: type_id,
                 id: field_id,
+            }
+        );
+    }
+
+    #[test]
+    fn resolution_catalogue_rejects_dangling_reference_targets() {
+        let owner = TypeId::from_bytes([5; 16]);
+        let field = FieldId::from_bytes([6; 16]);
+        let target = TypeId::from_bytes([7; 16]);
+
+        let error = ResolutionCatalogue::new(vec![QueryObjectType::new(
+            owner,
+            name(&["tasks", "task"]),
+            vec![(
+                "assignee".to_owned(),
+                QueryField::new(field, SemanticType::reference(target), true),
+            )],
+        )])
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            ResolutionCatalogueError::UnknownReferenceTarget {
+                owner,
+                field,
+                target,
             }
         );
     }
