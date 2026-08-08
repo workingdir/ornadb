@@ -9,6 +9,7 @@ use tokio::task::{JoinError, JoinHandle};
 use tokio_postgres::{Client, Config, NoTls};
 
 mod bootstrap;
+mod physical;
 
 pub use bootstrap::ActiveRevision;
 
