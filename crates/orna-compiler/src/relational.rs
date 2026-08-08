@@ -119,6 +119,123 @@ impl<T, F> RelationalQueryIr<T, F> {
     }
 }
 
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "the preparation stage consumes checked identity mappings in the next slice"
+    )
+)]
+impl<T: Copy, F: Copy> RelationalQueryIr<T, F> {
+    /// Rewrites every semantic identity while preserving the checked plan shape.
+    ///
+    /// The caller supplies one fallible mapping for each identity kind. An
+    /// error rejects the complete rewritten plan.
+    pub(crate) fn try_map_identities<T2, F2, E>(
+        &self,
+        mut map_type: impl FnMut(T) -> Result<T2, E>,
+        mut map_field: impl FnMut(F) -> Result<F2, E>,
+    ) -> Result<RelationalQueryIr<T2, F2>, E> {
+        Ok(RelationalQueryIr {
+            scan: ScanIr {
+                input: self.scan.input,
+                object_type: map_type(self.scan.object_type)?,
+            },
+            projections: self
+                .projections
+                .iter()
+                .map(|expression| try_map_expression(expression, &mut map_type, &mut map_field))
+                .collect::<Result<_, _>>()?,
+            selection: self
+                .selection
+                .as_ref()
+                .map(|expression| try_map_expression(expression, &mut map_type, &mut map_field))
+                .transpose()?,
+            ordering: self
+                .ordering
+                .iter()
+                .map(|ordering| {
+                    Ok(OrderingIr {
+                        expression: try_map_expression(
+                            &ordering.expression,
+                            &mut map_type,
+                            &mut map_field,
+                        )?,
+                        direction: ordering.direction,
+                        null_order: ordering.null_order,
+                    })
+                })
+                .collect::<Result<_, E>>()?,
+        })
+    }
+}
+
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "the preparation stage consumes checked identity mappings in the next slice"
+    )
+)]
+fn try_map_expression<T: Copy, F: Copy, T2, F2, E>(
+    expression: &ExpressionIr<T, F>,
+    map_type: &mut impl FnMut(T) -> Result<T2, E>,
+    map_field: &mut impl FnMut(F) -> Result<F2, E>,
+) -> Result<ExpressionIr<T2, F2>, E> {
+    let kind = match &expression.kind {
+        ExpressionKind::ObjectReference { input } => {
+            ExpressionKind::ObjectReference { input: *input }
+        }
+        ExpressionKind::FieldPath { input, steps } => ExpressionKind::FieldPath {
+            input: *input,
+            steps: steps
+                .iter()
+                .map(|step| {
+                    Ok(ResolvedFieldStep {
+                        owner: map_type(step.owner)?,
+                        field: map_field(step.field)?,
+                    })
+                })
+                .collect::<Result<_, E>>()?,
+        },
+        ExpressionKind::BooleanLiteral { value } => {
+            ExpressionKind::BooleanLiteral { value: *value }
+        }
+        ExpressionKind::Equality { left, right } => ExpressionKind::Equality {
+            left: Box::new(try_map_expression(left, map_type, map_field)?),
+            right: Box::new(try_map_expression(right, map_type, map_field)?),
+        },
+    };
+
+    Ok(ExpressionIr {
+        kind,
+        value_type: ValueType {
+            semantic_type: try_map_semantic_type(expression.value_type.semantic_type, map_type)?,
+            nullable: expression.value_type.nullable,
+        },
+    })
+}
+
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "the preparation stage consumes checked identity mappings in the next slice"
+    )
+)]
+fn try_map_semantic_type<T: Copy, T2, E>(
+    semantic_type: SemanticType<T>,
+    map_type: &mut impl FnMut(T) -> Result<T2, E>,
+) -> Result<SemanticType<T2>, E> {
+    Ok(match semantic_type {
+        SemanticType::Scalar(scalar) => SemanticType::Scalar(scalar),
+        SemanticType::Named(type_id) => SemanticType::Named(map_type(type_id)?),
+        SemanticType::Reference { target } => SemanticType::Reference {
+            target: map_type(target)?,
+        },
+    })
+}
+
 /// The single object input scanned by this query.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ScanIr<T = TypeId> {

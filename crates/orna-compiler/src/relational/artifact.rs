@@ -103,6 +103,8 @@ const fn adapt_null_order(null_order: CompilerNullOrder) -> NullOrder {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use orna_artifact::server_plan::{
         Expression, ExpressionKind, NullOrder, ServerPlan, SortDirection,
     };
@@ -112,9 +114,14 @@ mod tests {
             CatalogueSnapshot, FieldDefinition, ObjectTypeDefinition, QualifiedSemanticName,
             SchemaDefinition,
         },
+        source::{SourceBundle, SourceUnit},
         types::{ResolvedType, StandardScalar},
     };
     use orna_syntax::{ServerFunctionBody, parse};
+
+    use crate::{CheckedFieldId, CheckedTypeId};
+
+    use super::super::RelationalQueryIr;
 
     const TASK_TYPE: TypeId = TypeId::from_bytes([1; 16]);
     const PERSON_TYPE: TypeId = TypeId::from_bytes([2; 16]);
@@ -264,6 +271,164 @@ mod tests {
                     .any(|window| window == text.as_bytes()),
                 "artifact contains submitted source name {text:?}"
             );
+        }
+    }
+
+    #[test]
+    fn maps_checked_identities_before_encoding_durable_server_plan_bytes() {
+        let fixture = checked_plan_fixture();
+        let mapped = fixture
+            .plan
+            .try_map_identities(
+                |type_id| {
+                    fixture
+                        .type_ids
+                        .get(&type_id)
+                        .copied()
+                        .ok_or("unknown type")
+                },
+                |field_id| {
+                    fixture
+                        .field_ids
+                        .get(&field_id)
+                        .copied()
+                        .ok_or("unknown field")
+                },
+            )
+            .unwrap();
+
+        let encoded = mapped.encode_server_plan().unwrap();
+        let decoded = ServerPlan::decode(&encoded).unwrap();
+        let parsed = parse(SOURCE);
+        let ServerFunctionBody::SqlQuery(body) = &parsed.server_functions()[0].body;
+        let expected =
+            super::super::check_query(&body.query, &catalogue(), "source_semantic_marker.orna")
+                .unwrap();
+        let expected = ServerPlan::decode(&expected.encode_server_plan().unwrap()).unwrap();
+
+        assert_eq!(decoded, expected);
+        assert_eq!(decoded.scan.object_type, TASK_TYPE);
+        assert_object_reference(&decoded.projections[0], TASK_TYPE);
+        assert_field_path(
+            &decoded.projections[1],
+            &[(TASK_TYPE, TITLE_FIELD)],
+            ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+            true,
+        );
+        assert_field_path(
+            &decoded.projections[2],
+            &[
+                (TASK_TYPE, ASSIGNEE_FIELD),
+                (PERSON_TYPE, PERSON_NAME_FIELD),
+            ],
+            ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+            true,
+        );
+        assert_equality(
+            &decoded.projections[3],
+            ResolvedType::reference(PERSON_TYPE),
+            true,
+        );
+        assert_eq!(decoded.ordering.len(), 3);
+        assert_eq!(decoded.ordering[0].direction, SortDirection::Unspecified);
+        assert_eq!(decoded.ordering[1].direction, SortDirection::Ascending);
+        assert_eq!(decoded.ordering[2].direction, SortDirection::Descending);
+        assert!(
+            decoded
+                .ordering
+                .iter()
+                .all(|ordering| ordering.null_order == NullOrder::Unspecified)
+        );
+
+        for checked_marker in fixture.checked_markers {
+            assert!(
+                !encoded
+                    .windows(checked_marker.len())
+                    .any(|window| window == checked_marker.as_bytes()),
+                "artifact contains checked identity representation {checked_marker:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_the_complete_identity_rewrite_when_a_mapping_is_missing() {
+        let fixture = checked_plan_fixture();
+        let missing_field = fixture
+            .field_ids
+            .iter()
+            .find_map(|(checked, durable)| (*durable == TITLE_FIELD).then_some(*checked))
+            .unwrap();
+
+        let result = fixture.plan.try_map_identities(
+            |type_id| {
+                fixture
+                    .type_ids
+                    .get(&type_id)
+                    .copied()
+                    .ok_or("unknown type")
+            },
+            |field_id| {
+                if field_id == missing_field {
+                    Err("missing durable field identity")
+                } else {
+                    fixture
+                        .field_ids
+                        .get(&field_id)
+                        .copied()
+                        .ok_or("unknown field")
+                }
+            },
+        );
+
+        assert_eq!(result, Err("missing durable field identity"));
+    }
+
+    struct CheckedPlanFixture {
+        plan: RelationalQueryIr<CheckedTypeId, CheckedFieldId>,
+        type_ids: HashMap<CheckedTypeId, TypeId>,
+        field_ids: HashMap<CheckedFieldId, FieldId>,
+        checked_markers: Vec<String>,
+    }
+
+    fn checked_plan_fixture() -> CheckedPlanFixture {
+        let bundle = SourceBundle::new([SourceUnit::new("checked.orna", SOURCE)]).unwrap();
+        let base = CatalogueSnapshot::new(
+            CatalogueRevisionId::from_bytes([99; 16]),
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        let report = crate::check(&bundle, &base);
+        assert!(report.diagnostics().is_empty());
+        let checked = report.checked_bundle().unwrap();
+        let person = &checked.object_types()[0];
+        let task = &checked.object_types()[1];
+        let person_name = &person.fields()[0];
+        let assignee = &task.fields()[0];
+        let title = &task.fields()[1];
+        let completed = &task.fields()[2];
+
+        let type_ids = HashMap::from([(person.id(), PERSON_TYPE), (task.id(), TASK_TYPE)]);
+        let field_ids = HashMap::from([
+            (person_name.id(), PERSON_NAME_FIELD),
+            (assignee.id(), ASSIGNEE_FIELD),
+            (title.id(), TITLE_FIELD),
+            (completed.id(), COMPLETED_FIELD),
+        ]);
+        let checked_markers = type_ids
+            .keys()
+            .map(ToString::to_string)
+            .chain(field_ids.keys().map(ToString::to_string))
+            .collect();
+
+        assert!(type_ids.keys().all(|id| id.is_provisional()));
+        assert!(field_ids.keys().all(|id| id.is_provisional()));
+
+        CheckedPlanFixture {
+            plan: checked.server_functions()[0].plan().clone(),
+            type_ids,
+            field_ids,
+            checked_markers,
         }
     }
 
