@@ -1656,7 +1656,10 @@ impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
             {
                 return Err(QueryParseError {
                     code: "ORNA0001",
-                    message: "duplicate INSERT target fields are not supported".to_owned(),
+                    message: format!(
+                        "field {} appears more than once in this INSERT",
+                        normalise_identifier(&field)
+                    ),
                     span: field.span.clone(),
                 });
             }
@@ -1664,7 +1667,7 @@ impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
             if let Some(dot) = self.take_kind(TokenKind::Dot) {
                 return Err(QueryParseError {
                     code: "ORNA0001",
-                    message: "the current Orna INSERT parser does not yet implement qualified INSERT target fields; expected an unqualified field identifier".to_owned(),
+                    message: "write only the field name in the INSERT field list; do not add an object or alias".to_owned(),
                     span: dot.span(),
                 });
             }
@@ -1725,9 +1728,15 @@ impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
                 return Err(QueryParseError {
                     code: "ORNA0001",
                     message: format!(
-                        "INSERT target field list and VALUES row must have the same arity ({} fields, {} values)",
+                        "INSERT lists {} {} but {} {}; each field requires one value",
                         target_fields.len(),
-                        values.len()
+                        if target_fields.len() == 1 {
+                            "field"
+                        } else {
+                            "fields"
+                        },
+                        values.len(),
+                        if values.len() == 1 { "value" } else { "values" }
                     ),
                     span: arity_span,
                 });
@@ -1757,7 +1766,11 @@ impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
         if !identifiers_equal(&target_alias, &returning_alias) {
             return Err(QueryParseError {
                 code: "ORNA0001",
-                message: "RETURNING REF must use the INSERT target alias".to_owned(),
+                message: format!(
+                    "RETURNING REF must use the INSERT target alias {}, not {}",
+                    normalise_identifier(&target_alias),
+                    normalise_identifier(&returning_alias)
+                ),
                 span: returning_alias.span.clone(),
             });
         }
@@ -1823,7 +1836,7 @@ impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
             let dot = self.current().expect("dot exists");
             return Err(QueryParseError {
                 code: "ORNA0001",
-                message: "the current Orna INSERT parser does not yet implement qualified INSERT values; expected a bare declared parameter name".to_owned(),
+                message: "use the declared parameter name by itself in VALUES; do not add an object or alias".to_owned(),
                 span: dot.span(),
             });
         }
@@ -1833,7 +1846,7 @@ impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
         {
             return Err(self.implementation_gap(
                 "function calls in INSERT values",
-                "a bare declared parameter name",
+                "a declared parameter name by itself",
             ));
         }
         Ok(InsertValue::Parameter(name))
@@ -1933,15 +1946,17 @@ impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
     }
 
     fn implementation_gap(&self, feature: &str, expected: &str) -> QueryParseError {
-        let context = match self.syntax {
-            SqlBodySyntax::Select => "SELECT parser",
-            SqlBodySyntax::Insert => "INSERT parser",
+        let message = match self.syntax {
+            SqlBodySyntax::Select => format!(
+                "the current Orna SELECT parser does not yet implement {feature}; expected {expected}"
+            ),
+            SqlBodySyntax::Insert => {
+                format!("this INSERT does not support {feature}; expected {expected}")
+            }
         };
         QueryParseError {
             code: "ORNA0001",
-            message: format!(
-                "the current Orna {context} does not yet implement {feature}; expected {expected}"
-            ),
+            message,
             span: self.current_span(),
         }
     }
