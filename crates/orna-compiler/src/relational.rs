@@ -10,7 +10,7 @@ use std::fmt;
 use orna_core::{FieldId, FunctionId, ParameterId, TypeId, types::StandardScalar};
 #[cfg(test)]
 use orna_core::{catalogue::CatalogueSnapshot, types::ResolvedType};
-use orna_syntax::{NamePart, QueryExpression, SelectQuery, SourceSpan};
+use orna_syntax::{NamePart, QueryExpression, SelectQuantifier, SelectQuery, SourceSpan};
 
 use crate::resolver::{QueryCatalogue, SemanticType};
 use crate::{
@@ -666,6 +666,8 @@ where
     T: Copy + Eq + fmt::Display,
     F: Copy,
 {
+    check_supported_quantifier(query, logical_path)?;
+
     let CheckedQuerySource {
         context,
         projections,
@@ -737,6 +739,28 @@ where
         },
         references,
     })
+}
+
+/// Rejects query quantifiers that this relational IR cannot encode.
+fn check_supported_quantifier(
+    query: &SelectQuery,
+    logical_path: &str,
+) -> Result<(), Vec<CompilerDiagnostic>> {
+    match &query.quantifier {
+        SelectQuantifier::All => Ok(()),
+        SelectQuantifier::Distinct { source } => Err(vec![diagnostic(
+            DiagnosticCode::DomainIncompatible,
+            "SELECT DISTINCT is not available yet",
+            logical_path,
+            &source.span,
+        )]),
+        _ => Err(vec![diagnostic(
+            DiagnosticCode::DomainIncompatible,
+            "this SELECT form is not available yet",
+            logical_path,
+            &query.span,
+        )]),
+    }
 }
 
 struct CheckedQuerySource<T, F> {
@@ -818,6 +842,8 @@ where
     G: Copy,
     P: Copy,
 {
+    check_supported_quantifier(query, logical_path)?;
+
     if query.projections.is_empty() {
         return Err(vec![diagnostic(
             DiagnosticCode::DomainIncompatible,
@@ -1232,7 +1258,7 @@ mod tests {
         },
         types::{ResolvedType, StandardScalar},
     };
-    use orna_syntax::{QueryExpression, SourceSpan, parse};
+    use orna_syntax::{QueryExpression, SelectQuantifier, SourceSpan, parse};
 
     use super::{
         ExpressionKind, IdentitySelectedQueryReference, NullOrder, QueryParameter,
@@ -1515,6 +1541,48 @@ mod tests {
                 v2.projections[0].span(),
             );
         }
+    }
+
+    #[test]
+    fn rejects_distinct_before_v1_source_name_or_expression_checks() {
+        let query = query("SELECT DISTINCT missing.unknown FROM missing.object missing");
+        let SelectQuantifier::Distinct { source } = &query.quantifier else {
+            panic!("fixture must retain DISTINCT");
+        };
+
+        let result = check_query(&query, &catalogue(), "tasks.orna");
+        let diagnostics = result.expect_err("DISTINCT must not encode the v1 relational IR");
+
+        assert_one_diagnostic(
+            &diagnostics,
+            DiagnosticCode::DomainIncompatible,
+            "SELECT DISTINCT is not available yet",
+            &source.span,
+        );
+    }
+
+    #[test]
+    fn rejects_distinct_before_identity_selected_shape_or_semantic_checks() {
+        let query = query("SELECT DISTINCT missing.unknown FROM missing.object missing");
+        let SelectQuantifier::Distinct { source } = &query.quantifier else {
+            panic!("fixture must retain DISTINCT");
+        };
+
+        let result = check_identity_selected_query_in(
+            &query,
+            &catalogue(),
+            SELECTOR_OWNER,
+            &[] as &[QueryParameter],
+            "tasks.orna",
+        );
+        let diagnostics = result.expect_err("DISTINCT must not encode the identity-selected IR");
+
+        assert_one_diagnostic(
+            &diagnostics,
+            DiagnosticCode::DomainIncompatible,
+            "SELECT DISTINCT is not available yet",
+            &source.span,
+        );
     }
 
     #[test]

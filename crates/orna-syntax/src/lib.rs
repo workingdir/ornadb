@@ -120,6 +120,8 @@ pub struct SourceSlice {
 /// One parsed `SELECT` query.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectQuery {
+    /// The duplicate policy selected immediately after `SELECT`.
+    pub quantifier: SelectQuantifier,
     /// The expressions selected in source order.
     pub projections: Vec<QueryExpression>,
     /// The object source for the query.
@@ -130,6 +132,19 @@ pub struct SelectQuery {
     pub ordering: Vec<OrderingExpression>,
     /// The span from `SELECT` through the final query token.
     pub span: SourceSpan,
+}
+
+/// The closed duplicate policy for one parsed `SELECT` query.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SelectQuantifier {
+    /// The implicit duplicate-preserving form with no written keyword.
+    All,
+    /// The explicit duplicate-eliminating keyword and its exact source slice.
+    Distinct {
+        /// The exact written `DISTINCT` token.
+        source: SourceSlice,
+    },
 }
 
 /// An object type read by a `SELECT` query.
@@ -665,7 +680,8 @@ mod tests {
     use super::{
         FunctionReturnType, FunctionSecurity, FunctionTransaction, FunctionVolatility, InsertValue,
         MutationValue, NullOrdering, OnDeletePolicy, OrderingDirection, QueryExpression,
-        ServerFunctionBody, SourceSpan, StandardLargeObjectKind, TypeSpecification, parse,
+        SelectQuantifier, ServerFunctionBody, SourceSpan, StandardLargeObjectKind,
+        TypeSpecification, parse,
     };
 
     #[test]
@@ -824,6 +840,124 @@ mod tests {
                 panic!("tasks.overdue must use a SELECT body")
             }
         }
+    }
+
+    #[test]
+    fn parses_distinct_losslessly_with_quoted_source_and_type_neutral_syntax() {
+        let source = "CREATE SERVER FUNCTION tasks.values() RETURNS ROWS (value TEXT) \
+            AS SELECT DiStInCt \"item\".\"value\" FROM \"tasks\".\"item\" AS \"item\";";
+        let parsed = parse(source);
+
+        assert!(parsed.diagnostics().is_empty());
+        assert_eq!(parsed.syntax().text(), source);
+        let ServerFunctionBody::SqlQuery(query) = &parsed.server_functions()[0].body else {
+            panic!("DISTINCT source must parse as a SELECT query");
+        };
+        let SelectQuantifier::Distinct { source: distinct } = &query.query.quantifier else {
+            panic!("query must retain DISTINCT instead of the implicit ALL form");
+        };
+        let distinct_start = source.find("DiStInCt").expect("DISTINCT exists");
+        assert_eq!(distinct.text, "DiStInCt");
+        assert_eq!(
+            distinct.span,
+            SourceSpan {
+                start: distinct_start,
+                end: distinct_start + "DiStInCt".len(),
+            }
+        );
+        assert_eq!(
+            query.source.text,
+            "SELECT DiStInCt \"item\".\"value\" FROM \"tasks\".\"item\" AS \"item\""
+        );
+        assert_eq!(
+            query.source.span.start,
+            source.find("SELECT").expect("SELECT exists")
+        );
+        assert_eq!(
+            query.query.source_object.alias.text, "\"item\"",
+            "quoted aliases must remain lossless around DISTINCT"
+        );
+    }
+
+    #[test]
+    fn select_without_distinct_retains_the_implicit_all_quantifier() {
+        let source = "CREATE SERVER FUNCTION tasks.values() RETURNS ROWS (value INT) \
+            AS SELECT item.value FROM tasks.item item;";
+        let parsed = parse(source);
+
+        assert!(parsed.diagnostics().is_empty());
+        let ServerFunctionBody::SqlQuery(query) = &parsed.server_functions()[0].body else {
+            panic!("ordinary SELECT source must parse as a query");
+        };
+        assert!(matches!(query.query.quantifier, SelectQuantifier::All));
+    }
+
+    #[test]
+    fn rejects_distinct_order_by_at_order_and_recovers_to_the_next_declaration() {
+        let source = "CREATE SERVER FUNCTION tasks.bad() RETURNS ROWS (value INT) \
+            AS SELECT DISTINCT item.value FROM tasks.item item ORDER BY item.value; \
+            CREATE SCHEMA later;";
+        let parsed = parse(source);
+
+        assert_eq!(parsed.syntax().text(), source);
+        assert_eq!(parsed.diagnostics().len(), 1);
+        let diagnostic = &parsed.diagnostics()[0];
+        assert_eq!(diagnostic.code, "ORNA0001");
+        assert_eq!(
+            diagnostic.message,
+            "SELECT DISTINCT queries do not allow ORDER BY; remove the ORDER BY clause",
+        );
+        let order_start = source.find("ORDER BY").expect("ORDER exists");
+        assert_eq!(
+            diagnostic.span,
+            SourceSpan {
+                start: order_start,
+                end: order_start + "ORDER".len(),
+            }
+        );
+        assert!(parsed.server_functions().is_empty());
+        assert_eq!(parsed.schemas().len(), 1);
+        assert_eq!(parsed.schemas()[0].name.parts[0].text, "later");
+    }
+
+    #[test]
+    fn rejects_deferred_distinct_on_and_select_all_syntax() {
+        let distinct_on = "CREATE SERVER FUNCTION tasks.bad() RETURNS ROWS (value INT) \
+            AS SELECT DISTINCT ON (item.value) item.value FROM tasks.item item;";
+        let parsed = parse(distinct_on);
+        assert_eq!(parsed.diagnostics().len(), 1);
+        assert_eq!(parsed.diagnostics()[0].code, "ORNA0001");
+        assert_eq!(
+            parsed.diagnostics()[0].message,
+            "DISTINCT ON is not supported; use SELECT DISTINCT followed by the result columns",
+        );
+        let on_start =
+            distinct_on.find("DISTINCT ON").expect("DISTINCT ON exists") + "DISTINCT ".len();
+        assert_eq!(
+            parsed.diagnostics()[0].span,
+            SourceSpan {
+                start: on_start,
+                end: on_start + "ON".len(),
+            }
+        );
+
+        let select_all = "CREATE SERVER FUNCTION tasks.bad() RETURNS ROWS (value INT) \
+            AS SELECT ALL item.value FROM tasks.item item;";
+        let parsed = parse(select_all);
+        assert_eq!(parsed.diagnostics().len(), 1);
+        assert_eq!(parsed.diagnostics()[0].code, "ORNA0001");
+        assert_eq!(
+            parsed.diagnostics()[0].message,
+            "SELECT ALL is not supported; omit ALL to preserve duplicate rows",
+        );
+        let all_start = select_all.find("ALL").expect("ALL exists");
+        assert_eq!(
+            parsed.diagnostics()[0].span,
+            SourceSpan {
+                start: all_start,
+                end: all_start + "ALL".len(),
+            }
+        );
     }
 
     #[test]

@@ -5,10 +5,10 @@ use crate::{
     FunctionReturnType, FunctionSecurity, FunctionTransaction, FunctionVolatility, InsertStatement,
     MutationValue, NamePart, NullOrdering, ObjectFieldDeclaration, ObjectSource,
     ObjectTypeDeclaration, OnDeletePolicy, OrderingDirection, OrderingExpression, Parse,
-    QualifiedName, QueryExpression, RowsColumnDeclaration, SchemaDeclaration, SelectQuery,
-    ServerFunctionBody, ServerFunctionDeclaration, ServerFunctionParameter, SourceSlice,
-    SourceSpan, SqlDeleteBody, SqlInsertBody, SqlQueryBody, SqlUpdateBody, StandardLargeObjectKind,
-    SyntaxTree, TypeSpecification, UpdateAssignment, UpdateStatement,
+    QualifiedName, QueryExpression, RowsColumnDeclaration, SchemaDeclaration, SelectQuantifier,
+    SelectQuery, ServerFunctionBody, ServerFunctionDeclaration, ServerFunctionParameter,
+    SourceSlice, SourceSpan, SqlDeleteBody, SqlInsertBody, SqlQueryBody, SqlUpdateBody,
+    StandardLargeObjectKind, SyntaxTree, TypeSpecification, UpdateAssignment, UpdateStatement,
     lexer::{Token, TokenKind, lex},
 };
 
@@ -1550,6 +1550,32 @@ impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
             .ok_or_else(|| self.implementation_gap("only SELECT query bodies", "a SELECT query"))?;
 
         self.skip_trivia();
+        let quantifier = if let Some(distinct) = self.take_word("DISTINCT") {
+            self.skip_trivia();
+            if self.current().is_some_and(|token| token.is_word("ON")) {
+                return Err(QueryParseError {
+                    code: "ORNA0001",
+                    message: "DISTINCT ON is not supported; use SELECT DISTINCT followed by the result columns"
+                        .to_owned(),
+                    span: self.current_span(),
+                });
+            }
+            SelectQuantifier::Distinct {
+                source: SourceSlice {
+                    text: distinct.text.to_owned(),
+                    span: distinct.span(),
+                },
+            }
+        } else if self.current().is_some_and(|token| token.is_word("ALL")) {
+            return Err(QueryParseError {
+                code: "ORNA0001",
+                message: "SELECT ALL is not supported; omit ALL to preserve duplicate rows"
+                    .to_owned(),
+                span: self.current_span(),
+            });
+        } else {
+            SelectQuantifier::All
+        };
         let mut projections = vec![self.parse_expression(false)?];
         loop {
             self.skip_trivia();
@@ -1607,6 +1633,15 @@ impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
 
         self.skip_trivia();
         let ordering = if let Some(order) = self.take_word("ORDER") {
+            if matches!(quantifier, SelectQuantifier::Distinct { .. }) {
+                return Err(QueryParseError {
+                    code: "ORNA0001",
+                    message:
+                        "SELECT DISTINCT queries do not allow ORDER BY; remove the ORDER BY clause"
+                            .to_owned(),
+                    span: order.span(),
+                });
+            }
             if has_identity_selector_parameter {
                 return Err(QueryParseError {
                     code: "ORNA0001",
@@ -1636,6 +1671,7 @@ impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
             .or_else(|| predicate.as_ref().map(|predicate| predicate.span().end))
             .unwrap_or(source_object.span.end);
         Ok(SelectQuery {
+            quantifier,
             projections,
             source_object,
             predicate,
