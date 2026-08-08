@@ -3,9 +3,25 @@ mod support;
 use std::{collections::BTreeSet, str::FromStr, sync::Arc};
 
 use orna_core::{
-    CatalogueRevisionId, SourceBundleId,
-    canonical_hash::{catalogue_digest, source_bundle_digest, source_revision_record_digest},
-    catalogue::CatalogueSnapshot,
+    CatalogueRevisionId, FieldId, FunctionId, FunctionRevisionId, ParameterId, SchemaId,
+    SourceBundleId, SourceRevisionId, SourceUnitId, TypeId,
+    canonical_hash::{
+        artifact_payload_digest, catalogue_digest, function_declaration_digest,
+        function_semantic_digest, source_bundle_digest, source_revision_record_digest,
+        source_unit_content_digest,
+    },
+    catalogue::{
+        CatalogueSnapshot, FieldDefinition, FunctionDefinition, FunctionDomain, FunctionReturn,
+        FunctionSecurity, FunctionTransaction, FunctionVolatility, ObjectTypeDefinition,
+        ParameterDefinition, QualifiedSemanticName, SchemaDefinition,
+    },
+    revision::{
+        ActiveDatabaseRevision, DefinitionIdentity, DefinitionOrigin, DefinitionReference,
+        DefinitionReferenceKind, DefinitionReferenceTarget, ExecutableArtifact,
+        ExecutableArtifactKind, FunctionRevisionRecord, RevisionPair, SourceOrigin,
+        StoredSourceRevision, StoredSourceUnit,
+    },
+    types::{ResolvedType, StandardScalar},
 };
 use orna_kernel_postgres::{PostgresKernel, PostgresKernelError};
 use sha2::{Digest, Sha256};
@@ -52,6 +68,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "canonical hash contract v1",
         include_str!("../migrations/0004_canonical_hash_contract.sql"),
     ),
+    (
+        5,
+        "owner-qualified reference targets",
+        include_str!("../migrations/0005_owner_qualified_reference_targets.sql"),
+    ),
 ];
 const MIGRATION_DATA_STEP_SEPARATOR: &[u8] = b"\0orna.kernel.migration-step\0";
 const CANONICAL_HASH_V1_EMPTY_SEED_STEP: &[u8] = b"canonical-hash-v1-empty-seed/v1";
@@ -73,6 +94,39 @@ const ORIGIN_TABLES: &[&str] = &[
     "catalogue_function_parameters",
     "catalogue_function_return_columns",
 ];
+const REGISTERED_V4_SCHEMA_DECLARATION: &str = "schema_decl";
+const REGISTERED_V4_FIRST_TYPE_DECLARATION: &str = "first_type_decl";
+const REGISTERED_V4_FIELD_DECLARATION: &str = "field_decl";
+const REGISTERED_V4_SECOND_TYPE_DECLARATION: &str = "second_type_decl";
+const REGISTERED_V4_FIRST_FUNCTION_DECLARATION: &str = "first_function_decl";
+const REGISTERED_V4_PARAMETER_DECLARATION: &str = "parameter_decl";
+const REGISTERED_V4_FIELD_REFERENCE: &str = "field_reference";
+const REGISTERED_V4_PARAMETER_REFERENCE: &str = "parameter_reference";
+const REGISTERED_V4_SECOND_FUNCTION_DECLARATION: &str = "second_function_decl";
+const REGISTERED_V4_SOURCE: &str = concat!(
+    "schema_decl\n",
+    "first_type_decl\n",
+    "field_decl\n",
+    "second_type_decl\n",
+    "first_function_decl\n",
+    "parameter_decl\n",
+    "field_reference\n",
+    "parameter_reference\n",
+    "second_function_decl\n",
+);
+
+#[test]
+fn registered_v4_semantic_fixture_is_a_valid_active_database_revision() -> TestResult<()> {
+    let fixture = registered_v4_semantic_fixture()?;
+
+    require(
+        fixture.catalogue().object_types().len() == 2
+            && fixture.catalogue().functions().len() == 2
+            && fixture.function_revisions().len() == 2
+            && fixture.references().len() == 2,
+        "registered v4 fixture lost required semantic rows",
+    )
+}
 
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
@@ -125,6 +179,50 @@ async fn bootstrap_upgrades_the_registered_v3_empty_catalogue() -> TestResult<()
 
         kernel.bootstrap().await?;
         inspect_bootstrap_state(&database).await
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn bootstrap_owner_qualifies_registered_v4_semantic_references() -> TestResult<()> {
+    with_test_database(|database| async move {
+        seed_registered_v4_semantic_catalogue(&database, false).await?;
+        let kernel = PostgresKernel::from_str(&database.connection_string())?;
+
+        kernel.bootstrap().await?;
+        verify_owner_qualified_reference_backfill(&database).await
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn bootstrap_rolls_back_v5_for_a_dangling_legacy_reference() -> TestResult<()> {
+    with_test_database(|database| async move {
+        seed_registered_v4_semantic_catalogue(&database, true).await?;
+        let kernel = PostgresKernel::from_str(&database.connection_string())?;
+
+        let error = kernel
+            .bootstrap()
+            .await
+            .expect_err("v5 must reject a dangling legacy field reference");
+        require(
+            matches!(error, PostgresKernelError::Database(_)),
+            format!("dangling legacy reference produced the wrong failure: {error}"),
+        )?;
+        let database_message = match &error {
+            PostgresKernelError::Database(error) => error
+                .as_db_error()
+                .map(tokio_postgres::error::DbError::message),
+            _ => None,
+        };
+        require(
+            database_message
+                == Some("cannot owner-qualify a dangling or ambiguous legacy field reference"),
+            format!("dangling legacy reference produced an unexpected error: {error}"),
+        )?;
+        inspect_v5_rollback(&database).await
     })
     .await
 }
@@ -247,7 +345,7 @@ async fn bootstrap_rejects_tampered_gapped_and_newer_migration_history() -> Test
         Sha256::digest(MIGRATIONS[1].2.as_bytes()).to_vec(),
     )
     .await?;
-    reject_migration_history(5, "future migration", vec![0; 32]).await
+    reject_migration_history(6, "future migration", vec![0; 32]).await
 }
 
 async fn inspect_bootstrap_state(database: &TestDatabase) -> TestResult<()> {
@@ -305,6 +403,7 @@ async fn inspect_client(client: &Client) -> TestResult<()> {
     inspect_empty_aggregate_hashes(client).await?;
     inspect_hash_contract_columns(client).await?;
     inspect_origin_columns(client).await?;
+    inspect_owner_qualified_catalogue_members(client).await?;
     inspect_definition_references(client).await?;
     inspect_function_revision_constraints(client).await?;
 
@@ -540,6 +639,23 @@ async fn inspect_origin_columns(client: &Client) -> TestResult<()> {
     Ok(())
 }
 
+async fn inspect_owner_qualified_catalogue_members(client: &Client) -> TestResult<()> {
+    require_constraint(
+        client,
+        "catalogue_fields",
+        "catalogue_fields_pkey",
+        "PRIMARY KEY (catalogue_revision_id, owner_type_id, field_id)",
+    )
+    .await?;
+    require_constraint(
+        client,
+        "catalogue_function_parameters",
+        "catalogue_function_parameters_pkey",
+        "PRIMARY KEY (catalogue_revision_id, function_id, parameter_id)",
+    )
+    .await
+}
+
 async fn inspect_definition_references(client: &Client) -> TestResult<()> {
     let rows = client
         .query(
@@ -567,6 +683,8 @@ async fn inspect_definition_references(client: &Client) -> TestResult<()> {
         ("source_unit_id".to_owned(), "NO".to_owned()),
         ("source_start".to_owned(), "NO".to_owned()),
         ("source_end".to_owned(), "NO".to_owned()),
+        ("target_owner_type_id".to_owned(), "YES".to_owned()),
+        ("target_owner_function_id".to_owned(), "YES".to_owned()),
     ];
     require(
         actual_columns == expected_columns,
@@ -651,6 +769,107 @@ async fn inspect_definition_references(client: &Client) -> TestResult<()> {
             ),
         )?;
     }
+
+    require_constraint(
+        client,
+        "definition_references",
+        "definition_references_target_owner_type_id_check",
+        "octet_length(target_owner_type_id) = 16",
+    )
+    .await?;
+    require_constraint(
+        client,
+        "definition_references",
+        "definition_references_target_owner_function_id_check",
+        "octet_length(target_owner_function_id) = 16",
+    )
+    .await?;
+
+    let owner_shape_constraint = constraint_definition(
+        client,
+        "definition_references",
+        "definition_references_target_owner_shape_check",
+    )
+    .await?;
+    for expected_fragment in [
+        "target_kind = 'field'::text",
+        "target_kind = 'parameter'::text",
+        "target_owner_type_id IS NOT NULL",
+        "target_owner_function_id IS NOT NULL",
+        "target_owner_type_id IS NULL",
+        "target_owner_function_id IS NULL",
+        "target_kind <> ALL",
+    ] {
+        require(
+            owner_shape_constraint.contains(expected_fragment),
+            format!(
+                "definition reference owner-shape constraint omits {expected_fragment:?}: {owner_shape_constraint:?}"
+            ),
+        )?;
+    }
+
+    let compatibility_constraint = constraint_definition(
+        client,
+        "definition_references",
+        "definition_references_reference_target_compatibility_check",
+    )
+    .await?;
+    for expected_fragment in [
+        "reference_kind = 'function_call'::text",
+        "target_kind = 'function'::text",
+        "'named_type'::text",
+        "'object_reference'::text",
+        "'query_object'::text",
+        "target_kind = 'object_type'::text",
+        "reference_kind = 'parameter_read'::text",
+        "target_kind = 'parameter'::text",
+        "reference_kind = 'query_field'::text",
+        "target_kind = 'field'::text",
+        "reference_kind = 'expression'::text",
+        "target_kind = 'expression'::text",
+    ] {
+        require(
+            compatibility_constraint.contains(expected_fragment),
+            format!(
+                "definition reference compatibility constraint omits {expected_fragment:?}: {compatibility_constraint:?}"
+            ),
+        )?;
+    }
+
+    require_constraint(
+        client,
+        "definition_references",
+        "definition_references_field_target_fk",
+        "FOREIGN KEY (catalogue_revision_id, target_owner_type_id, target_definition_id) REFERENCES _orna_kernel.catalogue_fields(catalogue_revision_id, owner_type_id, field_id) DEFERRABLE INITIALLY DEFERRED",
+    )
+    .await?;
+    require_constraint(
+        client,
+        "definition_references",
+        "definition_references_parameter_target_fk",
+        "FOREIGN KEY (catalogue_revision_id, target_owner_function_id, target_definition_id) REFERENCES _orna_kernel.catalogue_function_parameters(catalogue_revision_id, function_id, parameter_id) DEFERRABLE INITIALLY DEFERRED",
+    )
+    .await?;
+    require_index(
+        client,
+        "definition_references_field_target_index",
+        "(target_owner_type_id, target_definition_id, catalogue_revision_id) WHERE (target_kind = 'field'::text)",
+    )
+    .await?;
+    require_index(
+        client,
+        "definition_references_parameter_target_index",
+        "(target_owner_function_id, target_definition_id, catalogue_revision_id) WHERE (target_kind = 'parameter'::text)",
+    )
+    .await?;
+    require_index(
+        client,
+        "definition_references_direct_target_index",
+        "(target_kind, target_definition_id, catalogue_revision_id) WHERE (target_kind <> ALL (ARRAY['field'::text, 'parameter'::text]))",
+    )
+    .await?;
+    require_index_absent(client, "definition_references_target_index").await?;
+    require_index_absent(client, "definition_references_owner_qualified_target_index").await?;
     Ok(())
 }
 
@@ -734,6 +953,33 @@ async fn require_constraint(
     )
 }
 
+async fn require_index(client: &Client, index: &str, expected_fragment: &str) -> TestResult<()> {
+    let row = client
+        .query_opt(
+            "SELECT pg_get_indexdef(to_regclass($1))",
+            &[&format!("_orna_kernel.{index}")],
+        )
+        .await?
+        .ok_or_else(|| failure(format!("missing index {index}")))?;
+    let definition: Option<String> = value(&row, 0)?;
+    let definition = definition.ok_or_else(|| failure(format!("missing index {index}")))?;
+    require(
+        definition.contains(expected_fragment),
+        format!("index {index} is {definition:?}; expected {expected_fragment:?}"),
+    )
+}
+
+async fn require_index_absent(client: &Client, index: &str) -> TestResult<()> {
+    let row = client
+        .query_one(
+            "SELECT to_regclass($1)::text",
+            &[&format!("_orna_kernel.{index}")],
+        )
+        .await?;
+    let relation: Option<String> = value(&row, 0)?;
+    require(relation.is_none(), format!("unexpected index {index}"))
+}
+
 async fn constraint_definition(
     client: &Client,
     table: &str,
@@ -794,6 +1040,835 @@ async fn seed_registered_v3_empty_catalogue(database: &TestDatabase) -> TestResu
             "registered v3 catalogue seed failed: {seed_error}; seed driver shutdown failed: {shutdown_error}"
         ))),
     }
+}
+
+async fn seed_registered_v4_semantic_catalogue(
+    database: &TestDatabase,
+    dangling_field_reference: bool,
+) -> TestResult<()> {
+    let fixture = registered_v4_semantic_fixture()?;
+    let session = database.open().await?;
+    let seed_result = async {
+        seed_registered_v4_empty_catalogue_client(session.client()).await?;
+        insert_registered_v4_semantic_rows(session.client(), &fixture).await?;
+        if dangling_field_reference {
+            session
+                .client()
+                .execute(
+                    "UPDATE _orna_kernel.definition_references
+                     SET target_definition_id = $1
+                     WHERE ordinal = 0",
+                    &[&vec![99_u8; 16]],
+                )
+                .await?;
+        }
+        Ok(())
+    }
+    .await;
+    let shutdown_result = session.shutdown().await;
+
+    match (seed_result, shutdown_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(seed_error), Err(shutdown_error)) => Err(failure(format!(
+            "registered v4 semantic catalogue seed failed: {seed_error}; seed driver shutdown failed: {shutdown_error}"
+        ))),
+    }
+}
+
+async fn seed_registered_v4_empty_catalogue_client(client: &Client) -> TestResult<()> {
+    seed_initial_catalogue_client(client).await?;
+    for (version, name, sql) in &MIGRATIONS[1..4] {
+        client.batch_execute(sql).await?;
+        if *version == 4 {
+            rewrite_registered_v4_empty_hashes(client).await?;
+        }
+        let checksum = expected_migration_checksum(*version, sql);
+        client
+            .execute(
+                "INSERT INTO _orna_kernel.schema_migrations (version, name, checksum)
+                 VALUES ($1, $2, $3)",
+                &[version, name, &checksum],
+            )
+            .await?;
+    }
+    Ok(())
+}
+
+async fn rewrite_registered_v4_empty_hashes(client: &Client) -> TestResult<()> {
+    let bundle = SourceBundleId::from_bytes([1_u8; 16]);
+    let catalogue = CatalogueRevisionId::from_bytes([3_u8; 16]);
+    let bundle_hash = source_bundle_digest(&[])?;
+    let source_hash = source_revision_record_digest(bundle, None, bundle_hash)?;
+    let snapshot = CatalogueSnapshot::new(catalogue, Vec::new(), Vec::new())?;
+    let catalogue_hash = catalogue_digest(&snapshot, &[], &[], &[], &[])?;
+
+    client
+        .execute(
+            "UPDATE _orna_kernel.source_bundles SET content_hash = $1",
+            &[&bundle_hash.to_bytes().to_vec()],
+        )
+        .await?;
+    client
+        .execute(
+            "UPDATE _orna_kernel.source_revisions SET content_hash = $1",
+            &[&source_hash.to_bytes().to_vec()],
+        )
+        .await?;
+    client
+        .execute(
+            "UPDATE _orna_kernel.catalogue_revisions SET content_hash = $1",
+            &[&catalogue_hash.to_bytes().to_vec()],
+        )
+        .await?;
+    Ok(())
+}
+
+fn registered_v4_semantic_fixture() -> TestResult<ActiveDatabaseRevision> {
+    let bundle_id = SourceBundleId::from_bytes([1_u8; 16]);
+    let source_revision_id = SourceRevisionId::from_bytes([2_u8; 16]);
+    let catalogue_revision_id = CatalogueRevisionId::from_bytes([3_u8; 16]);
+    let source_unit_id = SourceUnitId::from_bytes([4_u8; 16]);
+    let schema_id = SchemaId::from_bytes([5_u8; 16]);
+    let first_type_id = TypeId::from_bytes([6_u8; 16]);
+    let second_type_id = TypeId::from_bytes([7_u8; 16]);
+    let field_id = FieldId::from_bytes([8_u8; 16]);
+    let first_function_id = FunctionId::from_bytes([9_u8; 16]);
+    let second_function_id = FunctionId::from_bytes([10_u8; 16]);
+    let first_revision_id = FunctionRevisionId::from_bytes([11_u8; 16]);
+    let second_revision_id = FunctionRevisionId::from_bytes([12_u8; 16]);
+    let parameter_id = ParameterId::from_bytes([13_u8; 16]);
+
+    let source_unit = StoredSourceUnit::new(
+        source_unit_id,
+        0,
+        "semantic.orna",
+        REGISTERED_V4_SOURCE,
+        source_unit_content_digest(REGISTERED_V4_SOURCE)?,
+    )?;
+    let bundle_hash = source_bundle_digest(std::slice::from_ref(&source_unit))?;
+    let source = StoredSourceRevision::new(
+        bundle_id,
+        source_revision_id,
+        None,
+        vec![source_unit],
+        bundle_hash,
+        source_revision_record_digest(bundle_id, None, bundle_hash)?,
+    )?;
+
+    let schema = SchemaDefinition::new(schema_id, QualifiedSemanticName::new(["semantic"])?);
+    let first_type = ObjectTypeDefinition::new(
+        first_type_id,
+        QualifiedSemanticName::new(["semantic", "first_type"])?,
+        vec![FieldDefinition::new(
+            field_id,
+            "shared_field",
+            0,
+            ResolvedType::scalar(StandardScalar::Boolean),
+            false,
+            false,
+            None,
+            None,
+        )],
+    );
+    let second_type = ObjectTypeDefinition::new(
+        second_type_id,
+        QualifiedSemanticName::new(["semantic", "second_type"])?,
+        Vec::new(),
+    );
+    let first_function = FunctionDefinition::new(
+        first_function_id,
+        QualifiedSemanticName::new(["semantic", "first_function"])?,
+        FunctionDomain::Server,
+        vec![ParameterDefinition::new(
+            parameter_id,
+            "shared_parameter",
+            0,
+            ResolvedType::scalar(StandardScalar::Boolean),
+            None,
+        )],
+        FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Void)),
+        first_revision_id,
+        FunctionSecurity::Invoker,
+        Some(FunctionTransaction::Atomic),
+        FunctionVolatility::Immutable,
+    );
+    let second_function = FunctionDefinition::new(
+        second_function_id,
+        QualifiedSemanticName::new(["semantic", "second_function"])?,
+        FunctionDomain::Server,
+        Vec::new(),
+        FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Void)),
+        second_revision_id,
+        FunctionSecurity::Invoker,
+        Some(FunctionTransaction::Atomic),
+        FunctionVolatility::Immutable,
+    );
+    let catalogue = CatalogueSnapshot::new_with_functions(
+        catalogue_revision_id,
+        vec![schema],
+        vec![first_type, second_type],
+        vec![first_function, second_function],
+    )?;
+
+    let references = vec![
+        DefinitionReference::new(
+            first_function_id,
+            first_revision_id,
+            0,
+            DefinitionReferenceTarget::Field {
+                owner: first_type_id,
+                field: field_id,
+            },
+            DefinitionReferenceKind::QueryField,
+            fixture_source_origin(REGISTERED_V4_FIELD_REFERENCE)?,
+        ),
+        DefinitionReference::new(
+            first_function_id,
+            first_revision_id,
+            1,
+            DefinitionReferenceTarget::Parameter {
+                owner: first_function_id,
+                parameter: parameter_id,
+            },
+            DefinitionReferenceKind::ParameterRead,
+            fixture_source_origin(REGISTERED_V4_PARAMETER_REFERENCE)?,
+        ),
+    ];
+    let first_artifact_payload = b"first-server-plan-v1".to_vec();
+    let first_artifact = ExecutableArtifact::new(
+        ExecutableArtifactKind::Server,
+        "orna.server-plan",
+        1,
+        first_artifact_payload.clone(),
+        artifact_payload_digest(&first_artifact_payload)?,
+    )?;
+    let second_artifact_payload = b"second-server-plan-v1".to_vec();
+    let second_artifact = ExecutableArtifact::new(
+        ExecutableArtifactKind::Server,
+        "orna.server-plan",
+        1,
+        second_artifact_payload.clone(),
+        artifact_payload_digest(&second_artifact_payload)?,
+    )?;
+    let first_function = catalogue
+        .function_by_id(first_function_id)
+        .ok_or_else(|| failure("registered v4 fixture lost its first function"))?;
+    let second_function = catalogue
+        .function_by_id(second_function_id)
+        .ok_or_else(|| failure("registered v4 fixture lost its second function"))?;
+    let function_revisions = vec![
+        FunctionRevisionRecord::new(
+            first_function_id,
+            first_revision_id,
+            1,
+            fixture_source_origin(REGISTERED_V4_FIRST_FUNCTION_DECLARATION)?,
+            function_declaration_digest(REGISTERED_V4_FIRST_FUNCTION_DECLARATION.as_bytes())?,
+            function_semantic_digest(first_function, "orna-1", &first_artifact, &[], &references)?,
+            "orna-1",
+            first_artifact,
+        )?,
+        FunctionRevisionRecord::new(
+            second_function_id,
+            second_revision_id,
+            1,
+            fixture_source_origin(REGISTERED_V4_SECOND_FUNCTION_DECLARATION)?,
+            function_declaration_digest(REGISTERED_V4_SECOND_FUNCTION_DECLARATION.as_bytes())?,
+            function_semantic_digest(second_function, "orna-1", &second_artifact, &[], &[])?,
+            "orna-1",
+            second_artifact,
+        )?,
+    ];
+    let origins = vec![
+        DefinitionOrigin::new(
+            DefinitionIdentity::Schema(schema_id),
+            fixture_source_origin(REGISTERED_V4_SCHEMA_DECLARATION)?,
+        ),
+        DefinitionOrigin::new(
+            DefinitionIdentity::ObjectType(first_type_id),
+            fixture_source_origin(REGISTERED_V4_FIRST_TYPE_DECLARATION)?,
+        ),
+        DefinitionOrigin::new(
+            DefinitionIdentity::Field {
+                owner: first_type_id,
+                field: field_id,
+            },
+            fixture_source_origin(REGISTERED_V4_FIELD_DECLARATION)?,
+        ),
+        DefinitionOrigin::new(
+            DefinitionIdentity::ObjectType(second_type_id),
+            fixture_source_origin(REGISTERED_V4_SECOND_TYPE_DECLARATION)?,
+        ),
+        DefinitionOrigin::new(
+            DefinitionIdentity::Function(first_function_id),
+            fixture_source_origin(REGISTERED_V4_FIRST_FUNCTION_DECLARATION)?,
+        ),
+        DefinitionOrigin::new(
+            DefinitionIdentity::Parameter {
+                owner: first_function_id,
+                parameter: parameter_id,
+            },
+            fixture_source_origin(REGISTERED_V4_PARAMETER_DECLARATION)?,
+        ),
+        DefinitionOrigin::new(
+            DefinitionIdentity::Function(second_function_id),
+            fixture_source_origin(REGISTERED_V4_SECOND_FUNCTION_DECLARATION)?,
+        ),
+    ];
+    let catalogue_hash =
+        catalogue_digest(&catalogue, &function_revisions, &[], &origins, &references)?;
+    let pair = RevisionPair::new(source.id(), catalogue.revision());
+
+    Ok(ActiveDatabaseRevision::new_with_history(
+        pair,
+        source,
+        catalogue,
+        catalogue_hash,
+        Vec::new(),
+        function_revisions,
+        Vec::new(),
+        origins,
+        references,
+    )?)
+}
+
+fn fixture_source_origin(token: &str) -> TestResult<SourceOrigin> {
+    let start = REGISTERED_V4_SOURCE
+        .find(token)
+        .ok_or_else(|| failure(format!("registered v4 source omits {token:?}")))?;
+    let end = start + token.len();
+    Ok(SourceOrigin::new(
+        SourceUnitId::from_bytes([4_u8; 16]),
+        u32::try_from(start)?,
+        u32::try_from(end)?,
+    )?)
+}
+
+fn fixture_origin(
+    fixture: &ActiveDatabaseRevision,
+    identity: DefinitionIdentity,
+) -> TestResult<SourceOrigin> {
+    fixture
+        .origins()
+        .iter()
+        .find(|origin| origin.identity() == identity)
+        .map(DefinitionOrigin::source)
+        .ok_or_else(|| failure(format!("registered v4 fixture omits origin {identity:?}")))
+}
+
+fn legacy_reference_target(target: DefinitionReferenceTarget) -> (Vec<u8>, &'static str) {
+    match target {
+        DefinitionReferenceTarget::ObjectType(id) => (id.to_bytes().to_vec(), "object_type"),
+        DefinitionReferenceTarget::Field { field, .. } => (field.to_bytes().to_vec(), "field"),
+        DefinitionReferenceTarget::Function(id) => (id.to_bytes().to_vec(), "function"),
+        DefinitionReferenceTarget::Parameter { parameter, .. } => {
+            (parameter.to_bytes().to_vec(), "parameter")
+        }
+        DefinitionReferenceTarget::Expression(id) => (id.to_bytes().to_vec(), "expression"),
+    }
+}
+
+const fn reference_kind_sql(kind: DefinitionReferenceKind) -> &'static str {
+    match kind {
+        DefinitionReferenceKind::FunctionCall => "function_call",
+        DefinitionReferenceKind::NamedType => "named_type",
+        DefinitionReferenceKind::ObjectReference => "object_reference",
+        DefinitionReferenceKind::ParameterRead => "parameter_read",
+        DefinitionReferenceKind::QueryObject => "query_object",
+        DefinitionReferenceKind::QueryField => "query_field",
+        DefinitionReferenceKind::Expression => "expression",
+    }
+}
+
+async fn insert_registered_v4_semantic_rows(
+    client: &Client,
+    fixture: &ActiveDatabaseRevision,
+) -> TestResult<()> {
+    client
+        .batch_execute("BEGIN; SET CONSTRAINTS ALL DEFERRED;")
+        .await?;
+    let insert_result: TestResult<()> = async {
+        persist_registered_v4_source(client, fixture).await?;
+        persist_registered_v4_catalogue(client, fixture).await?;
+        persist_registered_v4_function_revisions(client, fixture).await?;
+        persist_registered_v4_references(client, fixture).await
+    }
+    .await;
+
+    match insert_result {
+        Ok(()) => client.batch_execute("COMMIT").await?,
+        Err(error) => {
+            let rollback_result = client.batch_execute("ROLLBACK").await;
+            return match rollback_result {
+                Ok(()) => Err(error),
+                Err(rollback_error) => Err(failure(format!(
+                    "registered v4 semantic row setup failed: {error}; rollback failed: {rollback_error}"
+                ))),
+            };
+        }
+    }
+    Ok(())
+}
+
+async fn persist_registered_v4_source(
+    client: &Client,
+    fixture: &ActiveDatabaseRevision,
+) -> TestResult<()> {
+    let source = fixture.source();
+    client
+        .execute(
+            "UPDATE _orna_kernel.source_bundles SET content_hash = $2 WHERE id = $1",
+            &[
+                &source.bundle().to_bytes().to_vec(),
+                &source.bundle_hash().to_bytes().to_vec(),
+            ],
+        )
+        .await?;
+    client
+        .execute(
+            "UPDATE _orna_kernel.source_revisions SET content_hash = $2 WHERE id = $1",
+            &[
+                &source.id().to_bytes().to_vec(),
+                &source.revision_hash().to_bytes().to_vec(),
+            ],
+        )
+        .await?;
+    for unit in source.units() {
+        let logical_path = unit.logical_path();
+        let content = unit.content();
+        client
+            .execute(
+                "INSERT INTO _orna_kernel.source_units
+                    (id, bundle_id, ordinal, logical_path, content, content_hash)
+                 VALUES ($1, $2, $3, $4, $5, $6)",
+                &[
+                    &unit.id().to_bytes().to_vec(),
+                    &source.bundle().to_bytes().to_vec(),
+                    &i64::from(unit.ordinal()),
+                    &logical_path,
+                    &content,
+                    &unit.content_hash().to_bytes().to_vec(),
+                ],
+            )
+            .await?;
+    }
+    Ok(())
+}
+
+async fn persist_registered_v4_catalogue(
+    client: &Client,
+    fixture: &ActiveDatabaseRevision,
+) -> TestResult<()> {
+    let catalogue = fixture.catalogue();
+    let catalogue_revision_id = catalogue.revision().to_bytes().to_vec();
+    client
+        .execute(
+            "UPDATE _orna_kernel.catalogue_revisions SET content_hash = $2 WHERE id = $1",
+            &[
+                &catalogue_revision_id,
+                &fixture.catalogue_hash().to_bytes().to_vec(),
+            ],
+        )
+        .await?;
+
+    for schema in catalogue.schemas() {
+        let origin = fixture_origin(fixture, DefinitionIdentity::Schema(schema.id()))?;
+        let name_parts = schema.name().parts().to_vec();
+        client
+            .execute(
+                "INSERT INTO _orna_kernel.catalogue_schemas
+                    (catalogue_revision_id, schema_id, name_parts,
+                     source_unit_id, source_start, source_end)
+                 VALUES ($1, $2, $3, $4, $5, $6)",
+                &[
+                    &catalogue_revision_id,
+                    &schema.id().to_bytes().to_vec(),
+                    &name_parts,
+                    &origin.source_unit().to_bytes().to_vec(),
+                    &i64::from(origin.byte_start()),
+                    &i64::from(origin.byte_end()),
+                ],
+            )
+            .await?;
+    }
+
+    let schema_id = catalogue
+        .schemas()
+        .first()
+        .ok_or_else(|| failure("registered v4 fixture has no schema"))?
+        .id()
+        .to_bytes()
+        .to_vec();
+    for object_type in catalogue.object_types() {
+        let origin = fixture_origin(fixture, DefinitionIdentity::ObjectType(object_type.id()))?;
+        let name_parts = object_type.name().parts().to_vec();
+        client
+            .execute(
+                "INSERT INTO _orna_kernel.catalogue_object_types
+                    (catalogue_revision_id, type_id, schema_id, name_parts,
+                     source_unit_id, source_start, source_end)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                &[
+                    &catalogue_revision_id,
+                    &object_type.id().to_bytes().to_vec(),
+                    &schema_id,
+                    &name_parts,
+                    &origin.source_unit().to_bytes().to_vec(),
+                    &i64::from(origin.byte_start()),
+                    &i64::from(origin.byte_end()),
+                ],
+            )
+            .await?;
+        persist_registered_v4_fields(client, fixture, object_type.id()).await?;
+    }
+
+    for function in catalogue.functions() {
+        require(
+            function.domain() == FunctionDomain::Server
+                && function.security() == FunctionSecurity::Invoker
+                && function.transaction() == Some(FunctionTransaction::Atomic)
+                && function.volatility() == FunctionVolatility::Immutable
+                && function.return_type()
+                    == &FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Void)),
+            "registered v4 function differs from its persisted execution contract",
+        )?;
+        let origin = fixture_origin(fixture, DefinitionIdentity::Function(function.id()))?;
+        let name_parts = function.name().parts().to_vec();
+        client
+            .execute(
+                "INSERT INTO _orna_kernel.catalogue_functions
+                    (catalogue_revision_id, function_id, schema_id, name_parts,
+                     domain, security_mode, transaction_mode, volatility,
+                     return_shape, return_type_kind, return_scalar_type,
+                     current_function_revision_id, source_unit_id,
+                     source_start, source_end)
+                 VALUES ($1, $2, $3, $4, 'server', 'invoker', 'atomic',
+                         'immutable', 'single', 'scalar', 'void', $5, $6, $7, $8)",
+                &[
+                    &catalogue_revision_id,
+                    &function.id().to_bytes().to_vec(),
+                    &schema_id,
+                    &name_parts,
+                    &function.current_revision().to_bytes().to_vec(),
+                    &origin.source_unit().to_bytes().to_vec(),
+                    &i64::from(origin.byte_start()),
+                    &i64::from(origin.byte_end()),
+                ],
+            )
+            .await?;
+        persist_registered_v4_parameters(client, fixture, function.id()).await?;
+    }
+    Ok(())
+}
+
+async fn persist_registered_v4_fields(
+    client: &Client,
+    fixture: &ActiveDatabaseRevision,
+    owner: TypeId,
+) -> TestResult<()> {
+    let catalogue = fixture.catalogue();
+    let object_type = catalogue
+        .object_type_by_id(owner)
+        .ok_or_else(|| failure("registered v4 fixture lost an object type"))?;
+    for field in object_type.fields() {
+        require(
+            field.resolved_type() == ResolvedType::scalar(StandardScalar::Boolean)
+                && field.default_expression().is_none()
+                && field.on_delete().is_none(),
+            "registered v4 field differs from its persisted scalar contract",
+        )?;
+        let origin = fixture_origin(
+            fixture,
+            DefinitionIdentity::Field {
+                owner,
+                field: field.id(),
+            },
+        )?;
+        client
+            .execute(
+                "INSERT INTO _orna_kernel.catalogue_fields
+                    (catalogue_revision_id, owner_type_id, field_id, name,
+                     ordinal, type_kind, scalar_type, nullable, is_unique,
+                     source_unit_id, source_start, source_end)
+                 VALUES ($1, $2, $3, $4, $5, 'scalar', 'boolean', $6, $7,
+                         $8, $9, $10)",
+                &[
+                    &catalogue.revision().to_bytes().to_vec(),
+                    &owner.to_bytes().to_vec(),
+                    &field.id().to_bytes().to_vec(),
+                    &field.name(),
+                    &i64::from(field.ordinal()),
+                    &field.nullable(),
+                    &field.unique(),
+                    &origin.source_unit().to_bytes().to_vec(),
+                    &i64::from(origin.byte_start()),
+                    &i64::from(origin.byte_end()),
+                ],
+            )
+            .await?;
+    }
+    Ok(())
+}
+
+async fn persist_registered_v4_parameters(
+    client: &Client,
+    fixture: &ActiveDatabaseRevision,
+    owner: FunctionId,
+) -> TestResult<()> {
+    let catalogue = fixture.catalogue();
+    let function = catalogue
+        .function_by_id(owner)
+        .ok_or_else(|| failure("registered v4 fixture lost a function"))?;
+    for parameter in function.parameters() {
+        require(
+            parameter.resolved_type() == ResolvedType::scalar(StandardScalar::Boolean)
+                && parameter.default_expression().is_none(),
+            "registered v4 parameter differs from its persisted scalar contract",
+        )?;
+        let origin = fixture_origin(
+            fixture,
+            DefinitionIdentity::Parameter {
+                owner,
+                parameter: parameter.id(),
+            },
+        )?;
+        client
+            .execute(
+                "INSERT INTO _orna_kernel.catalogue_function_parameters
+                    (catalogue_revision_id, function_id, parameter_id, name,
+                     ordinal, type_kind, scalar_type, source_unit_id,
+                     source_start, source_end)
+                 VALUES ($1, $2, $3, $4, $5, 'scalar', 'boolean', $6, $7, $8)",
+                &[
+                    &catalogue.revision().to_bytes().to_vec(),
+                    &owner.to_bytes().to_vec(),
+                    &parameter.id().to_bytes().to_vec(),
+                    &parameter.name(),
+                    &i64::from(parameter.ordinal()),
+                    &origin.source_unit().to_bytes().to_vec(),
+                    &i64::from(origin.byte_start()),
+                    &i64::from(origin.byte_end()),
+                ],
+            )
+            .await?;
+    }
+    Ok(())
+}
+
+async fn persist_registered_v4_function_revisions(
+    client: &Client,
+    fixture: &ActiveDatabaseRevision,
+) -> TestResult<()> {
+    let catalogue_revision_id = fixture.catalogue().revision().to_bytes().to_vec();
+    for revision in fixture.function_revisions() {
+        let language_version = revision.language_version();
+        client
+            .execute(
+                "INSERT INTO _orna_kernel.function_revisions
+                    (id, introduced_catalogue_revision_id, function_id,
+                     revision_number, content_hash, semantic_ir_hash,
+                     language_version, status)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, 'active')",
+                &[
+                    &revision.id().to_bytes().to_vec(),
+                    &catalogue_revision_id,
+                    &revision.function().to_bytes().to_vec(),
+                    &i64::try_from(revision.revision_number())?,
+                    &revision.declaration_content_hash().to_bytes().to_vec(),
+                    &revision.semantic_hash().to_bytes().to_vec(),
+                    &language_version,
+                ],
+            )
+            .await?;
+        let artifact = revision.artifact();
+        require(
+            artifact.kind() == ExecutableArtifactKind::Server,
+            "registered v4 fixture has a non-server function artifact",
+        )?;
+        let format = artifact.format();
+        let payload = artifact.payload().to_vec();
+        client
+            .execute(
+                "INSERT INTO _orna_kernel.function_artifacts
+                    (function_revision_id, artifact_kind, format,
+                     format_version, payload, content_hash)
+                 VALUES ($1, 'server_plan', $2, $3, $4, $5)",
+                &[
+                    &revision.id().to_bytes().to_vec(),
+                    &format,
+                    &i32::try_from(artifact.version())?,
+                    &payload,
+                    &artifact.content_hash().to_bytes().to_vec(),
+                ],
+            )
+            .await?;
+    }
+    Ok(())
+}
+
+async fn persist_registered_v4_references(
+    client: &Client,
+    fixture: &ActiveDatabaseRevision,
+) -> TestResult<()> {
+    let catalogue_revision_id = fixture.catalogue().revision().to_bytes().to_vec();
+    for reference in fixture.references() {
+        let (target_definition_id, target_kind) = legacy_reference_target(reference.target());
+        let reference_kind = reference_kind_sql(reference.kind());
+        let origin = reference.source_origin();
+        client
+            .execute(
+                "INSERT INTO _orna_kernel.definition_references
+                    (catalogue_revision_id, source_function_id,
+                     source_function_revision_id, ordinal,
+                     target_definition_id, target_kind, reference_kind,
+                     source_unit_id, source_start, source_end)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+                &[
+                    &catalogue_revision_id,
+                    &reference.source_function().to_bytes().to_vec(),
+                    &reference.source_revision().to_bytes().to_vec(),
+                    &i64::from(reference.ordinal()),
+                    &target_definition_id,
+                    &target_kind,
+                    &reference_kind,
+                    &origin.source_unit().to_bytes().to_vec(),
+                    &i64::from(origin.byte_start()),
+                    &i64::from(origin.byte_end()),
+                ],
+            )
+            .await?;
+    }
+    Ok(())
+}
+
+async fn verify_owner_qualified_reference_backfill(database: &TestDatabase) -> TestResult<()> {
+    let session = database.open().await?;
+    let verification_result =
+        verify_owner_qualified_reference_backfill_client(session.client()).await;
+    let shutdown_result = session.shutdown().await;
+
+    match (verification_result, shutdown_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(verification_error), Err(shutdown_error)) => Err(failure(format!(
+            "owner-qualified reference verification failed: {verification_error}; verification driver shutdown failed: {shutdown_error}"
+        ))),
+    }
+}
+
+async fn verify_owner_qualified_reference_backfill_client(client: &Client) -> TestResult<()> {
+    inspect_migrations(client).await?;
+    inspect_owner_qualified_catalogue_members(client).await?;
+    inspect_definition_references(client).await?;
+
+    let rows = client
+        .query(
+            "SELECT target_kind, target_definition_id,
+                    target_owner_type_id, target_owner_function_id
+             FROM _orna_kernel.definition_references
+             ORDER BY ordinal",
+            &[],
+        )
+        .await?;
+    require(
+        rows.len() == 2,
+        format!("legacy reference count is {}; expected 2", rows.len()),
+    )?;
+    let field_kind: String = value(&rows[0], 0)?;
+    let field_target: Vec<u8> = value(&rows[0], 1)?;
+    let field_owner: Option<Vec<u8>> = value(&rows[0], 2)?;
+    let field_function_owner: Option<Vec<u8>> = value(&rows[0], 3)?;
+    require(
+        field_kind == "field"
+            && field_target == vec![8_u8; 16]
+            && field_owner == Some(vec![6_u8; 16])
+            && field_function_owner.is_none(),
+        "legacy field reference did not receive its exact object-type owner",
+    )?;
+    let parameter_kind: String = value(&rows[1], 0)?;
+    let parameter_target: Vec<u8> = value(&rows[1], 1)?;
+    let parameter_type_owner: Option<Vec<u8>> = value(&rows[1], 2)?;
+    let parameter_owner: Option<Vec<u8>> = value(&rows[1], 3)?;
+    require(
+        parameter_kind == "parameter"
+            && parameter_target == vec![13_u8; 16]
+            && parameter_type_owner.is_none()
+            && parameter_owner == Some(vec![9_u8; 16]),
+        "legacy parameter reference did not receive its exact function owner",
+    )?;
+
+    let catalogue_revision_id = vec![3_u8; 16];
+    let second_type_id = vec![7_u8; 16];
+    let field_id = vec![8_u8; 16];
+    let source_function_id = vec![9_u8; 16];
+    let second_function_id = vec![10_u8; 16];
+    let source_function_revision_id = vec![11_u8; 16];
+    let parameter_id = vec![13_u8; 16];
+    let source_unit_id = vec![4_u8; 16];
+    client
+        .execute(
+            "INSERT INTO _orna_kernel.catalogue_fields
+                (catalogue_revision_id, owner_type_id, field_id, name, ordinal,
+                 type_kind, scalar_type, nullable, is_unique)
+             VALUES ($1, $2, $3, 'duplicate_field_id', 0,
+                     'scalar', 'uuid', false, false)",
+            &[&catalogue_revision_id, &second_type_id, &field_id],
+        )
+        .await?;
+    client
+        .execute(
+            "INSERT INTO _orna_kernel.catalogue_function_parameters
+                (catalogue_revision_id, function_id, parameter_id, name,
+                 ordinal, type_kind, scalar_type)
+             VALUES ($1, $2, $3, 'duplicate_parameter_id', 0,
+                     'scalar', 'uuid')",
+            &[&catalogue_revision_id, &second_function_id, &parameter_id],
+        )
+        .await?;
+    client
+        .execute(
+            "INSERT INTO _orna_kernel.definition_references
+                (catalogue_revision_id, source_function_id,
+                 source_function_revision_id, ordinal, target_definition_id,
+                 target_kind, reference_kind, target_owner_type_id,
+                 target_owner_function_id, source_unit_id, source_start, source_end)
+             VALUES
+                ($1, $2, $3, 2, $4, 'field', 'query_field', $5, NULL, $6, 2, 3),
+                ($1, $2, $3, 3, $7, 'parameter', 'parameter_read', NULL, $8, $6, 3, 4)",
+            &[
+                &catalogue_revision_id,
+                &source_function_id,
+                &source_function_revision_id,
+                &field_id,
+                &second_type_id,
+                &source_unit_id,
+                &parameter_id,
+                &second_function_id,
+            ],
+        )
+        .await?;
+
+    require_count(
+        client,
+        "owner-qualified catalogue fields",
+        "SELECT count(*) FROM _orna_kernel.catalogue_fields WHERE field_id = decode(repeat('08', 16), 'hex')",
+        2,
+    )
+    .await?;
+    require_count(
+        client,
+        "owner-qualified function parameters",
+        "SELECT count(*) FROM _orna_kernel.catalogue_function_parameters WHERE parameter_id = decode(repeat('0d', 16), 'hex')",
+        2,
+    )
+    .await?;
+    require_count(
+        client,
+        "owner-qualified definition references",
+        "SELECT count(*) FROM _orna_kernel.definition_references",
+        4,
+    )
+    .await
 }
 
 async fn insert_unsupported_initial_schema(database: &TestDatabase) -> TestResult<()> {
@@ -980,6 +2055,65 @@ async fn inspect_v4_rollback(database: &TestDatabase) -> TestResult<()> {
         (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
         (Err(inspection_error), Err(shutdown_error)) => Err(failure(format!(
             "v4 rollback inspection failed: {inspection_error}; inspection driver shutdown failed: {shutdown_error}"
+        ))),
+    }
+}
+
+async fn inspect_v5_rollback(database: &TestDatabase) -> TestResult<()> {
+    let session = database.open().await?;
+    let inspection_result = async {
+        let migration_row = session
+            .client()
+            .query_one(
+                "SELECT count(*) FROM _orna_kernel.schema_migrations WHERE version = 5",
+                &[],
+            )
+            .await?;
+        require(
+            value::<i64>(&migration_row, 0)? == 0,
+            "v5 migration record survived a failed owner backfill",
+        )?;
+        let column_row = session
+            .client()
+            .query_one(
+                "SELECT count(*)
+                 FROM information_schema.columns
+                 WHERE table_schema = '_orna_kernel'
+                   AND table_name = 'definition_references'
+                   AND column_name IN (
+                       'target_owner_type_id',
+                       'target_owner_function_id'
+                   )",
+                &[],
+            )
+            .await?;
+        require(
+            value::<i64>(&column_row, 0)? == 0,
+            "v5 owner columns survived a failed owner backfill",
+        )?;
+        require_constraint(
+            session.client(),
+            "catalogue_fields",
+            "catalogue_fields_pkey",
+            "PRIMARY KEY (catalogue_revision_id, field_id)",
+        )
+        .await?;
+        require_constraint(
+            session.client(),
+            "catalogue_function_parameters",
+            "catalogue_function_parameters_pkey",
+            "PRIMARY KEY (catalogue_revision_id, parameter_id)",
+        )
+        .await
+    }
+    .await;
+    let shutdown_result = session.shutdown().await;
+
+    match (inspection_result, shutdown_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(inspection_error), Err(shutdown_error)) => Err(failure(format!(
+            "v5 rollback inspection failed: {inspection_error}; inspection driver shutdown failed: {shutdown_error}"
         ))),
     }
 }
