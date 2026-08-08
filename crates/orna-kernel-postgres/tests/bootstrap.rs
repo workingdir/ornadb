@@ -128,6 +128,26 @@ fn registered_v4_semantic_fixture_is_a_valid_active_database_revision() -> TestR
     )
 }
 
+#[test]
+fn supported_reference_kind_sql_maps_every_legacy_fixture_kind() -> TestResult<()> {
+    assert_eq!(
+        SUPPORTED_REFERENCE_KINDS,
+        &[
+            (DefinitionReferenceKind::FunctionCall, "function_call"),
+            (DefinitionReferenceKind::NamedType, "named_type"),
+            (DefinitionReferenceKind::ObjectReference, "object_reference"),
+            (DefinitionReferenceKind::ParameterRead, "parameter_read"),
+            (DefinitionReferenceKind::QueryObject, "query_object"),
+            (DefinitionReferenceKind::QueryField, "query_field"),
+            (DefinitionReferenceKind::Expression, "expression"),
+        ]
+    );
+    for (kind, expected) in SUPPORTED_REFERENCE_KINDS {
+        assert_eq!(supported_reference_kind_sql(*kind)?, *expected);
+    }
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
 async fn bootstrap_creates_one_recoverable_empty_revision() -> TestResult<()> {
@@ -1368,16 +1388,22 @@ fn legacy_reference_target(target: DefinitionReferenceTarget) -> (Vec<u8>, &'sta
     }
 }
 
-const fn reference_kind_sql(kind: DefinitionReferenceKind) -> &'static str {
-    match kind {
-        DefinitionReferenceKind::FunctionCall => "function_call",
-        DefinitionReferenceKind::NamedType => "named_type",
-        DefinitionReferenceKind::ObjectReference => "object_reference",
-        DefinitionReferenceKind::ParameterRead => "parameter_read",
-        DefinitionReferenceKind::QueryObject => "query_object",
-        DefinitionReferenceKind::QueryField => "query_field",
-        DefinitionReferenceKind::Expression => "expression",
-    }
+const SUPPORTED_REFERENCE_KINDS: &[(DefinitionReferenceKind, &str)] = &[
+    (DefinitionReferenceKind::FunctionCall, "function_call"),
+    (DefinitionReferenceKind::NamedType, "named_type"),
+    (DefinitionReferenceKind::ObjectReference, "object_reference"),
+    (DefinitionReferenceKind::ParameterRead, "parameter_read"),
+    (DefinitionReferenceKind::QueryObject, "query_object"),
+    (DefinitionReferenceKind::QueryField, "query_field"),
+    (DefinitionReferenceKind::Expression, "expression"),
+];
+
+fn supported_reference_kind_sql(kind: DefinitionReferenceKind) -> TestResult<&'static str> {
+    SUPPORTED_REFERENCE_KINDS
+        .iter()
+        .find(|(supported, _)| *supported == kind)
+        .map(|(_, sql)| *sql)
+        .ok_or_else(|| failure("unsupported definition reference kind in bootstrap fixture"))
 }
 
 async fn insert_registered_v4_semantic_rows(
@@ -1713,7 +1739,7 @@ async fn persist_registered_v4_references(
     let catalogue_revision_id = fixture.catalogue().revision().to_bytes().to_vec();
     for reference in fixture.references() {
         let (target_definition_id, target_kind) = legacy_reference_target(reference.target());
-        let reference_kind = reference_kind_sql(reference.kind());
+        let reference_kind = supported_reference_kind_sql(reference.kind())?;
         let origin = reference.source_origin();
         client
             .execute(

@@ -40,6 +40,26 @@ const UNSUPPORTED_FUNCTION_SQL: &str =
             'scalar', 'void', decode(repeat('a3', 16), 'hex')
      FROM _orna_kernel.active_revision";
 
+#[test]
+fn supported_reference_kind_sql_maps_every_legacy_fixture_kind() -> TestResult<()> {
+    assert_eq!(
+        SUPPORTED_REFERENCE_KINDS,
+        &[
+            (DefinitionReferenceKind::FunctionCall, "function_call"),
+            (DefinitionReferenceKind::NamedType, "named_type"),
+            (DefinitionReferenceKind::ObjectReference, "object_reference"),
+            (DefinitionReferenceKind::ParameterRead, "parameter_read"),
+            (DefinitionReferenceKind::QueryObject, "query_object"),
+            (DefinitionReferenceKind::QueryField, "query_field"),
+            (DefinitionReferenceKind::Expression, "expression"),
+        ]
+    );
+    for (kind, expected) in SUPPORTED_REFERENCE_KINDS {
+        assert_eq!(supported_reference_kind_sql(*kind)?, *expected);
+    }
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
 async fn recovers_the_exact_bootstrapped_revision_after_reconnecting() -> TestResult<()> {
@@ -2398,15 +2418,7 @@ async fn insert_reference_record(
             (id.to_bytes().to_vec(), "expression", None, None)
         }
     };
-    let kind = match reference.kind() {
-        DefinitionReferenceKind::FunctionCall => "function_call",
-        DefinitionReferenceKind::NamedType => "named_type",
-        DefinitionReferenceKind::ObjectReference => "object_reference",
-        DefinitionReferenceKind::ParameterRead => "parameter_read",
-        DefinitionReferenceKind::QueryObject => "query_object",
-        DefinitionReferenceKind::QueryField => "query_field",
-        DefinitionReferenceKind::Expression => "expression",
-    };
+    let kind = supported_reference_kind_sql(reference.kind())?;
     let source = reference.source_origin();
     client
         .execute(
@@ -2434,6 +2446,24 @@ async fn insert_reference_record(
         )
         .await?;
     Ok(())
+}
+
+const SUPPORTED_REFERENCE_KINDS: &[(DefinitionReferenceKind, &str)] = &[
+    (DefinitionReferenceKind::FunctionCall, "function_call"),
+    (DefinitionReferenceKind::NamedType, "named_type"),
+    (DefinitionReferenceKind::ObjectReference, "object_reference"),
+    (DefinitionReferenceKind::ParameterRead, "parameter_read"),
+    (DefinitionReferenceKind::QueryObject, "query_object"),
+    (DefinitionReferenceKind::QueryField, "query_field"),
+    (DefinitionReferenceKind::Expression, "expression"),
+];
+
+fn supported_reference_kind_sql(kind: DefinitionReferenceKind) -> TestResult<&'static str> {
+    SUPPORTED_REFERENCE_KINDS
+        .iter()
+        .find(|(supported, _)| *supported == kind)
+        .map(|(_, sql)| *sql)
+        .ok_or_else(|| failure("unsupported definition reference kind in recovery fixture"))
 }
 
 fn resolved_type_columns(
