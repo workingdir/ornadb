@@ -1,13 +1,15 @@
-//! Canonical `orna.server-mutation-plan` artifact format, version 1.
+//! Canonical `orna.server-mutation-plan` artifact formats.
 //!
 //! The format carries only stable Orna identities and the closed expression
-//! set needed by the first single-row `INSERT` execution slice. It contains
+//! set needed by the single-object `INSERT` and `UPDATE` execution slices. It contains
 //! no source names, SQL, PostgreSQL names, runtime object identities, or
 //! source locations.
 //!
 //! Version 1 encodes one insert target, an ordered field-assignment list, and
-//! the returned object type. Catalogue-dependent field and parameter checks
-//! remain outside this artifact boundary.
+//! the returned object type. Version 2 encodes one update target, its selector
+//! parameter, the ordered field assignments, and the returned object type.
+//! Catalogue-dependent field and parameter checks remain outside this artifact
+//! boundary.
 
 use std::fmt;
 
@@ -20,16 +22,25 @@ use orna_core::{
 pub const FORMAT_IDENTITY: &str = "orna.server-mutation-plan";
 /// The Orna language version whose semantics this artifact version executes.
 pub const LANGUAGE_VERSION_IDENTITY: &str = "orna.language/1";
-/// The only supported server-mutation-plan artifact version.
+/// The version used by INSERT artifacts.
+///
+/// This name is retained for source compatibility with the first format. New
+/// code that handles more than INSERT should use [`INSERT_FORMAT_VERSION`] and
+/// [`UPDATE_FORMAT_VERSION`] explicitly.
 pub const FORMAT_VERSION: u32 = 1;
+/// The version used by INSERT artifacts.
+pub const INSERT_FORMAT_VERSION: u32 = FORMAT_VERSION;
+/// The version used by UPDATE artifacts.
+pub const UPDATE_FORMAT_VERSION: u32 = 2;
 /// The exact first eight bytes of every server-mutation-plan artifact.
 pub const MAGIC: [u8; 8] = *b"ORNAMP\0\0";
-/// The maximum number of field assignments in one version-1 plan.
+/// The maximum number of field assignments in one mutation plan.
 pub const MAX_ASSIGNMENTS: u32 = 1_024;
 /// The maximum accepted encoded artifact size.
 pub const MAX_ARTIFACT_BYTES: usize = 16 * 1024 * 1024;
 
 const INSERT_OPERATION_TAG: u8 = 1;
+const UPDATE_OPERATION_TAG: u8 = 2;
 const PARAMETER_EXPRESSION_TAG: u8 = 1;
 const BOOLEAN_EXPRESSION_TAG: u8 = 2;
 const TYPED_NULL_EXPRESSION_TAG: u8 = 3;
@@ -44,9 +55,10 @@ const FLOAT_SCALAR_TAG: u8 = 4;
 const CLOB_SCALAR_TAG: u8 = 6;
 const BLOB_SCALAR_TAG: u8 = 7;
 
-/// A checked single-row `INSERT` mutation plan.
+/// A checked single-object mutation plan.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ServerMutationPlan {
+    operation: ServerMutationOperation,
     target: TypeId,
     assignments: Vec<FieldAssignment>,
     returned_object: TypeId,
@@ -59,25 +71,52 @@ impl ServerMutationPlan {
         assignments: impl IntoIterator<Item = FieldAssignment>,
         returned_object: TypeId,
     ) -> Result<Self, ServerMutationPlanError> {
-        let mut assignments_vec = Vec::new();
-        for (index, assignment) in assignments.into_iter().enumerate() {
-            let count = index.saturating_add(1);
-            if count > MAX_ASSIGNMENTS as usize {
-                return Err(ServerMutationPlanError::CollectionLimit {
-                    kind: "assignments",
-                    count,
-                    maximum: MAX_ASSIGNMENTS,
-                });
-            }
-            assignments_vec.push(assignment);
-        }
         let plan = Self {
+            operation: ServerMutationOperation::Insert,
             target,
-            assignments: assignments_vec,
+            assignments: collect_assignments(assignments)?,
             returned_object,
         };
         validate_plan(&plan)?;
         Ok(plan)
+    }
+
+    /// Builds a checked version-2 update plan.
+    pub fn new_update(
+        target: TypeId,
+        selector: MutationSelector,
+        assignments: impl IntoIterator<Item = FieldAssignment>,
+        returned_object: TypeId,
+    ) -> Result<Self, ServerMutationPlanError> {
+        let plan = Self {
+            operation: ServerMutationOperation::Update { selector },
+            target,
+            assignments: collect_assignments(assignments)?,
+            returned_object,
+        };
+        validate_plan(&plan)?;
+        Ok(plan)
+    }
+
+    /// Returns the mutation operation and any operation-specific evidence.
+    pub const fn operation(&self) -> &ServerMutationOperation {
+        &self.operation
+    }
+
+    /// Returns the selector for UPDATE, or `None` for INSERT.
+    pub const fn selector(&self) -> Option<MutationSelector> {
+        match self.operation {
+            ServerMutationOperation::Insert => None,
+            ServerMutationOperation::Update { selector } => Some(selector),
+        }
+    }
+
+    /// Returns the canonical artifact version for this operation.
+    pub const fn format_version(&self) -> u32 {
+        match self.operation {
+            ServerMutationOperation::Insert => INSERT_FORMAT_VERSION,
+            ServerMutationOperation::Update { .. } => UPDATE_FORMAT_VERSION,
+        }
     }
 
     /// Returns the target object type identity.
@@ -95,14 +134,21 @@ impl ServerMutationPlan {
         self.returned_object
     }
 
-    /// Encodes this checked plan into canonical version-1 bytes.
+    /// Encodes this checked plan into canonical bytes for its operation.
     pub fn encode(&self) -> Result<Vec<u8>, ServerMutationPlanError> {
         validate_plan(self)?;
         let mut writer = Writer::new();
         writer.bytes(&MAGIC);
-        writer.u32(FORMAT_VERSION);
-        writer.u8(INSERT_OPERATION_TAG);
+        writer.u32(self.format_version());
+        match self.operation {
+            ServerMutationOperation::Insert => writer.u8(INSERT_OPERATION_TAG),
+            ServerMutationOperation::Update { .. } => writer.u8(UPDATE_OPERATION_TAG),
+        }
         writer.type_id(self.target);
+        if let ServerMutationOperation::Update { selector } = self.operation {
+            writer.function_id(selector.owner);
+            writer.parameter_id(selector.parameter);
+        }
         writer.u32(u32::try_from(self.assignments.len()).map_err(|_| {
             ServerMutationPlanError::CollectionLimit {
                 kind: "assignments",
@@ -121,7 +167,7 @@ impl ServerMutationPlan {
         Ok(bytes)
     }
 
-    /// Decodes exactly one canonical version-1 artifact.
+    /// Decodes exactly one canonical INSERT or UPDATE artifact.
     pub fn decode(bytes: &[u8]) -> Result<Self, ServerMutationPlanError> {
         validate_artifact_size(bytes.len())?;
         let mut reader = Reader::new(bytes);
@@ -129,17 +175,30 @@ impl ServerMutationPlan {
             return Err(ServerMutationPlanError::InvalidMagic);
         }
         let version = reader.u32()?;
-        if version != FORMAT_VERSION {
+        if !matches!(version, INSERT_FORMAT_VERSION | UPDATE_FORMAT_VERSION) {
             return Err(ServerMutationPlanError::UnsupportedVersion(version));
         }
         let operation = reader.u8()?;
-        if operation != INSERT_OPERATION_TAG {
-            return Err(ServerMutationPlanError::InvalidEnumTag {
-                kind: "operation",
-                tag: operation,
-            });
-        }
+        let is_update = match version {
+            INSERT_FORMAT_VERSION if operation == INSERT_OPERATION_TAG => false,
+            UPDATE_FORMAT_VERSION if operation == UPDATE_OPERATION_TAG => true,
+            INSERT_FORMAT_VERSION | UPDATE_FORMAT_VERSION => {
+                return Err(ServerMutationPlanError::InvalidEnumTag {
+                    kind: "operation",
+                    tag: operation,
+                });
+            }
+            version => return Err(ServerMutationPlanError::UnsupportedVersion(version)),
+        };
         let target = reader.type_id()?;
+        let selector = if is_update {
+            Some(MutationSelector {
+                owner: reader.function_id()?,
+                parameter: reader.parameter_id()?,
+            })
+        } else {
+            None
+        };
         let assignment_count = reader.count("assignments", MAX_ASSIGNMENTS)?;
         let mut assignments = Vec::with_capacity(assignment_count);
         for _ in 0..assignment_count {
@@ -151,11 +210,69 @@ impl ServerMutationPlan {
         }
         let returned_object = reader.type_id()?;
         reader.require_finished()?;
-        Self::new_insert(target, assignments, returned_object)
+        match selector {
+            Some(selector) => Self::new_update(target, selector, assignments, returned_object),
+            None => Self::new_insert(target, assignments, returned_object),
+        }
     }
 }
 
-/// One positional target-field assignment in an insert plan.
+fn collect_assignments(
+    assignments: impl IntoIterator<Item = FieldAssignment>,
+) -> Result<Vec<FieldAssignment>, ServerMutationPlanError> {
+    let mut collected = Vec::new();
+    for (index, assignment) in assignments.into_iter().enumerate() {
+        let count = index.saturating_add(1);
+        if count > MAX_ASSIGNMENTS as usize {
+            return Err(ServerMutationPlanError::CollectionLimit {
+                kind: "assignments",
+                count,
+                maximum: MAX_ASSIGNMENTS,
+            });
+        }
+        collected.push(assignment);
+    }
+    Ok(collected)
+}
+
+/// The operation represented by a server mutation plan.
+#[non_exhaustive]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ServerMutationOperation {
+    /// A version-1 single-row insert.
+    Insert,
+    /// A version-2 single-object update.
+    Update {
+        /// The parameter that supplies the target object identity.
+        selector: MutationSelector,
+    },
+}
+
+/// The owner-qualified parameter that selects one object for UPDATE.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MutationSelector {
+    owner: FunctionId,
+    parameter: ParameterId,
+}
+
+impl MutationSelector {
+    /// Creates an owner-qualified selector parameter.
+    pub const fn new(owner: FunctionId, parameter: ParameterId) -> Self {
+        Self { owner, parameter }
+    }
+
+    /// Returns the function that owns the selector parameter.
+    pub const fn owner(self) -> FunctionId {
+        self.owner
+    }
+
+    /// Returns the selector parameter identity.
+    pub const fn parameter(self) -> ParameterId {
+        self.parameter
+    }
+}
+
+/// One positional target-field assignment in a mutation plan.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FieldAssignment {
     owner: TypeId,
@@ -190,7 +307,7 @@ impl FieldAssignment {
     }
 }
 
-/// One closed insert assignment value.
+/// One closed mutation assignment value.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MutationExpression {
     kind: MutationExpressionKind,
@@ -248,7 +365,7 @@ impl MutationExpression {
     }
 }
 
-/// The closed expression kinds accepted by a version-1 mutation plan.
+/// The closed expression kinds accepted by mutation-plan versions 1 and 2.
 #[non_exhaustive]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MutationExpressionKind {
@@ -272,7 +389,7 @@ pub enum MutationExpressionKind {
 #[non_exhaustive]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ServerMutationPlanError {
-    /// The artifact does not start with the version-1 magic bytes.
+    /// The artifact does not start with the mutation-plan magic bytes.
     InvalidMagic,
     /// The artifact version is not supported.
     UnsupportedVersion(u32),
@@ -290,7 +407,7 @@ pub enum ServerMutationPlanError {
         /// The encoded byte.
         value: u8,
     },
-    /// A collection exceeds the version-1 limit.
+    /// A collection exceeds the format limit.
     CollectionLimit {
         /// The collection category.
         kind: &'static str,
@@ -299,16 +416,16 @@ pub enum ServerMutationPlanError {
         /// The largest valid count.
         maximum: u32,
     },
-    /// The encoded artifact exceeds the version-1 byte limit.
+    /// The encoded artifact exceeds the format byte limit.
     ArtifactSizeLimit {
         /// The supplied artifact size.
         size: usize,
         /// The largest accepted artifact size.
         maximum: usize,
     },
-    /// An insert plan must contain at least one assignment.
+    /// A mutation plan must contain at least one assignment.
     EmptyAssignments,
-    /// An assignment owner differs from the insert target.
+    /// An assignment owner differs from the mutation target.
     AssignmentOwnerMismatch {
         /// The assignment's zero-based position.
         assignment: usize,
@@ -339,6 +456,15 @@ pub enum ServerMutationPlanError {
         /// The mixed parameter owner.
         actual: FunctionId,
     },
+    /// An UPDATE assignment reads a parameter from another function.
+    SelectorParameterOwnerMismatch {
+        /// The assignment's zero-based position.
+        assignment: usize,
+        /// The function that owns the selector parameter.
+        selector_owner: FunctionId,
+        /// The function that owns the assignment parameter.
+        assignment_owner: FunctionId,
+    },
     /// A parameter or typed NULL uses a value type outside the closed set.
     UnsupportedValueType {
         /// The rejected resolved type.
@@ -362,7 +488,7 @@ pub enum ServerMutationPlanError {
         /// The supplied nullability.
         actual: bool,
     },
-    /// The returned reference target differs from the insert target.
+    /// The returned reference target differs from the mutation target.
     ReturnedObjectMismatch {
         /// The insert target identity.
         target: TypeId,
@@ -395,11 +521,11 @@ impl fmt::Display for ServerMutationPlanError {
                 maximum,
             } => write!(
                 formatter,
-                "{kind} count {count} exceeds version-1 limit {maximum}"
+                "{kind} count {count} exceeds the limit {maximum}"
             ),
             Self::ArtifactSizeLimit { size, maximum } => write!(
                 formatter,
-                "server mutation plan artifact size {size} exceeds version-1 limit {maximum}"
+                "server mutation plan artifact size {size} exceeds the limit {maximum}"
             ),
             Self::EmptyAssignments => {
                 formatter.write_str("a server mutation plan must contain at least one assignment")
@@ -410,7 +536,7 @@ impl fmt::Display for ServerMutationPlanError {
                 owner,
             } => write!(
                 formatter,
-                "assignment {assignment} owner {owner} differs from insert target {target}"
+                "assignment {assignment} owner {owner} differs from mutation target {target}"
             ),
             Self::DuplicateFieldAssignment {
                 first,
@@ -429,6 +555,14 @@ impl fmt::Display for ServerMutationPlanError {
             } => write!(
                 formatter,
                 "assignment {assignment} parameter owner {actual} differs from assignment {first} owner {expected}"
+            ),
+            Self::SelectorParameterOwnerMismatch {
+                assignment,
+                selector_owner,
+                assignment_owner,
+            } => write!(
+                formatter,
+                "assignment {assignment} parameter owner {assignment_owner} differs from selector owner {selector_owner}"
             ),
             Self::UnsupportedValueType { resolved_type } => {
                 write!(
@@ -454,7 +588,7 @@ impl fmt::Display for ServerMutationPlanError {
             ),
             Self::ReturnedObjectMismatch { target, returned } => write!(
                 formatter,
-                "returned object {returned} differs from insert target {target}"
+                "returned object {returned} differs from mutation target {target}"
             ),
             Self::Truncated => formatter.write_str("truncated orna.server-mutation-plan artifact"),
             Self::TrailingBytes => {
@@ -483,6 +617,10 @@ fn validate_plan(plan: &ServerMutationPlan) -> Result<(), ServerMutationPlanErro
             returned: plan.returned_object,
         });
     }
+    let selector_owner = match plan.operation {
+        ServerMutationOperation::Insert => None,
+        ServerMutationOperation::Update { selector } => Some(selector.owner),
+    };
     let mut first_parameter_owner = None;
     let mut first_parameter_assignment = 0;
     for (index, assignment) in plan.assignments.iter().enumerate() {
@@ -511,6 +649,15 @@ fn validate_plan(plan: &ServerMutationPlan) -> Result<(), ServerMutationPlanErro
         }
         validate_expression(&assignment.expression)?;
         if let MutationExpressionKind::Parameter { owner, .. } = assignment.expression.kind {
+            if let Some(selector_owner) = selector_owner
+                && owner != selector_owner
+            {
+                return Err(ServerMutationPlanError::SelectorParameterOwnerMismatch {
+                    assignment: index,
+                    selector_owner,
+                    assignment_owner: owner,
+                });
+            }
             match first_parameter_owner {
                 None => {
                     first_parameter_owner = Some(owner);
@@ -871,14 +1018,31 @@ mod tests {
     fn plan_with(
         expressions: impl IntoIterator<Item = (FieldId, MutationExpression)>,
     ) -> ServerMutationPlan {
-        ServerMutationPlan::new_insert(
-            TARGET,
-            expressions
-                .into_iter()
-                .map(|(field, expression)| assignment(field, expression)),
-            TARGET,
+        mutation_plan_with(None, expressions)
+    }
+
+    fn update_plan_with(
+        expressions: impl IntoIterator<Item = (FieldId, MutationExpression)>,
+    ) -> ServerMutationPlan {
+        mutation_plan_with(
+            Some(MutationSelector::new(FUNCTION_A, PARAMETER_A)),
+            expressions,
         )
-        .unwrap()
+    }
+
+    fn mutation_plan_with(
+        selector: Option<MutationSelector>,
+        expressions: impl IntoIterator<Item = (FieldId, MutationExpression)>,
+    ) -> ServerMutationPlan {
+        let assignments = expressions
+            .into_iter()
+            .map(|(field, expression)| assignment(field, expression));
+        match selector {
+            Some(selector) => {
+                ServerMutationPlan::new_update(TARGET, selector, assignments, TARGET).unwrap()
+            }
+            None => ServerMutationPlan::new_insert(TARGET, assignments, TARGET).unwrap(),
+        }
     }
 
     #[test]
@@ -961,6 +1125,41 @@ mod tests {
     }
 
     #[test]
+    fn round_trips_update_with_exact_selector_and_operation() {
+        let plan = update_plan_with([
+            (
+                FIELD_A,
+                MutationExpression::parameter(
+                    FUNCTION_A,
+                    PARAMETER_B,
+                    ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+                )
+                .unwrap(),
+            ),
+            (FIELD_B, MutationExpression::boolean_literal(false)),
+        ]);
+
+        let encoded = plan.encode().unwrap();
+        let decoded = ServerMutationPlan::decode(&encoded).unwrap();
+
+        assert_eq!(decoded, plan);
+        assert_eq!(decoded.encode(), Ok(encoded));
+        assert_eq!(decoded.format_version(), UPDATE_FORMAT_VERSION);
+        assert_eq!(
+            decoded.operation(),
+            &ServerMutationOperation::Update {
+                selector: MutationSelector::new(FUNCTION_A, PARAMETER_A)
+            }
+        );
+        assert_eq!(
+            decoded.selector(),
+            Some(MutationSelector::new(FUNCTION_A, PARAMETER_A))
+        );
+        assert_eq!(decoded.selector().unwrap().owner(), FUNCTION_A);
+        assert_eq!(decoded.selector().unwrap().parameter(), PARAMETER_A);
+    }
+
+    #[test]
     fn encodes_minimal_boolean_golden_exactly() {
         let plan = plan_with([(FIELD_A, MutationExpression::boolean_literal(true))]);
         assert_eq!(
@@ -970,6 +1169,21 @@ mod tests {
                 1, 1, 1, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 3, 3, 3, 3, 3,
                 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
                 1, 1, 1, 1,
+            ]
+        );
+    }
+
+    #[test]
+    fn encodes_minimal_update_golden_exactly() {
+        let plan = update_plan_with([(FIELD_A, MutationExpression::boolean_literal(false))]);
+        assert_eq!(
+            plan.encode().unwrap(),
+            vec![
+                79, 82, 78, 65, 77, 80, 0, 0, 0, 0, 0, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+                1, 1, 1, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+                7, 7, 7, 7, 7, 7, 7, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 3,
+                3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2, 1, 1, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1,
+                1, 1, 1, 1, 1, 1, 1, 1,
             ]
         );
     }
@@ -1019,6 +1233,9 @@ mod tests {
     #[test]
     fn private_tags_are_append_only() {
         assert_eq!(INSERT_OPERATION_TAG, 1);
+        assert_eq!(UPDATE_OPERATION_TAG, 2);
+        assert_eq!(INSERT_FORMAT_VERSION, 1);
+        assert_eq!(UPDATE_FORMAT_VERSION, 2);
         assert_eq!(
             [
                 PARAMETER_EXPRESSION_TAG,
@@ -1056,10 +1273,10 @@ mod tests {
             Err(ServerMutationPlanError::InvalidMagic)
         );
         let mut version = valid.clone();
-        version[11] = 2;
+        version[11] = 3;
         assert_eq!(
             ServerMutationPlan::decode(&version),
-            Err(ServerMutationPlanError::UnsupportedVersion(2))
+            Err(ServerMutationPlanError::UnsupportedVersion(3))
         );
         let mut operation = valid.clone();
         operation[12] = 99;
@@ -1196,9 +1413,52 @@ mod tests {
     }
 
     #[test]
+    fn rejects_update_version_operation_and_selector_corruption() {
+        let valid = update_plan_with([(FIELD_A, MutationExpression::boolean_literal(true))])
+            .encode()
+            .unwrap();
+
+        let mut insert_operation = valid.clone();
+        insert_operation[12] = INSERT_OPERATION_TAG;
+        assert_eq!(
+            ServerMutationPlan::decode(&insert_operation),
+            Err(ServerMutationPlanError::InvalidEnumTag {
+                kind: "operation",
+                tag: INSERT_OPERATION_TAG,
+            })
+        );
+
+        let mut update_operation_in_v1 = valid.clone();
+        update_operation_in_v1[11] = INSERT_FORMAT_VERSION as u8;
+        assert_eq!(
+            ServerMutationPlan::decode(&update_operation_in_v1),
+            Err(ServerMutationPlanError::InvalidEnumTag {
+                kind: "operation",
+                tag: UPDATE_OPERATION_TAG,
+            })
+        );
+
+        for prefix in 0..valid.len() {
+            assert_eq!(
+                ServerMutationPlan::decode(&valid[..prefix]),
+                Err(ServerMutationPlanError::Truncated)
+            );
+        }
+    }
+
+    #[test]
     fn rejects_all_plan_and_expression_invariants() {
         assert_eq!(
             ServerMutationPlan::new_insert(TARGET, Vec::new(), TARGET),
+            Err(ServerMutationPlanError::EmptyAssignments)
+        );
+        assert_eq!(
+            ServerMutationPlan::new_update(
+                TARGET,
+                MutationSelector::new(FUNCTION_A, PARAMETER_A),
+                Vec::new(),
+                TARGET,
+            ),
             Err(ServerMutationPlanError::EmptyAssignments)
         );
         let too_many = (0..=MAX_ASSIGNMENTS).map(|index| {
@@ -1238,6 +1498,27 @@ mod tests {
                 ..
             })
         ));
+        assert_eq!(
+            ServerMutationPlan::new_update(
+                TARGET,
+                MutationSelector::new(FUNCTION_A, PARAMETER_A),
+                [assignment(
+                    FIELD_A,
+                    MutationExpression::parameter(
+                        FUNCTION_B,
+                        PARAMETER_B,
+                        ResolvedType::scalar(StandardScalar::Integer),
+                    )
+                    .unwrap(),
+                )],
+                TARGET,
+            ),
+            Err(ServerMutationPlanError::SelectorParameterOwnerMismatch {
+                assignment: 0,
+                selector_owner: FUNCTION_A,
+                assignment_owner: FUNCTION_B,
+            })
+        );
         assert!(matches!(
             ServerMutationPlan::new_insert(
                 TARGET,
@@ -1307,6 +1588,7 @@ mod tests {
             Ok(expression) if expression.nullable()
         ));
         let wrong_boolean_type = ServerMutationPlan {
+            operation: ServerMutationOperation::Insert,
             target: TARGET,
             assignments: vec![assignment(
                 FIELD_A,
@@ -1327,6 +1609,7 @@ mod tests {
             })
         );
         let nullable_parameter = ServerMutationPlan {
+            operation: ServerMutationOperation::Insert,
             target: TARGET,
             assignments: vec![assignment(
                 FIELD_A,
@@ -1350,6 +1633,7 @@ mod tests {
             })
         );
         let nullable_boolean = ServerMutationPlan {
+            operation: ServerMutationOperation::Insert,
             target: TARGET,
             assignments: vec![assignment(
                 FIELD_A,
@@ -1373,21 +1657,30 @@ mod tests {
 
     #[test]
     fn no_source_or_backend_names_enter_encoded_bytes() {
-        let encoded = plan_with([(FIELD_A, MutationExpression::boolean_literal(true))])
-            .encode()
-            .unwrap();
-        for forbidden in [
-            b"INSERT".as_slice(),
-            b"_orna".as_slice(),
-            b"source".as_slice(),
-            b"tasks".as_slice(),
-            b"created".as_slice(),
-        ] {
-            assert!(
-                !encoded
-                    .windows(forbidden.len())
-                    .any(|window| window == forbidden)
-            );
+        let encoded_plans = [
+            plan_with([(FIELD_A, MutationExpression::boolean_literal(true))])
+                .encode()
+                .unwrap(),
+            update_plan_with([(FIELD_A, MutationExpression::boolean_literal(true))])
+                .encode()
+                .unwrap(),
+        ];
+        for encoded in encoded_plans {
+            for forbidden in [
+                b"INSERT".as_slice(),
+                b"UPDATE".as_slice(),
+                b"_orna".as_slice(),
+                b"source".as_slice(),
+                b"tasks".as_slice(),
+                b"created".as_slice(),
+                b"updated".as_slice(),
+            ] {
+                assert!(
+                    !encoded
+                        .windows(forbidden.len())
+                        .any(|window| window == forbidden)
+                );
+            }
         }
     }
 }
