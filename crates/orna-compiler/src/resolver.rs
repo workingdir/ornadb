@@ -6,6 +6,11 @@
 mod identity;
 mod model;
 
+pub use identity::{
+    CheckedExpressionId, CheckedFieldId, CheckedFunctionId, CheckedParameterId, CheckedSchemaId,
+    CheckedTypeId, ProvisionalExpressionId, ProvisionalFieldId, ProvisionalFunctionId,
+    ProvisionalParameterId, ProvisionalSchemaId, ProvisionalTypeId,
+};
 #[cfg(test)]
 pub(crate) use model::QueryField;
 pub use model::{
