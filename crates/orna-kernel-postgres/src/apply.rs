@@ -397,7 +397,7 @@ fn validate_postgres_encodings(candidate: &DeployableRevision) -> Result<(), Pos
     for reference in candidate.references() {
         validate_origin(reference.source_origin())?;
         let _ = reference_target(reference.target());
-        let _ = reference_kind(reference.kind());
+        let _ = reference_kind(reference.kind())?;
     }
     Ok(())
 }
@@ -781,6 +781,7 @@ async fn persist_revisions_and_references(
     }
     for reference in candidate.references() {
         let (target, kind, owner_type, owner_function) = reference_columns(reference);
+        let reference_kind = reference_kind(reference.kind())?;
         let source = reference.source_origin();
         transaction
             .execute(
@@ -799,7 +800,7 @@ async fn persist_revisions_and_references(
                     &kind,
                     &owner_type,
                     &owner_function,
-                    &reference_kind(reference.kind()),
+                    &reference_kind,
                     &bytes(source.source_unit()),
                     &i64::from(source.byte_start()),
                     &i64::from(source.byte_end()),
@@ -1101,17 +1102,24 @@ fn artifact_kind(value: orna_core::revision::ExecutableArtifactKind) -> &'static
         orna_core::revision::ExecutableArtifactKind::Client => "client_bytecode",
     }
 }
-fn reference_kind(value: DefinitionReferenceKind) -> &'static str {
-    match value {
-        DefinitionReferenceKind::FunctionCall => "function_call",
-        DefinitionReferenceKind::NamedType => "named_type",
-        DefinitionReferenceKind::ObjectReference => "object_reference",
-        DefinitionReferenceKind::ParameterRead => "parameter_read",
-        DefinitionReferenceKind::QueryObject => "query_object",
-        DefinitionReferenceKind::QueryField => "query_field",
-        DefinitionReferenceKind::Expression => "expression",
-    }
+fn reference_kind(value: DefinitionReferenceKind) -> Result<&'static str, PostgresKernelError> {
+    POSTGRES_REFERENCE_KINDS
+        .iter()
+        .find(|(kind, _)| *kind == value)
+        .map(|(_, name)| *name)
+        .ok_or_else(|| {
+            invariant("definition reference kind is not supported by PostgreSQL persistence")
+        })
 }
+const POSTGRES_REFERENCE_KINDS: &[(DefinitionReferenceKind, &str)] = &[
+    (DefinitionReferenceKind::FunctionCall, "function_call"),
+    (DefinitionReferenceKind::NamedType, "named_type"),
+    (DefinitionReferenceKind::ObjectReference, "object_reference"),
+    (DefinitionReferenceKind::ParameterRead, "parameter_read"),
+    (DefinitionReferenceKind::QueryObject, "query_object"),
+    (DefinitionReferenceKind::QueryField, "query_field"),
+    (DefinitionReferenceKind::Expression, "expression"),
+];
 type ReferenceTargetColumns = (&'static str, Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>);
 
 fn reference_target(value: DefinitionReferenceTarget) -> ReferenceTargetColumns {
@@ -1246,31 +1254,31 @@ mod tests {
             "expression"
         );
         assert_eq!(
-            reference_kind(DefinitionReferenceKind::FunctionCall),
+            reference_kind(DefinitionReferenceKind::FunctionCall).unwrap(),
             "function_call"
         );
         assert_eq!(
-            reference_kind(DefinitionReferenceKind::NamedType),
+            reference_kind(DefinitionReferenceKind::NamedType).unwrap(),
             "named_type"
         );
         assert_eq!(
-            reference_kind(DefinitionReferenceKind::ObjectReference),
+            reference_kind(DefinitionReferenceKind::ObjectReference).unwrap(),
             "object_reference"
         );
         assert_eq!(
-            reference_kind(DefinitionReferenceKind::ParameterRead),
+            reference_kind(DefinitionReferenceKind::ParameterRead).unwrap(),
             "parameter_read"
         );
         assert_eq!(
-            reference_kind(DefinitionReferenceKind::QueryObject),
+            reference_kind(DefinitionReferenceKind::QueryObject).unwrap(),
             "query_object"
         );
         assert_eq!(
-            reference_kind(DefinitionReferenceKind::QueryField),
+            reference_kind(DefinitionReferenceKind::QueryField).unwrap(),
             "query_field"
         );
         assert_eq!(
-            reference_kind(DefinitionReferenceKind::Expression),
+            reference_kind(DefinitionReferenceKind::Expression).unwrap(),
             "expression"
         );
     }

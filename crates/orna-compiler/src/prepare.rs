@@ -27,9 +27,9 @@ use orna_core::{
     },
     revision::{
         ActiveDatabaseRevision, DefinitionIdentity, DefinitionOrigin, DefinitionReference,
-        DefinitionReferenceTarget, DeployableRevision, ExecutableArtifact, ExecutableArtifactKind,
-        ExpressionArtifact, FunctionRevisionRecord, RevisionInvariantError, RevisionPair,
-        SourceOrigin, StoredSourceRevision, StoredSourceUnit,
+        DefinitionReferenceKind, DefinitionReferenceTarget, DeployableRevision, ExecutableArtifact,
+        ExecutableArtifactKind, ExpressionArtifact, FunctionRevisionRecord, RevisionInvariantError,
+        RevisionPair, SourceOrigin, StoredSourceRevision, StoredSourceUnit,
     },
     types::ResolvedType,
 };
@@ -242,9 +242,32 @@ fn preflight(report: &CheckReport, checked: &CheckedBundle) -> Result<(), Prepar
                 count: function.references().len(),
             });
         }
+        if function
+            .references()
+            .iter()
+            .any(|reference| !supports_definition_reference_kind(reference.kind()))
+        {
+            return Err(PrepareError::InvalidCheckedBundle {
+                reason: "checked function contains an unsupported definition reference kind",
+            });
+        }
     }
     Ok(())
 }
+
+fn supports_definition_reference_kind(kind: DefinitionReferenceKind) -> bool {
+    SUPPORTED_DEFINITION_REFERENCE_KINDS.contains(&kind)
+}
+
+const SUPPORTED_DEFINITION_REFERENCE_KINDS: &[DefinitionReferenceKind] = &[
+    DefinitionReferenceKind::FunctionCall,
+    DefinitionReferenceKind::NamedType,
+    DefinitionReferenceKind::ObjectReference,
+    DefinitionReferenceKind::ParameterRead,
+    DefinitionReferenceKind::QueryObject,
+    DefinitionReferenceKind::QueryField,
+    DefinitionReferenceKind::Expression,
+];
 
 fn checked_locations(checked: &CheckedBundle) -> Vec<&SourceLocation> {
     let mut locations = Vec::new();
@@ -1125,6 +1148,21 @@ mod tests {
           TRANSACTION READ ONLY VOLATILITY STABLE\n\
           AS SELECT REF(t), t.title FROM tasks.task t\n\
           WHERE t.completed = FALSE ORDER BY t.title;\n";
+
+    #[test]
+    fn accepts_all_supported_definition_reference_kinds() {
+        let kinds = [
+            DefinitionReferenceKind::FunctionCall,
+            DefinitionReferenceKind::NamedType,
+            DefinitionReferenceKind::ObjectReference,
+            DefinitionReferenceKind::ParameterRead,
+            DefinitionReferenceKind::QueryObject,
+            DefinitionReferenceKind::QueryField,
+            DefinitionReferenceKind::Expression,
+        ];
+
+        assert!(kinds.into_iter().all(supports_definition_reference_kind));
+    }
 
     const CHANGED_SOURCE: &str = "CREATE SCHEMA tasks;\n\
         CREATE TYPE tasks.person AS OBJECT (name TEXT NOT NULL);\n\
