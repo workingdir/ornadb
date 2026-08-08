@@ -12,6 +12,7 @@ use orna_core::{
 };
 use orna_syntax::{NamePart, QueryExpression, SelectQuery, SourceSpan};
 
+use crate::resolver::{QueryCatalogue, SemanticType};
 use crate::{
     CompilerDiagnostic, DiagnosticCode, normalise_name_part, normalise_qualified_name,
     semantic_diagnostic,
@@ -29,72 +30,64 @@ impl InputSlot {
 
 /// A checked one-source relational query.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct RelationalQueryIr {
-    scan: ScanIr,
-    projections: Vec<ExpressionIr>,
-    selection: Option<ExpressionIr>,
-    ordering: Vec<OrderingIr>,
+pub(crate) struct RelationalQueryIr<T = TypeId, F = FieldId> {
+    scan: ScanIr<T>,
+    projections: Vec<ExpressionIr<T, F>>,
+    selection: Option<ExpressionIr<T, F>>,
+    ordering: Vec<OrderingIr<T, F>>,
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
-impl RelationalQueryIr {
-    /// Encodes this checked query as one canonical server-plan artifact.
-    ///
-    /// The returned bytes contain stable semantic identifiers and resolved
-    /// execution facts only. They do not contain source syntax or storage
-    /// backend details.
-    pub(crate) fn encode_server_plan(
-        &self,
-    ) -> Result<Vec<u8>, orna_artifact::server_plan::ServerPlanError> {
-        artifact::encode(self)
-    }
-
-    pub(crate) fn scan(&self) -> &ScanIr {
+impl<T, F> RelationalQueryIr<T, F> {
+    pub(crate) fn scan(&self) -> &ScanIr<T> {
         &self.scan
     }
 
-    pub(crate) fn projections(&self) -> &[ExpressionIr] {
+    pub(crate) fn projections(&self) -> &[ExpressionIr<T, F>] {
         &self.projections
     }
 
-    pub(crate) fn selection(&self) -> Option<&ExpressionIr> {
+    pub(crate) fn selection(&self) -> Option<&ExpressionIr<T, F>> {
         self.selection.as_ref()
     }
 
-    pub(crate) fn ordering(&self) -> &[OrderingIr] {
+    pub(crate) fn ordering(&self) -> &[OrderingIr<T, F>] {
         &self.ordering
     }
 }
 
 /// The single object input scanned by this query.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct ScanIr {
+pub(crate) struct ScanIr<T = TypeId> {
     input: InputSlot,
-    object_type: TypeId,
+    object_type: T,
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
-impl ScanIr {
+impl<T> ScanIr<T> {
     pub(crate) const fn input(&self) -> InputSlot {
         self.input
     }
 
-    pub(crate) const fn object_type(&self) -> TypeId {
+    pub(crate) const fn object_type(&self) -> T
+    where
+        T: Copy,
+    {
         self.object_type
     }
 }
 
 /// A checked ordering expression and its source-selected ordering rules.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct OrderingIr {
-    expression: ExpressionIr,
+pub(crate) struct OrderingIr<T = TypeId, F = FieldId> {
+    expression: ExpressionIr<T, F>,
     direction: SortDirection,
     null_order: NullOrder,
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
-impl OrderingIr {
-    pub(crate) fn expression(&self) -> &ExpressionIr {
+impl<T, F> OrderingIr<T, F> {
+    pub(crate) fn expression(&self) -> &ExpressionIr<T, F> {
         &self.expression
     }
 
@@ -123,74 +116,104 @@ pub(crate) enum NullOrder {
 
 /// One checked relational expression.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ExpressionIr {
-    kind: ExpressionKind,
-    value_type: ValueType,
+pub(crate) struct ExpressionIr<T = TypeId, F = FieldId> {
+    kind: ExpressionKind<T, F>,
+    value_type: ValueType<T>,
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
-impl ExpressionIr {
-    pub(crate) fn kind(&self) -> &ExpressionKind {
+impl<T, F> ExpressionIr<T, F> {
+    pub(crate) fn kind(&self) -> &ExpressionKind<T, F> {
         &self.kind
     }
 
-    pub(crate) const fn value_type(&self) -> ValueType {
+    pub(crate) const fn value_type(&self) -> ValueType<T>
+    where
+        T: Copy,
+    {
         self.value_type
     }
 }
 
 /// The resolved meaning of one relational expression.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum ExpressionKind {
+pub(crate) enum ExpressionKind<T = TypeId, F = FieldId> {
     ObjectReference {
         input: InputSlot,
     },
     FieldPath {
         input: InputSlot,
-        steps: Vec<ResolvedFieldStep>,
+        steps: Vec<ResolvedFieldStep<T, F>>,
     },
     BooleanLiteral {
         value: bool,
     },
     Equality {
-        left: Box<ExpressionIr>,
-        right: Box<ExpressionIr>,
+        left: Box<ExpressionIr<T, F>>,
+        right: Box<ExpressionIr<T, F>>,
     },
 }
 
 /// One stable field reference in an ordered path.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct ResolvedFieldStep {
-    owner: TypeId,
-    field: FieldId,
+pub(crate) struct ResolvedFieldStep<T = TypeId, F = FieldId> {
+    owner: T,
+    field: F,
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
-impl ResolvedFieldStep {
-    pub(crate) const fn owner(&self) -> TypeId {
+impl<T, F> ResolvedFieldStep<T, F> {
+    pub(crate) const fn owner(&self) -> T
+    where
+        T: Copy,
+    {
         self.owner
     }
 
-    pub(crate) const fn field(&self) -> FieldId {
+    pub(crate) const fn field(&self) -> F
+    where
+        F: Copy,
+    {
         self.field
     }
 }
 
 /// The resolved type and nullability of a relational expression.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct ValueType {
-    resolved_type: ResolvedType,
+pub(crate) struct ValueType<T = TypeId> {
+    semantic_type: SemanticType<T>,
     nullable: bool,
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
-impl ValueType {
-    pub(crate) const fn resolved_type(&self) -> ResolvedType {
-        self.resolved_type
+impl<T> ValueType<T> {
+    /// Returns the semantic type in this query's identity domain.
+    pub(crate) const fn semantic_type(&self) -> SemanticType<T>
+    where
+        T: Copy,
+    {
+        self.semantic_type
     }
 
     pub(crate) const fn nullable(&self) -> bool {
         self.nullable
+    }
+}
+
+impl ValueType<TypeId> {
+    /// Returns the durable core type for compatibility with existing callers.
+    pub(crate) const fn resolved_type(&self) -> ResolvedType {
+        self.semantic_type.into_core()
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl RelationalQueryIr<TypeId, FieldId> {
+    /// Encodes this durable checked query as one canonical server-plan artifact.
+    pub(crate) fn encode_server_plan(
+        &self,
+    ) -> Result<Vec<u8>, orna_artifact::server_plan::ServerPlanError> {
+        artifact::encode(self)
     }
 }
 
@@ -203,8 +226,24 @@ pub(crate) fn check_query(
     catalogue: &CatalogueSnapshot,
     logical_path: &str,
 ) -> Result<RelationalQueryIr, Vec<CompilerDiagnostic>> {
+    check_query_in(query, catalogue, logical_path)
+}
+
+/// Checks a parsed one-source `SELECT` query against one identity domain.
+///
+/// The result keeps the identities supplied by the catalogue. This permits
+/// resolver-local checked identities without creating durable core identities.
+pub(crate) fn check_query_in<T, F>(
+    query: &SelectQuery,
+    catalogue: &impl QueryCatalogue<T, F>,
+    logical_path: &str,
+) -> Result<RelationalQueryIr<T, F>, Vec<CompilerDiagnostic>>
+where
+    T: Copy + Eq,
+    F: Copy,
+{
     let source_name = normalise_qualified_name(&query.source_object.object_type);
-    let Some(source_object) = catalogue.object_type_by_name(&source_name) else {
+    let Some(source_object) = catalogue.object_type_id_by_name(&source_name) else {
         return Err(vec![diagnostic(
             DiagnosticCode::UnknownQualifiedName,
             format!("unknown object type {source_name}"),
@@ -216,7 +255,7 @@ pub(crate) fn check_query(
     let input = InputSlot::PRIMARY;
     let context = InputContext {
         input,
-        object_type: source_object.id(),
+        object_type: source_object,
         alias: normalise_name_part(&query.source_object.alias),
     };
     let mut diagnostics = Vec::new();
@@ -244,7 +283,7 @@ pub(crate) fn check_query(
             logical_path,
             &mut diagnostics,
         )?;
-        if expression.value_type.resolved_type != ResolvedType::scalar(StandardScalar::Boolean) {
+        if expression.value_type.semantic_type != SemanticType::scalar(StandardScalar::Boolean) {
             diagnostics.push(diagnostic(
                 DiagnosticCode::TypeMismatch,
                 "WHERE requires a BOOLEAN expression",
@@ -296,19 +335,23 @@ pub(crate) fn check_query(
     })
 }
 
-struct InputContext {
+struct InputContext<T> {
     input: InputSlot,
-    object_type: TypeId,
+    object_type: T,
     alias: String,
 }
 
-fn check_expression(
+fn check_expression<T, F>(
     expression: &QueryExpression,
-    context: &InputContext,
-    catalogue: &CatalogueSnapshot,
+    context: &InputContext<T>,
+    catalogue: &impl QueryCatalogue<T, F>,
     logical_path: &str,
     diagnostics: &mut Vec<CompilerDiagnostic>,
-) -> Option<ExpressionIr> {
+) -> Option<ExpressionIr<T, F>>
+where
+    T: Copy + Eq,
+    F: Copy,
+{
     match expression {
         QueryExpression::ObjectReference { alias, .. } => {
             check_alias(alias, context, logical_path, diagnostics)?;
@@ -317,7 +360,7 @@ fn check_expression(
                     input: context.input,
                 },
                 value_type: ValueType {
-                    resolved_type: ResolvedType::reference(context.object_type),
+                    semantic_type: SemanticType::reference(context.object_type),
                     nullable: false,
                 },
             })
@@ -329,7 +372,7 @@ fn check_expression(
         QueryExpression::BooleanLiteral { value, .. } => Some(ExpressionIr {
             kind: ExpressionKind::BooleanLiteral { value: *value },
             value_type: ValueType {
-                resolved_type: ResolvedType::scalar(StandardScalar::Boolean),
+                semantic_type: SemanticType::scalar(StandardScalar::Boolean),
                 nullable: false,
             },
         }),
@@ -340,7 +383,7 @@ fn check_expression(
                 return None;
             };
 
-            if left.value_type.resolved_type != right.value_type.resolved_type {
+            if left.value_type.semantic_type != right.value_type.semantic_type {
                 diagnostics.push(diagnostic(
                     DiagnosticCode::TypeMismatch,
                     "equality requires expressions with compatible types",
@@ -352,7 +395,7 @@ fn check_expression(
 
             Some(ExpressionIr {
                 value_type: ValueType {
-                    resolved_type: ResolvedType::scalar(StandardScalar::Boolean),
+                    semantic_type: SemanticType::scalar(StandardScalar::Boolean),
                     nullable: left.value_type.nullable || right.value_type.nullable,
                 },
                 kind: ExpressionKind::Equality {
@@ -364,32 +407,36 @@ fn check_expression(
     }
 }
 
-fn check_field_path(
+fn check_field_path<T, F>(
     members: &[NamePart],
-    context: &InputContext,
-    catalogue: &CatalogueSnapshot,
+    context: &InputContext<T>,
+    catalogue: &impl QueryCatalogue<T, F>,
     logical_path: &str,
     diagnostics: &mut Vec<CompilerDiagnostic>,
-) -> Option<ExpressionIr> {
+) -> Option<ExpressionIr<T, F>>
+where
+    T: Copy + Eq,
+    F: Copy,
+{
     let mut owner = context.object_type;
     let mut nullable = false;
     let mut steps = Vec::with_capacity(members.len());
 
     for (index, member) in members.iter().enumerate() {
-        let Some(object_type) = catalogue.object_type_by_id(owner) else {
+        let Some(object_type_name) = catalogue.object_type_name_by_id(owner) else {
             diagnostics.push(diagnostic(
                 DiagnosticCode::InvalidReferenceTarget,
-                format!("REF target type {owner} is not an object type"),
+                "REF target type is not an object type",
                 logical_path,
                 &member.span,
             ));
             return None;
         };
         let member_name = normalise_name_part(member);
-        let Some(field) = object_type.field_by_name(&member_name) else {
+        let Some(field) = catalogue.field_by_name(owner, &member_name) else {
             diagnostics.push(diagnostic(
                 DiagnosticCode::UnknownQualifiedName,
-                format!("unknown field {member_name} on {}", object_type.name()),
+                format!("unknown field {member_name} on {object_type_name}"),
                 logical_path,
                 &member.span,
             ));
@@ -409,13 +456,13 @@ fn check_field_path(
                     steps,
                 },
                 value_type: ValueType {
-                    resolved_type: field.resolved_type(),
+                    semantic_type: field.semantic_type(),
                     nullable,
                 },
             });
         }
 
-        let ResolvedType::Reference { target } = field.resolved_type() else {
+        let SemanticType::Reference { target } = field.semantic_type() else {
             diagnostics.push(diagnostic(
                 DiagnosticCode::InvalidReferenceTarget,
                 format!("field {member_name} is not a REF and cannot be traversed"),
@@ -430,9 +477,9 @@ fn check_field_path(
     unreachable!("syntax requires a field path to contain at least one member")
 }
 
-fn check_alias(
+fn check_alias<T>(
     alias: &NamePart,
-    context: &InputContext,
+    context: &InputContext<T>,
     logical_path: &str,
     diagnostics: &mut Vec<CompilerDiagnostic>,
 ) -> Option<()> {
@@ -471,8 +518,9 @@ mod tests {
     };
     use orna_syntax::{ServerFunctionBody, parse};
 
-    use super::{ExpressionKind, NullOrder, SortDirection, check_query};
+    use super::{ExpressionKind, NullOrder, SortDirection, check_query, check_query_in};
     use crate::DiagnosticCode;
+    use crate::resolver::{QueryCatalogue, QueryField, SemanticType};
 
     const TASK_TYPE: TypeId = TypeId::from_bytes([1; 16]);
     const PERSON_TYPE: TypeId = TypeId::from_bytes([2; 16]);
@@ -706,5 +754,100 @@ mod tests {
         let ir = check_query(&query, &catalogue(), "tasks.orna").unwrap();
 
         assert!(ir.selection().unwrap().value_type().nullable());
+    }
+
+    #[test]
+    fn checks_a_query_with_non_core_copyable_identities() {
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        struct TestTypeId(u8);
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        struct TestFieldId(u8);
+
+        struct TestCatalogue {
+            task_name: QualifiedSemanticName,
+            person_name: QualifiedSemanticName,
+        }
+
+        impl QueryCatalogue<TestTypeId, TestFieldId> for TestCatalogue {
+            fn object_type_id_by_name(&self, name: &QualifiedSemanticName) -> Option<TestTypeId> {
+                if name == &self.task_name {
+                    Some(TestTypeId(1))
+                } else if name == &self.person_name {
+                    Some(TestTypeId(2))
+                } else {
+                    None
+                }
+            }
+
+            fn object_type_name_by_id(&self, id: TestTypeId) -> Option<&QualifiedSemanticName> {
+                match id {
+                    TestTypeId(1) => Some(&self.task_name),
+                    TestTypeId(2) => Some(&self.person_name),
+                    TestTypeId(_) => None,
+                }
+            }
+
+            fn field_by_name(
+                &self,
+                owner: TestTypeId,
+                name: &str,
+            ) -> Option<QueryField<TestTypeId, TestFieldId>> {
+                match (owner, name) {
+                    (TestTypeId(1), "person") => Some(QueryField::new(
+                        TestFieldId(10),
+                        SemanticType::reference(TestTypeId(2)),
+                        true,
+                    )),
+                    (TestTypeId(2), "name") => Some(QueryField::new(
+                        TestFieldId(20),
+                        SemanticType::scalar(StandardScalar::CharacterLargeObject),
+                        false,
+                    )),
+                    _ => None,
+                }
+            }
+
+            fn field_by_id(
+                &self,
+                owner: TestTypeId,
+                id: TestFieldId,
+            ) -> Option<QueryField<TestTypeId, TestFieldId>> {
+                match (owner, id) {
+                    (TestTypeId(1), TestFieldId(10)) => self.field_by_name(owner, "person"),
+                    (TestTypeId(2), TestFieldId(20)) => self.field_by_name(owner, "name"),
+                    _ => None,
+                }
+            }
+        }
+
+        let catalogue = TestCatalogue {
+            task_name: name(&["test", "task"]),
+            person_name: name(&["test", "person"]),
+        };
+        let query = query("SELECT t.person.name FROM test.task t");
+        let ir = check_query_in(&query, &catalogue, "test.orna").unwrap();
+
+        assert_eq!(ir.scan().object_type(), TestTypeId(1));
+        let ExpressionKind::FieldPath { steps, .. } = ir.projections()[0].kind() else {
+            panic!("expected a field path");
+        };
+        assert_eq!(
+            steps,
+            &[
+                super::ResolvedFieldStep {
+                    owner: TestTypeId(1),
+                    field: TestFieldId(10),
+                },
+                super::ResolvedFieldStep {
+                    owner: TestTypeId(2),
+                    field: TestFieldId(20),
+                }
+            ]
+        );
+        assert_eq!(
+            ir.projections()[0].value_type().semantic_type(),
+            SemanticType::scalar(StandardScalar::CharacterLargeObject)
+        );
+        assert!(ir.projections()[0].value_type().nullable());
     }
 }
