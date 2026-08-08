@@ -21,11 +21,15 @@ mod decode;
 mod physical;
 mod recovery;
 mod server_execution;
+mod server_mutation_execution;
 mod server_runtime;
 mod storage;
 
 pub use bootstrap::ActiveRevision;
 pub use server_execution::{ServerSelectContext, ServerSelectError, ServerSelectResult};
+pub use server_mutation_execution::{
+    ServerInsertCommitState, ServerInsertContext, ServerInsertError, ServerInsertResult,
+};
 
 /// A concrete connection point for the private PostgreSQL kernel.
 #[derive(Clone)]
@@ -78,6 +82,11 @@ struct PostgresSession {
 }
 
 impl PostgresSession {
+    #[cfg(feature = "test-hooks")]
+    fn abort_driver(&self) {
+        self.driver.abort();
+    }
+
     async fn shutdown(self) -> Result<(), PostgresKernelError> {
         let Self { client, driver } = self;
         drop(client);
@@ -121,6 +130,8 @@ pub enum PostgresKernelError {
     PhysicalPlan(PhysicalPlanError),
     /// A SERVER SELECT function cannot execute against the active revision.
     ServerSelect(ServerSelectError),
+    /// A SERVER INSERT function cannot execute or complete its commit lifecycle.
+    ServerInsert(ServerInsertError),
     /// A durable row value could not be decoded as its selected PostgreSQL type.
     RowDecode {
         /// The relation that supplied the row.
@@ -186,6 +197,7 @@ impl fmt::Display for PostgresKernelError {
             }
             Self::PhysicalPlan(error) => write!(formatter, "physical plan failed: {error}"),
             Self::ServerSelect(error) => write!(formatter, "server SELECT failed: {error}"),
+            Self::ServerInsert(error) => write!(formatter, "row creation failed: {error}"),
             Self::RowDecode {
                 relation,
                 record,
@@ -222,6 +234,7 @@ impl Error for PostgresKernelError {
             Self::CatalogueSnapshot(error) => Some(error),
             Self::PhysicalPlan(error) => Some(error),
             Self::ServerSelect(error) => Some(error),
+            Self::ServerInsert(error) => Some(error),
             Self::RowDecode { source, .. } => Some(source),
             Self::MigrationMismatch { .. }
             | Self::CatalogueInvariant(_)
