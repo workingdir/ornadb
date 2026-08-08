@@ -9,13 +9,12 @@ use orna_syntax::{
     Diagnostic as SyntaxDiagnostic, NamePart, Parse as SyntaxParse, QualifiedName, SourceSpan,
 };
 
-#[allow(dead_code)]
 pub(crate) mod relational;
 mod resolver;
 
 pub use resolver::{
     CheckReport, CheckedBundle, CheckedDefault, CheckedField, CheckedObjectType, CheckedSchema,
-    ConstantValue, check,
+    CheckedServerFunction, ConstantValue, check,
 };
 
 /// Resolves an identifier component with Orna quoted-name rules.
