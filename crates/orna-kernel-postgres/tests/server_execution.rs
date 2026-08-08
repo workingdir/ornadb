@@ -5,46 +5,62 @@ mod support;
 use std::str::FromStr;
 
 #[cfg(feature = "test-hooks")]
-use std::time::Duration;
+use std::{future::Future, time::Duration};
 
 use orna_compiler::{check, prepare};
 use orna_core::{
-    FieldId, FunctionId, FunctionRevisionId, ObjectId, TypeId,
+    FieldId, FunctionId, FunctionRevisionId, ObjectId, ParameterId, TypeId,
     revision::{ActiveDatabaseRevision, DeployableRevision, RevisionPair},
     source::{SourceBundle, SourceUnit},
     types::{ResolvedType, StandardScalar},
-    value::{RuntimeFloat, RuntimeValue},
+    value::{FunctionArgument, RuntimeFloat, RuntimeValue},
 };
 use orna_kernel_postgres::{
     PostgresKernel, PostgresKernelError, ServerSelectError, ServerSelectResult,
 };
-use support::{TestDatabase, TestResult, failure, with_test_database};
+use support::{TestDatabase, TestResult, TestSession, failure, with_test_database};
 
-const EXECUTION_SOURCE: &str = "CREATE SCHEMA exec;\n\
-    CREATE TYPE exec.node AS OBJECT (\n\
-      child REF exec.node, active BOOL NOT NULL, value INT NOT NULL,\n\
-      amount BIGINT NOT NULL, score FLOAT NOT NULL, label TEXT NOT NULL,\n\
-      blob BYTES NOT NULL\n\
-    );\n\
-    CREATE SERVER FUNCTION exec.read()\n\
-    RETURNS ROWS (root REF exec.node, active BOOL, value INT, amount BIGINT, score FLOAT, label TEXT, blob BYTES, child_label TEXT)\n\
-    AS SELECT REF(n), n.active, n.value, n.amount, n.score, n.label, n.blob, n.child.label\n\
-    FROM exec.node n WHERE n.active = TRUE ORDER BY n.value DESC;\n\
-    CREATE SERVER FUNCTION exec.none() RETURNS ROWS (value INT)\n\
-    AS SELECT n.value FROM exec.node n WHERE n.active = FALSE ORDER BY n.value;\n";
+const EXECUTION_SOURCE: &str = r"CREATE SCHEMA exec;
+    CREATE TYPE exec.node AS OBJECT (
+      child REF exec.node, active BOOL NOT NULL, value INT NOT NULL,
+      amount BIGINT NOT NULL, score FLOAT NOT NULL, label TEXT NOT NULL,
+      blob BYTES NOT NULL
+    );
+    CREATE TYPE exec.other AS OBJECT ();
+    CREATE SERVER FUNCTION exec.read()
+    RETURNS ROWS (root REF exec.node, active BOOL, value INT, amount BIGINT, score FLOAT, label TEXT, blob BYTES, child_label TEXT)
+    AS SELECT REF(n), n.active, n.value, n.amount, n.score, n.label, n.blob, n.child.label
+    FROM exec.node n WHERE n.active = TRUE ORDER BY n.value DESC;
+    CREATE SERVER FUNCTION exec.none() RETURNS ROWS (value INT)
+    AS SELECT n.value FROM exec.node n WHERE n.active = FALSE ORDER BY n.value;
+    CREATE SERVER FUNCTION exec.select_node(p_node REF exec.node)
+    RETURNS ROWS (selected REF exec.node, value INT, child_label TEXT, same_as_child BOOL)
+    SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE
+    AS SELECT REF(selected), selected.value, selected.child.label,
+      REF(selected) = selected.child
+    FROM exec.node selected WHERE REF(selected) = p_node;
+";
 
 #[cfg(feature = "test-hooks")]
-const EXECUTION_SOURCE_EDIT: &str = "-- source-only active edit\n\
-    CREATE SCHEMA exec;\n\
-    CREATE TYPE exec.node AS OBJECT ( child REF exec.node, active BOOL NOT NULL,\n\
-      value INT NOT NULL, amount BIGINT NOT NULL, score FLOAT NOT NULL,\n\
-      label TEXT NOT NULL, blob BYTES NOT NULL );\n\
-    CREATE SERVER FUNCTION exec.read() RETURNS ROWS (root REF exec.node, active BOOL,\n\
-      value INT, amount BIGINT, score FLOAT, label TEXT, blob BYTES, child_label TEXT)\n\
-    AS SELECT REF(n), n.active, n.value, n.amount, n.score, n.label, n.blob, n.child.label\n\
-    FROM exec.node n WHERE n.active = TRUE ORDER BY n.value DESC;\n\
-    CREATE SERVER FUNCTION exec.none() RETURNS ROWS (value INT)\n\
-    AS SELECT n.value FROM exec.node n WHERE n.active = FALSE ORDER BY n.value;\n";
+const EXECUTION_SOURCE_EDIT: &str = r"-- source-only active edit
+    CREATE SCHEMA exec;
+    CREATE TYPE exec.node AS OBJECT ( child REF exec.node, active BOOL NOT NULL,
+      value INT NOT NULL, amount BIGINT NOT NULL, score FLOAT NOT NULL,
+      label TEXT NOT NULL, blob BYTES NOT NULL );
+    CREATE TYPE exec.other AS OBJECT ();
+    CREATE SERVER FUNCTION exec.read() RETURNS ROWS (root REF exec.node, active BOOL,
+      value INT, amount BIGINT, score FLOAT, label TEXT, blob BYTES, child_label TEXT)
+    AS SELECT REF(n), n.active, n.value, n.amount, n.score, n.label, n.blob, n.child.label
+    FROM exec.node n WHERE n.active = TRUE ORDER BY n.value DESC;
+    CREATE SERVER FUNCTION exec.none() RETURNS ROWS (value INT)
+    AS SELECT n.value FROM exec.node n WHERE n.active = FALSE ORDER BY n.value;
+    CREATE SERVER FUNCTION exec.select_node(p_node REF exec.node)
+    RETURNS ROWS (selected REF exec.node, value INT, child_label TEXT, same_as_child BOOL)
+    SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE
+    AS SELECT REF(selected), selected.value, selected.child.label,
+      REF(selected) = selected.child
+    FROM exec.node selected WHERE REF(selected) = p_node;
+";
 
 const MANY_SOURCE: &str = "CREATE SCHEMA many;\n\
     CREATE TYPE many.row AS OBJECT (value INT NOT NULL);\n\
@@ -60,7 +76,7 @@ const VARIABLE_PAYLOAD_MAXIMUM: usize = 5_592_377;
 #[ignore = "requires the Compose PostgreSQL development service"]
 async fn executes_the_active_server_select_subset_exactly() -> TestResult<()> {
     with_test_database(|database| async move {
-        let kernel = kernel(&database)?;
+        let kernel = hostile_kernel(&database)?;
         kernel.bootstrap().await?;
         let active = kernel.recover().await?;
         let applied = kernel.apply(&candidate(EXECUTION_SOURCE, &active)?).await?;
@@ -78,7 +94,195 @@ async fn executes_the_active_server_select_subset_exactly() -> TestResult<()> {
             empty.rows().rows().is_empty(),
             "zero-match function returned a row",
         )?;
-        require_no_idle_transaction(&database).await
+        require_no_session_leaks(&database).await
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn identity_selected_server_select_returns_exact_zero_or_one_rows() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = hostile_kernel(&database)?;
+        kernel.bootstrap().await?;
+        let active = kernel.recover().await?;
+        let applied = kernel.apply(&candidate(EXECUTION_SOURCE, &active)?).await?;
+        let fixture = Fixture::from_active(&applied)?;
+        insert_execution_rows(&database, fixture).await?;
+        install_public_identity_selected_decoy(&database, fixture).await?;
+
+        let selected = kernel
+            .execute_server_select_with_arguments(
+                fixture.select_node,
+                &selector_argument(fixture, fixture.root)?,
+            )
+            .await?;
+        require_result_identity(
+            &selected,
+            applied.pair(),
+            fixture.select_node,
+            fixture.select_node_revision,
+        )?;
+        require_identity_selected_columns(&selected, fixture)?;
+        require_identity_selected_root_row(&selected, fixture, 20)?;
+
+        let absent = ObjectId::from_bytes([0x61; 16]);
+        let empty = kernel
+            .execute_server_select_with_arguments(
+                fixture.select_node,
+                &selector_argument(fixture, absent)?,
+            )
+            .await?;
+        require_result_identity(
+            &empty,
+            applied.pair(),
+            fixture.select_node,
+            fixture.select_node_revision,
+        )?;
+        require_identity_selected_columns(&empty, fixture)?;
+        require(
+            empty.rows().rows().is_empty(),
+            "absent selector returned a row",
+        )?;
+
+        let v1 = kernel.execute_server_select(fixture.read).await?;
+        require_result_identity(&v1, applied.pair(), fixture.read, fixture.read_revision)?;
+        require_exact_columns(&v1, fixture)?;
+        require_exact_rows(&v1, fixture, 20)?;
+        require_no_session_leaks(&database).await
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn identity_selected_arguments_fail_contextually_without_changing_state() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = hostile_kernel(&database)?;
+        kernel.bootstrap().await?;
+        let active = kernel.recover().await?;
+        let applied = kernel.apply(&candidate(EXECUTION_SOURCE, &active)?).await?;
+        let fixture = Fixture::from_active(&applied)?;
+        insert_execution_rows(&database, fixture).await?;
+
+        let missing = expect_kernel_error(
+            kernel
+                .execute_server_select_with_arguments(fixture.select_node, &[])
+                .await,
+            "missing selector argument unexpectedly succeeded",
+        )?;
+        require_select_argument_error(
+            &missing,
+            applied.pair(),
+            fixture.select_node,
+            fixture.select_node_revision,
+            Some(fixture.select_node_parameter),
+            "a required argument is missing",
+        )?;
+
+        let duplicate_argument = selector_argument(fixture, fixture.root)?;
+        let duplicate = expect_kernel_error(
+            kernel
+                .execute_server_select_with_arguments(
+                    fixture.select_node,
+                    &[duplicate_argument[0].clone(), duplicate_argument[0].clone()],
+                )
+                .await,
+            "duplicate selector argument unexpectedly succeeded",
+        )?;
+        require_select_argument_error(
+            &duplicate,
+            applied.pair(),
+            fixture.select_node,
+            fixture.select_node_revision,
+            Some(fixture.select_node_parameter),
+            "the same parameter was supplied twice",
+        )?;
+
+        let unknown_parameter = ParameterId::from_bytes([0x62; 16]);
+        let unknown = expect_kernel_error(
+            kernel
+                .execute_server_select_with_arguments(
+                    fixture.select_node,
+                    &[FunctionArgument::new(
+                        unknown_parameter,
+                        RuntimeValue::Reference {
+                            target: fixture.node,
+                            object: fixture.root,
+                        },
+                    )?],
+                )
+                .await,
+            "unknown selector parameter unexpectedly succeeded",
+        )?;
+        require_select_argument_error(
+            &unknown,
+            applied.pair(),
+            fixture.select_node,
+            fixture.select_node_revision,
+            Some(unknown_parameter),
+            "an argument was supplied for a parameter that this function does not declare",
+        )?;
+
+        let scalar = expect_kernel_error(
+            kernel
+                .execute_server_select_with_arguments(
+                    fixture.select_node,
+                    &[FunctionArgument::new(
+                        fixture.select_node_parameter,
+                        RuntimeValue::Integer(1),
+                    )?],
+                )
+                .await,
+            "scalar selector argument unexpectedly succeeded",
+        )?;
+        require_select_argument_error(
+            &scalar,
+            applied.pair(),
+            fixture.select_node,
+            fixture.select_node_revision,
+            Some(fixture.select_node_parameter),
+            "the argument type does not match the declared parameter type",
+        )?;
+
+        let wrong_target = expect_kernel_error(
+            kernel
+                .execute_server_select_with_arguments(
+                    fixture.select_node,
+                    &[FunctionArgument::new(
+                        fixture.select_node_parameter,
+                        RuntimeValue::Reference {
+                            target: fixture.other_type,
+                            object: fixture.root,
+                        },
+                    )?],
+                )
+                .await,
+            "wrong active REF selector target unexpectedly succeeded",
+        )?;
+        require_select_argument_error(
+            &wrong_target,
+            applied.pair(),
+            fixture.select_node,
+            fixture.select_node_revision,
+            Some(fixture.select_node_parameter),
+            "the argument type does not match the declared parameter type",
+        )?;
+
+        let unchanged = kernel.execute_server_select(fixture.read).await?;
+        require_result_identity(
+            &unchanged,
+            applied.pair(),
+            fixture.read,
+            fixture.read_revision,
+        )?;
+        require_exact_columns(&unchanged, fixture)?;
+        require_exact_rows(&unchanged, fixture, 20)?;
+        require(
+            kernel.recover().await?.pair() == applied.pair(),
+            "argument rejection changed the active pair",
+        )?;
+        require_no_session_leaks(&database).await
     })
     .await
 }
@@ -97,24 +301,31 @@ async fn trusted_variable_payload_guard_rejects_before_client_decode() -> TestRe
 
         let oversize = "x".repeat(PAYLOAD_LIMIT / 2 + 1);
         let session = database.open().await?;
-        session
-            .client()
-            .execute(
-                &format!(
-                    "UPDATE {} SET {} = $2 WHERE _orna_object_id = $1",
-                    relation(fixture.node),
-                    field(fixture.label)
-                ),
-                &[&fixture.root.to_bytes().to_vec(), &oversize],
-            )
-            .await?;
-        session.shutdown().await?;
+        let operation: TestResult<u64> = async {
+            Ok(session
+                .client()
+                .execute(
+                    &format!(
+                        "UPDATE {} SET {} = $2 WHERE _orna_object_id = $1",
+                        relation(fixture.node),
+                        field(fixture.label)
+                    ),
+                    &[&fixture.root.to_bytes().to_vec(), &oversize],
+                )
+                .await?)
+        }
+        .await;
+        let updated = finish_session(session, operation, "oversize fixture update").await?;
+        require(
+            updated == 1,
+            "oversize fixture update changed the wrong row count",
+        )?;
 
         let before_rows = count_rows(&database, fixture.node).await?;
-        let error = kernel
-            .execute_server_select(fixture.read)
-            .await
-            .expect_err("oversized TEXT must not enter RuntimeValue");
+        let error = expect_kernel_error(
+            kernel.execute_server_select(fixture.read).await,
+            "oversized TEXT unexpectedly entered RuntimeValue",
+        )?;
         require_variable_payload_error(
             &error,
             applied.pair(),
@@ -129,7 +340,7 @@ async fn trusted_variable_payload_guard_rejects_before_client_decode() -> TestRe
             kernel.recover().await?.pair() == applied.pair(),
             "failed execution changed the active pair",
         )?;
-        require_no_idle_transaction(&database).await
+        require_no_session_leaks(&database).await
     })
     .await
 }
@@ -148,17 +359,21 @@ async fn row_limit_is_contextual_and_does_not_mutate_state() -> TestResult<()> {
         let value = applied.catalogue().object_types()[0].fields()[0].id();
 
         let session = database.open().await?;
-        session
-            .client()
-            .batch_execute(&format!(
-                "INSERT INTO {} (_orna_object_id, {}) \
+        let operation: TestResult<()> = async {
+            session
+                .client()
+                .batch_execute(&format!(
+                    "INSERT INTO {} (_orna_object_id, {}) \
                  SELECT decode(lpad(to_hex(value), 32, '0'), 'hex'), value \
                  FROM generate_series(1, 10000) AS value",
-                relation(object),
-                field(value),
-            ))
-            .await?;
-        session.shutdown().await?;
+                    relation(object),
+                    field(value),
+                ))
+                .await?;
+            Ok(())
+        }
+        .await;
+        finish_session(session, operation, "row-limit boundary insert").await?;
 
         let accepted = kernel.execute_server_select(function).await?;
         require_result_identity(&accepted, applied.pair(), function, revision)?;
@@ -176,21 +391,25 @@ async fn row_limit_is_contextual_and_does_not_mutate_state() -> TestResult<()> {
         )?;
 
         let session = database.open().await?;
-        session
-            .client()
-            .batch_execute(&format!(
-                "INSERT INTO {} (_orna_object_id, {}) \
+        let operation: TestResult<()> = async {
+            session
+                .client()
+                .batch_execute(&format!(
+                    "INSERT INTO {} (_orna_object_id, {}) \
                  VALUES (decode(lpad(to_hex(10001), 32, '0'), 'hex'), 10001)",
-                relation(object),
-                field(value),
-            ))
-            .await?;
-        session.shutdown().await?;
+                    relation(object),
+                    field(value),
+                ))
+                .await?;
+            Ok(())
+        }
+        .await;
+        finish_session(session, operation, "row-limit overflow insert").await?;
 
-        let error = kernel
-            .execute_server_select(function)
-            .await
-            .expect_err("10,001 rows must exceed the fixed bound");
+        let error = expect_kernel_error(
+            kernel.execute_server_select(function).await,
+            "10,001 rows unexpectedly passed the fixed bound",
+        )?;
         require_row_limit_error(&error, applied.pair(), function, revision)?;
         require(
             count_rows(&database, object).await? == 10_001,
@@ -200,7 +419,7 @@ async fn row_limit_is_contextual_and_does_not_mutate_state() -> TestResult<()> {
             kernel.recover().await?.pair() == applied.pair(),
             "row-limit execution changed the active pair",
         )?;
-        require_no_idle_transaction(&database).await
+        require_no_session_leaks(&database).await
     })
     .await
 }
@@ -223,7 +442,7 @@ async fn execution_pins_one_snapshot_while_source_only_apply_advances() -> TestR
         let executor = kernel.clone();
         let execution_reached = reached.clone();
         let execution_resume = resume.clone();
-        let execution = tokio::spawn(async move {
+        let execution = ExecutionTask::new(tokio::spawn(async move {
             executor
                 .execute_server_select_with_test_barrier(
                     fixture.read,
@@ -231,34 +450,21 @@ async fn execution_pins_one_snapshot_while_source_only_apply_advances() -> TestR
                     execution_resume,
                 )
                 .await
-        });
-
-        if tokio::time::timeout(WAIT, reached.wait()).await.is_err() {
-            execution.abort();
-            let _ = execution.await;
-            return Err(failure(
-                "execution did not recover and pin its initial active snapshot",
-            ));
-        }
-
-        let advancement: TestResult<_> = async {
-            update_root_value(&database, fixture, 21).await?;
-            kernel
-                .apply(&source_only_candidate)
-                .await
-                .map_err(Into::into)
-        }
-        .await;
-        resume.wait().await;
-        let second = match advancement {
-            Ok(second) => second,
-            Err(error) => {
-                execution.abort();
-                let _ = execution.await;
-                return Err(error);
-            }
-        };
-        let running = wait_for_execution(execution).await?;
+        }));
+        let (running, second) = complete_pinned_execution(
+            execution,
+            reached,
+            resume,
+            "version-1 SERVER SELECT",
+            async {
+                update_root_value(&database, fixture, 21).await?;
+                kernel
+                    .apply(&source_only_candidate)
+                    .await
+                    .map_err(Into::into)
+            },
+        )
+        .await?;
 
         require(
             second.pair() != first.pair(),
@@ -276,7 +482,132 @@ async fn execution_pins_one_snapshot_while_source_only_apply_advances() -> TestR
         require_result_identity(&later, second.pair(), fixture.read, fixture.read_revision)?;
         require_exact_columns(&later, fixture)?;
         require_exact_rows(&later, fixture, 21)?;
-        require_no_idle_transaction(&database).await
+        require_no_session_leaks(&database).await
+    })
+    .await
+}
+
+#[cfg(feature = "test-hooks")]
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn identity_selected_execution_pins_active_revision_and_data_snapshot() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = kernel(&database)?;
+        kernel.bootstrap().await?;
+        let empty = kernel.recover().await?;
+        let first = kernel.apply(&candidate(EXECUTION_SOURCE, &empty)?).await?;
+        let fixture = Fixture::from_active(&first)?;
+        insert_execution_rows(&database, fixture).await?;
+        let source_only_candidate = candidate(EXECUTION_SOURCE_EDIT, &first)?;
+
+        let reached = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let resume = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let executor = kernel.clone();
+        let arguments = selector_argument(fixture, fixture.root)?;
+        let execution_reached = reached.clone();
+        let execution_resume = resume.clone();
+        let execution = ExecutionTask::new(tokio::spawn(async move {
+            executor
+                .execute_server_select_with_arguments_and_test_barrier(
+                    fixture.select_node,
+                    &arguments,
+                    execution_reached,
+                    execution_resume,
+                )
+                .await
+        }));
+        let (running, second) = complete_pinned_execution(
+            execution,
+            reached,
+            resume,
+            "identity-selected SERVER SELECT",
+            async {
+                update_root_value(&database, fixture, 21).await?;
+                kernel
+                    .apply(&source_only_candidate)
+                    .await
+                    .map_err(Into::into)
+            },
+        )
+        .await?;
+
+        require(
+            second.pair() != first.pair(),
+            "source-only apply did not advance the identity-selected pair",
+        )?;
+        require(
+            current_revision(&second, fixture.select_node)? == fixture.select_node_revision,
+            "source-only apply did not retain the immutable identity-selected revision",
+        )?;
+        require_result_identity(
+            &running,
+            first.pair(),
+            fixture.select_node,
+            fixture.select_node_revision,
+        )?;
+        require_identity_selected_columns(&running, fixture)?;
+        require_identity_selected_root_row(&running, fixture, 20)?;
+
+        let later = kernel
+            .execute_server_select_with_arguments(
+                fixture.select_node,
+                &selector_argument(fixture, fixture.root)?,
+            )
+            .await?;
+        require_result_identity(
+            &later,
+            second.pair(),
+            fixture.select_node,
+            fixture.select_node_revision,
+        )?;
+        require_identity_selected_columns(&later, fixture)?;
+        require_identity_selected_root_row(&later, fixture, 21)?;
+        require_no_session_leaks(&database).await
+    })
+    .await
+}
+
+#[cfg(feature = "test-hooks")]
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn identity_selected_post_commit_shutdown_is_contextual_and_read_only() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = kernel(&database)?;
+        kernel.bootstrap().await?;
+        let active = kernel.recover().await?;
+        let applied = kernel.apply(&candidate(EXECUTION_SOURCE, &active)?).await?;
+        let fixture = Fixture::from_active(&applied)?;
+        insert_execution_rows(&database, fixture).await?;
+
+        let error = expect_kernel_error(
+            kernel
+                .execute_server_select_with_arguments_and_forced_post_commit_driver_shutdown(
+                    fixture.select_node,
+                    &selector_argument(fixture, fixture.root)?,
+                )
+                .await,
+            "forced post-commit shutdown unexpectedly returned a collected result",
+        )?;
+        require_select_shutdown_error(
+            &error,
+            applied.pair(),
+            fixture.select_node,
+            fixture.select_node_revision,
+        )?;
+        let unchanged = kernel.execute_server_select(fixture.read).await?;
+        require_result_identity(
+            &unchanged,
+            applied.pair(),
+            fixture.read,
+            fixture.read_revision,
+        )?;
+        require_exact_columns(&unchanged, fixture)?;
+        require_exact_rows(&unchanged, fixture, 20)?;
+        require(
+            kernel.recover().await?.pair() == applied.pair(),
+            "post-commit select shutdown changed the active pair",
+        )?;
+        require_no_session_leaks(&database).await
     })
     .await
 }
@@ -289,15 +620,14 @@ async fn rejects_tampered_artifacts_and_unknown_functions_before_target_executio
         let kernel = kernel(&database)?;
         kernel.bootstrap().await?;
         let active = kernel.recover().await?;
-        let applied = kernel.apply(&candidate(MANY_SOURCE, &active)?).await?;
-        let function = applied.catalogue().functions()[0].id();
-        let revision = applied.catalogue().functions()[0].current_revision();
+        let applied = kernel.apply(&candidate(EXECUTION_SOURCE, &active)?).await?;
+        let fixture = Fixture::from_active(&applied)?;
         let unknown = FunctionId::from_bytes([0xee; 16]);
 
-        let unknown_error = kernel
-            .execute_server_select(unknown)
-            .await
-            .expect_err("unknown function must fail before target execution");
+        let unknown_error = expect_kernel_error(
+            kernel.execute_server_select(unknown).await,
+            "unknown function unexpectedly executed",
+        )?;
         require(matches!(
             unknown_error,
             PostgresKernelError::ServerSelect(ServerSelectError::FunctionNotActive { pair, function })
@@ -305,21 +635,33 @@ async fn rejects_tampered_artifacts_and_unknown_functions_before_target_executio
         ), "unknown function did not return FunctionNotActive for the recovered pair")?;
 
         let session = database.open().await?;
-        session
-            .client()
-            .execute(
+        let operation: TestResult<u64> = async {
+            Ok(session
+                .client()
+                .execute(
                 "UPDATE _orna_kernel.function_artifacts \
                  SET payload = $1 \
                  WHERE function_revision_id = $2 AND artifact_kind = 'server_plan'",
-                &[&vec![0_u8], &revision.to_bytes().to_vec()],
-            )
-            .await?;
-        session.shutdown().await?;
+                &[
+                    &vec![0_u8],
+                    &fixture.select_node_revision.to_bytes().to_vec(),
+                ],
+                )
+                .await?)
+        }
+        .await;
+        let tampered = finish_session(session, operation, "identity-selected artifact tamper").await?;
+        require(tampered == 1, "artifact tamper changed the wrong row count")?;
 
-        let error = kernel
-            .execute_server_select(function)
-            .await
-            .expect_err("tampered artifact must fail during active recovery");
+        let error = expect_kernel_error(
+            kernel
+                .execute_server_select_with_arguments(
+                    fixture.select_node,
+                    &selector_argument(fixture, fixture.root)?,
+                )
+                .await,
+            "tampered artifact unexpectedly executed",
+        )?;
         require(matches!(
             error,
             PostgresKernelError::DurableInvariant {
@@ -327,7 +669,7 @@ async fn rejects_tampered_artifacts_and_unknown_functions_before_target_executio
                 ..
             }
         ), "tampered artifact did not fail as a durable invariant")?;
-        require_no_idle_transaction(&database).await
+        require_no_session_leaks(&database).await
     })
     .await
 }
@@ -335,6 +677,7 @@ async fn rejects_tampered_artifacts_and_unknown_functions_before_target_executio
 #[derive(Clone, Copy)]
 struct Fixture {
     node: TypeId,
+    other_type: TypeId,
     child: FieldId,
     active: FieldId,
     value: FieldId,
@@ -344,8 +687,11 @@ struct Fixture {
     blob: FieldId,
     read: FunctionId,
     none: FunctionId,
+    select_node: FunctionId,
     read_revision: FunctionRevisionId,
     none_revision: FunctionRevisionId,
+    select_node_revision: FunctionRevisionId,
+    select_node_parameter: ParameterId,
     root: ObjectId,
     other: ObjectId,
 }
@@ -375,8 +721,26 @@ impl Fixture {
             .iter()
             .find(|function| name_is(function.name().parts(), &["exec", "none"]))
             .ok_or_else(|| failure("none function is absent"))?;
+        let select_node = active
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|function| name_is(function.name().parts(), &["exec", "select_node"]))
+            .ok_or_else(|| failure("identity-selected function is absent"))?;
+        let other_type = active
+            .catalogue()
+            .object_types()
+            .iter()
+            .find(|object| name_is(object.name().parts(), &["exec", "other"]))
+            .ok_or_else(|| failure("active wrong-reference target type is absent"))?;
+        let [selector] = select_node.parameters() else {
+            return Err(failure(
+                "identity-selected function must have one selector parameter",
+            ));
+        };
         Ok(Self {
             node: node.id(),
+            other_type: other_type.id(),
             child: field("child")?,
             active: field("active")?,
             value: field("value")?,
@@ -386,8 +750,11 @@ impl Fixture {
             blob: field("blob")?,
             read: read.id(),
             none: none.id(),
+            select_node: select_node.id(),
             read_revision: read.current_revision(),
             none_revision: none.current_revision(),
+            select_node_revision: select_node.current_revision(),
+            select_node_parameter: selector.id(),
             root: ObjectId::from_bytes([1; 16]),
             other: ObjectId::from_bytes([2; 16]),
         })
@@ -408,39 +775,96 @@ async fn insert_execution_rows(database: &TestDatabase, fixture: Fixture) -> Tes
         field(fixture.blob),
     );
     let session = database.open().await?;
-    session
-        .client()
-        .execute(
-            &statement,
-            &[
-                &fixture.other.to_bytes().to_vec(),
-                &Option::<Vec<u8>>::None,
-                &true,
-                &10_i32,
-                &100_i64,
-                &1.5_f64,
-                &"other",
-                &vec![1_u8],
-            ],
-        )
-        .await?;
-    session
-        .client()
-        .execute(
-            &statement,
-            &[
-                &fixture.root.to_bytes().to_vec(),
-                &Some(fixture.other.to_bytes().to_vec()),
-                &true,
-                &20_i32,
-                &200_i64,
-                &2.5_f64,
-                &"root",
-                &vec![2_u8, 0],
-            ],
-        )
-        .await?;
-    session.shutdown().await
+    let operation: TestResult<()> = async {
+        session
+            .client()
+            .execute(
+                &statement,
+                &[
+                    &fixture.other.to_bytes().to_vec(),
+                    &Option::<Vec<u8>>::None,
+                    &true,
+                    &10_i32,
+                    &100_i64,
+                    &1.5_f64,
+                    &"other",
+                    &vec![1_u8],
+                ],
+            )
+            .await?;
+        session
+            .client()
+            .execute(
+                &statement,
+                &[
+                    &fixture.root.to_bytes().to_vec(),
+                    &Some(fixture.other.to_bytes().to_vec()),
+                    &true,
+                    &20_i32,
+                    &200_i64,
+                    &2.5_f64,
+                    &"root",
+                    &vec![2_u8, 0],
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+    .await;
+    finish_session(session, operation, "execution fixture insert").await
+}
+
+async fn install_public_identity_selected_decoy(
+    database: &TestDatabase,
+    fixture: Fixture,
+) -> TestResult<()> {
+    let session = database.open().await?;
+    let statement = format!(
+        "CREATE TABLE public.t_{:032x} \
+         (_orna_object_id bytea, {} bytea, {} integer, {} text);",
+        u128::from_be_bytes(fixture.node.to_bytes()),
+        field(fixture.child),
+        field(fixture.value),
+        field(fixture.label),
+    );
+    let operation: TestResult<()> = async {
+        session.client().batch_execute(&statement).await?;
+        let insert = format!(
+            "INSERT INTO public.t_{:032x} (_orna_object_id, {}, {}, {}) \
+             VALUES ($1, $2, $3, $4)",
+            u128::from_be_bytes(fixture.node.to_bytes()),
+            field(fixture.child),
+            field(fixture.value),
+            field(fixture.label),
+        );
+        session
+            .client()
+            .execute(
+                &insert,
+                &[
+                    &fixture.other.to_bytes().to_vec(),
+                    &Option::<Vec<u8>>::None,
+                    &-999_i32,
+                    &"hostile other",
+                ],
+            )
+            .await?;
+        session
+            .client()
+            .execute(
+                &insert,
+                &[
+                    &fixture.root.to_bytes().to_vec(),
+                    &Some(fixture.other.to_bytes().to_vec()),
+                    &-998_i32,
+                    &"hostile root",
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+    .await;
+    finish_session(session, operation, "public identity-selected decoy").await
 }
 
 #[cfg(feature = "test-hooks")]
@@ -450,18 +874,21 @@ async fn update_root_value(
     value: i32,
 ) -> TestResult<()> {
     let session = database.open().await?;
-    let updated = session
-        .client()
-        .execute(
-            &format!(
-                "UPDATE {} SET {} = $2 WHERE _orna_object_id = $1",
-                relation(fixture.node),
-                field(fixture.value),
-            ),
-            &[&fixture.root.to_bytes().to_vec(), &value],
-        )
-        .await?;
-    session.shutdown().await?;
+    let operation: TestResult<u64> = async {
+        Ok(session
+            .client()
+            .execute(
+                &format!(
+                    "UPDATE {} SET {} = $2 WHERE _orna_object_id = $1",
+                    relation(fixture.node),
+                    field(fixture.value),
+                ),
+                &[&fixture.root.to_bytes().to_vec(), &value],
+            )
+            .await?)
+    }
+    .await;
+    let updated = finish_session(session, operation, "snapshot root update").await?;
     require(
         updated == 1,
         "snapshot advancement did not update the root row",
@@ -529,6 +956,16 @@ fn require(condition: bool, message: impl Into<String>) -> TestResult<()> {
         Ok(())
     } else {
         Err(failure(message.into()))
+    }
+}
+
+fn expect_kernel_error<T>(
+    result: Result<T, PostgresKernelError>,
+    success_message: &'static str,
+) -> TestResult<PostgresKernelError> {
+    match result {
+        Ok(_) => Err(failure(success_message)),
+        Err(error) => Ok(error),
     }
 }
 
@@ -654,33 +1091,181 @@ fn require_exact_rows(
     Ok(())
 }
 
+fn selector_argument(fixture: Fixture, object: ObjectId) -> TestResult<Vec<FunctionArgument>> {
+    Ok(vec![FunctionArgument::new(
+        fixture.select_node_parameter,
+        RuntimeValue::Reference {
+            target: fixture.node,
+            object,
+        },
+    )?])
+}
+
+fn require_identity_selected_columns(
+    result: &ServerSelectResult,
+    fixture: Fixture,
+) -> TestResult<()> {
+    let expected = [
+        ("selected", ResolvedType::reference(fixture.node), false),
+        (
+            "value",
+            ResolvedType::scalar(StandardScalar::Integer),
+            false,
+        ),
+        (
+            "child_label",
+            ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+            true,
+        ),
+        (
+            "same_as_child",
+            ResolvedType::scalar(StandardScalar::Boolean),
+            true,
+        ),
+    ];
+    require(
+        result.rows().columns().len() == expected.len(),
+        "identity-selected result column count differs",
+    )?;
+    for (column, (name, resolved_type, nullable)) in result.rows().columns().iter().zip(expected) {
+        require(
+            column.name() == name,
+            format!("identity-selected result column name is not {name}"),
+        )?;
+        require(
+            column.resolved_type() == resolved_type,
+            format!("identity-selected result column {name} type differs"),
+        )?;
+        require(
+            column.nullable() == nullable,
+            format!("identity-selected result column {name} nullability differs"),
+        )?;
+    }
+    Ok(())
+}
+
+fn require_identity_selected_root_row(
+    result: &ServerSelectResult,
+    fixture: Fixture,
+    value: i32,
+) -> TestResult<()> {
+    require(
+        result.rows().rows().len() == 1,
+        "identity-selected root query did not return exactly one row",
+    )?;
+    require(
+        result.rows().rows()[0].values()
+            == [
+                RuntimeValue::Reference {
+                    target: fixture.node,
+                    object: fixture.root,
+                },
+                RuntimeValue::Integer(value),
+                RuntimeValue::Text(String::from("other")),
+                RuntimeValue::Boolean(false),
+            ],
+        "identity-selected root row differs from the exact durable values",
+    )
+}
+
+fn require_select_argument_error(
+    error: &PostgresKernelError,
+    pair: RevisionPair,
+    function: FunctionId,
+    revision: FunctionRevisionId,
+    parameter: Option<ParameterId>,
+    rule: &'static str,
+) -> TestResult<()> {
+    let PostgresKernelError::ServerSelect(ServerSelectError::Execution { context, source }) = error
+    else {
+        return Err(failure(
+            "argument error is not contextual SERVER SELECT execution",
+        ));
+    };
+    require(context.pair() == pair, "argument context pair differs")?;
+    require(
+        context.function() == function,
+        "argument context function differs",
+    )?;
+    require(
+        context.function_revision() == revision,
+        "argument context revision differs",
+    )?;
+    let ServerSelectError::Argument {
+        parameter: actual,
+        rule: actual_rule,
+    } = source.as_ref()
+    else {
+        return Err(failure("argument execution source is not Argument"));
+    };
+    require(*actual == parameter, "argument error parameter differs")?;
+    require(*actual_rule == rule, "argument error rule differs")
+}
+
+#[cfg(feature = "test-hooks")]
+fn require_select_shutdown_error(
+    error: &PostgresKernelError,
+    pair: RevisionPair,
+    function: FunctionId,
+    revision: FunctionRevisionId,
+) -> TestResult<()> {
+    let PostgresKernelError::ServerSelect(ServerSelectError::Execution { context, source }) = error
+    else {
+        return Err(failure(
+            "post-commit shutdown is not contextual SERVER SELECT execution",
+        ));
+    };
+    require(context.pair() == pair, "shutdown context pair differs")?;
+    require(
+        context.function() == function,
+        "shutdown context function differs",
+    )?;
+    require(
+        context.function_revision() == revision,
+        "shutdown context revision differs",
+    )?;
+    let ServerSelectError::Kernel { source } = source.as_ref() else {
+        return Err(failure(
+            "post-commit shutdown source is not a contextual kernel failure",
+        ));
+    };
+    require(
+        matches!(source.as_ref(), PostgresKernelError::DriverTask(error) if error.is_cancelled()),
+        "post-commit shutdown source is not the forced driver-task cancellation",
+    )
+}
+
 async fn install_hostile_octet_length_shadow(database: &TestDatabase) -> TestResult<()> {
     let session = database.open().await?;
-    let result = session
-        .client()
-        .batch_execute(
-            "CREATE FUNCTION public.octet_length(text) RETURNS integer
+    let operation: TestResult<()> = async {
+        session
+            .client()
+            .batch_execute(
+                "CREATE FUNCTION public.octet_length(text) RETURNS integer
              LANGUAGE plpgsql IMMUTABLE AS $$
              BEGIN
                RAISE EXCEPTION 'hostile public.octet_length(text) invoked';
              END;
              $$",
-        )
-        .await;
-    let shutdown = session.shutdown().await;
-    result?;
-    shutdown
+            )
+            .await?;
+        Ok(())
+    }
+    .await;
+    finish_session(session, operation, "hostile octet_length fixture").await
 }
 
 async fn count_rows(database: &TestDatabase, object: TypeId) -> TestResult<i64> {
     let session = database.open().await?;
-    let result = session
-        .client()
-        .query_one(&format!("SELECT count(*) FROM {}", relation(object)), &[])
-        .await?
-        .try_get(0)?;
-    session.shutdown().await?;
-    Ok(result)
+    let operation: TestResult<i64> = async {
+        Ok(session
+            .client()
+            .query_one(&format!("SELECT count(*) FROM {}", relation(object)), &[])
+            .await?
+            .try_get(0)?)
+    }
+    .await;
+    finish_session(session, operation, "private row count").await
 }
 
 fn require_variable_payload_error(
@@ -751,34 +1336,127 @@ fn require_row_limit_error(
     }
 }
 
-async fn require_no_idle_transaction(database: &TestDatabase) -> TestResult<()> {
+async fn require_no_session_leaks(database: &TestDatabase) -> TestResult<()> {
     let session = database.open().await?;
-    let idle: i64 = session
-        .client()
-        .query_one(
-            "SELECT count(*) FROM pg_catalog.pg_stat_activity
-             WHERE datname = pg_catalog.current_database()
-               AND state = 'idle in transaction'",
-            &[],
-        )
-        .await?
-        .try_get(0)?;
-    session.shutdown().await?;
-    require(idle == 0, format!("found {idle} idle transaction(s)"))
+    let operation: TestResult<(i64, i64)> = async {
+        let row = session
+            .client()
+            .query_one(
+                "SELECT count(*) FILTER (WHERE state = 'idle in transaction'),
+                        count(*) FILTER (WHERE pid <> pg_catalog.pg_backend_pid())
+                 FROM pg_catalog.pg_stat_activity
+                 WHERE datname = pg_catalog.current_database()",
+                &[],
+            )
+            .await?;
+        Ok((row.try_get(0)?, row.try_get(1)?))
+    }
+    .await;
+    let (idle, others) = finish_session(session, operation, "session leak inspection").await?;
+    require(idle == 0, format!("found {idle} idle transaction(s)"))?;
+    require(others == 0, format!("found {others} leaked session(s)"))
+}
+
+async fn finish_session<T>(
+    session: TestSession,
+    operation: TestResult<T>,
+    name: &str,
+) -> TestResult<T> {
+    let shutdown = session.shutdown().await;
+    match (operation, shutdown) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), Ok(())) => Err(failure(format!("{name} failed: {error}"))),
+        (Ok(_), Err(error)) => Err(failure(format!("{name} shutdown failed: {error}"))),
+        (Err(operation), Err(shutdown)) => Err(failure(format!(
+            "{name} failed: {operation}; test session shutdown failed: {shutdown}"
+        ))),
+    }
 }
 
 #[cfg(feature = "test-hooks")]
-async fn wait_for_execution(
-    mut execution: tokio::task::JoinHandle<Result<ServerSelectResult, PostgresKernelError>>,
-) -> TestResult<ServerSelectResult> {
-    match tokio::time::timeout(WAIT, &mut execution).await {
-        Ok(result) => result
-            .map_err(|error| failure(format!("snapshot execution task failed: {error}")))?
-            .map_err(|error| failure(format!("snapshot execution failed: {error}"))),
-        Err(_) => {
-            execution.abort();
-            let _ = execution.await;
-            Err(failure("snapshot execution exceeded the bounded wait"))
+struct ExecutionTask {
+    handle: Option<tokio::task::JoinHandle<Result<ServerSelectResult, PostgresKernelError>>>,
+}
+
+#[cfg(feature = "test-hooks")]
+impl ExecutionTask {
+    fn new(
+        handle: tokio::task::JoinHandle<Result<ServerSelectResult, PostgresKernelError>>,
+    ) -> Self {
+        Self {
+            handle: Some(handle),
         }
     }
+
+    async fn abort_and_wait(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+            let _ = handle.await;
+        }
+    }
+
+    async fn finish(mut self, name: &str) -> TestResult<ServerSelectResult> {
+        let Some(mut handle) = self.handle.take() else {
+            return Err(failure(format!("{name} task was already consumed")));
+        };
+        match tokio::time::timeout(WAIT, &mut handle).await {
+            Ok(result) => result
+                .map_err(|error| failure(format!("{name} task failed: {error}")))?
+                .map_err(|error| failure(format!("{name} failed: {error}"))),
+            Err(_) => {
+                handle.abort();
+                let _ = handle.await;
+                Err(failure(format!("{name} exceeded the bounded wait")))
+            }
+        }
+    }
+}
+
+#[cfg(feature = "test-hooks")]
+impl Drop for ExecutionTask {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
+    }
+}
+
+#[cfg(feature = "test-hooks")]
+async fn complete_pinned_execution<F>(
+    mut execution: ExecutionTask,
+    reached: std::sync::Arc<tokio::sync::Barrier>,
+    resume: std::sync::Arc<tokio::sync::Barrier>,
+    name: &'static str,
+    advancement: F,
+) -> TestResult<(ServerSelectResult, ActiveDatabaseRevision)>
+where
+    F: Future<Output = TestResult<ActiveDatabaseRevision>>,
+{
+    if tokio::time::timeout(WAIT, reached.wait()).await.is_err() {
+        execution.abort_and_wait().await;
+        return Err(failure(format!(
+            "{name} did not recover and pin its initial snapshot"
+        )));
+    }
+    let advanced = match tokio::time::timeout(WAIT, advancement).await {
+        Ok(Ok(advanced)) => advanced,
+        Ok(Err(error)) => {
+            execution.abort_and_wait().await;
+            return Err(error);
+        }
+        Err(_) => {
+            execution.abort_and_wait().await;
+            return Err(failure(format!(
+                "{name} active-state advancement exceeded the bounded wait"
+            )));
+        }
+    };
+    if tokio::time::timeout(WAIT, resume.wait()).await.is_err() {
+        execution.abort_and_wait().await;
+        return Err(failure(format!(
+            "{name} did not resume after active-state advancement"
+        )));
+    }
+    let result = execution.finish(name).await?;
+    Ok((result, advanced))
 }
