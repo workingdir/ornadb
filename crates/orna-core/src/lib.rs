@@ -5,6 +5,7 @@
 
 pub mod canonical_hash;
 pub mod catalogue;
+pub mod physical;
 pub mod revision;
 pub mod source;
 pub mod types;
