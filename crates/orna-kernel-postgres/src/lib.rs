@@ -21,6 +21,7 @@ mod decode;
 mod physical;
 mod recovery;
 mod server_execution;
+mod server_runtime;
 mod storage;
 
 pub use bootstrap::ActiveRevision;
