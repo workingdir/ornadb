@@ -316,6 +316,20 @@ pub enum ServerFunctionBody {
     SqlQuery(SqlQueryBody),
 }
 
+impl ServerFunctionBody {
+    /// Returns the relational query when this body contains one.
+    ///
+    /// Callers must use this accessor when they support only query bodies. A
+    /// later body kind can then fail closed instead of being treated as a
+    /// query.
+    #[must_use]
+    pub fn as_sql_query(&self) -> Option<&SqlQueryBody> {
+        match self {
+            Self::SqlQuery(query) => Some(query),
+        }
+    }
+}
+
 /// The relational query body of a server function.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SqlQueryBody {
