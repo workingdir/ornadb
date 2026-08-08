@@ -3,16 +3,22 @@
 use std::{collections::HashMap, error::Error, fmt, hash::Hash};
 
 use orna_core::{
-    ExpressionId, FieldId, FunctionId, SchemaId, TypeId,
-    catalogue::{CatalogueSnapshot, FunctionDefinition, OnDeleteAction, QualifiedSemanticName},
+    CatalogueRevisionId, FieldId, TypeId,
+    catalogue::{CatalogueSnapshot, OnDeleteAction, QualifiedSemanticName},
+    revision::DefinitionReferenceKind,
     types::{ResolvedType, StandardScalar},
 };
 
 use crate::{CompilerDiagnostic, ParseReport, SourceLocation, relational::RelationalQueryIr};
 
+use super::{
+    CheckedExpressionId, CheckedFieldId, CheckedFunctionId, CheckedParameterId, CheckedSchemaId,
+    CheckedTypeId,
+};
+
 /// A resolved semantic type whose identities belong to the checking context.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) enum SemanticType<T> {
+pub enum SemanticType<T> {
     /// A standard scalar type.
     Scalar(StandardScalar),
     /// A resolved non-scalar named type.
@@ -26,12 +32,12 @@ pub(crate) enum SemanticType<T> {
 
 impl<T> SemanticType<T> {
     /// Creates a standard scalar type.
-    pub(crate) const fn scalar(scalar: StandardScalar) -> Self {
+    pub const fn scalar(scalar: StandardScalar) -> Self {
         Self::Scalar(scalar)
     }
 
     /// Creates a typed object reference.
-    pub(crate) const fn reference(target: T) -> Self {
+    pub const fn reference(target: T) -> Self {
         Self::Reference { target }
     }
 }
@@ -98,26 +104,12 @@ impl<T, F> QueryField<T, F> {
 
 /// The name and field data for one object type in a query catalogue.
 #[derive(Clone, Debug, Eq, PartialEq)]
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "the resolver constructs this checked catalogue in the next slice"
-    )
-)]
 pub(crate) struct QueryObjectType<T, F> {
     id: T,
     name: QualifiedSemanticName,
     fields: Vec<(String, QueryField<T, F>)>,
 }
 
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "the resolver constructs this checked catalogue in the next slice"
-    )
-)]
 impl<T, F> QueryObjectType<T, F> {
     /// Creates one query-visible object type.
     pub(crate) fn new(
@@ -129,6 +121,7 @@ impl<T, F> QueryObjectType<T, F> {
     }
 
     /// Returns the type identity.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) const fn id(&self) -> T
     where
         T: Copy,
@@ -137,11 +130,13 @@ impl<T, F> QueryObjectType<T, F> {
     }
 
     /// Returns the resolved qualified type name.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn name(&self) -> &QualifiedSemanticName {
         &self.name
     }
 
     /// Returns fields in deterministic declaration order.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn fields(&self) -> &[(String, QueryField<T, F>)] {
         &self.fields
     }
@@ -171,13 +166,6 @@ pub(crate) trait QueryCatalogue<T, F> {
 
 /// A deterministic, validated catalogue for resolver-local identities.
 #[derive(Clone, Debug, Eq, PartialEq)]
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "the resolver constructs this checked catalogue in the next slice"
-    )
-)]
 pub(crate) struct ResolutionCatalogue<T: Eq + Hash, F: Eq + Hash> {
     object_types: Vec<QueryObjectType<T, F>>,
     object_type_indices_by_name: HashMap<QualifiedSemanticName, usize>,
@@ -186,13 +174,6 @@ pub(crate) struct ResolutionCatalogue<T: Eq + Hash, F: Eq + Hash> {
     field_indices_by_id: HashMap<(T, F), (usize, usize)>,
 }
 
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "the resolver constructs this checked catalogue in the next slice"
-    )
-)]
 impl<T, F> ResolutionCatalogue<T, F>
 where
     T: Copy + Eq + Hash,
@@ -278,6 +259,7 @@ where
     }
 
     /// Returns object types in deterministic construction order.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn object_types(&self) -> &[QueryObjectType<T, F>] {
         &self.object_types
     }
@@ -315,13 +297,6 @@ where
 
 /// A validation error for a resolver-local query catalogue.
 #[derive(Clone, Debug, Eq, PartialEq)]
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "the resolver handles this validation in the next slice"
-    )
-)]
 pub(crate) enum ResolutionCatalogueError<T, F> {
     /// More than one object type has the same resolved qualified name.
     DuplicateObjectTypeName {
@@ -583,14 +558,14 @@ pub enum ConstantValue {
 /// A checked constant default expression.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CheckedDefault {
-    pub(super) id: ExpressionId,
+    pub(super) id: CheckedExpressionId,
     pub(super) value: ConstantValue,
     pub(super) location: SourceLocation,
 }
 
 impl CheckedDefault {
-    /// Returns the stable identity of this checked expression.
-    pub const fn id(&self) -> ExpressionId {
+    /// Returns the identity of this checked expression.
+    pub const fn id(&self) -> CheckedExpressionId {
         self.id
     }
 
@@ -608,10 +583,10 @@ impl CheckedDefault {
 /// A checked field definition without parser implementation values.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CheckedField {
-    pub(super) id: FieldId,
+    pub(super) id: CheckedFieldId,
     pub(super) name: String,
     pub(super) ordinal: u32,
-    pub(super) resolved_type: ResolvedType,
+    pub(super) semantic_type: SemanticType<CheckedTypeId>,
     pub(super) nullable: bool,
     pub(super) unique: bool,
     pub(super) default: Option<CheckedDefault>,
@@ -620,8 +595,8 @@ pub struct CheckedField {
 }
 
 impl CheckedField {
-    /// Returns the stable identity of the field.
-    pub const fn id(&self) -> FieldId {
+    /// Returns the identity of the field.
+    pub const fn id(&self) -> CheckedFieldId {
         self.id
     }
     /// Returns the resolved field name.
@@ -632,9 +607,9 @@ impl CheckedField {
     pub const fn ordinal(&self) -> u32 {
         self.ordinal
     }
-    /// Returns the resolved type.
-    pub const fn resolved_type(&self) -> ResolvedType {
-        self.resolved_type
+    /// Returns the checked semantic type.
+    pub const fn semantic_type(&self) -> SemanticType<CheckedTypeId> {
+        self.semantic_type
     }
     /// Reports whether the field permits null.
     pub const fn nullable(&self) -> bool {
@@ -661,15 +636,15 @@ impl CheckedField {
 /// A checked object type declaration without parser implementation values.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CheckedObjectType {
-    pub(super) id: TypeId,
+    pub(super) id: CheckedTypeId,
     pub(super) name: QualifiedSemanticName,
     pub(super) fields: Vec<CheckedField>,
     pub(super) location: SourceLocation,
 }
 
 impl CheckedObjectType {
-    /// Returns the stable identity of the object type.
-    pub const fn id(&self) -> TypeId {
+    /// Returns the identity of the object type.
+    pub const fn id(&self) -> CheckedTypeId {
         self.id
     }
     /// Returns the resolved qualified type name.
@@ -689,12 +664,18 @@ impl CheckedObjectType {
 /// A checked source bundle ready for a later semantic-diff and apply stage.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CheckedBundle {
+    pub(super) base_catalogue_revision: CatalogueRevisionId,
     pub(super) schemas: Vec<CheckedSchema>,
     pub(super) object_types: Vec<CheckedObjectType>,
     pub(super) server_functions: Vec<CheckedServerFunction>,
 }
 
 impl CheckedBundle {
+    /// Returns the immutable catalogue revision used for identity continuity.
+    pub const fn base_catalogue_revision(&self) -> CatalogueRevisionId {
+        self.base_catalogue_revision
+    }
+
     /// Returns submitted schema declarations in source order.
     pub fn schemas(&self) -> &[CheckedSchema] {
         &self.schemas
@@ -711,23 +692,173 @@ impl CheckedBundle {
     }
 }
 
+/// One checked SERVER function parameter.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CheckedServerFunctionParameter {
+    pub(super) id: CheckedParameterId,
+    pub(super) name: String,
+    pub(super) ordinal: u32,
+    pub(super) semantic_type: SemanticType<CheckedTypeId>,
+    pub(super) location: SourceLocation,
+}
+
+impl CheckedServerFunctionParameter {
+    /// Returns the identity of the parameter.
+    pub const fn id(&self) -> CheckedParameterId {
+        self.id
+    }
+
+    /// Returns the resolved parameter name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Returns the declaration ordinal.
+    pub const fn ordinal(&self) -> u32 {
+        self.ordinal
+    }
+
+    /// Returns the checked semantic type.
+    pub const fn semantic_type(&self) -> SemanticType<CheckedTypeId> {
+        self.semantic_type
+    }
+
+    /// Returns the full parameter declaration location.
+    pub fn location(&self) -> &SourceLocation {
+        &self.location
+    }
+}
+
+/// One checked `ROWS` return column.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CheckedServerFunctionReturnColumn {
+    pub(super) name: String,
+    pub(super) ordinal: u32,
+    pub(super) semantic_type: SemanticType<CheckedTypeId>,
+    pub(super) location: SourceLocation,
+}
+
+impl CheckedServerFunctionReturnColumn {
+    /// Returns the resolved return-column name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Returns the declaration ordinal.
+    pub const fn ordinal(&self) -> u32 {
+        self.ordinal
+    }
+
+    /// Returns the checked semantic type.
+    pub const fn semantic_type(&self) -> SemanticType<CheckedTypeId> {
+        self.semantic_type
+    }
+
+    /// Returns the full return-column declaration location.
+    pub fn location(&self) -> &SourceLocation {
+        &self.location
+    }
+}
+
+/// A checked definition target referenced by one declaration or query.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum CheckedDefinitionReferenceTarget {
+    /// A checked object type.
+    ObjectType(CheckedTypeId),
+    /// A checked field on an object type.
+    Field {
+        /// The owning checked object type.
+        owner: CheckedTypeId,
+        /// The checked field identity.
+        field: CheckedFieldId,
+    },
+    /// A checked SERVER function.
+    Function(CheckedFunctionId),
+    /// A checked parameter on a SERVER function.
+    Parameter {
+        /// The owning checked SERVER function.
+        owner: CheckedFunctionId,
+        /// The checked parameter identity.
+        parameter: CheckedParameterId,
+    },
+    /// A checked expression.
+    Expression(CheckedExpressionId),
+}
+
+/// One ordered checked definition reference with its exact source location.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CheckedDefinitionReference {
+    pub(super) target: CheckedDefinitionReferenceTarget,
+    pub(super) kind: DefinitionReferenceKind,
+    pub(super) location: SourceLocation,
+}
+
+impl CheckedDefinitionReference {
+    /// Returns the checked target definition.
+    pub const fn target(&self) -> CheckedDefinitionReferenceTarget {
+        self.target
+    }
+
+    /// Returns the resolved reference category.
+    pub const fn kind(&self) -> DefinitionReferenceKind {
+        self.kind
+    }
+
+    /// Returns the exact source location of this reference.
+    pub fn location(&self) -> &SourceLocation {
+        &self.location
+    }
+}
+
 /// A checked SERVER function with an Orna-owned relational execution plan.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CheckedServerFunction {
-    pub(super) definition: FunctionDefinition,
+    pub(super) id: CheckedFunctionId,
+    pub(super) name: QualifiedSemanticName,
+    pub(super) parameters: Vec<CheckedServerFunctionParameter>,
+    pub(super) return_columns: Vec<CheckedServerFunctionReturnColumn>,
+    pub(super) security: orna_core::catalogue::FunctionSecurity,
+    pub(super) transaction: Option<orna_core::catalogue::FunctionTransaction>,
+    pub(super) volatility: orna_core::catalogue::FunctionVolatility,
     pub(super) location: SourceLocation,
-    pub(super) plan: RelationalQueryIr,
+    pub(super) plan: RelationalQueryIr<CheckedTypeId, CheckedFieldId>,
+    pub(super) references: Vec<CheckedDefinitionReference>,
 }
 
 impl CheckedServerFunction {
-    /// Returns the stable function identity.
-    pub const fn id(&self) -> FunctionId {
-        self.definition.id()
+    /// Returns the checked function identity.
+    pub const fn id(&self) -> CheckedFunctionId {
+        self.id
     }
 
     /// Returns the resolved function name.
     pub fn name(&self) -> &QualifiedSemanticName {
-        self.definition.name()
+        &self.name
+    }
+
+    /// Returns checked parameters in declaration order.
+    pub fn parameters(&self) -> &[CheckedServerFunctionParameter] {
+        &self.parameters
+    }
+
+    /// Returns checked `ROWS` return columns in declaration order.
+    pub fn return_columns(&self) -> &[CheckedServerFunctionReturnColumn] {
+        &self.return_columns
+    }
+
+    /// Returns the function security context mode.
+    pub const fn security(&self) -> orna_core::catalogue::FunctionSecurity {
+        self.security
+    }
+
+    /// Returns the declared transaction mode.
+    pub const fn transaction(&self) -> Option<orna_core::catalogue::FunctionTransaction> {
+        self.transaction
+    }
+
+    /// Returns the declared volatility mode.
+    pub const fn volatility(&self) -> orna_core::catalogue::FunctionVolatility {
+        self.volatility
     }
 
     /// Returns the source location of the declaration.
@@ -735,8 +866,13 @@ impl CheckedServerFunction {
         &self.location
     }
 
+    /// Returns checked definition references in source-resolution order.
+    pub fn references(&self) -> &[CheckedDefinitionReference] {
+        &self.references
+    }
+
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn plan(&self) -> &RelationalQueryIr {
+    pub(crate) fn plan(&self) -> &RelationalQueryIr<CheckedTypeId, CheckedFieldId> {
         &self.plan
     }
 }
@@ -744,14 +880,14 @@ impl CheckedServerFunction {
 /// A checked logical schema declaration.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CheckedSchema {
-    pub(super) id: SchemaId,
+    pub(super) id: CheckedSchemaId,
     pub(super) name: QualifiedSemanticName,
     pub(super) location: SourceLocation,
 }
 
 impl CheckedSchema {
-    /// Returns the stable identity of the schema.
-    pub const fn id(&self) -> SchemaId {
+    /// Returns the identity of the schema.
+    pub const fn id(&self) -> CheckedSchemaId {
         self.id
     }
 
@@ -772,7 +908,6 @@ pub struct CheckReport {
     pub(super) parse_report: ParseReport,
     pub(super) diagnostics: Vec<CompilerDiagnostic>,
     pub(super) checked_bundle: Option<CheckedBundle>,
-    pub(super) candidate: Option<CatalogueSnapshot>,
 }
 
 impl CheckReport {
@@ -787,9 +922,5 @@ impl CheckReport {
     /// Returns checked Orna-owned definitions when checking succeeds.
     pub fn checked_bundle(&self) -> Option<&CheckedBundle> {
         self.checked_bundle.as_ref()
-    }
-    /// Returns the immutable candidate catalogue when checking succeeds.
-    pub fn candidate(&self) -> Option<&CatalogueSnapshot> {
-        self.candidate.as_ref()
     }
 }
