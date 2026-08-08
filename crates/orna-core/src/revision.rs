@@ -1129,6 +1129,16 @@ fn validate_function_revision_history(
         .iter()
         .map(|revision| (revision.function(), revision.revision_number()))
         .collect::<HashSet<_>>();
+    let mut function_hash_pairs = current
+        .iter()
+        .map(|revision| {
+            (
+                revision.function(),
+                revision.declaration_content_hash(),
+                revision.semantic_hash(),
+            )
+        })
+        .collect::<HashSet<_>>();
 
     for revision in historical {
         if !revision_ids.insert(revision.id()) {
@@ -1140,6 +1150,17 @@ fn validate_function_revision_history(
             return Err(RevisionInvariantError::DuplicateFunctionRevisionNumber {
                 function: revision.function(),
                 revision_number: revision.revision_number(),
+            });
+        }
+        if !function_hash_pairs.insert((
+            revision.function(),
+            revision.declaration_content_hash(),
+            revision.semantic_hash(),
+        )) {
+            return Err(RevisionInvariantError::DuplicateFunctionRevisionHashPair {
+                function: revision.function(),
+                declaration_content_hash: revision.declaration_content_hash(),
+                semantic_hash: revision.semantic_hash(),
             });
         }
     }
@@ -1458,6 +1479,12 @@ pub enum RevisionInvariantError {
         function: FunctionId,
         revision_number: u64,
     },
+    /// A function has the same declaration and semantic hash pair twice.
+    DuplicateFunctionRevisionHashPair {
+        function: FunctionId,
+        declaration_content_hash: Sha256Digest,
+        semantic_hash: Sha256Digest,
+    },
     /// More than one supplied function revision belongs to one function.
     DuplicateFunctionRevisionFunction { function: FunctionId },
     /// A function revision names a function absent from the catalogue.
@@ -1593,6 +1620,8 @@ impl fmt::Display for RevisionInvariantError {
             DuplicateFunctionRevisionNumber { .. } => {
                 formatter.write_str("duplicate function revision number")
             }
+            DuplicateFunctionRevisionHashPair { .. } => formatter
+                .write_str("duplicate function revision declaration and semantic hash pair"),
             DuplicateFunctionRevisionFunction { .. } => {
                 formatter.write_str("duplicate supplied function revision function")
             }
@@ -1902,6 +1931,65 @@ mod tests {
                 revision_number,
             }) if function == current_revision.function()
                 && revision_number == current_revision.revision_number()
+        ));
+    }
+
+    #[test]
+    fn rejects_function_revision_hash_pair_reused_between_current_and_history() {
+        let current_revision = function_revision();
+        let duplicate = FunctionRevisionRecord::new(
+            current_revision.function(),
+            FunctionRevisionId::from_bytes(id::<47>()),
+            2,
+            SourceOrigin::new(SourceUnitId::from_bytes(id::<48>()), 4, 23).unwrap(),
+            current_revision.declaration_content_hash(),
+            current_revision.semantic_hash(),
+            current_revision.language_version(),
+            current_revision.artifact().clone(),
+        )
+        .unwrap();
+
+        let result = active_with_history(vec![duplicate]);
+
+        assert!(matches!(
+            result,
+            Err(RevisionInvariantError::DuplicateFunctionRevisionHashPair {
+                function,
+                declaration_content_hash,
+                semantic_hash,
+            }) if function == current_revision.function()
+                && declaration_content_hash == current_revision.declaration_content_hash()
+                && semantic_hash == current_revision.semantic_hash()
+        ));
+    }
+
+    #[test]
+    fn rejects_function_revision_hash_pair_reused_within_history() {
+        let function = FunctionId::from_bytes(id::<49>());
+        let first = historical_function_revision(
+            function,
+            FunctionRevisionId::from_bytes(id::<50>()),
+            1,
+            SourceUnitId::from_bytes(id::<51>()),
+        );
+        let duplicate = historical_function_revision(
+            function,
+            FunctionRevisionId::from_bytes(id::<52>()),
+            2,
+            SourceUnitId::from_bytes(id::<53>()),
+        );
+
+        let result = active_with_history(vec![first.clone(), duplicate]);
+
+        assert!(matches!(
+            result,
+            Err(RevisionInvariantError::DuplicateFunctionRevisionHashPair {
+                function: rejected_function,
+                declaration_content_hash,
+                semantic_hash,
+            }) if rejected_function == function
+                && declaration_content_hash == first.declaration_content_hash()
+                && semantic_hash == first.semantic_hash()
         ));
     }
 
