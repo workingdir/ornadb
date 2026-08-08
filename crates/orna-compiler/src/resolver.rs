@@ -43,7 +43,10 @@ use orna_syntax::{
 use crate::mutation::{
     MutationParameter, MutationReference, check_delete_in, check_insert_in, check_update_in,
 };
-use crate::relational::{QueryReference, QueryReferenceKind, QueryReferenceTarget, check_query_in};
+use crate::relational::{
+    ExpressionIr, IdentitySelectedQueryReference, QueryParameter, QueryReference,
+    QueryReferenceKind, QueryReferenceTarget, check_identity_selected_query_in, check_query_in,
+};
 use crate::{
     CompilerDiagnostic, DiagnosticCode, ParseReport, SourceLocation,
     normalise_name_part as semantic_part, normalise_qualified_name as semantic_name, parse_bundle,
@@ -840,64 +843,74 @@ fn check_server_functions(
         };
 
         let (body, body_references) = if let Some(query_body) = input.body.as_sql_query() {
-            let query_check =
-                match check_query_in(&query_body.query, catalogue, input.location.logical_path()) {
+            let has_selector = matches!(
+                &query_body.query.predicate,
+                Some(orna_syntax::QueryExpression::Equality { right, .. })
+                    if matches!(right.as_ref(), orna_syntax::QueryExpression::ParameterRead { .. })
+            );
+            if input.parameters.is_empty() && !has_selector {
+                let query_check = match check_query_in(
+                    &query_body.query,
+                    catalogue,
+                    input.location.logical_path(),
+                ) {
                     Ok(query_check) => query_check,
                     Err(query_diagnostics) => {
                         diagnostics.extend(query_diagnostics);
                         continue;
                     }
                 };
-            let plan = query_check.plan();
-            if plan.projections().len() != columns.len() {
-                diagnostics.push(DiagnosticCode::semantic(
-                    DiagnosticCode::TypeMismatch,
-                    format!(
-                        "SELECT returns {} {}, but RETURNS ROWS (...) declares {} {}",
-                        plan.projections().len(),
-                        if plan.projections().len() == 1 {
-                            "column"
-                        } else {
-                            "columns"
-                        },
-                        columns.len(),
-                        if columns.len() == 1 {
-                            "column"
-                        } else {
-                            "columns"
-                        }
-                    ),
-                    return_location.clone(),
-                ));
-                continue;
-            }
-
-            let mut matches_return = true;
-            for (projection, column) in plan.projections().iter().zip(columns) {
-                if projection.value_type().semantic_type() != column.semantic_type {
-                    diagnostics.push(DiagnosticCode::semantic(
-                        DiagnosticCode::TypeMismatch,
-                        format!(
-                            "SELECT column {} does not have the same type as RETURNS ROWS column {}",
-                            column.ordinal + 1,
-                            column.name
-                        ),
-                        column.location.clone(),
-                    ));
-                    matches_return = false;
+                if !query_return_matches(
+                    query_check.plan().projections(),
+                    columns,
+                    return_location,
+                    diagnostics,
+                ) {
+                    continue;
                 }
+                (
+                    CheckedServerFunctionBody::Query(query_check.plan().clone()),
+                    query_check
+                        .references()
+                        .iter()
+                        .map(query_reference)
+                        .collect::<Vec<_>>(),
+                )
+            } else {
+                if !identity_selected_query_execution_mode_is_valid(input, diagnostics) {
+                    continue;
+                }
+                let parameters = identity_selected_query_parameters(input);
+                let query_check = match check_identity_selected_query_in(
+                    &query_body.query,
+                    catalogue,
+                    input.id,
+                    &parameters,
+                    input.location.logical_path(),
+                ) {
+                    Ok(query_check) => query_check,
+                    Err(query_diagnostics) => {
+                        diagnostics.extend(query_diagnostics);
+                        continue;
+                    }
+                };
+                if !query_return_matches(
+                    query_check.plan().projections(),
+                    columns,
+                    return_location,
+                    diagnostics,
+                ) {
+                    continue;
+                }
+                (
+                    CheckedServerFunctionBody::IdentitySelectedQuery(query_check.plan().clone()),
+                    query_check
+                        .references()
+                        .iter()
+                        .map(identity_selected_query_reference)
+                        .collect::<Vec<_>>(),
+                )
             }
-            if !matches_return {
-                continue;
-            }
-            (
-                CheckedServerFunctionBody::Query(plan.clone()),
-                query_check
-                    .references()
-                    .iter()
-                    .map(query_reference)
-                    .collect::<Vec<_>>(),
-            )
         } else if let Some(delete_body) = input.body.as_sql_delete() {
             if !mutation_execution_mode_is_valid(input, "DELETE", diagnostics) {
                 continue;
@@ -1082,6 +1095,101 @@ fn mutation_execution_mode_is_valid(
     valid
 }
 
+fn identity_selected_query_execution_mode_is_valid(
+    input: &ResolvedServerFunctionInput<'_>,
+    diagnostics: &mut Vec<CompilerDiagnostic>,
+) -> bool {
+    let mut valid = true;
+    if input.security != CatalogueFunctionSecurity::Invoker {
+        diagnostics.push(DiagnosticCode::semantic(
+            DiagnosticCode::DomainIncompatible,
+            "parameterised SELECT SERVER functions require SECURITY INVOKER",
+            input.location.clone(),
+        ));
+        valid = false;
+    }
+    if input.transaction != Some(CatalogueFunctionTransaction::ReadOnly) {
+        diagnostics.push(DiagnosticCode::semantic(
+            DiagnosticCode::DomainIncompatible,
+            "parameterised SELECT SERVER functions require TRANSACTION READ ONLY",
+            input.location.clone(),
+        ));
+        valid = false;
+    }
+    if input.volatility != CatalogueFunctionVolatility::Stable {
+        diagnostics.push(DiagnosticCode::semantic(
+            DiagnosticCode::DomainIncompatible,
+            "parameterised SELECT SERVER functions require VOLATILITY STABLE",
+            input.location.clone(),
+        ));
+        valid = false;
+    }
+    valid
+}
+
+fn identity_selected_query_parameters(
+    input: &ResolvedServerFunctionInput<'_>,
+) -> Vec<QueryParameter<CheckedTypeId, CheckedParameterId>> {
+    input
+        .parameters
+        .iter()
+        .map(|parameter| {
+            QueryParameter::new(
+                parameter.name.clone(),
+                parameter.id,
+                parameter.semantic_type,
+            )
+        })
+        .collect()
+}
+
+fn query_return_matches(
+    projections: &[ExpressionIr<CheckedTypeId, CheckedFieldId>],
+    columns: &[ResolvedServerFunctionReturnColumn],
+    return_location: &SourceLocation,
+    diagnostics: &mut Vec<CompilerDiagnostic>,
+) -> bool {
+    if projections.len() != columns.len() {
+        diagnostics.push(DiagnosticCode::semantic(
+            DiagnosticCode::TypeMismatch,
+            format!(
+                "SELECT returns {} {}, but RETURNS ROWS (...) declares {} {}",
+                projections.len(),
+                if projections.len() == 1 {
+                    "column"
+                } else {
+                    "columns"
+                },
+                columns.len(),
+                if columns.len() == 1 {
+                    "column"
+                } else {
+                    "columns"
+                }
+            ),
+            return_location.clone(),
+        ));
+        return false;
+    }
+
+    let mut matches_return = true;
+    for (projection, column) in projections.iter().zip(columns) {
+        if projection.value_type().semantic_type() != column.semantic_type {
+            diagnostics.push(DiagnosticCode::semantic(
+                DiagnosticCode::TypeMismatch,
+                format!(
+                    "SELECT column {} does not have the same type as RETURNS ROWS column {}",
+                    column.ordinal + 1,
+                    column.name
+                ),
+                column.location.clone(),
+            ));
+            matches_return = false;
+        }
+    }
+    matches_return
+}
+
 fn mutation_parameters(
     input: &ResolvedServerFunctionInput<'_>,
 ) -> Vec<MutationParameter<CheckedTypeId, CheckedParameterId>> {
@@ -1220,6 +1328,63 @@ fn query_reference(
         target,
         kind,
         location: reference.location().clone(),
+    }
+}
+
+fn identity_selected_query_reference(
+    reference: &IdentitySelectedQueryReference<
+        CheckedTypeId,
+        CheckedFieldId,
+        CheckedFunctionId,
+        CheckedParameterId,
+    >,
+) -> CheckedDefinitionReference {
+    let (target, kind, location) = match reference {
+        IdentitySelectedQueryReference::QueryObject {
+            object_type,
+            location,
+        } => (
+            CheckedDefinitionReferenceTarget::ObjectType(*object_type),
+            DefinitionReferenceKind::QueryObject,
+            location,
+        ),
+        IdentitySelectedQueryReference::ObjectReference {
+            object_type,
+            location,
+        } => (
+            CheckedDefinitionReferenceTarget::ObjectType(*object_type),
+            DefinitionReferenceKind::ObjectReference,
+            location,
+        ),
+        IdentitySelectedQueryReference::QueryField {
+            owner,
+            field,
+            location,
+        } => (
+            CheckedDefinitionReferenceTarget::Field {
+                owner: *owner,
+                field: *field,
+            },
+            DefinitionReferenceKind::QueryField,
+            location,
+        ),
+        IdentitySelectedQueryReference::ParameterRead {
+            owner,
+            parameter,
+            location,
+        } => (
+            CheckedDefinitionReferenceTarget::Parameter {
+                owner: *owner,
+                parameter: *parameter,
+            },
+            DefinitionReferenceKind::ParameterRead,
+            location,
+        ),
+    };
+    CheckedDefinitionReference {
+        target,
+        kind,
+        location: location.clone(),
     }
 }
 
@@ -2175,10 +2340,12 @@ mod tests {
         let source = "CREATE SCHEMA alpha; CREATE SCHEMA beta; \
             CREATE TYPE alpha.one AS OBJECT (number INT DEFAULT 1); \
             CREATE TYPE beta.two AS OBJECT (one REF alpha.one, number INT DEFAULT 2); \
-            CREATE SERVER FUNCTION alpha.first(p_one REF alpha.one, p_number INT) \
-            RETURNS ROWS (number INT) AS SELECT o.number FROM alpha.one o; \
+            CREATE SERVER FUNCTION alpha.first(p_one REF alpha.one) \
+            RETURNS ROWS (number INT) TRANSACTION READ ONLY VOLATILITY STABLE \
+            AS SELECT o.number FROM alpha.one o WHERE REF(o) = p_one; \
             CREATE SERVER FUNCTION beta.second(p_two REF beta.two) \
-            RETURNS ROWS (number INT) AS SELECT t.number FROM beta.two t;";
+            RETURNS ROWS (number INT) TRANSACTION READ ONLY VOLATILITY STABLE \
+            AS SELECT t.number FROM beta.two t WHERE REF(t) = p_two;";
         let report = check(&bundle([("counters.orna", source)]), &empty_catalogue());
 
         assert!(report.diagnostics().is_empty());
@@ -2242,16 +2409,10 @@ mod tests {
             "provisional:parameter:0"
         );
         assert_eq!(
-            checked.server_functions()[0].parameters()[1]
-                .id()
-                .to_string(),
-            "provisional:parameter:1"
-        );
-        assert_eq!(
             checked.server_functions()[1].parameters()[0]
                 .id()
                 .to_string(),
-            "provisional:parameter:2"
+            "provisional:parameter:1"
         );
     }
 
@@ -2279,28 +2440,24 @@ mod tests {
             vec![server_function(
                 5,
                 &["tasks", "open"],
-                vec![parameter(
-                    6,
-                    "p_limit",
-                    0,
-                    ResolvedType::scalar(StandardScalar::Integer),
-                )],
+                vec![parameter(6, "p_task", 0, ResolvedType::reference(type_id))],
                 vec![rows_column(
                     "title",
                     0,
                     ResolvedType::scalar(StandardScalar::CharacterLargeObject),
                 )],
                 FunctionSecurity::Invoker,
-                None,
-                FunctionVolatility::Volatile,
+                Some(FunctionTransaction::ReadOnly),
+                FunctionVolatility::Stable,
             )],
         );
         let report = check(
             &bundle([(
                 "tasks.orna",
                 "CREATE SCHEMA TASKS; CREATE TYPE tasks.task AS OBJECT (title TEXT DEFAULT 'old'); \
-                 CREATE SERVER FUNCTION TASKS.OPEN(P_LIMIT INT) RETURNS ROWS (title TEXT) \
-                 AS SELECT t.title FROM tasks.task t;",
+                 CREATE SERVER FUNCTION TASKS.OPEN(P_TASK REF tasks.task) RETURNS ROWS (title TEXT) \
+                 SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE \
+                 AS SELECT t.title FROM tasks.task t WHERE REF(t) = P_TASK;",
             )]),
             &base,
         );
@@ -2392,15 +2549,135 @@ mod tests {
     }
 
     #[test]
-    fn records_signature_and_query_references_in_order_with_exact_spans() {
+    fn records_signature_and_identity_selected_query_references_in_order_with_exact_spans() {
         let source = "CREATE SCHEMA people; CREATE SCHEMA tasks; \
             CREATE TYPE people.person AS OBJECT (name TEXT); \
             CREATE TYPE tasks.task AS OBJECT (assignee REF people.person, completed BOOL NOT NULL); \
-            CREATE SERVER FUNCTION tasks.find(p_person REF people.person) \
+            CREATE SERVER FUNCTION tasks.find(p_task REF tasks.task) \
+            RETURNS ROWS (task REF tasks.task, name TEXT) \
+            SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE \
+            AS SELECT REF(t), t.assignee.name FROM tasks.task t \
+            WHERE REF(t) = p_task;";
+        let report = check(&bundle([("references.orna", source)]), &empty_catalogue());
+
+        assert!(report.diagnostics().is_empty());
+        let checked = report.checked_bundle().unwrap();
+        let person = &checked.object_types()[0];
+        let task = &checked.object_types()[1];
+        let assignee = &task.fields()[0];
+        let name = &person.fields()[0];
+        let function = &checked.server_functions()[0];
+        let plan = function
+            .identity_selected_query_plan()
+            .expect("fixture has an identity-selected SELECT body");
+        assert!(function.query_plan().is_none());
+        assert_eq!(plan.scan().object_type(), task.id());
+        assert_eq!(plan.selector().owner(), function.id());
+        assert_eq!(plan.selector().parameter(), function.parameters()[0].id());
+        assert_eq!(plan.projections().len(), 2);
+        let query_start = source.find("SELECT REF(t)").unwrap();
+        let assignee_start = source.find("t.assignee.name").unwrap();
+        let parameter_target_start =
+            source.find("p_task REF tasks.task").unwrap() + "p_task REF ".len();
+        let return_target_start = source.find("RETURNS ROWS (task REF tasks.task").unwrap()
+            + "RETURNS ROWS (task REF ".len();
+        let query_object_start = query_start + source[query_start..].find("tasks.task").unwrap();
+        let projection_reference_start =
+            query_start + source[query_start..].find("REF(t)").unwrap() + 4;
+        let selector_reference_start = source.rfind("REF(t)").unwrap() + 4;
+        let parameter_read_start = source.rfind("p_task").unwrap();
+        let expected = [
+            (
+                DefinitionReferenceKind::ObjectReference,
+                CheckedDefinitionReferenceTarget::ObjectType(task.id()),
+                parameter_target_start,
+                "tasks.task".len(),
+            ),
+            (
+                DefinitionReferenceKind::ObjectReference,
+                CheckedDefinitionReferenceTarget::ObjectType(task.id()),
+                return_target_start,
+                "tasks.task".len(),
+            ),
+            (
+                DefinitionReferenceKind::QueryObject,
+                CheckedDefinitionReferenceTarget::ObjectType(task.id()),
+                query_object_start,
+                "tasks.task".len(),
+            ),
+            (
+                DefinitionReferenceKind::ObjectReference,
+                CheckedDefinitionReferenceTarget::ObjectType(task.id()),
+                projection_reference_start,
+                1,
+            ),
+            (
+                DefinitionReferenceKind::QueryField,
+                CheckedDefinitionReferenceTarget::Field {
+                    owner: task.id(),
+                    field: assignee.id(),
+                },
+                assignee_start + 2,
+                "assignee".len(),
+            ),
+            (
+                DefinitionReferenceKind::QueryField,
+                CheckedDefinitionReferenceTarget::Field {
+                    owner: person.id(),
+                    field: name.id(),
+                },
+                assignee_start + 11,
+                "name".len(),
+            ),
+            (
+                DefinitionReferenceKind::ObjectReference,
+                CheckedDefinitionReferenceTarget::ObjectType(task.id()),
+                selector_reference_start,
+                1,
+            ),
+            (
+                DefinitionReferenceKind::ParameterRead,
+                CheckedDefinitionReferenceTarget::Parameter {
+                    owner: function.id(),
+                    parameter: function.parameters()[0].id(),
+                },
+                parameter_read_start,
+                "p_task".len(),
+            ),
+        ];
+
+        assert_eq!(
+            function.parameters()[0].location().span().start(),
+            source.find("p_task REF").unwrap()
+        );
+        assert_eq!(
+            function.return_columns()[0].location().span().start(),
+            source.find("RETURNS ROWS (task REF").unwrap() + "RETURNS ROWS (".len()
+        );
+        assert_eq!(function.references().len(), expected.len());
+        for (reference, (kind, target, start, length)) in function.references().iter().zip(expected)
+        {
+            assert_eq!(reference.kind(), kind);
+            assert_eq!(reference.target(), target);
+            assert_eq!(reference.location().logical_path(), "references.orna");
+            assert_eq!(reference.location().span().start(), start);
+            assert_eq!(reference.location().span().end(), start + length);
+        }
+    }
+
+    #[test]
+    fn preserves_v1_signature_and_query_references_in_order_with_exact_spans() {
+        let source = "CREATE SCHEMA people; CREATE SCHEMA tasks; \
+            CREATE TYPE people.person AS OBJECT (name TEXT); \
+            CREATE TYPE tasks.task AS OBJECT (assignee REF people.person, completed BOOL NOT NULL); \
+            CREATE SERVER FUNCTION tasks.find() \
             RETURNS ROWS (task REF tasks.task, name TEXT) \
             AS SELECT REF(t), t.assignee.name FROM tasks.task t \
             WHERE t.completed = t.completed ORDER BY t.assignee.name DESC;";
-        let report = check(&bundle([("references.orna", source)]), &empty_catalogue());
+        let report = check(
+            &bundle([("v1_references.orna", source)]),
+            &empty_catalogue(),
+        );
 
         assert!(report.diagnostics().is_empty());
         let checked = report.checked_bundle().unwrap();
@@ -2410,6 +2687,8 @@ mod tests {
         let completed = &task.fields()[1];
         let name = &person.fields()[0];
         let function = &checked.server_functions()[0];
+        assert!(function.query_plan().is_some());
+        assert!(function.identity_selected_query_plan().is_none());
         let query_start = source.find("SELECT REF(t)").unwrap();
         let assignee_starts = source
             .match_indices("t.assignee.name")
@@ -2419,19 +2698,11 @@ mod tests {
             .match_indices("t.completed")
             .map(|(start, _)| start)
             .collect::<Vec<_>>();
-        let parameter_target_start =
-            source.find("p_person REF people.person").unwrap() + "p_person REF ".len();
         let return_target_start = source.find("task REF tasks.task").unwrap() + "task REF ".len();
         let query_object_start = query_start + source[query_start..].find("tasks.task").unwrap();
         let object_reference_start =
             query_start + source[query_start..].find("REF(t)").unwrap() + 4;
         let expected = [
-            (
-                DefinitionReferenceKind::ObjectReference,
-                CheckedDefinitionReferenceTarget::ObjectType(person.id()),
-                parameter_target_start,
-                "people.person".len(),
-            ),
             (
                 DefinitionReferenceKind::ObjectReference,
                 CheckedDefinitionReferenceTarget::ObjectType(task.id()),
@@ -2507,10 +2778,6 @@ mod tests {
         ];
 
         assert_eq!(
-            function.parameters()[0].location().span().start(),
-            source.find("p_person REF").unwrap()
-        );
-        assert_eq!(
             function.return_columns()[0].location().span().start(),
             source.find("task REF").unwrap()
         );
@@ -2519,7 +2786,7 @@ mod tests {
         {
             assert_eq!(reference.kind(), kind);
             assert_eq!(reference.target(), target);
-            assert_eq!(reference.location().logical_path(), "references.orna");
+            assert_eq!(reference.location().logical_path(), "v1_references.orna");
             assert_eq!(reference.location().span().start(), start);
             assert_eq!(reference.location().span().end(), start + length);
         }
@@ -2708,7 +2975,7 @@ mod tests {
     #[test]
     fn accepts_a_checked_server_function_with_a_relational_plan() {
         let source = "CREATE SCHEMA tasks; \
-            CREATE SERVER FUNCTION tasks.open(p_limit INT) RETURNS ROWS (title TEXT, completed BOOL) \
+            CREATE SERVER FUNCTION tasks.open() RETURNS ROWS (title TEXT, completed BOOL) \
             SECURITY DEFINER TRANSACTION READ ONLY VOLATILITY STABLE \
             AS SELECT t.title, t.completed FROM tasks.task t WHERE t.completed = FALSE; \
             CREATE TYPE tasks.task AS OBJECT (title TEXT, completed BOOL NOT NULL);";
@@ -2719,7 +2986,7 @@ mod tests {
         assert_eq!(checked.security(), FunctionSecurity::Definer);
         assert_eq!(checked.transaction(), Some(FunctionTransaction::ReadOnly));
         assert_eq!(checked.volatility(), FunctionVolatility::Stable);
-        assert_eq!(checked.parameters().len(), 1);
+        assert!(checked.parameters().is_empty());
         assert_eq!(checked.return_columns().len(), 2);
         let plan = checked.query_plan().expect("fixture has a SELECT body");
         assert_eq!(plan.projections().len(), 2);
@@ -3424,10 +3691,10 @@ mod tests {
     }
 
     #[test]
-    fn preserves_existing_function_and_reordered_parameter_ids_by_semantic_name() {
-        let function_id = FunctionId::from_bytes([4; 16]);
-        let parameter_id = ParameterId::from_bytes([5; 16]);
-        let offset_parameter_id = ParameterId::from_bytes([6; 16]);
+    fn rejects_parameterised_select_with_more_than_one_declared_parameter() {
+        let _function_id = FunctionId::from_bytes([4; 16]);
+        let _parameter_id = ParameterId::from_bytes([5; 16]);
+        let _offset_parameter_id = ParameterId::from_bytes([6; 16]);
         let base = catalogue(
             vec![schema(1, &["tasks"])],
             vec![object_type(
@@ -3474,21 +3741,169 @@ mod tests {
                 "functions.orna",
                 "CREATE SCHEMA tasks; CREATE TYPE tasks.task AS OBJECT (title TEXT); \
                  CREATE SERVER FUNCTION tasks.open(p_offset INT, p_limit INT) RETURNS ROWS (title TEXT) \
+                 SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE \
                  AS SELECT t.title FROM tasks.task t;",
             )]),
             &base,
         );
 
-        assert!(report.diagnostics().is_empty());
-        let revised = &report.checked_bundle().unwrap().server_functions()[0];
-        assert_eq!(revised.id().existing(), Some(function_id));
-        assert_eq!(revised.parameters()[0].name(), "p_offset");
+        assert_eq!(report.diagnostics().len(), 1);
         assert_eq!(
-            revised.parameters()[0].id().existing(),
-            Some(offset_parameter_id)
+            report.diagnostics()[0].code(),
+            DiagnosticCode::DomainIncompatible
         );
-        assert_eq!(revised.parameters()[1].name(), "p_limit");
-        assert_eq!(revised.parameters()[1].id().existing(), Some(parameter_id));
+        assert_eq!(
+            report.diagnostics()[0].message(),
+            "parameterised SELECT SERVER functions require exactly one declared parameter"
+        );
+        assert_eq!(
+            report.diagnostics()[0].location().logical_path(),
+            "functions.orna"
+        );
+        assert_eq!(
+            report.diagnostics()[0].location().span().start(),
+            "CREATE SCHEMA tasks; CREATE TYPE tasks.task AS OBJECT (title TEXT); \
+                 CREATE SERVER FUNCTION tasks.open(p_offset INT, p_limit INT) RETURNS ROWS (title TEXT) \
+                 SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE \
+                 AS SELECT t.title FROM tasks.task t;"
+                .find("SELECT t.title")
+                .unwrap()
+        );
+        assert_no_checked_bundle(&report);
+    }
+
+    #[test]
+    fn rejects_identity_selected_query_candidates_with_exact_diagnostics() {
+        let prefix = "CREATE SCHEMA tasks; CREATE TYPE tasks.task AS OBJECT (title TEXT); ";
+        let suffix = " SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE";
+        let cases = [
+            (
+                "no_predicate",
+                "CREATE SERVER FUNCTION tasks.get(p_task REF tasks.task) RETURNS ROWS (title TEXT)",
+                " AS SELECT t.title FROM tasks.task t;",
+                DiagnosticCode::DomainIncompatible,
+                "parameterised SELECT SERVER functions require WHERE REF(source_alias) = selector_parameter",
+                "SELECT t.title",
+            ),
+            (
+                "wrong_name",
+                "CREATE SERVER FUNCTION tasks.get(p_task REF tasks.task) RETURNS ROWS (title TEXT)",
+                " AS SELECT t.title FROM tasks.task t WHERE REF(t) = other;",
+                DiagnosticCode::UnknownQualifiedName,
+                "this function has no parameter named other",
+                "other",
+            ),
+            (
+                "wrong_type",
+                "CREATE SERVER FUNCTION tasks.get(p_task INT) RETURNS ROWS (title TEXT)",
+                " AS SELECT t.title FROM tasks.task t WHERE REF(t) = p_task;",
+                DiagnosticCode::TypeMismatch,
+                "selector parameter p_task must use REF tasks.task",
+                "p_task;",
+            ),
+            (
+                "wrong_alias",
+                "CREATE SERVER FUNCTION tasks.get(p_task REF tasks.task) RETURNS ROWS (title TEXT)",
+                " AS SELECT t.title FROM tasks.task t WHERE REF(other) = p_task;",
+                DiagnosticCode::UnknownQualifiedName,
+                "unknown query alias other",
+                "other",
+            ),
+            (
+                "return_type",
+                "CREATE SERVER FUNCTION tasks.get(p_task REF tasks.task) RETURNS ROWS (title BOOL)",
+                " AS SELECT t.title FROM tasks.task t WHERE REF(t) = p_task;",
+                DiagnosticCode::TypeMismatch,
+                "SELECT column 1 does not have the same type as RETURNS ROWS column title",
+                "title BOOL",
+            ),
+        ];
+
+        for (path, header, body, code, message, marker) in cases {
+            let source = format!("{prefix}{header}{suffix}{body}");
+            let bundle = SourceBundle::new([SourceUnit::new(path, source.as_str())]).unwrap();
+            let report = check(&bundle, &empty_catalogue());
+            assert_eq!(report.diagnostics().len(), 1, "{path}");
+            let diagnostic = &report.diagnostics()[0];
+            assert_eq!(diagnostic.code(), code, "{path}");
+            assert_eq!(diagnostic.message(), message, "{path}");
+            assert_eq!(diagnostic.location().logical_path(), path, "{path}");
+            let expected_start = source.rfind(marker).unwrap();
+            assert_eq!(
+                diagnostic.location().span().start(),
+                expected_start,
+                "{path}"
+            );
+            assert_eq!(
+                diagnostic.location().span().end(),
+                if path == "no_predicate" {
+                    source.len() - 1
+                } else {
+                    expected_start + marker.len().saturating_sub((path == "wrong_type") as usize)
+                },
+                "{path}"
+            );
+            assert_no_checked_bundle(&report);
+        }
+    }
+
+    #[test]
+    fn reports_identity_selected_query_mode_failures_before_body_checking() {
+        let source = "CREATE SCHEMA tasks; CREATE TYPE tasks.task AS OBJECT (title TEXT); \
+            CREATE SERVER FUNCTION tasks.get(p_task REF tasks.task) RETURNS ROWS (title TEXT) \
+            SECURITY DEFINER TRANSACTION ATOMIC VOLATILITY VOLATILE \
+            AS SELECT t.title FROM tasks.task t;";
+        let report = check(&bundle([("modes.orna", source)]), &empty_catalogue());
+        let messages = report
+            .diagnostics()
+            .iter()
+            .map(|diagnostic| diagnostic.message())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            messages,
+            vec![
+                "parameterised SELECT SERVER functions require SECURITY INVOKER",
+                "parameterised SELECT SERVER functions require TRANSACTION READ ONLY",
+                "parameterised SELECT SERVER functions require VOLATILITY STABLE",
+            ]
+        );
+        for diagnostic in report.diagnostics() {
+            assert_eq!(diagnostic.code(), DiagnosticCode::DomainIncompatible);
+            assert_eq!(diagnostic.location().logical_path(), "modes.orna");
+            assert_eq!(
+                diagnostic.location().span().start(),
+                source.find("CREATE SERVER FUNCTION").unwrap()
+            );
+            assert_eq!(diagnostic.location().span().end(), source.len());
+        }
+        assert_no_checked_bundle(&report);
+    }
+
+    #[test]
+    fn syntax_errors_take_precedence_over_identity_selected_query_modes() {
+        let source = "CREATE SCHEMA tasks; CREATE TYPE tasks.task AS OBJECT (title TEXT); \
+            CREATE SERVER FUNCTION tasks.get(p_task REF tasks.task) RETURNS ROWS (title TEXT) \
+            SECURITY DEFINER TRANSACTION ATOMIC VOLATILITY VOLATILE \
+            AS SELECT t.title FROM tasks.task t WHERE p_task = REF(t);";
+        let report = check(&bundle([("syntax.orna", source)]), &empty_catalogue());
+        assert_eq!(report.diagnostics().len(), 1);
+        assert_eq!(
+            report.diagnostics()[0].code(),
+            DiagnosticCode::UnexpectedToken
+        );
+        assert_eq!(
+            report.diagnostics()[0].message(),
+            "the current Orna SELECT parser does not yet implement selector parameters on the left side of WHERE equality; expected WHERE REF(alias) = selector_parameter"
+        );
+        assert_eq!(
+            report.diagnostics()[0].location().logical_path(),
+            "syntax.orna"
+        );
+        assert_eq!(
+            report.diagnostics()[0].location().span().start(),
+            source.rfind("p_task").unwrap()
+        );
+        assert_no_checked_bundle(&report);
     }
 
     #[test]
