@@ -7,7 +7,8 @@
 use std::{collections::BTreeMap, error::Error, fmt};
 
 use orna_artifact::server_mutation_plan::{
-    self, MutationExpressionKind, ServerMutationOperation, ServerMutationPlan,
+    self, MutationExpressionKind, MutationSelector, ServerDeletePlan, ServerMutationOperation,
+    ServerMutationPlan,
 };
 use orna_core::{
     FunctionId, FunctionRevisionId, ObjectId, ParameterId, TypeId,
@@ -23,7 +24,8 @@ use orna_core::{
     value::{FunctionArgument, ResultColumn, ResultRow, ResultRows, ResultRowsError, RuntimeValue},
 };
 use tokio_postgres::{
-    Client, IsolationLevel, Statement, Transaction,
+    Client, IsolationLevel, Row, Statement, Transaction,
+    error::SqlState,
     types::{ToSql, Type},
 };
 
@@ -90,6 +92,9 @@ pub type ServerInsertContext = ServerMutationContext;
 
 /// Immutable active state pinned for one SERVER `UPDATE` execution.
 pub type ServerUpdateContext = ServerMutationContext;
+
+/// Immutable active state pinned for one SERVER `DELETE` execution.
+pub type ServerDeleteContext = ServerMutationContext;
 
 /// The committed result of one validated single-row SERVER `INSERT`.
 #[derive(Clone, Debug, PartialEq)]
@@ -234,9 +239,83 @@ impl ServerUpdateResult {
     }
 }
 
+/// The committed result of one validated single-object SERVER `DELETE`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ServerDeleteResult {
+    context: ServerDeleteContext,
+    target: TypeId,
+    selector: ObjectId,
+    matched: bool,
+    rows: ResultRows,
+}
+
+impl ServerDeleteResult {
+    fn new(
+        context: ServerDeleteContext,
+        target: TypeId,
+        selector: ObjectId,
+        matched: bool,
+        column: ResultColumn,
+    ) -> Result<Self, ResultRowsError> {
+        let rows = if matched {
+            ResultRows::new([column], [ResultRow::new([RuntimeValue::Boolean(true)])])?
+        } else {
+            ResultRows::new([column], std::iter::empty::<ResultRow>())?
+        };
+        Ok(Self {
+            context,
+            target,
+            selector,
+            matched,
+            rows,
+        })
+    }
+
+    /// Returns the complete active execution context.
+    pub const fn context(&self) -> ServerDeleteContext {
+        self.context
+    }
+
+    /// Returns the source and catalogue revision pair.
+    pub const fn pair(&self) -> RevisionPair {
+        self.context.pair()
+    }
+
+    /// Returns the executed function identity.
+    pub const fn function(&self) -> FunctionId {
+        self.context.function()
+    }
+
+    /// Returns the immutable function revision that supplied the plan.
+    pub const fn function_revision(&self) -> FunctionRevisionId {
+        self.context.function_revision()
+    }
+
+    /// Returns the deleted object type identity.
+    pub const fn target(&self) -> TypeId {
+        self.target
+    }
+
+    /// Returns the object identity selected for deletion.
+    pub const fn selector(&self) -> ObjectId {
+        self.selector
+    }
+
+    /// Reports whether the selected object existed and was deleted.
+    pub const fn matched(&self) -> bool {
+        self.matched
+    }
+
+    /// Returns the declared zero-or-one-row typed BOOLEAN result.
+    pub const fn rows(&self) -> &ResultRows {
+        &self.rows
+    }
+}
+
 enum ServerMutationResult {
     Insert(ServerInsertResult),
     Update(ServerUpdateResult),
+    Delete(ServerDeleteResult),
 }
 
 impl ServerMutationResult {
@@ -244,6 +323,7 @@ impl ServerMutationResult {
         match self {
             Self::Insert(result) => result.context(),
             Self::Update(result) => result.context(),
+            Self::Delete(result) => result.context(),
         }
     }
 
@@ -257,24 +337,43 @@ impl ServerMutationResult {
                 result: Box::new(result),
                 source: Box::new(source),
             }),
+            Self::Delete(result) => delete_error(ServerDeleteError::CommittedButShutdownFailed {
+                result: Box::new(result),
+                source: Box::new(source),
+            }),
         }
     }
 
     fn into_insert(self) -> Result<ServerInsertResult, PostgresKernelError> {
         match self {
             Self::Insert(result) => Ok(result),
-            Self::Update(_) => Err(server_error(ServerMutationError::ValueInvariant {
-                rule: "INSERT execution produced an UPDATE result",
-            })),
+            Self::Update(_) | Self::Delete(_) => {
+                Err(server_error(ServerMutationError::ValueInvariant {
+                    rule: "INSERT execution produced a different mutation result",
+                }))
+            }
         }
     }
 
     fn into_update(self) -> Result<ServerUpdateResult, PostgresKernelError> {
         match self {
             Self::Update(result) => Ok(result),
-            Self::Insert(_) => Err(update_unavailable(PostgresKernelError::CatalogueInvariant(
-                "UPDATE execution produced an INSERT result",
-            ))),
+            Self::Insert(_) | Self::Delete(_) => {
+                Err(update_unavailable(PostgresKernelError::CatalogueInvariant(
+                    "UPDATE execution produced a different mutation result",
+                )))
+            }
+        }
+    }
+
+    fn into_delete(self) -> Result<ServerDeleteResult, PostgresKernelError> {
+        match self {
+            Self::Delete(result) => Ok(result),
+            Self::Insert(_) | Self::Update(_) => {
+                Err(delete_unavailable(PostgresKernelError::CatalogueInvariant(
+                    "DELETE execution produced a different mutation result",
+                )))
+            }
         }
     }
 }
@@ -297,6 +396,9 @@ pub type ServerInsertCommitState = ServerMutationCommitState;
 /// The confirmed commit state attached to a SERVER `UPDATE` error.
 pub type ServerUpdateCommitState = ServerMutationCommitState;
 
+/// The confirmed commit state attached to a SERVER `DELETE` error.
+pub type ServerDeleteCommitState = ServerMutationCommitState;
+
 /// A shared typed failure while validating or executing a SERVER mutation.
 #[non_exhaustive]
 #[derive(Debug)]
@@ -315,7 +417,7 @@ pub enum ServerMutationError {
         /// The underlying typed validation or execution failure.
         source: Box<ServerInsertError>,
     },
-    /// A kernel failure occurred before the insert could commit.
+    /// A kernel failure occurred before the change could commit.
     Kernel {
         /// The kernel failure with its native source chain.
         source: Box<PostgresKernelError>,
@@ -325,7 +427,7 @@ pub enum ServerMutationError {
         /// The PostgreSQL failure.
         source: tokio_postgres::Error,
     },
-    /// The function declaration is outside the accepted INSERT subset.
+    /// The function declaration is outside the accepted mutation subset.
     FunctionSignature {
         /// The stable function identity.
         function: FunctionId,
@@ -389,7 +491,7 @@ pub enum ServerMutationError {
         /// The exact rejected rule.
         rule: &'static str,
     },
-    /// The declared one-row typed reference result could not be built.
+    /// The declared typed result could not be built.
     ResultRows(ResultRowsError),
     /// PostgreSQL rejected COMMIT and confirmed that the transaction did not commit.
     CommitRejected {
@@ -663,6 +765,140 @@ impl Error for ServerUpdateError {
     }
 }
 
+/// A typed failure from the initial single-object SERVER `DELETE` subset.
+#[non_exhaustive]
+#[derive(Debug)]
+pub enum ServerDeleteError {
+    /// The database could not establish the active state needed for a delete.
+    Unavailable {
+        /// The underlying kernel failure.
+        source: Box<PostgresKernelError>,
+    },
+    /// The requested function is not in the recovered active catalogue.
+    FunctionNotActive {
+        /// The recovered active revision pair.
+        pair: RevisionPair,
+        /// The requested stable function identity.
+        function: FunctionId,
+    },
+    /// A failure after an active function revision was pinned and rolled back.
+    NotCommitted {
+        /// The immutable active execution context.
+        context: ServerDeleteContext,
+        /// The shared typed mutation failure.
+        source: Box<ServerMutationError>,
+    },
+    /// A declared reference policy prevented the object from being deleted.
+    DeleteRestricted {
+        /// The immutable active execution context.
+        context: ServerDeleteContext,
+        /// The delete target identity.
+        target: TypeId,
+        /// The selected object identity.
+        selector: ObjectId,
+        /// The PostgreSQL integrity rejection retained as an internal source.
+        source: tokio_postgres::Error,
+    },
+    /// PostgreSQL rejected COMMIT and confirmed that the delete did not commit.
+    CommitRejected {
+        /// The immutable active execution context.
+        context: ServerDeleteContext,
+        /// The delete target identity.
+        target: TypeId,
+        /// The selected object identity.
+        selector: ObjectId,
+        /// Whether the statement matched an object before COMMIT.
+        matched: bool,
+        /// The PostgreSQL commit rejection.
+        source: tokio_postgres::Error,
+    },
+    /// The connection failed while the commit outcome was unknown.
+    CommitOutcomeUnknown {
+        /// The immutable active execution context.
+        context: ServerDeleteContext,
+        /// The delete target identity.
+        target: TypeId,
+        /// The selected object identity.
+        selector: ObjectId,
+        /// Whether the statement matched an object before COMMIT.
+        matched: bool,
+        /// The driver or transport failure.
+        source: tokio_postgres::Error,
+    },
+    /// COMMIT succeeded, but the connection driver then failed to shut down.
+    CommittedButShutdownFailed {
+        /// The complete confirmed committed result.
+        result: Box<ServerDeleteResult>,
+        /// The connection shutdown failure.
+        source: Box<PostgresKernelError>,
+    },
+}
+
+impl ServerDeleteError {
+    /// Returns the commit state that callers must use for retry decisions.
+    pub const fn commit_state(&self) -> ServerDeleteCommitState {
+        match self {
+            Self::CommitOutcomeUnknown { .. } => ServerMutationCommitState::Unknown,
+            Self::CommittedButShutdownFailed { .. } => ServerMutationCommitState::Committed,
+            Self::Unavailable { .. }
+            | Self::FunctionNotActive { .. }
+            | Self::NotCommitted { .. }
+            | Self::DeleteRestricted { .. }
+            | Self::CommitRejected { .. } => ServerMutationCommitState::NotCommitted,
+        }
+    }
+}
+
+impl fmt::Display for ServerDeleteError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unavailable { .. } => {
+                formatter.write_str("the database could not check the active function")
+            }
+            Self::FunctionNotActive { .. } => {
+                formatter.write_str("the requested function is not active; no object was deleted")
+            }
+            Self::NotCommitted { source, .. } => {
+                write!(formatter, "the object was not deleted: {source}")
+            }
+            Self::DeleteRestricted { selector, .. } => write!(
+                formatter,
+                "object {} cannot be deleted because another object still refers to it",
+                selector.canonical(),
+            ),
+            Self::CommitRejected { selector, .. } => write!(
+                formatter,
+                "the database rejected the final save for object {}; the delete did not commit",
+                selector.canonical(),
+            ),
+            Self::CommitOutcomeUnknown { selector, .. } => write!(
+                formatter,
+                "the connection failed while deleting object {}; it is not known whether the delete committed; do not retry automatically",
+                selector.canonical(),
+            ),
+            Self::CommittedButShutdownFailed { result, .. } => write!(
+                formatter,
+                "the delete for object {} committed, but the database connection did not close cleanly",
+                result.selector().canonical(),
+            ),
+        }
+    }
+}
+
+impl Error for ServerDeleteError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Unavailable { source } => Some(source),
+            Self::NotCommitted { source, .. } => Some(source),
+            Self::DeleteRestricted { source, .. }
+            | Self::CommitRejected { source, .. }
+            | Self::CommitOutcomeUnknown { source, .. } => Some(source),
+            Self::CommittedButShutdownFailed { source, .. } => Some(source),
+            Self::FunctionNotActive { .. } => None,
+        }
+    }
+}
+
 impl PostgresKernel {
     /// Executes one active single-row SERVER `INSERT` by stable function identity.
     ///
@@ -785,6 +1021,68 @@ impl PostgresKernel {
         .await?
         .into_update()
     }
+
+    /// Executes one active single-object SERVER `DELETE` by stable function identity.
+    ///
+    /// Arguments are matched by stable [`ParameterId`] and can arrive in any
+    /// order. A missing target commits successfully and returns zero rows.
+    pub async fn execute_server_delete(
+        &self,
+        function: FunctionId,
+        arguments: &[FunctionArgument],
+    ) -> Result<ServerDeleteResult, PostgresKernelError> {
+        self.execute_server_delete_with_options(function, arguments, None, false)
+            .await
+    }
+
+    /// Pauses a live delete after it has recovered and pinned its active snapshot.
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub async fn execute_server_delete_with_test_barrier(
+        &self,
+        function: FunctionId,
+        arguments: &[FunctionArgument],
+        reached: std::sync::Arc<tokio::sync::Barrier>,
+        resume: std::sync::Arc<tokio::sync::Barrier>,
+    ) -> Result<ServerDeleteResult, PostgresKernelError> {
+        self.execute_server_delete_with_options(
+            function,
+            arguments,
+            Some(MutationTestBarrier { reached, resume }),
+            false,
+        )
+        .await
+    }
+
+    /// Forces the driver to fail after PostgreSQL has confirmed a delete COMMIT.
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub async fn execute_server_delete_with_forced_post_commit_driver_shutdown(
+        &self,
+        function: FunctionId,
+        arguments: &[FunctionArgument],
+    ) -> Result<ServerDeleteResult, PostgresKernelError> {
+        self.execute_server_delete_with_options(function, arguments, None, true)
+            .await
+    }
+
+    async fn execute_server_delete_with_options(
+        &self,
+        function: FunctionId,
+        arguments: &[FunctionArgument],
+        barrier: Option<MutationTestBarrier>,
+        force_post_commit_driver_shutdown: bool,
+    ) -> Result<ServerDeleteResult, PostgresKernelError> {
+        self.execute_server_mutation_with_options(
+            MutationExecutionKind::Delete,
+            function,
+            arguments,
+            barrier,
+            force_post_commit_driver_shutdown,
+        )
+        .await?
+        .into_delete()
+    }
 }
 
 async fn execute_mutation_client(
@@ -855,7 +1153,52 @@ async fn commit_mutation_candidate(
                     source,
                 })
             }
+            ServerMutationResult::Delete(result) => match delete_commit_failure(
+                source
+                    .as_db_error()
+                    .map(tokio_postgres::error::DbError::code),
+            ) {
+                DeleteCommitFailure::Restricted => {
+                    delete_error(ServerDeleteError::DeleteRestricted {
+                        context,
+                        target: result.target(),
+                        selector: result.selector(),
+                        source,
+                    })
+                }
+                DeleteCommitFailure::Rejected => delete_error(ServerDeleteError::CommitRejected {
+                    context,
+                    target: result.target(),
+                    selector: result.selector(),
+                    matched: result.matched(),
+                    source,
+                }),
+                DeleteCommitFailure::Unknown => {
+                    delete_error(ServerDeleteError::CommitOutcomeUnknown {
+                        context,
+                        target: result.target(),
+                        selector: result.selector(),
+                        matched: result.matched(),
+                        source,
+                    })
+                }
+            },
         }),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DeleteCommitFailure {
+    Restricted,
+    Rejected,
+    Unknown,
+}
+
+fn delete_commit_failure(code: Option<&SqlState>) -> DeleteCommitFailure {
+    match code {
+        Some(code) if code == &SqlState::FOREIGN_KEY_VIOLATION => DeleteCommitFailure::Restricted,
+        Some(_) => DeleteCommitFailure::Rejected,
+        None => DeleteCommitFailure::Unknown,
     }
 }
 
@@ -886,6 +1229,12 @@ async fn execute_mutation_transaction(
                         function: function_id,
                     })
                 }
+                MutationExecutionKind::Delete => {
+                    delete_error(ServerDeleteError::FunctionNotActive {
+                        pair: active.pair(),
+                        function: function_id,
+                    })
+                }
             })?;
     let context =
         ServerMutationContext::new(active.pair(), function_id, function.current_revision());
@@ -902,6 +1251,12 @@ async fn execute_mutation_transaction(
                 .await
                 .map(ServerMutationResult::Update)
                 .map_err(|error| update_not_committed(context, error))
+        }
+        MutationExecutionKind::Delete => {
+            execute_active_delete(transaction, &active, function, context, arguments)
+                .await
+                .map(ServerMutationResult::Delete)
+                .map_err(|error| delete_not_committed(context, error))
         }
     }
 }
@@ -929,6 +1284,45 @@ async fn execute_active_update(
         selector,
         matched,
         validated.returned.column,
+    )
+    .map_err(ServerMutationError::ResultRows)
+    .map_err(server_error)
+}
+
+async fn execute_active_delete(
+    transaction: &Transaction<'_>,
+    active: &ActiveDatabaseRevision,
+    function: &FunctionDefinition,
+    context: ServerDeleteContext,
+    arguments: &[FunctionArgument],
+) -> Result<ServerDeleteResult, PostgresKernelError> {
+    let validated = validate_active_delete(active, function, arguments)?;
+    let selector = selector_argument_object(
+        validated.plan.target(),
+        validated.plan.selector(),
+        arguments,
+    )?;
+    let lowered = lower_delete(&validated.plan, &validated.arguments)?;
+    let statement = transaction
+        .prepare_typed(&lowered.sql, &lowered.bind_types)
+        .await
+        .map_err(|source| server_error(ServerMutationError::Database { source }))?;
+    validate_prepared_result(&statement, "DELETE")?;
+    let matched = execute_delete(
+        transaction,
+        &statement,
+        lowered.binds,
+        context,
+        validated.target.id(),
+        selector,
+    )
+    .await?;
+    ServerDeleteResult::new(
+        context,
+        validated.target.id(),
+        selector,
+        matched,
+        validated.column,
     )
     .map_err(ServerMutationError::ResultRows)
     .map_err(server_error)
@@ -989,10 +1383,18 @@ struct ValidatedActiveMutation<'a> {
     arguments: BTreeMap<ParameterId, BindValue>,
 }
 
+struct ValidatedActiveDelete<'a> {
+    column: ResultColumn,
+    plan: ServerDeletePlan,
+    target: &'a ObjectTypeDefinition,
+    arguments: BTreeMap<ParameterId, BindValue>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MutationExecutionKind {
     Insert,
     Update,
+    Delete,
 }
 
 impl MutationExecutionKind {
@@ -1000,6 +1402,7 @@ impl MutationExecutionKind {
         match self {
             Self::Insert => server_mutation_plan::INSERT_FORMAT_VERSION,
             Self::Update => server_mutation_plan::UPDATE_FORMAT_VERSION,
+            Self::Delete => server_mutation_plan::DELETE_FORMAT_VERSION,
         }
     }
 }
@@ -1053,6 +1456,47 @@ fn validate_active_mutation<'a>(
     })
 }
 
+fn validate_active_delete<'a>(
+    active: &'a ActiveDatabaseRevision,
+    function: &FunctionDefinition,
+    arguments: &[FunctionArgument],
+) -> Result<ValidatedActiveDelete<'a>, PostgresKernelError> {
+    let column = validate_delete_function_signature(active.catalogue(), function)?;
+    let revision = active
+        .function_revisions()
+        .iter()
+        .find(|revision| {
+            revision.function() == function.id() && revision.id() == function.current_revision()
+        })
+        .ok_or_else(|| {
+            server_error(ServerMutationError::CurrentRevision {
+                function: function.id(),
+                revision: function.current_revision(),
+            })
+        })?;
+    let artifact = revision.artifact();
+    validate_artifact_metadata_for_operation(
+        function.id(),
+        artifact.kind(),
+        artifact.format(),
+        artifact.version(),
+        revision.language_version(),
+        MutationExecutionKind::Delete,
+    )?;
+    let plan = ServerDeletePlan::decode(artifact.payload())
+        .map_err(ServerMutationError::PlanDecode)
+        .map_err(server_error)?;
+    let target = validate_delete_plan(active.catalogue(), function, &plan)?;
+    validate_delete_reference_evidence(active, function, &plan)?;
+    let arguments = validate_arguments(active.catalogue(), function, arguments)?;
+    Ok(ValidatedActiveDelete {
+        column,
+        plan,
+        target,
+        arguments,
+    })
+}
+
 #[cfg(test)]
 fn validate_artifact_metadata(
     function: FunctionId,
@@ -1095,6 +1539,9 @@ fn validate_artifact_metadata_for_operation(
                 MutationExecutionKind::Update => {
                     "the active function must use the supported UPDATE mutation format version 2"
                 }
+                MutationExecutionKind::Delete => {
+                    "the active function must use the supported DELETE mutation format version 3"
+                }
             },
         ));
     }
@@ -1120,63 +1567,8 @@ fn validate_function_signature_for_operation(
     function: &FunctionDefinition,
     operation: MutationExecutionKind,
 ) -> Result<ValidatedReturn, PostgresKernelError> {
-    let reject = |rule| {
-        server_error(ServerInsertError::FunctionSignature {
-            function: function.id(),
-            rule,
-        })
-    };
-    if function.domain() != FunctionDomain::Server {
-        return Err(reject("this operation requires a SERVER function"));
-    }
-    if function.security() != FunctionSecurity::Invoker {
-        return Err(reject(match operation {
-            MutationExecutionKind::Insert => "an INSERT SERVER function must use SECURITY INVOKER",
-            MutationExecutionKind::Update => "an UPDATE SERVER function must use SECURITY INVOKER",
-        }));
-    }
-    if function.transaction() != Some(FunctionTransaction::Atomic) {
-        return Err(reject(match operation {
-            MutationExecutionKind::Insert => {
-                "an INSERT SERVER function must use exactly TRANSACTION ATOMIC"
-            }
-            MutationExecutionKind::Update => {
-                "an UPDATE SERVER function must use exactly TRANSACTION ATOMIC"
-            }
-        }));
-    }
-    if function.volatility() != FunctionVolatility::Volatile {
-        return Err(reject(match operation {
-            MutationExecutionKind::Insert => {
-                "an INSERT SERVER function must use VOLATILITY VOLATILE"
-            }
-            MutationExecutionKind::Update => {
-                "an UPDATE SERVER function must use VOLATILITY VOLATILE"
-            }
-        }));
-    }
-    for parameter in function.parameters() {
-        if parameter.default_expression().is_some() {
-            return Err(reject(match operation {
-                MutationExecutionKind::Insert => {
-                    "INSERT SERVER function parameters cannot have default expressions"
-                }
-                MutationExecutionKind::Update => {
-                    "UPDATE SERVER function parameters cannot have default expressions"
-                }
-            }));
-        }
-        if !runtime_type_is_active(catalogue, parameter.resolved_type()) {
-            return Err(reject(match operation {
-                MutationExecutionKind::Insert => {
-                    "every INSERT SERVER function parameter must use a supported active type"
-                }
-                MutationExecutionKind::Update => {
-                    "every UPDATE SERVER function parameter must use a supported active type"
-                }
-            }));
-        }
-    }
+    validate_mutation_function_header(catalogue, function, operation)?;
+    let reject = |rule| function_signature_error(function.id(), rule);
     let FunctionReturn::Rows(columns) = function.return_type() else {
         return Err(reject(match operation {
             MutationExecutionKind::Insert => {
@@ -1184,6 +1576,9 @@ fn validate_function_signature_for_operation(
             }
             MutationExecutionKind::Update => {
                 "an UPDATE SERVER function must return exactly one object-reference column"
+            }
+            MutationExecutionKind::Delete => {
+                "a DELETE SERVER function must return exactly one BOOLEAN column"
             }
         }));
     };
@@ -1194,6 +1589,9 @@ fn validate_function_signature_for_operation(
             }
             MutationExecutionKind::Update => {
                 "an UPDATE SERVER function must return exactly one object-reference column"
+            }
+            MutationExecutionKind::Delete => {
+                "a DELETE SERVER function must return exactly one BOOLEAN column"
             }
         }));
     };
@@ -1211,6 +1609,115 @@ fn validate_function_signature_for_operation(
         .map_err(ServerInsertError::ResultRows)
         .map_err(server_error)?;
     Ok(ValidatedReturn { target, column })
+}
+
+fn validate_delete_function_signature(
+    catalogue: &CatalogueSnapshot,
+    function: &FunctionDefinition,
+) -> Result<ResultColumn, PostgresKernelError> {
+    validate_mutation_function_header(catalogue, function, MutationExecutionKind::Delete)?;
+    let FunctionReturn::Rows(columns) = function.return_type() else {
+        return Err(function_signature_error(
+            function.id(),
+            "a DELETE SERVER function must return exactly one BOOLEAN column",
+        ));
+    };
+    let [column] = columns.as_slice() else {
+        return Err(function_signature_error(
+            function.id(),
+            "a DELETE SERVER function must return exactly one BOOLEAN column",
+        ));
+    };
+    if column.resolved_type() != ResolvedType::Scalar(orna_core::types::StandardScalar::Boolean) {
+        return Err(function_signature_error(
+            function.id(),
+            "the sole DELETE result column must be BOOLEAN",
+        ));
+    }
+    ResultColumn::new(
+        column.name(),
+        ResolvedType::Scalar(orna_core::types::StandardScalar::Boolean),
+        false,
+    )
+    .map_err(ServerMutationError::ResultRows)
+    .map_err(server_error)
+}
+
+fn validate_mutation_function_header(
+    catalogue: &CatalogueSnapshot,
+    function: &FunctionDefinition,
+    operation: MutationExecutionKind,
+) -> Result<(), PostgresKernelError> {
+    let reject = |rule| function_signature_error(function.id(), rule);
+    if function.domain() != FunctionDomain::Server {
+        return Err(reject("this operation requires a SERVER function"));
+    }
+    if function.security() != FunctionSecurity::Invoker {
+        return Err(reject(match operation {
+            MutationExecutionKind::Insert => "an INSERT SERVER function must use SECURITY INVOKER",
+            MutationExecutionKind::Update => "an UPDATE SERVER function must use SECURITY INVOKER",
+            MutationExecutionKind::Delete => "a DELETE SERVER function must use SECURITY INVOKER",
+        }));
+    }
+    if function.transaction() != Some(FunctionTransaction::Atomic) {
+        return Err(reject(match operation {
+            MutationExecutionKind::Insert => {
+                "an INSERT SERVER function must use exactly TRANSACTION ATOMIC"
+            }
+            MutationExecutionKind::Update => {
+                "an UPDATE SERVER function must use exactly TRANSACTION ATOMIC"
+            }
+            MutationExecutionKind::Delete => {
+                "a DELETE SERVER function must use exactly TRANSACTION ATOMIC"
+            }
+        }));
+    }
+    if function.volatility() != FunctionVolatility::Volatile {
+        return Err(reject(match operation {
+            MutationExecutionKind::Insert => {
+                "an INSERT SERVER function must use VOLATILITY VOLATILE"
+            }
+            MutationExecutionKind::Update => {
+                "an UPDATE SERVER function must use VOLATILITY VOLATILE"
+            }
+            MutationExecutionKind::Delete => {
+                "a DELETE SERVER function must use VOLATILITY VOLATILE"
+            }
+        }));
+    }
+    for parameter in function.parameters() {
+        if parameter.default_expression().is_some() {
+            return Err(reject(match operation {
+                MutationExecutionKind::Insert => {
+                    "INSERT SERVER function parameters cannot have default expressions"
+                }
+                MutationExecutionKind::Update => {
+                    "UPDATE SERVER function parameters cannot have default expressions"
+                }
+                MutationExecutionKind::Delete => {
+                    "DELETE SERVER function parameters cannot have default expressions"
+                }
+            }));
+        }
+        if !runtime_type_is_active(catalogue, parameter.resolved_type()) {
+            return Err(reject(match operation {
+                MutationExecutionKind::Insert => {
+                    "every INSERT SERVER function parameter must use a supported active type"
+                }
+                MutationExecutionKind::Update => {
+                    "every UPDATE SERVER function parameter must use a supported active type"
+                }
+                MutationExecutionKind::Delete => {
+                    "every DELETE SERVER function parameter must use a supported active type"
+                }
+            }));
+        }
+    }
+    Ok(())
+}
+
+fn function_signature_error(function: FunctionId, rule: &'static str) -> PostgresKernelError {
+    server_error(ServerMutationError::FunctionSignature { function, rule })
 }
 
 fn runtime_type_is_active(catalogue: &CatalogueSnapshot, resolved_type: ResolvedType) -> bool {
@@ -1384,6 +1891,38 @@ fn validate_plan_for_operation<'a>(
     Ok(target)
 }
 
+fn validate_delete_plan<'a>(
+    catalogue: &'a CatalogueSnapshot,
+    function: &FunctionDefinition,
+    plan: &ServerDeletePlan,
+) -> Result<&'a ObjectTypeDefinition, PostgresKernelError> {
+    if plan.format_version() != server_mutation_plan::DELETE_FORMAT_VERSION {
+        return Err(plan_invariant(
+            "the DELETE payload must use mutation format version 3",
+        ));
+    }
+    let target = catalogue
+        .object_type_by_id(plan.target())
+        .ok_or_else(|| plan_invariant("DELETE target must be an active object type"))?;
+    let selector = plan.selector();
+    if selector.owner() != function.id() {
+        return Err(plan_invariant(
+            "DELETE selector owner must equal the active function",
+        ));
+    }
+    let parameter = function
+        .parameter_by_id(selector.parameter())
+        .ok_or_else(|| plan_invariant("DELETE selector must name an active declared parameter"))?;
+    if parameter.default_expression().is_some()
+        || parameter.resolved_type() != ResolvedType::reference(target.id())
+    {
+        return Err(plan_invariant(
+            "DELETE selector must exactly match a required REF parameter for the target object",
+        ));
+    }
+    Ok(target)
+}
+
 fn validate_reference_evidence(
     active: &ActiveDatabaseRevision,
     function: &FunctionDefinition,
@@ -1404,6 +1943,48 @@ fn validate_reference_evidence(
             rule,
         })
     })
+}
+
+fn validate_delete_reference_evidence(
+    active: &ActiveDatabaseRevision,
+    function: &FunctionDefinition,
+    plan: &ServerDeletePlan,
+) -> Result<(), PostgresKernelError> {
+    let expected = expected_delete_body_references(plan);
+    validate_function_reference_replay(active, function, &expected).map_err(|mismatch| {
+        let rule = match mismatch {
+            ReferenceReplayMismatch::Count => {
+                "reference count must match the signature and DELETE body"
+            }
+            ReferenceReplayMismatch::Sequence => {
+                "references must replay the exact signature and DELETE body order"
+            }
+        };
+        server_error(ServerMutationError::ReferenceEvidence {
+            function: function.id(),
+            rule,
+        })
+    })
+}
+
+fn expected_delete_body_references(plan: &ServerDeletePlan) -> [ExpectedDefinitionReference; 3] {
+    [
+        ExpectedDefinitionReference::new(
+            DefinitionReferenceKind::WriteObject,
+            DefinitionReferenceTarget::ObjectType(plan.target()),
+        ),
+        ExpectedDefinitionReference::new(
+            DefinitionReferenceKind::ObjectReference,
+            DefinitionReferenceTarget::ObjectType(plan.target()),
+        ),
+        ExpectedDefinitionReference::new(
+            DefinitionReferenceKind::ParameterRead,
+            DefinitionReferenceTarget::Parameter {
+                owner: plan.selector().owner(),
+                parameter: plan.selector().parameter(),
+            },
+        ),
+    ]
 }
 
 fn expected_body_references(plan: &ServerMutationPlan) -> Vec<ExpectedDefinitionReference> {
@@ -1518,12 +2099,23 @@ fn selector_object(
     let selector = plan
         .selector()
         .ok_or_else(|| plan_invariant("UPDATE plan must contain one selector parameter"))?;
+    selector_argument_object(plan.target(), selector, arguments)
+}
+
+fn selector_argument_object(
+    target: TypeId,
+    selector: MutationSelector,
+    arguments: &[FunctionArgument],
+) -> Result<ObjectId, PostgresKernelError> {
     let argument = arguments
         .iter()
         .find(|argument| argument.parameter() == selector.parameter())
         .ok_or_else(|| plan_invariant("validated selector argument must be present"))?;
     match argument.value() {
-        RuntimeValue::Reference { target, object } if *target == plan.target() => Ok(*object),
+        RuntimeValue::Reference {
+            target: actual,
+            object,
+        } if *actual == target => Ok(*object),
         _ => Err(plan_invariant(
             "validated selector argument must be an exact target object reference",
         )),
@@ -1740,6 +2332,31 @@ fn lower_update(
     })
 }
 
+fn lower_delete(
+    plan: &ServerDeletePlan,
+    arguments: &BTreeMap<ParameterId, BindValue>,
+) -> Result<LoweredMutation, PostgresKernelError> {
+    let selector = plan.selector();
+    let value = arguments.get(&selector.parameter()).ok_or_else(|| {
+        plan_invariant("validated DELETE selector must have one runtime argument")
+    })?;
+    let sql = format!(
+        "DELETE FROM {DATA_SCHEMA}.{} WHERE {OBJECT_ID_COLUMN} = $1 RETURNING {OBJECT_ID_COLUMN} AS c0",
+        relation_name(plan.target()),
+    );
+    if sql.len() > SQL_LIMIT {
+        return Err(server_error(ServerMutationError::ComplexityLimit {
+            category: "saved function complexity",
+            maximum: SQL_LIMIT,
+        }));
+    }
+    Ok(LoweredMutation {
+        sql,
+        bind_types: vec![Type::BYTEA],
+        binds: vec![value.clone()],
+    })
+}
+
 fn validate_prepared_result(
     statement: &Statement,
     operation: &'static str,
@@ -1749,6 +2366,7 @@ fn validate_prepared_result(
             rule: match operation {
                 "INSERT" => "prepared INSERT must return exactly one column",
                 "UPDATE" => "prepared UPDATE must return exactly one column",
+                "DELETE" => "prepared DELETE must return exactly one column",
                 _ => "prepared mutation must return exactly one column",
             },
         }));
@@ -1758,6 +2376,7 @@ fn validate_prepared_result(
             rule: match operation {
                 "INSERT" => "prepared INSERT must return one BYTEA column named c0",
                 "UPDATE" => "prepared UPDATE must return one BYTEA column named c0",
+                "DELETE" => "prepared DELETE must return one BYTEA column named c0",
                 _ => "prepared mutation must return one BYTEA column named c0",
             },
         }));
@@ -1811,12 +2430,56 @@ async fn execute_update(
         .query(statement, &parameters)
         .await
         .map_err(|source| server_error(ServerInsertError::Database { source }))?;
-    let [row] = rows.as_slice() else {
+    decode_selected_result(&rows, selector, "UPDATE")
+}
+
+async fn execute_delete(
+    transaction: &Transaction<'_>,
+    statement: &Statement,
+    binds: Vec<BindValue>,
+    context: ServerDeleteContext,
+    target: TypeId,
+    selector: ObjectId,
+) -> Result<bool, PostgresKernelError> {
+    let parameters = binds.iter().map(BindValue::as_to_sql).collect::<Vec<_>>();
+    let rows = transaction
+        .query(statement, &parameters)
+        .await
+        .map_err(|source| {
+            if delete_commit_failure(
+                source
+                    .as_db_error()
+                    .map(tokio_postgres::error::DbError::code),
+            ) == DeleteCommitFailure::Restricted
+            {
+                delete_error(ServerDeleteError::DeleteRestricted {
+                    context,
+                    target,
+                    selector,
+                    source,
+                })
+            } else {
+                server_error(ServerMutationError::Database { source })
+            }
+        })?;
+    decode_selected_result(&rows, selector, "DELETE")
+}
+
+fn decode_selected_result(
+    rows: &[Row],
+    selector: ObjectId,
+    operation: &'static str,
+) -> Result<bool, PostgresKernelError> {
+    let [row] = rows else {
         if rows.is_empty() {
             return Ok(false);
         }
         return Err(server_error(ServerInsertError::ValueInvariant {
-            rule: "UPDATE must return at most one row",
+            rule: match operation {
+                "UPDATE" => "UPDATE must return at most one row",
+                "DELETE" => "DELETE must return at most one row",
+                _ => "identity-selected mutation must return at most one row",
+            },
         }));
     };
     let returned = row
@@ -1829,7 +2492,11 @@ async fn execute_update(
     })?;
     if ObjectId::from_bytes(returned) != selector {
         return Err(server_error(ServerInsertError::ValueInvariant {
-            rule: "returned object identity must equal the selected identity",
+            rule: match operation {
+                "UPDATE" => "updated object identity must equal the selected identity",
+                "DELETE" => "deleted object identity must equal the selected identity",
+                _ => "returned object identity must equal the selected identity",
+            },
         }));
     }
     Ok(true)
@@ -1843,8 +2510,18 @@ fn update_error(error: ServerUpdateError) -> PostgresKernelError {
     PostgresKernelError::ServerUpdate(error)
 }
 
+fn delete_error(error: ServerDeleteError) -> PostgresKernelError {
+    PostgresKernelError::ServerDelete(error)
+}
+
 fn update_unavailable(error: PostgresKernelError) -> PostgresKernelError {
     update_error(ServerUpdateError::Unavailable {
+        source: Box::new(error),
+    })
+}
+
+fn delete_unavailable(error: PostgresKernelError) -> PostgresKernelError {
+    delete_error(ServerDeleteError::Unavailable {
         source: Box::new(error),
     })
 }
@@ -1856,6 +2533,7 @@ fn mutation_kernel_error(
     match operation {
         MutationExecutionKind::Insert => kernel_error(error),
         MutationExecutionKind::Update => update_unavailable(error),
+        MutationExecutionKind::Delete => delete_unavailable(error),
     }
 }
 
@@ -1866,6 +2544,7 @@ fn pre_transaction_mutation_error(
     match operation {
         MutationExecutionKind::Insert => pre_transaction_error(error),
         MutationExecutionKind::Update => update_unavailable(error),
+        MutationExecutionKind::Delete => delete_unavailable(error),
     }
 }
 
@@ -1881,6 +2560,26 @@ fn update_not_committed(
         },
     };
     update_error(ServerUpdateError::NotCommitted {
+        context,
+        source: Box::new(source),
+    })
+}
+
+fn delete_not_committed(
+    context: ServerDeleteContext,
+    error: PostgresKernelError,
+) -> PostgresKernelError {
+    let source = match error {
+        PostgresKernelError::ServerDelete(error) => {
+            return PostgresKernelError::ServerDelete(error);
+        }
+        PostgresKernelError::ServerInsert(source) => source,
+        PostgresKernelError::Database(source) => ServerMutationError::Database { source },
+        error => ServerMutationError::Kernel {
+            source: Box::new(error),
+        },
+    };
+    delete_error(ServerDeleteError::NotCommitted {
         context,
         source: Box::new(source),
     })
@@ -2251,6 +2950,48 @@ mod tests {
         arguments
     }
 
+    fn rows_boolean() -> FunctionReturn {
+        FunctionReturn::Rows(vec![FunctionReturnColumnDefinition::new(
+            "semantic_deleted",
+            0,
+            ResolvedType::scalar(StandardScalar::Boolean),
+        )])
+    }
+
+    fn valid_delete_function() -> FunctionDefinition {
+        function(
+            FunctionDomain::Server,
+            vec![ParameterDefinition::new(
+                PARAMETER_SELECTOR,
+                "semantic_selector_parameter",
+                0,
+                ResolvedType::reference(TARGET),
+                None,
+            )],
+            rows_boolean(),
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::Atomic),
+            FunctionVolatility::Volatile,
+        )
+    }
+
+    fn valid_delete_plan() -> ServerDeletePlan {
+        ServerDeletePlan::new(TARGET, MutationSelector::new(FUNCTION, PARAMETER_SELECTOR))
+    }
+
+    fn valid_delete_arguments() -> Vec<FunctionArgument> {
+        vec![
+            FunctionArgument::new(
+                PARAMETER_SELECTOR,
+                RuntimeValue::Reference {
+                    target: TARGET,
+                    object: SELECTED_OBJECT,
+                },
+            )
+            .unwrap(),
+        ]
+    }
+
     fn expect_insert_error(error: PostgresKernelError) -> ServerInsertError {
         let PostgresKernelError::ServerInsert(error) = error else {
             panic!("expected typed SERVER INSERT error");
@@ -2261,6 +3002,13 @@ mod tests {
     fn expect_update_error(error: PostgresKernelError) -> ServerUpdateError {
         let PostgresKernelError::ServerUpdate(error) = error else {
             panic!("expected typed SERVER UPDATE error");
+        };
+        error
+    }
+
+    fn expect_delete_error(error: PostgresKernelError) -> ServerDeleteError {
+        let PostgresKernelError::ServerDelete(error) = error else {
+            panic!("expected typed SERVER DELETE error");
         };
         error
     }
@@ -2336,6 +3084,181 @@ mod tests {
                 target: TARGET,
                 object: SELECTED_OBJECT,
             }],
+        );
+    }
+
+    #[test]
+    fn delete_result_distinguishes_absent_and_deleted_objects() {
+        let pair = RevisionPair::new(
+            SourceRevisionId::from_bytes([0x71; 16]),
+            CatalogueRevisionId::from_bytes([0x72; 16]),
+        );
+        let context = ServerDeleteContext::new(pair, FUNCTION, REVISION);
+        let column = || {
+            ResultColumn::new(
+                "semantic_deleted",
+                ResolvedType::scalar(StandardScalar::Boolean),
+                false,
+            )
+            .unwrap()
+        };
+        let absent =
+            ServerDeleteResult::new(context, TARGET, SELECTED_OBJECT, false, column()).unwrap();
+        let deleted =
+            ServerDeleteResult::new(context, TARGET, SELECTED_OBJECT, true, column()).unwrap();
+
+        assert_eq!(absent.context(), context);
+        assert_eq!(absent.pair(), pair);
+        assert_eq!(absent.function(), FUNCTION);
+        assert_eq!(absent.function_revision(), REVISION);
+        assert_eq!(absent.target(), TARGET);
+        assert_eq!(absent.selector(), SELECTED_OBJECT);
+        assert!(!absent.matched());
+        assert!(absent.rows().rows().is_empty());
+        assert_eq!(absent.rows().columns(), deleted.rows().columns());
+        assert_eq!(deleted.rows().columns()[0].name(), "semantic_deleted");
+        assert_eq!(
+            deleted.rows().columns()[0].resolved_type(),
+            ResolvedType::scalar(StandardScalar::Boolean),
+        );
+        assert!(!deleted.rows().columns()[0].nullable());
+        assert!(deleted.matched());
+        assert_eq!(
+            deleted.rows().rows()[0].values(),
+            &[RuntimeValue::Boolean(true)],
+        );
+    }
+
+    #[test]
+    fn delete_metadata_signature_plan_selector_and_references_are_exact() {
+        let catalogue = catalogue(target_fields(OTHER), true, Vec::new());
+        let function = valid_delete_function();
+        let plan = valid_delete_plan();
+
+        validate_artifact_metadata_for_operation(
+            FUNCTION,
+            ExecutableArtifactKind::Server,
+            server_mutation_plan::FORMAT_IDENTITY,
+            server_mutation_plan::DELETE_FORMAT_VERSION,
+            server_mutation_plan::LANGUAGE_VERSION_IDENTITY,
+            MutationExecutionKind::Delete,
+        )
+        .unwrap();
+        for version in [
+            server_mutation_plan::INSERT_FORMAT_VERSION,
+            server_mutation_plan::UPDATE_FORMAT_VERSION,
+        ] {
+            assert!(
+                validate_artifact_metadata_for_operation(
+                    FUNCTION,
+                    ExecutableArtifactKind::Server,
+                    server_mutation_plan::FORMAT_IDENTITY,
+                    version,
+                    server_mutation_plan::LANGUAGE_VERSION_IDENTITY,
+                    MutationExecutionKind::Delete,
+                )
+                .is_err()
+            );
+        }
+
+        let column = validate_delete_function_signature(&catalogue, &function).unwrap();
+        assert_eq!(column.name(), "semantic_deleted");
+        assert_eq!(
+            column.resolved_type(),
+            ResolvedType::scalar(StandardScalar::Boolean),
+        );
+        assert!(!column.nullable());
+        assert_eq!(
+            validate_delete_plan(&catalogue, &function, &plan)
+                .unwrap()
+                .id(),
+            TARGET
+        );
+        assert_eq!(
+            plan.format_version(),
+            server_mutation_plan::DELETE_FORMAT_VERSION
+        );
+        assert_eq!(plan.target(), TARGET);
+        assert_eq!(
+            plan.selector(),
+            MutationSelector::new(FUNCTION, PARAMETER_SELECTOR),
+        );
+        assert_eq!(
+            selector_argument_object(plan.target(), plan.selector(), &valid_delete_arguments())
+                .unwrap(),
+            SELECTED_OBJECT,
+        );
+        assert_eq!(
+            expected_delete_body_references(&plan),
+            [
+                ExpectedDefinitionReference::new(
+                    DefinitionReferenceKind::WriteObject,
+                    DefinitionReferenceTarget::ObjectType(TARGET),
+                ),
+                ExpectedDefinitionReference::new(
+                    DefinitionReferenceKind::ObjectReference,
+                    DefinitionReferenceTarget::ObjectType(TARGET),
+                ),
+                ExpectedDefinitionReference::new(
+                    DefinitionReferenceKind::ParameterRead,
+                    DefinitionReferenceTarget::Parameter {
+                        owner: FUNCTION,
+                        parameter: PARAMETER_SELECTOR,
+                    },
+                ),
+            ],
+        );
+    }
+
+    #[test]
+    fn delete_rejects_wrong_result_selector_owner_parameter_and_target() {
+        let catalogue = catalogue(target_fields(OTHER), true, Vec::new());
+        let wrong_result = function(
+            FunctionDomain::Server,
+            valid_delete_function().parameters().to_vec(),
+            rows_reference(TARGET),
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::Atomic),
+            FunctionVolatility::Volatile,
+        );
+        assert!(matches!(
+            expect_insert_error(
+                validate_delete_function_signature(&catalogue, &wrong_result).unwrap_err()
+            ),
+            ServerMutationError::FunctionSignature { .. },
+        ));
+
+        for selector in [
+            MutationSelector::new(OTHER_FUNCTION, PARAMETER_SELECTOR),
+            MutationSelector::new(FUNCTION, ParameterId::from_bytes([0x54; 16])),
+        ] {
+            assert!(
+                validate_delete_plan(
+                    &catalogue,
+                    &valid_delete_function(),
+                    &ServerDeletePlan::new(TARGET, selector),
+                )
+                .is_err()
+            );
+        }
+
+        let wrong_target_function = function(
+            FunctionDomain::Server,
+            vec![ParameterDefinition::new(
+                PARAMETER_SELECTOR,
+                "selector",
+                0,
+                ResolvedType::reference(OTHER),
+                None,
+            )],
+            rows_boolean(),
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::Atomic),
+            FunctionVolatility::Volatile,
+        );
+        assert!(
+            validate_delete_plan(&catalogue, &wrong_target_function, &valid_delete_plan(),)
+                .is_err()
         );
     }
 
@@ -3120,6 +4043,37 @@ mod tests {
     }
 
     #[test]
+    fn delete_lowering_uses_only_stable_ids_and_the_exact_bytea_selector() {
+        let catalogue = catalogue(target_fields(OTHER), true, Vec::new());
+        let function = valid_delete_function();
+        let plan = valid_delete_plan();
+        validate_delete_plan(&catalogue, &function, &plan).unwrap();
+        let raw_arguments = valid_delete_arguments();
+        let arguments = validate_arguments(&catalogue, &function, &raw_arguments).unwrap();
+
+        let lowered = lower_delete(&plan, &arguments).unwrap();
+
+        assert_eq!(
+            lowered.sql,
+            "DELETE FROM _orna_data.t_10101010101010101010101010101010 WHERE _orna_object_id = $1 RETURNING _orna_object_id AS c0",
+        );
+        assert_eq!(lowered.bind_types, vec![Type::BYTEA]);
+        assert_eq!(
+            lowered.binds,
+            vec![BindValue::Bytes(SELECTED_OBJECT.to_bytes().to_vec())],
+        );
+        for forbidden in [
+            "semantic_target",
+            "semantic_insert",
+            "semantic_deleted",
+            "semantic_selector_parameter",
+        ] {
+            assert!(!lowered.sql.contains(forbidden));
+        }
+        assert!(lowered.sql.len() < SQL_LIMIT);
+    }
+
+    #[test]
     fn lowering_reuses_one_owned_bind_for_repeated_parameter_assignments() {
         let text_type = ResolvedType::scalar(StandardScalar::CharacterLargeObject);
         let function = function(
@@ -3394,6 +4348,111 @@ mod tests {
             *source,
             ServerMutationError::PlanInvariant { rule: "test" },
         ));
+    }
+
+    #[test]
+    fn delete_errors_preserve_selector_match_result_and_retry_state() {
+        let context = ServerDeleteContext::new(
+            RevisionPair::new(
+                SourceRevisionId::from_bytes([0x76; 16]),
+                CatalogueRevisionId::from_bytes([0x77; 16]),
+            ),
+            FUNCTION,
+            REVISION,
+        );
+        let not_committed = ServerDeleteError::NotCommitted {
+            context,
+            source: Box::new(ServerMutationError::Argument {
+                parameter: Some(PARAMETER_SELECTOR),
+                rule: "the argument type does not match the declared parameter type",
+            }),
+        };
+        assert_eq!(
+            not_committed.commit_state(),
+            ServerDeleteCommitState::NotCommitted,
+        );
+        assert_eq!(
+            not_committed.to_string(),
+            "the object was not deleted: a supplied function argument is invalid: the argument type does not match the declared parameter type",
+        );
+
+        let unknown = ServerDeleteError::CommitOutcomeUnknown {
+            context,
+            target: TARGET,
+            selector: SELECTED_OBJECT,
+            matched: true,
+            source: "port=invalid"
+                .parse::<tokio_postgres::Config>()
+                .unwrap_err(),
+        };
+        assert_eq!(unknown.commit_state(), ServerDeleteCommitState::Unknown);
+        assert_eq!(
+            unknown.to_string(),
+            format!(
+                "the connection failed while deleting object {}; it is not known whether the delete committed; do not retry automatically",
+                SELECTED_OBJECT.canonical(),
+            ),
+        );
+        let ServerDeleteError::CommitOutcomeUnknown {
+            target,
+            selector,
+            matched,
+            ..
+        } = unknown
+        else {
+            unreachable!();
+        };
+        assert_eq!(target, TARGET);
+        assert_eq!(selector, SELECTED_OBJECT);
+        assert!(matched);
+
+        let result = ServerDeleteResult::new(
+            context,
+            TARGET,
+            SELECTED_OBJECT,
+            true,
+            ResultColumn::new(
+                "deleted",
+                ResolvedType::scalar(StandardScalar::Boolean),
+                false,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let committed = ServerDeleteError::CommittedButShutdownFailed {
+            result: Box::new(result.clone()),
+            source: Box::new(PostgresKernelError::CatalogueInvariant("shutdown test")),
+        };
+        assert_eq!(committed.commit_state(), ServerDeleteCommitState::Committed);
+        let ServerDeleteError::CommittedButShutdownFailed {
+            result: retained, ..
+        } = committed
+        else {
+            unreachable!();
+        };
+        assert_eq!(*retained, result);
+
+        let wrapped = expect_delete_error(delete_not_committed(context, plan_invariant("test")));
+        let ServerDeleteError::NotCommitted { source, .. } = wrapped else {
+            panic!("expected a known-not-committed DELETE failure");
+        };
+        assert!(matches!(
+            *source,
+            ServerMutationError::PlanInvariant { rule: "test" },
+        ));
+    }
+
+    #[test]
+    fn delete_commit_classification_hides_constraint_timing() {
+        assert_eq!(
+            delete_commit_failure(Some(&SqlState::FOREIGN_KEY_VIOLATION)),
+            DeleteCommitFailure::Restricted,
+        );
+        assert_eq!(
+            delete_commit_failure(Some(&SqlState::UNIQUE_VIOLATION)),
+            DeleteCommitFailure::Rejected,
+        );
+        assert_eq!(delete_commit_failure(None), DeleteCommitFailure::Unknown,);
     }
 
     #[test]
