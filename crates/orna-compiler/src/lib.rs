@@ -9,6 +9,14 @@ use orna_syntax::{
     Diagnostic as SyntaxDiagnostic, NamePart, Parse as SyntaxParse, QualifiedName, SourceSpan,
 };
 
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "the mutation checker is wired in the immediately following resolver slice"
+    )
+)]
+mod mutation;
 mod prepare;
 pub(crate) mod relational;
 mod resolver;
