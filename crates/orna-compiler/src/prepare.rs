@@ -267,6 +267,8 @@ const SUPPORTED_DEFINITION_REFERENCE_KINDS: &[DefinitionReferenceKind] = &[
     DefinitionReferenceKind::QueryObject,
     DefinitionReferenceKind::QueryField,
     DefinitionReferenceKind::Expression,
+    DefinitionReferenceKind::WriteObject,
+    DefinitionReferenceKind::WriteField,
 ];
 
 fn checked_locations(checked: &CheckedBundle) -> Vec<&SourceLocation> {
@@ -1159,8 +1161,11 @@ mod tests {
             DefinitionReferenceKind::QueryObject,
             DefinitionReferenceKind::QueryField,
             DefinitionReferenceKind::Expression,
+            DefinitionReferenceKind::WriteObject,
+            DefinitionReferenceKind::WriteField,
         ];
 
+        assert_eq!(SUPPORTED_DEFINITION_REFERENCE_KINDS, kinds.as_slice());
         assert!(kinds.into_iter().all(supports_definition_reference_kind));
     }
 

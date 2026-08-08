@@ -1119,6 +1119,8 @@ const POSTGRES_REFERENCE_KINDS: &[(DefinitionReferenceKind, &str)] = &[
     (DefinitionReferenceKind::QueryObject, "query_object"),
     (DefinitionReferenceKind::QueryField, "query_field"),
     (DefinitionReferenceKind::Expression, "expression"),
+    (DefinitionReferenceKind::WriteObject, "write_object"),
+    (DefinitionReferenceKind::WriteField, "write_field"),
 ];
 type ReferenceTargetColumns = (&'static str, Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>);
 
@@ -1152,8 +1154,8 @@ mod tests {
     };
 
     use super::{
-        artifact_kind, function_transaction, positive_i32, positive_i64, reference_kind,
-        reference_target, scalar, type_columns,
+        POSTGRES_REFERENCE_KINDS, artifact_kind, function_transaction, positive_i32, positive_i64,
+        reference_kind, reference_target, scalar, type_columns,
     };
 
     #[test]
@@ -1253,6 +1255,18 @@ mod tests {
             reference_target(DefinitionReferenceTarget::Expression(expression)).0,
             "expression"
         );
+        let expected_kinds = [
+            (DefinitionReferenceKind::FunctionCall, "function_call"),
+            (DefinitionReferenceKind::NamedType, "named_type"),
+            (DefinitionReferenceKind::ObjectReference, "object_reference"),
+            (DefinitionReferenceKind::ParameterRead, "parameter_read"),
+            (DefinitionReferenceKind::QueryObject, "query_object"),
+            (DefinitionReferenceKind::QueryField, "query_field"),
+            (DefinitionReferenceKind::Expression, "expression"),
+            (DefinitionReferenceKind::WriteObject, "write_object"),
+            (DefinitionReferenceKind::WriteField, "write_field"),
+        ];
+        assert_eq!(POSTGRES_REFERENCE_KINDS, expected_kinds.as_slice());
         assert_eq!(
             reference_kind(DefinitionReferenceKind::FunctionCall).unwrap(),
             "function_call"
@@ -1280,6 +1294,14 @@ mod tests {
         assert_eq!(
             reference_kind(DefinitionReferenceKind::Expression).unwrap(),
             "expression"
+        );
+        assert_eq!(
+            reference_kind(DefinitionReferenceKind::WriteObject).unwrap(),
+            "write_object"
+        );
+        assert_eq!(
+            reference_kind(DefinitionReferenceKind::WriteField).unwrap(),
+            "write_field"
         );
     }
 

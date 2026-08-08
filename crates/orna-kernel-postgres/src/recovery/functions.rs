@@ -1462,20 +1462,7 @@ fn decode_reference(
         }
     };
     let kind_name: String = record.column(row, "reference_kind", "reference kind must decode")?;
-    let kind = exact_enum(
-        &kind_name,
-        &[
-            ("function_call", DefinitionReferenceKind::FunctionCall),
-            ("named_type", DefinitionReferenceKind::NamedType),
-            ("object_reference", DefinitionReferenceKind::ObjectReference),
-            ("parameter_read", DefinitionReferenceKind::ParameterRead),
-            ("query_object", DefinitionReferenceKind::QueryObject),
-            ("query_field", DefinitionReferenceKind::QueryField),
-            ("expression", DefinitionReferenceKind::Expression),
-        ],
-        &record,
-        "reference kind must be one exact supported semantic relation",
-    )?;
+    let kind = decode_reference_kind(&kind_name, &record)?;
     if !reference_kind_matches_target(kind, target) {
         return Err(
             record.invariant("reference kind must be compatible with its exact target kind")
@@ -1491,6 +1478,30 @@ fn decode_reference(
         source_origin,
     ))
 }
+
+fn decode_reference_kind(
+    name: &str,
+    record: &DurableRecord,
+) -> Result<DefinitionReferenceKind, PostgresKernelError> {
+    exact_enum(
+        name,
+        SUPPORTED_REFERENCE_KINDS,
+        record,
+        "reference kind must be one exact supported semantic relation",
+    )
+}
+
+const SUPPORTED_REFERENCE_KINDS: &[(&str, DefinitionReferenceKind)] = &[
+    ("function_call", DefinitionReferenceKind::FunctionCall),
+    ("named_type", DefinitionReferenceKind::NamedType),
+    ("object_reference", DefinitionReferenceKind::ObjectReference),
+    ("parameter_read", DefinitionReferenceKind::ParameterRead),
+    ("query_object", DefinitionReferenceKind::QueryObject),
+    ("query_field", DefinitionReferenceKind::QueryField),
+    ("expression", DefinitionReferenceKind::Expression),
+    ("write_object", DefinitionReferenceKind::WriteObject),
+    ("write_field", DefinitionReferenceKind::WriteField),
+];
 
 fn decode_reference_origin(
     row: &Row,
@@ -1541,6 +1552,12 @@ const fn reference_kind_matches_target(
         ) | (
             DefinitionReferenceKind::Expression,
             DefinitionReferenceTarget::Expression(_)
+        ) | (
+            DefinitionReferenceKind::WriteObject,
+            DefinitionReferenceTarget::ObjectType(_)
+        ) | (
+            DefinitionReferenceKind::WriteField,
+            DefinitionReferenceTarget::Field { .. }
         )
     )
 }
@@ -1616,6 +1633,64 @@ fn parameter_record(function: FunctionId, parameter: ParameterId) -> DurableReco
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reference_kind_decoder_maps_all_supported_spellings_exactly() {
+        let record = DurableRecord::new(REFERENCE_RELATION, "test");
+        let expected = [
+            ("function_call", DefinitionReferenceKind::FunctionCall),
+            ("named_type", DefinitionReferenceKind::NamedType),
+            ("object_reference", DefinitionReferenceKind::ObjectReference),
+            ("parameter_read", DefinitionReferenceKind::ParameterRead),
+            ("query_object", DefinitionReferenceKind::QueryObject),
+            ("query_field", DefinitionReferenceKind::QueryField),
+            ("expression", DefinitionReferenceKind::Expression),
+            ("write_object", DefinitionReferenceKind::WriteObject),
+            ("write_field", DefinitionReferenceKind::WriteField),
+        ];
+
+        assert_eq!(SUPPORTED_REFERENCE_KINDS, expected.as_slice());
+        for (name, kind) in expected {
+            assert_eq!(decode_reference_kind(name, &record).unwrap(), kind);
+        }
+    }
+
+    #[test]
+    fn reference_kind_decoder_rejects_unknown_spellings() {
+        let record = DurableRecord::new(REFERENCE_RELATION, "test");
+
+        assert!(decode_reference_kind("write_Object", &record).is_err());
+        assert!(decode_reference_kind("insert", &record).is_err());
+    }
+
+    #[test]
+    fn write_reference_kinds_require_their_exact_targets() {
+        let object = TypeId::from_bytes([1; 16]);
+        let field = orna_core::FieldId::from_bytes([2; 16]);
+
+        assert!(reference_kind_matches_target(
+            DefinitionReferenceKind::WriteObject,
+            DefinitionReferenceTarget::ObjectType(object),
+        ));
+        assert!(reference_kind_matches_target(
+            DefinitionReferenceKind::WriteField,
+            DefinitionReferenceTarget::Field {
+                owner: object,
+                field,
+            },
+        ));
+        assert!(!reference_kind_matches_target(
+            DefinitionReferenceKind::WriteObject,
+            DefinitionReferenceTarget::Field {
+                owner: object,
+                field,
+            },
+        ));
+        assert!(!reference_kind_matches_target(
+            DefinitionReferenceKind::WriteField,
+            DefinitionReferenceTarget::ObjectType(object),
+        ));
+    }
 
     #[test]
     fn void_scalar_is_reserved_for_single_function_returns() {
