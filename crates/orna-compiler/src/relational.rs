@@ -37,6 +37,24 @@ pub(crate) struct RelationalQueryIr<T = TypeId, F = FieldId> {
     ordering: Vec<OrderingIr<T, F>>,
 }
 
+/// A checked parameter-free `SELECT DISTINCT` query.
+///
+/// This is deliberately separate from `RelationalQueryIr`. The operation
+/// excludes ordering and has its own projection type domain.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "the preparation stage consumes checked DISTINCT plans in the next slice"
+    )
+)]
+pub(crate) struct DistinctQueryIr<T = TypeId, F = FieldId> {
+    scan: ScanIr<T>,
+    projections: Vec<ExpressionIr<T, F>>,
+    selection: Option<ExpressionIr<T, F>>,
+}
+
 /// A checked SERVER query with one fixed identity selector.
 ///
 /// This is deliberately separate from `RelationalQueryIr`. The selector is
@@ -161,6 +179,20 @@ pub(crate) struct QueryCheck<T = TypeId, F = FieldId> {
     references: Vec<QueryReference<T, F>>,
 }
 
+/// A checked `SELECT DISTINCT` query and its source evidence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "the resolver consumes checked DISTINCT queries in the next slice"
+    )
+)]
+pub(crate) struct DistinctQueryCheck<T = TypeId, F = FieldId> {
+    plan: DistinctQueryIr<T, F>,
+    references: Vec<QueryReference<T, F>>,
+}
+
 /// A declared function parameter available to identity-selected query checking.
 ///
 /// `semantic_name` must use the normalised Orna identifier form. The remaining
@@ -278,6 +310,25 @@ impl<T, F, G, P> IdentitySelectedQueryCheck<T, F, G, P> {
     }
 }
 
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "the resolver consumes checked DISTINCT queries in the next slice"
+    )
+)]
+impl<T, F> DistinctQueryCheck<T, F> {
+    /// Returns the source-free checked DISTINCT query plan.
+    pub(crate) fn plan(&self) -> &DistinctQueryIr<T, F> {
+        &self.plan
+    }
+
+    /// Returns query references in deterministic source order.
+    pub(crate) fn references(&self) -> &[QueryReference<T, F>] {
+        &self.references
+    }
+}
+
 #[cfg_attr(not(test), allow(dead_code))]
 impl<T, F> QueryCheck<T, F> {
     pub(crate) fn plan(&self) -> &RelationalQueryIr<T, F> {
@@ -354,6 +405,30 @@ impl<T, F> RelationalQueryIr<T, F> {
     not(test),
     allow(
         dead_code,
+        reason = "the preparation stage consumes checked DISTINCT plans in the next slice"
+    )
+)]
+impl<T, F> DistinctQueryIr<T, F> {
+    /// Returns the query scan.
+    pub(crate) fn scan(&self) -> &ScanIr<T> {
+        &self.scan
+    }
+
+    /// Returns projections in source order.
+    pub(crate) fn projections(&self) -> &[ExpressionIr<T, F>] {
+        &self.projections
+    }
+
+    /// Returns the optional query predicate.
+    pub(crate) fn selection(&self) -> Option<&ExpressionIr<T, F>> {
+        self.selection.as_ref()
+    }
+}
+
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
         reason = "the preparation stage consumes checked identity mappings in the next slice"
     )
 )]
@@ -397,6 +472,39 @@ impl<T: Copy, F: Copy> RelationalQueryIr<T, F> {
                     })
                 })
                 .collect::<Result<_, E>>()?,
+        })
+    }
+}
+
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "the preparation stage consumes checked DISTINCT plans in the next slice"
+    )
+)]
+impl<T: Copy, F: Copy> DistinctQueryIr<T, F> {
+    /// Rewrites every semantic identity while preserving the checked DISTINCT shape.
+    pub(crate) fn try_map_identities<T2, F2, E>(
+        &self,
+        mut map_type: impl FnMut(T) -> Result<T2, E>,
+        mut map_field: impl FnMut(F) -> Result<F2, E>,
+    ) -> Result<DistinctQueryIr<T2, F2>, E> {
+        Ok(DistinctQueryIr {
+            scan: ScanIr {
+                input: self.scan.input,
+                object_type: map_type(self.scan.object_type)?,
+            },
+            projections: self
+                .projections
+                .iter()
+                .map(|expression| try_map_expression(expression, &mut map_type, &mut map_field))
+                .collect::<Result<_, _>>()?,
+            selection: self
+                .selection
+                .as_ref()
+                .map(|expression| try_map_expression(expression, &mut map_type, &mut map_field))
+                .transpose()?,
         })
     }
 }
@@ -675,27 +783,14 @@ where
         mut diagnostics,
     } = check_source_and_projections(query, catalogue, logical_path)?;
 
-    let selection = query.predicate.as_ref().and_then(|expression| {
-        let source_span = expression.span();
-        let expression = check_expression(
-            expression,
-            &context,
-            catalogue,
-            logical_path,
-            &mut diagnostics,
-            &mut references,
-        )?;
-        if expression.value_type.semantic_type != SemanticType::scalar(StandardScalar::Boolean) {
-            diagnostics.push(diagnostic(
-                DiagnosticCode::TypeMismatch,
-                "WHERE requires a BOOLEAN expression",
-                logical_path,
-                source_span,
-            ));
-            return None;
-        }
-        Some(expression)
-    });
+    let selection = check_selection(
+        query.predicate.as_ref(),
+        &context,
+        catalogue,
+        logical_path,
+        &mut diagnostics,
+        &mut references,
+    );
 
     let ordering = query
         .ordering
@@ -738,6 +833,131 @@ where
             ordering,
         },
         references,
+    })
+}
+
+/// Checks the closed parameter-free `SELECT DISTINCT` form from ADR 0010.
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "the resolver consumes checked DISTINCT queries in the next slice"
+    )
+)]
+pub(crate) fn check_distinct_query_in<T, F>(
+    query: &SelectQuery,
+    catalogue: &impl QueryCatalogue<T, F>,
+    logical_path: &str,
+) -> Result<DistinctQueryCheck<T, F>, Vec<CompilerDiagnostic>>
+where
+    T: Copy + Eq + fmt::Display,
+    F: Copy,
+{
+    let SelectQuantifier::Distinct { .. } = &query.quantifier else {
+        return Err(vec![diagnostic(
+            DiagnosticCode::DomainIncompatible,
+            "this query must use SELECT DISTINCT",
+            logical_path,
+            &query.span,
+        )]);
+    };
+    if query.projections.is_empty() {
+        return Err(vec![diagnostic(
+            DiagnosticCode::DomainIncompatible,
+            "SELECT DISTINCT requires at least one projection",
+            logical_path,
+            &query.span,
+        )]);
+    }
+    if let Some(ordering) = query.ordering.first() {
+        return Err(vec![diagnostic(
+            DiagnosticCode::DomainIncompatible,
+            "SELECT DISTINCT queries do not allow ORDER BY",
+            logical_path,
+            &ordering.span,
+        )]);
+    }
+
+    let CheckedQuerySource {
+        context,
+        projections,
+        mut references,
+        mut diagnostics,
+    } = check_source_and_projections(query, catalogue, logical_path)?;
+
+    let selection = check_selection(
+        query.predicate.as_ref(),
+        &context,
+        catalogue,
+        logical_path,
+        &mut diagnostics,
+        &mut references,
+    );
+
+    if !diagnostics.is_empty() {
+        return Err(diagnostics);
+    }
+
+    for (source, projection) in query.projections.iter().zip(&projections) {
+        if !supports_server_select_distinct(projection.value_type.semantic_type) {
+            diagnostics.push(diagnostic(
+                DiagnosticCode::DomainIncompatible,
+                "SELECT DISTINCT projections support only BOOLEAN, INTEGER, BIGINT, BYTES, and REF values",
+                logical_path,
+                source.span(),
+            ));
+        }
+    }
+    if !diagnostics.is_empty() {
+        return Err(diagnostics);
+    }
+
+    Ok(DistinctQueryCheck {
+        plan: DistinctQueryIr {
+            scan: ScanIr {
+                input: context.input,
+                object_type: context.object_type,
+            },
+            projections,
+            selection,
+        },
+        references,
+    })
+}
+
+/// Checks an optional query predicate and appends its evidence after projections.
+fn check_selection<T, F>(
+    predicate: Option<&QueryExpression>,
+    context: &InputContext<T>,
+    catalogue: &impl QueryCatalogue<T, F>,
+    logical_path: &str,
+    diagnostics: &mut Vec<CompilerDiagnostic>,
+    references: &mut Vec<QueryReference<T, F>>,
+) -> Option<ExpressionIr<T, F>>
+where
+    T: Copy + Eq + fmt::Display,
+    F: Copy,
+{
+    predicate.and_then(|expression| {
+        let source_span = expression.span();
+        let expression = check_expression(
+            expression,
+            context,
+            catalogue,
+            logical_path,
+            diagnostics,
+            references,
+        )?;
+        if expression.value_type.semantic_type != SemanticType::scalar(StandardScalar::Boolean) {
+            diagnostics.push(diagnostic(
+                DiagnosticCode::TypeMismatch,
+                "WHERE requires a BOOLEAN expression",
+                logical_path,
+                source_span,
+            ));
+            return None;
+        }
+        Some(expression)
     })
 }
 
@@ -1140,6 +1360,19 @@ pub(crate) fn supports_server_select_equality<T>(semantic_type: SemanticType<T>)
     )
 }
 
+/// Returns whether one projection type has accepted Orna DISTINCT semantics.
+pub(crate) fn supports_server_select_distinct<T>(semantic_type: SemanticType<T>) -> bool {
+    matches!(
+        semantic_type,
+        SemanticType::Scalar(
+            StandardScalar::Boolean
+                | StandardScalar::Integer
+                | StandardScalar::BigInt
+                | StandardScalar::BinaryLargeObject
+        ) | SemanticType::Reference { .. }
+    )
+}
+
 fn check_field_path<T, F>(
     members: &[NamePart],
     context: &InputContext<T>,
@@ -1262,8 +1495,9 @@ mod tests {
 
     use super::{
         ExpressionKind, IdentitySelectedQueryReference, NullOrder, QueryParameter,
-        QueryReferenceKind, QueryReferenceTarget, SortDirection, check_identity_selected_query_in,
-        check_query, check_query_in, supports_server_select_equality,
+        QueryReferenceKind, QueryReferenceTarget, SortDirection, check_distinct_query_in,
+        check_identity_selected_query_in, check_query, check_query_in,
+        supports_server_select_distinct, supports_server_select_equality,
     };
     use crate::DiagnosticCode;
     use crate::resolver::{QueryCatalogue, QueryField, SemanticType};
@@ -1583,6 +1817,298 @@ mod tests {
             "SELECT DISTINCT is not available yet",
             &source.span,
         );
+    }
+
+    #[test]
+    fn checks_distinct_query_with_nullable_projections_and_a_predicate() {
+        let query = query(
+            "SELECT DISTINCT t.completed, t.assignee FROM tasks.task t WHERE t.completed = FALSE",
+        );
+        let check = check_distinct_query_in(&query, &catalogue(), "tasks.orna").unwrap();
+        let plan = check.plan();
+
+        assert_eq!(plan.scan().object_type(), TASK_TYPE);
+        assert_eq!(plan.projections().len(), 2);
+        assert_eq!(
+            plan.projections()[0].value_type().semantic_type(),
+            SemanticType::scalar(StandardScalar::Boolean)
+        );
+        assert!(!plan.projections()[0].value_type().nullable());
+        assert_eq!(
+            plan.projections()[1].value_type().semantic_type(),
+            SemanticType::reference(PERSON_TYPE)
+        );
+        assert!(plan.projections()[1].value_type().nullable());
+        assert!(matches!(
+            plan.selection().map(|selection| selection.kind()),
+            Some(ExpressionKind::Equality { .. })
+        ));
+        assert!(!plan.selection().unwrap().value_type().nullable());
+    }
+
+    #[test]
+    fn rejects_distinct_closed_shapes_before_source_resolution() {
+        let mut empty = query("SELECT DISTINCT t.completed FROM missing.object t");
+        empty.projections.clear();
+        let diagnostics = check_distinct_query_in(&empty, &catalogue(), "tasks.orna").unwrap_err();
+        assert_one_diagnostic(
+            &diagnostics,
+            DiagnosticCode::DomainIncompatible,
+            "SELECT DISTINCT requires at least one projection",
+            &empty.span,
+        );
+
+        let mut ordering = query("SELECT DISTINCT t.completed FROM missing.object t");
+        ordering.ordering =
+            query("SELECT t.completed FROM missing.object t ORDER BY t.completed").ordering;
+        let ordering_span = ordering.ordering[0].span.clone();
+        let diagnostics =
+            check_distinct_query_in(&ordering, &catalogue(), "tasks.orna").unwrap_err();
+        assert_one_diagnostic(
+            &diagnostics,
+            DiagnosticCode::DomainIncompatible,
+            "SELECT DISTINCT queries do not allow ORDER BY",
+            &ordering_span,
+        );
+    }
+
+    #[test]
+    fn distinct_checker_requires_the_distinct_quantifier_before_source_resolution() {
+        let query = query("SELECT t.completed FROM missing.object t");
+        let diagnostics = check_distinct_query_in(&query, &catalogue(), "tasks.orna").unwrap_err();
+
+        assert_one_diagnostic(
+            &diagnostics,
+            DiagnosticCode::DomainIncompatible,
+            "this query must use SELECT DISTINCT",
+            &query.span,
+        );
+    }
+
+    #[test]
+    fn records_distinct_evidence_in_source_projection_predicate_order() {
+        let source = "SELECT DISTINCT REF(t), t.assignee, t.completed FROM tasks.task t WHERE t.completed = t.completed";
+        let query = query(source);
+        let check = check_distinct_query_in(&query, &catalogue(), "tasks.orna").unwrap();
+        let references = check.references();
+        let completed_starts = source
+            .match_indices("t.completed")
+            .map(|(start, _)| start)
+            .collect::<Vec<_>>();
+        let expected = [
+            (
+                QueryReferenceKind::QueryObject,
+                QueryReferenceTarget::Object(TASK_TYPE),
+                source.find("tasks.task").unwrap(),
+                "tasks.task".len(),
+            ),
+            (
+                QueryReferenceKind::ObjectReference,
+                QueryReferenceTarget::Object(TASK_TYPE),
+                source.find("REF(t)").unwrap() + "REF(".len(),
+                "t".len(),
+            ),
+            (
+                QueryReferenceKind::QueryField,
+                QueryReferenceTarget::Field {
+                    owner: TASK_TYPE,
+                    field: ASSIGNEE_FIELD,
+                },
+                source.find("t.assignee").unwrap() + "t.".len(),
+                "assignee".len(),
+            ),
+            (
+                QueryReferenceKind::QueryField,
+                QueryReferenceTarget::Field {
+                    owner: TASK_TYPE,
+                    field: COMPLETED_FIELD,
+                },
+                completed_starts[0] + "t.".len(),
+                "completed".len(),
+            ),
+            (
+                QueryReferenceKind::QueryField,
+                QueryReferenceTarget::Field {
+                    owner: TASK_TYPE,
+                    field: COMPLETED_FIELD,
+                },
+                completed_starts[1] + "t.".len(),
+                "completed".len(),
+            ),
+            (
+                QueryReferenceKind::QueryField,
+                QueryReferenceTarget::Field {
+                    owner: TASK_TYPE,
+                    field: COMPLETED_FIELD,
+                },
+                completed_starts[2] + "t.".len(),
+                "completed".len(),
+            ),
+        ];
+
+        assert_eq!(references.len(), expected.len());
+        for (reference, (kind, target, offset, length)) in references.iter().zip(expected) {
+            assert_eq!(reference.kind(), kind);
+            assert_eq!(reference.target(), &target);
+            assert_eq!(reference.location().logical_path(), "tasks.orna");
+            assert_eq!(
+                reference.location().span().start(),
+                query.span.start + offset
+            );
+            assert_eq!(
+                reference.location().span().end(),
+                query.span.start + offset + length
+            );
+        }
+    }
+
+    #[test]
+    fn reports_unsupported_distinct_projections_in_projection_order() {
+        let query = query("SELECT DISTINCT t.title, t.score FROM tasks.task t");
+        let diagnostics = check_distinct_query_in(&query, &catalogue(), "tasks.orna").unwrap_err();
+
+        assert_eq!(diagnostics.len(), 2);
+        for (diagnostic, projection) in diagnostics.iter().zip(&query.projections) {
+            assert_eq!(diagnostic.code(), DiagnosticCode::DomainIncompatible);
+            assert_eq!(
+                diagnostic.message(),
+                "SELECT DISTINCT projections support only BOOLEAN, INTEGER, BIGINT, BYTES, and REF values",
+            );
+            assert_eq!(diagnostic.location().logical_path(), "tasks.orna");
+            assert_eq!(
+                diagnostic.location().span().start(),
+                projection.span().start
+            );
+            assert_eq!(diagnostic.location().span().end(), projection.span().end);
+        }
+    }
+
+    #[test]
+    fn returns_source_semantic_diagnostics_before_distinct_domain_errors() {
+        let query = query("SELECT DISTINCT t.title FROM missing.object t");
+        let diagnostics = check_distinct_query_in(&query, &catalogue(), "tasks.orna").unwrap_err();
+
+        assert_one_diagnostic(
+            &diagnostics,
+            DiagnosticCode::UnknownQualifiedName,
+            "unknown object type missing.object",
+            &query.source_object.object_type.span,
+        );
+    }
+
+    #[test]
+    fn returns_projection_and_predicate_semantic_diagnostics_before_distinct_domain_errors() {
+        let query = query(
+            "SELECT DISTINCT t.unknown, t.title FROM tasks.task t WHERE t.score = t.completed",
+        );
+        let diagnostics = check_distinct_query_in(&query, &catalogue(), "tasks.orna").unwrap_err();
+
+        assert_eq!(diagnostics.len(), 2);
+        assert_one_diagnostic(
+            &diagnostics[..1],
+            DiagnosticCode::UnknownQualifiedName,
+            "unknown field unknown on tasks.task",
+            match &query.projections[0] {
+                QueryExpression::FieldPath { members, .. } => &members[0].span,
+                _ => unreachable!(),
+            },
+        );
+        assert_one_diagnostic(
+            &diagnostics[1..],
+            DiagnosticCode::TypeMismatch,
+            "equality requires expressions with compatible types",
+            query.predicate.as_ref().unwrap().span(),
+        );
+    }
+
+    #[test]
+    fn distinct_type_domain_is_exact_and_independent_from_equality() {
+        for scalar in StandardScalar::ALL {
+            let expected = matches!(
+                scalar,
+                StandardScalar::Boolean
+                    | StandardScalar::Integer
+                    | StandardScalar::BigInt
+                    | StandardScalar::BinaryLargeObject
+            );
+            assert_eq!(
+                supports_server_select_distinct(SemanticType::<TypeId>::scalar(scalar)),
+                expected,
+                "unexpected DISTINCT support for {scalar:?}"
+            );
+        }
+        assert!(supports_server_select_distinct(SemanticType::reference(
+            TASK_TYPE
+        )));
+        assert!(!supports_server_select_distinct(SemanticType::Named(
+            TASK_TYPE
+        )));
+    }
+
+    #[test]
+    fn maps_distinct_identities_and_rejects_each_type_or_field_failure() {
+        let query =
+            query("SELECT DISTINCT REF(t), t.assignee FROM tasks.task t WHERE t.completed = FALSE");
+        let plan = check_distinct_query_in(&query, &catalogue(), "tasks.orna")
+            .unwrap()
+            .plan()
+            .clone();
+
+        let mapped = plan
+            .try_map_identities(
+                |type_id| Ok::<u8, &str>(type_id.to_bytes()[0]),
+                |field_id| Ok::<u16, &str>(field_id.to_bytes()[0].into()),
+            )
+            .unwrap();
+        assert_eq!(mapped.scan().object_type(), TASK_TYPE.to_bytes()[0]);
+        let ExpressionKind::FieldPath { steps, .. } = mapped.projections()[1].kind() else {
+            panic!("second projection must remain a field path");
+        };
+        assert_eq!(steps[0].owner(), TASK_TYPE.to_bytes()[0]);
+        assert_eq!(steps[0].field(), ASSIGNEE_FIELD.to_bytes()[0] as u16);
+
+        assert_eq!(
+            plan.try_map_identities(|_| Err::<u8, _>("type"), |_| Ok::<u16, &str>(0),),
+            Err("type")
+        );
+        assert_eq!(
+            plan.try_map_identities(|_| Ok::<u8, &str>(0), |_| Err::<u16, _>("field"),),
+            Err("field")
+        );
+
+        let mut type_callbacks = 0;
+        assert_eq!(
+            plan.try_map_identities(
+                |_| {
+                    type_callbacks += 1;
+                    if type_callbacks == 2 {
+                        Err("later type")
+                    } else {
+                        Ok(0_u8)
+                    }
+                },
+                |_| Ok::<u16, &str>(0),
+            ),
+            Err("later type")
+        );
+        assert_eq!(type_callbacks, 2);
+
+        let mut field_callbacks = 0;
+        assert_eq!(
+            plan.try_map_identities(
+                |_| Ok::<u8, &str>(0),
+                |_| {
+                    field_callbacks += 1;
+                    if field_callbacks == 2 {
+                        Err("later field")
+                    } else {
+                        Ok(0_u16)
+                    }
+                },
+            ),
+            Err("later field")
+        );
+        assert_eq!(field_callbacks, 2);
     }
 
     #[test]
