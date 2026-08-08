@@ -267,7 +267,11 @@ fn server_mutation_plan(
         function,
         matches!(plan.operation(), MutationOperation::Insert),
     )?;
-    validate_mutation_reference_sequence(&mutation_reference_sequence(plan, function), references)?;
+    validate_reference_sequence(
+        &mutation_reference_sequence(plan, function),
+        references,
+        "mutation definition references differ from the checked body",
+    )?;
     Ok(match plan.operation() {
         MutationOperation::Insert => ServerMutationPlan::new_insert(
             plan.target_object(),
@@ -292,6 +296,233 @@ fn server_mutation_plan(
             )?
         }
     })
+}
+
+fn identity_selected_query_plan(
+    plan: &crate::relational::IdentitySelectedQueryIr<TypeId, FieldId, FunctionId, ParameterId>,
+    function: &FunctionDefinition,
+    object_types: &[ObjectTypeDefinition],
+    references: &[(DefinitionReferenceKind, DefinitionReferenceTarget)],
+) -> Result<crate::relational::EncodedIdentitySelectedServerPlan, PrepareError> {
+    let scan = object_types
+        .iter()
+        .find(|object_type| object_type.id() == plan.scan().object_type())
+        .ok_or(PrepareError::InvalidCheckedBundle {
+            reason: "identity-selected query scan object is absent from the candidate catalogue",
+        })?;
+    if function.domain() != FunctionDomain::Server
+        || function.security() != FunctionSecurity::Invoker
+        || function.transaction() != Some(FunctionTransaction::ReadOnly)
+        || function.volatility() != FunctionVolatility::Stable
+    {
+        return Err(PrepareError::InvalidCheckedBundle {
+            reason: "identity-selected query function has unsupported execution modes",
+        });
+    }
+    let FunctionReturn::Rows(columns) = function.return_type() else {
+        return Err(PrepareError::InvalidCheckedBundle {
+            reason: "identity-selected query function does not return ROWS",
+        });
+    };
+    if function.parameters().len() != 1 {
+        return Err(PrepareError::InvalidCheckedBundle {
+            reason: "identity-selected query function does not declare exactly one parameter",
+        });
+    }
+    let selector = function.parameters()[0].clone();
+    if selector.default_expression().is_some() {
+        return Err(PrepareError::InvalidCheckedBundle {
+            reason: "identity-selected query selector parameter has an unsupported default expression",
+        });
+    }
+    if selector.resolved_type() != ResolvedType::reference(scan.id()) {
+        return Err(PrepareError::InvalidCheckedBundle {
+            reason: "identity-selected query selector parameter does not reference its scan object",
+        });
+    }
+    if plan.selector().owner() != function.id() {
+        return Err(PrepareError::InvalidCheckedBundle {
+            reason: "identity-selected query selector owner differs from its enclosing function",
+        });
+    }
+    if plan.selector().parameter() != selector.id() {
+        return Err(PrepareError::InvalidCheckedBundle {
+            reason: "identity-selected query selector parameter is not its enclosing function parameter",
+        });
+    }
+    if columns.len() != plan.projections().len() {
+        return Err(PrepareError::InvalidCheckedBundle {
+            reason: "identity-selected query projection count differs from its function return",
+        });
+    }
+    for (projection, column) in plan.projections().iter().zip(columns) {
+        validate_identity_selected_expression(projection, scan, plan.scan().input(), object_types)?;
+        let value_type = projection.value_type();
+        if resolved_type_from_semantic(value_type.semantic_type()) != column.resolved_type() {
+            return Err(PrepareError::InvalidCheckedBundle {
+                reason: "identity-selected query projection differs from its function return",
+            });
+        }
+    }
+    validate_reference_sequence(
+        &identity_selected_query_reference_sequence(plan, function),
+        references,
+        "parameterised SELECT definition references differ from the checked function body",
+    )?;
+    plan.encode_identity_selected_server_plan()
+        .map_err(PrepareError::from)
+}
+
+fn validate_identity_selected_expression(
+    expression: &crate::relational::ExpressionIr<TypeId, FieldId>,
+    scan: &ObjectTypeDefinition,
+    scan_input: crate::relational::InputSlot,
+    object_types: &[ObjectTypeDefinition],
+) -> Result<(), PrepareError> {
+    use crate::relational::ExpressionKind;
+
+    match expression.kind() {
+        ExpressionKind::ObjectReference { input } => {
+            if *input != scan_input
+                || expression.value_type().semantic_type() != SemanticType::reference(scan.id())
+                || expression.value_type().nullable()
+            {
+                return Err(PrepareError::InvalidCheckedBundle {
+                    reason: "identity-selected query object reference has inconsistent facts",
+                });
+            }
+        }
+        ExpressionKind::FieldPath { input, steps } => {
+            if *input != scan_input || steps.is_empty() {
+                return Err(PrepareError::InvalidCheckedBundle {
+                    reason: "identity-selected query field path has an invalid input or is empty",
+                });
+            }
+            let mut owner = scan;
+            let mut nullable = false;
+            for (index, step) in steps.iter().enumerate() {
+                if step.owner() != owner.id() {
+                    return Err(PrepareError::InvalidCheckedBundle {
+                        reason: "identity-selected query field path owner differs from its source object",
+                    });
+                }
+                let field = owner.field_by_id(step.field()).ok_or(PrepareError::InvalidCheckedBundle { reason: "identity-selected query field path field is absent from its source object" })?;
+                nullable |= field.nullable();
+                if index + 1 == steps.len() {
+                    let matching_type = match (
+                        field.resolved_type(),
+                        expression.value_type().semantic_type(),
+                    ) {
+                        (ResolvedType::Scalar(left), SemanticType::Scalar(right)) => left == right,
+                        (ResolvedType::Named(left), SemanticType::Named(right)) => left == right,
+                        (
+                            ResolvedType::Reference { target: left },
+                            SemanticType::Reference { target: right },
+                        ) => left == right,
+                        _ => false,
+                    };
+                    if !matching_type || expression.value_type().nullable() != nullable {
+                        return Err(PrepareError::InvalidCheckedBundle {
+                            reason: "identity-selected query field path type differs from its source field",
+                        });
+                    }
+                } else {
+                    let ResolvedType::Reference { target } = field.resolved_type() else {
+                        return Err(PrepareError::InvalidCheckedBundle {
+                            reason: "identity-selected query field path continues through a non-reference field",
+                        });
+                    };
+                    owner = object_types.iter().find(|candidate| candidate.id() == target).ok_or(PrepareError::InvalidCheckedBundle { reason: "identity-selected query field path target is absent from the candidate catalogue" })?;
+                }
+            }
+        }
+        ExpressionKind::BooleanLiteral { .. } => {
+            if expression.value_type().semantic_type()
+                != SemanticType::Scalar(StandardScalar::Boolean)
+                || expression.value_type().nullable()
+            {
+                return Err(PrepareError::InvalidCheckedBundle {
+                    reason: "identity-selected query BOOLEAN expression has inconsistent type facts",
+                });
+            }
+        }
+        ExpressionKind::Equality { left, right } => {
+            validate_identity_selected_expression(left, scan, scan_input, object_types)?;
+            validate_identity_selected_expression(right, scan, scan_input, object_types)?;
+            if left.value_type().semantic_type() != right.value_type().semantic_type()
+                || expression.value_type().semantic_type()
+                    != SemanticType::Scalar(StandardScalar::Boolean)
+                || expression.value_type().nullable()
+                    != (left.value_type().nullable() || right.value_type().nullable())
+            {
+                return Err(PrepareError::InvalidCheckedBundle {
+                    reason: "identity-selected query equality expression has inconsistent type facts",
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn identity_selected_query_reference_sequence(
+    plan: &crate::relational::IdentitySelectedQueryIr<TypeId, FieldId, FunctionId, ParameterId>,
+    function: &FunctionDefinition,
+) -> Vec<(DefinitionReferenceKind, DefinitionReferenceTarget)> {
+    let mut references = signature_reference_sequence(function);
+    references.push((
+        DefinitionReferenceKind::QueryObject,
+        DefinitionReferenceTarget::ObjectType(plan.scan().object_type()),
+    ));
+    for projection in plan.projections() {
+        identity_selected_expression_references(
+            projection,
+            plan.scan().object_type(),
+            &mut references,
+        );
+    }
+    references.extend([
+        (
+            DefinitionReferenceKind::ObjectReference,
+            DefinitionReferenceTarget::ObjectType(plan.scan().object_type()),
+        ),
+        (
+            DefinitionReferenceKind::ParameterRead,
+            DefinitionReferenceTarget::Parameter {
+                owner: plan.selector().owner(),
+                parameter: plan.selector().parameter(),
+            },
+        ),
+    ]);
+    references
+}
+
+fn identity_selected_expression_references(
+    expression: &crate::relational::ExpressionIr<TypeId, FieldId>,
+    scan: TypeId,
+    references: &mut Vec<(DefinitionReferenceKind, DefinitionReferenceTarget)>,
+) {
+    use crate::relational::ExpressionKind;
+
+    match expression.kind() {
+        ExpressionKind::ObjectReference { .. } => references.push((
+            DefinitionReferenceKind::ObjectReference,
+            DefinitionReferenceTarget::ObjectType(scan),
+        )),
+        ExpressionKind::FieldPath { steps, .. } => references.extend(steps.iter().map(|step| {
+            (
+                DefinitionReferenceKind::QueryField,
+                DefinitionReferenceTarget::Field {
+                    owner: step.owner(),
+                    field: step.field(),
+                },
+            )
+        })),
+        ExpressionKind::BooleanLiteral { .. } => {}
+        ExpressionKind::Equality { left, right } => {
+            identity_selected_expression_references(left, scan, references);
+            identity_selected_expression_references(right, scan, references);
+        }
+    }
 }
 
 fn server_delete_plan(
@@ -337,7 +568,11 @@ fn server_delete_plan(
         plan.target_object(),
         function,
     )?;
-    validate_mutation_reference_sequence(&delete_reference_sequence(plan, function), references)?;
+    validate_reference_sequence(
+        &delete_reference_sequence(plan, function),
+        references,
+        "mutation definition references differ from the checked body",
+    )?;
 
     Ok(ServerDeletePlan::new(
         plan.target_object(),
@@ -674,16 +909,15 @@ fn signature_reference_sequence(
     references
 }
 
-fn validate_mutation_reference_sequence(
+fn validate_reference_sequence(
     expected: &[(DefinitionReferenceKind, DefinitionReferenceTarget)],
     actual: &[(DefinitionReferenceKind, DefinitionReferenceTarget)],
+    reason: &'static str,
 ) -> Result<(), PrepareError> {
     if expected == actual {
         Ok(())
     } else {
-        Err(PrepareError::InvalidCheckedBundle {
-            reason: "mutation definition references differ from the checked body",
-        })
+        Err(PrepareError::InvalidCheckedBundle { reason })
     }
 }
 
@@ -1634,6 +1868,38 @@ impl<'a> CandidateBuilder<'a> {
         function: &FunctionDefinition,
         object_types: &[ObjectTypeDefinition],
     ) -> Result<PreparedServerArtifact, PrepareError> {
+        if let Some(checked_plan) = checked.identity_selected_query_plan() {
+            let plan = checked_plan.try_map_identities(
+                |id| self.identities.type_id(id),
+                |id| self.identities.field(id),
+                |id| self.identities.function(id),
+                |id| self.identities.parameter(id),
+            )?;
+            let references = checked
+                .references()
+                .iter()
+                .map(|reference| {
+                    Ok((
+                        reference.kind(),
+                        self.identities.reference_target(reference.target())?,
+                    ))
+                })
+                .collect::<Result<Vec<_>, PrepareError>>()?;
+            let encoded = identity_selected_query_plan(&plan, function, object_types, &references)?;
+            let payload = encoded.payload().to_vec();
+            let hash = artifact_payload_digest(&payload)?;
+            return Ok(PreparedServerArtifact {
+                artifact: ExecutableArtifact::new(
+                    ExecutableArtifactKind::Server,
+                    SERVER_PLAN_FORMAT,
+                    encoded.format_version(),
+                    payload,
+                    hash,
+                )?,
+                language_version: SERVER_PLAN_LANGUAGE_VERSION,
+            });
+        }
+
         if let Some(checked_plan) = checked.query_plan() {
             let plan = checked_plan.try_map_identities(
                 |id| self.identities.type_id(id),
@@ -1789,7 +2055,7 @@ mod tests {
             MutationExpressionKind as DurableMutationExpressionKind, ServerDeletePlan,
             ServerMutationOperation, ServerMutationPlan,
         },
-        server_plan::{ExpressionKind, ServerPlan},
+        server_plan::{ExpressionKind, IdentitySelectedServerPlan, ServerPlan},
     };
     use orna_core::{
         catalogue::{
@@ -1937,6 +2203,28 @@ mod tests {
         TRANSACTION READ ONLY VOLATILITY STABLE\n\
         AS SELECT REF(t), t.title FROM tasks.task t\n\
         WHERE t.completed = TRUE ORDER BY t.title;\n";
+
+    const IDENTITY_SELECTED_SOURCE: &str = "CREATE SCHEMA tasks;\n\
+        CREATE TYPE tasks.task AS OBJECT (title TEXT NOT NULL);\n\
+        CREATE SERVER FUNCTION tasks.find(p_task REF tasks.task)\n\
+        RETURNS ROWS (task REF tasks.task, title TEXT)\n\
+        SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n\
+        AS SELECT REF(t), t.title FROM tasks.task t WHERE REF(t) = p_task;\n";
+
+    const IDENTITY_SELECTED_RENAMED_SELECTOR_SOURCE: &str = "CREATE SCHEMA tasks;\n\
+        CREATE TYPE tasks.task AS OBJECT (title TEXT NOT NULL);\n\
+        CREATE SERVER FUNCTION tasks.find(selector REF tasks.task)\n\
+        RETURNS ROWS (task REF tasks.task, title TEXT)\n\
+        SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n\
+        AS SELECT REF(t), t.title FROM tasks.task t WHERE REF(t) = selector;\n";
+
+    const IDENTITY_SELECTED_NULLABLE_EQUALITY_SOURCE: &str = "CREATE SCHEMA tasks;\n\
+        CREATE TYPE tasks.person AS OBJECT (name TEXT NOT NULL);\n\
+        CREATE TYPE tasks.task AS OBJECT (owner REF tasks.person);\n\
+        CREATE SERVER FUNCTION tasks.matches(p_task REF tasks.task)\n\
+        RETURNS ROWS (same BOOL)\n\
+        SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n\
+        AS SELECT t.owner.name = t.owner.name FROM tasks.task t WHERE REF(t) = p_task;\n";
 
     const MUTATION_SOURCE: &str = "CREATE SCHEMA tasks;\n\
         CREATE TYPE tasks.person AS OBJECT (name TEXT NOT NULL);\n\
@@ -2153,6 +2441,724 @@ mod tests {
             .unwrap(),
             prepared.catalogue_hash()
         );
+    }
+
+    #[test]
+    fn prepares_identity_selected_query_as_a_version_two_server_plan() {
+        let active = empty_active();
+        let prepared = prepare(
+            &checked_report(IDENTITY_SELECTED_SOURCE, active.catalogue()),
+            active.pair(),
+            &active,
+        )
+        .unwrap();
+        let catalogue = prepared.candidate();
+        let task = catalogue
+            .object_type_by_name(&semantic_name(&["tasks", "task"]))
+            .unwrap();
+        let function = &catalogue.functions()[0];
+        let revision = &prepared.new_function_revisions()[0];
+        assert_eq!(revision.artifact().format(), SERVER_PLAN_FORMAT);
+        assert_eq!(revision.artifact().version(), 2);
+        assert_eq!(
+            artifact_payload_digest(revision.artifact().payload()).unwrap(),
+            revision.artifact().content_hash()
+        );
+        let plan = IdentitySelectedServerPlan::decode(revision.artifact().payload()).unwrap();
+        assert_eq!(plan.scan().object_type, task.id());
+        assert_eq!(plan.selector().owner(), function.id());
+        assert_eq!(plan.selector().parameter(), function.parameters()[0].id());
+        assert!(ServerPlan::decode(revision.artifact().payload()).is_err());
+        assert_eq!(
+            prepared
+                .references()
+                .iter()
+                .map(|reference| (reference.kind(), reference.target()))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    DefinitionReferenceKind::ObjectReference,
+                    DefinitionReferenceTarget::ObjectType(task.id())
+                ),
+                (
+                    DefinitionReferenceKind::ObjectReference,
+                    DefinitionReferenceTarget::ObjectType(task.id())
+                ),
+                (
+                    DefinitionReferenceKind::QueryObject,
+                    DefinitionReferenceTarget::ObjectType(task.id())
+                ),
+                (
+                    DefinitionReferenceKind::ObjectReference,
+                    DefinitionReferenceTarget::ObjectType(task.id())
+                ),
+                (
+                    DefinitionReferenceKind::QueryField,
+                    DefinitionReferenceTarget::Field {
+                        owner: task.id(),
+                        field: task.field_by_name("title").unwrap().id()
+                    }
+                ),
+                (
+                    DefinitionReferenceKind::ObjectReference,
+                    DefinitionReferenceTarget::ObjectType(task.id())
+                ),
+                (
+                    DefinitionReferenceKind::ParameterRead,
+                    DefinitionReferenceTarget::Parameter {
+                        owner: function.id(),
+                        parameter: function.parameters()[0].id()
+                    }
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn identity_selected_query_replay_reuses_and_selector_rename_revises() {
+        let empty = empty_active();
+        let initial = prepare(
+            &checked_report(IDENTITY_SELECTED_SOURCE, empty.catalogue()),
+            empty.pair(),
+            &empty,
+        )
+        .unwrap();
+        let initial_revision = initial.new_function_revisions()[0].clone();
+        let initial_parameter = initial.candidate().functions()[0].parameters()[0].id();
+        let active = activate(&initial, vec![initial_revision.clone()], Vec::new());
+
+        let replay = prepare(
+            &checked_report(IDENTITY_SELECTED_SOURCE, active.catalogue()),
+            active.pair(),
+            &active,
+        )
+        .unwrap();
+        assert!(replay.new_function_revisions().is_empty());
+        assert_eq!(
+            replay.candidate().functions()[0].current_revision(),
+            initial_revision.id()
+        );
+        assert_eq!(
+            replay.candidate().functions()[0].parameters()[0].id(),
+            initial_parameter
+        );
+
+        let renamed = prepare(
+            &checked_report(
+                IDENTITY_SELECTED_RENAMED_SELECTOR_SOURCE,
+                active.catalogue(),
+            ),
+            active.pair(),
+            &active,
+        )
+        .unwrap();
+        let changed = &renamed.new_function_revisions()[0];
+        assert_eq!(
+            changed.revision_number(),
+            initial_revision.revision_number() + 1
+        );
+        assert_ne!(changed.id(), initial_revision.id());
+        assert_ne!(changed.semantic_hash(), initial_revision.semantic_hash());
+        assert_ne!(
+            changed.artifact().payload(),
+            initial_revision.artifact().payload()
+        );
+        assert_ne!(
+            renamed.candidate().functions()[0].parameters()[0].id(),
+            initial_parameter
+        );
+        assert_eq!(changed.artifact().version(), 2);
+    }
+
+    #[test]
+    fn prepares_nullable_multi_hop_equality_projection_with_complete_evidence() {
+        let active = empty_active();
+        let prepared = prepare(
+            &checked_report(
+                IDENTITY_SELECTED_NULLABLE_EQUALITY_SOURCE,
+                active.catalogue(),
+            ),
+            active.pair(),
+            &active,
+        )
+        .unwrap();
+        let task = prepared
+            .candidate()
+            .object_type_by_name(&semantic_name(&["tasks", "task"]))
+            .unwrap();
+        let person = prepared
+            .candidate()
+            .object_type_by_name(&semantic_name(&["tasks", "person"]))
+            .unwrap();
+        assert_eq!(
+            prepared
+                .references()
+                .iter()
+                .map(|reference| (reference.kind(), reference.target()))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    DefinitionReferenceKind::ObjectReference,
+                    DefinitionReferenceTarget::ObjectType(task.id())
+                ),
+                (
+                    DefinitionReferenceKind::QueryObject,
+                    DefinitionReferenceTarget::ObjectType(task.id())
+                ),
+                (
+                    DefinitionReferenceKind::QueryField,
+                    DefinitionReferenceTarget::Field {
+                        owner: task.id(),
+                        field: task.field_by_name("owner").unwrap().id()
+                    }
+                ),
+                (
+                    DefinitionReferenceKind::QueryField,
+                    DefinitionReferenceTarget::Field {
+                        owner: person.id(),
+                        field: person.field_by_name("name").unwrap().id()
+                    }
+                ),
+                (
+                    DefinitionReferenceKind::QueryField,
+                    DefinitionReferenceTarget::Field {
+                        owner: task.id(),
+                        field: task.field_by_name("owner").unwrap().id()
+                    }
+                ),
+                (
+                    DefinitionReferenceKind::QueryField,
+                    DefinitionReferenceTarget::Field {
+                        owner: person.id(),
+                        field: person.field_by_name("name").unwrap().id()
+                    }
+                ),
+                (
+                    DefinitionReferenceKind::ObjectReference,
+                    DefinitionReferenceTarget::ObjectType(task.id())
+                ),
+                (
+                    DefinitionReferenceKind::ParameterRead,
+                    DefinitionReferenceTarget::Parameter {
+                        owner: prepared.candidate().functions()[0].id(),
+                        parameter: prepared.candidate().functions()[0].parameters()[0].id()
+                    }
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn identity_selected_validator_rejects_private_plan_and_evidence_mismatches() {
+        let active = empty_active();
+        let prepared = prepare(
+            &checked_report(IDENTITY_SELECTED_SOURCE, active.catalogue()),
+            active.pair(),
+            &active,
+        )
+        .unwrap();
+        let task = prepared.candidate().object_types()[0].clone();
+        let function = prepared.candidate().functions()[0].clone();
+        let checked = checked_report(IDENTITY_SELECTED_SOURCE, active.catalogue());
+        let checked_function = &checked.checked_bundle().unwrap().server_functions()[0];
+        let map = |owner, parameter, scan, field| {
+            checked_function
+                .identity_selected_query_plan()
+                .unwrap()
+                .try_map_identities(
+                    |_| Ok::<_, PrepareError>(scan),
+                    |_| Ok::<_, PrepareError>(field),
+                    |_| Ok::<_, PrepareError>(owner),
+                    |_| Ok::<_, PrepareError>(parameter),
+                )
+                .unwrap()
+        };
+        let plan = map(
+            function.id(),
+            function.parameters()[0].id(),
+            task.id(),
+            task.fields()[0].id(),
+        );
+        let references = identity_selected_query_reference_sequence(&plan, &function);
+        let expect = |result: Result<_, PrepareError>, reason| {
+            assert!(
+                matches!(result, Err(PrepareError::InvalidCheckedBundle { reason: actual }) if actual == reason)
+            );
+        };
+        expect(
+            identity_selected_query_plan(
+                &map(
+                    function.id(),
+                    function.parameters()[0].id(),
+                    TypeId::new(),
+                    task.fields()[0].id(),
+                ),
+                &function,
+                std::slice::from_ref(&task),
+                &references,
+            ),
+            "identity-selected query scan object is absent from the candidate catalogue",
+        );
+        let wrong_mode = FunctionDefinition::new(
+            function.id(),
+            function.name().clone(),
+            FunctionDomain::Server,
+            function.parameters().to_vec(),
+            function.return_type().clone(),
+            function.current_revision(),
+            FunctionSecurity::Definer,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Stable,
+        );
+        expect(
+            identity_selected_query_plan(
+                &plan,
+                &wrong_mode,
+                std::slice::from_ref(&task),
+                &references,
+            ),
+            "identity-selected query function has unsupported execution modes",
+        );
+        let wrong_selector_type = FunctionDefinition::new(
+            function.id(),
+            function.name().clone(),
+            FunctionDomain::Server,
+            vec![ParameterDefinition::new(
+                function.parameters()[0].id(),
+                function.parameters()[0].name(),
+                0,
+                ResolvedType::reference(TypeId::new()),
+                None,
+            )],
+            function.return_type().clone(),
+            function.current_revision(),
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Stable,
+        );
+        expect(
+            identity_selected_query_plan(
+                &plan,
+                &wrong_selector_type,
+                std::slice::from_ref(&task),
+                &references,
+            ),
+            "identity-selected query selector parameter does not reference its scan object",
+        );
+        let non_rows = FunctionDefinition::new(
+            function.id(),
+            function.name().clone(),
+            FunctionDomain::Server,
+            function.parameters().to_vec(),
+            FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Boolean)),
+            function.current_revision(),
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Stable,
+        );
+        expect(
+            identity_selected_query_plan(
+                &plan,
+                &non_rows,
+                std::slice::from_ref(&task),
+                &references,
+            ),
+            "identity-selected query function does not return ROWS",
+        );
+        let wrong_count = FunctionDefinition::new(
+            function.id(),
+            function.name().clone(),
+            FunctionDomain::Server,
+            function.parameters().to_vec(),
+            FunctionReturn::Rows(Vec::new()),
+            function.current_revision(),
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Stable,
+        );
+        expect(
+            identity_selected_query_plan(
+                &plan,
+                &wrong_count,
+                std::slice::from_ref(&task),
+                &references,
+            ),
+            "identity-selected query projection count differs from its function return",
+        );
+        let wrong_return_type = FunctionDefinition::new(
+            function.id(),
+            function.name().clone(),
+            FunctionDomain::Server,
+            function.parameters().to_vec(),
+            FunctionReturn::Rows(vec![
+                FunctionReturnColumnDefinition::new("task", 0, ResolvedType::reference(task.id())),
+                FunctionReturnColumnDefinition::new(
+                    "title",
+                    1,
+                    ResolvedType::scalar(StandardScalar::Boolean),
+                ),
+            ]),
+            function.current_revision(),
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Stable,
+        );
+        expect(
+            identity_selected_query_plan(
+                &plan,
+                &wrong_return_type,
+                std::slice::from_ref(&task),
+                &identity_selected_query_reference_sequence(&plan, &wrong_return_type),
+            ),
+            "identity-selected query projection differs from its function return",
+        );
+        let no_parameters = FunctionDefinition::new(
+            function.id(),
+            function.name().clone(),
+            FunctionDomain::Server,
+            Vec::new(),
+            function.return_type().clone(),
+            function.current_revision(),
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Stable,
+        );
+        expect(
+            identity_selected_query_plan(
+                &plan,
+                &no_parameters,
+                std::slice::from_ref(&task),
+                &references,
+            ),
+            "identity-selected query function does not declare exactly one parameter",
+        );
+        let two_parameters = FunctionDefinition::new(
+            function.id(),
+            function.name().clone(),
+            FunctionDomain::Server,
+            vec![
+                function.parameters()[0].clone(),
+                function.parameters()[0].clone(),
+            ],
+            function.return_type().clone(),
+            function.current_revision(),
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Stable,
+        );
+        expect(
+            identity_selected_query_plan(
+                &plan,
+                &two_parameters,
+                std::slice::from_ref(&task),
+                &references,
+            ),
+            "identity-selected query function does not declare exactly one parameter",
+        );
+        let default_parameter = ParameterDefinition::new(
+            function.parameters()[0].id(),
+            function.parameters()[0].name(),
+            0,
+            function.parameters()[0].resolved_type(),
+            Some(ExpressionId::new()),
+        );
+        let with_default = FunctionDefinition::new(
+            function.id(),
+            function.name().clone(),
+            FunctionDomain::Server,
+            vec![default_parameter],
+            function.return_type().clone(),
+            function.current_revision(),
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Stable,
+        );
+        expect(
+            identity_selected_query_plan(
+                &plan,
+                &with_default,
+                std::slice::from_ref(&task),
+                &references,
+            ),
+            "identity-selected query selector parameter has an unsupported default expression",
+        );
+        expect(
+            identity_selected_query_plan(
+                &map(
+                    FunctionId::new(),
+                    function.parameters()[0].id(),
+                    task.id(),
+                    task.fields()[0].id(),
+                ),
+                &function,
+                std::slice::from_ref(&task),
+                &references,
+            ),
+            "identity-selected query selector owner differs from its enclosing function",
+        );
+        expect(
+            identity_selected_query_plan(
+                &map(
+                    function.id(),
+                    ParameterId::new(),
+                    task.id(),
+                    task.fields()[0].id(),
+                ),
+                &function,
+                std::slice::from_ref(&task),
+                &references,
+            ),
+            "identity-selected query selector parameter is not its enclosing function parameter",
+        );
+        expect(
+            identity_selected_query_plan(
+                &map(
+                    function.id(),
+                    function.parameters()[0].id(),
+                    task.id(),
+                    FieldId::new(),
+                ),
+                &function,
+                std::slice::from_ref(&task),
+                &references,
+            ),
+            "identity-selected query field path field is absent from its source object",
+        );
+        let wrong_final_type = ObjectTypeDefinition::new(
+            task.id(),
+            task.name().clone(),
+            vec![FieldDefinition::new(
+                task.fields()[0].id(),
+                task.fields()[0].name(),
+                0,
+                ResolvedType::scalar(StandardScalar::Boolean),
+                false,
+                false,
+                None,
+                None,
+            )],
+        );
+        expect(
+            identity_selected_query_plan(
+                &plan,
+                &function,
+                std::slice::from_ref(&wrong_final_type),
+                &references,
+            ),
+            "identity-selected query field path type differs from its source field",
+        );
+        let nullable_final = ObjectTypeDefinition::new(
+            task.id(),
+            task.name().clone(),
+            vec![FieldDefinition::new(
+                task.fields()[0].id(),
+                task.fields()[0].name(),
+                0,
+                task.fields()[0].resolved_type(),
+                true,
+                false,
+                None,
+                None,
+            )],
+        );
+        expect(
+            identity_selected_query_plan(
+                &plan,
+                &function,
+                std::slice::from_ref(&nullable_final),
+                &references,
+            ),
+            "identity-selected query field path type differs from its source field",
+        );
+        let mut wrong_evidence = references.clone();
+        wrong_evidence.reverse();
+        expect(
+            identity_selected_query_plan(
+                &plan,
+                &function,
+                std::slice::from_ref(&task),
+                &wrong_evidence,
+            ),
+            "parameterised SELECT definition references differ from the checked function body",
+        );
+        expect(
+            identity_selected_query_plan(
+                &plan,
+                &function,
+                std::slice::from_ref(&task),
+                &references[..references.len() - 1],
+            ),
+            "parameterised SELECT definition references differ from the checked function body",
+        );
+        let mut extra_evidence = references.clone();
+        extra_evidence.push(references[0]);
+        expect(
+            identity_selected_query_plan(
+                &plan,
+                &function,
+                std::slice::from_ref(&task),
+                &extra_evidence,
+            ),
+            "parameterised SELECT definition references differ from the checked function body",
+        );
+        let mut wrong_target_evidence = references.clone();
+        wrong_target_evidence[0].1 = DefinitionReferenceTarget::ObjectType(TypeId::new());
+        expect(
+            identity_selected_query_plan(
+                &plan,
+                &function,
+                std::slice::from_ref(&task),
+                &wrong_target_evidence,
+            ),
+            "parameterised SELECT definition references differ from the checked function body",
+        );
+        let checked_plan = checked_function.identity_selected_query_plan().unwrap();
+        assert_eq!(
+            checked_plan
+                .try_map_identities(
+                    |_| Err::<TypeId, _>("type identity"),
+                    |_| Ok::<_, &'static str>(task.fields()[0].id()),
+                    |_| Ok::<_, &'static str>(function.id()),
+                    |_| Ok::<_, &'static str>(function.parameters()[0].id()),
+                )
+                .unwrap_err(),
+            "type identity"
+        );
+        assert_eq!(
+            checked_plan
+                .try_map_identities(
+                    |_| Ok::<_, &'static str>(task.id()),
+                    |_| Err::<FieldId, _>("field identity"),
+                    |_| Ok::<_, &'static str>(function.id()),
+                    |_| Ok::<_, &'static str>(function.parameters()[0].id()),
+                )
+                .unwrap_err(),
+            "field identity"
+        );
+        assert_eq!(
+            checked_plan
+                .try_map_identities(
+                    |_| Ok::<_, &'static str>(task.id()),
+                    |_| Ok::<_, &'static str>(task.fields()[0].id()),
+                    |_| Err::<FunctionId, _>("function identity"),
+                    |_| Ok::<_, &'static str>(function.parameters()[0].id()),
+                )
+                .unwrap_err(),
+            "function identity"
+        );
+        assert_eq!(
+            checked_plan
+                .try_map_identities(
+                    |_| Ok::<_, &'static str>(task.id()),
+                    |_| Ok::<_, &'static str>(task.fields()[0].id()),
+                    |_| Ok::<_, &'static str>(function.id()),
+                    |_| Err::<ParameterId, _>("parameter identity"),
+                )
+                .unwrap_err(),
+            "parameter identity"
+        );
+    }
+
+    #[test]
+    fn identity_selected_validator_rejects_multi_hop_catalogue_mismatches() {
+        let active = empty_active();
+        let prepared = prepare(
+            &checked_report(
+                IDENTITY_SELECTED_NULLABLE_EQUALITY_SOURCE,
+                active.catalogue(),
+            ),
+            active.pair(),
+            &active,
+        )
+        .unwrap();
+        let task = prepared
+            .candidate()
+            .object_type_by_name(&semantic_name(&["tasks", "task"]))
+            .unwrap()
+            .clone();
+        let person = prepared
+            .candidate()
+            .object_type_by_name(&semantic_name(&["tasks", "person"]))
+            .unwrap()
+            .clone();
+        let function = prepared.candidate().functions()[0].clone();
+        let checked = checked_report(
+            IDENTITY_SELECTED_NULLABLE_EQUALITY_SOURCE,
+            active.catalogue(),
+        );
+        let checked_plan = checked.checked_bundle().unwrap().server_functions()[0]
+            .identity_selected_query_plan()
+            .unwrap();
+        let owner_field = task.field_by_name("owner").unwrap();
+        let name_field = person.field_by_name("name").unwrap();
+        let map_plan = |type_ids: [TypeId; 5]| {
+            let mut type_index = 0;
+            let mut field_index = 0;
+            let field_ids = [
+                owner_field.id(),
+                name_field.id(),
+                owner_field.id(),
+                name_field.id(),
+            ];
+            checked_plan
+                .try_map_identities(
+                    |_| {
+                        let mapped = type_ids[type_index];
+                        type_index += 1;
+                        Ok::<_, PrepareError>(mapped)
+                    },
+                    |_| {
+                        let mapped = field_ids[field_index];
+                        field_index += 1;
+                        Ok::<_, PrepareError>(mapped)
+                    },
+                    |_| Ok::<_, PrepareError>(function.id()),
+                    |_| Ok::<_, PrepareError>(function.parameters()[0].id()),
+                )
+                .unwrap()
+        };
+        let exact_types = [task.id(), task.id(), person.id(), task.id(), person.id()];
+        let plan = map_plan(exact_types);
+        let references = identity_selected_query_reference_sequence(&plan, &function);
+        let non_reference_task = ObjectTypeDefinition::new(
+            task.id(),
+            task.name().clone(),
+            vec![FieldDefinition::new(
+                owner_field.id(),
+                owner_field.name(),
+                owner_field.ordinal(),
+                ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+                owner_field.nullable(),
+                false,
+                None,
+                None,
+            )],
+        );
+        assert!(matches!(
+            identity_selected_query_plan(
+                &plan,
+                &function,
+                &[non_reference_task, person.clone()],
+                &references,
+            ),
+            Err(PrepareError::InvalidCheckedBundle {
+                reason: "identity-selected query field path continues through a non-reference field"
+            })
+        ));
+
+        let wrong_owner_plan =
+            map_plan([task.id(), person.id(), person.id(), task.id(), person.id()]);
+        assert!(matches!(
+            identity_selected_query_plan(
+                &wrong_owner_plan,
+                &function,
+                &[task, person],
+                &identity_selected_query_reference_sequence(&wrong_owner_plan, &function),
+            ),
+            Err(PrepareError::InvalidCheckedBundle {
+                reason: "identity-selected query field path owner differs from its source object"
+            })
+        ));
     }
 
     #[test]
@@ -2726,11 +3732,32 @@ mod tests {
                 },
             ),
         ];
-        assert!(validate_mutation_reference_sequence(&expected, &expected).is_ok());
+        assert!(
+            validate_reference_sequence(
+                &expected,
+                &expected,
+                "mutation definition references differ from the checked body"
+            )
+            .is_ok()
+        );
         let mut reordered = expected.clone();
         reordered.reverse();
-        assert!(validate_mutation_reference_sequence(&expected, &reordered).is_err());
-        assert!(validate_mutation_reference_sequence(&expected, &expected[..1]).is_err());
+        assert!(
+            validate_reference_sequence(
+                &expected,
+                &reordered,
+                "mutation definition references differ from the checked body"
+            )
+            .is_err()
+        );
+        assert!(
+            validate_reference_sequence(
+                &expected,
+                &expected[..1],
+                "mutation definition references differ from the checked body"
+            )
+            .is_err()
+        );
     }
 
     #[test]
