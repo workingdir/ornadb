@@ -2,6 +2,11 @@ mod support;
 
 use std::{collections::BTreeSet, str::FromStr, sync::Arc};
 
+use orna_core::{
+    CatalogueRevisionId, SourceBundleId,
+    canonical_hash::{catalogue_digest, source_bundle_digest, source_revision_record_digest},
+    catalogue::CatalogueSnapshot,
+};
 use orna_kernel_postgres::{PostgresKernel, PostgresKernelError};
 use sha2::{Digest, Sha256};
 use support::{TestDatabase, TestResult, failure, with_test_database};
@@ -42,6 +47,22 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "definition reference integrity",
         include_str!("../migrations/0003_reference_integrity.sql"),
     ),
+    (
+        4,
+        "canonical hash contract v1",
+        include_str!("../migrations/0004_canonical_hash_contract.sql"),
+    ),
+];
+const MIGRATION_DATA_STEP_SEPARATOR: &[u8] = b"\0orna.kernel.migration-step\0";
+const CANONICAL_HASH_V1_EMPTY_SEED_STEP: &[u8] = b"canonical-hash-v1-empty-seed/v1";
+const HASH_CONTRACT_TABLES: &[&str] = &[
+    "source_units",
+    "source_bundles",
+    "source_revisions",
+    "catalogue_revisions",
+    "catalogue_expressions",
+    "function_revisions",
+    "function_artifacts",
 ];
 const ORIGIN_TABLES: &[&str] = &[
     "catalogue_schemas",
@@ -97,6 +118,101 @@ async fn bootstrap_upgrades_the_seeded_initial_catalogue() -> TestResult<()> {
 
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
+async fn bootstrap_upgrades_the_registered_v3_empty_catalogue() -> TestResult<()> {
+    with_test_database(|database| async move {
+        seed_registered_v3_empty_catalogue(&database).await?;
+        let kernel = PostgresKernel::from_str(&database.connection_string())?;
+
+        kernel.bootstrap().await?;
+        inspect_bootstrap_state(&database).await
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn bootstrap_rolls_back_v4_when_legacy_empty_hashes_are_tampered() -> TestResult<()> {
+    with_test_database(|database| async move {
+        seed_registered_v3_empty_catalogue(&database).await?;
+        let session = database.open().await?;
+        let tamper_result = session
+            .client()
+            .execute(
+                "UPDATE _orna_kernel.source_bundles SET content_hash = $1",
+                &[&vec![0_u8; 32]],
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| Box::new(error) as _);
+        let shutdown_result = session.shutdown().await;
+        match (tamper_result, shutdown_result) {
+            (Ok(()), Ok(())) => {}
+            (Err(error), Ok(())) | (Ok(()), Err(error)) => return Err(error),
+            (Err(tamper_error), Err(shutdown_error)) => {
+                return Err(failure(format!(
+                    "legacy hash tamper failed: {tamper_error}; tamper driver shutdown failed: {shutdown_error}"
+                )));
+            }
+        }
+
+        let kernel = PostgresKernel::from_str(&database.connection_string())?;
+        let error = kernel
+            .bootstrap()
+            .await
+            .expect_err("a tampered legacy hash must fail closed");
+        require(
+            matches!(error, PostgresKernelError::CatalogueInvariant(_)),
+            format!("tampered legacy hash produced the wrong failure: {error}"),
+        )?;
+        inspect_v4_rollback(&database).await
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn bootstrap_rejects_registered_v3_semantic_rows_and_rolls_back_v4() -> TestResult<()> {
+    with_test_database(|database| async move {
+        seed_registered_v3_empty_catalogue(&database).await?;
+        insert_unsupported_initial_schema(&database).await?;
+        let kernel = PostgresKernel::from_str(&database.connection_string())?;
+
+        let error = kernel
+            .bootstrap()
+            .await
+            .expect_err("v4 must reject a registered legacy catalogue with semantic rows");
+        require(
+            matches!(error, PostgresKernelError::CatalogueInvariant(_)),
+            format!("registered v3 semantic row produced the wrong failure: {error}"),
+        )?;
+        inspect_v4_rollback(&database).await
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn function_revisions_allow_distinct_semantics_for_one_declaration() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = PostgresKernel::from_str(&database.connection_string())?;
+        kernel.bootstrap().await?;
+
+        let session = database.open().await?;
+        let verification_result = verify_function_revision_semantic_hash_uniqueness(session.client()).await;
+        let shutdown_result = session.shutdown().await;
+        match (verification_result, shutdown_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+            (Err(verification_error), Err(shutdown_error)) => Err(failure(format!(
+                "function revision uniqueness verification failed: {verification_error}; verification driver shutdown failed: {shutdown_error}"
+            ))),
+        }
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
 async fn bootstrap_rejects_a_seeded_initial_catalogue_with_semantic_rows() -> TestResult<()> {
     with_test_database(|database| async move {
         seed_initial_catalogue(&database).await?;
@@ -131,7 +247,7 @@ async fn bootstrap_rejects_tampered_gapped_and_newer_migration_history() -> Test
         Sha256::digest(MIGRATIONS[1].2.as_bytes()).to_vec(),
     )
     .await?;
-    reject_migration_history(3, "future migration", vec![0; 32]).await
+    reject_migration_history(5, "future migration", vec![0; 32]).await
 }
 
 async fn inspect_bootstrap_state(database: &TestDatabase) -> TestResult<()> {
@@ -187,6 +303,7 @@ async fn inspect_client(client: &Client) -> TestResult<()> {
     .await?;
 
     inspect_empty_aggregate_hashes(client).await?;
+    inspect_hash_contract_columns(client).await?;
     inspect_origin_columns(client).await?;
     inspect_definition_references(client).await?;
     inspect_function_revision_constraints(client).await?;
@@ -265,8 +382,8 @@ async fn inspect_migrations(client: &Client) -> TestResult<()> {
             format!("migration {version} name is {name:?}; expected {expected_name:?}"),
         )?;
         require(
-            checksum == Sha256::digest(migration_sql.as_bytes()).to_vec(),
-            format!("migration {version} checksum does not match its SQL"),
+            checksum == expected_migration_checksum(*expected_version, migration_sql),
+            format!("migration {version} checksum does not match its registered contract"),
         )?;
         require(
             checksum.len() == 32,
@@ -276,38 +393,104 @@ async fn inspect_migrations(client: &Client) -> TestResult<()> {
     Ok(())
 }
 
+fn expected_migration_checksum(version: i64, sql: &str) -> Vec<u8> {
+    let mut hash = Sha256::new();
+    hash.update(sql.as_bytes());
+    if version == 4 {
+        hash.update(MIGRATION_DATA_STEP_SEPARATOR);
+        hash.update(CANONICAL_HASH_V1_EMPTY_SEED_STEP);
+    }
+    hash.finalize().to_vec()
+}
+
 async fn inspect_empty_aggregate_hashes(client: &Client) -> TestResult<()> {
-    let rows = client
-        .query(
-            "SELECT 'source_bundles' AS relation, content_hash, hash_algorithm
-             FROM _orna_kernel.source_bundles
-             UNION ALL
-             SELECT 'source_revisions' AS relation, content_hash, hash_algorithm
-             FROM _orna_kernel.source_revisions
-             UNION ALL
-             SELECT 'catalogue_revisions' AS relation, content_hash, hash_algorithm
-             FROM _orna_kernel.catalogue_revisions
-             ORDER BY relation",
+    let row = client
+        .query_one(
+            "SELECT
+                bundle.id,
+                bundle.content_hash,
+                bundle.hash_algorithm,
+                bundle.hash_contract_version,
+                source.content_hash,
+                source.hash_algorithm,
+                source.hash_contract_version,
+                catalogue.id,
+                catalogue.content_hash,
+                catalogue.hash_algorithm,
+                catalogue.hash_contract_version
+             FROM _orna_kernel.source_bundles AS bundle
+             CROSS JOIN _orna_kernel.source_revisions AS source
+             CROSS JOIN _orna_kernel.catalogue_revisions AS catalogue",
             &[],
         )
         .await?;
-    let empty_hash = Sha256::digest([]).to_vec();
+    let bundle = SourceBundleId::from_bytes(exact_id(value(&row, 0)?, "source bundle")?);
+    let catalogue = CatalogueRevisionId::from_bytes(exact_id(value(&row, 7)?, "catalogue")?);
+    let bundle_hash = source_bundle_digest(&[])?;
+    let source_hash = source_revision_record_digest(bundle, None, bundle_hash)?;
+    let snapshot = CatalogueSnapshot::new(catalogue, Vec::new(), Vec::new())?;
+    let catalogue_hash = catalogue_digest(&snapshot, &[], &[], &[], &[])?;
+
     require(
-        rows.len() == 3,
-        "empty revision has incomplete aggregate hashes",
+        value::<Vec<u8>>(&row, 1)? == bundle_hash.to_bytes(),
+        "source bundle does not store the canonical empty bundle hash",
     )?;
-    for row in rows {
-        let relation: String = value(&row, 0)?;
-        let content_hash: Vec<u8> = value(&row, 1)?;
-        let hash_algorithm: String = value(&row, 2)?;
-        require(
-            content_hash == empty_hash,
-            format!("{relation} does not store SHA-256 of the empty aggregate"),
-        )?;
+    require(
+        value::<Vec<u8>>(&row, 4)? == source_hash.to_bytes(),
+        "source revision does not store the canonical empty source revision hash",
+    )?;
+    require(
+        value::<Vec<u8>>(&row, 8)? == catalogue_hash.to_bytes(),
+        "catalogue revision does not store the canonical empty catalogue hash",
+    )?;
+    for (relation, algorithm_index, contract_version_index) in [
+        ("source bundle", 2, 3),
+        ("source revision", 5, 6),
+        ("catalogue revision", 9, 10),
+    ] {
+        let hash_algorithm: String = value(&row, algorithm_index)?;
+        let contract_version: i16 = value(&row, contract_version_index)?;
         require(
             hash_algorithm == "sha256",
             format!("{relation} hash algorithm is {hash_algorithm:?}; expected sha256"),
         )?;
+        require(
+            contract_version == 1,
+            format!("{relation} hash contract version is {contract_version}; expected 1"),
+        )?;
+    }
+    Ok(())
+}
+
+async fn inspect_hash_contract_columns(client: &Client) -> TestResult<()> {
+    for table in HASH_CONTRACT_TABLES {
+        let row = client
+            .query_opt(
+                "SELECT data_type, is_nullable, column_default
+                 FROM information_schema.columns
+                 WHERE table_schema = '_orna_kernel'
+                   AND table_name = $1
+                   AND column_name = 'hash_contract_version'",
+                &[table],
+            )
+            .await?
+            .ok_or_else(|| failure(format!("missing {table}.hash_contract_version")))?;
+        let data_type: String = value(&row, 0)?;
+        let is_nullable: String = value(&row, 1)?;
+        let default: Option<String> = value(&row, 2)?;
+        require(
+            data_type == "smallint" && is_nullable == "NO" && default.as_deref() == Some("1"),
+            format!(
+                "{table}.hash_contract_version contract is ({data_type:?}, {is_nullable:?}, {default:?})"
+            ),
+        )?;
+        require_constraint(
+            client,
+            table,
+            &format!("{table}_hash_contract_version_check"),
+            "hash_contract_version = 1",
+        )
+        .await?;
     }
     Ok(())
 }
@@ -495,11 +678,45 @@ async fn inspect_function_revision_constraints(client: &Client) -> TestResult<()
     .await?;
     require_constraint(
         client,
+        "function_revisions",
+        "function_revisions_function_content_semantic_key",
+        "UNIQUE (function_id, content_hash, semantic_ir_hash)",
+    )
+    .await?;
+    require_constraint_absent(
+        client,
+        "function_revisions",
+        "function_revisions_function_id_content_hash_key",
+    )
+    .await?;
+    require_constraint(
+        client,
         "catalogue_functions",
         "catalogue_functions_current_revision_fk",
         "FOREIGN KEY (function_id, current_function_revision_id) REFERENCES _orna_kernel.function_revisions(function_id, id)",
     )
     .await
+}
+
+async fn require_constraint_absent(
+    client: &Client,
+    table: &str,
+    constraint: &str,
+) -> TestResult<()> {
+    let row = client
+        .query_one(
+            "SELECT count(*)
+             FROM pg_constraint AS constraint_row
+             WHERE constraint_row.conrelid = to_regclass($1)
+               AND constraint_row.conname = $2",
+            &[&format!("_orna_kernel.{table}"), &constraint],
+        )
+        .await?;
+    let count: i64 = value(&row, 0)?;
+    require(
+        count == 0,
+        format!("unexpected {table} constraint {constraint}"),
+    )
 }
 
 async fn require_constraint(
@@ -545,6 +762,36 @@ async fn seed_initial_catalogue(database: &TestDatabase) -> TestResult<()> {
         (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
         (Err(seed_error), Err(shutdown_error)) => Err(failure(format!(
             "initial catalogue seed failed: {seed_error}; seed driver shutdown failed: {shutdown_error}"
+        ))),
+    }
+}
+
+async fn seed_registered_v3_empty_catalogue(database: &TestDatabase) -> TestResult<()> {
+    let session = database.open().await?;
+    let seed_result = async {
+        seed_initial_catalogue_client(session.client()).await?;
+        for (version, name, sql) in &MIGRATIONS[1..3] {
+            session.client().batch_execute(sql).await?;
+            let checksum = expected_migration_checksum(*version, sql);
+            session
+                .client()
+                .execute(
+                    "INSERT INTO _orna_kernel.schema_migrations (version, name, checksum)
+                     VALUES ($1, $2, $3)",
+                    &[version, name, &checksum],
+                )
+                .await?;
+        }
+        Ok(())
+    }
+    .await;
+    let shutdown_result = session.shutdown().await;
+
+    match (seed_result, shutdown_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(seed_error), Err(shutdown_error)) => Err(failure(format!(
+            "registered v3 catalogue seed failed: {seed_error}; seed driver shutdown failed: {shutdown_error}"
         ))),
     }
 }
@@ -695,6 +942,192 @@ async fn create_migration_registry(client: &Client) -> TestResult<()> {
     Ok(())
 }
 
+async fn inspect_v4_rollback(database: &TestDatabase) -> TestResult<()> {
+    let session = database.open().await?;
+    let inspection_result = async {
+        let migration_row = session
+            .client()
+            .query_one(
+                "SELECT count(*) FROM _orna_kernel.schema_migrations WHERE version = 4",
+                &[],
+            )
+            .await?;
+        require(
+            value::<i64>(&migration_row, 0)? == 0,
+            "v4 migration record survived a failed data step",
+        )?;
+        let column_row = session
+            .client()
+            .query_one(
+                "SELECT count(*)
+                 FROM information_schema.columns
+                 WHERE table_schema = '_orna_kernel'
+                   AND table_name = 'source_bundles'
+                   AND column_name = 'hash_contract_version'",
+                &[],
+            )
+            .await?;
+        require(
+            value::<i64>(&column_row, 0)? == 0,
+            "v4 schema changes survived a failed data step",
+        )
+    }
+    .await;
+    let shutdown_result = session.shutdown().await;
+
+    match (inspection_result, shutdown_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(inspection_error), Err(shutdown_error)) => Err(failure(format!(
+            "v4 rollback inspection failed: {inspection_error}; inspection driver shutdown failed: {shutdown_error}"
+        ))),
+    }
+}
+
+async fn verify_function_revision_semantic_hash_uniqueness(client: &Client) -> TestResult<()> {
+    let active = client
+        .query_one(
+            "SELECT catalogue_revision_id
+             FROM _orna_kernel.active_revision
+             WHERE singleton = true",
+            &[],
+        )
+        .await?;
+    let catalogue_revision_id: Vec<u8> = value(&active, 0)?;
+    let schema_id = vec![4_u8; 16];
+    let function_id = vec![5_u8; 16];
+    let first_revision_id = vec![6_u8; 16];
+    let second_revision_id = vec![7_u8; 16];
+    let duplicate_revision_id = vec![8_u8; 16];
+    let declaration_hash = vec![9_u8; 32];
+    let first_semantic_hash = vec![10_u8; 32];
+    let second_semantic_hash = vec![11_u8; 32];
+
+    client
+        .execute(
+            "INSERT INTO _orna_kernel.catalogue_schemas
+                (catalogue_revision_id, schema_id, name_parts)
+             VALUES ($1, $2, $3)",
+            &[
+                &catalogue_revision_id,
+                &schema_id,
+                &vec!["semantic".to_owned()],
+            ],
+        )
+        .await?;
+    client
+        .batch_execute("BEGIN; SET CONSTRAINTS ALL DEFERRED;")
+        .await?;
+    let insert_result: TestResult<()> = async {
+        client
+            .execute(
+                "INSERT INTO _orna_kernel.catalogue_functions
+                    (catalogue_revision_id, function_id, schema_id, name_parts,
+                     domain, security_mode, transaction_mode, volatility,
+                     return_shape, current_function_revision_id)
+                 VALUES ($1, $2, $3, $4, 'server', 'invoker', 'atomic', 'immutable', 'rows', $5)",
+                &[
+                    &catalogue_revision_id,
+                    &function_id,
+                    &schema_id,
+                    &vec!["semantic".to_owned(), "work".to_owned()],
+                    &first_revision_id,
+                ],
+            )
+            .await?;
+        insert_function_revision(
+            client,
+            &catalogue_revision_id,
+            &function_id,
+            &first_revision_id,
+            1,
+            &declaration_hash,
+            &first_semantic_hash,
+        )
+        .await?;
+        insert_function_revision(
+            client,
+            &catalogue_revision_id,
+            &function_id,
+            &second_revision_id,
+            2,
+            &declaration_hash,
+            &second_semantic_hash,
+        )
+        .await?;
+        Ok(())
+    }
+    .await;
+    match insert_result {
+        Ok(()) => client.batch_execute("COMMIT").await?,
+        Err(error) => {
+            let rollback_result = client.batch_execute("ROLLBACK").await;
+            return match rollback_result {
+                Ok(()) => Err(error),
+                Err(rollback_error) => Err(failure(format!(
+                    "function revision setup failed: {error}; rollback failed: {rollback_error}"
+                ))),
+            };
+        }
+    }
+
+    let duplicate_error = insert_function_revision(
+        client,
+        &catalogue_revision_id,
+        &function_id,
+        &duplicate_revision_id,
+        3,
+        &declaration_hash,
+        &first_semantic_hash,
+    )
+    .await
+    .expect_err("an exact function revision content-and-semantic tuple must be unique");
+    require(
+        duplicate_error
+            .as_db_error()
+            .and_then(|error| error.constraint())
+            == Some("function_revisions_function_content_semantic_key"),
+        format!("duplicate function revision tuple failed for the wrong reason: {duplicate_error}"),
+    )?;
+    let revisions = client
+        .query_one(
+            "SELECT count(*) FROM _orna_kernel.function_revisions WHERE function_id = $1",
+            &[&function_id],
+        )
+        .await?;
+    require(
+        value::<i64>(&revisions, 0)? == 2,
+        "function revisions with distinct semantic hashes were not both retained",
+    )
+}
+
+async fn insert_function_revision(
+    client: &Client,
+    catalogue_revision_id: &[u8],
+    function_id: &[u8],
+    revision_id: &[u8],
+    revision_number: i64,
+    declaration_hash: &[u8],
+    semantic_hash: &[u8],
+) -> Result<u64, tokio_postgres::Error> {
+    client
+        .execute(
+            "INSERT INTO _orna_kernel.function_revisions
+                (id, introduced_catalogue_revision_id, function_id, revision_number,
+                 content_hash, semantic_ir_hash, language_version, status)
+             VALUES ($1, $2, $3, $4, $5, $6, 'test-v1', 'active')",
+            &[
+                &revision_id,
+                &catalogue_revision_id,
+                &function_id,
+                &revision_number,
+                &declaration_hash,
+                &semantic_hash,
+            ],
+        )
+        .await
+}
+
 async fn require_count(
     client: &Client,
     table: &str,
@@ -722,4 +1155,13 @@ where
     T: tokio_postgres::types::FromSqlOwned,
 {
     Ok(row.try_get(index)?)
+}
+
+fn exact_id(bytes: Vec<u8>, identity: &str) -> TestResult<[u8; 16]> {
+    let length = bytes.len();
+    bytes.try_into().map_err(|_| {
+        failure(format!(
+            "{identity} identity is {length} bytes; expected 16"
+        ))
+    })
 }
