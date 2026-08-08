@@ -9,8 +9,11 @@ use orna_syntax::{
     Diagnostic as SyntaxDiagnostic, NamePart, Parse as SyntaxParse, QualifiedName, SourceSpan,
 };
 
+mod prepare;
 pub(crate) mod relational;
 mod resolver;
+
+pub use prepare::{PrepareError, prepare};
 
 pub use resolver::{
     CheckReport, CheckedBundle, CheckedDefault, CheckedDefinitionReference,
