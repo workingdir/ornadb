@@ -1,13 +1,13 @@
 use rowan::{GreenNode, GreenNodeBuilder, Language};
 
 use crate::{
-    CapabilitySpecification, Diagnostic, FunctionReturnType, FunctionSecurity, FunctionTransaction,
-    FunctionVolatility, InsertStatement, InsertValue, NamePart, NullOrdering,
-    ObjectFieldDeclaration, ObjectSource, ObjectTypeDeclaration, OnDeletePolicy, OrderingDirection,
-    OrderingExpression, Parse, QualifiedName, QueryExpression, RowsColumnDeclaration,
-    SchemaDeclaration, SelectQuery, ServerFunctionBody, ServerFunctionDeclaration,
-    ServerFunctionParameter, SourceSlice, SourceSpan, SqlInsertBody, SqlQueryBody,
-    StandardLargeObjectKind, SyntaxTree, TypeSpecification,
+    CapabilitySpecification, Diagnostic, FieldRenameDeclaration, FunctionReturnType,
+    FunctionSecurity, FunctionTransaction, FunctionVolatility, InsertStatement, InsertValue,
+    NamePart, NullOrdering, ObjectFieldDeclaration, ObjectSource, ObjectTypeDeclaration,
+    OnDeletePolicy, OrderingDirection, OrderingExpression, Parse, QualifiedName, QueryExpression,
+    RowsColumnDeclaration, SchemaDeclaration, SelectQuery, ServerFunctionBody,
+    ServerFunctionDeclaration, ServerFunctionParameter, SourceSlice, SourceSpan, SqlInsertBody,
+    SqlQueryBody, StandardLargeObjectKind, SyntaxTree, TypeSpecification,
     lexer::{Token, TokenKind, lex},
 };
 
@@ -43,6 +43,7 @@ pub(crate) enum SyntaxKind {
     CapabilitySpecification,
     CapabilityArguments,
     SqlInsertBody,
+    AlterTypeRenameFieldStatement,
 }
 
 impl From<SyntaxKind> for rowan::SyntaxKind {
@@ -88,6 +89,7 @@ impl Language for OrnaLanguage {
             26 => SyntaxKind::CapabilitySpecification,
             27 => SyntaxKind::CapabilityArguments,
             28 => SyntaxKind::SqlInsertBody,
+            29 => SyntaxKind::AlterTypeRenameFieldStatement,
             _ => panic!("unknown Orna syntax kind"),
         }
     }
@@ -109,6 +111,7 @@ struct Parser<'source> {
     diagnostics: Vec<Diagnostic>,
     schemas: Vec<SchemaDeclaration>,
     object_types: Vec<ObjectTypeDeclaration>,
+    field_renames: Vec<FieldRenameDeclaration>,
     server_functions: Vec<ServerFunctionDeclaration>,
 }
 
@@ -123,6 +126,7 @@ impl<'source> Parser<'source> {
             diagnostics,
             schemas: Vec::new(),
             object_types: Vec::new(),
+            field_renames: Vec::new(),
             server_functions: Vec::new(),
         }
     }
@@ -134,9 +138,11 @@ impl<'source> Parser<'source> {
                 self.bump();
             } else if self.current().is_some_and(|token| token.is_word("CREATE")) {
                 self.parse_create_statement();
+            } else if self.current().is_some_and(|token| token.is_word("ALTER")) {
+                self.parse_alter_type_rename_field_statement();
             } else {
-                self.error_current("ORNA0001", "expected a supported CREATE statement");
-                self.bump();
+                self.error_current("ORNA0001", "expected a CREATE or ALTER declaration");
+                self.recover_statement();
             }
         }
         self.builder.finish_node();
@@ -149,6 +155,7 @@ impl<'source> Parser<'source> {
             diagnostics: self.diagnostics,
             schemas: self.schemas,
             object_types: self.object_types,
+            field_renames: self.field_renames,
             server_functions: self.server_functions,
         }
     }
@@ -175,6 +182,105 @@ impl<'source> Parser<'source> {
         } else {
             self.parse_create_schema_statement();
         }
+    }
+
+    fn parse_alter_type_rename_field_statement(&mut self) {
+        let statement_start = self.current().expect("ALTER token exists").range.start;
+        self.builder
+            .start_node(SyntaxKind::AlterTypeRenameFieldStatement.into());
+
+        self.expect_word("ALTER");
+        self.skip_trivia();
+        if self.take_word("TYPE").is_none() {
+            self.error_current("ORNA0001", "ALTER must be followed by TYPE");
+            self.recover_statement();
+            self.builder.finish_node();
+            return;
+        }
+
+        self.skip_trivia();
+        if self.current().is_some_and(|token| token.is_word("RENAME")) {
+            self.error_current("ORNA0001", "expected the type name after ALTER TYPE");
+            self.recover_statement();
+            self.builder.finish_node();
+            return;
+        }
+        let Some(type_name) = self.parse_qualified_name_with_messages(
+            "expected the type name after ALTER TYPE",
+            "expected the type name after '.'",
+            Some("RENAME"),
+        ) else {
+            self.recover_statement();
+            self.builder.finish_node();
+            return;
+        };
+        self.skip_trivia();
+        if self.take_word("RENAME").is_none() {
+            self.error_current("ORNA0001", "expected RENAME after the type name");
+            self.recover_statement();
+            self.builder.finish_node();
+            return;
+        }
+        self.skip_trivia();
+        if self.take_word("FIELD").is_none() {
+            let message = if self.current().is_some_and(|token| token.is_word("TO")) {
+                "ALTER TYPE only supports RENAME FIELD"
+            } else {
+                "expected FIELD after RENAME"
+            };
+            self.error_current("ORNA0001", message);
+            self.recover_statement();
+            self.builder.finish_node();
+            return;
+        }
+        self.skip_trivia();
+        if self.current().is_some_and(|token| token.is_word("TO")) {
+            self.error_current("ORNA0001", "expected the old field name after RENAME FIELD");
+            self.recover_statement();
+            self.builder.finish_node();
+            return;
+        }
+        let Some(old_field_name) =
+            self.expect_identifier("expected the old field name after RENAME FIELD")
+        else {
+            self.recover_statement();
+            self.builder.finish_node();
+            return;
+        };
+        self.skip_trivia();
+        if self.take_word("TO").is_none() {
+            self.error_current("ORNA0001", "expected TO after the old field name");
+            self.recover_statement();
+            self.builder.finish_node();
+            return;
+        }
+        self.skip_trivia();
+        let Some(new_field_name) = self.expect_identifier("expected the new field name after TO")
+        else {
+            self.recover_statement();
+            self.builder.finish_node();
+            return;
+        };
+        self.skip_trivia();
+        let Some(semicolon) = self.expect_kind(
+            TokenKind::Semicolon,
+            "expected ';' after field rename declaration",
+        ) else {
+            self.recover_statement();
+            self.builder.finish_node();
+            return;
+        };
+
+        self.field_renames.push(FieldRenameDeclaration {
+            type_name,
+            old_field_name,
+            new_field_name,
+            span: SourceSpan {
+                start: statement_start,
+                end: semicolon.end,
+            },
+        });
+        self.builder.finish_node();
     }
 
     fn parse_create_schema_statement(&mut self) {
@@ -1183,6 +1289,19 @@ impl<'source> Parser<'source> {
     }
 
     fn parse_qualified_name(&mut self, first_identifier_message: &str) -> Option<QualifiedName> {
+        self.parse_qualified_name_with_messages(
+            first_identifier_message,
+            "expected a name after '.'",
+            None,
+        )
+    }
+
+    fn parse_qualified_name_with_messages(
+        &mut self,
+        first_identifier_message: &str,
+        next_identifier_message: &str,
+        stop_word: Option<&str>,
+    ) -> Option<QualifiedName> {
         self.builder.start_node(SyntaxKind::QualifiedName.into());
         let first = self.expect_identifier(first_identifier_message);
         let mut parts = first.into_iter().collect::<Vec<_>>();
@@ -1197,7 +1316,13 @@ impl<'source> Parser<'source> {
             }
             self.bump();
             self.skip_trivia();
-            match self.expect_identifier("expected an identifier after '.' in qualified name") {
+            if stop_word.is_some_and(|word| self.current().is_some_and(|token| token.is_word(word)))
+            {
+                self.error_current("ORNA0001", next_identifier_message);
+                self.builder.finish_node();
+                return None;
+            }
+            match self.expect_identifier(next_identifier_message) {
                 Some(part) => parts.push(part),
                 None => {
                     self.builder.finish_node();
@@ -1246,6 +1371,15 @@ impl<'source> Parser<'source> {
             self.error_current("ORNA0001", message);
             return None;
         };
+        if token.kind == TokenKind::QuotedIdentifier
+            && self
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "ORNA0002" && diagnostic.span == token.span())
+        {
+            self.bump();
+            return None;
+        }
         if !token.is_identifier() {
             self.error_current("ORNA0001", message);
             return None;
@@ -1278,6 +1412,9 @@ impl<'source> Parser<'source> {
         while let Some(token) = self.current() {
             if token.kind == TokenKind::Semicolon {
                 self.bump();
+                break;
+            }
+            if token.is_word("CREATE") || token.is_word("ALTER") {
                 break;
             }
             self.bump();
