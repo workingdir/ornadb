@@ -34,6 +34,7 @@ pub(crate) struct RelationalQueryIr {
     ordering: Vec<OrderingIr>,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 impl RelationalQueryIr {
     pub(crate) fn scan(&self) -> &ScanIr {
         &self.scan
@@ -59,6 +60,7 @@ pub(crate) struct ScanIr {
     object_type: TypeId,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 impl ScanIr {
     pub(crate) const fn input(&self) -> InputSlot {
         self.input
@@ -77,6 +79,7 @@ pub(crate) struct OrderingIr {
     null_order: NullOrder,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 impl OrderingIr {
     pub(crate) fn expression(&self) -> &ExpressionIr {
         &self.expression
@@ -112,6 +115,7 @@ pub(crate) struct ExpressionIr {
     value_type: ValueType,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 impl ExpressionIr {
     pub(crate) fn kind(&self) -> &ExpressionKind {
         &self.kind
@@ -148,6 +152,7 @@ pub(crate) struct ResolvedFieldStep {
     field: FieldId,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 impl ResolvedFieldStep {
     pub(crate) const fn owner(&self) -> TypeId {
         self.owner
@@ -165,6 +170,7 @@ pub(crate) struct ValueType {
     nullable: bool,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 impl ValueType {
     pub(crate) const fn resolved_type(&self) -> ResolvedType {
         self.resolved_type

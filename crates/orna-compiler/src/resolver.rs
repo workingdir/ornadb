@@ -6,12 +6,14 @@
 use std::collections::{HashMap, HashSet};
 
 use orna_core::{
-    CatalogueRevisionId, ExpressionId, FieldId, FunctionId, ParameterId, SchemaId, TypeId,
+    CatalogueRevisionId, ExpressionId, FieldId, FunctionId, FunctionRevisionId, ParameterId,
+    SchemaId, TypeId,
     catalogue::{
-        CatalogueSnapshot, FieldDefinition, FunctionSecurity as CatalogueFunctionSecurity,
+        CatalogueSnapshot, FieldDefinition, FunctionDefinition, FunctionDomain, FunctionReturn,
+        FunctionReturnColumnDefinition, FunctionSecurity as CatalogueFunctionSecurity,
         FunctionTransaction as CatalogueFunctionTransaction,
         FunctionVolatility as CatalogueFunctionVolatility, ObjectTypeDefinition, OnDeleteAction,
-        QualifiedSemanticName, SchemaDefinition,
+        ParameterDefinition, QualifiedSemanticName, SchemaDefinition,
     },
     source::SourceBundle,
     types::{ResolvedType, StandardScalar},
@@ -24,6 +26,7 @@ use orna_syntax::{
     StandardLargeObjectKind, TypeSpecification,
 };
 
+use crate::relational::{RelationalQueryIr, check_query};
 use crate::{
     ByteSpan, CompilerDiagnostic, DiagnosticCode, ParseReport, SourceLocation,
     normalise_name_part as semantic_part, normalise_qualified_name as semantic_name, parse_bundle,
@@ -157,6 +160,7 @@ impl CheckedObjectType {
 pub struct CheckedBundle {
     schemas: Vec<CheckedSchema>,
     object_types: Vec<CheckedObjectType>,
+    server_functions: Vec<CheckedServerFunction>,
 }
 
 impl CheckedBundle {
@@ -168,6 +172,41 @@ impl CheckedBundle {
     /// Returns submitted object declarations in source order.
     pub fn object_types(&self) -> &[CheckedObjectType] {
         &self.object_types
+    }
+
+    /// Returns submitted checked SERVER functions in source order.
+    pub fn server_functions(&self) -> &[CheckedServerFunction] {
+        &self.server_functions
+    }
+}
+
+/// A checked SERVER function with an Orna-owned relational execution plan.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CheckedServerFunction {
+    definition: FunctionDefinition,
+    location: SourceLocation,
+    plan: RelationalQueryIr,
+}
+
+impl CheckedServerFunction {
+    /// Returns the stable function identity.
+    pub const fn id(&self) -> FunctionId {
+        self.definition.id()
+    }
+
+    /// Returns the resolved function name.
+    pub fn name(&self) -> &QualifiedSemanticName {
+        self.definition.name()
+    }
+
+    /// Returns the source location of the declaration.
+    pub fn location(&self) -> &SourceLocation {
+        &self.location
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn plan(&self) -> &RelationalQueryIr {
+        &self.plan
     }
 }
 
@@ -231,11 +270,7 @@ struct Header<'a> {
     id: TypeId,
 }
 
-/// Resolved metadata for a SERVER function before compiler input resolution.
-///
-/// This temporary input is deliberately private. It does not make a function
-/// executable or create a catalogue definition.
-#[allow(dead_code)]
+/// Resolved metadata for a SERVER function before relational planning.
 #[derive(Clone, Copy)]
 struct ServerFunctionHeader<'a> {
     declaration: &'a ServerFunctionDeclaration,
@@ -246,31 +281,16 @@ struct ServerFunctionHeader<'a> {
     volatility: CatalogueFunctionVolatility,
 }
 
-/// Exact source that needs expression or relational planning.
-///
-/// The compiler keeps this temporary value private until the relational stage
-/// replaces it with typed plans. It is not executable source.
-#[allow(dead_code)]
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct UnplannedSource {
-    source: String,
-    location: SourceLocation,
-}
-
-/// One resolved parameter before default-expression planning.
-#[allow(dead_code)]
+/// One resolved parameter accepted by this SERVER function slice.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ResolvedServerFunctionParameter {
     id: ParameterId,
     name: String,
     ordinal: u32,
     resolved_type: ResolvedType,
-    default: Option<UnplannedSource>,
-    location: SourceLocation,
 }
 
-/// One resolved column in an unplanned rows result.
-#[allow(dead_code)]
+/// One resolved column in a `ROWS` result.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ResolvedServerFunctionReturnColumn {
     name: String,
@@ -280,29 +300,20 @@ struct ResolvedServerFunctionReturnColumn {
 }
 
 /// The resolved result shape before relational planning.
-#[allow(dead_code)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum ResolvedServerFunctionReturn {
-    Single(ResolvedType),
-    Rows(Vec<ResolvedServerFunctionReturnColumn>),
+    Single {
+        location: SourceLocation,
+    },
+    Rows {
+        columns: Vec<ResolvedServerFunctionReturnColumn>,
+        location: SourceLocation,
+    },
 }
 
-/// One unresolved capability requirement retained for a later capability pass.
-#[allow(dead_code)]
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct ResolvedCapabilityInput {
-    name: QualifiedSemanticName,
-    arguments: Option<UnplannedSource>,
-    location: SourceLocation,
-}
-
-/// A complete SERVER function input before expression and relational planning.
-///
-/// This is compiler-owned and deliberately non-executable. The apply stage
-/// cannot consume it until later planning creates an executable function.
-#[allow(dead_code)]
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct ResolvedServerFunctionInput {
+/// A resolved SERVER function that is ready for relational body checking.
+#[derive(Clone, Debug)]
+struct ResolvedServerFunctionInput<'a> {
     id: FunctionId,
     name: QualifiedSemanticName,
     parameters: Vec<ResolvedServerFunctionParameter>,
@@ -310,9 +321,22 @@ struct ResolvedServerFunctionInput {
     security: CatalogueFunctionSecurity,
     transaction: Option<CatalogueFunctionTransaction>,
     volatility: CatalogueFunctionVolatility,
-    capabilities: Vec<ResolvedCapabilityInput>,
-    body: UnplannedSource,
+    body: &'a ServerFunctionBody,
     location: SourceLocation,
+}
+
+/// A fully checked SERVER function before its revision identity is allocated.
+#[derive(Clone, Debug)]
+struct PlannedServerFunction {
+    id: FunctionId,
+    name: QualifiedSemanticName,
+    parameters: Vec<ResolvedServerFunctionParameter>,
+    columns: Vec<ResolvedServerFunctionReturnColumn>,
+    security: CatalogueFunctionSecurity,
+    transaction: Option<CatalogueFunctionTransaction>,
+    volatility: CatalogueFunctionVolatility,
+    location: SourceLocation,
+    plan: RelationalQueryIr,
 }
 
 fn check_parsed(parse_report: ParseReport, base: &CatalogueSnapshot) -> CheckReport {
@@ -322,11 +346,7 @@ fn check_parsed(parse_report: ParseReport, base: &CatalogueSnapshot) -> CheckRep
     }
 
     let mut checked_schemas = Vec::new();
-    let mut known_schemas = base
-        .schemas()
-        .iter()
-        .map(|schema| schema.name().clone())
-        .collect::<HashSet<_>>();
+    let mut known_schemas = HashSet::new();
     let mut submitted_schemas = HashSet::new();
     for unit in parse_report.units() {
         for declaration in unit.parsed().schemas() {
@@ -424,7 +444,6 @@ fn check_parsed(parse_report: ParseReport, base: &CatalogueSnapshot) -> CheckRep
             let resolved_type = resolve_type(
                 &field.type_specification,
                 &submitted_ids,
-                base,
                 header.logical_path,
                 &mut diagnostics,
             );
@@ -492,31 +511,16 @@ fn check_parsed(parse_report: ParseReport, base: &CatalogueSnapshot) -> CheckRep
         });
     }
 
-    let function_headers = if diagnostics.is_empty() {
-        resolve_server_function_headers(&parse_report, base, &known_schemas, &mut diagnostics)
-    } else {
-        Vec::new()
-    };
-    let function_inputs = if diagnostics.is_empty() {
-        resolve_server_function_inputs(&function_headers, &submitted_ids, base, &mut diagnostics)
-    } else {
-        Vec::new()
-    };
-    if diagnostics.is_empty() {
-        for input in function_inputs {
-            diagnostics.push(DiagnosticCode::semantic(
-                DiagnosticCode::TypeMismatch,
-                "SERVER function body planning is not implemented",
-                input.body.location.clone(),
-            ));
-        }
-    }
-
     if !diagnostics.is_empty() {
         return failed(parse_report, diagnostics);
     }
 
-    let mut object_types = base.object_types().to_vec();
+    reject_unplanned_server_function_features(&parse_report, &mut diagnostics);
+    if !diagnostics.is_empty() {
+        return failed(parse_report, diagnostics);
+    }
+
+    let mut object_types: Vec<ObjectTypeDefinition> = Vec::with_capacity(checked_types.len());
     for checked_type in &checked_types {
         let definition = ObjectTypeDefinition::new(
             checked_type.id,
@@ -536,7 +540,7 @@ fn check_parsed(parse_report: ParseReport, base: &CatalogueSnapshot) -> CheckRep
             object_types.push(definition);
         }
     }
-    let mut schemas = base.schemas().to_vec();
+    let mut schemas: Vec<SchemaDefinition> = Vec::with_capacity(checked_schemas.len());
     for checked_schema in &checked_schemas {
         let definition = SchemaDefinition::new(checked_schema.id, checked_schema.name.clone());
         if let Some(index) = schemas
@@ -548,11 +552,51 @@ fn check_parsed(parse_report: ParseReport, base: &CatalogueSnapshot) -> CheckRep
             schemas.push(definition);
         }
     }
-    let candidate = CatalogueSnapshot::new_with_functions(
+    let query_catalogue = CatalogueSnapshot::new_with_functions(
         CatalogueRevisionId::new(),
         schemas,
         object_types,
-        base.functions().to_vec(),
+        Vec::new(),
+    )
+    .expect("checked definitions satisfy catalogue invariants");
+
+    let function_headers = if diagnostics.is_empty() {
+        resolve_server_function_headers(&parse_report, base, &known_schemas, &mut diagnostics)
+    } else {
+        Vec::new()
+    };
+    let function_inputs = if diagnostics.is_empty() {
+        resolve_server_function_inputs(&function_headers, &submitted_ids, base, &mut diagnostics)
+    } else {
+        Vec::new()
+    };
+    let checked_functions = if diagnostics.is_empty() {
+        check_server_functions(&function_inputs, &query_catalogue, &mut diagnostics)
+    } else {
+        Vec::new()
+    };
+
+    if !diagnostics.is_empty() {
+        return failed(parse_report, diagnostics);
+    }
+
+    let mut functions: Vec<FunctionDefinition> = Vec::with_capacity(checked_functions.len());
+    for checked_function in &checked_functions {
+        let definition = checked_function.definition.clone();
+        if let Some(index) = functions
+            .iter()
+            .position(|candidate| candidate.id() == definition.id())
+        {
+            functions[index] = definition;
+        } else {
+            functions.push(definition);
+        }
+    }
+    let candidate = CatalogueSnapshot::new_with_functions(
+        CatalogueRevisionId::new(),
+        query_catalogue.schemas().to_vec(),
+        query_catalogue.object_types().to_vec(),
+        functions,
     )
     .expect("checked definitions satisfy catalogue invariants");
     CheckReport {
@@ -561,6 +605,7 @@ fn check_parsed(parse_report: ParseReport, base: &CatalogueSnapshot) -> CheckRep
         checked_bundle: Some(CheckedBundle {
             schemas: checked_schemas,
             object_types: checked_types,
+            server_functions: checked_functions,
         }),
         candidate: Some(candidate),
     }
@@ -635,12 +680,12 @@ fn resolve_server_function_headers<'a>(
     headers
 }
 
-fn resolve_server_function_inputs(
-    headers: &[ServerFunctionHeader<'_>],
+fn resolve_server_function_inputs<'a>(
+    headers: &[ServerFunctionHeader<'a>],
     submitted_ids: &HashMap<QualifiedSemanticName, TypeId>,
     base: &CatalogueSnapshot,
     diagnostics: &mut Vec<CompilerDiagnostic>,
-) -> Vec<ResolvedServerFunctionInput> {
+) -> Vec<ResolvedServerFunctionInput<'a>> {
     let mut inputs = Vec::with_capacity(headers.len());
 
     for header in headers {
@@ -665,7 +710,6 @@ fn resolve_server_function_inputs(
             let Some(resolved_type) = resolve_type(
                 &parameter.type_specification,
                 submitted_ids,
-                base,
                 header.logical_path,
                 diagnostics,
             ) else {
@@ -679,18 +723,12 @@ fn resolve_server_function_inputs(
                 name: parameter_name,
                 ordinal: parameter.order as u32,
                 resolved_type,
-                default: parameter
-                    .default_expression
-                    .as_ref()
-                    .map(|source| unplanned_source(header.logical_path, source)),
-                location: location(header.logical_path, &parameter.span),
             });
         }
 
         let return_type = resolve_server_function_return(
             &header.declaration.return_type,
             submitted_ids,
-            base,
             header.logical_path,
             diagnostics,
         );
@@ -709,23 +747,7 @@ fn resolve_server_function_inputs(
             security: header.security,
             transaction: header.transaction,
             volatility: header.volatility,
-            capabilities: header
-                .declaration
-                .capabilities
-                .iter()
-                .map(|capability| ResolvedCapabilityInput {
-                    name: semantic_name(&capability.name),
-                    arguments: capability
-                        .arguments
-                        .as_ref()
-                        .map(|source| unplanned_source(header.logical_path, source)),
-                    location: location(header.logical_path, &capability.span),
-                })
-                .collect(),
-            body: unplanned_source(
-                header.logical_path,
-                server_function_body_source(&header.declaration.body),
-            ),
+            body: &header.declaration.body,
             location: location(header.logical_path, &header.declaration.span),
         });
     }
@@ -733,22 +755,48 @@ fn resolve_server_function_inputs(
     inputs
 }
 
+fn reject_unplanned_server_function_features(
+    parse_report: &ParseReport,
+    diagnostics: &mut Vec<CompilerDiagnostic>,
+) {
+    for unit in parse_report.units() {
+        for declaration in unit.parsed().server_functions() {
+            for parameter in &declaration.parameters {
+                if let Some(default) = &parameter.default_expression {
+                    diagnostics.push(diagnostic(
+                        DiagnosticCode::TypeMismatch,
+                        "SERVER default-expression planning is not implemented",
+                        unit.logical_path(),
+                        &default.span,
+                    ));
+                }
+            }
+            for capability in &declaration.capabilities {
+                diagnostics.push(diagnostic(
+                    DiagnosticCode::TypeMismatch,
+                    "SERVER capability checking/planning is not implemented",
+                    unit.logical_path(),
+                    &capability.span,
+                ));
+            }
+        }
+    }
+}
+
 fn resolve_server_function_return(
     return_type: &FunctionReturnType,
     submitted_ids: &HashMap<QualifiedSemanticName, TypeId>,
-    base: &CatalogueSnapshot,
     logical_path: &str,
     diagnostics: &mut Vec<CompilerDiagnostic>,
 ) -> Option<ResolvedServerFunctionReturn> {
     match return_type {
-        FunctionReturnType::Single(specification) => resolve_type(
-            specification,
-            submitted_ids,
-            base,
-            logical_path,
-            diagnostics,
-        )
-        .map(ResolvedServerFunctionReturn::Single),
+        FunctionReturnType::Single(specification) => {
+            resolve_type(specification, submitted_ids, logical_path, diagnostics).map(|_| {
+                ResolvedServerFunctionReturn::Single {
+                    location: location(logical_path, specification.span()),
+                }
+            })
+        }
         FunctionReturnType::Rows { columns, span } => {
             if columns.is_empty() {
                 diagnostics.push(diagnostic(
@@ -777,7 +825,6 @@ fn resolve_server_function_return(
                 let Some(resolved_type) = resolve_type(
                     &column.type_specification,
                     submitted_ids,
-                    base,
                     logical_path,
                     diagnostics,
                 ) else {
@@ -793,16 +840,132 @@ fn resolve_server_function_return(
             if diagnostics.len() != diagnostics_before {
                 return None;
             }
-            Some(ResolvedServerFunctionReturn::Rows(resolved_columns))
+            Some(ResolvedServerFunctionReturn::Rows {
+                columns: resolved_columns,
+                location: location(logical_path, span),
+            })
         }
     }
 }
 
-fn unplanned_source(logical_path: &str, source: &SourceSlice) -> UnplannedSource {
-    UnplannedSource {
-        source: source.text.clone(),
-        location: location(logical_path, &source.span),
+fn check_server_functions(
+    inputs: &[ResolvedServerFunctionInput<'_>],
+    catalogue: &CatalogueSnapshot,
+    diagnostics: &mut Vec<CompilerDiagnostic>,
+) -> Vec<CheckedServerFunction> {
+    let diagnostics_before = diagnostics.len();
+    let mut plans = Vec::with_capacity(inputs.len());
+
+    for input in inputs {
+        let ResolvedServerFunctionReturn::Rows { columns, location } = &input.return_type else {
+            let ResolvedServerFunctionReturn::Single { location } = &input.return_type else {
+                unreachable!("SERVER function return resolution has two variants")
+            };
+            diagnostics.push(DiagnosticCode::semantic(
+                DiagnosticCode::TypeMismatch,
+                "SELECT SERVER functions require RETURNS ROWS (...)",
+                location.clone(),
+            ));
+            continue;
+        };
+        let ServerFunctionBody::SqlQuery(body) = input.body;
+        let plan = match check_query(&body.query, catalogue, input.location.logical_path()) {
+            Ok(plan) => plan,
+            Err(query_diagnostics) => {
+                diagnostics.extend(query_diagnostics);
+                continue;
+            }
+        };
+
+        if plan.projections().len() != columns.len() {
+            diagnostics.push(DiagnosticCode::semantic(
+                DiagnosticCode::TypeMismatch,
+                format!(
+                    "SELECT projection count {} does not match RETURNS ROWS column count {}",
+                    plan.projections().len(),
+                    columns.len()
+                ),
+                location.clone(),
+            ));
+            continue;
+        }
+
+        let mut matches_return = true;
+        for (projection, column) in plan.projections().iter().zip(columns) {
+            if projection.value_type().resolved_type() != column.resolved_type {
+                diagnostics.push(DiagnosticCode::semantic(
+                    DiagnosticCode::TypeMismatch,
+                    format!(
+                        "SELECT projection {} type does not match RETURNS ROWS column {}",
+                        column.ordinal + 1,
+                        column.name
+                    ),
+                    column.location.clone(),
+                ));
+                matches_return = false;
+            }
+        }
+        if !matches_return {
+            continue;
+        }
+
+        plans.push(PlannedServerFunction {
+            id: input.id,
+            name: input.name.clone(),
+            parameters: input.parameters.clone(),
+            columns: columns.clone(),
+            security: input.security,
+            transaction: input.transaction,
+            volatility: input.volatility,
+            location: input.location.clone(),
+            plan,
+        });
     }
+
+    if diagnostics.len() != diagnostics_before {
+        return Vec::new();
+    }
+
+    plans
+        .into_iter()
+        .map(|plan| CheckedServerFunction {
+            definition: FunctionDefinition::new(
+                plan.id,
+                plan.name,
+                FunctionDomain::Server,
+                plan.parameters
+                    .into_iter()
+                    .map(|parameter| {
+                        ParameterDefinition::new(
+                            parameter.id,
+                            parameter.name,
+                            parameter.ordinal,
+                            parameter.resolved_type,
+                            None,
+                        )
+                    })
+                    .collect(),
+                FunctionReturn::Rows(
+                    plan.columns
+                        .into_iter()
+                        .map(|column| {
+                            FunctionReturnColumnDefinition::new(
+                                column.name,
+                                column.ordinal,
+                                column.resolved_type,
+                            )
+                        })
+                        .collect(),
+                ),
+                FunctionRevisionId::new(),
+                plan.security,
+                plan.transaction,
+                plan.volatility,
+            ),
+            location: plan.location,
+            plan: plan.plan,
+        })
+        .collect()
 }
 
 fn map_function_security(mode: Option<SyntaxFunctionSecurity>) -> CatalogueFunctionSecurity {
@@ -831,12 +994,6 @@ fn map_function_volatility(mode: Option<SyntaxFunctionVolatility>) -> CatalogueF
     }
 }
 
-fn server_function_body_source(body: &ServerFunctionBody) -> &SourceSlice {
-    match body {
-        ServerFunctionBody::SqlQuery(body) => &body.source,
-    }
-}
-
 fn failed(parse_report: ParseReport, diagnostics: Vec<CompilerDiagnostic>) -> CheckReport {
     CheckReport {
         parse_report,
@@ -849,7 +1006,6 @@ fn failed(parse_report: ParseReport, diagnostics: Vec<CompilerDiagnostic>) -> Ch
 fn resolve_type(
     specification: &TypeSpecification,
     submitted_ids: &HashMap<QualifiedSemanticName, TypeId>,
-    base: &CatalogueSnapshot,
     logical_path: &str,
     diagnostics: &mut Vec<CompilerDiagnostic>,
 ) -> Option<ResolvedType> {
@@ -859,9 +1015,7 @@ fn resolve_type(
                 return Some(ResolvedType::scalar(scalar));
             }
             let semantic_name = semantic_name(name);
-            if submitted_ids.contains_key(&semantic_name)
-                || base.object_type_by_name(&semantic_name).is_some()
-            {
+            if submitted_ids.contains_key(&semantic_name) {
                 diagnostics.push(diagnostic(
                     DiagnosticCode::TypeMismatch,
                     format!("object type {semantic_name} must be declared with REF"),
@@ -896,10 +1050,7 @@ fn resolve_type(
                 return None;
             }
             let name = semantic_name(target);
-            if let Some(id) = submitted_ids.get(&name).copied().or_else(|| {
-                base.object_type_by_name(&name)
-                    .map(ObjectTypeDefinition::id)
-            }) {
+            if let Some(id) = submitted_ids.get(&name).copied() {
                 Some(ResolvedType::reference(id))
             } else {
                 diagnostics.push(diagnostic(
@@ -1036,22 +1187,21 @@ fn diagnostic(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashSet;
 
     use orna_core::{
-        CatalogueRevisionId, FunctionId, FunctionRevisionId, ParameterId, SchemaId,
+        CatalogueRevisionId, FunctionId, FunctionRevisionId, SchemaId,
         catalogue::{
             CatalogueSnapshot, FunctionDefinition, FunctionDomain, FunctionReturn,
             FunctionSecurity, FunctionTransaction, FunctionVolatility, OnDeleteAction,
-            ParameterDefinition, QualifiedSemanticName, SchemaDefinition,
+            QualifiedSemanticName, SchemaDefinition,
         },
         source::{SourceBundle, SourceUnit},
         types::{ResolvedType, StandardScalar},
     };
 
     use super::{
-        ConstantValue, DiagnosticCode, ResolvedServerFunctionReturn, check, parse_bundle,
-        resolve_server_function_headers, resolve_server_function_inputs,
+        ConstantValue, DiagnosticCode, check, parse_bundle, resolve_server_function_headers,
     };
 
     fn empty_catalogue() -> CatalogueSnapshot {
@@ -1126,7 +1276,7 @@ mod tests {
     }
 
     #[test]
-    fn base_schema_definitions_authorise_object_and_function_namespaces() {
+    fn requires_submitted_schema_declarations_even_when_base_has_them() {
         let base = CatalogueSnapshot::new(
             CatalogueRevisionId::new(),
             vec![schema(1, &["crm"])],
@@ -1141,31 +1291,27 @@ mod tests {
             )]),
             &base,
         );
-        assert!(object_report.diagnostics().is_empty());
-        assert!(
-            object_report
-                .candidate()
-                .unwrap()
-                .object_type_by_name(&QualifiedSemanticName::new(["crm", "contact"]).unwrap())
-                .is_some()
+        assert_eq!(object_report.diagnostics().len(), 1);
+        assert_eq!(
+            object_report.diagnostics()[0].code(),
+            DiagnosticCode::UnknownQualifiedName
         );
+        assert!(object_report.candidate().is_none());
 
         let function_report = check(
             &bundle([(
                 "functions.orna",
-                "CREATE SERVER FUNCTION crm.probe() RETURNS BOOL AS SELECT TRUE FROM crm.probe p;",
+                "CREATE SERVER FUNCTION crm.probe_status() RETURNS ROWS (enabled BOOL) \
+                 AS SELECT p.enabled FROM crm.probe p;",
             )]),
             &base,
         );
         assert_eq!(function_report.diagnostics().len(), 1);
         assert_eq!(
             function_report.diagnostics()[0].code(),
-            DiagnosticCode::TypeMismatch
+            DiagnosticCode::UnknownQualifiedName
         );
-        assert_eq!(
-            function_report.diagnostics()[0].message(),
-            "SERVER function body planning is not implemented"
-        );
+        assert!(function_report.candidate().is_none());
     }
 
     #[test]
@@ -1280,7 +1426,7 @@ mod tests {
         let report = check(
             &bundle([(
                 "schema.orna",
-                "CREATE TYPE people.person AS OBJECT (name TEXT, email TEXT);",
+                "CREATE SCHEMA people; CREATE TYPE people.person AS OBJECT (name TEXT, email TEXT);",
             )]),
             &initial,
         );
@@ -1325,52 +1471,77 @@ mod tests {
     }
 
     #[test]
-    fn a_renamed_declaration_gets_a_new_identity_and_preserves_unmentioned_types() {
+    fn candidate_contains_only_submitted_schemas_and_object_types() {
         let initial = successful_candidate(
             "CREATE SCHEMA people; CREATE SCHEMA tasks;\
              CREATE TYPE people.person AS OBJECT (name TEXT);\
              CREATE TYPE tasks.task AS OBJECT (title TEXT);",
         );
         let person_id = initial.object_types()[0].id();
-        let task_id = initial.object_types()[1].id();
         let report = check(
             &bundle([(
                 "schema.orna",
-                "CREATE TYPE people.customer AS OBJECT (name TEXT);",
+                "CREATE SCHEMA people; CREATE TYPE people.customer AS OBJECT (name TEXT);",
             )]),
             &initial,
         );
 
         let candidate = report.candidate().unwrap();
-        let ids = candidate
-            .object_types()
-            .iter()
-            .map(|object_type| object_type.id())
-            .collect::<Vec<_>>();
-        assert!(ids.contains(&task_id));
-        assert!(ids.contains(&person_id));
-        assert_ne!(
+        assert_eq!(candidate.schemas().len(), 1);
+        assert_eq!(candidate.schemas()[0].name().to_string(), "people");
+        assert_eq!(candidate.object_types().len(), 1);
+        assert_ne!(candidate.object_types()[0].id(), person_id);
+        assert!(
             candidate
-                .object_types()
-                .iter()
-                .find(|object_type| object_type.name().to_string() == "people.customer")
-                .unwrap()
-                .id(),
-            person_id
+                .object_type_by_name(&QualifiedSemanticName::new(["people", "person"]).unwrap())
+                .is_none()
+        );
+        assert!(
+            candidate
+                .object_type_by_name(&QualifiedSemanticName::new(["tasks", "task"]).unwrap())
+                .is_none()
         );
     }
 
     #[test]
-    fn rejects_server_function_bodies_until_planning_exists() {
-        let report = check(
-            &bundle([(
-                "functions.orna",
-                "CREATE SCHEMA people; CREATE SERVER FUNCTION people.find() RETURNS TEXT AS SELECT TRUE FROM people.person p;",
-            )]),
-            &empty_catalogue(),
+    fn rejects_references_to_base_object_types_omitted_from_the_bundle() {
+        let initial = successful_candidate(
+            "CREATE SCHEMA people; CREATE TYPE people.person AS OBJECT (name TEXT);",
         );
+        let source = "CREATE SCHEMA tasks; \
+            CREATE TYPE tasks.task AS OBJECT (owner REF people.person);";
 
+        let report = check(&bundle([("tasks.orna", source)]), &initial);
+
+        assert_eq!(report.diagnostics().len(), 1);
+        assert_eq!(
+            report.diagnostics()[0].code(),
+            DiagnosticCode::UnknownQualifiedName
+        );
+        assert_eq!(
+            report.diagnostics()[0].location().span().start(),
+            source.find("people.person").unwrap()
+        );
+        assert!(report.checked_bundle().is_none());
+        assert!(report.candidate().is_none());
+    }
+
+    #[test]
+    fn rejects_single_return_select_at_the_declared_return() {
+        let source = "CREATE SCHEMA people; CREATE TYPE people.person AS OBJECT (name TEXT); \
+            CREATE SERVER FUNCTION people.find() RETURNS TEXT AS SELECT p.name FROM people.person p;";
+        let report = check(&bundle([("functions.orna", source)]), &empty_catalogue());
+
+        assert_eq!(report.diagnostics().len(), 1);
         assert_eq!(report.diagnostics()[0].code(), DiagnosticCode::TypeMismatch);
+        assert_eq!(
+            report.diagnostics()[0].message(),
+            "SELECT SERVER functions require RETURNS ROWS (...)"
+        );
+        assert_eq!(
+            report.diagnostics()[0].location().span().start(),
+            source.rfind("TEXT AS").unwrap()
+        );
         assert!(report.candidate().is_none());
     }
 
@@ -1416,21 +1587,112 @@ mod tests {
     }
 
     #[test]
-    fn fails_closed_at_a_clean_server_function_body() {
-        let source = "CREATE SCHEMA people; CREATE SERVER FUNCTION people.find() RETURNS TEXT AS SELECT TRUE FROM people.person p;";
+    fn accepts_a_checked_server_function_with_a_relational_plan() {
+        let source = "CREATE SCHEMA tasks; \
+            CREATE SERVER FUNCTION tasks.open(p_limit INT) RETURNS ROWS (title TEXT, completed BOOL) \
+            SECURITY DEFINER TRANSACTION READ ONLY VOLATILITY STABLE \
+            AS SELECT t.title, t.completed FROM tasks.task t WHERE t.completed = FALSE; \
+            CREATE TYPE tasks.task AS OBJECT (title TEXT, completed BOOL NOT NULL);";
+        let report = check(&bundle([("functions.orna", source)]), &empty_catalogue());
+
+        assert!(report.diagnostics().is_empty());
+        let checked = &report.checked_bundle().unwrap().server_functions()[0];
+        let candidate = report.candidate().unwrap();
+        let definition = candidate.function_by_id(checked.id()).unwrap();
+        assert_eq!(definition.security(), FunctionSecurity::Definer);
+        assert_eq!(
+            definition.transaction(),
+            Some(FunctionTransaction::ReadOnly)
+        );
+        assert_eq!(definition.volatility(), FunctionVolatility::Stable);
+        assert_eq!(definition.parameters().len(), 1);
+        assert_eq!(checked.plan().projections().len(), 2);
+        assert!(checked.plan().selection().is_some());
+    }
+
+    #[test]
+    fn rejects_select_projection_count_and_type_at_rows_declarations() {
+        let source = "CREATE SCHEMA tasks; CREATE TYPE tasks.task AS OBJECT (title TEXT); \
+            CREATE SERVER FUNCTION tasks.count() RETURNS ROWS (first TEXT, second TEXT) \
+            AS SELECT t.title FROM tasks.task t; \
+            CREATE SERVER FUNCTION tasks.kind() RETURNS ROWS (title BOOL) \
+            AS SELECT t.title FROM tasks.task t;";
+        let report = check(&bundle([("functions.orna", source)]), &empty_catalogue());
+
+        assert_eq!(report.diagnostics().len(), 2);
+        assert_eq!(
+            report.diagnostics()[0].message(),
+            "SELECT projection count 1 does not match RETURNS ROWS column count 2"
+        );
+        assert_eq!(
+            report.diagnostics()[0].location().span().start(),
+            source.find("ROWS (first").unwrap()
+        );
+        assert_eq!(
+            report.diagnostics()[1].message(),
+            "SELECT projection 1 type does not match RETURNS ROWS column title"
+        );
+        assert_eq!(
+            report.diagnostics()[1].location().span().start(),
+            source.rfind("title BOOL").unwrap()
+        );
+        assert!(report.checked_bundle().is_none());
+        assert!(report.candidate().is_none());
+    }
+
+    #[test]
+    fn preserves_existing_function_and_reordered_parameter_ids_by_semantic_name() {
+        let initial = successful_candidate(
+            "CREATE SCHEMA tasks; CREATE TYPE tasks.task AS OBJECT (title TEXT); \
+             CREATE SERVER FUNCTION tasks.open(p_limit INT, p_offset INT) RETURNS ROWS (title TEXT) \
+             AS SELECT t.title FROM tasks.task t;",
+        );
+        let original = initial
+            .function_by_name(&QualifiedSemanticName::new(["tasks", "open"]).unwrap())
+            .unwrap();
+        let function_id = original.id();
+        let parameter_id = original.parameter_by_name("p_limit").unwrap().id();
+        let offset_parameter_id = original.parameter_by_name("p_offset").unwrap().id();
+
+        let report = check(
+            &bundle([(
+                "functions.orna",
+                "CREATE SCHEMA tasks; CREATE TYPE tasks.task AS OBJECT (title TEXT); \
+                 CREATE SERVER FUNCTION tasks.open(p_offset INT, p_limit INT) RETURNS ROWS (title TEXT) \
+                 AS SELECT t.title FROM tasks.task t;",
+            )]),
+            &initial,
+        );
+
+        assert!(report.diagnostics().is_empty());
+        let revised = report
+            .candidate()
+            .unwrap()
+            .function_by_name(&QualifiedSemanticName::new(["tasks", "open"]).unwrap())
+            .unwrap();
+        assert_eq!(revised.id(), function_id);
+        assert_eq!(
+            revised.parameter_by_name("p_limit").unwrap().id(),
+            parameter_id
+        );
+        assert_eq!(
+            revised.parameter_by_name("p_offset").unwrap().id(),
+            offset_parameter_id
+        );
+        assert_eq!(revised.parameters()[0].name(), "p_offset");
+        assert_eq!(revised.parameters()[1].name(), "p_limit");
+    }
+
+    #[test]
+    fn any_server_function_error_rejects_all_checked_definitions_and_candidates() {
+        let source = "CREATE SCHEMA tasks; CREATE TYPE tasks.task AS OBJECT (title TEXT); \
+            CREATE SERVER FUNCTION tasks.valid() RETURNS ROWS (title TEXT) \
+            AS SELECT t.title FROM tasks.task t; \
+            CREATE SERVER FUNCTION tasks.invalid() RETURNS ROWS (title BOOL) \
+            AS SELECT t.title FROM tasks.task t;";
         let report = check(&bundle([("functions.orna", source)]), &empty_catalogue());
 
         assert_eq!(report.diagnostics().len(), 1);
-        let diagnostic = &report.diagnostics()[0];
-        assert_eq!(diagnostic.code(), DiagnosticCode::TypeMismatch);
-        assert_eq!(
-            diagnostic.message(),
-            "SERVER function body planning is not implemented"
-        );
-        assert_eq!(
-            diagnostic.location().span().start(),
-            source.find("SELECT").unwrap()
-        );
         assert!(report.checked_bundle().is_none());
         assert!(report.candidate().is_none());
     }
@@ -1461,7 +1723,7 @@ mod tests {
     }
 
     #[test]
-    fn recognises_schemas_from_base_schema_definitions() {
+    fn rejects_definitions_in_base_schemas_that_are_omitted_from_the_bundle() {
         let base_function = FunctionDefinition::new(
             FunctionId::new(),
             QualifiedSemanticName::new(["sys", "health"]).unwrap(),
@@ -1484,17 +1746,19 @@ mod tests {
         let report = check(
             &bundle([(
                 "functions.orna",
-                "CREATE SERVER FUNCTION sys.probe() RETURNS BOOL AS SELECT TRUE FROM sys.health h;",
+                "CREATE TYPE sys.probe AS OBJECT (enabled BOOL); \
+                 CREATE SERVER FUNCTION sys.probe_status() RETURNS ROWS (enabled BOOL) \
+                 AS SELECT p.enabled FROM sys.probe p;",
             )]),
             &base,
         );
 
         assert_eq!(report.diagnostics().len(), 1);
-        assert_eq!(report.diagnostics()[0].code(), DiagnosticCode::TypeMismatch);
         assert_eq!(
-            report.diagnostics()[0].message(),
-            "SERVER function body planning is not implemented"
+            report.diagnostics()[0].code(),
+            DiagnosticCode::UnknownQualifiedName
         );
+        assert!(report.candidate().is_none());
     }
 
     #[test]
@@ -1573,144 +1837,36 @@ mod tests {
     }
 
     #[test]
-    fn server_function_inputs_preserve_signature_sources_and_parameter_ids() {
-        let existing_old_id = ParameterId::new();
-        let existing_other_id = ParameterId::new();
-        let existing = FunctionDefinition::new(
-            FunctionId::new(),
-            QualifiedSemanticName::new(["sys", "health"]).unwrap(),
-            FunctionDomain::Server,
-            vec![
-                ParameterDefinition::new(
-                    existing_old_id,
-                    "p_old",
-                    0,
-                    ResolvedType::scalar(StandardScalar::CharacterLargeObject),
-                    None,
-                ),
-                ParameterDefinition::new(
-                    existing_other_id,
-                    "p_other",
-                    1,
-                    ResolvedType::scalar(StandardScalar::Integer),
-                    None,
-                ),
-            ],
-            FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Boolean)),
-            FunctionRevisionId::new(),
-            FunctionSecurity::Invoker,
-            None,
-            FunctionVolatility::Volatile,
-        );
-        let existing_id = existing.id();
-        let base = CatalogueSnapshot::new_with_functions(
-            CatalogueRevisionId::new(),
-            vec![schema(1, &["sys"])],
-            vec![],
-            vec![existing],
-        )
-        .unwrap();
-        let source = "CREATE SERVER FUNCTION Sys.Health(p_other INT, \
-            p_old TEXT DEFAULT sys.path.default(), p_new INT) \
-            RETURNS ROWS (label TEXT, count INT) SECURITY DEFINER \
-            TRANSACTION READ ONLY VOLATILITY STABLE \
-            REQUIRES CAPABILITY sys.fs.read(p_old), sys.jobs.noop(), sys.launch.start \
-            AS SELECT REF(h) FROM sys.health h;";
-        let parsed = parse_bundle(&bundle([("functions.orna", source)]));
-        assert_eq!(parsed.diagnostics().len(), 0, "{:?}", parsed.diagnostics());
-        assert_eq!(parsed.units()[0].parsed().server_functions().len(), 1);
-        let known_schemas = HashSet::from([QualifiedSemanticName::new(["sys"]).unwrap()]);
-        let mut diagnostics = Vec::new();
-        let headers =
-            resolve_server_function_headers(&parsed, &base, &known_schemas, &mut diagnostics);
-        assert_eq!(headers.len(), 1);
-        let inputs =
-            resolve_server_function_inputs(&headers, &HashMap::new(), &base, &mut diagnostics);
+    fn rejects_server_defaults_and_capabilities_at_their_source() {
+        let source = "CREATE SCHEMA tasks; CREATE TYPE tasks.task AS OBJECT (title TEXT); \
+            CREATE SERVER FUNCTION tasks.find(p_name TEXT DEFAULT 'open') \
+            RETURNS ROWS (title TEXT) REQUIRES CAPABILITY sys.fs.read(p_name) \
+            AS SELECT t.title FROM tasks.task t;";
+        let report = check(&bundle([("functions.orna", source)]), &empty_catalogue());
 
-        assert!(diagnostics.is_empty());
-        assert_eq!(inputs.len(), 1);
-        let input = &inputs[0];
-        assert_eq!(input.id, existing_id);
-        assert_eq!(input.name.to_string(), "sys.health");
-        assert_eq!(input.parameters.len(), 3);
-        assert_eq!(input.parameters[0].id, existing_other_id);
-        assert_eq!(input.parameters[0].name, "p_other");
-        assert_eq!(input.parameters[0].ordinal, 0);
-        assert!(input.parameters[0].default.is_none());
-        assert_eq!(input.parameters[1].id, existing_old_id);
-        assert_eq!(input.parameters[1].name, "p_old");
-        assert_eq!(input.parameters[1].ordinal, 1);
+        assert_eq!(report.diagnostics().len(), 2);
         assert_eq!(
-            input.parameters[1].default.as_ref().unwrap().source,
-            "sys.path.default()"
+            report.diagnostics()[0].message(),
+            "SERVER default-expression planning is not implemented"
         );
         assert_eq!(
-            input.parameters[1]
-                .default
-                .as_ref()
-                .unwrap()
-                .location
-                .span()
-                .start(),
-            source.find("sys.path.default()").unwrap()
+            report.diagnostics()[0].location().span().start(),
+            source.find("'open'").unwrap()
         );
         assert_eq!(
-            input.parameters[1].location.span().start(),
-            source.find("p_old").unwrap()
-        );
-        assert_eq!(input.parameters[2].ordinal, 2);
-        assert_ne!(input.parameters[2].id, existing_old_id);
-        assert_ne!(input.parameters[2].id, existing_other_id);
-        assert_eq!(
-            input.parameters[2].resolved_type,
-            ResolvedType::scalar(StandardScalar::Integer)
-        );
-        assert_eq!(input.security, FunctionSecurity::Definer);
-        assert_eq!(input.transaction, Some(FunctionTransaction::ReadOnly));
-        assert_eq!(input.volatility, FunctionVolatility::Stable);
-        assert_eq!(input.capabilities.len(), 3);
-        assert_eq!(input.capabilities[0].name.to_string(), "sys.fs.read");
-        assert_eq!(
-            input.capabilities[0].arguments.as_ref().unwrap().source,
-            "p_old"
+            report.diagnostics()[1].message(),
+            "SERVER capability checking/planning is not implemented"
         );
         assert_eq!(
-            input.capabilities[0].location.span().start(),
+            report.diagnostics()[1].location().span().start(),
             source.find("sys.fs.read").unwrap()
         );
-        assert_eq!(input.capabilities[1].name.to_string(), "sys.jobs.noop");
-        assert_eq!(input.capabilities[1].arguments.as_ref().unwrap().source, "");
-        assert!(input.capabilities[2].arguments.is_none());
-        let ResolvedServerFunctionReturn::Rows(columns) = &input.return_type else {
-            panic!("sys.health must resolve to ROWS");
-        };
-        assert_eq!(columns.len(), 2);
-        assert_eq!(columns[0].name, "label");
-        assert_eq!(columns[0].ordinal, 0);
-        assert_eq!(
-            columns[0].resolved_type,
-            ResolvedType::scalar(StandardScalar::CharacterLargeObject)
-        );
-        assert_eq!(
-            columns[0].location.span().start(),
-            source.find("label TEXT").unwrap()
-        );
-        assert_eq!(columns[1].name, "count");
-        assert_eq!(columns[1].ordinal, 1);
-        assert_eq!(
-            columns[1].resolved_type,
-            ResolvedType::scalar(StandardScalar::Integer)
-        );
-        assert_eq!(input.body.source, "SELECT REF(h) FROM sys.health h");
-        assert_eq!(
-            input.body.location.span().start(),
-            source.find("SELECT").unwrap()
-        );
-        assert_eq!(input.location.span().start(), 0);
+        assert!(report.checked_bundle().is_none());
+        assert!(report.candidate().is_none());
     }
 
     #[test]
-    fn object_overlay_preserves_existing_function_definitions() {
+    fn candidate_omits_unsubmitted_base_functions_and_schemas() {
         let function = FunctionDefinition::new(
             FunctionId::new(),
             QualifiedSemanticName::new(["sys", "health"]).unwrap(),
@@ -1722,7 +1878,6 @@ mod tests {
             None,
             FunctionVolatility::Stable,
         );
-        let function_id = function.id();
         let base = CatalogueSnapshot::new_with_functions(
             CatalogueRevisionId::new(),
             vec![schema(1, &["sys"])],
@@ -1740,13 +1895,10 @@ mod tests {
         );
 
         assert!(report.diagnostics().is_empty());
-        assert!(
-            report
-                .candidate()
-                .unwrap()
-                .function_by_id(function_id)
-                .is_some()
-        );
+        let candidate = report.candidate().unwrap();
+        assert!(candidate.functions().is_empty());
+        assert_eq!(candidate.schemas().len(), 1);
+        assert_eq!(candidate.schemas()[0].name().to_string(), "people");
     }
 
     #[test]
