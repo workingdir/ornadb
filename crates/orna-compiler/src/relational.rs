@@ -17,6 +17,8 @@ use crate::{
     semantic_diagnostic,
 };
 
+mod artifact;
+
 /// A deterministic input position in one relational query.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct InputSlot(u8);
@@ -36,6 +38,17 @@ pub(crate) struct RelationalQueryIr {
 
 #[cfg_attr(not(test), allow(dead_code))]
 impl RelationalQueryIr {
+    /// Encodes this checked query as one canonical server-plan artifact.
+    ///
+    /// The returned bytes contain stable semantic identifiers and resolved
+    /// execution facts only. They do not contain source syntax or storage
+    /// backend details.
+    pub(crate) fn encode_server_plan(
+        &self,
+    ) -> Result<Vec<u8>, orna_artifact::server_plan::ServerPlanError> {
+        artifact::encode(self)
+    }
+
     pub(crate) fn scan(&self) -> &ScanIr {
         &self.scan
     }
