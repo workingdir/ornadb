@@ -21,6 +21,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "revision catalogue integrity",
         sql: include_str!("../migrations/0002_revisions.sql"),
     },
+    Migration {
+        version: 3,
+        name: "definition reference integrity",
+        sql: include_str!("../migrations/0003_reference_integrity.sql"),
+    },
 ];
 const MIGRATION_REGISTRY_SQL: &str = "
     CREATE SCHEMA IF NOT EXISTS _orna_kernel;
@@ -276,10 +281,11 @@ mod tests {
             validated_migration_registry()
                 .expect("registry is valid")
                 .len(),
-            2
+            3
         );
         assert_eq!(MIGRATIONS[0].version, 1);
         assert_eq!(MIGRATIONS[1].version, 2);
+        assert_eq!(MIGRATIONS[2].version, 3);
     }
 
     #[tokio::test]
