@@ -9,6 +9,8 @@
     reason = "the resolver identity assignments are an isolated prerequisite for later checking work"
 )]
 
+use std::fmt;
+
 use orna_core::{ExpressionId, FieldId, FunctionId, ParameterId, SchemaId, TypeId};
 
 /// Constructs a checked identity without exposing a conversion API.
@@ -18,7 +20,7 @@ pub(crate) trait ResolverId<CoreId> {
 }
 
 macro_rules! checked_identity {
-    ($provisional:ident, $checked:ident, $core:ty) => {
+    ($provisional:ident, $checked:ident, $core:ty, $kind:literal) => {
         /// A resolver-local identity for a declaration without a core identity.
         #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
         pub struct $provisional(u32);
@@ -30,6 +32,18 @@ macro_rules! checked_identity {
             Existing($core),
             /// A definition first declared in the checked source bundle.
             Provisional($provisional),
+        }
+
+        impl fmt::Display for $checked {
+            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                match self {
+                    Self::Existing(id) => id.fmt(formatter),
+                    // Provisional identities only identify resolver-local values in
+                    // invariant diagnostics. Their stable spelling is
+                    // `provisional:<kind>:<counter>`.
+                    Self::Provisional(id) => write!(formatter, "provisional:{}:{}", $kind, id.0),
+                }
+            }
         }
 
         impl $checked {
@@ -59,12 +73,27 @@ macro_rules! checked_identity {
     };
 }
 
-checked_identity!(ProvisionalSchemaId, CheckedSchemaId, SchemaId);
-checked_identity!(ProvisionalTypeId, CheckedTypeId, TypeId);
-checked_identity!(ProvisionalFieldId, CheckedFieldId, FieldId);
-checked_identity!(ProvisionalExpressionId, CheckedExpressionId, ExpressionId);
-checked_identity!(ProvisionalFunctionId, CheckedFunctionId, FunctionId);
-checked_identity!(ProvisionalParameterId, CheckedParameterId, ParameterId);
+checked_identity!(ProvisionalSchemaId, CheckedSchemaId, SchemaId, "schema");
+checked_identity!(ProvisionalTypeId, CheckedTypeId, TypeId, "type");
+checked_identity!(ProvisionalFieldId, CheckedFieldId, FieldId, "field");
+checked_identity!(
+    ProvisionalExpressionId,
+    CheckedExpressionId,
+    ExpressionId,
+    "expression"
+);
+checked_identity!(
+    ProvisionalFunctionId,
+    CheckedFunctionId,
+    FunctionId,
+    "function"
+);
+checked_identity!(
+    ProvisionalParameterId,
+    CheckedParameterId,
+    ParameterId,
+    "parameter"
+);
 
 /// Assigns a typed identity to each definition that the resolver encounters.
 ///
@@ -236,5 +265,50 @@ mod tests {
 
         assert_eq!(provisional.existing(), None);
         assert!(provisional.is_provisional());
+    }
+
+    #[test]
+    fn existing_checked_ids_format_exactly_as_core_ids() {
+        macro_rules! assert_existing_display {
+            ($core:ident, $checked:ident, $byte:expr) => {
+                let core = $core::from_bytes([$byte; 16]);
+                assert_eq!($checked::Existing(core).to_string(), core.to_string());
+            };
+        }
+
+        assert_existing_display!(SchemaId, CheckedSchemaId, 1);
+        assert_existing_display!(TypeId, CheckedTypeId, 2);
+        assert_existing_display!(FieldId, CheckedFieldId, 3);
+        assert_existing_display!(ExpressionId, CheckedExpressionId, 4);
+        assert_existing_display!(FunctionId, CheckedFunctionId, 5);
+        assert_existing_display!(ParameterId, CheckedParameterId, 6);
+    }
+
+    #[test]
+    fn provisional_checked_ids_have_stable_diagnostic_display() {
+        assert_eq!(
+            CheckedSchemaId::Provisional(ProvisionalSchemaId(0)).to_string(),
+            "provisional:schema:0"
+        );
+        assert_eq!(
+            CheckedTypeId::Provisional(ProvisionalTypeId(1)).to_string(),
+            "provisional:type:1"
+        );
+        assert_eq!(
+            CheckedFieldId::Provisional(ProvisionalFieldId(2)).to_string(),
+            "provisional:field:2"
+        );
+        assert_eq!(
+            CheckedExpressionId::Provisional(ProvisionalExpressionId(3)).to_string(),
+            "provisional:expression:3"
+        );
+        assert_eq!(
+            CheckedFunctionId::Provisional(ProvisionalFunctionId(4)).to_string(),
+            "provisional:function:4"
+        );
+        assert_eq!(
+            CheckedParameterId::Provisional(ProvisionalParameterId(5)).to_string(),
+            "provisional:parameter:5"
+        );
     }
 }
