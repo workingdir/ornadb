@@ -6,13 +6,14 @@
 //! backend concepts.
 
 use orna_artifact::server_plan::{
-    Expression, ExpressionKind, FieldStep, IdentitySelectedServerPlan, IdentitySelector, NullOrder,
-    Ordering, Scan, ServerPlan, ServerPlanError, SortDirection, ValueType,
+    DistinctServerPlan, Expression, ExpressionKind, FieldStep, IdentitySelectedServerPlan,
+    IdentitySelector, NullOrder, Ordering, Scan, ServerPlan, ServerPlanError, SortDirection,
+    ValueType,
 };
 use orna_core::{FieldId, FunctionId, ParameterId, TypeId};
 
 use super::{
-    EncodedIdentitySelectedServerPlan, ExpressionIr, ExpressionKind as CompilerExpressionKind,
+    DistinctQueryIr, EncodedServerPlan, ExpressionIr, ExpressionKind as CompilerExpressionKind,
     IdentitySelectedQueryIr, InputSlot, NullOrder as CompilerNullOrder, OrderingIr,
     RelationalQueryIr, ResolvedFieldStep, ScanIr, SortDirection as CompilerSortDirection,
     ValueType as CompilerValueType,
@@ -36,9 +37,9 @@ fn adapt(query: &RelationalQueryIr<TypeId, FieldId>) -> ServerPlan {
 /// Converts and encodes one checked identity-selected query into version-2 bytes.
 pub(super) fn encode_identity_selected(
     query: &IdentitySelectedQueryIr<TypeId, FieldId, FunctionId, ParameterId>,
-) -> Result<EncodedIdentitySelectedServerPlan, ServerPlanError> {
+) -> Result<EncodedServerPlan, ServerPlanError> {
     let plan = adapt_identity_selected(query)?;
-    Ok(EncodedIdentitySelectedServerPlan {
+    Ok(EncodedServerPlan {
         format_version: plan.format_version(),
         payload: plan.encode()?,
     })
@@ -51,6 +52,27 @@ fn adapt_identity_selected(
         adapt_scan(&query.scan),
         query.projections.iter().map(adapt_expression),
         IdentitySelector::new(query.selector.owner, query.selector.parameter),
+    )
+}
+
+/// Converts and encodes one checked DISTINCT query into version-3 bytes.
+pub(super) fn encode_distinct(
+    query: &DistinctQueryIr<TypeId, FieldId>,
+) -> Result<EncodedServerPlan, ServerPlanError> {
+    let plan = adapt_distinct(query)?;
+    Ok(EncodedServerPlan {
+        format_version: plan.format_version(),
+        payload: plan.encode()?,
+    })
+}
+
+fn adapt_distinct(
+    query: &DistinctQueryIr<TypeId, FieldId>,
+) -> Result<DistinctServerPlan, ServerPlanError> {
+    DistinctServerPlan::new(
+        adapt_scan(query.scan()),
+        query.projections().iter().map(adapt_expression),
+        query.selection().map(adapt_expression),
     )
 }
 
@@ -128,8 +150,8 @@ mod tests {
     use std::collections::HashMap;
 
     use orna_artifact::server_plan::{
-        Expression, ExpressionKind, IdentitySelectedServerPlan, NullOrder, ServerPlan,
-        SortDirection,
+        DistinctServerPlan, Expression, ExpressionKind, IdentitySelectedServerPlan, NullOrder,
+        ServerPlan, SortDirection,
     };
     use orna_core::{
         CatalogueRevisionId, FieldId, FunctionId, ParameterId, SchemaId, TypeId,
@@ -144,7 +166,9 @@ mod tests {
 
     use crate::{CheckedFieldId, CheckedTypeId};
 
-    use super::super::{QueryParameter, RelationalQueryIr, check_identity_selected_query_in};
+    use super::super::{
+        DistinctQueryIr, QueryParameter, RelationalQueryIr, check_identity_selected_query_in,
+    };
 
     const TASK_TYPE: TypeId = TypeId::from_bytes([1; 16]);
     const PERSON_TYPE: TypeId = TypeId::from_bytes([2; 16]);
@@ -152,6 +176,7 @@ mod tests {
     const COMPLETED_FIELD: FieldId = FieldId::from_bytes([12; 16]);
     const TITLE_FIELD: FieldId = FieldId::from_bytes([13; 16]);
     const PERSON_NAME_FIELD: FieldId = FieldId::from_bytes([21; 16]);
+    const ACTIVE_FIELD: FieldId = FieldId::from_bytes([22; 16]);
     const SELECTOR_OWNER: FunctionId = FunctionId::from_bytes([31; 16]);
     const SELECTOR_PARAMETER: ParameterId = ParameterId::from_bytes([32; 16]);
 
@@ -190,6 +215,27 @@ mod tests {
         ) AS SELECT REF(t_alias_marker), t_alias_marker.title_marker \
         FROM semantic_schema_marker.task_type_marker t_alias_marker \
         WHERE REF(t_alias_marker) = p_task;";
+
+    const DISTINCT_SOURCE: &str = "CREATE SCHEMA distinct_schema_marker; \
+        CREATE TYPE distinct_schema_marker.person_type_marker AS OBJECT ( \
+            active_marker BOOL NOT NULL \
+        ); \
+        CREATE TYPE distinct_schema_marker.task_type_marker AS OBJECT ( \
+            assignee_marker REF distinct_schema_marker.person_type_marker, \
+            completed_marker BOOL NOT NULL \
+        ); \
+        CREATE SERVER FUNCTION distinct_schema_marker.values_marker() \
+        RETURNS ROWS ( \
+            task_value_marker REF distinct_schema_marker.task_type_marker, \
+            active_value_marker BOOL, \
+            completed_value_marker BOOL \
+        ) SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE \
+        AS SELECT DISTINCT \
+            REF(t_alias_marker), \
+            t_alias_marker.assignee_marker.active_marker, \
+            t_alias_marker.completed_marker \
+        FROM distinct_schema_marker.task_type_marker t_alias_marker \
+        WHERE t_alias_marker.completed_marker = TRUE;";
 
     #[test]
     fn encodes_a_checked_server_function_without_source_semantics() {
@@ -355,6 +401,102 @@ mod tests {
     }
 
     #[test]
+    fn encodes_distinct_queries_with_coupled_version_and_payload() {
+        let fixture = checked_distinct_plan_fixture();
+        let mapped = fixture
+            .plan
+            .try_map_identities(
+                |type_id| {
+                    fixture
+                        .type_ids
+                        .get(&type_id)
+                        .copied()
+                        .ok_or("unknown type")
+                },
+                |field_id| {
+                    fixture
+                        .field_ids
+                        .get(&field_id)
+                        .copied()
+                        .ok_or("unknown field")
+                },
+            )
+            .unwrap();
+
+        let encoded = mapped.encode_distinct_server_plan().unwrap();
+        let decoded = DistinctServerPlan::decode(encoded.payload()).unwrap();
+        assert_eq!(encoded.format_version(), decoded.format_version());
+        assert_eq!(encoded.payload(), decoded.encode().unwrap());
+        assert_eq!(decoded.scan().input, 0);
+        assert_eq!(decoded.scan().object_type, TASK_TYPE);
+        assert_eq!(decoded.projections().len(), 3);
+        assert_object_reference(&decoded.projections()[0], TASK_TYPE);
+        assert_field_path(
+            &decoded.projections()[1],
+            &[(TASK_TYPE, ASSIGNEE_FIELD), (PERSON_TYPE, ACTIVE_FIELD)],
+            ResolvedType::scalar(StandardScalar::Boolean),
+            true,
+        );
+        assert_field_path(
+            &decoded.projections()[2],
+            &[(TASK_TYPE, COMPLETED_FIELD)],
+            ResolvedType::scalar(StandardScalar::Boolean),
+            false,
+        );
+        let selection = decoded.selection().expect("fixture has a selection");
+        assert_equality(
+            selection,
+            ResolvedType::scalar(StandardScalar::Boolean),
+            false,
+        );
+        let ExpressionKind::Equality { left, right } = &selection.kind else {
+            unreachable!("equality was asserted above")
+        };
+        assert_field_path(
+            left,
+            &[(TASK_TYPE, COMPLETED_FIELD)],
+            ResolvedType::scalar(StandardScalar::Boolean),
+            false,
+        );
+        assert!(matches!(
+            right.kind,
+            ExpressionKind::BooleanLiteral { value: true }
+        ));
+
+        for text in [
+            "distinct_checked.orna",
+            "distinct_schema_marker",
+            "person_type_marker",
+            "task_type_marker",
+            "values_marker",
+            "task_value_marker",
+            "active_value_marker",
+            "completed_value_marker",
+            "t_alias_marker",
+            "assignee_marker",
+            "active_marker",
+            "completed_marker",
+        ] {
+            assert!(
+                !encoded
+                    .payload()
+                    .windows(text.len())
+                    .any(|window| window == text.as_bytes()),
+                "artifact contains submitted source name {text:?}"
+            );
+        }
+        for checked_marker in fixture.checked_markers {
+            assert!(
+                !encoded
+                    .payload()
+                    .windows(checked_marker.len())
+                    .any(|window| window == checked_marker.as_bytes()),
+                "artifact contains checked identity representation {checked_marker:?}"
+            );
+        }
+    }
+
+    #[test]
     fn maps_checked_identities_before_encoding_durable_server_plan_bytes() {
         let fixture = checked_plan_fixture();
         let mapped = fixture
@@ -473,6 +615,13 @@ mod tests {
         checked_markers: Vec<String>,
     }
 
+    struct CheckedDistinctPlanFixture {
+        plan: DistinctQueryIr<CheckedTypeId, CheckedFieldId>,
+        type_ids: HashMap<CheckedTypeId, TypeId>,
+        field_ids: HashMap<CheckedFieldId, FieldId>,
+        checked_markers: Vec<String>,
+    }
+
     fn checked_plan_fixture() -> CheckedPlanFixture {
         let bundle = SourceBundle::new([SourceUnit::new("checked.orna", SOURCE)]).unwrap();
         let base = CatalogueSnapshot::new(
@@ -511,6 +660,54 @@ mod tests {
             plan: checked.server_functions()[0]
                 .query_plan()
                 .expect("fixture has a SELECT body")
+                .clone(),
+            type_ids,
+            field_ids,
+            checked_markers,
+        }
+    }
+
+    fn checked_distinct_plan_fixture() -> CheckedDistinctPlanFixture {
+        let bundle =
+            SourceBundle::new([SourceUnit::new("distinct_checked.orna", DISTINCT_SOURCE)]).unwrap();
+        let base = CatalogueSnapshot::new(
+            CatalogueRevisionId::from_bytes([98; 16]),
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        let report = crate::check(&bundle, &base);
+        assert!(
+            report.diagnostics().is_empty(),
+            "{:?}",
+            report.diagnostics()
+        );
+        let checked = report.checked_bundle().unwrap();
+        let person = &checked.object_types()[0];
+        let task = &checked.object_types()[1];
+        let active = &person.fields()[0];
+        let assignee = &task.fields()[0];
+        let completed = &task.fields()[1];
+
+        let type_ids = HashMap::from([(person.id(), PERSON_TYPE), (task.id(), TASK_TYPE)]);
+        let field_ids = HashMap::from([
+            (active.id(), ACTIVE_FIELD),
+            (assignee.id(), ASSIGNEE_FIELD),
+            (completed.id(), COMPLETED_FIELD),
+        ]);
+        let checked_markers = type_ids
+            .keys()
+            .map(ToString::to_string)
+            .chain(field_ids.keys().map(ToString::to_string))
+            .collect();
+
+        assert!(type_ids.keys().all(|id| id.is_provisional()));
+        assert!(field_ids.keys().all(|id| id.is_provisional()));
+
+        CheckedDistinctPlanFixture {
+            plan: checked.server_functions()[0]
+                .distinct_query_plan()
+                .expect("fixture has a DISTINCT SELECT body")
                 .clone(),
             type_ids,
             field_ids,

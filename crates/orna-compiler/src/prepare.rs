@@ -304,7 +304,7 @@ fn identity_selected_query_plan(
     function: &FunctionDefinition,
     object_types: &[ObjectTypeDefinition],
     references: &[(DefinitionReferenceKind, DefinitionReferenceTarget)],
-) -> Result<crate::relational::EncodedIdentitySelectedServerPlan, PrepareError> {
+) -> Result<crate::relational::EncodedServerPlan, PrepareError> {
     let scan = object_types
         .iter()
         .find(|object_type| object_type.id() == plan.scan().object_type())
