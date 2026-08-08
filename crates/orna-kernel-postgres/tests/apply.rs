@@ -7,10 +7,14 @@ use std::{
 
 use orna_compiler::{check, prepare};
 use orna_core::{
-    TypeId,
+    FieldId, ObjectId, TypeId,
     catalogue::FunctionReturn,
-    revision::{ActiveDatabaseRevision, DeployableRevision, FunctionRevisionRecord},
+    revision::{
+        ActiveDatabaseRevision, DefinitionIdentity, DefinitionReferenceKind,
+        DefinitionReferenceTarget, DeployableRevision, FunctionRevisionRecord, SourceOrigin,
+    },
     source::{SourceBundle, SourceUnit},
+    value::RuntimeValue,
 };
 use orna_kernel_postgres::{PostgresKernel, PostgresKernelError};
 use support::{TestDatabase, TestResult, failure, with_test_database};
@@ -32,6 +36,19 @@ const BASIC_CHANGED_SOURCE: &str = "CREATE SCHEMA app;\n\
     CREATE SERVER FUNCTION app.list_widgets()\n\
     RETURNS ROWS (name TEXT)\n\
     AS SELECT widget.name FROM app.widget widget WHERE widget.active = TRUE;\n";
+
+const FIELD_RENAME_ORIGINAL_SOURCE: &str = "CREATE SCHEMA people;\n\
+    CREATE TYPE people.person AS OBJECT (email TEXT NOT NULL);\n\
+    CREATE SERVER FUNCTION people.list_emails()\n\
+    RETURNS ROWS (email TEXT)\n\
+    AS SELECT p.email FROM people.person p;\n";
+
+const FIELD_RENAME_FINAL_SOURCE: &str = "CREATE SCHEMA people;\n\
+    CREATE TYPE people.person AS OBJECT (primary_email TEXT NOT NULL);\n\
+    ALTER TYPE people.person RENAME FIELD email TO primary_email;\n\
+    CREATE SERVER FUNCTION people.list_emails()\n\
+    RETURNS ROWS (email TEXT)\n\
+    AS SELECT p.primary_email FROM people.person p;\n";
 
 const MUTUAL_REFERENCE_SOURCE: &str = "CREATE SCHEMA graph;\n\
     CREATE TYPE graph.left AS OBJECT (right REF graph.right);\n\
@@ -173,6 +190,91 @@ async fn source_only_edit_reuses_the_immutable_function_revision_and_artifact() 
             applied.historical_function_revisions().is_empty(),
             "source-only apply invented function revision history",
         )
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn replay_safe_field_rename_preserves_live_storage_and_execution() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let initial_kernel = kernel(&database)?;
+        initial_kernel.bootstrap().await?;
+        let original_candidate = candidate(
+            FIELD_RENAME_ORIGINAL_SOURCE,
+            &initial_kernel.recover().await?,
+        )?;
+        let original = initial_kernel.apply(&original_candidate).await?;
+        let object = original.catalogue().object_types()[0].id();
+        let original_field = original.catalogue().object_types()[0].fields()[0].id();
+        let function = original.catalogue().functions()[0].id();
+        let original_revision = only_revision(&original)?.clone();
+        let original_immutable = immutable_rows(&database, &original_revision).await?;
+        let original_physical = physical_catalogue(&database, object).await?;
+        let stored_object = ObjectId::from_bytes([91; 16]);
+        insert_private_text(
+            &database,
+            object,
+            original_field,
+            stored_object,
+            "kept@example.test",
+        )
+        .await?;
+        let proof = RenameProof {
+            object,
+            field: original_field,
+            function,
+            revision: original_revision,
+            immutable: original_immutable,
+            physical: original_physical,
+            stored_object,
+        };
+
+        let renamed_candidate = candidate(FIELD_RENAME_FINAL_SOURCE, &original)?;
+        require(
+            renamed_candidate.new_function_revisions().is_empty(),
+            "field rename allocated a new immutable function revision",
+        )?;
+        require(
+            renamed_candidate.source().bundle_hash() != original.source().bundle_hash()
+                && renamed_candidate.source().revision_hash() != original.source().revision_hash()
+                && renamed_candidate.catalogue_hash() != original.catalogue_hash(),
+            "field rename did not change all source and catalogue hashes",
+        )?;
+        require_rename_semantics(
+            &renamed_candidate,
+            proof.object,
+            proof.field,
+            proof.function,
+            proof.revision.id(),
+        )?;
+
+        let renamed = initial_kernel.apply(&renamed_candidate).await?;
+        require_recovered_snapshot(&renamed_candidate, &renamed)?;
+        require_rename_state(&database, &renamed, &proof).await?;
+
+        let replay_kernel = kernel(&database)?;
+        let recovered = replay_kernel.recover().await?;
+        require_rename_state(&database, &recovered, &proof).await?;
+        let replay_candidate = candidate(FIELD_RENAME_FINAL_SOURCE, &recovered)?;
+        require(
+            replay_candidate.new_function_revisions().is_empty(),
+            "exact field-rename replay allocated a new immutable function revision",
+        )?;
+        require_rename_semantics(
+            &replay_candidate,
+            proof.object,
+            proof.field,
+            proof.function,
+            proof.revision.id(),
+        )?;
+
+        let replayed = replay_kernel.apply(&replay_candidate).await?;
+        let final_kernel = kernel(&database)?;
+        let final_recovered = final_kernel.recover().await?;
+        require_recovered_snapshot(&replay_candidate, &replayed)?;
+        require_recovered_snapshot(&replay_candidate, &final_recovered)?;
+        require_rename_state(&database, &final_recovered, &proof).await
     })
     .await
 }
@@ -901,6 +1003,346 @@ fn only_revision(active: &ActiveDatabaseRevision) -> TestResult<&FunctionRevisio
         .ok_or_else(|| failure("expected exactly one active function revision"))
 }
 
+fn require_rename_semantics(
+    candidate: &DeployableRevision,
+    object: TypeId,
+    field: FieldId,
+    function: orna_core::FunctionId,
+    revision: orna_core::FunctionRevisionId,
+) -> TestResult<()> {
+    let renamed_object = candidate
+        .candidate()
+        .object_type_by_id(object)
+        .ok_or_else(|| failure("renamed candidate lost the original object TypeId"))?;
+    let renamed_field = renamed_object
+        .field_by_id(field)
+        .ok_or_else(|| failure("renamed candidate lost the original FieldId"))?;
+    require(
+        renamed_field.name() == "primary_email"
+            && candidate.candidate().functions().iter().any(|definition| {
+                definition.id() == function && definition.current_revision() == revision
+            }),
+        "renamed candidate changed stable semantic identities",
+    )?;
+
+    let source_unit = candidate.source().units()[0].id();
+    let declaration_origin = token_origin(
+        source_unit,
+        FIELD_RENAME_FINAL_SOURCE,
+        "CREATE TYPE people.person AS OBJECT (",
+        "primary_email TEXT NOT NULL",
+    )?;
+    let query_origin = token_origin(
+        source_unit,
+        FIELD_RENAME_FINAL_SOURCE,
+        "AS SELECT p.",
+        "primary_email",
+    )?;
+    let field_origin = candidate
+        .origins()
+        .iter()
+        .find(|origin| {
+            origin.identity()
+                == DefinitionIdentity::Field {
+                    owner: object,
+                    field,
+                }
+        })
+        .ok_or_else(|| failure("renamed field definition origin is absent"))?;
+    require(
+        field_origin.source() == declaration_origin,
+        "renamed field origin does not select the final CREATE TYPE token",
+    )?;
+    let query_reference = candidate
+        .references()
+        .iter()
+        .find(|reference| {
+            reference.source_function() == function
+                && reference.kind() == DefinitionReferenceKind::QueryField
+                && reference.target()
+                    == DefinitionReferenceTarget::Field {
+                        owner: object,
+                        field,
+                    }
+        })
+        .ok_or_else(|| failure("renamed QueryField reference is absent"))?;
+    require(
+        query_reference.source_revision() == revision
+            && query_reference.source_origin() == query_origin,
+        "renamed QueryField reference changed identity or token origin",
+    )
+}
+
+fn token_origin(
+    source_unit: orna_core::SourceUnitId,
+    source: &str,
+    anchor: &str,
+    token: &str,
+) -> TestResult<SourceOrigin> {
+    let anchor_start = source
+        .find(anchor)
+        .ok_or_else(|| failure("source-origin anchor is absent"))?;
+    let token_start = source[anchor_start + anchor.len()..]
+        .find(token)
+        .map(|offset| anchor_start + anchor.len() + offset)
+        .ok_or_else(|| failure("source-origin token is absent after its anchor"))?;
+    let token_end = token_start + token.len();
+    Ok(SourceOrigin::new(
+        source_unit,
+        u32::try_from(token_start)?,
+        u32::try_from(token_end)?,
+    )?)
+}
+
+struct RenameProof {
+    object: TypeId,
+    field: FieldId,
+    function: orna_core::FunctionId,
+    revision: FunctionRevisionRecord,
+    immutable: ImmutableRevisionRows,
+    physical: PhysicalCatalogue,
+    stored_object: ObjectId,
+}
+
+async fn require_rename_state(
+    database: &TestDatabase,
+    active: &ActiveDatabaseRevision,
+    proof: &RenameProof,
+) -> TestResult<()> {
+    let current_object = active
+        .catalogue()
+        .object_type_by_id(proof.object)
+        .ok_or_else(|| failure("recovered rename lost the original TypeId"))?;
+    let current_field = current_object
+        .field_by_id(proof.field)
+        .ok_or_else(|| failure("recovered rename lost the original FieldId"))?;
+    require(
+        current_field.name() == "primary_email"
+            && only_revision(active)? == &proof.revision
+            && active.catalogue().functions()[0].current_revision() == proof.revision.id()
+            && active.historical_function_revisions().is_empty(),
+        "recovered rename changed identity, immutable revision, or history",
+    )?;
+    require(
+        immutable_rows(database, &proof.revision).await? == proof.immutable,
+        "field rename rewrote the immutable function revision or artifact",
+    )?;
+    require(
+        physical_catalogue(database, proof.object).await? == proof.physical,
+        "field rename changed the stable-ID PostgreSQL physical catalogue",
+    )?;
+    require_private_text(
+        database,
+        proof.object,
+        proof.field,
+        proof.stored_object,
+        "kept@example.test",
+    )
+    .await?;
+    let result = kernel(database)?
+        .execute_server_select(proof.function)
+        .await?;
+    require(
+        result.rows().rows().len() == 1
+            && result.rows().rows()[0].values()
+                == [RuntimeValue::Text(String::from("kept@example.test"))],
+        "renamed SERVER SELECT did not read the pre-existing private field value",
+    )
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct PhysicalCatalogue {
+    relation: (i64, i64, String, String),
+    attributes: Vec<(i16, String, i64, i32, bool, bool)>,
+    constraints: Vec<(i64, String, String)>,
+    indexes: Vec<(i64, String, String)>,
+}
+
+async fn physical_catalogue(
+    database: &TestDatabase,
+    object: TypeId,
+) -> TestResult<PhysicalCatalogue> {
+    let session = database.open().await?;
+    let operation = async {
+        let relation_name = relation(object);
+        let relation_row = session
+            .client()
+            .query_one(
+                "SELECT c.oid::bigint, c.relfilenode::bigint, c.relkind::text,
+                        n.nspname || '.' || c.relname
+                 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                 WHERE c.oid = to_regclass($1)",
+                &[&relation_name],
+            )
+            .await?;
+        let attributes = session
+            .client()
+            .query(
+                "SELECT a.attnum, a.attname, a.atttypid::bigint, a.atttypmod,
+                        a.attnotnull, a.attisdropped
+                 FROM pg_attribute a
+                 WHERE a.attrelid = to_regclass($1) AND a.attnum > 0
+                 ORDER BY a.attnum",
+                &[&relation_name],
+            )
+            .await?
+            .into_iter()
+            .map(|row| {
+                Ok((
+                    row.try_get(0)?,
+                    row.try_get(1)?,
+                    row.try_get(2)?,
+                    row.try_get(3)?,
+                    row.try_get(4)?,
+                    row.try_get(5)?,
+                ))
+            })
+            .collect::<Result<Vec<_>, tokio_postgres::Error>>()?;
+        let constraints = session
+            .client()
+            .query(
+                "SELECT oid::bigint, conname, pg_get_constraintdef(oid, false)
+                 FROM pg_constraint WHERE conrelid = to_regclass($1) ORDER BY oid",
+                &[&relation_name],
+            )
+            .await?
+            .into_iter()
+            .map(|row| Ok((row.try_get(0)?, row.try_get(1)?, row.try_get(2)?)))
+            .collect::<Result<Vec<_>, tokio_postgres::Error>>()?;
+        let indexes = session
+            .client()
+            .query(
+                "SELECT i.indexrelid::bigint, c.relname, pg_get_indexdef(i.indexrelid)
+                 FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
+                 WHERE i.indrelid = to_regclass($1) ORDER BY i.indexrelid",
+                &[&relation_name],
+            )
+            .await?
+            .into_iter()
+            .map(|row| Ok((row.try_get(0)?, row.try_get(1)?, row.try_get(2)?)))
+            .collect::<Result<Vec<_>, tokio_postgres::Error>>()?;
+        Ok(PhysicalCatalogue {
+            relation: (
+                relation_row.try_get(0)?,
+                relation_row.try_get(1)?,
+                relation_row.try_get(2)?,
+                relation_row.try_get(3)?,
+            ),
+            attributes,
+            constraints,
+            indexes,
+        })
+    }
+    .await;
+    finish_test_session(
+        operation,
+        session.shutdown().await,
+        "physical catalogue inspection",
+    )
+}
+
+async fn insert_private_text(
+    database: &TestDatabase,
+    object: TypeId,
+    field_id: FieldId,
+    object_id: ObjectId,
+    value: &str,
+) -> TestResult<()> {
+    private_text(
+        database,
+        object,
+        field_id,
+        object_id,
+        PrivateTextOperation::Insert(value),
+    )
+    .await
+}
+
+async fn require_private_text(
+    database: &TestDatabase,
+    object: TypeId,
+    field_id: FieldId,
+    object_id: ObjectId,
+    expected: &str,
+) -> TestResult<()> {
+    private_text(
+        database,
+        object,
+        field_id,
+        object_id,
+        PrivateTextOperation::Require(expected),
+    )
+    .await
+}
+
+enum PrivateTextOperation<'a> {
+    Insert(&'a str),
+    Require(&'a str),
+}
+
+async fn private_text(
+    database: &TestDatabase,
+    object: TypeId,
+    field_id: FieldId,
+    object_id: ObjectId,
+    operation: PrivateTextOperation<'_>,
+) -> TestResult<()> {
+    let session = database.open().await?;
+    let operation = async {
+        match operation {
+            PrivateTextOperation::Insert(value) => {
+                session
+                    .client()
+                    .execute(
+                        &format!(
+                            "INSERT INTO {} (_orna_object_id, {}) VALUES ($1, $2)",
+                            relation(object),
+                            field(field_id)
+                        ),
+                        &[&object_id.to_bytes().to_vec(), &value],
+                    )
+                    .await?;
+                Ok(())
+            }
+            PrivateTextOperation::Require(expected) => {
+                let row = session
+                    .client()
+                    .query_one(
+                        &format!(
+                            "SELECT {} FROM {} WHERE _orna_object_id = $1",
+                            field(field_id),
+                            relation(object)
+                        ),
+                        &[&object_id.to_bytes().to_vec()],
+                    )
+                    .await?;
+                let actual: String = row.try_get(0)?;
+                require(
+                    actual == expected,
+                    "pre-existing private field value did not survive the rename",
+                )
+            }
+        }
+    }
+    .await;
+    finish_test_session(operation, session.shutdown().await, "private row operation")
+}
+
+fn finish_test_session<T>(
+    operation: TestResult<T>,
+    shutdown: TestResult<()>,
+    context: &str,
+) -> TestResult<T> {
+    match (operation, shutdown) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+        (Err(operation), Err(shutdown)) => Err(failure(format!(
+            "{context} failed: {operation}; session shutdown also failed: {shutdown}"
+        ))),
+    }
+}
+
 #[derive(Debug, Eq, PartialEq)]
 struct ImmutableRevisionRows {
     revision_count: i64,
@@ -931,68 +1373,75 @@ async fn immutable_rows(
     revision: &FunctionRevisionRecord,
 ) -> TestResult<ImmutableRevisionRows> {
     let session = database.open().await?;
-    let revision_id = revision.id().to_bytes().to_vec();
-    let revision_count: i64 = session
-        .client()
-        .query_one(
-            "SELECT count(*) FROM _orna_kernel.function_revisions WHERE id = $1",
-            &[&revision_id],
-        )
-        .await?
-        .try_get(0)?;
-    let revision_row = session
-        .client()
-        .query_one(
-            "SELECT xmin::text, introduced_catalogue_revision_id, function_id,
+    let operation = async {
+        let revision_id = revision.id().to_bytes().to_vec();
+        let revision_count: i64 = session
+            .client()
+            .query_one(
+                "SELECT count(*) FROM _orna_kernel.function_revisions WHERE id = $1",
+                &[&revision_id],
+            )
+            .await?
+            .try_get(0)?;
+        let revision_row = session
+            .client()
+            .query_one(
+                "SELECT xmin::text, introduced_catalogue_revision_id, function_id,
                     revision_number, content_hash, semantic_ir_hash, hash_algorithm,
                     language_version, status, hash_contract_version
              FROM _orna_kernel.function_revisions
              WHERE id = $1",
-            &[&revision_id],
-        )
-        .await?;
-    let artifact_count: i64 = session
-        .client()
-        .query_one(
-            "SELECT count(*) FROM _orna_kernel.function_artifacts WHERE function_revision_id = $1",
-            &[&revision_id],
-        )
-        .await?
-        .try_get(0)?;
-    let artifact_row = session
-        .client()
-        .query_one(
-            "SELECT xmin::text, function_revision_id, artifact_kind, format, format_version,
+                &[&revision_id],
+            )
+            .await?;
+        let artifact_count: i64 = session
+            .client()
+            .query_one(
+                "SELECT count(*) FROM _orna_kernel.function_artifacts WHERE function_revision_id = $1",
+                &[&revision_id],
+            )
+            .await?
+            .try_get(0)?;
+        let artifact_row = session
+            .client()
+            .query_one(
+                "SELECT xmin::text, function_revision_id, artifact_kind, format, format_version,
                     payload, content_hash, hash_algorithm, hash_contract_version
              FROM _orna_kernel.function_artifacts
              WHERE function_revision_id = $1",
-            &[&revision_id],
-        )
-        .await?;
-    session.shutdown().await?;
-    Ok(ImmutableRevisionRows {
-        revision_count,
-        revision_xmin: revision_row.try_get(0)?,
-        introduced_catalogue_revision_id: revision_row.try_get(1)?,
-        function_id: revision_row.try_get(2)?,
-        revision_number: revision_row.try_get(3)?,
-        declaration_hash: revision_row.try_get(4)?,
-        semantic_hash: revision_row.try_get(5)?,
-        hash_algorithm: revision_row.try_get(6)?,
-        language_version: revision_row.try_get(7)?,
-        status: revision_row.try_get(8)?,
-        hash_contract_version: revision_row.try_get(9)?,
-        artifact_count,
-        artifact_xmin: artifact_row.try_get(0)?,
-        artifact_function_revision_id: artifact_row.try_get(1)?,
-        artifact_kind: artifact_row.try_get(2)?,
-        artifact_format: artifact_row.try_get(3)?,
-        artifact_version: artifact_row.try_get(4)?,
-        artifact_payload: artifact_row.try_get(5)?,
-        artifact_hash: artifact_row.try_get(6)?,
-        artifact_hash_algorithm: artifact_row.try_get(7)?,
-        artifact_hash_contract_version: artifact_row.try_get(8)?,
-    })
+                &[&revision_id],
+            )
+            .await?;
+        Ok(ImmutableRevisionRows {
+            revision_count,
+            revision_xmin: revision_row.try_get(0)?,
+            introduced_catalogue_revision_id: revision_row.try_get(1)?,
+            function_id: revision_row.try_get(2)?,
+            revision_number: revision_row.try_get(3)?,
+            declaration_hash: revision_row.try_get(4)?,
+            semantic_hash: revision_row.try_get(5)?,
+            hash_algorithm: revision_row.try_get(6)?,
+            language_version: revision_row.try_get(7)?,
+            status: revision_row.try_get(8)?,
+            hash_contract_version: revision_row.try_get(9)?,
+            artifact_count,
+            artifact_xmin: artifact_row.try_get(0)?,
+            artifact_function_revision_id: artifact_row.try_get(1)?,
+            artifact_kind: artifact_row.try_get(2)?,
+            artifact_format: artifact_row.try_get(3)?,
+            artifact_version: artifact_row.try_get(4)?,
+            artifact_payload: artifact_row.try_get(5)?,
+            artifact_hash: artifact_row.try_get(6)?,
+            artifact_hash_algorithm: artifact_row.try_get(7)?,
+            artifact_hash_contract_version: artifact_row.try_get(8)?,
+        })
+    }
+    .await;
+    finish_test_session(
+        operation,
+        session.shutdown().await,
+        "immutable row inspection",
+    )
 }
 
 async fn require_no_candidate_residue(
@@ -1159,6 +1608,10 @@ fn relation(type_id: TypeId) -> String {
         "_orna_data.t_{:032x}",
         u128::from_be_bytes(type_id.to_bytes())
     )
+}
+
+fn field(field_id: FieldId) -> String {
+    format!("f_{:032x}", u128::from_be_bytes(field_id.to_bytes()))
 }
 
 fn require(condition: bool, message: &'static str) -> TestResult<()> {
