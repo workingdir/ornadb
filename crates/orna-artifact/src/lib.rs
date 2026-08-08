@@ -5,4 +5,5 @@
 //! returns an executable representation.
 
 pub mod constant_expression;
+pub mod server_mutation_plan;
 pub mod server_plan;
