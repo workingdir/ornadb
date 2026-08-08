@@ -6,13 +6,16 @@
 use std::{error::Error, fmt, str::FromStr};
 
 use orna_core::{
-    canonical_hash::CanonicalHashError, catalogue::CatalogueSnapshotError,
-    revision::RevisionInvariantError,
+    canonical_hash::CanonicalHashError,
+    catalogue::CatalogueSnapshotError,
+    physical::PhysicalPlanError,
+    revision::{RevisionInvariantError, RevisionPair},
 };
 
 use tokio::task::{JoinError, JoinHandle};
 use tokio_postgres::{Client, Config, NoTls};
 
+mod apply;
 mod bootstrap;
 mod decode;
 mod physical;
@@ -103,6 +106,15 @@ pub enum PostgresKernelError {
     RevisionInvariant(RevisionInvariantError),
     /// Reconstructed semantic definitions do not form a valid catalogue.
     CatalogueSnapshot(CatalogueSnapshotError),
+    /// The candidate was prepared against a revision pair that is no longer active.
+    ExpectedBaseMismatch {
+        /// The base pair carried by the candidate.
+        expected: RevisionPair,
+        /// The pair locked by the apply transaction.
+        active: RevisionPair,
+    },
+    /// Backend-neutral physical planning rejected the candidate.
+    PhysicalPlan(PhysicalPlanError),
     /// A durable row value could not be decoded as its selected PostgreSQL type.
     RowDecode {
         /// The relation that supplied the row.
@@ -163,6 +175,10 @@ impl fmt::Display for PostgresKernelError {
             Self::CatalogueSnapshot(error) => {
                 write!(formatter, "recovered catalogue snapshot failed: {error}")
             }
+            Self::ExpectedBaseMismatch { .. } => {
+                formatter.write_str("expected revision pair is not active")
+            }
+            Self::PhysicalPlan(error) => write!(formatter, "physical plan failed: {error}"),
             Self::RowDecode {
                 relation,
                 record,
@@ -197,9 +213,11 @@ impl Error for PostgresKernelError {
             Self::CanonicalHash(error) => Some(error),
             Self::RevisionInvariant(error) => Some(error),
             Self::CatalogueSnapshot(error) => Some(error),
+            Self::PhysicalPlan(error) => Some(error),
             Self::RowDecode { source, .. } => Some(source),
             Self::MigrationMismatch { .. }
             | Self::CatalogueInvariant(_)
+            | Self::ExpectedBaseMismatch { .. }
             | Self::DurableInvariant { .. } => None,
         }
     }
@@ -211,7 +229,8 @@ mod tests {
 
     use orna_core::{
         CatalogueRevisionId, SourceRevisionId, canonical_hash::CanonicalHashError,
-        catalogue::CatalogueSnapshotError, revision::RevisionInvariantError,
+        catalogue::CatalogueSnapshotError, physical::PhysicalPlanError,
+        revision::RevisionInvariantError,
     };
 
     use super::{PostgresKernel, PostgresKernelError};
@@ -249,10 +268,15 @@ mod tests {
             PostgresKernelError::CatalogueSnapshot(CatalogueSnapshotError::DuplicateSchemaId {
                 id: orna_core::SchemaId::from_bytes([3; 16]),
             });
+        let physical =
+            PostgresKernelError::PhysicalPlan(PhysicalPlanError::UnsupportedObjectDrop {
+                object_type: orna_core::TypeId::from_bytes([5; 16]),
+            });
 
         assert!(canonical.source().is_some());
         assert!(revision.source().is_some());
         assert!(catalogue.source().is_some());
+        assert!(physical.source().is_some());
         assert!(
             PostgresKernelError::DurableInvariant {
                 relation: "_orna_kernel.test",
