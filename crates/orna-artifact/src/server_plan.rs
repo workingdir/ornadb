@@ -22,6 +22,10 @@
 //! selection to `REF(input 0) = selector_parameter`, adds the private selector
 //! parameter expression tag 5 only in that position, and requires zero
 //! ordering terms.
+//!
+//! Version 3 uses the version-1 layout with a mandatory zero ordering count.
+//! The version itself marks `SELECT DISTINCT`; it adds no expression tag or
+//! set-quantifier field.
 
 use std::fmt;
 
@@ -38,6 +42,8 @@ pub const LANGUAGE_VERSION_IDENTITY: &str = "orna.language/1";
 pub const FORMAT_VERSION: u32 = 1;
 /// The version used by identity-selected SERVER query artifacts.
 pub const IDENTITY_SELECTED_FORMAT_VERSION: u32 = 2;
+/// The version used by parameter-free `SELECT DISTINCT` SERVER query artifacts.
+pub const DISTINCT_FORMAT_VERSION: u32 = 3;
 /// The exact first eight bytes of every server-plan artifact.
 pub const MAGIC: [u8; 8] = *b"ORNASP\0\0";
 
@@ -77,13 +83,7 @@ impl ServerPlan {
         validate_plan(self)?;
 
         let mut writer = encode_plan_prefix(FORMAT_VERSION, self.scan, &self.projections)?;
-        match &self.selection {
-            Some(expression) => {
-                writer.boolean("selection presence", true);
-                encode_expression(&mut writer, expression, 0)?;
-            }
-            None => writer.boolean("selection presence", false),
-        }
+        encode_optional_selection(&mut writer, self.selection.as_ref())?;
         writer.count("ordering", self.ordering.len(), MAX_ORDERING)?;
         for ordering in &self.ordering {
             encode_expression(&mut writer, &ordering.expression, 0)?;
@@ -99,14 +99,7 @@ impl ServerPlan {
     pub fn decode(bytes: &[u8]) -> Result<Self, ServerPlanError> {
         let (mut reader, scan, projections, mut remaining_expression_nodes) =
             decode_plan_prefix(bytes, FORMAT_VERSION)?;
-        let selection = match reader.boolean("selection presence")? {
-            true => Some(decode_expression(
-                &mut reader,
-                0,
-                &mut remaining_expression_nodes,
-            )?),
-            false => None,
-        };
+        let selection = decode_optional_selection(&mut reader, &mut remaining_expression_nodes)?;
         let ordering_count = reader.count("ordering", MAX_ORDERING)?;
         let mut ordering = Vec::with_capacity(ordering_count as usize);
         for _ in 0..ordering_count {
@@ -213,6 +206,82 @@ impl IdentitySelectedServerPlan {
         }
         reader.require_finished()?;
         Self::new(scan, projections, selector)
+    }
+}
+
+/// A checked parameter-free `SELECT DISTINCT` SERVER query plan.
+///
+/// This separate model makes duplicate elimination part of the artifact
+/// version. It permits only the version-1 scan, projections, and optional
+/// selection shape, and it cannot contain ordering or parameter expressions.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DistinctServerPlan {
+    scan: Scan,
+    projections: Vec<Expression>,
+    selection: Option<Expression>,
+}
+
+impl DistinctServerPlan {
+    /// Creates a checked parameter-free `SELECT DISTINCT` plan.
+    pub fn new(
+        scan: Scan,
+        projections: impl IntoIterator<Item = Expression>,
+        selection: Option<Expression>,
+    ) -> Result<Self, ServerPlanError> {
+        let plan = Self {
+            scan,
+            projections: collect_projections(projections)?,
+            selection,
+        };
+        validate_distinct_plan(&plan)?;
+        Ok(plan)
+    }
+
+    /// Returns the canonical version for `SELECT DISTINCT` artifacts.
+    pub const fn format_version(&self) -> u32 {
+        DISTINCT_FORMAT_VERSION
+    }
+
+    /// Returns the single source object scan.
+    pub const fn scan(&self) -> Scan {
+        self.scan
+    }
+
+    /// Returns projection expressions in source order.
+    pub fn projections(&self) -> &[Expression] {
+        &self.projections
+    }
+
+    /// Returns the optional `WHERE` expression.
+    pub fn selection(&self) -> Option<&Expression> {
+        self.selection.as_ref()
+    }
+
+    /// Encodes this checked plan into canonical version-3 bytes.
+    pub fn encode(&self) -> Result<Vec<u8>, ServerPlanError> {
+        validate_distinct_plan(self)?;
+
+        let mut writer = encode_plan_prefix(DISTINCT_FORMAT_VERSION, self.scan, &self.projections)?;
+        encode_optional_selection(&mut writer, self.selection.as_ref())?;
+        writer.count("ordering", 0, MAX_ORDERING)?;
+        let bytes = writer.finish();
+        validate_artifact_size(bytes.len())?;
+        Ok(bytes)
+    }
+
+    /// Decodes exactly one canonical version-3 `SELECT DISTINCT` artifact.
+    pub fn decode(bytes: &[u8]) -> Result<Self, ServerPlanError> {
+        let (mut reader, scan, projections, mut remaining_expression_nodes) =
+            decode_plan_prefix(bytes, DISTINCT_FORMAT_VERSION)?;
+        let selection = decode_optional_selection(&mut reader, &mut remaining_expression_nodes)?;
+        let ordering_count = reader.u32()?;
+        if ordering_count != 0 {
+            return Err(ServerPlanError::DistinctOrderingNotAllowed {
+                count: ordering_count,
+            });
+        }
+        reader.require_finished()?;
+        Self::new(scan, projections, selection)
     }
 }
 
@@ -335,6 +404,7 @@ pub struct FieldStep {
 }
 
 /// An error returned when an artifact cannot be decoded or encoded safely.
+#[non_exhaustive]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ServerPlanError {
     /// The artifact does not start with the server-plan magic bytes.
@@ -381,6 +451,16 @@ pub enum ServerPlanError {
     RecursionLimitExceeded,
     /// A complete plan contains too many expression nodes.
     ExpressionNodeLimitExceeded,
+    /// A version-3 projection uses a type outside the accepted DISTINCT domain.
+    UnsupportedDistinctProjectionType {
+        /// The rejected resolved projection type.
+        resolved_type: ResolvedType,
+    },
+    /// A version-3 artifact contains a nonzero ordering count.
+    DistinctOrderingNotAllowed {
+        /// The rejected encoded ordering count.
+        count: u32,
+    },
     /// The artifact ends before a complete field can be read.
     Truncated,
     /// The artifact contains bytes after a complete plan.
@@ -435,6 +515,12 @@ impl fmt::Display for ServerPlanError {
             Self::ExpressionNodeLimitExceeded => {
                 formatter.write_str("server plan expression count exceeds server-plan limit")
             }
+            Self::UnsupportedDistinctProjectionType { .. } => formatter.write_str(
+                "SELECT DISTINCT projections support only BOOLEAN, INTEGER, BIGINT, BYTES, and REF values",
+            ),
+            Self::DistinctOrderingNotAllowed { .. } => formatter.write_str(
+                "SELECT DISTINCT queries do not allow ORDER BY; remove the ORDER BY clause",
+            ),
             Self::Truncated => formatter.write_str("truncated orna.server-plan artifact"),
             Self::TrailingBytes => {
                 formatter.write_str("trailing bytes after orna.server-plan artifact")
@@ -499,6 +585,30 @@ fn decode_plan_prefix(
     Ok((reader, scan, projections, remaining_expression_nodes))
 }
 
+fn encode_optional_selection(
+    writer: &mut Writer,
+    selection: Option<&Expression>,
+) -> Result<(), ServerPlanError> {
+    match selection {
+        Some(expression) => {
+            writer.boolean("selection presence", true);
+            encode_expression(writer, expression, 0)?;
+        }
+        None => writer.boolean("selection presence", false),
+    }
+    Ok(())
+}
+
+fn decode_optional_selection(
+    reader: &mut Reader<'_>,
+    remaining_expression_nodes: &mut u32,
+) -> Result<Option<Expression>, ServerPlanError> {
+    match reader.boolean("selection presence")? {
+        true => decode_expression(reader, 0, remaining_expression_nodes).map(Some),
+        false => Ok(None),
+    }
+}
+
 fn validate_plan(plan: &ServerPlan) -> Result<(), ServerPlanError> {
     let mut remaining_expression_nodes = MAX_EXPRESSION_NODES;
     validate_scan_and_projections(
@@ -506,14 +616,11 @@ fn validate_plan(plan: &ServerPlan) -> Result<(), ServerPlanError> {
         &plan.projections,
         &mut remaining_expression_nodes,
     )?;
-    if let Some(selection) = &plan.selection {
-        validate_expression(selection, plan.scan, 0, &mut remaining_expression_nodes)?;
-        if selection.value_type.resolved_type != ResolvedType::scalar(StandardScalar::Boolean) {
-            return Err(ServerPlanError::InvalidModel(
-                "a selection must have resolved BOOLEAN type",
-            ));
-        }
-    }
+    validate_optional_selection(
+        plan.selection.as_ref(),
+        plan.scan,
+        &mut remaining_expression_nodes,
+    )?;
     validate_count("ordering", plan.ordering.len(), MAX_ORDERING)?;
     for ordering in &plan.ordering {
         validate_expression(
@@ -537,6 +644,56 @@ fn validate_identity_selected_plan(
     )?;
     consume_identity_selection_nodes(&mut remaining_expression_nodes)?;
     Ok(())
+}
+
+fn validate_distinct_plan(plan: &DistinctServerPlan) -> Result<(), ServerPlanError> {
+    let mut remaining_expression_nodes = MAX_EXPRESSION_NODES;
+    validate_scan_and_projections(
+        plan.scan,
+        &plan.projections,
+        &mut remaining_expression_nodes,
+    )?;
+    validate_optional_selection(
+        plan.selection.as_ref(),
+        plan.scan,
+        &mut remaining_expression_nodes,
+    )?;
+    for projection in &plan.projections {
+        let resolved_type = projection.value_type.resolved_type;
+        if !supports_distinct_projection(resolved_type) {
+            return Err(ServerPlanError::UnsupportedDistinctProjectionType { resolved_type });
+        }
+    }
+    Ok(())
+}
+
+fn validate_optional_selection(
+    selection: Option<&Expression>,
+    scan: Scan,
+    remaining_expression_nodes: &mut u32,
+) -> Result<(), ServerPlanError> {
+    let Some(selection) = selection else {
+        return Ok(());
+    };
+    validate_expression(selection, scan, 0, remaining_expression_nodes)?;
+    if selection.value_type.resolved_type != ResolvedType::scalar(StandardScalar::Boolean) {
+        return Err(ServerPlanError::InvalidModel(
+            "a selection must have resolved BOOLEAN type",
+        ));
+    }
+    Ok(())
+}
+
+const fn supports_distinct_projection(resolved_type: ResolvedType) -> bool {
+    matches!(
+        resolved_type,
+        ResolvedType::Scalar(
+            StandardScalar::Boolean
+                | StandardScalar::Integer
+                | StandardScalar::BigInt
+                | StandardScalar::BinaryLargeObject
+        ) | ResolvedType::Reference { .. }
+    )
 }
 
 fn validate_scan_and_projections(
@@ -1246,6 +1403,470 @@ mod tests {
         .unwrap()
     }
 
+    fn distinct_plan(selection: Option<Expression>) -> DistinctServerPlan {
+        DistinctServerPlan::new(
+            Scan {
+                input: 0,
+                object_type: TASK,
+            },
+            [boolean(true)],
+            selection,
+        )
+        .unwrap()
+    }
+
+    fn typed_field_path(resolved_type: ResolvedType, nullable: bool) -> Expression {
+        Expression {
+            kind: ExpressionKind::FieldPath {
+                input: 0,
+                steps: vec![FieldStep {
+                    owner: TASK,
+                    field: TITLE,
+                }],
+            },
+            value_type: value_type(resolved_type, nullable),
+        }
+    }
+
+    #[test]
+    fn distinct_plan_has_a_closed_v3_wire_format() {
+        let plan = distinct_plan(None);
+        let encoded = plan.encode().unwrap();
+
+        assert_eq!(plan.format_version(), DISTINCT_FORMAT_VERSION);
+        assert_eq!(plan.scan().object_type, TASK);
+        assert_eq!(plan.projections(), [boolean(true)]);
+        assert_eq!(plan.selection(), None);
+        assert_eq!(encoded.len(), 50);
+        assert_eq!(
+            encoded,
+            vec![
+                79, 82, 78, 65, 83, 80, 0, 0, 0, 0, 0, 3, 0, 0, 0, 1, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1,
+                1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 1, 3, 1, 1, 0, 1, 0, 0, 0, 0, 0,
+            ]
+        );
+    }
+
+    #[test]
+    fn distinct_plan_round_trips_optional_selection_canonically() {
+        for plan in [
+            distinct_plan(None),
+            distinct_plan(Some(boolean(false))),
+            distinct_plan(Some(typed_field_path(
+                ResolvedType::scalar(StandardScalar::Boolean),
+                true,
+            ))),
+        ] {
+            let encoded = plan.encode().unwrap();
+
+            assert_eq!(DistinctServerPlan::decode(&encoded), Ok(plan.clone()));
+            assert_eq!(
+                DistinctServerPlan::decode(&encoded).unwrap().encode(),
+                Ok(encoded)
+            );
+        }
+    }
+
+    #[test]
+    fn distinct_projection_domain_is_exhaustive_and_ignores_nullability() {
+        for scalar in StandardScalar::ALL {
+            let expected = matches!(
+                scalar,
+                StandardScalar::Boolean
+                    | StandardScalar::Integer
+                    | StandardScalar::BigInt
+                    | StandardScalar::BinaryLargeObject
+            );
+            for nullable in [false, true] {
+                let resolved_type = ResolvedType::scalar(scalar);
+                let result = DistinctServerPlan::new(
+                    Scan {
+                        input: 0,
+                        object_type: TASK,
+                    },
+                    [typed_field_path(resolved_type, nullable)],
+                    None,
+                );
+                if expected {
+                    assert!(result.is_ok(), "unexpected rejection for {scalar:?}");
+                } else {
+                    assert_eq!(
+                        result,
+                        Err(ServerPlanError::UnsupportedDistinctProjectionType { resolved_type }),
+                        "unexpected acceptance for {scalar:?}",
+                    );
+                }
+            }
+        }
+
+        for nullable in [false, true] {
+            assert!(
+                DistinctServerPlan::new(
+                    Scan {
+                        input: 0,
+                        object_type: TASK,
+                    },
+                    [typed_field_path(ResolvedType::reference(PERSON), nullable,)],
+                    None,
+                )
+                .is_ok()
+            );
+
+            let resolved_type = ResolvedType::named(PERSON);
+            assert_eq!(
+                DistinctServerPlan::new(
+                    Scan {
+                        input: 0,
+                        object_type: TASK,
+                    },
+                    [typed_field_path(resolved_type, nullable)],
+                    None,
+                ),
+                Err(ServerPlanError::UnsupportedDistinctProjectionType { resolved_type })
+            );
+        }
+
+        let mut unsupported_payload = DistinctServerPlan::new(
+            Scan {
+                input: 0,
+                object_type: TASK,
+            },
+            [typed_field_path(
+                ResolvedType::scalar(StandardScalar::Integer),
+                false,
+            )],
+            None,
+        )
+        .unwrap()
+        .encode()
+        .unwrap();
+        unsupported_payload[42] = 6;
+        assert_eq!(
+            DistinctServerPlan::decode(&unsupported_payload),
+            Err(ServerPlanError::UnsupportedDistinctProjectionType {
+                resolved_type: ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+            })
+        );
+    }
+
+    #[test]
+    fn distinct_plan_rejects_private_parameter_tags_in_every_expression_position() {
+        let mut projection = distinct_plan(None).encode().unwrap();
+        projection[40] = 5;
+        assert_eq!(
+            DistinctServerPlan::decode(&projection),
+            Err(ServerPlanError::InvalidEnumTag {
+                kind: "expression kind",
+                tag: 5,
+            })
+        );
+
+        let mut selection = distinct_plan(Some(boolean(true))).encode().unwrap();
+        selection[46] = 5;
+        assert_eq!(
+            DistinctServerPlan::decode(&selection),
+            Err(ServerPlanError::InvalidEnumTag {
+                kind: "expression kind",
+                tag: 5,
+            })
+        );
+
+        let nested_plan = DistinctServerPlan::new(
+            Scan {
+                input: 0,
+                object_type: TASK,
+            },
+            [equality(boolean(true), boolean(false))],
+            None,
+        )
+        .unwrap();
+        let mut nested = nested_plan.encode().unwrap();
+        nested[44] = 5;
+        assert_eq!(
+            DistinctServerPlan::decode(&nested),
+            Err(ServerPlanError::InvalidEnumTag {
+                kind: "expression kind",
+                tag: 5,
+            })
+        );
+    }
+
+    #[test]
+    fn distinct_plan_rejects_ordering_with_a_typed_error() {
+        let mut encoded = distinct_plan(None).encode().unwrap();
+        let ordering_offset = encoded.len() - 4;
+        encoded[ordering_offset..].copy_from_slice(&1_u32.to_be_bytes());
+
+        assert_eq!(
+            DistinctServerPlan::decode(&encoded),
+            Err(ServerPlanError::DistinctOrderingNotAllowed { count: 1 })
+        );
+    }
+
+    #[test]
+    fn distinct_plan_enforces_the_exact_shared_expression_node_budget() {
+        let scan = Scan {
+            input: 0,
+            object_type: TASK,
+        };
+        let maximum_projection = full_boolean_tree(12);
+        let maximum =
+            DistinctServerPlan::new(scan, [maximum_projection.clone()], Some(boolean(true)))
+                .unwrap();
+        let encoded = maximum.encode().unwrap();
+        assert_eq!(DistinctServerPlan::decode(&encoded), Ok(maximum));
+
+        let oversized_selection = equality(boolean(true), boolean(false));
+        assert_eq!(
+            DistinctServerPlan::new(
+                scan,
+                [maximum_projection.clone()],
+                Some(oversized_selection.clone()),
+            ),
+            Err(ServerPlanError::ExpressionNodeLimitExceeded)
+        );
+
+        let unchecked = DistinctServerPlan {
+            scan,
+            projections: vec![maximum_projection.clone()],
+            selection: Some(oversized_selection.clone()),
+        };
+        assert_eq!(
+            unchecked.encode(),
+            Err(ServerPlanError::ExpressionNodeLimitExceeded)
+        );
+
+        let mut writer =
+            encode_plan_prefix(DISTINCT_FORMAT_VERSION, scan, &[maximum_projection]).unwrap();
+        encode_optional_selection(&mut writer, Some(&oversized_selection)).unwrap();
+        writer.count("ordering", 0, MAX_ORDERING).unwrap();
+        assert_eq!(
+            DistinctServerPlan::decode(&writer.finish()),
+            Err(ServerPlanError::ExpressionNodeLimitExceeded)
+        );
+    }
+
+    #[test]
+    fn distinct_plan_rejects_corruption_and_shared_limits() {
+        assert_eq!(
+            DistinctServerPlan::new(
+                Scan {
+                    input: 1,
+                    object_type: TASK,
+                },
+                [boolean(true)],
+                None,
+            ),
+            Err(ServerPlanError::InvalidInputSlot(1))
+        );
+        assert_eq!(
+            DistinctServerPlan::new(
+                Scan {
+                    input: 0,
+                    object_type: TASK,
+                },
+                [],
+                None,
+            ),
+            Err(ServerPlanError::InvalidModel(
+                "a server plan must contain at least one projection"
+            ))
+        );
+        assert_eq!(
+            DistinctServerPlan::new(
+                Scan {
+                    input: 0,
+                    object_type: TASK,
+                },
+                std::iter::repeat_with(|| boolean(true)).take(MAX_PROJECTIONS as usize + 1),
+                None,
+            ),
+            Err(ServerPlanError::CollectionLimit {
+                kind: "projections",
+                count: MAX_PROJECTIONS + 1,
+                maximum: MAX_PROJECTIONS,
+            })
+        );
+        assert_eq!(
+            DistinctServerPlan::new(
+                Scan {
+                    input: 0,
+                    object_type: TASK,
+                },
+                [boolean(true)],
+                Some(typed_field_path(
+                    ResolvedType::scalar(StandardScalar::Integer),
+                    false,
+                )),
+            ),
+            Err(ServerPlanError::InvalidModel(
+                "a selection must have resolved BOOLEAN type"
+            ))
+        );
+
+        let empty_path = Expression {
+            kind: ExpressionKind::FieldPath {
+                input: 0,
+                steps: Vec::new(),
+            },
+            value_type: value_type(ResolvedType::scalar(StandardScalar::Integer), false),
+        };
+        assert_eq!(
+            DistinctServerPlan::new(
+                Scan {
+                    input: 0,
+                    object_type: TASK,
+                },
+                [empty_path],
+                None,
+            ),
+            Err(ServerPlanError::EmptyFieldPath)
+        );
+
+        let oversized_path = Expression {
+            kind: ExpressionKind::FieldPath {
+                input: 0,
+                steps: vec![
+                    FieldStep {
+                        owner: TASK,
+                        field: TITLE,
+                    };
+                    MAX_FIELD_PATH_STEPS as usize + 1
+                ],
+            },
+            value_type: value_type(ResolvedType::scalar(StandardScalar::Integer), false),
+        };
+        assert_eq!(
+            DistinctServerPlan::new(
+                Scan {
+                    input: 0,
+                    object_type: TASK,
+                },
+                [oversized_path],
+                None,
+            ),
+            Err(ServerPlanError::CollectionLimit {
+                kind: "field path steps",
+                count: MAX_FIELD_PATH_STEPS + 1,
+                maximum: MAX_FIELD_PATH_STEPS,
+            })
+        );
+
+        let mut deep = boolean(true);
+        for _ in 0..MAX_EXPRESSION_DEPTH {
+            deep = equality(deep, boolean(false));
+        }
+        assert_eq!(
+            DistinctServerPlan::new(
+                Scan {
+                    input: 0,
+                    object_type: TASK,
+                },
+                [deep],
+                None,
+            ),
+            Err(ServerPlanError::RecursionLimitExceeded)
+        );
+
+        let encoded = distinct_plan(None).encode().unwrap();
+        let mut magic = encoded.clone();
+        magic[0] = b'X';
+        assert_eq!(
+            DistinctServerPlan::decode(&magic),
+            Err(ServerPlanError::InvalidMagic)
+        );
+        let mut input_count = encoded.clone();
+        input_count[12..16].copy_from_slice(&2_u32.to_be_bytes());
+        assert_eq!(
+            DistinctServerPlan::decode(&input_count),
+            Err(ServerPlanError::UnexpectedInputCount(2))
+        );
+        let mut input_slot = encoded.clone();
+        input_slot[16..20].copy_from_slice(&1_u32.to_be_bytes());
+        assert_eq!(
+            DistinctServerPlan::decode(&input_slot),
+            Err(ServerPlanError::InvalidInputSlot(1))
+        );
+        let mut projection_count = encoded.clone();
+        projection_count[36..40].copy_from_slice(&(MAX_PROJECTIONS + 1).to_be_bytes());
+        assert_eq!(
+            DistinctServerPlan::decode(&projection_count),
+            Err(ServerPlanError::CollectionLimit {
+                kind: "projections",
+                count: MAX_PROJECTIONS + 1,
+                maximum: MAX_PROJECTIONS,
+            })
+        );
+        assert_eq!(
+            DistinctServerPlan::decode(&encoded[..encoded.len() - 1]),
+            Err(ServerPlanError::Truncated)
+        );
+        let mut trailing = encoded;
+        trailing.push(0);
+        assert_eq!(
+            DistinctServerPlan::decode(&trailing),
+            Err(ServerPlanError::TrailingBytes)
+        );
+        assert_eq!(
+            DistinctServerPlan::decode(&vec![0; MAX_ARTIFACT_BYTES + 1]),
+            Err(ServerPlanError::ArtifactSizeLimit {
+                size: MAX_ARTIFACT_BYTES + 1,
+                maximum: MAX_ARTIFACT_BYTES,
+            })
+        );
+    }
+
+    #[test]
+    fn all_server_plan_versions_decode_only_their_own_model() {
+        let version_one = ServerPlan {
+            scan: Scan {
+                input: 0,
+                object_type: TASK,
+            },
+            projections: vec![boolean(true)],
+            selection: None,
+            ordering: Vec::new(),
+        }
+        .encode()
+        .unwrap();
+        let version_two = identity_selected_plan().encode().unwrap();
+        let version_three = distinct_plan(None).encode().unwrap();
+
+        assert!(ServerPlan::decode(&version_one).is_ok());
+        assert_eq!(
+            ServerPlan::decode(&version_two),
+            Err(ServerPlanError::UnsupportedVersion(
+                IDENTITY_SELECTED_FORMAT_VERSION
+            ))
+        );
+        assert_eq!(
+            ServerPlan::decode(&version_three),
+            Err(ServerPlanError::UnsupportedVersion(DISTINCT_FORMAT_VERSION))
+        );
+
+        assert_eq!(
+            IdentitySelectedServerPlan::decode(&version_one),
+            Err(ServerPlanError::UnsupportedVersion(FORMAT_VERSION))
+        );
+        assert!(IdentitySelectedServerPlan::decode(&version_two).is_ok());
+        assert_eq!(
+            IdentitySelectedServerPlan::decode(&version_three),
+            Err(ServerPlanError::UnsupportedVersion(DISTINCT_FORMAT_VERSION))
+        );
+
+        assert_eq!(
+            DistinctServerPlan::decode(&version_one),
+            Err(ServerPlanError::UnsupportedVersion(FORMAT_VERSION))
+        );
+        assert_eq!(
+            DistinctServerPlan::decode(&version_two),
+            Err(ServerPlanError::UnsupportedVersion(
+                IDENTITY_SELECTED_FORMAT_VERSION
+            ))
+        );
+        assert!(DistinctServerPlan::decode(&version_three).is_ok());
+    }
+
     #[test]
     fn identity_selected_plan_has_a_closed_v2_wire_format() {
         let plan = identity_selected_plan();
@@ -1535,6 +2156,16 @@ mod tests {
             (
                 ServerPlanError::ExpressionNodeLimitExceeded,
                 "server plan expression count exceeds server-plan limit",
+            ),
+            (
+                ServerPlanError::UnsupportedDistinctProjectionType {
+                    resolved_type: ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+                },
+                "SELECT DISTINCT projections support only BOOLEAN, INTEGER, BIGINT, BYTES, and REF values",
+            ),
+            (
+                ServerPlanError::DistinctOrderingNotAllowed { count: 1 },
+                "SELECT DISTINCT queries do not allow ORDER BY; remove the ORDER BY clause",
             ),
             (
                 ServerPlanError::Truncated,
