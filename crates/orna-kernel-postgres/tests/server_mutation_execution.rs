@@ -25,9 +25,9 @@ use orna_core::{
     value::{FunctionArgument, RuntimeFloat, RuntimeValue},
 };
 use orna_kernel_postgres::{
-    PostgresKernel, PostgresKernelError, ServerInsertCommitState, ServerInsertError,
-    ServerInsertResult, ServerMutationError, ServerUpdateCommitState, ServerUpdateError,
-    ServerUpdateResult,
+    PostgresKernel, PostgresKernelError, ServerDeleteCommitState, ServerDeleteError,
+    ServerDeleteResult, ServerInsertCommitState, ServerInsertError, ServerInsertResult,
+    ServerMutationError, ServerUpdateCommitState, ServerUpdateError, ServerUpdateResult,
 };
 use support::{TestDatabase, TestResult, TestSession, failure, with_test_database};
 use tokio_postgres::error::SqlState;
@@ -43,6 +43,15 @@ const MUTATION_SOURCE: &str = "CREATE SCHEMA tasks;\n\
       active BOOL NOT NULL, count INT NOT NULL, amount BIGINT NOT NULL,\n\
       score FLOAT NOT NULL, title TEXT NOT NULL, payload BYTES NOT NULL,\n\
       owner REF tasks.owner NOT NULL, note TEXT\n\
+    );\n\
+    CREATE TYPE tasks.task_restrict AS OBJECT (\n\
+      task REF tasks.task NOT NULL ON DELETE RESTRICT\n\
+    );\n\
+    CREATE TYPE tasks.task_set_null AS OBJECT (\n\
+      task REF tasks.task ON DELETE SET NULL\n\
+    );\n\
+    CREATE TYPE tasks.task_cascade AS OBJECT (\n\
+      task REF tasks.task NOT NULL ON DELETE CASCADE\n\
     );\n\
     CREATE SERVER FUNCTION tasks.create_owner(p_name TEXT)\n\
     RETURNS ROWS (created_owner REF tasks.owner)\n\
@@ -69,7 +78,17 @@ const MUTATION_SOURCE: &str = "CREATE SCHEMA tasks;\n\
     SET active = p_active, count = p_count, title = p_title,\n\
         owner = p_owner, note = NULL\n\
     WHERE REF(updated_task) = p_task\n\
-    RETURNING REF(updated_task);\n";
+    RETURNING REF(updated_task);\n\
+    CREATE SERVER FUNCTION tasks.delete_task(p_task REF tasks.task)\n\
+    RETURNS ROWS (deleted BOOL)\n\
+    SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE\n\
+    AS DELETE FROM tasks.task AS deleted_task\n\
+    WHERE REF(deleted_task) = p_task RETURNING TRUE;\n\
+    CREATE SERVER FUNCTION tasks.delete_owner(p_owner REF tasks.owner)\n\
+    RETURNS ROWS (deleted BOOL)\n\
+    SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE\n\
+    AS DELETE FROM tasks.owner AS deleted_owner\n\
+    WHERE REF(deleted_owner) = p_owner RETURNING TRUE;\n";
 
 #[cfg(feature = "test-hooks")]
 const MUTATION_SOURCE_EDIT: &str = "-- source-only edit\n\
@@ -78,6 +97,12 @@ const MUTATION_SOURCE_EDIT: &str = "-- source-only edit\n\
     CREATE TYPE tasks.task AS OBJECT ( active BOOL NOT NULL, count INT NOT NULL,\n\
       amount BIGINT NOT NULL, score FLOAT NOT NULL, title TEXT NOT NULL,\n\
       payload BYTES NOT NULL, owner REF tasks.owner NOT NULL, note TEXT );\n\
+    CREATE TYPE tasks.task_restrict AS OBJECT (\n\
+      task REF tasks.task NOT NULL ON DELETE RESTRICT );\n\
+    CREATE TYPE tasks.task_set_null AS OBJECT (\n\
+      task REF tasks.task ON DELETE SET NULL );\n\
+    CREATE TYPE tasks.task_cascade AS OBJECT (\n\
+      task REF tasks.task NOT NULL ON DELETE CASCADE );\n\
     CREATE SERVER FUNCTION tasks.create_owner( p_name TEXT )\n\
     RETURNS ROWS ( created_owner REF tasks.owner ) SECURITY INVOKER\n\
     TRANSACTION ATOMIC VOLATILITY VOLATILE\n\
@@ -99,7 +124,15 @@ const MUTATION_SOURCE_EDIT: &str = "-- source-only edit\n\
     AS UPDATE tasks.task AS updated_task\n\
     SET active = p_active, count = p_count, title = p_title,\n\
       owner = p_owner, note = NULL\n\
-    WHERE REF(updated_task) = p_task RETURNING REF(updated_task);\n";
+    WHERE REF(updated_task) = p_task RETURNING REF(updated_task);\n\
+    CREATE SERVER FUNCTION tasks.delete_task( p_task REF tasks.task )\n\
+    RETURNS ROWS ( deleted BOOL ) SECURITY INVOKER TRANSACTION ATOMIC\n\
+    VOLATILITY VOLATILE AS DELETE FROM tasks.task AS deleted_task\n\
+    WHERE REF(deleted_task) = p_task RETURNING TRUE;\n\
+    CREATE SERVER FUNCTION tasks.delete_owner( p_owner REF tasks.owner )\n\
+    RETURNS ROWS ( deleted BOOL ) SECURITY INVOKER TRANSACTION ATOMIC\n\
+    VOLATILITY VOLATILE AS DELETE FROM tasks.owner AS deleted_owner\n\
+    WHERE REF(deleted_owner) = p_owner RETURNING TRUE;\n";
 
 #[cfg(feature = "test-hooks")]
 const WAIT: Duration = Duration::from_secs(10);
@@ -273,6 +306,267 @@ async fn update_returns_zero_or_one_row_and_rolls_back_reference_failures() -> T
         require(
             kernel.recover().await?.pair() == applied.pair(),
             "SERVER UPDATE execution changed the active revision pair",
+        )?;
+        require_no_session_leaks(&database).await
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn delete_returns_zero_or_one_boolean_and_hides_reference_timing() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = hostile_kernel(&database)?;
+        kernel.bootstrap().await?;
+        let empty = kernel.recover().await?;
+        let applied = kernel.apply(&candidate(MUTATION_SOURCE, &empty)?).await?;
+        let fixture = Fixture::from_active(&applied)?;
+        install_public_decoy(&database, fixture.task).await?;
+
+        let unknown_function = FunctionId::from_bytes([0xdd; 16]);
+        let unknown = kernel.execute_server_delete(unknown_function, &[]).await;
+        let unknown = match unknown {
+            Ok(_) => return Err(failure("unknown DELETE function unexpectedly executed")),
+            Err(error) => error,
+        };
+        require(
+            matches!(
+                &unknown,
+                PostgresKernelError::ServerDelete(ServerDeleteError::FunctionNotActive {
+                    pair,
+                    function,
+                }) if *pair == applied.pair() && *function == unknown_function
+            ),
+            "unknown DELETE function lost its active pair or typed identity",
+        )?;
+
+        let owner = insert_owner(&kernel, fixture, "Ada").await?;
+        let exact = ExactTask::new(owner.object());
+        let task = kernel
+            .execute_server_insert(fixture.create_task, &task_arguments(fixture, &exact)?)
+            .await?;
+
+        let wrong_target = [FunctionArgument::new(
+            fixture.delete_task_selector_parameter,
+            RuntimeValue::Reference {
+                target: fixture.owner,
+                object: owner.object(),
+            },
+        )?];
+        let wrong_target = kernel
+            .execute_server_delete(fixture.delete_task, &wrong_target)
+            .await;
+        let wrong_target = match wrong_target {
+            Ok(_) => {
+                return Err(failure(
+                    "wrong-target DELETE argument unexpectedly executed",
+                ));
+            }
+            Err(error) => error,
+        };
+        let PostgresKernelError::ServerDelete(ServerDeleteError::NotCommitted { context, source }) =
+            &wrong_target
+        else {
+            return Err(failure(
+                "wrong-target DELETE argument did not fail before execution",
+            ));
+        };
+        require_context(
+            *context,
+            applied.pair(),
+            fixture.delete_task,
+            fixture.delete_task_revision,
+        )?;
+        require(
+            matches!(source.as_ref(), ServerMutationError::Argument { .. }),
+            "wrong-target DELETE argument did not fail typed argument validation",
+        )?;
+        require_task_row(&database, fixture, task.object(), &exact).await?;
+
+        let restricted = kernel
+            .execute_server_delete(
+                fixture.delete_owner,
+                &delete_argument(
+                    fixture.delete_owner_selector_parameter,
+                    fixture.owner,
+                    owner.object(),
+                )?,
+            )
+            .await;
+        let restricted = match restricted {
+            Ok(_) => return Err(failure("a referenced owner was unexpectedly deleted")),
+            Err(error) => error,
+        };
+        require_delete_restricted(
+            &restricted,
+            applied.pair(),
+            fixture.delete_owner,
+            fixture.delete_owner_revision,
+            fixture.owner,
+            owner.object(),
+            &SqlState::FOREIGN_KEY_VIOLATION,
+        )?;
+        require_owner_row(&database, fixture, owner.object(), "Ada").await?;
+        require_task_row(&database, fixture, task.object(), &exact).await?;
+
+        let restrict_object = ObjectId::from_bytes([0xc1; 16]);
+        let set_null_object = ObjectId::from_bytes([0xc2; 16]);
+        let cascade_object = ObjectId::from_bytes([0xc3; 16]);
+        insert_reference_fixture_row(
+            &database,
+            fixture.task_restrict,
+            fixture.task_restrict_field,
+            restrict_object,
+            task.object(),
+        )
+        .await?;
+        insert_reference_fixture_row(
+            &database,
+            fixture.task_set_null,
+            fixture.task_set_null_field,
+            set_null_object,
+            task.object(),
+        )
+        .await?;
+        insert_reference_fixture_row(
+            &database,
+            fixture.task_cascade,
+            fixture.task_cascade_field,
+            cascade_object,
+            task.object(),
+        )
+        .await?;
+
+        let task_restricted = kernel
+            .execute_server_delete(
+                fixture.delete_task,
+                &delete_argument(
+                    fixture.delete_task_selector_parameter,
+                    fixture.task,
+                    task.object(),
+                )?,
+            )
+            .await;
+        let task_restricted = match task_restricted {
+            Ok(_) => return Err(failure("RESTRICT unexpectedly allowed task deletion")),
+            Err(error) => error,
+        };
+        require_delete_restricted(
+            &task_restricted,
+            applied.pair(),
+            fixture.delete_task,
+            fixture.delete_task_revision,
+            fixture.task,
+            task.object(),
+            &SqlState::RESTRICT_VIOLATION,
+        )?;
+        require_task_row(&database, fixture, task.object(), &exact).await?;
+        require(
+            reference_fixture_value(
+                &database,
+                fixture.task_set_null,
+                fixture.task_set_null_field,
+                set_null_object,
+            )
+            .await?
+                == Some(task.object().to_bytes().to_vec()),
+            "failed restricted DELETE changed the SET NULL row",
+        )?;
+        require(
+            count_rows(&database, fixture.task_cascade).await? == 1,
+            "failed restricted DELETE changed the CASCADE row",
+        )?;
+        delete_fixture_row(&database, fixture.task_restrict, restrict_object).await?;
+
+        let deleted = kernel
+            .execute_server_delete(
+                fixture.delete_task,
+                &delete_argument(
+                    fixture.delete_task_selector_parameter,
+                    fixture.task,
+                    task.object(),
+                )?,
+            )
+            .await?;
+        require_delete_result(
+            &deleted,
+            applied.pair(),
+            fixture.delete_task,
+            fixture.delete_task_revision,
+            fixture.task,
+            task.object(),
+            true,
+        )?;
+        require(
+            count_rows(&database, fixture.task).await? == 0,
+            "matched DELETE left the selected task row",
+        )?;
+        require(
+            reference_fixture_value(
+                &database,
+                fixture.task_set_null,
+                fixture.task_set_null_field,
+                set_null_object,
+            )
+            .await?
+            .is_none(),
+            "SET NULL did not clear the dependent reference",
+        )?;
+        require(
+            count_rows(&database, fixture.task_cascade).await? == 0,
+            "CASCADE did not remove the dependent object",
+        )?;
+
+        let absent = kernel
+            .execute_server_delete(
+                fixture.delete_task,
+                &delete_argument(
+                    fixture.delete_task_selector_parameter,
+                    fixture.task,
+                    task.object(),
+                )?,
+            )
+            .await?;
+        require_delete_result(
+            &absent,
+            applied.pair(),
+            fixture.delete_task,
+            fixture.delete_task_revision,
+            fixture.task,
+            task.object(),
+            false,
+        )?;
+
+        let owner_deleted = kernel
+            .execute_server_delete(
+                fixture.delete_owner,
+                &delete_argument(
+                    fixture.delete_owner_selector_parameter,
+                    fixture.owner,
+                    owner.object(),
+                )?,
+            )
+            .await?;
+        require_delete_result(
+            &owner_deleted,
+            applied.pair(),
+            fixture.delete_owner,
+            fixture.delete_owner_revision,
+            fixture.owner,
+            owner.object(),
+            true,
+        )?;
+        require(
+            count_rows(&database, fixture.owner).await? == 0,
+            "owner remained after its dependent task was deleted",
+        )?;
+        require(
+            count_public_decoy_rows(&database, fixture.task).await? == 0,
+            "hostile public search_path redirected the private DELETE",
+        )?;
+        require(
+            kernel.recover().await?.pair() == applied.pair(),
+            "SERVER DELETE execution changed the active revision pair",
         )?;
         require_no_session_leaks(&database).await
     })
@@ -487,7 +781,7 @@ async fn insert_pins_snapshot_while_source_only_apply_advances() -> TestResult<(
                 return Err(error.into());
             }
         };
-        let running = wait_for_insert(execution, "snapshot insert").await?;
+        let running = wait_for_success(execution, "snapshot insert").await?;
 
         require(
             first.pair() != second.pair(),
@@ -523,6 +817,225 @@ async fn insert_pins_snapshot_while_source_only_apply_advances() -> TestResult<(
         require(
             count_rows(&database, fixture.task).await? == 2,
             "snapshot test did not commit both task rows",
+        )?;
+        require_no_session_leaks(&database).await
+    })
+    .await
+}
+
+#[cfg(feature = "test-hooks")]
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn delete_pins_snapshot_and_preserves_uncertain_and_committed_outcomes() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = kernel(&database)?;
+        kernel.bootstrap().await?;
+        let empty = kernel.recover().await?;
+        let first = kernel.apply(&candidate(MUTATION_SOURCE, &empty)?).await?;
+        let fixture = Fixture::from_active(&first)?;
+        let owner = insert_owner(&kernel, fixture, "owner").await?;
+        let first_task = kernel
+            .execute_server_insert(
+                fixture.create_task,
+                &task_arguments(fixture, &ExactTask::new(owner.object()))?,
+            )
+            .await?;
+        let source_only = candidate(MUTATION_SOURCE_EDIT, &first)?;
+        require(
+            source_only.new_function_revisions().is_empty(),
+            "source-only edit unexpectedly created a function revision",
+        )?;
+
+        let reached = Arc::new(tokio::sync::Barrier::new(2));
+        let resume = Arc::new(tokio::sync::Barrier::new(2));
+        let executor = kernel.clone();
+        let execution_reached = reached.clone();
+        let execution_resume = resume.clone();
+        let arguments = delete_argument(
+            fixture.delete_task_selector_parameter,
+            fixture.task,
+            first_task.object(),
+        )?;
+        let mut execution = tokio::spawn(async move {
+            executor
+                .execute_server_delete_with_test_barrier(
+                    fixture.delete_task,
+                    &arguments,
+                    execution_reached,
+                    execution_resume,
+                )
+                .await
+        });
+        wait_for_barrier(&mut execution, reached, "snapshot delete").await?;
+
+        let advancement = kernel.apply(&source_only).await;
+        resume.wait().await;
+        let second = match advancement {
+            Ok(active) => active,
+            Err(error) => {
+                abort_and_wait(execution).await;
+                return Err(error.into());
+            }
+        };
+        let running = wait_for_success(execution, "snapshot delete").await?;
+        require(
+            first.pair() != second.pair(),
+            "source-only apply did not advance the pair",
+        )?;
+        require(
+            fixture.delete_task_revision == function_revision(&second, fixture.delete_task)?,
+            "source-only apply did not reuse the immutable DELETE function revision",
+        )?;
+        require_delete_result(
+            &running,
+            first.pair(),
+            fixture.delete_task,
+            fixture.delete_task_revision,
+            fixture.task,
+            first_task.object(),
+            true,
+        )?;
+
+        let second_task = kernel
+            .execute_server_insert(
+                fixture.create_task,
+                &task_arguments(fixture, &ExactTask::new(owner.object()))?,
+            )
+            .await?;
+        let committed_shutdown = kernel
+            .execute_server_delete_with_forced_post_commit_driver_shutdown(
+                fixture.delete_task,
+                &delete_argument(
+                    fixture.delete_task_selector_parameter,
+                    fixture.task,
+                    second_task.object(),
+                )?,
+            )
+            .await;
+        let committed_shutdown = match committed_shutdown {
+            Ok(_) => {
+                return Err(failure(
+                    "forced post-commit shutdown unexpectedly returned success",
+                ));
+            }
+            Err(error) => error,
+        };
+        let PostgresKernelError::ServerDelete(
+            ServerDeleteError::CommittedButShutdownFailed { result, .. },
+        ) = committed_shutdown
+        else {
+            return Err(failure(
+                "post-commit shutdown did not retain the confirmed DELETE result",
+            ));
+        };
+        require_delete_result(
+            &result,
+            second.pair(),
+            fixture.delete_task,
+            fixture.delete_task_revision,
+            fixture.task,
+            second_task.object(),
+            true,
+        )?;
+
+        let rejected_task_value = ExactTask::new(owner.object());
+        let rejected_task = kernel
+            .execute_server_insert(
+                fixture.create_task,
+                &task_arguments(fixture, &rejected_task_value)?,
+            )
+            .await?;
+        let rejected = execute_delete_with_installed_trigger(
+            &database,
+            &kernel,
+            fixture,
+            rejected_task.object(),
+        )
+        .await?;
+        require_delete_commit_rejected(
+            &rejected,
+            second.pair(),
+            fixture,
+            rejected_task.object(),
+        )?;
+        require_task_row(
+            &database,
+            fixture,
+            rejected_task.object(),
+            &rejected_task_value,
+        )
+        .await?;
+        kernel
+            .execute_server_delete(
+                fixture.delete_task,
+                &delete_argument(
+                    fixture.delete_task_selector_parameter,
+                    fixture.task,
+                    rejected_task.object(),
+                )?,
+            )
+            .await?;
+
+        let third_task = kernel
+            .execute_server_insert(
+                fixture.create_task,
+                &task_arguments(fixture, &ExactTask::new(owner.object()))?,
+            )
+            .await?;
+        let arguments = delete_argument(
+            fixture.delete_task_selector_parameter,
+            fixture.task,
+            third_task.object(),
+        )?;
+        let (proxy_config, proxy) = start_commit_drop_proxy(&database).await?;
+        let proxy_kernel = PostgresKernel::new(proxy_config);
+        let uncertain = proxy_kernel
+            .execute_server_delete(fixture.delete_task, &arguments)
+            .await;
+        wait_for_proxy(proxy).await?;
+        let uncertain = match uncertain {
+            Ok(_) => {
+                return Err(failure(
+                    "withheld DELETE commit confirmation unexpectedly returned success",
+                ));
+            }
+            Err(error) => error,
+        };
+        let PostgresKernelError::ServerDelete(ServerDeleteError::CommitOutcomeUnknown {
+            context,
+            target,
+            selector,
+            matched,
+            ..
+        }) = &uncertain
+        else {
+            return Err(failure(
+                "withheld DELETE confirmation did not retain its uncertain outcome",
+            ));
+        };
+        require_context(
+            *context,
+            second.pair(),
+            fixture.delete_task,
+            fixture.delete_task_revision,
+        )?;
+        require(*target == fixture.task, "uncertain delete target differs")?;
+        require(
+            *selector == third_task.object(),
+            "uncertain delete selector differs",
+        )?;
+        require(*matched, "uncertain delete lost its match state")?;
+        require(
+            uncertain.to_string()
+                == format!(
+                    "object deletion failed: the connection failed while deleting object {}; it is not known whether the delete committed; do not retry automatically",
+                    third_task.object().canonical(),
+                ),
+            "uncertain delete lost its no-retry warning",
+        )?;
+        require(
+            count_rows(&database, fixture.task).await? == 0,
+            "DELETE outcome tests left an unexpected task row",
         )?;
         require_no_session_leaks(&database).await
     })
@@ -667,6 +1180,12 @@ struct Fixture {
     payload: FieldId,
     owner_field: FieldId,
     note: FieldId,
+    task_restrict: TypeId,
+    task_restrict_field: FieldId,
+    task_set_null: TypeId,
+    task_set_null_field: FieldId,
+    task_cascade: TypeId,
+    task_cascade_field: FieldId,
     create_owner: FunctionId,
     create_owner_revision: FunctionRevisionId,
     owner_name_parameter: ParameterId,
@@ -686,6 +1205,12 @@ struct Fixture {
     update_count_parameter: ParameterId,
     update_title_parameter: ParameterId,
     update_owner_parameter: ParameterId,
+    delete_task: FunctionId,
+    delete_task_revision: FunctionRevisionId,
+    delete_task_selector_parameter: ParameterId,
+    delete_owner: FunctionId,
+    delete_owner_revision: FunctionRevisionId,
+    delete_owner_selector_parameter: ParameterId,
 }
 
 impl Fixture {
@@ -702,6 +1227,24 @@ impl Fixture {
             .iter()
             .find(|object| name_is(object.name().parts(), &["tasks", "task"]))
             .ok_or_else(|| failure("task type is absent"))?;
+        let task_restrict = active
+            .catalogue()
+            .object_types()
+            .iter()
+            .find(|object| name_is(object.name().parts(), &["tasks", "task_restrict"]))
+            .ok_or_else(|| failure("task_restrict type is absent"))?;
+        let task_set_null = active
+            .catalogue()
+            .object_types()
+            .iter()
+            .find(|object| name_is(object.name().parts(), &["tasks", "task_set_null"]))
+            .ok_or_else(|| failure("task_set_null type is absent"))?;
+        let task_cascade = active
+            .catalogue()
+            .object_types()
+            .iter()
+            .find(|object| name_is(object.name().parts(), &["tasks", "task_cascade"]))
+            .ok_or_else(|| failure("task_cascade type is absent"))?;
         let create_owner = active
             .catalogue()
             .functions()
@@ -720,6 +1263,18 @@ impl Fixture {
             .iter()
             .find(|function| name_is(function.name().parts(), &["tasks", "update_task"]))
             .ok_or_else(|| failure("update_task function is absent"))?;
+        let delete_task = active
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|function| name_is(function.name().parts(), &["tasks", "delete_task"]))
+            .ok_or_else(|| failure("delete_task function is absent"))?;
+        let delete_owner = active
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|function| name_is(function.name().parts(), &["tasks", "delete_owner"]))
+            .ok_or_else(|| failure("delete_owner function is absent"))?;
         let object_field = |object: &orna_core::catalogue::ObjectTypeDefinition, name| {
             object
                 .field_by_name(name)
@@ -744,6 +1299,12 @@ impl Fixture {
             payload: object_field(task, "payload")?,
             owner_field: object_field(task, "owner")?,
             note: object_field(task, "note")?,
+            task_restrict: task_restrict.id(),
+            task_restrict_field: object_field(task_restrict, "task")?,
+            task_set_null: task_set_null.id(),
+            task_set_null_field: object_field(task_set_null, "task")?,
+            task_cascade: task_cascade.id(),
+            task_cascade_field: object_field(task_cascade, "task")?,
             create_owner: create_owner.id(),
             create_owner_revision: create_owner.current_revision(),
             owner_name_parameter: parameter(create_owner, "p_name")?,
@@ -763,6 +1324,12 @@ impl Fixture {
             update_count_parameter: parameter(update_task, "p_count")?,
             update_title_parameter: parameter(update_task, "p_title")?,
             update_owner_parameter: parameter(update_task, "p_owner")?,
+            delete_task: delete_task.id(),
+            delete_task_revision: delete_task.current_revision(),
+            delete_task_selector_parameter: parameter(delete_task, "p_task")?,
+            delete_owner: delete_owner.id(),
+            delete_owner_revision: delete_owner.current_revision(),
+            delete_owner_selector_parameter: parameter(delete_owner, "p_owner")?,
         })
     }
 }
@@ -913,6 +1480,20 @@ fn update_arguments(
     ])
 }
 
+fn delete_argument(
+    parameter: ParameterId,
+    target: TypeId,
+    selector: ObjectId,
+) -> TestResult<Vec<FunctionArgument>> {
+    Ok(vec![FunctionArgument::new(
+        parameter,
+        RuntimeValue::Reference {
+            target,
+            object: selector,
+        },
+    )?])
+}
+
 fn replace_owner_argument(
     arguments: &mut [FunctionArgument],
     fixture: Fixture,
@@ -1040,6 +1621,56 @@ fn require_update_result(
         require(
             result.rows().rows().is_empty(),
             "absent update returned a row",
+        )
+    }
+}
+
+fn require_delete_result(
+    result: &ServerDeleteResult,
+    pair: RevisionPair,
+    function: FunctionId,
+    revision: FunctionRevisionId,
+    target: TypeId,
+    selector: ObjectId,
+    matched: bool,
+) -> TestResult<()> {
+    require_context(result.context(), pair, function, revision)?;
+    require(result.pair() == pair, "delete result pair differs")?;
+    require(
+        result.function() == function,
+        "delete result function differs",
+    )?;
+    require(
+        result.function_revision() == revision,
+        "delete result function revision differs",
+    )?;
+    require(result.target() == target, "delete target differs")?;
+    require(result.selector() == selector, "delete selector differs")?;
+    require(result.matched() == matched, "delete match state differs")?;
+    let [column] = result.rows().columns() else {
+        return Err(failure("delete result does not have exactly one column"));
+    };
+    require(
+        column.name() == "deleted",
+        "delete result lost its declared return-column name",
+    )?;
+    require(
+        column.resolved_type() == ResolvedType::scalar(orna_core::types::StandardScalar::Boolean),
+        "delete result column is not BOOLEAN",
+    )?;
+    require(!column.nullable(), "delete result column became nullable")?;
+    if matched {
+        let [row] = result.rows().rows() else {
+            return Err(failure("matched delete does not have exactly one row"));
+        };
+        require(
+            row.values() == [RuntimeValue::Boolean(true)],
+            "matched delete did not return TRUE",
+        )
+    } else {
+        require(
+            result.rows().rows().is_empty(),
+            "absent delete returned a row",
         )
     }
 }
@@ -1178,6 +1809,83 @@ async fn count_rows(database: &TestDatabase, object: TypeId) -> TestResult<i64> 
     finish_session(session, operation, "private row count").await
 }
 
+async fn insert_reference_fixture_row(
+    database: &TestDatabase,
+    object_type: TypeId,
+    reference_field: FieldId,
+    object: ObjectId,
+    referenced_object: ObjectId,
+) -> TestResult<()> {
+    let session = database.open().await?;
+    let operation: TestResult<()> = async {
+        session
+            .client()
+            .execute(
+                &format!(
+                    "INSERT INTO {} (_orna_object_id, {}) VALUES ($1, $2)",
+                    relation(object_type),
+                    field(reference_field),
+                ),
+                &[
+                    &object.to_bytes().to_vec(),
+                    &referenced_object.to_bytes().to_vec(),
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+    .await;
+    finish_session(session, operation, "reference-policy fixture insertion").await
+}
+
+async fn delete_fixture_row(
+    database: &TestDatabase,
+    object_type: TypeId,
+    object: ObjectId,
+) -> TestResult<()> {
+    let session = database.open().await?;
+    let operation: TestResult<()> = async {
+        session
+            .client()
+            .execute(
+                &format!(
+                    "DELETE FROM {} WHERE _orna_object_id = $1",
+                    relation(object_type),
+                ),
+                &[&object.to_bytes().to_vec()],
+            )
+            .await?;
+        Ok(())
+    }
+    .await;
+    finish_session(session, operation, "reference-policy fixture removal").await
+}
+
+async fn reference_fixture_value(
+    database: &TestDatabase,
+    object_type: TypeId,
+    reference_field: FieldId,
+    object: ObjectId,
+) -> TestResult<Option<Vec<u8>>> {
+    let session = database.open().await?;
+    let operation: TestResult<Option<Vec<u8>>> = async {
+        Ok(session
+            .client()
+            .query_one(
+                &format!(
+                    "SELECT {} FROM {} WHERE _orna_object_id = $1",
+                    field(reference_field),
+                    relation(object_type),
+                ),
+                &[&object.to_bytes().to_vec()],
+            )
+            .await?
+            .try_get(0)?)
+    }
+    .await;
+    finish_session(session, operation, "reference-policy fixture inspection").await
+}
+
 fn require_not_committed_argument_error(
     error: &PostgresKernelError,
     pair: RevisionPair,
@@ -1237,6 +1945,52 @@ fn require_commit_rejected(
     require(
         code == &SqlState::RAISE_EXCEPTION,
         "deferred trigger commit error code differs",
+    )
+}
+
+#[cfg(feature = "test-hooks")]
+fn require_delete_commit_rejected(
+    error: &PostgresKernelError,
+    pair: RevisionPair,
+    fixture: Fixture,
+    selector: ObjectId,
+) -> TestResult<()> {
+    let PostgresKernelError::ServerDelete(delete) = error else {
+        return Err(failure("commit rejection is not a SERVER DELETE error"));
+    };
+    require(
+        delete.commit_state() == ServerDeleteCommitState::NotCommitted,
+        "delete commit rejection has the wrong commit state",
+    )?;
+    let ServerDeleteError::CommitRejected {
+        context,
+        target,
+        selector: rejected_selector,
+        matched,
+        source,
+    } = delete
+    else {
+        return Err(failure("DELETE failure did not occur during COMMIT"));
+    };
+    require_context(
+        *context,
+        pair,
+        fixture.delete_task,
+        fixture.delete_task_revision,
+    )?;
+    require(*target == fixture.task, "delete rejection target differs")?;
+    require(
+        *rejected_selector == selector,
+        "delete rejection selector differs",
+    )?;
+    require(*matched, "delete rejection lost its match state")?;
+    let code = source
+        .as_db_error()
+        .map(|error| error.code())
+        .ok_or_else(|| failure("delete commit rejection has no database error code"))?;
+    require(
+        code == &SqlState::RAISE_EXCEPTION,
+        "deferred delete trigger error code differs",
     )
 }
 
@@ -1303,6 +2057,62 @@ fn require_update_database_failure(
     require(
         code == &SqlState::FOREIGN_KEY_VIOLATION,
         "database update error code differs",
+    )
+}
+
+fn require_delete_restricted(
+    error: &PostgresKernelError,
+    pair: RevisionPair,
+    function: FunctionId,
+    revision: FunctionRevisionId,
+    expected_target: TypeId,
+    selector: ObjectId,
+    expected_code: &SqlState,
+) -> TestResult<()> {
+    let PostgresKernelError::ServerDelete(delete) = error else {
+        return Err(failure(
+            "reference restriction is not a SERVER DELETE error",
+        ));
+    };
+    require(
+        delete.commit_state() == ServerDeleteCommitState::NotCommitted,
+        "reference restriction has the wrong commit state",
+    )?;
+    let ServerDeleteError::DeleteRestricted {
+        context,
+        target,
+        selector: rejected_selector,
+        source,
+    } = delete
+    else {
+        return Err(failure(format!(
+            "dependent reference did not produce DeleteRestricted: {delete:?}",
+        )));
+    };
+    require_context(*context, pair, function, revision)?;
+    require(
+        *target == expected_target,
+        "restricted delete target differs",
+    )?;
+    require(
+        *rejected_selector == selector,
+        "restricted delete selector differs",
+    )?;
+    let code = source
+        .as_db_error()
+        .map(|error| error.code())
+        .ok_or_else(|| failure("reference restriction has no database error code"))?;
+    require(
+        code == expected_code,
+        "reference restriction error code differs",
+    )?;
+    require(
+        error.to_string()
+            == format!(
+                "object deletion failed: object {} cannot be deleted because another object still refers to it",
+                selector.canonical(),
+            ),
+        "reference restriction exposed an internal constraint detail",
     )
 }
 
@@ -1439,6 +2249,46 @@ async fn require_unchanged_state(
 enum TriggerKind {
     AfterRow,
     DeferredConstraint,
+    DeferredDeleteConstraint,
+}
+
+#[cfg(feature = "test-hooks")]
+async fn execute_delete_with_installed_trigger(
+    database: &TestDatabase,
+    kernel: &PostgresKernel,
+    fixture: Fixture,
+    selector: ObjectId,
+) -> TestResult<PostgresKernelError> {
+    let reached = Arc::new(tokio::sync::Barrier::new(2));
+    let resume = Arc::new(tokio::sync::Barrier::new(2));
+    let executor = kernel.clone();
+    let arguments = delete_argument(
+        fixture.delete_task_selector_parameter,
+        fixture.task,
+        selector,
+    )?;
+    let execution_reached = reached.clone();
+    let execution_resume = resume.clone();
+    let execution = tokio::spawn(async move {
+        executor
+            .execute_server_delete_with_test_barrier(
+                fixture.delete_task,
+                &arguments,
+                execution_reached,
+                execution_resume,
+            )
+            .await
+    });
+    finish_triggered_failure(
+        database,
+        fixture.task,
+        TriggerKind::DeferredDeleteConstraint,
+        execution,
+        reached,
+        resume,
+        "triggered delete",
+    )
+    .await
 }
 
 #[cfg(feature = "test-hooks")]
@@ -1455,7 +2305,7 @@ async fn execute_with_installed_trigger(
     let owned_arguments = arguments.to_vec();
     let execution_reached = reached.clone();
     let execution_resume = resume.clone();
-    let mut execution = tokio::spawn(async move {
+    let execution = tokio::spawn(async move {
         executor
             .execute_server_insert_with_test_barrier(
                 fixture.create_task,
@@ -1465,21 +2315,42 @@ async fn execute_with_installed_trigger(
             )
             .await
     });
-    wait_for_barrier(&mut execution, reached, "triggered insert").await?;
+    finish_triggered_failure(
+        database,
+        fixture.task,
+        kind,
+        execution,
+        reached,
+        resume,
+        "triggered insert",
+    )
+    .await
+}
 
-    let install = install_failure_trigger(database, fixture.task, kind).await;
+#[cfg(feature = "test-hooks")]
+async fn finish_triggered_failure<T>(
+    database: &TestDatabase,
+    target: TypeId,
+    kind: TriggerKind,
+    mut execution: tokio::task::JoinHandle<Result<T, PostgresKernelError>>,
+    reached: Arc<tokio::sync::Barrier>,
+    resume: Arc<tokio::sync::Barrier>,
+    operation: &str,
+) -> TestResult<PostgresKernelError> {
+    wait_for_barrier(&mut execution, reached, operation).await?;
+    let install = install_failure_trigger(database, target, kind).await;
     resume.wait().await;
     if let Err(error) = install {
         abort_and_wait(execution).await;
         return Err(error);
     }
-    let outcome = wait_for_insert_error(execution, "triggered insert").await;
-    let cleanup = remove_failure_trigger(database, fixture.task, kind).await;
+    let outcome = wait_for_failure(execution, operation).await;
+    let cleanup = remove_failure_trigger(database, target, kind).await;
     match (outcome, cleanup) {
         (Ok(error), Ok(())) => Ok(error),
         (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
         (Err(execution_error), Err(cleanup_error)) => Err(failure(format!(
-            "triggered insert failed: {execution_error}; trigger cleanup failed: {cleanup_error}"
+            "{operation} failed: {execution_error}; trigger cleanup failed: {cleanup_error}"
         ))),
     }
 }
@@ -1499,10 +2370,16 @@ async fn install_failure_trigger(
             "test_fail_deferred_insert",
             "CREATE CONSTRAINT TRIGGER test_fail_deferred_insert AFTER INSERT",
         ),
+        TriggerKind::DeferredDeleteConstraint => (
+            "test_fail_deferred_delete",
+            "CREATE CONSTRAINT TRIGGER test_fail_deferred_delete AFTER DELETE",
+        ),
     };
     let deferred = match kind {
         TriggerKind::AfterRow => "",
-        TriggerKind::DeferredConstraint => " DEFERRABLE INITIALLY DEFERRED",
+        TriggerKind::DeferredConstraint | TriggerKind::DeferredDeleteConstraint => {
+            " DEFERRABLE INITIALLY DEFERRED"
+        }
     };
     let session = database.open().await?;
     let operation: TestResult<()> = async {
@@ -1531,6 +2408,7 @@ async fn remove_failure_trigger(
     let name = match kind {
         TriggerKind::AfterRow => "test_fail_after_insert",
         TriggerKind::DeferredConstraint => "test_fail_deferred_insert",
+        TriggerKind::DeferredDeleteConstraint => "test_fail_deferred_delete",
     };
     let session = database.open().await?;
     let operation: TestResult<()> = async {
@@ -1566,10 +2444,10 @@ async fn wait_for_barrier<T>(
 }
 
 #[cfg(feature = "test-hooks")]
-async fn wait_for_insert(
-    mut task: tokio::task::JoinHandle<Result<ServerInsertResult, PostgresKernelError>>,
+async fn wait_for_success<T>(
+    mut task: tokio::task::JoinHandle<Result<T, PostgresKernelError>>,
     operation: &str,
-) -> TestResult<ServerInsertResult> {
+) -> TestResult<T> {
     match tokio::time::timeout(WAIT, &mut task).await {
         Ok(result) => result
             .map_err(|error| failure(format!("{operation} task failed: {error}")))?
@@ -1582,8 +2460,8 @@ async fn wait_for_insert(
 }
 
 #[cfg(feature = "test-hooks")]
-async fn wait_for_insert_error(
-    mut task: tokio::task::JoinHandle<Result<ServerInsertResult, PostgresKernelError>>,
+async fn wait_for_failure<T>(
+    mut task: tokio::task::JoinHandle<Result<T, PostgresKernelError>>,
     operation: &str,
 ) -> TestResult<PostgresKernelError> {
     match tokio::time::timeout(WAIT, &mut task).await {
