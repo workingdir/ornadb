@@ -12,7 +12,7 @@ use orna_core::{
 use crate::{
     CompilerDiagnostic, ParseReport, SourceLocation,
     mutation::{MutationCatalogue, MutationField},
-    relational::{IdentitySelectedQueryIr, RelationalQueryIr},
+    relational::{DistinctQueryIr, IdentitySelectedQueryIr, RelationalQueryIr},
 };
 
 use super::{
@@ -860,6 +860,8 @@ impl CheckedDefinitionReference {
 pub(crate) enum CheckedServerFunctionBody {
     /// A checked relational query body.
     Query(RelationalQueryIr<CheckedTypeId, CheckedFieldId>),
+    /// A checked parameter-free `SELECT DISTINCT` query body.
+    DistinctQuery(DistinctQueryIr<CheckedTypeId, CheckedFieldId>),
     /// A checked SERVER query with one fixed identity selector.
     IdentitySelectedQuery(
         IdentitySelectedQueryIr<
@@ -943,11 +945,32 @@ impl CheckedServerFunction {
         &self.references
     }
 
-    /// Returns the checked relational query when the function has a `SELECT` body.
+    /// Returns the checked duplicate-preserving relational query when present.
     pub(crate) fn query_plan(&self) -> Option<&RelationalQueryIr<CheckedTypeId, CheckedFieldId>> {
         match &self.body {
             CheckedServerFunctionBody::Query(plan) => Some(plan),
-            CheckedServerFunctionBody::IdentitySelectedQuery(_)
+            CheckedServerFunctionBody::DistinctQuery(_)
+            | CheckedServerFunctionBody::IdentitySelectedQuery(_)
+            | CheckedServerFunctionBody::Mutation(_)
+            | CheckedServerFunctionBody::Delete(_) => None,
+        }
+    }
+
+    /// Returns the checked DISTINCT query plan when the function has one.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "the preparation stage consumes checked DISTINCT plans in the next slice"
+        )
+    )]
+    pub(crate) fn distinct_query_plan(
+        &self,
+    ) -> Option<&DistinctQueryIr<CheckedTypeId, CheckedFieldId>> {
+        match &self.body {
+            CheckedServerFunctionBody::DistinctQuery(plan) => Some(plan),
+            CheckedServerFunctionBody::Query(_)
+            | CheckedServerFunctionBody::IdentitySelectedQuery(_)
             | CheckedServerFunctionBody::Mutation(_)
             | CheckedServerFunctionBody::Delete(_) => None,
         }
@@ -968,6 +991,7 @@ impl CheckedServerFunction {
         match &self.body {
             CheckedServerFunctionBody::IdentitySelectedQuery(plan) => Some(plan),
             CheckedServerFunctionBody::Query(_)
+            | CheckedServerFunctionBody::DistinctQuery(_)
             | CheckedServerFunctionBody::Mutation(_)
             | CheckedServerFunctionBody::Delete(_) => None,
         }
@@ -986,6 +1010,7 @@ impl CheckedServerFunction {
     > {
         match &self.body {
             CheckedServerFunctionBody::Query(_)
+            | CheckedServerFunctionBody::DistinctQuery(_)
             | CheckedServerFunctionBody::IdentitySelectedQuery(_)
             | CheckedServerFunctionBody::Delete(_) => None,
             CheckedServerFunctionBody::Mutation(plan) => Some(plan),
@@ -1000,6 +1025,7 @@ impl CheckedServerFunction {
         match &self.body {
             CheckedServerFunctionBody::Delete(plan) => Some(plan),
             CheckedServerFunctionBody::Query(_)
+            | CheckedServerFunctionBody::DistinctQuery(_)
             | CheckedServerFunctionBody::IdentitySelectedQuery(_)
             | CheckedServerFunctionBody::Mutation(_) => None,
         }
