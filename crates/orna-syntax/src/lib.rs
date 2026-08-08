@@ -319,6 +319,8 @@ pub enum ServerFunctionBody {
     SqlInsert(SqlInsertBody),
     /// A parsed single-object Orna relational update retained with its exact source.
     SqlUpdate(SqlUpdateBody),
+    /// A parsed single-object Orna relational delete retained with its exact source.
+    SqlDelete(SqlDeleteBody),
 }
 
 impl ServerFunctionBody {
@@ -349,6 +351,15 @@ impl ServerFunctionBody {
     pub fn as_sql_update(&self) -> Option<&SqlUpdateBody> {
         match self {
             Self::SqlUpdate(update) => Some(update),
+            _ => None,
+        }
+    }
+
+    /// Returns the relational delete when this body contains one.
+    #[must_use]
+    pub fn as_sql_delete(&self) -> Option<&SqlDeleteBody> {
+        match self {
+            Self::SqlDelete(delete) => Some(delete),
             _ => None,
         }
     }
@@ -458,6 +469,32 @@ pub struct UpdateStatement {
     /// The alias written inside the `RETURNING REF(...)` expression.
     pub returning_alias: NamePart,
     /// The span from `UPDATE` through the closing `RETURNING REF(...)` parenthesis.
+    pub span: SourceSpan,
+}
+
+/// A parsed single-object `DELETE` body of a server function.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlDeleteBody {
+    /// The exact source text for the delete body, without the declaration terminator.
+    pub source: SourceSlice,
+    /// The parsed delete statement.
+    pub delete: DeleteStatement,
+}
+
+/// One parsed identity-selected `DELETE` statement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeleteStatement {
+    /// The object type named after `DELETE FROM`.
+    pub target_object: QualifiedName,
+    /// The mandatory alias written after `AS`.
+    pub target_alias: NamePart,
+    /// The alias written inside the selector `REF(...)` expression.
+    pub selector_alias: NamePart,
+    /// The declared function parameter that supplies the selected object identity.
+    pub selector_parameter: NamePart,
+    /// The exact `TRUE` source written after `RETURNING`.
+    pub returning_true: SourceSlice,
+    /// The span from `DELETE` through the `RETURNING TRUE` literal.
     pub span: SourceSpan,
 }
 
@@ -775,7 +812,9 @@ mod tests {
                     NullOrdering::Unspecified
                 );
             }
-            ServerFunctionBody::SqlInsert(_) | ServerFunctionBody::SqlUpdate(_) => {
+            ServerFunctionBody::SqlInsert(_)
+            | ServerFunctionBody::SqlUpdate(_)
+            | ServerFunctionBody::SqlDelete(_) => {
                 panic!("tasks.overdue must use a SELECT body")
             }
         }
@@ -1619,6 +1658,169 @@ mod tests {
     }
 
     #[test]
+    fn parses_single_object_delete_bodies_losslessly() {
+        let source = "CREATE SERVER FUNCTION tasks.remove(p_task REF tasks.task)
+            RETURNS ROWS (deleted BOOL)
+            SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE
+            AS DELETE /* target */ FROM tasks.task AS \"Gone\"
+            WHERE REF(\"Gone\") = p_task
+            RETURNING TrUe;";
+        let parsed = parse(source);
+
+        assert!(parsed.diagnostics().is_empty());
+        assert_eq!(parsed.syntax().text(), source);
+        let function = &parsed.server_functions()[0];
+        let body = function
+            .body
+            .as_sql_delete()
+            .expect("the function must have a DELETE body");
+        assert!(function.body.as_sql_query().is_none());
+        assert!(function.body.as_sql_insert().is_none());
+        assert!(function.body.as_sql_update().is_none());
+        let delete_start = source.find("DELETE /* target */").unwrap();
+        let body_end = source.rfind("TrUe").unwrap() + "TrUe".len();
+        assert_eq!(body.source.text, &source[delete_start..body_end]);
+        assert_eq!(
+            body.source.span,
+            SourceSpan {
+                start: delete_start,
+                end: body_end,
+            }
+        );
+        assert_eq!(body.delete.span, body.source.span);
+        assert_eq!(body.delete.target_object.parts[0].text, "tasks");
+        assert_eq!(body.delete.target_object.parts[1].text, "task");
+        assert_eq!(body.delete.target_alias.text, "\"Gone\"");
+        assert_eq!(body.delete.selector_alias.text, "\"Gone\"");
+        assert_eq!(body.delete.selector_parameter.text, "p_task");
+        assert_eq!(body.delete.returning_true.text, "TrUe");
+        assert_eq!(
+            body.delete.returning_true.span.start,
+            source.rfind("TrUe").unwrap()
+        );
+        assert_eq!(body.delete.returning_true.span.end, body_end);
+    }
+
+    #[test]
+    fn delete_diagnostics_are_exact_and_select_the_offending_source() {
+        let cases = [
+            (
+                "DELETE tasks.task AS deleted_task WHERE REF(deleted_task) = p_task RETURNING TRUE",
+                "expected FROM after DELETE in DELETE body",
+                "DELETE tasks.task",
+                "DELETE ".len(),
+                "tasks".len(),
+            ),
+            (
+                "DELETE FROM tasks.task deleted_task WHERE REF(deleted_task) = p_task RETURNING TRUE",
+                "expected AS before the DELETE target alias in DELETE body",
+                "deleted_task WHERE",
+                0,
+                "deleted_task".len(),
+            ),
+            (
+                "DELETE FROM tasks.task AS deleted_task RETURNING TRUE",
+                "expected WHERE after the DELETE target alias in DELETE body",
+                "RETURNING",
+                0,
+                "RETURNING".len(),
+            ),
+            (
+                "DELETE FROM tasks.task AS deleted_task WHERE deleted_task.id = p_task RETURNING TRUE",
+                "expected REF(target_alias) after WHERE in DELETE body",
+                "deleted_task.id",
+                0,
+                "deleted_task".len(),
+            ),
+            (
+                "DELETE FROM tasks.task AS deleted_task WHERE REF(other) = p_task RETURNING TRUE",
+                "WHERE REF must use the DELETE target alias deleted_task, not other",
+                "REF(other)",
+                "REF(".len(),
+                "other".len(),
+            ),
+            (
+                "DELETE FROM tasks.task AS deleted_task WHERE REF(deleted_task) p_task RETURNING TRUE",
+                "expected '=' after WHERE REF(target_alias) in DELETE body",
+                "p_task RETURNING",
+                0,
+                "p_task".len(),
+            ),
+            (
+                "DELETE FROM tasks.task AS deleted_task WHERE REF(deleted_task) = TRUE RETURNING TRUE",
+                "expected a declared REF parameter after '=' in DELETE body",
+                "TRUE RETURNING",
+                0,
+                "TRUE".len(),
+            ),
+            (
+                "DELETE FROM tasks.task AS deleted_task WHERE REF(deleted_task) = owner.p_task RETURNING TRUE",
+                "use the selector parameter name by itself after '='; do not add an object or alias",
+                "owner.p_task",
+                "owner".len(),
+                1,
+            ),
+            (
+                "DELETE FROM tasks.task AS deleted_task WHERE REF(deleted_task) = find_task() RETURNING TRUE",
+                "this DELETE does not support function calls as DELETE selectors; expected a declared REF parameter name by itself",
+                "find_task()",
+                "find_task".len(),
+                1,
+            ),
+            (
+                "DELETE FROM tasks.task AS deleted_task WHERE REF(deleted_task) = p_task EXTRA",
+                "expected RETURNING after the DELETE selector in DELETE body",
+                "EXTRA",
+                0,
+                "EXTRA".len(),
+            ),
+            (
+                "DELETE FROM tasks.task AS deleted_task WHERE REF(deleted_task) = p_task RETURNING FALSE",
+                "expected TRUE after RETURNING in DELETE body",
+                "FALSE",
+                0,
+                "FALSE".len(),
+            ),
+            (
+                "DELETE FROM tasks.task AS deleted_task WHERE REF(deleted_task) = p_task RETURNING REF(deleted_task)",
+                "expected TRUE after RETURNING in DELETE body",
+                "RETURNING REF(deleted_task)",
+                "RETURNING ".len(),
+                "REF".len(),
+            ),
+            (
+                "DELETE FROM tasks.task AS deleted_task WHERE REF(deleted_task) = p_task RETURNING TRUE EXTRA",
+                "this DELETE does not support EXTRA; expected the end of the DELETE body",
+                "EXTRA",
+                0,
+                "EXTRA".len(),
+            ),
+        ];
+
+        for (body, message, marker, span_offset, span_length) in cases {
+            assert_delete_diagnostic(body, message, marker, span_offset, span_length);
+        }
+    }
+
+    #[test]
+    fn malformed_delete_parentheses_do_not_consume_later_declarations() {
+        let source = "CREATE SERVER FUNCTION tasks.bad(p_task REF tasks.task) RETURNS ROWS (deleted BOOL) AS DELETE FROM tasks.task AS deleted_task WHERE REF(deleted_task = p_task RETURNING TRUE;
+            CREATE SERVER FUNCTION tasks.good(p_task REF tasks.task) RETURNS ROWS (deleted BOOL) AS DELETE FROM tasks.task AS deleted_task WHERE REF(deleted_task) = p_task RETURNING TRUE;";
+        let parsed = parse(source);
+
+        assert_eq!(parsed.syntax().text(), source);
+        assert_eq!(parsed.server_functions().len(), 1);
+        assert_eq!(parsed.server_functions()[0].name.parts[1].text, "good");
+        assert!(parsed.server_functions()[0].body.as_sql_delete().is_some());
+        assert_eq!(parsed.diagnostics().len(), 1);
+        assert_eq!(parsed.diagnostics()[0].code, "ORNA0001");
+        assert_eq!(
+            parsed.diagnostics()[0].message,
+            "expected ')' after the WHERE REF alias in DELETE body"
+        );
+    }
+
+    #[test]
     fn parses_object_type_fields_without_rewriting_aliases_or_defaults() {
         let source = "CREATE TYPE tasks.task AS OBJECT (\n\
             title TEXT NOT NULL,\n\
@@ -1981,6 +2183,7 @@ mod tests {
     ) {
         assert_body_diagnostic(
             "p_title TEXT, p_done BOOL",
+            "result REF tasks.task",
             body,
             message,
             marker,
@@ -1998,6 +2201,25 @@ mod tests {
     ) {
         assert_body_diagnostic(
             "p_task REF tasks.task, p_title TEXT",
+            "result REF tasks.task",
+            body,
+            message,
+            marker,
+            span_offset,
+            span_length,
+        );
+    }
+
+    fn assert_delete_diagnostic(
+        body: &str,
+        message: &str,
+        marker: &str,
+        span_offset: usize,
+        span_length: usize,
+    ) {
+        assert_body_diagnostic(
+            "p_task REF tasks.task",
+            "deleted BOOL",
             body,
             message,
             marker,
@@ -2008,6 +2230,7 @@ mod tests {
 
     fn assert_body_diagnostic(
         parameters: &str,
+        result_column: &str,
         body: &str,
         message: &str,
         marker: &str,
@@ -2015,7 +2238,7 @@ mod tests {
         span_length: usize,
     ) {
         let source = format!(
-            "CREATE SERVER FUNCTION tasks.bad({parameters}) RETURNS ROWS (result REF tasks.task) AS {body};"
+            "CREATE SERVER FUNCTION tasks.bad({parameters}) RETURNS ROWS ({result_column}) AS {body};"
         );
         let parsed = parse(&source);
 
