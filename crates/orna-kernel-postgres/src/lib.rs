@@ -8,6 +8,10 @@ use std::{error::Error, fmt, str::FromStr};
 use tokio::task::{JoinError, JoinHandle};
 use tokio_postgres::{Client, Config, NoTls};
 
+mod bootstrap;
+
+pub use bootstrap::ActiveRevision;
+
 /// A concrete connection point for the private PostgreSQL kernel.
 #[derive(Clone)]
 pub struct PostgresKernel {
@@ -78,6 +82,13 @@ pub enum PostgresKernelError {
     Database(tokio_postgres::Error),
     /// The asynchronous PostgreSQL connection driver terminated abnormally.
     DriverTask(JoinError),
+    /// A recorded schema migration does not match this binary.
+    MigrationMismatch {
+        /// The incompatible migration version.
+        version: i64,
+    },
+    /// Protected catalogue rows violate a durable kernel invariant.
+    CatalogueInvariant(&'static str),
 }
 
 impl fmt::Display for PostgresKernelError {
@@ -95,6 +106,18 @@ impl fmt::Display for PostgresKernelError {
                     "private PostgreSQL connection task failed: {error}"
                 )
             }
+            Self::MigrationMismatch { version } => {
+                write!(
+                    formatter,
+                    "PostgreSQL kernel migration {version} does not match this binary"
+                )
+            }
+            Self::CatalogueInvariant(message) => {
+                write!(
+                    formatter,
+                    "private PostgreSQL catalogue invariant failed: {message}"
+                )
+            }
         }
     }
 }
@@ -104,6 +127,7 @@ impl Error for PostgresKernelError {
         match self {
             Self::Configuration(error) | Self::Database(error) => Some(error),
             Self::DriverTask(error) => Some(error),
+            Self::MigrationMismatch { .. } | Self::CatalogueInvariant(_) => None,
         }
     }
 }
