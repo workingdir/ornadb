@@ -169,6 +169,11 @@ pub enum QueryExpression {
         /// The exact source spelling of the literal.
         source: SourceSlice,
     },
+    /// A bare server function parameter read used as an identity selector.
+    ParameterRead {
+        /// The parameter name as written in the query.
+        parameter: NamePart,
+    },
     /// Equality between two supported query expressions.
     Equality {
         /// The expression to the left of `=`.
@@ -188,6 +193,7 @@ impl QueryExpression {
             | Self::FieldPath { span, .. }
             | Self::Equality { span, .. } => span,
             Self::BooleanLiteral { source, .. } => &source.span,
+            Self::ParameterRead { parameter } => &parameter.span,
         }
     }
 }
@@ -1128,6 +1134,202 @@ mod tests {
             }
             _ => panic!("query must contain its equality predicate"),
         }
+    }
+
+    #[test]
+    fn retains_identity_selector_parameters_for_both_source_alias_forms() {
+        for (source, selector) in [
+            (
+                "CREATE SERVER FUNCTION tasks.get(p_task REF tasks.task) RETURNS ROWS (task REF tasks.task) AS SELECT REF(selected) FROM tasks.task selected WHERE REF(selected) = p_task;",
+                "p_task",
+            ),
+            (
+                "CREATE SERVER FUNCTION tasks.get(\"p_Task\" REF tasks.task) RETURNS ROWS (task REF tasks.task) AS SELECT REF(selected) FROM tasks.task AS selected WHERE REF(selected) = \"p_Task\";",
+                "\"p_Task\"",
+            ),
+        ] {
+            let parsed = parse(source);
+
+            assert!(parsed.diagnostics().is_empty(), "source: {source}");
+            assert_eq!(parsed.syntax().text(), source);
+            let body = parsed.server_functions()[0]
+                .body
+                .as_sql_query()
+                .expect("function must retain its SELECT query");
+            let parameter_start = source.rfind(selector).expect("selector parameter exists");
+            let query_start = source.find("SELECT").expect("query exists");
+            assert_eq!(body.source.text, &source[query_start..source.len() - 1]);
+            assert_eq!(body.query.span.end, parameter_start + selector.len());
+
+            match &body.query.predicate {
+                Some(QueryExpression::Equality { left, right, span }) => {
+                    assert_eq!(&source[left.span().start..left.span().end], "REF(selected)");
+                    match right.as_ref() {
+                        QueryExpression::ParameterRead { parameter } => {
+                            assert_eq!(parameter.text, selector);
+                            assert_eq!(parameter.span.start, parameter_start);
+                            assert_eq!(parameter.span.end, parameter_start + selector.len());
+                            assert_eq!(&source[parameter.span.start..parameter.span.end], selector);
+                        }
+                        _ => panic!("selector right operand must retain the parameter read"),
+                    }
+                    assert_eq!(span.start, left.span().start);
+                    assert_eq!(span.end, parameter_start + selector.len());
+                }
+                _ => panic!("query must contain the identity selector predicate"),
+            }
+        }
+    }
+
+    #[test]
+    fn preserves_existing_ref_and_boolean_right_operands_after_object_references() {
+        let cases = [
+            (
+                "CREATE SERVER FUNCTION tasks.ref_equal() RETURNS ROWS (task REF tasks.task) AS SELECT REF(t) FROM tasks.task t WHERE REF(t) = REF(t);",
+                "REF(t)",
+            ),
+            (
+                "CREATE SERVER FUNCTION tasks.ref_true() RETURNS ROWS (task REF tasks.task) AS SELECT REF(t) FROM tasks.task t WHERE REF(t) = TRUE;",
+                "TRUE",
+            ),
+        ];
+
+        for (source, right_source) in cases {
+            let parsed = parse(source);
+
+            assert!(parsed.diagnostics().is_empty(), "source: {source}");
+            let body = parsed.server_functions()[0]
+                .body
+                .as_sql_query()
+                .expect("function must retain its SELECT query");
+            match &body.query.predicate {
+                Some(QueryExpression::Equality { right, .. }) => {
+                    assert_eq!(&source[right.span().start..right.span().end], right_source,);
+                    if right_source == "REF(t)" {
+                        assert!(matches!(
+                            right.as_ref(),
+                            QueryExpression::ObjectReference { alias, .. } if alias.text == "t"
+                        ));
+                    } else {
+                        assert!(matches!(
+                            right.as_ref(),
+                            QueryExpression::BooleanLiteral { value: true, .. }
+                        ));
+                    }
+                }
+                _ => panic!("query must retain its equality predicate"),
+            }
+        }
+    }
+
+    #[test]
+    fn preserves_existing_boolean_left_equality_with_an_object_reference() {
+        let source = "CREATE SERVER FUNCTION tasks.true_equal() RETURNS ROWS (task REF tasks.task) AS SELECT REF(t) FROM tasks.task t WHERE TRUE = REF(t);";
+        let parsed = parse(source);
+
+        assert!(parsed.diagnostics().is_empty());
+        let body = parsed.server_functions()[0]
+            .body
+            .as_sql_query()
+            .expect("function must retain its SELECT query");
+        match &body.query.predicate {
+            Some(QueryExpression::Equality { left, right, .. }) => {
+                assert!(matches!(
+                    left.as_ref(),
+                    QueryExpression::BooleanLiteral { value: true, .. }
+                ));
+                assert!(matches!(
+                    right.as_ref(),
+                    QueryExpression::ObjectReference { alias, .. } if alias.text == "t"
+                ));
+            }
+            _ => panic!("query must retain its equality predicate"),
+        }
+    }
+
+    #[test]
+    fn rejects_reversed_identity_selector_operands_with_an_exact_diagnostic() {
+        let source = "CREATE SERVER FUNCTION tasks.bad(p_task REF tasks.task) RETURNS ROWS (task REF tasks.task) AS SELECT REF(selected) FROM tasks.task selected WHERE p_task = REF(selected);";
+        let parsed = parse(source);
+
+        assert_eq!(parsed.syntax().text(), source);
+        assert!(parsed.server_functions().is_empty());
+        assert_eq!(parsed.diagnostics().len(), 1);
+        let diagnostic = &parsed.diagnostics()[0];
+        assert_eq!(diagnostic.code, "ORNA0001");
+        assert_eq!(
+            diagnostic.message,
+            "the current Orna SELECT parser does not yet implement selector parameters on the left side of WHERE equality; expected WHERE REF(alias) = selector_parameter",
+        );
+        let parameter_start =
+            source.find("WHERE p_task").expect("selector exists") + "WHERE ".len();
+        assert_eq!(
+            diagnostic.span,
+            SourceSpan {
+                start: parameter_start,
+                end: parameter_start + "p_task".len(),
+            }
+        );
+    }
+
+    #[test]
+    fn keeps_the_existing_bare_projection_diagnostic() {
+        let source = "CREATE SERVER FUNCTION tasks.bad(p_task REF tasks.task) RETURNS ROWS (task REF tasks.task) AS SELECT p_task FROM tasks.task selected;";
+        let parsed = parse(source);
+
+        assert_eq!(parsed.syntax().text(), source);
+        assert!(parsed.server_functions().is_empty());
+        assert_eq!(parsed.diagnostics().len(), 1);
+        let diagnostic = &parsed.diagnostics()[0];
+        assert_eq!(diagnostic.code, "ORNA0001");
+        assert_eq!(
+            diagnostic.message,
+            "the current Orna SELECT parser does not yet implement bare alias expressions; expected a field path",
+        );
+        let from_start = source.find(" FROM").expect("FROM exists") + 1;
+        assert_eq!(
+            diagnostic.span,
+            SourceSpan {
+                start: from_start,
+                end: from_start + "FROM".len(),
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_order_by_after_an_identity_selector_parameter() {
+        let source = "CREATE SERVER FUNCTION tasks.bad(p_task REF tasks.task) RETURNS ROWS (task REF tasks.task) AS SELECT REF(selected) FROM tasks.task selected WHERE REF(selected) = p_task ORDER BY selected.title;";
+        let parsed = parse(source);
+
+        assert_eq!(parsed.syntax().text(), source);
+        assert!(parsed.server_functions().is_empty());
+        assert_eq!(parsed.diagnostics().len(), 1);
+        let diagnostic = &parsed.diagnostics()[0];
+        assert_eq!(diagnostic.code, "ORNA0001");
+        assert_eq!(
+            diagnostic.message,
+            "identity-selected SELECT queries do not allow ORDER BY; remove the ORDER BY clause",
+        );
+        let order_start = source.find("ORDER BY").expect("ORDER BY exists");
+        assert_eq!(
+            diagnostic.span,
+            SourceSpan {
+                start: order_start,
+                end: order_start + "ORDER".len(),
+            }
+        );
+    }
+
+    #[test]
+    fn recovers_to_later_declarations_after_an_invalid_identity_selector() {
+        let source = "CREATE SERVER FUNCTION tasks.bad(p_task REF tasks.task) RETURNS ROWS (task REF tasks.task) AS SELECT REF(selected) FROM tasks.task selected WHERE p_task = REF(selected);\n\
+            CREATE SERVER FUNCTION tasks.good(p_task REF tasks.task) RETURNS ROWS (task REF tasks.task) AS SELECT REF(selected) FROM tasks.task selected WHERE REF(selected) = p_task;";
+        let parsed = parse(source);
+
+        assert_eq!(parsed.syntax().text(), source);
+        assert_eq!(parsed.diagnostics().len(), 1);
+        assert_eq!(parsed.server_functions().len(), 1);
+        assert_eq!(parsed.server_functions()[0].name.parts[1].text, "good");
     }
 
     #[test]

@@ -582,6 +582,15 @@ where
                 nullable: false,
             },
         }),
+        QueryExpression::ParameterRead { parameter } => {
+            diagnostics.push(diagnostic(
+                DiagnosticCode::DomainIncompatible,
+                "SERVER SELECT parameter selectors are not yet supported",
+                logical_path,
+                &parameter.span,
+            ));
+            None
+        }
         QueryExpression::Equality { left, right, span } => {
             let left = check_expression(
                 left,
@@ -745,7 +754,7 @@ mod tests {
         },
         types::{ResolvedType, StandardScalar},
     };
-    use orna_syntax::parse;
+    use orna_syntax::{QueryExpression, parse};
 
     use super::{
         ExpressionKind, NullOrder, QueryReferenceKind, QueryReferenceTarget, SortDirection,
@@ -989,6 +998,30 @@ mod tests {
         let ir = check_query(&query, &catalogue(), "tasks.orna").unwrap();
 
         assert!(ir.selection().unwrap().value_type().nullable());
+    }
+
+    #[test]
+    fn rejects_unchecked_selector_parameters_at_the_exact_parameter_span() {
+        let query = query("SELECT REF(t) FROM tasks.task t WHERE REF(t) = p_task");
+        let expected_span = match query.predicate.as_ref() {
+            Some(QueryExpression::Equality { right, .. }) => right.span().clone(),
+            _ => panic!("fixture must contain the selector parameter"),
+        };
+
+        let diagnostics = check_query(&query, &catalogue(), "tasks.orna").unwrap_err();
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code(), DiagnosticCode::DomainIncompatible);
+        assert_eq!(
+            diagnostics[0].message(),
+            "SERVER SELECT parameter selectors are not yet supported"
+        );
+        assert_eq!(diagnostics[0].location().logical_path(), "tasks.orna");
+        assert_eq!(
+            diagnostics[0].location().span().start(),
+            expected_span.start
+        );
+        assert_eq!(diagnostics[0].location().span().end(), expected_span.end);
     }
 
     #[test]
