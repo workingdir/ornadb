@@ -1,0 +1,13 @@
+[package]
+name = "orna-kernel-postgres"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+tokio = { version = "1.53.1", features = ["net", "rt"] }
+tokio-postgres = "0.7.18"
+
+[dev-dependencies]
+tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread"] }
