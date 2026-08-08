@@ -310,10 +310,13 @@ pub struct CapabilitySpecification {
 }
 
 /// The body of a server function.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServerFunctionBody {
     /// A parsed Orna relational query retained with its exact source.
     SqlQuery(SqlQueryBody),
+    /// A parsed single-row Orna relational insert retained with its exact source.
+    SqlInsert(SqlInsertBody),
 }
 
 impl ServerFunctionBody {
@@ -326,6 +329,16 @@ impl ServerFunctionBody {
     pub fn as_sql_query(&self) -> Option<&SqlQueryBody> {
         match self {
             Self::SqlQuery(query) => Some(query),
+            _ => None,
+        }
+    }
+
+    /// Returns the relational insert when this body contains one.
+    #[must_use]
+    pub fn as_sql_insert(&self) -> Option<&SqlInsertBody> {
+        match self {
+            Self::SqlInsert(insert) => Some(insert),
+            _ => None,
         }
     }
 }
@@ -337,6 +350,62 @@ pub struct SqlQueryBody {
     pub source: SourceSlice,
     /// The typed Orna query syntax.
     pub query: SelectQuery,
+}
+
+/// The value forms supported by a single-row SQL insert body.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InsertValue {
+    /// A bare declared server-function parameter name.
+    Parameter(NamePart),
+    /// A boolean literal, retaining its exact source spelling.
+    BooleanLiteral {
+        /// The boolean value selected by the source text.
+        value: bool,
+        /// The exact source spelling of the literal.
+        source: SourceSlice,
+    },
+    /// A null literal, retaining its exact source spelling.
+    NullLiteral {
+        /// The exact source spelling of the literal.
+        source: SourceSlice,
+    },
+}
+
+impl InsertValue {
+    /// Return the complete source span for this value.
+    pub fn span(&self) -> &SourceSpan {
+        match self {
+            Self::Parameter(name) => &name.span,
+            Self::BooleanLiteral { source, .. } | Self::NullLiteral { source } => &source.span,
+        }
+    }
+}
+
+/// A parsed single-row `INSERT` body of a server function.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlInsertBody {
+    /// The exact source text for the insert body, without the declaration terminator.
+    pub source: SourceSlice,
+    /// The parsed insert statement.
+    pub insert: InsertStatement,
+}
+
+/// One parsed single-row `INSERT` statement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InsertStatement {
+    /// The object type named after `INSERT INTO`.
+    pub target_object: QualifiedName,
+    /// The mandatory alias written after `AS`.
+    pub target_alias: NamePart,
+    /// The target fields in their positional source order.
+    pub target_fields: Vec<NamePart>,
+    /// The one row of values in positional source order.
+    pub values: Vec<InsertValue>,
+    /// The alias written inside the `RETURNING REF(...)` expression.
+    pub returning_alias: NamePart,
+    /// The span from `INSERT` through the closing `RETURNING REF(...)` parenthesis.
+    pub span: SourceSpan,
 }
 
 /// A parsed `CREATE SERVER FUNCTION` declaration.
@@ -476,7 +545,7 @@ pub fn parse(source: &str) -> Parse {
 #[cfg(test)]
 mod tests {
     use super::{
-        FunctionReturnType, FunctionSecurity, FunctionTransaction, FunctionVolatility,
+        FunctionReturnType, FunctionSecurity, FunctionTransaction, FunctionVolatility, InsertValue,
         NullOrdering, OnDeletePolicy, OrderingDirection, QueryExpression, ServerFunctionBody,
         StandardLargeObjectKind, TypeSpecification, parse,
     };
@@ -631,6 +700,7 @@ mod tests {
                     NullOrdering::Unspecified
                 );
             }
+            ServerFunctionBody::SqlInsert(_) => panic!("tasks.overdue must use a SELECT body"),
         }
     }
 
@@ -904,7 +974,10 @@ mod tests {
 
         assert!(parsed.diagnostics().is_empty());
         assert_eq!(parsed.syntax().text(), source);
-        let ServerFunctionBody::SqlQuery(body) = &parsed.server_functions()[0].body;
+        let body = parsed.server_functions()[0]
+            .body
+            .as_sql_query()
+            .expect("tasks.list must use a SELECT body");
         let query_start = source.find("SELECT").expect("query exists");
         let query_end = source.rfind("ASC").expect("ordering direction exists") + "ASC".len();
         assert_eq!(&body.source.text, &source[query_start..query_end]);
@@ -974,7 +1047,10 @@ mod tests {
         let parsed = parse(source);
 
         assert!(parsed.diagnostics().is_empty());
-        let ServerFunctionBody::SqlQuery(body) = &parsed.server_functions()[0].body;
+        let body = parsed.server_functions()[0]
+            .body
+            .as_sql_query()
+            .expect("tasks.unresolved must use a SELECT body");
         assert!(matches!(
             body.query.projections[0],
             QueryExpression::ObjectReference { ref alias, .. } if alias.text == "other"
@@ -983,6 +1059,182 @@ mod tests {
             body.query.projections[1],
             QueryExpression::FieldPath { ref root, .. } if root.text == "other"
         ));
+    }
+
+    #[test]
+    fn parses_single_row_insert_bodies_losslessly() {
+        let source = "CREATE SERVER FUNCTION tasks.create (\n\
+            p_title TEXT,\n\
+            p_done BOOL,\n\
+            p_owner REF tasks.owner\n\
+        )\n\
+        RETURNS ROWS (created REF tasks.task)\n\
+        SECURITY INVOKER\n\
+        TRANSACTION ATOMIC\n\
+        VOLATILITY VOLATILE\n\
+        AS\n\
+            INSERT /* target */ INTO tasks /* type */ . task AS created (\n\
+                title, done, owner\n\
+            ) VALUES (p_title, p_done, p_owner) RETURNING REF(created);";
+        let parsed = parse(source);
+
+        assert!(parsed.diagnostics().is_empty());
+        assert_eq!(parsed.syntax().text(), source);
+        let function = &parsed.server_functions()[0];
+        let body = function
+            .body
+            .as_sql_insert()
+            .expect("the function must have an INSERT body");
+        let insert = &body.insert;
+        assert!(function.body.as_sql_query().is_none());
+        let insert_start = source.find("INSERT").expect("INSERT exists");
+        let body_end = source.rfind(")").expect("RETURNING close exists") + 1;
+        assert_eq!(body.source.text, &source[insert_start..body_end]);
+        assert_eq!(body.source.span.start, insert_start);
+        assert_eq!(body.source.span.end, body_end);
+        assert_eq!(insert.span, body.source.span);
+        assert_eq!(insert.target_object.parts[0].text, "tasks");
+        assert_eq!(insert.target_object.parts[1].text, "task");
+        assert_eq!(insert.target_alias.text, "created");
+        assert_eq!(insert.target_fields.len(), 3);
+        assert_eq!(insert.target_fields[0].text, "title");
+        assert_eq!(insert.target_fields[1].text, "done");
+        assert_eq!(insert.target_fields[2].text, "owner");
+        assert!(matches!(
+            &insert.values[0],
+            InsertValue::Parameter(name) if name.text == "p_title"
+        ));
+        assert!(matches!(
+            &insert.values[1],
+            InsertValue::Parameter(name) if name.text == "p_done"
+        ));
+        assert!(matches!(
+            &insert.values[2],
+            InsertValue::Parameter(name) if name.text == "p_owner"
+        ));
+        assert_eq!(insert.returning_alias.text, "created");
+        assert_eq!(
+            insert.returning_alias.span.start,
+            source.rfind("created").unwrap()
+        );
+        assert_eq!(
+            insert.values[0].span().start,
+            source.rfind("p_title").unwrap()
+        );
+    }
+
+    #[test]
+    fn rejects_closed_insert_forms_and_recovers_to_a_valid_declaration() {
+        let invalid = [
+            "INSERT INTO tasks.task created (title) VALUES (p_title) RETURNING REF(created)",
+            "INSERT INTO tasks.task AS created () VALUES (p_title) RETURNING REF(created)",
+            "INSERT INTO tasks.task AS created (title,) VALUES (p_title) RETURNING REF(created)",
+            "INSERT INTO tasks.task AS created (title, title) VALUES (p_title, p_title) RETURNING REF(created)",
+            "INSERT INTO tasks.task AS created (title, \"title\") VALUES (p_title, p_title) RETURNING REF(created)",
+            "INSERT INTO tasks.task AS created (tasks.title) VALUES (p_title) RETURNING REF(created)",
+            "INSERT INTO tasks.task AS created (title, done) VALUES (p_title) RETURNING REF(created)",
+            "INSERT INTO tasks.task AS created (title) VALUES (p_title, TRUE) RETURNING REF(created)",
+            "INSERT INTO tasks.task AS created (title) VALUES () RETURNING REF(created)",
+            "INSERT INTO tasks.task AS created (title) VALUES (p_title,) RETURNING REF(created)",
+            "INSERT INTO tasks.task AS created (title) VALUES (p_title), (p_title) RETURNING REF(created)",
+            "INSERT INTO tasks.task AS created (title) VALUES ('title') RETURNING REF(created)",
+            "INSERT INTO tasks.task AS created (title) VALUES (make_title()) RETURNING REF(created)",
+            "INSERT INTO tasks.task AS created (title) VALUES (other.title) RETURNING REF(created)",
+            "INSERT INTO tasks.task AS created (title) VALUES (p_title) RETURNING created",
+            "INSERT INTO tasks.task AS created (title) VALUES (p_title) RETURNING REF(created.title)",
+            "INSERT INTO tasks.task AS created (title) VALUES (p_title) RETURNING REF(other)",
+        ];
+        for body in invalid {
+            let source = format!(
+                "CREATE SERVER FUNCTION tasks.bad(p_title TEXT) RETURNS ROWS (created REF tasks.task) AS {body};"
+            );
+            let parsed = parse(&source);
+            assert_eq!(parsed.syntax().text(), source);
+            assert!(parsed.server_functions().is_empty(), "invalid body: {body}");
+            assert!(!parsed.diagnostics().is_empty(), "invalid body: {body}");
+        }
+
+        let source = "CREATE SERVER FUNCTION tasks.bad(p_title TEXT) RETURNS ROWS (created REF tasks.task) AS INSERT INTO tasks.task AS created (title) VALUES (p_title) RETURNING REF(other);\n\
+            CREATE SERVER FUNCTION tasks.good(p_title TEXT) RETURNS ROWS (result REF tasks.task) AS INSERT INTO tasks.task AS created (title) VALUES (p_title) RETURNING REF(created);";
+        let parsed = parse(source);
+        assert_eq!(parsed.syntax().text(), source);
+        assert_eq!(parsed.server_functions().len(), 1);
+        assert_eq!(parsed.server_functions()[0].name.parts[1].text, "good");
+        assert!(parsed.diagnostics().iter().any(|diagnostic| {
+            diagnostic
+                .message
+                .contains("RETURNING REF must use the INSERT target alias")
+                && diagnostic.span.start == source.find("other").expect("other exists")
+        }));
+    }
+
+    #[test]
+    fn insert_keywords_and_unquoted_aliases_are_case_insensitive() {
+        let source = "CREATE SERVER FUNCTION tasks.create() RETURNS ROWS (result REF tasks.task) AS iNsErT iNtO tasks.task aS Created (done, note) vAlUeS (fAlSe, nUlL) rEtUrNiNg rEf(created);";
+        let parsed = parse(source);
+
+        assert!(parsed.diagnostics().is_empty());
+        let body = parsed.server_functions()[0]
+            .body
+            .as_sql_insert()
+            .expect("the function must have an INSERT body");
+        assert_eq!(body.insert.target_alias.text, "Created");
+        assert_eq!(body.insert.returning_alias.text, "created");
+        assert!(matches!(
+            &body.insert.values[0],
+            InsertValue::BooleanLiteral { value: false, source } if source.text == "fAlSe"
+        ));
+        assert!(matches!(
+            &body.insert.values[1],
+            InsertValue::NullLiteral { source } if source.text == "nUlL"
+        ));
+    }
+
+    #[test]
+    fn insert_diagnostics_point_at_the_offending_syntax() {
+        let source = "CREATE SERVER FUNCTION tasks.bad(p_title TEXT) RETURNS ROWS (result REF tasks.task) AS INSERT INTO tasks.task AS created (title, title) VALUES (p_title, p_title) RETURNING REF(created);";
+        let parsed = parse(source);
+
+        assert!(parsed.server_functions().is_empty());
+        assert_eq!(parsed.diagnostics().len(), 1);
+        assert_eq!(
+            parsed.diagnostics()[0].message,
+            "duplicate INSERT target fields are not supported"
+        );
+        let duplicate = source
+            .rfind("title) VALUES")
+            .expect("duplicate field exists");
+        assert_eq!(parsed.diagnostics()[0].span.start, duplicate);
+        assert_eq!(parsed.diagnostics()[0].span.end, duplicate + "title".len());
+    }
+
+    #[test]
+    fn malformed_insert_quotes_report_diagnostics_without_panicking() {
+        let source = "CREATE SERVER FUNCTION tasks.bad(p_title TEXT) RETURNS ROWS (result REF tasks.task) AS INSERT INTO tasks.task AS created (title) VALUES (p_title) RETURNING REF(\"";
+        let parsed = parse(source);
+
+        assert_eq!(parsed.syntax().text(), source);
+        assert!(parsed.server_functions().is_empty());
+        assert!(parsed.diagnostics().iter().any(|diagnostic| {
+            diagnostic.code == "ORNA0002" && diagnostic.message == "unterminated quoted identifier"
+        }));
+    }
+
+    #[test]
+    fn malformed_insert_parentheses_do_not_consume_later_declarations() {
+        let source = "CREATE SERVER FUNCTION tasks.bad(p_title TEXT) RETURNS ROWS (result REF tasks.task) AS INSERT INTO tasks.task AS created (title) VALUES (p_title;
+            CREATE SERVER FUNCTION tasks.good(p_title TEXT) RETURNS ROWS (result REF tasks.task) AS INSERT INTO tasks.task AS created (title) VALUES (p_title) RETURNING REF(created);";
+        let parsed = parse(source);
+
+        assert_eq!(parsed.syntax().text(), source);
+        assert_eq!(parsed.server_functions().len(), 1);
+        assert_eq!(parsed.server_functions()[0].name.parts[1].text, "good");
+        assert!(parsed.diagnostics().iter().any(|diagnostic| {
+            diagnostic.code == "ORNA0001"
+                && diagnostic
+                    .message
+                    .contains("expected ',' or ')' after an INSERT value")
+        }));
     }
 
     #[test]
