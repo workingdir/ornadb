@@ -3,14 +3,18 @@ mod support;
 use std::str::FromStr;
 
 use orna_core::{
-    SourceBundleId, SourceRevisionId, SourceUnitId,
+    CatalogueRevisionId, SchemaId, SourceBundleId, SourceRevisionId, SourceUnitId,
     canonical_hash::{
-        source_bundle_digest, source_revision_record_digest, source_unit_content_digest,
+        catalogue_digest, source_bundle_digest, source_revision_record_digest,
+        source_unit_content_digest,
     },
-    revision::StoredSourceUnit,
+    catalogue::{CatalogueSnapshot, QualifiedSemanticName, SchemaDefinition},
+    revision::{DefinitionIdentity, DefinitionOrigin, SourceOrigin, StoredSourceUnit},
 };
 use orna_kernel_postgres::{PostgresKernel, PostgresKernelError};
 use support::{TestDatabase, TestResult, failure, with_test_database};
+
+const SCHEMA_SOURCE: &str = "schema café;\n";
 
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
@@ -57,6 +61,102 @@ async fn recovers_exact_nonempty_source_for_an_empty_catalogue() -> TestResult<(
             "source-only fixture recovered semantic definitions",
         )
     })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn recovers_an_exact_schema_and_its_unicode_source_origin() -> TestResult<()> {
+    with_test_database(|database| async move {
+        kernel(&database)?.bootstrap().await?;
+        let expected = install_schema_revision(&database).await?;
+
+        let recovered = kernel(&database)?.recover().await?;
+
+        require(
+            recovered.source().units() == [expected.unit],
+            "schema recovery changed exact retained source",
+        )?;
+        require(
+            recovered.catalogue().schemas() == [expected.schema],
+            "schema recovery changed the exact schema definition",
+        )?;
+        require(
+            recovered.origins() == [expected.origin],
+            "schema recovery changed the exact source origin",
+        )?;
+        require(
+            recovered.catalogue().object_types().is_empty()
+                && recovered.catalogue().functions().is_empty(),
+            "schema recovery invented later catalogue members",
+        )
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn rejects_tampered_schema_name_and_incomplete_origin() -> TestResult<()> {
+    reject_schema_tamper(
+        "UPDATE _orna_kernel.catalogue_schemas
+         SET name_parts = ARRAY['tampered']",
+        ExpectedRecoveryError::Durable("_orna_kernel.catalogue_revisions"),
+    )
+    .await?;
+    reject_schema_tamper(
+        "ALTER TABLE _orna_kernel.catalogue_schemas
+             DROP CONSTRAINT catalogue_schemas_source_origin_check;
+         UPDATE _orna_kernel.catalogue_schemas SET source_end = NULL",
+        ExpectedRecoveryError::Durable("_orna_kernel.catalogue_schemas"),
+    )
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn rejects_schema_origin_from_another_bundle_or_invalid_span() -> TestResult<()> {
+    reject_schema_tamper(
+        "INSERT INTO _orna_kernel.source_bundles (id, content_hash)
+         VALUES (
+             decode(repeat('71', 16), 'hex'),
+             decode(repeat('00', 32), 'hex')
+         );
+         INSERT INTO _orna_kernel.source_units
+             (id, bundle_id, ordinal, logical_path, content, content_hash)
+         VALUES (
+             decode(repeat('72', 16), 'hex'),
+             decode(repeat('71', 16), 'hex'),
+             0,
+             'other.orna',
+             'other',
+             decode(repeat('00', 32), 'hex')
+         );
+         UPDATE _orna_kernel.catalogue_schemas
+         SET source_unit_id = decode(repeat('72', 16), 'hex')",
+        ExpectedRecoveryError::Revision,
+    )
+    .await?;
+    reject_schema_tamper(
+        "UPDATE _orna_kernel.catalogue_schemas SET source_end = 999",
+        ExpectedRecoveryError::Revision,
+    )
+    .await?;
+    reject_schema_tamper(
+        "UPDATE _orna_kernel.catalogue_schemas SET source_start = 11",
+        ExpectedRecoveryError::Revision,
+    )
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn rejects_tampered_schema_catalogue_hash() -> TestResult<()> {
+    reject_schema_tamper(
+        "UPDATE _orna_kernel.catalogue_revisions
+         SET content_hash = decode(repeat('73', 32), 'hex')
+         WHERE id = (SELECT catalogue_revision_id FROM _orna_kernel.active_revision)",
+        ExpectedRecoveryError::Durable("_orna_kernel.catalogue_revisions"),
+    )
     .await
 }
 
@@ -132,8 +232,16 @@ async fn rejects_semantic_and_physical_state_that_this_slice_cannot_recover() ->
         "INSERT INTO _orna_kernel.catalogue_schemas
             (catalogue_revision_id, schema_id, name_parts)
          SELECT catalogue_revision_id, decode(repeat('a1', 16), 'hex'), ARRAY['unexpected']
+         FROM _orna_kernel.active_revision;
+         INSERT INTO _orna_kernel.catalogue_object_types
+            (catalogue_revision_id, type_id, schema_id, name_parts)
+         SELECT
+             catalogue_revision_id,
+             decode(repeat('a2', 16), 'hex'),
+             decode(repeat('a1', 16), 'hex'),
+             ARRAY['unexpected', 'object']
          FROM _orna_kernel.active_revision",
-        "_orna_kernel.catalogue_schemas",
+        "_orna_kernel.catalogue_object_types",
     )
     .await?;
     reject_unsupported_state(
@@ -198,6 +306,21 @@ async fn rejects_a_multi_revision_catalogue_and_source_ancestry_cycle() -> TestR
 enum ExpectedRecoveryError {
     Canonical,
     Durable(&'static str),
+    Revision,
+}
+
+async fn reject_schema_tamper(
+    statement: &'static str,
+    expected: ExpectedRecoveryError,
+) -> TestResult<()> {
+    with_test_database(|database| async move {
+        kernel(&database)?.bootstrap().await?;
+        install_schema_revision(&database).await?;
+        run_batch(&database, statement).await?;
+
+        require_expected_error(recovery_error(&database).await?, expected)
+    })
+    .await
 }
 
 async fn reject_source_tamper(
@@ -312,6 +435,89 @@ async fn install_source_only_revision(
     finish_session(operation_result, session.shutdown().await, "source fixture")
 }
 
+struct SchemaFixture {
+    unit: StoredSourceUnit,
+    schema: SchemaDefinition,
+    origin: DefinitionOrigin,
+}
+
+async fn install_schema_revision(database: &TestDatabase) -> TestResult<SchemaFixture> {
+    let unit = install_source_only_revision(database, SCHEMA_SOURCE).await?;
+    let session = database.open().await?;
+    let operation_result: TestResult<SchemaFixture> = async {
+        let row = session
+            .client()
+            .query_one(
+                "SELECT catalogue_revision_id
+                 FROM _orna_kernel.active_revision
+                 WHERE singleton = true",
+                &[],
+            )
+            .await?;
+        let catalogue = CatalogueRevisionId::from_bytes(exact_identity(
+            row.try_get("catalogue_revision_id")?,
+            "active catalogue revision identity",
+        )?);
+        let schema = SchemaDefinition::new(
+            SchemaId::from_bytes([0x61; 16]),
+            QualifiedSemanticName::new(["café"])?,
+        );
+        let origin = DefinitionOrigin::new(
+            DefinitionIdentity::Schema(schema.id()),
+            SourceOrigin::new(
+                unit.id(),
+                0,
+                u32::try_from(SCHEMA_SOURCE.trim_end_matches('\n').len())?,
+            )?,
+        );
+        let snapshot = CatalogueSnapshot::new(catalogue, vec![schema.clone()], Vec::new())?;
+        let catalogue_hash =
+            catalogue_digest(&snapshot, &[], &[], std::slice::from_ref(&origin), &[])?;
+        let name_parts = schema.name().parts().to_vec();
+        let source = origin.source();
+
+        session.client().batch_execute("BEGIN").await?;
+        session
+            .client()
+            .execute(
+                "INSERT INTO _orna_kernel.catalogue_schemas
+                    (catalogue_revision_id, schema_id, name_parts,
+                     source_unit_id, source_start, source_end)
+                 VALUES ($1, $2, $3, $4, $5, $6)",
+                &[
+                    &catalogue.to_bytes().to_vec(),
+                    &schema.id().to_bytes().to_vec(),
+                    &name_parts,
+                    &source.source_unit().to_bytes().to_vec(),
+                    &i64::from(source.byte_start()),
+                    &i64::from(source.byte_end()),
+                ],
+            )
+            .await?;
+        session
+            .client()
+            .execute(
+                "UPDATE _orna_kernel.catalogue_revisions
+                 SET content_hash = $2
+                 WHERE id = $1",
+                &[
+                    &catalogue.to_bytes().to_vec(),
+                    &catalogue_hash.to_bytes().to_vec(),
+                ],
+            )
+            .await?;
+        session.client().batch_execute("COMMIT").await?;
+
+        Ok(SchemaFixture {
+            unit,
+            schema,
+            origin,
+        })
+    }
+    .await;
+    finish_session(operation_result, session.shutdown().await, "schema fixture")
+}
+
 async fn run_batch(database: &TestDatabase, statement: &str) -> TestResult<()> {
     let session = database.open().await?;
     let operation_result = session
@@ -344,6 +550,9 @@ fn require_expected_error(
             PostgresKernelError::DurableInvariant { relation, .. }
                 if relation == expected_relation
         ),
+        ExpectedRecoveryError::Revision => {
+            matches!(error, PostgresKernelError::RevisionInvariant(_))
+        }
     };
     require(
         matches,

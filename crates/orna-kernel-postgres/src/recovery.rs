@@ -1,13 +1,14 @@
 use std::collections::HashSet;
 
 use orna_core::{
-    CatalogueRevisionId, SourceBundleId, SourceRevisionId, SourceUnitId,
+    CatalogueRevisionId, SchemaId, SourceBundleId, SourceRevisionId, SourceUnitId,
     canonical_hash::{
         catalogue_digest, source_bundle_digest, source_revision_digest, source_unit_content_digest,
     },
-    catalogue::CatalogueSnapshot,
+    catalogue::{CatalogueSnapshot, QualifiedSemanticName, SchemaDefinition},
     revision::{
-        ActiveDatabaseRevision, RevisionPair, Sha256Digest, StoredSourceRevision, StoredSourceUnit,
+        ActiveDatabaseRevision, DefinitionIdentity, DefinitionOrigin, RevisionPair, Sha256Digest,
+        SourceOrigin, StoredSourceRevision, StoredSourceUnit,
     },
 };
 use tokio_postgres::{Client, IsolationLevel, Row, Transaction};
@@ -44,12 +45,17 @@ struct RecoveredRevisionHeader {
     catalogue_hash: Sha256Digest,
 }
 
+struct RecoveredSchema {
+    definition: SchemaDefinition,
+    origin: DefinitionOrigin,
+}
+
 impl PostgresKernel {
     /// Reconstructs and validates the complete active durable database revision.
     ///
-    /// This first recovery slice supports an empty semantic catalogue. It
-    /// fails closed when the active revision contains semantic or physical
-    /// members that this binary cannot reconstruct completely.
+    /// This recovery slice supports schemas without object types or functions.
+    /// It fails closed when the active revision contains later semantic or
+    /// physical members that this binary cannot reconstruct completely.
     pub async fn recover(&self) -> Result<ActiveDatabaseRevision, PostgresKernelError> {
         let mut session = self.open().await?;
         let recovery_result = recover_client(&mut session.client).await;
@@ -78,7 +84,8 @@ async fn recover_client(
     validate_revision_ancestry(&transaction, header.catalogue, header.source).await?;
     reject_unsupported_durable_state(&transaction, header.catalogue).await?;
     let units = load_source_units(&transaction, header.bundle).await?;
-    let active = assemble_empty_revision(header, units)?;
+    let schemas = load_schemas(&transaction, header.catalogue).await?;
+    let active = assemble_revision(header, units, schemas)?;
 
     transaction
         .commit()
@@ -458,8 +465,6 @@ async fn reject_unsupported_durable_state(
     let row = transaction
         .query_one(
             "SELECT
-                (SELECT count(*) FROM _orna_kernel.catalogue_schemas
-                 WHERE catalogue_revision_id = $1) AS catalogue_schemas,
                 (SELECT count(*) FROM _orna_kernel.catalogue_object_types
                  WHERE catalogue_revision_id = $1) AS catalogue_object_types,
                 (SELECT count(*) FROM _orna_kernel.catalogue_fields
@@ -484,7 +489,6 @@ async fn reject_unsupported_durable_state(
         .await
         .map_err(PostgresKernelError::Database)?;
     let unsupported = [
-        ("_orna_kernel.catalogue_schemas", "catalogue_schemas"),
         (
             "_orna_kernel.catalogue_object_types",
             "catalogue_object_types",
@@ -527,11 +531,117 @@ async fn reject_unsupported_durable_state(
             return Err(PostgresKernelError::DurableInvariant {
                 relation,
                 record: catalogue.canonical(),
-                rule: "empty semantic catalogue recovery cannot omit present durable records",
+                rule: "schema-only catalogue recovery cannot omit present durable records",
             });
         }
     }
     Ok(())
+}
+
+async fn load_schemas(
+    transaction: &Transaction<'_>,
+    catalogue: CatalogueRevisionId,
+) -> Result<Vec<RecoveredSchema>, PostgresKernelError> {
+    let rows = transaction
+        .query(
+            "SELECT
+                catalogue_revision_id,
+                schema_id,
+                name_parts,
+                source_unit_id,
+                source_start,
+                source_end
+             FROM _orna_kernel.catalogue_schemas
+             WHERE catalogue_revision_id = $1
+             ORDER BY schema_id",
+            &[&catalogue.to_bytes().to_vec()],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?;
+
+    rows.iter()
+        .enumerate()
+        .map(|(index, row)| decode_schema(row, index, catalogue))
+        .collect()
+}
+
+fn decode_schema(
+    row: &Row,
+    row_index: usize,
+    expected_catalogue: CatalogueRevisionId,
+) -> Result<RecoveredSchema, PostgresKernelError> {
+    const RELATION: &str = "_orna_kernel.catalogue_schemas";
+    let record = DurableRecord::new(RELATION, format!("row={row_index}"));
+    let catalogue = CatalogueRevisionId::from_bytes(identity_bytes(
+        record.column(
+            row,
+            "catalogue_revision_id",
+            "schema catalogue revision identity must be 16 bytes",
+        )?,
+        &record,
+        "schema catalogue revision identity must be 16 bytes",
+    )?);
+    if catalogue != expected_catalogue {
+        return Err(record.invariant("schema must belong to the selected catalogue revision"));
+    }
+
+    let id = SchemaId::from_bytes(identity_bytes(
+        record.column(row, "schema_id", "schema identity must be 16 bytes")?,
+        &record,
+        "schema identity must be 16 bytes",
+    )?);
+    let record = DurableRecord::new(RELATION, id.canonical());
+    let name_parts: Vec<String> = record.column(
+        row,
+        "name_parts",
+        "schema name parts must be an exact PostgreSQL text array",
+    )?;
+    let name = QualifiedSemanticName::new(name_parts)
+        .map_err(|_| record.invariant("schema name parts must form one exact semantic name"))?;
+
+    let source_unit: Option<Vec<u8>> = record.column(
+        row,
+        "source_unit_id",
+        "schema source origin must contain a source unit identity",
+    )?;
+    let source_start: Option<i64> = record.column(
+        row,
+        "source_start",
+        "schema source origin start must be a non-negative bigint",
+    )?;
+    let source_end: Option<i64> = record.column(
+        row,
+        "source_end",
+        "schema source origin end must be a non-negative bigint",
+    )?;
+    let (source_unit, source_start, source_end) = match (source_unit, source_start, source_end) {
+        (Some(source_unit), Some(source_start), Some(source_end)) => {
+            (source_unit, source_start, source_end)
+        }
+        _ => {
+            return Err(record.invariant(
+                "schema source origin must contain source unit, start, and end values",
+            ));
+        }
+    };
+    let source_unit = SourceUnitId::from_bytes(identity_bytes(
+        source_unit,
+        &record,
+        "schema source unit identity must be 16 bytes",
+    )?);
+    let source_start = u32_from_i64(
+        source_start,
+        &record,
+        "schema source origin start must fit u32",
+    )?;
+    let source_end = u32_from_i64(source_end, &record, "schema source origin end must fit u32")?;
+    let origin = SourceOrigin::new(source_unit, source_start, source_end)
+        .map_err(PostgresKernelError::RevisionInvariant)?;
+
+    Ok(RecoveredSchema {
+        definition: SchemaDefinition::new(id, name),
+        origin: DefinitionOrigin::new(DefinitionIdentity::Schema(id), origin),
+    })
 }
 
 async fn load_source_units(
@@ -646,9 +756,10 @@ fn decode_source_unit(
         .map_err(PostgresKernelError::RevisionInvariant)
 }
 
-fn assemble_empty_revision(
+fn assemble_revision(
     header: RecoveredRevisionHeader,
     units: Vec<StoredSourceUnit>,
+    schemas: Vec<RecoveredSchema>,
 ) -> Result<ActiveDatabaseRevision, PostgresKernelError> {
     let bundle_record =
         DurableRecord::new("_orna_kernel.source_bundles", header.bundle.canonical());
@@ -677,20 +788,13 @@ fn assemble_empty_revision(
             .invariant("source revision digest must match its bundle, parent, and bundle digest"));
     }
 
-    let catalogue = CatalogueSnapshot::new(header.catalogue, Vec::new(), Vec::new())
+    let (schemas, origins) = schemas
+        .into_iter()
+        .map(|schema| (schema.definition, schema.origin))
+        .unzip();
+    let catalogue = CatalogueSnapshot::new(header.catalogue, schemas, Vec::new())
         .map_err(PostgresKernelError::CatalogueSnapshot)?;
-    let computed_catalogue_hash = catalogue_digest(&catalogue, &[], &[], &[], &[])
-        .map_err(PostgresKernelError::CanonicalHash)?;
-    if computed_catalogue_hash != header.catalogue_hash {
-        let catalogue_record = DurableRecord::new(
-            "_orna_kernel.catalogue_revisions",
-            header.catalogue.canonical(),
-        );
-        return Err(catalogue_record
-            .invariant("catalogue digest must match the exact empty semantic catalogue"));
-    }
-
-    ActiveDatabaseRevision::new_with_history(
+    let active = ActiveDatabaseRevision::new_with_history(
         RevisionPair::new(header.source, header.catalogue),
         source,
         catalogue,
@@ -698,10 +802,28 @@ fn assemble_empty_revision(
         Vec::new(),
         Vec::new(),
         Vec::new(),
-        Vec::new(),
+        origins,
         Vec::new(),
     )
-    .map_err(PostgresKernelError::RevisionInvariant)
+    .map_err(PostgresKernelError::RevisionInvariant)?;
+    let computed_catalogue_hash = catalogue_digest(
+        active.catalogue(),
+        active.function_revisions(),
+        active.expressions(),
+        active.origins(),
+        active.references(),
+    )
+    .map_err(PostgresKernelError::CanonicalHash)?;
+    if computed_catalogue_hash != active.catalogue_hash() {
+        let catalogue_record = DurableRecord::new(
+            "_orna_kernel.catalogue_revisions",
+            header.catalogue.canonical(),
+        );
+        return Err(catalogue_record
+            .invariant("catalogue digest must match the exact recovered schema catalogue"));
+    }
+
+    Ok(active)
 }
 
 #[cfg(test)]
@@ -716,7 +838,7 @@ mod tests {
         revision::StoredSourceUnit,
     };
 
-    use super::{RecoveredRevisionHeader, assemble_empty_revision};
+    use super::{RecoveredRevisionHeader, assemble_revision};
 
     #[test]
     fn assembles_the_exact_empty_semantic_revision() {
@@ -731,7 +853,7 @@ mod tests {
         let catalogue_hash =
             catalogue_digest(&empty_catalogue, &[], &[], &[], &[]).expect("empty catalogue hash");
 
-        let recovered = assemble_empty_revision(
+        let recovered = assemble_revision(
             RecoveredRevisionHeader {
                 bundle,
                 source,
@@ -741,6 +863,7 @@ mod tests {
                 source_hash,
                 catalogue_hash,
             },
+            Vec::new(),
             Vec::new(),
         )
         .expect("exact empty revision");
@@ -765,7 +888,7 @@ mod tests {
             .expect("empty source revision hash");
 
         assert!(
-            assemble_empty_revision(
+            assemble_revision(
                 RecoveredRevisionHeader {
                     bundle,
                     source,
@@ -775,6 +898,7 @@ mod tests {
                     source_hash,
                     catalogue_hash: bundle_hash,
                 },
+                Vec::new(),
                 Vec::new(),
             )
             .is_err()
@@ -804,7 +928,7 @@ mod tests {
         let catalogue_hash =
             catalogue_digest(&empty_catalogue, &[], &[], &[], &[]).expect("empty catalogue hash");
 
-        let recovered = assemble_empty_revision(
+        let recovered = assemble_revision(
             RecoveredRevisionHeader {
                 bundle,
                 source,
@@ -815,6 +939,7 @@ mod tests {
                 catalogue_hash,
             },
             units,
+            Vec::new(),
         )
         .expect("empty semantic revision with source");
 
