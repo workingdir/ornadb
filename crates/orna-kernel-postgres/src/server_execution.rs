@@ -28,15 +28,15 @@ use tokio_postgres::{
 
 use crate::{
     PostgresKernel, PostgresKernelError,
-    physical::establish_trusted_search_path,
-    recovery::recover_active_revision,
+    server_runtime::{
+        ExpectedDefinitionReference, ReferenceReplayMismatch, configure_and_recover, postgres_type,
+        validate_function_reference_replay,
+    },
     storage::{DATA_SCHEMA, OBJECT_ID_COLUMN, field_name, relation_name},
 };
 
 const SERVER_PLAN_FORMAT: &str = server_plan::FORMAT_IDENTITY;
 const SERVER_PLAN_VERSION: u32 = server_plan::FORMAT_VERSION;
-const STATEMENT_TIMEOUT: &str = "SET LOCAL statement_timeout = '30s'";
-const LOCK_TIMEOUT: &str = "SET LOCAL lock_timeout = '5s'";
 const ROW_LIMIT: usize = 10_000;
 const CELL_LIMIT: usize = 1_000_000;
 const PAYLOAD_LIMIT: usize = 16 * 1024 * 1024;
@@ -466,16 +466,7 @@ async fn execute_transaction(
     function_id: FunctionId,
     test_barrier: Option<&SelectTestBarrier>,
 ) -> Result<ServerSelectResult, PostgresKernelError> {
-    establish_trusted_search_path(transaction).await?;
-    transaction
-        .batch_execute(STATEMENT_TIMEOUT)
-        .await
-        .map_err(PostgresKernelError::Database)?;
-    transaction
-        .batch_execute(LOCK_TIMEOUT)
-        .await
-        .map_err(PostgresKernelError::Database)?;
-    let active = recover_active_revision(transaction).await?;
+    let active = configure_and_recover(transaction).await?;
     let function = active
         .catalogue()
         .functions()
@@ -891,63 +882,25 @@ fn validate_reference_evidence(
     function: &FunctionDefinition,
     plan: &ServerPlan,
 ) -> Result<(), PostgresKernelError> {
-    let expected = expected_references(function, plan);
-    let actual = active
-        .references()
-        .iter()
-        .filter(|reference| {
-            reference.source_function() == function.id()
-                && reference.source_revision() == function.current_revision()
-        })
-        .collect::<Vec<_>>();
-    validate_reference_sequence(function.id(), &actual, &expected)
+    let expected = expected_body_references(plan);
+    validate_function_reference_replay(active, function, &expected).map_err(|mismatch| {
+        let rule = match mismatch {
+            ReferenceReplayMismatch::Count => {
+                "reference count must match signature and plan traversal"
+            }
+            ReferenceReplayMismatch::Sequence => {
+                "references must be ordered signature evidence followed by plan traversal"
+            }
+        };
+        reference_error(function.id(), rule)
+    })
 }
 
-fn validate_reference_sequence(
-    function: FunctionId,
-    actual: &[&orna_core::revision::DefinitionReference],
-    expected: &[ExpectedReference],
-) -> Result<(), PostgresKernelError> {
-    if actual.len() != expected.len() {
-        return Err(reference_error(
-            function,
-            "reference count must match signature and plan traversal",
-        ));
-    }
-    for (ordinal, (reference, expected)) in actual.iter().zip(expected).enumerate() {
-        if reference.ordinal() != ordinal as u32
-            || reference.kind() != expected.kind
-            || reference.target() != expected.target
-        {
-            return Err(reference_error(
-                function,
-                "references must be ordered signature evidence followed by plan traversal",
-            ));
-        }
-    }
-    Ok(())
-}
-
-#[derive(Clone, Copy)]
-struct ExpectedReference {
-    kind: DefinitionReferenceKind,
-    target: DefinitionReferenceTarget,
-}
-
-fn expected_references(function: &FunctionDefinition, plan: &ServerPlan) -> Vec<ExpectedReference> {
-    let mut expected = Vec::new();
-    for parameter in function.parameters() {
-        add_signature_reference(&mut expected, parameter.resolved_type());
-    }
-    if let FunctionReturn::Rows(columns) = function.return_type() {
-        for column in columns {
-            add_signature_reference(&mut expected, column.resolved_type());
-        }
-    }
-    expected.push(ExpectedReference {
-        kind: DefinitionReferenceKind::QueryObject,
-        target: DefinitionReferenceTarget::ObjectType(plan.scan.object_type),
-    });
+fn expected_body_references(plan: &ServerPlan) -> Vec<ExpectedDefinitionReference> {
+    let mut expected = vec![ExpectedDefinitionReference::new(
+        DefinitionReferenceKind::QueryObject,
+        DefinitionReferenceTarget::ObjectType(plan.scan.object_type),
+    )];
     for expression in &plan.projections {
         add_expression_references(&mut expected, plan.scan.object_type, expression);
     }
@@ -960,35 +913,28 @@ fn expected_references(function: &FunctionDefinition, plan: &ServerPlan) -> Vec<
     expected
 }
 
-fn add_signature_reference(expected: &mut Vec<ExpectedReference>, resolved_type: ResolvedType) {
-    if let ResolvedType::Reference { target } = resolved_type {
-        expected.push(ExpectedReference {
-            kind: DefinitionReferenceKind::ObjectReference,
-            target: DefinitionReferenceTarget::ObjectType(target),
-        });
-    }
-}
-
 fn add_expression_references(
-    expected: &mut Vec<ExpectedReference>,
+    expected: &mut Vec<ExpectedDefinitionReference>,
     scan: TypeId,
     expression: &Expression,
 ) {
     match &expression.kind {
-        ExpressionKind::ObjectReference { .. } => expected.push(ExpectedReference {
-            kind: DefinitionReferenceKind::ObjectReference,
-            target: DefinitionReferenceTarget::ObjectType(scan),
-        }),
+        ExpressionKind::ObjectReference { .. } => {
+            expected.push(ExpectedDefinitionReference::new(
+                DefinitionReferenceKind::ObjectReference,
+                DefinitionReferenceTarget::ObjectType(scan),
+            ));
+        }
         ExpressionKind::BooleanLiteral { .. } => {}
         ExpressionKind::FieldPath { steps, .. } => {
             for step in steps {
-                expected.push(ExpectedReference {
-                    kind: DefinitionReferenceKind::QueryField,
-                    target: DefinitionReferenceTarget::Field {
+                expected.push(ExpectedDefinitionReference::new(
+                    DefinitionReferenceKind::QueryField,
+                    DefinitionReferenceTarget::Field {
                         owner: step.owner,
                         field: step.field,
                     },
-                });
+                ));
             }
         }
         ExpressionKind::Equality { left, right } => {
@@ -1309,20 +1255,11 @@ fn validate_prepared_columns(
 }
 
 fn expected_postgres_type(resolved_type: ResolvedType) -> Result<Type, PostgresKernelError> {
-    match resolved_type {
-        ResolvedType::Scalar(StandardScalar::Boolean) => Ok(Type::BOOL),
-        ResolvedType::Scalar(StandardScalar::Integer) => Ok(Type::INT4),
-        ResolvedType::Scalar(StandardScalar::BigInt) => Ok(Type::INT8),
-        ResolvedType::Scalar(StandardScalar::Float) => Ok(Type::FLOAT8),
-        ResolvedType::Scalar(StandardScalar::CharacterLargeObject) => Ok(Type::TEXT),
-        ResolvedType::Scalar(StandardScalar::BinaryLargeObject)
-        | ResolvedType::Reference { .. } => Ok(Type::BYTEA),
-        ResolvedType::Scalar(_) | ResolvedType::Named(_) => {
-            Err(server_error(ServerSelectError::PreparedResult {
-                rule: "result type is outside the initial runtime subset",
-            }))
-        }
-    }
+    postgres_type(resolved_type).ok_or_else(|| {
+        server_error(ServerSelectError::PreparedResult {
+            rule: "result type is outside the initial runtime subset",
+        })
+    })
 }
 
 async fn stream_rows(
@@ -1557,7 +1494,7 @@ fn reference_error(function: FunctionId, rule: &'static str) -> PostgresKernelEr
 mod tests {
     use orna_artifact::server_plan::{Scan, ValueType};
     use orna_core::{
-        CatalogueRevisionId, FieldId, SchemaId, SourceUnitId,
+        CatalogueRevisionId, FieldId, SchemaId,
         catalogue::{
             CatalogueSnapshot, FieldDefinition, FunctionReturnColumnDefinition,
             ObjectTypeDefinition, QualifiedSemanticName, SchemaDefinition,
@@ -1776,11 +1713,12 @@ mod tests {
         };
         let mut references = Vec::new();
         add_expression_references(&mut references, source, &expression);
-        assert_eq!(references.len(), 1);
-        assert_eq!(references[0].kind, DefinitionReferenceKind::ObjectReference);
         assert_eq!(
-            references[0].target,
-            DefinitionReferenceTarget::ObjectType(source)
+            references,
+            vec![ExpectedDefinitionReference::new(
+                DefinitionReferenceKind::ObjectReference,
+                DefinitionReferenceTarget::ObjectType(source),
+            )]
         );
     }
 
@@ -1967,98 +1905,6 @@ mod tests {
             context_from_result(&result),
             ServerSelectContext::new(pair, result.function(), result.function_revision())
         );
-    }
-
-    #[test]
-    fn reference_evidence_rejects_missing_extra_and_reordered_records() {
-        let function = FunctionId::from_bytes([0x71; 16]);
-        let revision = FunctionRevisionId::from_bytes([0x72; 16]);
-        let first = DefinitionReferenceTarget::ObjectType(TypeId::from_bytes([0x73; 16]));
-        let second = DefinitionReferenceTarget::Field {
-            owner: TypeId::from_bytes([0x74; 16]),
-            field: FieldId::from_bytes([0x75; 16]),
-        };
-        let expected = [
-            ExpectedReference {
-                kind: DefinitionReferenceKind::QueryObject,
-                target: first,
-            },
-            ExpectedReference {
-                kind: DefinitionReferenceKind::QueryField,
-                target: second,
-            },
-        ];
-        let source =
-            orna_core::revision::SourceOrigin::new(SourceUnitId::from_bytes([0x76; 16]), 0, 0)
-                .unwrap();
-        let records = [
-            orna_core::revision::DefinitionReference::new(
-                function,
-                revision,
-                0,
-                first,
-                DefinitionReferenceKind::QueryObject,
-                source,
-            ),
-            orna_core::revision::DefinitionReference::new(
-                function,
-                revision,
-                1,
-                second,
-                DefinitionReferenceKind::QueryField,
-                source,
-            ),
-        ];
-        assert!(
-            validate_reference_sequence(function, &[&records[0], &records[1]], &expected).is_ok()
-        );
-        assert!(validate_reference_sequence(function, &[&records[0]], &expected).is_err());
-        assert!(
-            validate_reference_sequence(
-                function,
-                &[&records[0], &records[1], &records[1]],
-                &expected
-            )
-            .is_err()
-        );
-        assert!(
-            validate_reference_sequence(function, &[&records[1], &records[0]], &expected).is_err()
-        );
-    }
-
-    #[test]
-    fn generated_result_types_cover_the_runtime_subset_only() {
-        assert_eq!(
-            expected_postgres_type(ResolvedType::scalar(StandardScalar::Boolean)).unwrap(),
-            Type::BOOL
-        );
-        assert_eq!(
-            expected_postgres_type(ResolvedType::scalar(StandardScalar::Integer)).unwrap(),
-            Type::INT4
-        );
-        assert_eq!(
-            expected_postgres_type(ResolvedType::scalar(StandardScalar::BigInt)).unwrap(),
-            Type::INT8
-        );
-        assert_eq!(
-            expected_postgres_type(ResolvedType::scalar(StandardScalar::Float)).unwrap(),
-            Type::FLOAT8
-        );
-        assert_eq!(
-            expected_postgres_type(ResolvedType::scalar(StandardScalar::CharacterLargeObject))
-                .unwrap(),
-            Type::TEXT
-        );
-        assert_eq!(
-            expected_postgres_type(ResolvedType::scalar(StandardScalar::BinaryLargeObject))
-                .unwrap(),
-            Type::BYTEA
-        );
-        assert_eq!(
-            expected_postgres_type(ResolvedType::reference(TypeId::from_bytes([7; 16]))).unwrap(),
-            Type::BYTEA
-        );
-        assert!(expected_postgres_type(ResolvedType::scalar(StandardScalar::Decimal)).is_err());
     }
 
     #[test]
