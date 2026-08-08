@@ -9,6 +9,7 @@ pub mod physical;
 pub mod revision;
 pub mod source;
 pub mod types;
+pub mod value;
 
 use std::{fmt, str::FromStr};
 
