@@ -1078,6 +1078,15 @@ where
                 ));
                 return None;
             }
+            if !supports_server_select_equality(left.value_type.semantic_type) {
+                diagnostics.push(diagnostic(
+                    DiagnosticCode::DomainIncompatible,
+                    "SERVER SELECT equality supports only BOOLEAN, INTEGER, BIGINT, BYTES, and REF values",
+                    logical_path,
+                    span,
+                ));
+                return None;
+            }
 
             Some(ExpressionIr {
                 value_type: ValueType {
@@ -1091,6 +1100,18 @@ where
             })
         }
     }
+}
+
+pub(crate) fn supports_server_select_equality<T>(semantic_type: SemanticType<T>) -> bool {
+    matches!(
+        semantic_type,
+        SemanticType::Scalar(
+            StandardScalar::Boolean
+                | StandardScalar::Integer
+                | StandardScalar::BigInt
+                | StandardScalar::BinaryLargeObject
+        ) | SemanticType::Reference { .. }
+    )
 }
 
 fn check_field_path<T, F>(
@@ -1216,7 +1237,7 @@ mod tests {
     use super::{
         ExpressionKind, IdentitySelectedQueryReference, NullOrder, QueryParameter,
         QueryReferenceKind, QueryReferenceTarget, SortDirection, check_identity_selected_query_in,
-        check_query, check_query_in,
+        check_query, check_query_in, supports_server_select_equality,
     };
     use crate::DiagnosticCode;
     use crate::resolver::{QueryCatalogue, QueryField, SemanticType};
@@ -1226,6 +1247,7 @@ mod tests {
     const ASSIGNEE_FIELD: FieldId = FieldId::from_bytes([11; 16]);
     const COMPLETED_FIELD: FieldId = FieldId::from_bytes([12; 16]);
     const TITLE_FIELD: FieldId = FieldId::from_bytes([13; 16]);
+    const SCORE_FIELD: FieldId = FieldId::from_bytes([14; 16]);
     const PERSON_NAME_FIELD: FieldId = FieldId::from_bytes([21; 16]);
     const SELECTOR_OWNER: FunctionId = FunctionId::from_bytes([31; 16]);
     const SELECTOR_PARAMETER: ParameterId = ParameterId::from_bytes([32; 16]);
@@ -1259,6 +1281,13 @@ mod tests {
                             2,
                             ResolvedType::scalar(StandardScalar::CharacterLargeObject),
                             true,
+                        ),
+                        field(
+                            SCORE_FIELD,
+                            "score",
+                            3,
+                            ResolvedType::scalar(StandardScalar::Float),
+                            false,
                         ),
                     ],
                 ),
@@ -1449,6 +1478,67 @@ mod tests {
             diagnostics[0].location().span().start(),
             query.span.start + query_source.find("t.completed = t.title").unwrap()
         );
+    }
+
+    #[test]
+    fn rejects_unsupported_server_equality_types_in_v1_and_v2() {
+        let message =
+            "SERVER SELECT equality supports only BOOLEAN, INTEGER, BIGINT, BYTES, and REF values";
+        for expression in ["t.title = t.title", "t.score = t.score"] {
+            let v1 = query(&format!("SELECT {expression} FROM tasks.task t"));
+            let diagnostics = check_query(&v1, &catalogue(), "tasks.orna").unwrap_err();
+            assert_one_diagnostic(
+                &diagnostics,
+                DiagnosticCode::DomainIncompatible,
+                message,
+                v1.projections[0].span(),
+            );
+
+            let v2 = query(&format!(
+                "SELECT {expression} FROM tasks.task t WHERE REF(t) = p_task"
+            ));
+            let diagnostics = check_identity_selected_query_in(
+                &v2,
+                &catalogue(),
+                SELECTOR_OWNER,
+                &[selector_parameter(
+                    "p_task",
+                    SemanticType::reference(TASK_TYPE),
+                )],
+                "tasks.orna",
+            )
+            .unwrap_err();
+            assert_one_diagnostic(
+                &diagnostics,
+                DiagnosticCode::DomainIncompatible,
+                message,
+                v2.projections[0].span(),
+            );
+        }
+    }
+
+    #[test]
+    fn server_select_equality_allowlist_is_exact() {
+        for scalar in StandardScalar::ALL {
+            let expected = matches!(
+                scalar,
+                StandardScalar::Boolean
+                    | StandardScalar::Integer
+                    | StandardScalar::BigInt
+                    | StandardScalar::BinaryLargeObject
+            );
+            assert_eq!(
+                supports_server_select_equality(SemanticType::<TypeId>::scalar(scalar)),
+                expected,
+                "unexpected equality support for {scalar:?}"
+            );
+        }
+        assert!(supports_server_select_equality(SemanticType::reference(
+            TASK_TYPE
+        )));
+        assert!(!supports_server_select_equality(SemanticType::Named(
+            TASK_TYPE
+        )));
     }
 
     #[test]
