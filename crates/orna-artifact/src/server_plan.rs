@@ -1,4 +1,4 @@
-//! Canonical `orna.server-plan` artifact format, version 1.
+//! Canonical `orna.server-plan` artifact formats.
 //!
 //! The version-1 byte order is:
 //!
@@ -17,11 +17,16 @@
 //! nullability byte, then its kind payload. Identifiers are their raw opaque
 //! 16-byte Orna representations. This format contains no source names, source
 //! spans, PostgreSQL names, or Rust serialisation data.
+//!
+//! Version 2 uses the same envelope, scan, and projection encoding. It fixes
+//! selection to `REF(input 0) = selector_parameter`, adds the private selector
+//! parameter expression tag 5 only in that position, and requires zero
+//! ordering terms.
 
 use std::fmt;
 
 use orna_core::{
-    FieldId, TypeId,
+    FieldId, FunctionId, ParameterId, TypeId,
     types::{ResolvedType, StandardScalar},
 };
 
@@ -29,14 +34,16 @@ use orna_core::{
 pub const FORMAT_IDENTITY: &str = "orna.server-plan";
 /// The Orna language version whose semantics this artifact version executes.
 pub const LANGUAGE_VERSION_IDENTITY: &str = "orna.language/1";
-/// The only supported server-plan artifact version.
+/// The version used by no-argument SERVER query artifacts.
 pub const FORMAT_VERSION: u32 = 1;
+/// The version used by identity-selected SERVER query artifacts.
+pub const IDENTITY_SELECTED_FORMAT_VERSION: u32 = 2;
 /// The exact first eight bytes of every server-plan artifact.
 pub const MAGIC: [u8; 8] = *b"ORNASP\0\0";
 
-/// The maximum number of projections in one version-1 plan.
+/// The maximum number of projections in one server plan.
 pub const MAX_PROJECTIONS: u32 = 1_024;
-/// The maximum number of ordering terms in one version-1 plan.
+/// The maximum number of ordering terms in one server plan.
 pub const MAX_ORDERING: u32 = 1_024;
 /// The maximum number of stable steps in a field path.
 pub const MAX_FIELD_PATH_STEPS: u32 = 64;
@@ -49,6 +56,7 @@ pub const MAX_ARTIFACT_BYTES: usize = 16 * 1024 * 1024;
 
 const PRIMARY_INPUT: u32 = 0;
 const EXACT_INPUT_COUNT: u32 = 1;
+const IDENTITY_SELECTION_EXPRESSION_NODES: u32 = 3;
 
 /// A backend-neutral checked SERVER query plan.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -68,15 +76,7 @@ impl ServerPlan {
     pub fn encode(&self) -> Result<Vec<u8>, ServerPlanError> {
         validate_plan(self)?;
 
-        let mut writer = Writer::new();
-        writer.bytes(&MAGIC);
-        writer.u32(FORMAT_VERSION);
-        writer.u32(EXACT_INPUT_COUNT);
-        encode_scan(&mut writer, self.scan);
-        writer.count("projections", self.projections.len(), MAX_PROJECTIONS)?;
-        for expression in &self.projections {
-            encode_expression(&mut writer, expression, 0)?;
-        }
+        let mut writer = encode_plan_prefix(FORMAT_VERSION, self.scan, &self.projections)?;
         match &self.selection {
             Some(expression) => {
                 writer.boolean("selection presence", true);
@@ -97,35 +97,8 @@ impl ServerPlan {
 
     /// Decodes exactly one canonical version-1 artifact.
     pub fn decode(bytes: &[u8]) -> Result<Self, ServerPlanError> {
-        validate_artifact_size(bytes.len())?;
-        let mut reader = Reader::new(bytes);
-        if reader.array::<8>()? != MAGIC {
-            return Err(ServerPlanError::InvalidMagic);
-        }
-        let version = reader.u32()?;
-        if version != FORMAT_VERSION {
-            return Err(ServerPlanError::UnsupportedVersion(version));
-        }
-        let input_count = reader.u32()?;
-        if input_count != EXACT_INPUT_COUNT {
-            return Err(ServerPlanError::UnexpectedInputCount(input_count));
-        }
-        let scan = decode_scan(&mut reader)?;
-        let projection_count = reader.count("projections", MAX_PROJECTIONS)?;
-        if projection_count == 0 {
-            return Err(ServerPlanError::InvalidModel(
-                "a server plan must contain at least one projection",
-            ));
-        }
-        let mut projections = Vec::with_capacity(projection_count as usize);
-        let mut remaining_expression_nodes = MAX_EXPRESSION_NODES;
-        for _ in 0..projection_count {
-            projections.push(decode_expression(
-                &mut reader,
-                0,
-                &mut remaining_expression_nodes,
-            )?);
-        }
+        let (mut reader, scan, projections, mut remaining_expression_nodes) =
+            decode_plan_prefix(bytes, FORMAT_VERSION)?;
         let selection = match reader.boolean("selection presence")? {
             true => Some(decode_expression(
                 &mut reader,
@@ -156,10 +129,121 @@ impl ServerPlan {
     }
 }
 
-/// The single source object scanned by a version-1 plan.
+/// A checked SERVER query plan with one fixed identity selector.
+///
+/// This separate model prevents the private selector parameter from appearing
+/// in projections or ordering expressions. Its selection is always
+/// `REF(input 0) = selector_parameter` and it has no ordering terms.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IdentitySelectedServerPlan {
+    scan: Scan,
+    projections: Vec<Expression>,
+    selector: IdentitySelector,
+}
+
+impl IdentitySelectedServerPlan {
+    /// Creates a checked identity-selected plan.
+    pub fn new(
+        scan: Scan,
+        projections: impl IntoIterator<Item = Expression>,
+        selector: IdentitySelector,
+    ) -> Result<Self, ServerPlanError> {
+        let plan = Self {
+            scan,
+            projections: collect_projections(projections)?,
+            selector,
+        };
+        validate_identity_selected_plan(&plan)?;
+        Ok(plan)
+    }
+
+    /// Returns the canonical version for identity-selected artifacts.
+    pub const fn format_version(&self) -> u32 {
+        IDENTITY_SELECTED_FORMAT_VERSION
+    }
+
+    /// Returns the single source object scan.
+    pub const fn scan(&self) -> Scan {
+        self.scan
+    }
+
+    /// Returns projection expressions in source order.
+    pub fn projections(&self) -> &[Expression] {
+        &self.projections
+    }
+
+    /// Returns the owner-qualified selector parameter.
+    pub const fn selector(&self) -> IdentitySelector {
+        self.selector
+    }
+
+    /// Encodes this checked plan into canonical version-2 bytes.
+    pub fn encode(&self) -> Result<Vec<u8>, ServerPlanError> {
+        validate_identity_selected_plan(self)?;
+
+        let mut writer = encode_plan_prefix(
+            IDENTITY_SELECTED_FORMAT_VERSION,
+            self.scan,
+            &self.projections,
+        )?;
+        writer.boolean("selection presence", true);
+        encode_identity_selection(&mut writer, self.scan, self.selector)?;
+        writer.count("ordering", 0, MAX_ORDERING)?;
+        let bytes = writer.finish();
+        validate_artifact_size(bytes.len())?;
+        Ok(bytes)
+    }
+
+    /// Decodes exactly one canonical version-2 identity-selected artifact.
+    pub fn decode(bytes: &[u8]) -> Result<Self, ServerPlanError> {
+        let (mut reader, scan, projections, mut remaining_expression_nodes) =
+            decode_plan_prefix(bytes, IDENTITY_SELECTED_FORMAT_VERSION)?;
+        if !reader.boolean("selection presence")? {
+            return Err(ServerPlanError::InvalidModel(
+                "an identity-selected server plan must contain its fixed selection",
+            ));
+        }
+        consume_identity_selection_nodes(&mut remaining_expression_nodes)?;
+        let selector = decode_identity_selection(&mut reader, scan)?;
+        let ordering_count = reader.count("ordering", MAX_ORDERING)?;
+        if ordering_count != 0 {
+            return Err(ServerPlanError::InvalidModel(
+                "an identity-selected server plan must not contain ordering terms",
+            ));
+        }
+        reader.require_finished()?;
+        Self::new(scan, projections, selector)
+    }
+}
+
+/// An owner-qualified parameter used by an identity-selected plan.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IdentitySelector {
+    owner: FunctionId,
+    parameter: ParameterId,
+}
+
+impl IdentitySelector {
+    /// Creates an owner-qualified selector parameter.
+    pub const fn new(owner: FunctionId, parameter: ParameterId) -> Self {
+        Self { owner, parameter }
+    }
+
+    /// Returns the function that owns the selector parameter.
+    pub const fn owner(self) -> FunctionId {
+        self.owner
+    }
+
+    /// Returns the selector parameter identity.
+    pub const fn parameter(self) -> ParameterId {
+        self.parameter
+    }
+}
+
+/// The single source object scanned by a server plan.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Scan {
-    /// The explicit input slot. Version 1 accepts only slot zero.
+    /// The explicit input slot. Server plans accept only slot zero.
     pub input: u32,
     /// The stable identity of the scanned object type.
     pub object_type: TypeId,
@@ -253,13 +337,13 @@ pub struct FieldStep {
 /// An error returned when an artifact cannot be decoded or encoded safely.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ServerPlanError {
-    /// The artifact does not start with the version-1 magic bytes.
+    /// The artifact does not start with the server-plan magic bytes.
     InvalidMagic,
     /// The artifact version is not supported.
     UnsupportedVersion(u32),
-    /// The version-1 artifact did not declare exactly one input.
+    /// The artifact did not declare exactly one input.
     UnexpectedInputCount(u32),
-    /// An input slot is invalid for the version-1 single-scan model.
+    /// An input slot is invalid for the single-scan model.
     InvalidInputSlot(u32),
     /// An enum tag is not defined by this format version.
     InvalidEnumTag {
@@ -275,7 +359,7 @@ pub enum ServerPlanError {
         /// The encoded byte.
         value: u8,
     },
-    /// A length-prefixed collection exceeds the version-1 limit.
+    /// A length-prefixed collection exceeds the server-plan limit.
     CollectionLimit {
         /// The collection category.
         kind: &'static str,
@@ -284,7 +368,7 @@ pub enum ServerPlanError {
         /// The largest valid count.
         maximum: u32,
     },
-    /// The encoded artifact exceeds the version-1 byte limit.
+    /// The encoded artifact exceeds the server-plan byte limit.
     ArtifactSizeLimit {
         /// The supplied artifact size.
         size: usize,
@@ -293,7 +377,7 @@ pub enum ServerPlanError {
     },
     /// A field path contains no field steps.
     EmptyFieldPath,
-    /// An expression tree exceeds the version-1 nesting limit.
+    /// An expression tree exceeds the server-plan nesting limit.
     RecursionLimitExceeded,
     /// A complete plan contains too many expression nodes.
     ExpressionNodeLimitExceeded,
@@ -316,15 +400,12 @@ impl fmt::Display for ServerPlanError {
                 )
             }
             Self::UnexpectedInputCount(count) => {
-                write!(
-                    formatter,
-                    "version-1 server plan requires one input, found {count}"
-                )
+                write!(formatter, "server plan requires one input, found {count}")
             }
             Self::InvalidInputSlot(slot) => {
                 write!(
                     formatter,
-                    "version-1 server plan requires input slot zero, found {slot}"
+                    "server plan requires input slot zero, found {slot}"
                 )
             }
             Self::InvalidEnumTag { kind, tag } => {
@@ -339,20 +420,20 @@ impl fmt::Display for ServerPlanError {
                 maximum,
             } => write!(
                 formatter,
-                "{kind} count {count} exceeds version-1 limit {maximum}"
+                "{kind} count {count} exceeds server-plan limit {maximum}"
             ),
             Self::ArtifactSizeLimit { size, maximum } => write!(
                 formatter,
-                "server plan artifact size {size} exceeds version-1 limit {maximum}"
+                "server plan artifact size {size} exceeds server-plan limit {maximum}"
             ),
             Self::EmptyFieldPath => {
                 formatter.write_str("field path must contain at least one step")
             }
             Self::RecursionLimitExceeded => {
-                formatter.write_str("server plan expression nesting exceeds version-1 limit")
+                formatter.write_str("server plan expression nesting exceeds server-plan limit")
             }
             Self::ExpressionNodeLimitExceeded => {
-                formatter.write_str("server plan expression count exceeds version-1 limit")
+                formatter.write_str("server plan expression count exceeds server-plan limit")
             }
             Self::Truncated => formatter.write_str("truncated orna.server-plan artifact"),
             Self::TrailingBytes => {
@@ -365,20 +446,66 @@ impl fmt::Display for ServerPlanError {
 
 impl std::error::Error for ServerPlanError {}
 
-fn validate_plan(plan: &ServerPlan) -> Result<(), ServerPlanError> {
-    if plan.scan.input != PRIMARY_INPUT {
-        return Err(ServerPlanError::InvalidInputSlot(plan.scan.input));
+fn encode_plan_prefix(
+    version: u32,
+    scan: Scan,
+    projections: &[Expression],
+) -> Result<Writer, ServerPlanError> {
+    let mut writer = Writer::new();
+    writer.bytes(&MAGIC);
+    writer.u32(version);
+    writer.u32(EXACT_INPUT_COUNT);
+    encode_scan(&mut writer, scan);
+    writer.count("projections", projections.len(), MAX_PROJECTIONS)?;
+    for expression in projections {
+        encode_expression(&mut writer, expression, 0)?;
     }
-    validate_count("projections", plan.projections.len(), MAX_PROJECTIONS)?;
-    if plan.projections.is_empty() {
+    Ok(writer)
+}
+
+fn decode_plan_prefix(
+    bytes: &[u8],
+    expected_version: u32,
+) -> Result<(Reader<'_>, Scan, Vec<Expression>, u32), ServerPlanError> {
+    validate_artifact_size(bytes.len())?;
+    let mut reader = Reader::new(bytes);
+    if reader.array::<8>()? != MAGIC {
+        return Err(ServerPlanError::InvalidMagic);
+    }
+    let version = reader.u32()?;
+    if version != expected_version {
+        return Err(ServerPlanError::UnsupportedVersion(version));
+    }
+    let input_count = reader.u32()?;
+    if input_count != EXACT_INPUT_COUNT {
+        return Err(ServerPlanError::UnexpectedInputCount(input_count));
+    }
+    let scan = decode_scan(&mut reader)?;
+    let projection_count = reader.count("projections", MAX_PROJECTIONS)?;
+    if projection_count == 0 {
         return Err(ServerPlanError::InvalidModel(
             "a server plan must contain at least one projection",
         ));
     }
+    let mut projections = Vec::with_capacity(projection_count as usize);
     let mut remaining_expression_nodes = MAX_EXPRESSION_NODES;
-    for expression in &plan.projections {
-        validate_expression(expression, plan.scan, 0, &mut remaining_expression_nodes)?;
+    for _ in 0..projection_count {
+        projections.push(decode_expression(
+            &mut reader,
+            0,
+            &mut remaining_expression_nodes,
+        )?);
     }
+    Ok((reader, scan, projections, remaining_expression_nodes))
+}
+
+fn validate_plan(plan: &ServerPlan) -> Result<(), ServerPlanError> {
+    let mut remaining_expression_nodes = MAX_EXPRESSION_NODES;
+    validate_scan_and_projections(
+        plan.scan,
+        &plan.projections,
+        &mut remaining_expression_nodes,
+    )?;
     if let Some(selection) = &plan.selection {
         validate_expression(selection, plan.scan, 0, &mut remaining_expression_nodes)?;
         if selection.value_type.resolved_type != ResolvedType::scalar(StandardScalar::Boolean) {
@@ -397,6 +524,65 @@ fn validate_plan(plan: &ServerPlan) -> Result<(), ServerPlanError> {
         )?;
     }
     Ok(())
+}
+
+fn validate_identity_selected_plan(
+    plan: &IdentitySelectedServerPlan,
+) -> Result<(), ServerPlanError> {
+    let mut remaining_expression_nodes = MAX_EXPRESSION_NODES;
+    validate_scan_and_projections(
+        plan.scan,
+        &plan.projections,
+        &mut remaining_expression_nodes,
+    )?;
+    consume_identity_selection_nodes(&mut remaining_expression_nodes)?;
+    Ok(())
+}
+
+fn validate_scan_and_projections(
+    scan: Scan,
+    projections: &[Expression],
+    remaining_expression_nodes: &mut u32,
+) -> Result<(), ServerPlanError> {
+    if scan.input != PRIMARY_INPUT {
+        return Err(ServerPlanError::InvalidInputSlot(scan.input));
+    }
+    validate_count("projections", projections.len(), MAX_PROJECTIONS)?;
+    if projections.is_empty() {
+        return Err(ServerPlanError::InvalidModel(
+            "a server plan must contain at least one projection",
+        ));
+    }
+    for expression in projections {
+        validate_expression(expression, scan, 0, remaining_expression_nodes)?;
+    }
+    Ok(())
+}
+
+fn consume_identity_selection_nodes(remaining_nodes: &mut u32) -> Result<(), ServerPlanError> {
+    if *remaining_nodes < IDENTITY_SELECTION_EXPRESSION_NODES {
+        return Err(ServerPlanError::ExpressionNodeLimitExceeded);
+    }
+    *remaining_nodes -= IDENTITY_SELECTION_EXPRESSION_NODES;
+    Ok(())
+}
+
+fn collect_projections(
+    projections: impl IntoIterator<Item = Expression>,
+) -> Result<Vec<Expression>, ServerPlanError> {
+    let mut collected = Vec::new();
+    for (index, projection) in projections.into_iter().enumerate() {
+        let count = index.saturating_add(1);
+        if count > MAX_PROJECTIONS as usize {
+            return Err(ServerPlanError::CollectionLimit {
+                kind: "projections",
+                count: u32::try_from(count).unwrap_or(u32::MAX),
+                maximum: MAX_PROJECTIONS,
+            });
+        }
+        collected.push(projection);
+    }
+    Ok(collected)
 }
 
 fn validate_expression(
@@ -520,6 +706,77 @@ fn decode_scan(reader: &mut Reader<'_>) -> Result<Scan, ServerPlanError> {
         input,
         object_type: reader.type_id()?,
     })
+}
+
+fn identity_selector_value_type(scan: Scan) -> ValueType {
+    ValueType {
+        resolved_type: ResolvedType::reference(scan.object_type),
+        nullable: false,
+    }
+}
+
+fn encode_identity_selection(
+    writer: &mut Writer,
+    scan: Scan,
+    selector: IdentitySelector,
+) -> Result<(), ServerPlanError> {
+    writer.u8(4);
+    encode_value_type(
+        writer,
+        ValueType {
+            resolved_type: ResolvedType::scalar(StandardScalar::Boolean),
+            nullable: false,
+        },
+    );
+    writer.u8(1);
+    encode_value_type(writer, identity_selector_value_type(scan));
+    writer.u32(PRIMARY_INPUT);
+    writer.u8(5);
+    encode_value_type(writer, identity_selector_value_type(scan));
+    writer.function_id(selector.owner);
+    writer.parameter_id(selector.parameter);
+    Ok(())
+}
+
+fn decode_identity_selection(
+    reader: &mut Reader<'_>,
+    scan: Scan,
+) -> Result<IdentitySelector, ServerPlanError> {
+    let equality_tag = reader.u8()?;
+    let equality_type = decode_value_type(reader)?;
+    let expected_boolean = ValueType {
+        resolved_type: ResolvedType::scalar(StandardScalar::Boolean),
+        nullable: false,
+    };
+    if equality_tag != 4 || equality_type != expected_boolean {
+        return Err(ServerPlanError::InvalidModel(
+            "an identity-selected server plan must use its fixed equality selection",
+        ));
+    }
+
+    let object_reference_tag = reader.u8()?;
+    let object_reference_type = decode_value_type(reader)?;
+    let object_reference_input = reader.u32()?;
+    if object_reference_tag != 1
+        || object_reference_type != identity_selector_value_type(scan)
+        || object_reference_input != PRIMARY_INPUT
+    {
+        return Err(ServerPlanError::InvalidModel(
+            "an identity-selected server plan must compare the primary object reference first",
+        ));
+    }
+
+    let parameter_tag = reader.u8()?;
+    let parameter_type = decode_value_type(reader)?;
+    if parameter_tag != 5 || parameter_type != identity_selector_value_type(scan) {
+        return Err(ServerPlanError::InvalidModel(
+            "an identity-selected server plan must compare its exact non-null selector parameter second",
+        ));
+    }
+    Ok(IdentitySelector::new(
+        reader.function_id()?,
+        reader.parameter_id()?,
+    ))
 }
 
 fn encode_expression(
@@ -776,6 +1033,14 @@ impl Writer {
     fn field_id(&mut self, id: FieldId) {
         self.bytes(&id.to_bytes());
     }
+
+    fn function_id(&mut self, id: FunctionId) {
+        self.bytes(&id.to_bytes());
+    }
+
+    fn parameter_id(&mut self, id: ParameterId) {
+        self.bytes(&id.to_bytes());
+    }
 }
 
 struct Reader<'a> {
@@ -842,6 +1107,14 @@ impl<'a> Reader<'a> {
         Ok(FieldId::from_bytes(self.array()?))
     }
 
+    fn function_id(&mut self) -> Result<FunctionId, ServerPlanError> {
+        Ok(FunctionId::from_bytes(self.array()?))
+    }
+
+    fn parameter_id(&mut self) -> Result<ParameterId, ServerPlanError> {
+        Ok(ParameterId::from_bytes(self.array()?))
+    }
+
     fn require_finished(&self) -> Result<(), ServerPlanError> {
         if self.offset == self.bytes.len() {
             Ok(())
@@ -860,6 +1133,8 @@ mod tests {
     const TITLE: FieldId = FieldId::from_bytes([3; 16]);
     const ASSIGNEE: FieldId = FieldId::from_bytes([4; 16]);
     const NAME: FieldId = FieldId::from_bytes([5; 16]);
+    const FUNCTION: FunctionId = FunctionId::from_bytes([6; 16]);
+    const PARAMETER: ParameterId = ParameterId::from_bytes([7; 16]);
 
     fn value_type(resolved_type: ResolvedType, nullable: bool) -> ValueType {
         ValueType {
@@ -959,6 +1234,214 @@ mod tests {
         }
     }
 
+    fn identity_selected_plan() -> IdentitySelectedServerPlan {
+        IdentitySelectedServerPlan::new(
+            Scan {
+                input: 0,
+                object_type: TASK,
+            },
+            [boolean(true)],
+            IdentitySelector::new(FUNCTION, PARAMETER),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn identity_selected_plan_has_a_closed_v2_wire_format() {
+        let plan = identity_selected_plan();
+
+        assert_eq!(plan.format_version(), IDENTITY_SELECTED_FORMAT_VERSION);
+        assert_eq!(plan.scan().object_type, TASK);
+        assert_eq!(plan.projections(), [boolean(true)]);
+        assert_eq!(plan.selector().owner(), FUNCTION);
+        assert_eq!(plan.selector().parameter(), PARAMETER);
+        assert_eq!(
+            plan.encode().unwrap(),
+            b"\x4f\x52\x4e\x41\x53\x50\x00\x00\x00\x00\x00\x02\x00\x00\x00\x01\x00\x00\x00\x00\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x00\x00\x00\x01\x03\x01\x01\x00\x01\x01\x04\x01\x01\x00\x01\x03\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x00\x00\x00\x00\x00\x05\x03\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x00\x06\x06\x06\x06\x06\x06\x06\x06\x06\x06\x06\x06\x06\x06\x06\x06\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x00\x00\x00\x00"
+                .to_vec()
+        );
+    }
+
+    #[test]
+    fn identity_selected_plan_round_trips_and_versions_are_closed() {
+        let identity_selected_plan = identity_selected_plan();
+        let encoded = identity_selected_plan.encode().unwrap();
+        let version_one = plan().encode().unwrap();
+
+        assert_eq!(
+            IdentitySelectedServerPlan::decode(&encoded),
+            Ok(identity_selected_plan)
+        );
+        assert_eq!(
+            IdentitySelectedServerPlan::decode(&encoded)
+                .unwrap()
+                .encode(),
+            Ok(encoded.clone())
+        );
+        assert_eq!(
+            ServerPlan::decode(&encoded),
+            Err(ServerPlanError::UnsupportedVersion(
+                IDENTITY_SELECTED_FORMAT_VERSION
+            ))
+        );
+        assert_eq!(
+            IdentitySelectedServerPlan::decode(&version_one),
+            Err(ServerPlanError::UnsupportedVersion(FORMAT_VERSION))
+        );
+    }
+
+    #[test]
+    fn identity_selected_plan_rejects_corruption_and_noncanonical_selection() {
+        let encoded = identity_selected_plan().encode().unwrap();
+
+        let mut magic = encoded.clone();
+        magic[0] = b'X';
+        assert_eq!(
+            IdentitySelectedServerPlan::decode(&magic),
+            Err(ServerPlanError::InvalidMagic)
+        );
+
+        assert_eq!(
+            IdentitySelectedServerPlan::decode(&encoded[..encoded.len() - 1]),
+            Err(ServerPlanError::Truncated)
+        );
+
+        let mut missing_selection = encoded.clone();
+        missing_selection[45] = 0;
+        assert_eq!(
+            IdentitySelectedServerPlan::decode(&missing_selection),
+            Err(ServerPlanError::InvalidModel(
+                "an identity-selected server plan must contain its fixed selection"
+            ))
+        );
+
+        let mut wrong_selection = encoded.clone();
+        wrong_selection[46] = 3;
+        assert_eq!(
+            IdentitySelectedServerPlan::decode(&wrong_selection),
+            Err(ServerPlanError::InvalidModel(
+                "an identity-selected server plan must use its fixed equality selection"
+            ))
+        );
+
+        let mut ordering = encoded;
+        let ordering_offset = ordering.len() - 4;
+        ordering[ordering_offset..].copy_from_slice(&1_u32.to_be_bytes());
+        assert_eq!(
+            IdentitySelectedServerPlan::decode(&ordering),
+            Err(ServerPlanError::InvalidModel(
+                "an identity-selected server plan must not contain ordering terms"
+            ))
+        );
+    }
+
+    #[test]
+    fn identity_selected_plan_enforces_projection_and_expression_budgets() {
+        assert_eq!(
+            IdentitySelectedServerPlan::new(
+                Scan {
+                    input: 1,
+                    object_type: TASK,
+                },
+                [boolean(true)],
+                IdentitySelector::new(FUNCTION, PARAMETER),
+            ),
+            Err(ServerPlanError::InvalidInputSlot(1))
+        );
+
+        assert_eq!(
+            IdentitySelectedServerPlan::new(
+                Scan {
+                    input: 0,
+                    object_type: TASK,
+                },
+                [],
+                IdentitySelector::new(FUNCTION, PARAMETER),
+            ),
+            Err(ServerPlanError::InvalidModel(
+                "a server plan must contain at least one projection"
+            ))
+        );
+
+        assert_eq!(
+            IdentitySelectedServerPlan::new(
+                Scan {
+                    input: 0,
+                    object_type: TASK,
+                },
+                std::iter::repeat_with(|| boolean(true)).take(MAX_PROJECTIONS as usize + 1),
+                IdentitySelector::new(FUNCTION, PARAMETER),
+            ),
+            Err(ServerPlanError::CollectionLimit {
+                kind: "projections",
+                count: MAX_PROJECTIONS + 1,
+                maximum: MAX_PROJECTIONS,
+            })
+        );
+
+        assert_eq!(
+            IdentitySelectedServerPlan::new(
+                Scan {
+                    input: 0,
+                    object_type: TASK,
+                },
+                [full_boolean_tree(13)],
+                IdentitySelector::new(FUNCTION, PARAMETER),
+            ),
+            Err(ServerPlanError::ExpressionNodeLimitExceeded)
+        );
+
+        let scan = Scan {
+            input: 0,
+            object_type: TASK,
+        };
+        let selector = IdentitySelector::new(FUNCTION, PARAMETER);
+        let projections = vec![full_boolean_tree(12)];
+        assert_eq!(
+            IdentitySelectedServerPlan::new(scan, projections.clone(), selector),
+            Err(ServerPlanError::ExpressionNodeLimitExceeded)
+        );
+
+        let unchecked = IdentitySelectedServerPlan {
+            scan,
+            projections: projections.clone(),
+            selector,
+        };
+        assert_eq!(
+            unchecked.encode(),
+            Err(ServerPlanError::ExpressionNodeLimitExceeded)
+        );
+
+        let mut writer =
+            encode_plan_prefix(IDENTITY_SELECTED_FORMAT_VERSION, scan, &projections).unwrap();
+        writer.boolean("selection presence", true);
+        encode_identity_selection(&mut writer, scan, selector).unwrap();
+        writer.count("ordering", 0, MAX_ORDERING).unwrap();
+        assert_eq!(
+            IdentitySelectedServerPlan::decode(&writer.finish()),
+            Err(ServerPlanError::ExpressionNodeLimitExceeded)
+        );
+
+        let mut oversized_projection_count = identity_selected_plan().encode().unwrap();
+        oversized_projection_count[36..40].copy_from_slice(&(MAX_PROJECTIONS + 1).to_be_bytes());
+        assert_eq!(
+            IdentitySelectedServerPlan::decode(&oversized_projection_count),
+            Err(ServerPlanError::CollectionLimit {
+                kind: "projections",
+                count: MAX_PROJECTIONS + 1,
+                maximum: MAX_PROJECTIONS,
+            })
+        );
+
+        assert_eq!(
+            IdentitySelectedServerPlan::decode(&vec![0; MAX_ARTIFACT_BYTES + 1]),
+            Err(ServerPlanError::ArtifactSizeLimit {
+                size: MAX_ARTIFACT_BYTES + 1,
+                maximum: MAX_ARTIFACT_BYTES,
+            })
+        );
+    }
+
     #[test]
     fn round_trips_each_current_expression_kind_and_resolved_type_shape() {
         let plan = plan();
@@ -991,6 +1474,85 @@ mod tests {
                 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 1, 3, 1, 1, 0, 1, 0, 0, 0, 0, 0,
             ]
         );
+    }
+
+    #[test]
+    fn displays_version_neutral_server_plan_errors() {
+        let cases = [
+            (
+                ServerPlanError::InvalidMagic,
+                "invalid orna.server-plan artifact magic",
+            ),
+            (
+                ServerPlanError::UnsupportedVersion(9),
+                "unsupported orna.server-plan artifact version 9",
+            ),
+            (
+                ServerPlanError::UnexpectedInputCount(2),
+                "server plan requires one input, found 2",
+            ),
+            (
+                ServerPlanError::InvalidInputSlot(1),
+                "server plan requires input slot zero, found 1",
+            ),
+            (
+                ServerPlanError::InvalidEnumTag {
+                    kind: "kind",
+                    tag: 7,
+                },
+                "invalid kind tag 7",
+            ),
+            (
+                ServerPlanError::InvalidBoolean {
+                    context: "context",
+                    value: 2,
+                },
+                "invalid context boolean byte 2",
+            ),
+            (
+                ServerPlanError::CollectionLimit {
+                    kind: "items",
+                    count: 3,
+                    maximum: 2,
+                },
+                "items count 3 exceeds server-plan limit 2",
+            ),
+            (
+                ServerPlanError::ArtifactSizeLimit {
+                    size: 3,
+                    maximum: 2,
+                },
+                "server plan artifact size 3 exceeds server-plan limit 2",
+            ),
+            (
+                ServerPlanError::EmptyFieldPath,
+                "field path must contain at least one step",
+            ),
+            (
+                ServerPlanError::RecursionLimitExceeded,
+                "server plan expression nesting exceeds server-plan limit",
+            ),
+            (
+                ServerPlanError::ExpressionNodeLimitExceeded,
+                "server plan expression count exceeds server-plan limit",
+            ),
+            (
+                ServerPlanError::Truncated,
+                "truncated orna.server-plan artifact",
+            ),
+            (
+                ServerPlanError::TrailingBytes,
+                "trailing bytes after orna.server-plan artifact",
+            ),
+            (
+                ServerPlanError::InvalidModel("reason"),
+                "invalid server plan model: reason",
+            ),
+        ];
+
+        for (error, expected) in cases {
+            assert_eq!(error.to_string(), expected);
+        }
     }
 
     #[test]
