@@ -5,11 +5,18 @@
 
 use std::{error::Error, fmt, str::FromStr};
 
+use orna_core::{
+    canonical_hash::CanonicalHashError, catalogue::CatalogueSnapshotError,
+    revision::RevisionInvariantError,
+};
+
 use tokio::task::{JoinError, JoinHandle};
 use tokio_postgres::{Client, Config, NoTls};
 
 mod bootstrap;
+mod decode;
 mod physical;
+mod recovery;
 
 pub use bootstrap::ActiveRevision;
 
@@ -90,6 +97,34 @@ pub enum PostgresKernelError {
     },
     /// Protected catalogue rows violate a durable kernel invariant.
     CatalogueInvariant(&'static str),
+    /// Canonical version-1 hash construction failed.
+    CanonicalHash(CanonicalHashError),
+    /// Reconstructed revision values violate a core revision invariant.
+    RevisionInvariant(RevisionInvariantError),
+    /// Reconstructed semantic definitions do not form a valid catalogue.
+    CatalogueSnapshot(CatalogueSnapshotError),
+    /// A durable row value could not be decoded as its selected PostgreSQL type.
+    RowDecode {
+        /// The relation that supplied the row.
+        relation: &'static str,
+        /// The stable record description available at the decode boundary.
+        record: String,
+        /// The selected column that failed to decode.
+        column: &'static str,
+        /// The recovery rule that required this column value.
+        rule: &'static str,
+        /// The PostgreSQL decode failure.
+        source: tokio_postgres::Error,
+    },
+    /// Durable state violates a recovery rule.
+    DurableInvariant {
+        /// The relation that owns the invalid state.
+        relation: &'static str,
+        /// The stable record identity or description.
+        record: String,
+        /// The exact recovery rule that failed.
+        rule: &'static str,
+    },
 }
 
 impl fmt::Display for PostgresKernelError {
@@ -119,6 +154,37 @@ impl fmt::Display for PostgresKernelError {
                     "private PostgreSQL catalogue invariant failed: {message}"
                 )
             }
+            Self::CanonicalHash(error) => {
+                write!(formatter, "canonical durable hash failed: {error}")
+            }
+            Self::RevisionInvariant(error) => {
+                write!(formatter, "recovered revision invariant failed: {error}")
+            }
+            Self::CatalogueSnapshot(error) => {
+                write!(formatter, "recovered catalogue snapshot failed: {error}")
+            }
+            Self::RowDecode {
+                relation,
+                record,
+                column,
+                rule,
+                source,
+            } => {
+                write!(
+                    formatter,
+                    "cannot decode {relation} record {record} column {column} for rule {rule}: {source}"
+                )
+            }
+            Self::DurableInvariant {
+                relation,
+                record,
+                rule,
+            } => {
+                write!(
+                    formatter,
+                    "durable invariant failed for {relation} record {record}: {rule}"
+                )
+            }
         }
     }
 }
@@ -128,14 +194,25 @@ impl Error for PostgresKernelError {
         match self {
             Self::Configuration(error) | Self::Database(error) => Some(error),
             Self::DriverTask(error) => Some(error),
-            Self::MigrationMismatch { .. } | Self::CatalogueInvariant(_) => None,
+            Self::CanonicalHash(error) => Some(error),
+            Self::RevisionInvariant(error) => Some(error),
+            Self::CatalogueSnapshot(error) => Some(error),
+            Self::RowDecode { source, .. } => Some(source),
+            Self::MigrationMismatch { .. }
+            | Self::CatalogueInvariant(_)
+            | Self::DurableInvariant { .. } => None,
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr;
+    use std::{error::Error, str::FromStr};
+
+    use orna_core::{
+        CatalogueRevisionId, SourceRevisionId, canonical_hash::CanonicalHashError,
+        catalogue::CatalogueSnapshotError, revision::RevisionInvariantError,
+    };
 
     use super::{PostgresKernel, PostgresKernelError};
 
@@ -154,6 +231,37 @@ mod tests {
             .expect("invalid port must fail");
 
         assert!(matches!(error, PostgresKernelError::Configuration(_)));
+    }
+
+    #[test]
+    fn preserves_typed_core_errors_as_sources() {
+        let canonical = PostgresKernelError::CanonicalHash(CanonicalHashError::LengthExceedsU32 {
+            value: "test",
+            length: usize::MAX,
+        });
+        let revision = PostgresKernelError::RevisionInvariant(
+            RevisionInvariantError::SourceRevisionPairMismatch {
+                pair: SourceRevisionId::from_bytes([1; 16]),
+                source: SourceRevisionId::from_bytes([2; 16]),
+            },
+        );
+        let catalogue =
+            PostgresKernelError::CatalogueSnapshot(CatalogueSnapshotError::DuplicateSchemaId {
+                id: orna_core::SchemaId::from_bytes([3; 16]),
+            });
+
+        assert!(canonical.source().is_some());
+        assert!(revision.source().is_some());
+        assert!(catalogue.source().is_some());
+        assert!(
+            PostgresKernelError::DurableInvariant {
+                relation: "_orna_kernel.test",
+                record: CatalogueRevisionId::from_bytes([4; 16]).canonical(),
+                rule: "test rule",
+            }
+            .source()
+            .is_none()
+        );
     }
 
     #[tokio::test]
