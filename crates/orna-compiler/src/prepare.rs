@@ -16,7 +16,7 @@ use orna_artifact::{
         FieldAssignment as ServerMutationFieldAssignment,
         LANGUAGE_VERSION_IDENTITY as SERVER_MUTATION_PLAN_LANGUAGE_VERSION,
         MutationExpression as ServerMutationExpression,
-        MutationExpressionKind as ServerMutationExpressionKind, MutationSelector,
+        MutationExpressionKind as ServerMutationExpressionKind, MutationSelector, ServerDeletePlan,
         ServerMutationPlan, ServerMutationPlanError,
     },
     server_plan::{
@@ -34,8 +34,9 @@ use orna_core::{
     },
     catalogue::{
         CatalogueSnapshot, CatalogueSnapshotError, FieldDefinition, FunctionDefinition,
-        FunctionDomain, FunctionReturn, FunctionReturnColumnDefinition, ObjectTypeDefinition,
-        ParameterDefinition, SchemaDefinition,
+        FunctionDomain, FunctionReturn, FunctionReturnColumnDefinition, FunctionSecurity,
+        FunctionTransaction, FunctionVolatility, ObjectTypeDefinition, ParameterDefinition,
+        SchemaDefinition,
     },
     revision::{
         ActiveDatabaseRevision, DefinitionIdentity, DefinitionOrigin, DefinitionReference,
@@ -52,7 +53,7 @@ use crate::{
     ConstantValue, SemanticType, SourceLocation,
 };
 use crate::{
-    mutation::{MutationExpressionKind, MutationOperation, MutationPlanIr},
+    mutation::{DeletePlanIr, MutationExpressionKind, MutationOperation, MutationPlanIr},
     resolver::CheckedFieldRename,
 };
 
@@ -293,6 +294,57 @@ fn server_mutation_plan(
     })
 }
 
+fn server_delete_plan(
+    plan: &DeletePlanIr<TypeId, FunctionId, ParameterId>,
+    function: &FunctionDefinition,
+    object_types: &[ObjectTypeDefinition],
+    references: &[(DefinitionReferenceKind, DefinitionReferenceTarget)],
+) -> Result<ServerDeletePlan, PrepareError> {
+    if !object_types
+        .iter()
+        .any(|object_type| object_type.id() == plan.target_object())
+    {
+        return Err(PrepareError::InvalidCheckedBundle {
+            reason: "DELETE target object is absent from the candidate catalogue",
+        });
+    }
+    if function.domain() != FunctionDomain::Server
+        || function.security() != FunctionSecurity::Invoker
+        || function.transaction() != Some(FunctionTransaction::Atomic)
+        || function.volatility() != FunctionVolatility::Volatile
+    {
+        return Err(PrepareError::InvalidCheckedBundle {
+            reason: "DELETE function has unsupported execution modes",
+        });
+    }
+    let FunctionReturn::Rows(columns) = function.return_type() else {
+        return Err(PrepareError::InvalidCheckedBundle {
+            reason: "DELETE function does not return ROWS",
+        });
+    };
+    if columns.len() != 1
+        || columns[0].resolved_type() != ResolvedType::Scalar(StandardScalar::Boolean)
+    {
+        return Err(PrepareError::InvalidCheckedBundle {
+            reason: "DELETE function does not return exactly one BOOLEAN column",
+        });
+    }
+
+    validate_mutation_parameters(function, object_types)?;
+    validate_mutation_selector(
+        plan.selector_owner(),
+        plan.selector_parameter(),
+        plan.target_object(),
+        function,
+    )?;
+    validate_mutation_reference_sequence(&delete_reference_sequence(plan, function), references)?;
+
+    Ok(ServerDeletePlan::new(
+        plan.target_object(),
+        MutationSelector::new(plan.selector_owner(), plan.selector_parameter()),
+    ))
+}
+
 fn validate_mutation_selector(
     owner: FunctionId,
     parameter: ParameterId,
@@ -523,25 +575,7 @@ fn mutation_reference_sequence(
     plan: &MutationPlanIr<TypeId, FieldId, FunctionId, ParameterId>,
     function: &FunctionDefinition,
 ) -> Vec<(DefinitionReferenceKind, DefinitionReferenceTarget)> {
-    let mut references = Vec::new();
-    for parameter in function.parameters() {
-        if let ResolvedType::Reference { target } = parameter.resolved_type() {
-            references.push((
-                DefinitionReferenceKind::ObjectReference,
-                DefinitionReferenceTarget::ObjectType(target),
-            ));
-        }
-    }
-    if let FunctionReturn::Rows(columns) = function.return_type() {
-        for column in columns {
-            if let ResolvedType::Reference { target } = column.resolved_type() {
-                references.push((
-                    DefinitionReferenceKind::ObjectReference,
-                    DefinitionReferenceTarget::ObjectType(target),
-                ));
-            }
-        }
-    }
+    let mut references = signature_reference_sequence(function);
     references.push((
         DefinitionReferenceKind::WriteObject,
         DefinitionReferenceTarget::ObjectType(plan.target_object()),
@@ -587,6 +621,56 @@ fn mutation_reference_sequence(
         DefinitionReferenceKind::ObjectReference,
         DefinitionReferenceTarget::ObjectType(plan.returned_object()),
     ));
+    references
+}
+
+fn delete_reference_sequence(
+    plan: &DeletePlanIr<TypeId, FunctionId, ParameterId>,
+    function: &FunctionDefinition,
+) -> Vec<(DefinitionReferenceKind, DefinitionReferenceTarget)> {
+    let mut references = signature_reference_sequence(function);
+    references.extend([
+        (
+            DefinitionReferenceKind::WriteObject,
+            DefinitionReferenceTarget::ObjectType(plan.target_object()),
+        ),
+        (
+            DefinitionReferenceKind::ObjectReference,
+            DefinitionReferenceTarget::ObjectType(plan.target_object()),
+        ),
+        (
+            DefinitionReferenceKind::ParameterRead,
+            DefinitionReferenceTarget::Parameter {
+                owner: plan.selector_owner(),
+                parameter: plan.selector_parameter(),
+            },
+        ),
+    ]);
+    references
+}
+
+fn signature_reference_sequence(
+    function: &FunctionDefinition,
+) -> Vec<(DefinitionReferenceKind, DefinitionReferenceTarget)> {
+    let mut references = Vec::new();
+    for parameter in function.parameters() {
+        if let ResolvedType::Reference { target } = parameter.resolved_type() {
+            references.push((
+                DefinitionReferenceKind::ObjectReference,
+                DefinitionReferenceTarget::ObjectType(target),
+            ));
+        }
+    }
+    if let FunctionReturn::Rows(columns) = function.return_type() {
+        for column in columns {
+            if let ResolvedType::Reference { target } = column.resolved_type() {
+                references.push((
+                    DefinitionReferenceKind::ObjectReference,
+                    DefinitionReferenceTarget::ObjectType(target),
+                ));
+            }
+        }
+    }
     references
 }
 
@@ -1569,17 +1653,6 @@ impl<'a> CandidateBuilder<'a> {
             });
         }
 
-        let checked_plan = checked
-            .mutation_plan()
-            .ok_or(PrepareError::InvalidCheckedBundle {
-                reason: "checked SERVER function body cannot be prepared",
-            })?;
-        let plan = checked_plan.try_map_identities(
-            |id| self.identities.type_id(id),
-            |id| self.identities.field(id),
-            |id| self.identities.function(id),
-            |id| self.identities.parameter(id),
-        )?;
         let references = checked
             .references()
             .iter()
@@ -1590,9 +1663,30 @@ impl<'a> CandidateBuilder<'a> {
                 ))
             })
             .collect::<Result<Vec<_>, PrepareError>>()?;
-        let plan = server_mutation_plan(&plan, function, object_types, &references)?;
-        let format_version = plan.format_version();
-        let payload = plan.encode()?;
+
+        let (format_version, payload) = if let Some(checked_plan) = checked.mutation_plan() {
+            let plan = checked_plan.try_map_identities(
+                |id| self.identities.type_id(id),
+                |id| self.identities.field(id),
+                |id| self.identities.function(id),
+                |id| self.identities.parameter(id),
+            )?;
+            let plan = server_mutation_plan(&plan, function, object_types, &references)?;
+            (plan.format_version(), plan.encode()?)
+        } else {
+            let checked_plan = checked
+                .delete_plan()
+                .ok_or(PrepareError::InvalidCheckedBundle {
+                    reason: "checked SERVER function body cannot be prepared",
+                })?;
+            let plan = checked_plan.try_map_identities(
+                |id| self.identities.type_id(id),
+                |id| self.identities.function(id),
+                |id| self.identities.parameter(id),
+            )?;
+            let plan = server_delete_plan(&plan, function, object_types, &references)?;
+            (plan.format_version(), plan.encode()?)
+        };
         let hash = artifact_payload_digest(&payload)?;
         Ok(PreparedServerArtifact {
             artifact: ExecutableArtifact::new(
@@ -1692,8 +1786,8 @@ mod tests {
     use orna_artifact::{
         constant_expression::ConstantExpression,
         server_mutation_plan::{
-            MutationExpressionKind as DurableMutationExpressionKind, ServerMutationOperation,
-            ServerMutationPlan,
+            MutationExpressionKind as DurableMutationExpressionKind, ServerDeletePlan,
+            ServerMutationOperation, ServerMutationPlan,
         },
         server_plan::{ExpressionKind, ServerPlan},
     };
@@ -1868,6 +1962,13 @@ mod tests {
         RETURNS ROWS (updated REF tasks.task) TRANSACTION ATOMIC\n\
         AS UPDATE tasks.task AS changed SET title = p_title, owner = p_owner\n\
         WHERE REF(changed) = p_task RETURNING REF(changed);\n";
+
+    const DELETE_SOURCE: &str = "CREATE SCHEMA tasks;\n\
+        CREATE TYPE tasks.task AS OBJECT (title TEXT NOT NULL);\n\
+        CREATE SERVER FUNCTION tasks.remove(p_task REF tasks.task)\n\
+        RETURNS ROWS (deleted BOOL) TRANSACTION ATOMIC\n\
+        AS DELETE FROM tasks.task AS removed\n\
+        WHERE REF(removed) = p_task RETURNING TRUE;\n";
 
     const MUTATION_CHANGED_SOURCE: &str = "CREATE SCHEMA tasks;\n\
         CREATE TYPE tasks.person AS OBJECT (name TEXT NOT NULL);\n\
@@ -2373,6 +2474,108 @@ mod tests {
     }
 
     #[test]
+    fn prepares_delete_version_three_with_boolean_result_and_exact_references() {
+        let empty = empty_active();
+        let prepared = prepare(
+            &checked_report(DELETE_SOURCE, empty.catalogue()),
+            empty.pair(),
+            &empty,
+        )
+        .unwrap();
+
+        let catalogue = prepared.candidate();
+        let target = catalogue
+            .object_type_by_name(&semantic_name(&["tasks", "task"]))
+            .unwrap();
+        let function = &catalogue.functions()[0];
+        let revision = &prepared.new_function_revisions()[0];
+        assert_eq!(revision.artifact().kind(), ExecutableArtifactKind::Server);
+        assert_eq!(revision.artifact().format(), SERVER_MUTATION_PLAN_FORMAT);
+        assert_eq!(
+            revision.artifact().version(),
+            orna_artifact::server_mutation_plan::DELETE_FORMAT_VERSION
+        );
+        assert_eq!(
+            artifact_payload_digest(revision.artifact().payload()).unwrap(),
+            revision.artifact().content_hash()
+        );
+        assert_eq!(
+            revision.language_version(),
+            SERVER_MUTATION_PLAN_LANGUAGE_VERSION
+        );
+        let plan = ServerDeletePlan::decode(revision.artifact().payload()).unwrap();
+        assert_eq!(plan.target(), target.id());
+        assert_eq!(plan.selector().owner(), function.id());
+        assert_eq!(plan.selector().parameter(), function.parameters()[0].id());
+        assert!(matches!(
+            function.return_type(),
+            FunctionReturn::Rows(columns)
+                if columns.len() == 1
+                    && columns[0].resolved_type()
+                        == ResolvedType::Scalar(StandardScalar::Boolean)
+        ));
+        assert_eq!(
+            prepared
+                .references()
+                .iter()
+                .map(|reference| (reference.kind(), reference.target()))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    DefinitionReferenceKind::ObjectReference,
+                    DefinitionReferenceTarget::ObjectType(target.id()),
+                ),
+                (
+                    DefinitionReferenceKind::WriteObject,
+                    DefinitionReferenceTarget::ObjectType(target.id()),
+                ),
+                (
+                    DefinitionReferenceKind::ObjectReference,
+                    DefinitionReferenceTarget::ObjectType(target.id()),
+                ),
+                (
+                    DefinitionReferenceKind::ParameterRead,
+                    DefinitionReferenceTarget::Parameter {
+                        owner: function.id(),
+                        parameter: function.parameters()[0].id(),
+                    },
+                ),
+            ]
+        );
+        assert_eq!(
+            prepared
+                .references()
+                .iter()
+                .map(|reference| {
+                    (
+                        reference.ordinal(),
+                        reference.source_origin().byte_start() as usize,
+                        reference.source_origin().byte_end() as usize,
+                    )
+                })
+                .collect::<Vec<_>>(),
+            [
+                (0, "p_task REF ", "tasks.task"),
+                (1, "DELETE FROM ", "tasks.task"),
+                (2, "WHERE REF(", "removed"),
+                (3, "= ", "p_task"),
+            ]
+            .into_iter()
+            .zip([
+                "p_task REF tasks.task",
+                "DELETE FROM tasks.task",
+                "WHERE REF(removed)",
+                "= p_task RETURNING",
+            ])
+            .map(|((ordinal, prefix, token), context)| {
+                let start = DELETE_SOURCE.find(context).unwrap() + prefix.len();
+                (ordinal, start, start + token.len())
+            })
+            .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn mutation_preparation_revalidates_durable_catalogue_and_reference_facts() {
         let target_id = TypeId::from_bytes([41; 16]);
         let title_id = FieldId::from_bytes([42; 16]);
@@ -2644,6 +2847,101 @@ mod tests {
             validate_mutation_selector(function_id, parameter_id, target, &wrong_target),
             Err(PrepareError::InvalidCheckedBundle {
                 reason: "mutation selector parameter does not reference its target object"
+            })
+        ));
+    }
+
+    #[test]
+    fn delete_preparation_revalidates_target_modes_result_and_evidence() {
+        let function_id = FunctionId::from_bytes([71; 16]);
+        let parameter_id = ParameterId::from_bytes([72; 16]);
+        let target_id = TypeId::from_bytes([73; 16]);
+        let revision_id = FunctionRevisionId::from_bytes([74; 16]);
+        let target =
+            ObjectTypeDefinition::new(target_id, semantic_name(&["tasks", "task"]), Vec::new());
+        let function_with = |return_type, security| {
+            FunctionDefinition::new(
+                function_id,
+                semantic_name(&["tasks", "remove"]),
+                FunctionDomain::Server,
+                vec![ParameterDefinition::new(
+                    parameter_id,
+                    "p_task",
+                    0,
+                    ResolvedType::reference(target_id),
+                    None,
+                )],
+                return_type,
+                revision_id,
+                security,
+                Some(FunctionTransaction::Atomic),
+                FunctionVolatility::Volatile,
+            )
+        };
+        let boolean_rows = || {
+            FunctionReturn::Rows(vec![FunctionReturnColumnDefinition::new(
+                "deleted",
+                0,
+                ResolvedType::scalar(StandardScalar::Boolean),
+            )])
+        };
+        let function = function_with(boolean_rows(), FunctionSecurity::Invoker);
+        let plan = DeletePlanIr::new(target_id, function_id, parameter_id);
+        let references = delete_reference_sequence(&plan, &function);
+
+        assert!(
+            server_delete_plan(&plan, &function, std::slice::from_ref(&target), &references)
+                .is_ok()
+        );
+        assert!(matches!(
+            server_delete_plan(&plan, &function, &[], &references),
+            Err(PrepareError::InvalidCheckedBundle {
+                reason: "DELETE target object is absent from the candidate catalogue"
+            })
+        ));
+
+        let definer = function_with(boolean_rows(), FunctionSecurity::Definer);
+        assert!(matches!(
+            server_delete_plan(
+                &plan,
+                &definer,
+                std::slice::from_ref(&target),
+                &delete_reference_sequence(&plan, &definer),
+            ),
+            Err(PrepareError::InvalidCheckedBundle {
+                reason: "DELETE function has unsupported execution modes"
+            })
+        ));
+
+        let wrong_result = function_with(
+            FunctionReturn::Rows(vec![FunctionReturnColumnDefinition::new(
+                "deleted",
+                0,
+                ResolvedType::scalar(StandardScalar::Integer),
+            )]),
+            FunctionSecurity::Invoker,
+        );
+        assert!(matches!(
+            server_delete_plan(
+                &plan,
+                &wrong_result,
+                std::slice::from_ref(&target),
+                &delete_reference_sequence(&plan, &wrong_result),
+            ),
+            Err(PrepareError::InvalidCheckedBundle {
+                reason: "DELETE function does not return exactly one BOOLEAN column"
+            })
+        ));
+
+        assert!(matches!(
+            server_delete_plan(
+                &plan,
+                &function,
+                std::slice::from_ref(&target),
+                &references[..references.len() - 1],
+            ),
+            Err(PrepareError::InvalidCheckedBundle {
+                reason: "mutation definition references differ from the checked body"
             })
         ));
     }
