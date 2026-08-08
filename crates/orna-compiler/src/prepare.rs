@@ -9,7 +9,7 @@ use orna_artifact::{
     },
     server_plan::{
         FORMAT_IDENTITY as SERVER_PLAN_FORMAT, FORMAT_VERSION as SERVER_PLAN_VERSION,
-        ServerPlanError,
+        LANGUAGE_VERSION_IDENTITY, ServerPlanError,
     },
 };
 use orna_core::{
@@ -39,8 +39,6 @@ use crate::{
     CheckedFieldId, CheckedFunctionId, CheckedParameterId, CheckedSchemaId, CheckedTypeId,
     ConstantValue, SemanticType, SourceLocation,
 };
-
-const LANGUAGE_VERSION: &str = "orna.language/1";
 
 /// Prepares one complete durable candidate from a successful compiler check.
 ///
@@ -885,7 +883,7 @@ impl<'a> CandidateBuilder<'a> {
                 self.function_references(checked, function_id, initial_revision)?;
             let semantic_hash = function_semantic_digest(
                 &initial_definition,
-                LANGUAGE_VERSION,
+                LANGUAGE_VERSION_IDENTITY,
                 &artifact,
                 &self.expressions,
                 &initial_references,
@@ -919,7 +917,7 @@ impl<'a> CandidateBuilder<'a> {
                     declaration_origin,
                     function_declaration_digest(declaration)?,
                     semantic_hash,
-                    LANGUAGE_VERSION,
+                    LANGUAGE_VERSION_IDENTITY,
                     artifact,
                 )?;
                 self.new_function_revisions.push(revision.clone());
@@ -1539,7 +1537,7 @@ mod tests {
             SourceOrigin::new(SourceUnitId::new(), 0, 1).unwrap(),
             digest(71),
             digest(72),
-            LANGUAGE_VERSION,
+            LANGUAGE_VERSION_IDENTITY,
             current.artifact().clone(),
         )
         .unwrap();

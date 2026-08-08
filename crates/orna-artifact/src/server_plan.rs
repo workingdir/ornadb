@@ -27,6 +27,8 @@ use orna_core::{
 
 /// The stable public identity of this artifact format.
 pub const FORMAT_IDENTITY: &str = "orna.server-plan";
+/// The Orna language version whose semantics this artifact version executes.
+pub const LANGUAGE_VERSION_IDENTITY: &str = "orna.language/1";
 /// The only supported server-plan artifact version.
 pub const FORMAT_VERSION: u32 = 1;
 /// The exact first eight bytes of every server-plan artifact.
