@@ -3,18 +3,23 @@ mod support;
 use std::str::FromStr;
 
 use orna_core::{
-    CatalogueRevisionId, ExpressionId, FieldId, SchemaId, SourceBundleId, SourceRevisionId,
-    SourceUnitId, TypeId,
+    CatalogueRevisionId, ExpressionId, FieldId, FunctionId, FunctionRevisionId, ParameterId,
+    SchemaId, SourceBundleId, SourceRevisionId, SourceUnitId, TypeId,
     canonical_hash::{
-        artifact_payload_digest, catalogue_digest, source_bundle_digest,
-        source_revision_record_digest, source_unit_content_digest,
+        artifact_payload_digest, catalogue_digest, function_declaration_digest,
+        function_semantic_digest, source_bundle_digest, source_revision_record_digest,
+        source_unit_content_digest,
     },
     catalogue::{
-        CatalogueSnapshot, FieldDefinition, ObjectTypeDefinition, OnDeleteAction,
-        QualifiedSemanticName, SchemaDefinition,
+        CatalogueSnapshot, FieldDefinition, FunctionDefinition, FunctionDomain, FunctionReturn,
+        FunctionReturnColumnDefinition, FunctionSecurity, FunctionTransaction, FunctionVolatility,
+        ObjectTypeDefinition, OnDeleteAction, ParameterDefinition, QualifiedSemanticName,
+        SchemaDefinition,
     },
     revision::{
-        DefinitionIdentity, DefinitionOrigin, ExpressionArtifact, SourceOrigin, StoredSourceUnit,
+        DefinitionIdentity, DefinitionOrigin, DefinitionReference, DefinitionReferenceKind,
+        DefinitionReferenceTarget, ExecutableArtifact, ExecutableArtifactKind, ExpressionArtifact,
+        FunctionRevisionRecord, SourceOrigin, StoredSourceUnit,
     },
     types::{ResolvedType, StandardScalar},
 };
@@ -167,6 +172,380 @@ async fn reconstructs_shared_expression_defaults_before_physical_rejection() -> 
         require_expected_error(
             recovery_error(&database).await?,
             ExpectedRecoveryError::Durable("_orna_kernel.catalogue_fields"),
+        )
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn recovers_compiler_deployable_server_and_client_function_state() -> TestResult<()> {
+    with_test_database(|database| async move {
+        kernel(&database)?.bootstrap().await?;
+        let expected = install_function_revision(&database).await?;
+
+        let recovered = kernel(&database)?.recover().await?;
+
+        require(
+            recovered.catalogue().functions() == expected.catalogue.functions(),
+            "function recovery changed signatures, modifiers, parameters, or returns",
+        )?;
+        require(
+            recovered.function_revisions() == expected.revisions,
+            "function recovery changed current immutable revision records",
+        )?;
+        require(
+            recovered.historical_function_revisions().is_empty(),
+            "function recovery invented historical revisions",
+        )?;
+        require(
+            recovered.references() == expected.references,
+            "function recovery changed ordered owner-qualified references",
+        )?;
+        require(
+            recovered.origins() == expected.origins,
+            "function recovery changed exact current definition origins",
+        )
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn recovers_reused_current_revisions_and_retired_function_history() -> TestResult<()> {
+    with_test_database(|database| async move {
+        kernel(&database)?.bootstrap().await?;
+        let introduction = install_function_revision(&database).await?;
+        let expected = install_reused_function_catalogue(&database, &introduction).await?;
+
+        let recovered = kernel(&database)?.recover().await?;
+
+        require(
+            recovered.source().units() == [expected.unit],
+            "reused revision recovery changed the active retained source",
+        )?;
+        require(
+            recovered.catalogue().revision() == expected.catalogue.revision()
+                && recovered.catalogue().schemas() == expected.catalogue.schemas()
+                && recovered.catalogue().object_types() == expected.catalogue.object_types()
+                && recovered.catalogue().functions() == expected.catalogue.functions(),
+            "reused revision recovery changed the active semantic catalogue",
+        )?;
+        require(
+            recovered.function_revisions() == expected.current_revisions,
+            "reused revision recovery changed current immutable revision records",
+        )?;
+        require(
+            recovered.historical_function_revisions() == [expected.retired_revision],
+            "retired function revision was not recovered as immutable history",
+        )?;
+        require(
+            recovered.references() == expected.references,
+            "reused revision recovery changed active definition references",
+        )?;
+        require(
+            recovered.origins() == expected.origins,
+            "reused revision recovery changed current definition origins",
+        )?;
+        let current_function_origin = recovered
+            .origins()
+            .iter()
+            .find(|origin| {
+                origin.identity()
+                    == DefinitionIdentity::Function(recovered.catalogue().functions()[0].id())
+            })
+            .ok_or_else(|| failure("recovered current function origin is missing"))?;
+        require(
+            current_function_origin.source()
+                != recovered.function_revisions()[0].declaration_origin(),
+            "reused revision collapsed current definition origin into historical declaration origin",
+        )
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn rejects_function_signature_revision_artifact_and_reference_tampering() -> TestResult<()> {
+    let cases = [
+        "ALTER TABLE _orna_kernel.catalogue_function_parameters
+             DROP CONSTRAINT catalogue_function_parameters_check;
+         UPDATE _orna_kernel.catalogue_function_parameters
+         SET scalar_type = NULL
+         WHERE function_id = decode(repeat('d1', 16), 'hex')
+           AND parameter_id = decode(repeat('b1', 16), 'hex')",
+        "UPDATE _orna_kernel.catalogue_function_parameters
+         SET ordinal = 99
+         WHERE function_id = decode(repeat('d1', 16), 'hex')
+           AND parameter_id = decode(repeat('b1', 16), 'hex')",
+        "ALTER TABLE _orna_kernel.catalogue_function_parameters DISABLE TRIGGER ALL;
+         UPDATE _orna_kernel.catalogue_function_parameters
+         SET function_id = decode(repeat('ff', 16), 'hex')
+         WHERE function_id = decode(repeat('d1', 16), 'hex')
+           AND parameter_id = decode(repeat('b1', 16), 'hex')",
+        "UPDATE _orna_kernel.catalogue_functions
+         SET name_parts = ARRAY['wrong', 'server_rows']
+         WHERE function_id = decode(repeat('d1', 16), 'hex')",
+        "ALTER TABLE _orna_kernel.catalogue_functions DISABLE TRIGGER ALL;
+         UPDATE _orna_kernel.catalogue_functions
+         SET current_function_revision_id = decode(repeat('e2', 16), 'hex')
+         WHERE function_id = decode(repeat('d1', 16), 'hex')",
+        "UPDATE _orna_kernel.catalogue_functions
+         SET domain = 'client', transaction_mode = NULL
+         WHERE function_id = decode(repeat('d1', 16), 'hex')",
+        "ALTER TABLE _orna_kernel.catalogue_functions
+             DROP CONSTRAINT catalogue_functions_transaction_mode_check;
+         UPDATE _orna_kernel.catalogue_functions
+         SET transaction_mode = 'manual'
+         WHERE function_id = decode(repeat('d1', 16), 'hex')",
+        "ALTER TABLE _orna_kernel.catalogue_functions
+             DROP CONSTRAINT catalogue_functions_check1;
+         UPDATE _orna_kernel.catalogue_functions
+         SET return_type_kind = 'scalar', return_scalar_type = 'boolean'
+         WHERE function_id = decode(repeat('d1', 16), 'hex')",
+        "UPDATE _orna_kernel.catalogue_function_return_columns
+         SET ordinal = 99
+         WHERE function_id = decode(repeat('d1', 16), 'hex') AND ordinal = 1",
+        "ALTER TABLE _orna_kernel.catalogue_function_parameters DISABLE TRIGGER ALL;
+         UPDATE _orna_kernel.catalogue_function_parameters
+         SET default_expression_id = decode(repeat('ff', 16), 'hex')
+         WHERE function_id = decode(repeat('d1', 16), 'hex')
+           AND parameter_id = decode(repeat('b1', 16), 'hex')",
+        "ALTER TABLE _orna_kernel.definition_references DISABLE TRIGGER ALL;
+         UPDATE _orna_kernel.definition_references
+         SET target_owner_type_id = decode(repeat('82', 16), 'hex')
+         WHERE source_function_revision_id = decode(repeat('e1', 16), 'hex')
+           AND ordinal = 1",
+        "ALTER TABLE _orna_kernel.definition_references DISABLE TRIGGER ALL;
+         UPDATE _orna_kernel.definition_references
+         SET target_owner_function_id = decode(repeat('d2', 16), 'hex')
+         WHERE source_function_revision_id = decode(repeat('e1', 16), 'hex')
+           AND ordinal = 2",
+        "ALTER TABLE _orna_kernel.definition_references DISABLE TRIGGER ALL;
+         UPDATE _orna_kernel.definition_references
+         SET source_function_revision_id = decode(repeat('e2', 16), 'hex')
+         WHERE source_function_revision_id = decode(repeat('e1', 16), 'hex')",
+        "UPDATE _orna_kernel.definition_references
+         SET ordinal = ordinal + 10
+         WHERE source_function_revision_id = decode(repeat('e1', 16), 'hex')",
+        "UPDATE _orna_kernel.definition_references
+         SET source_end = 999
+         WHERE source_function_revision_id = decode(repeat('e1', 16), 'hex')",
+        "ALTER TABLE _orna_kernel.definition_references
+             DROP CONSTRAINT definition_references_reference_target_compatibility_check;
+         UPDATE _orna_kernel.definition_references
+         SET reference_kind = 'function_call'
+         WHERE source_function_revision_id = decode(repeat('e1', 16), 'hex')
+           AND ordinal = 0",
+        "ALTER TABLE _orna_kernel.definition_references DISABLE TRIGGER ALL;
+         UPDATE _orna_kernel.definition_references
+         SET target_definition_id = decode(repeat('ff', 16), 'hex')
+         WHERE source_function_revision_id = decode(repeat('e1', 16), 'hex')
+           AND ordinal = 0",
+        "UPDATE _orna_kernel.function_revisions
+         SET status = 'retired'
+         WHERE id = decode(repeat('e1', 16), 'hex')",
+        "UPDATE _orna_kernel.function_revisions
+         SET status = 'candidate'
+         WHERE id = decode(repeat('e1', 16), 'hex')",
+        "UPDATE _orna_kernel.function_revisions
+         SET status = 'invalid'
+         WHERE id = decode(repeat('e1', 16), 'hex')",
+        "ALTER TABLE _orna_kernel.function_revisions
+             DROP CONSTRAINT function_revisions_revision_number_check;
+         UPDATE _orna_kernel.function_revisions
+         SET revision_number = 0
+         WHERE id = decode(repeat('e1', 16), 'hex')",
+        "UPDATE _orna_kernel.function_revisions
+         SET content_hash = decode(repeat('ff', 32), 'hex')
+         WHERE id = decode(repeat('e1', 16), 'hex')",
+        "UPDATE _orna_kernel.function_revisions
+         SET semantic_ir_hash = decode(repeat('ff', 32), 'hex')
+         WHERE id = decode(repeat('e1', 16), 'hex')",
+        "ALTER TABLE _orna_kernel.function_revisions
+             DROP CONSTRAINT function_revisions_hash_contract_version_check;
+         UPDATE _orna_kernel.function_revisions
+         SET hash_contract_version = 2
+         WHERE id = decode(repeat('e1', 16), 'hex')",
+        "DELETE FROM _orna_kernel.function_artifacts
+         WHERE function_revision_id = decode(repeat('e1', 16), 'hex')",
+        "INSERT INTO _orna_kernel.function_artifacts
+            (function_revision_id, artifact_kind, format, format_version,
+             payload, content_hash)
+         SELECT function_revision_id, 'client_bytecode', format, format_version,
+                payload, content_hash
+         FROM _orna_kernel.function_artifacts
+         WHERE function_revision_id = decode(repeat('e1', 16), 'hex')",
+        "UPDATE _orna_kernel.function_artifacts
+         SET artifact_kind = 'client_bytecode'
+         WHERE function_revision_id = decode(repeat('e1', 16), 'hex')",
+        "ALTER TABLE _orna_kernel.function_artifacts
+             DROP CONSTRAINT function_artifacts_format_check;
+         UPDATE _orna_kernel.function_artifacts
+         SET format = ''
+         WHERE function_revision_id = decode(repeat('e1', 16), 'hex')",
+        "ALTER TABLE _orna_kernel.function_artifacts
+             DROP CONSTRAINT function_artifacts_format_version_check;
+         UPDATE _orna_kernel.function_artifacts
+         SET format_version = 0
+         WHERE function_revision_id = decode(repeat('e1', 16), 'hex')",
+        "UPDATE _orna_kernel.function_artifacts
+         SET payload = payload || decode('00', 'hex')
+         WHERE function_revision_id = decode(repeat('e1', 16), 'hex')",
+        "ALTER TABLE _orna_kernel.function_artifacts
+             DROP CONSTRAINT function_artifacts_content_hash_check;
+         UPDATE _orna_kernel.function_artifacts
+         SET content_hash = decode(repeat('ff', 31), 'hex')
+         WHERE function_revision_id = decode(repeat('e1', 16), 'hex')",
+        "ALTER TABLE _orna_kernel.function_artifacts
+             DROP CONSTRAINT function_artifacts_hash_contract_version_check;
+         UPDATE _orna_kernel.function_artifacts
+         SET hash_contract_version = 2
+         WHERE function_revision_id = decode(repeat('e1', 16), 'hex')",
+        "ALTER TABLE _orna_kernel.function_artifacts DISABLE TRIGGER ALL;
+         UPDATE _orna_kernel.function_artifacts
+         SET function_revision_id = decode(repeat('ff', 16), 'hex')
+         WHERE function_revision_id = decode(repeat('e1', 16), 'hex')",
+        "ALTER TABLE _orna_kernel.function_revisions DISABLE TRIGGER ALL;
+         UPDATE _orna_kernel.function_revisions
+         SET introduced_catalogue_revision_id = decode(repeat('ff', 16), 'hex')
+         WHERE id = decode(repeat('e3', 16), 'hex')",
+        "ALTER TABLE _orna_kernel.function_revisions DISABLE TRIGGER ALL;
+         UPDATE _orna_kernel.function_revisions
+         SET introduced_catalogue_revision_id = decode(repeat('ff', 16), 'hex')
+         WHERE id = decode(repeat('e3', 16), 'hex');
+         DELETE FROM _orna_kernel.function_artifacts
+         WHERE function_revision_id = decode(repeat('e3', 16), 'hex')",
+    ];
+    for (index, statement) in cases.into_iter().enumerate() {
+        reject_function_tamper(statement).await.map_err(|error| {
+            failure(format!(
+                "function tamper case {index} failed before recovery rejection: {error}"
+            ))
+        })?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn rejects_void_parameters_and_rows_columns_at_their_decoder_relations() -> TestResult<()> {
+    for (statement, relation) in [
+        (
+            "ALTER TABLE _orna_kernel.catalogue_function_parameters
+                 DROP CONSTRAINT catalogue_function_parameters_scalar_type_check;
+             UPDATE _orna_kernel.catalogue_function_parameters
+             SET scalar_type = 'void'
+             WHERE function_id = decode(repeat('d1', 16), 'hex')
+               AND parameter_id = decode(repeat('b1', 16), 'hex')",
+            "_orna_kernel.catalogue_function_parameters",
+        ),
+        (
+            "ALTER TABLE _orna_kernel.catalogue_function_return_columns
+                 DROP CONSTRAINT catalogue_function_return_columns_scalar_type_check;
+             UPDATE _orna_kernel.catalogue_function_return_columns
+             SET scalar_type = 'void'
+             WHERE function_id = decode(repeat('d1', 16), 'hex') AND ordinal = 0",
+            "_orna_kernel.catalogue_function_return_columns",
+        ),
+    ] {
+        reject_function_tamper_expected(statement, ExpectedRecoveryError::Durable(relation))
+            .await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn rejects_retained_introduction_source_catalogue_and_history_tampering() -> TestResult<()> {
+    let cases = [
+        "UPDATE _orna_kernel.function_revisions
+         SET status = 'active'
+         WHERE id = decode(repeat('e3', 16), 'hex')",
+        "UPDATE _orna_kernel.catalogue_revisions
+         SET content_hash = decode(repeat('ff', 32), 'hex')
+         WHERE id = (
+             SELECT parent_catalogue_revision_id
+             FROM _orna_kernel.catalogue_revisions
+             WHERE id = (SELECT catalogue_revision_id FROM _orna_kernel.active_revision)
+         )",
+        "UPDATE _orna_kernel.source_revisions
+         SET content_hash = decode(repeat('ff', 32), 'hex')
+         WHERE id = (
+             SELECT parent_source_revision_id
+             FROM _orna_kernel.source_revisions
+             WHERE id = (SELECT source_revision_id FROM _orna_kernel.active_revision)
+         )",
+        "UPDATE _orna_kernel.catalogue_functions
+         SET security_mode = 'definer'
+         WHERE catalogue_revision_id = (
+             SELECT parent_catalogue_revision_id
+             FROM _orna_kernel.catalogue_revisions
+             WHERE id = (SELECT catalogue_revision_id FROM _orna_kernel.active_revision)
+         ) AND function_id = decode(repeat('d3', 16), 'hex')",
+        "UPDATE _orna_kernel.definition_references
+         SET target_definition_id = decode(repeat('82', 16), 'hex')
+         WHERE catalogue_revision_id = (
+             SELECT parent_catalogue_revision_id
+             FROM _orna_kernel.catalogue_revisions
+             WHERE id = (SELECT catalogue_revision_id FROM _orna_kernel.active_revision)
+         ) AND source_function_revision_id = decode(repeat('e1', 16), 'hex')
+           AND ordinal = 0",
+        "UPDATE _orna_kernel.catalogue_functions
+         SET source_start = 1
+         WHERE catalogue_revision_id = (
+             SELECT parent_catalogue_revision_id
+             FROM _orna_kernel.catalogue_revisions
+             WHERE id = (SELECT catalogue_revision_id FROM _orna_kernel.active_revision)
+         ) AND function_id = decode(repeat('d3', 16), 'hex')",
+        "UPDATE _orna_kernel.catalogue_functions
+         SET source_end = 999
+         WHERE catalogue_revision_id = (
+             SELECT parent_catalogue_revision_id
+             FROM _orna_kernel.catalogue_revisions
+             WHERE id = (SELECT catalogue_revision_id FROM _orna_kernel.active_revision)
+         ) AND function_id = decode(repeat('d3', 16), 'hex')",
+        "UPDATE _orna_kernel.catalogue_functions
+         SET source_start = 11
+         WHERE catalogue_revision_id = (
+             SELECT parent_catalogue_revision_id
+             FROM _orna_kernel.catalogue_revisions
+             WHERE id = (SELECT catalogue_revision_id FROM _orna_kernel.active_revision)
+         ) AND function_id = decode(repeat('d3', 16), 'hex')",
+        "UPDATE _orna_kernel.catalogue_functions
+         SET source_unit_id = decode(repeat('f4', 16), 'hex')
+         WHERE catalogue_revision_id = (
+             SELECT parent_catalogue_revision_id
+             FROM _orna_kernel.catalogue_revisions
+             WHERE id = (SELECT catalogue_revision_id FROM _orna_kernel.active_revision)
+         ) AND function_id = decode(repeat('d3', 16), 'hex')",
+        "ALTER TABLE _orna_kernel.catalogue_revisions DISABLE TRIGGER ALL;
+         UPDATE _orna_kernel.catalogue_revisions
+         SET parent_catalogue_revision_id = NULL
+         WHERE id = (SELECT catalogue_revision_id FROM _orna_kernel.active_revision)",
+    ];
+    for (index, statement) in cases.into_iter().enumerate() {
+        reject_history_tamper(statement).await.map_err(|error| {
+            failure(format!(
+                "history tamper case {index} failed before recovery rejection: {error}"
+            ))
+        })?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn rejects_a_valid_function_introduction_from_a_sibling_branch() -> TestResult<()> {
+    with_test_database(|database| async move {
+        kernel(&database)?.bootstrap().await?;
+        let introduction = install_function_revision(&database).await?;
+        install_reused_function_catalogue(&database, &introduction).await?;
+        install_valid_sibling_introduction(&database, &introduction).await?;
+
+        require_expected_error(
+            recovery_error(&database).await?,
+            ExpectedRecoveryError::Durable("_orna_kernel.catalogue_revisions"),
         )
     })
     .await
@@ -495,38 +874,6 @@ async fn trusted_catalogue_rejects_checks_bound_to_a_shadow_function() -> TestRe
 
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
-async fn trusted_recovery_rejects_rows_hidden_by_a_shadow_count_aggregate() -> TestResult<()> {
-    with_test_database(|database| async move {
-        kernel(&database)?.bootstrap().await?;
-        run_batch(
-            &database,
-            "CREATE FUNCTION public.zero_count_state(bigint)
-             RETURNS bigint LANGUAGE sql IMMUTABLE AS 'SELECT 0';
-             CREATE AGGREGATE public.count(*) (
-                 SFUNC = public.zero_count_state,
-                 STYPE = bigint,
-                 INITCOND = '0'
-             )",
-        )
-        .await?;
-        run_batch(&database, UNSUPPORTED_FUNCTION_SQL).await?;
-
-        let mut hostile_config = database.config()?;
-        hostile_config.options("-c search_path=public,pg_catalog");
-        let error = match PostgresKernel::new(hostile_config).recover().await {
-            Ok(_) => return Err(failure("shadowed unsupported-state count recovered rows")),
-            Err(error) => error,
-        };
-        require_expected_error(
-            error,
-            ExpectedRecoveryError::Durable("_orna_kernel.catalogue_functions"),
-        )
-    })
-    .await
-}
-
-#[tokio::test]
-#[ignore = "requires the Compose PostgreSQL development service"]
 async fn rejects_tampered_migration_history_before_durable_state() -> TestResult<()> {
     with_test_database(|database| async move {
         kernel(&database)?.bootstrap().await?;
@@ -654,6 +1001,7 @@ async fn rejects_a_multi_revision_catalogue_and_source_ancestry_cycle() -> TestR
 
 #[derive(Clone, Copy)]
 enum ExpectedRecoveryError {
+    AnyInvariant,
     AnyDurable,
     Canonical,
     Catalogue,
@@ -668,6 +1016,39 @@ async fn reject_object_tamper(statement: &str, expected: ExpectedRecoveryError) 
         run_batch(&database, statement).await?;
 
         require_expected_error(recovery_error(&database).await?, expected)
+    })
+    .await
+}
+
+async fn reject_function_tamper(statement: &str) -> TestResult<()> {
+    reject_function_tamper_expected(statement, ExpectedRecoveryError::AnyInvariant).await
+}
+
+async fn reject_function_tamper_expected(
+    statement: &str,
+    expected: ExpectedRecoveryError,
+) -> TestResult<()> {
+    with_test_database(|database| async move {
+        kernel(&database)?.bootstrap().await?;
+        install_function_revision(&database).await?;
+        run_batch(&database, statement).await?;
+
+        require_expected_error(recovery_error(&database).await?, expected)
+    })
+    .await
+}
+
+async fn reject_history_tamper(statement: &str) -> TestResult<()> {
+    with_test_database(|database| async move {
+        kernel(&database)?.bootstrap().await?;
+        let introduction = install_function_revision(&database).await?;
+        install_reused_function_catalogue(&database, &introduction).await?;
+        run_batch(&database, statement).await?;
+
+        require_expected_error(
+            recovery_error(&database).await?,
+            ExpectedRecoveryError::AnyInvariant,
+        )
     })
     .await
 }
@@ -809,6 +1190,1260 @@ struct ObjectFixture {
     catalogue: CatalogueSnapshot,
     expression: ExpressionArtifact,
     origins: Vec<DefinitionOrigin>,
+}
+
+struct FunctionFixture {
+    unit: StoredSourceUnit,
+    catalogue: CatalogueSnapshot,
+    expression: ExpressionArtifact,
+    revisions: Vec<FunctionRevisionRecord>,
+    references: Vec<DefinitionReference>,
+    origins: Vec<DefinitionOrigin>,
+}
+
+async fn install_function_revision(database: &TestDatabase) -> TestResult<FunctionFixture> {
+    let object = install_object_revision(database, false).await?;
+    let session = database.open().await?;
+    let operation_result: TestResult<FunctionFixture> = async {
+        let catalogue_id = object.catalogue.revision();
+        let schema = object.catalogue.schemas()[0].clone();
+        let left = object.catalogue.object_types()[0].id();
+        let right = object.catalogue.object_types()[1].id();
+        let source = SourceOrigin::new(
+            object.unit.id(),
+            0,
+            u32::try_from(object.unit.content().len())?,
+        )?;
+        let server_id = FunctionId::from_bytes([0xd1; 16]);
+        let client_id = FunctionId::from_bytes([0xd2; 16]);
+        let volatile_id = FunctionId::from_bytes([0xd3; 16]);
+        let server_revision = FunctionRevisionId::from_bytes([0xe1; 16]);
+        let client_revision = FunctionRevisionId::from_bytes([0xe2; 16]);
+        let volatile_revision = FunctionRevisionId::from_bytes([0xe3; 16]);
+        let expression = object.expression.clone();
+        let scalar_types = [
+            StandardScalar::Boolean,
+            StandardScalar::Integer,
+            StandardScalar::BigInt,
+            StandardScalar::Float,
+            StandardScalar::Decimal,
+            StandardScalar::CharacterLargeObject,
+            StandardScalar::BinaryLargeObject,
+            StandardScalar::Uuid,
+            StandardScalar::Date,
+            StandardScalar::Time,
+            StandardScalar::Timestamp,
+            StandardScalar::Duration,
+        ];
+        let mut server_parameters = scalar_types
+            .into_iter()
+            .enumerate()
+            .map(|(ordinal, scalar)| {
+                ParameterDefinition::new(
+                    ParameterId::from_bytes(
+                        [0xb0 + u8::try_from(ordinal).expect("twelve parameters"); 16],
+                    ),
+                    format!("scalar_{ordinal}"),
+                    u32::try_from(ordinal).expect("twelve parameters"),
+                    ResolvedType::scalar(scalar),
+                    (ordinal == 0).then_some(expression.id()),
+                )
+            })
+            .collect::<Vec<_>>();
+        server_parameters.push(ParameterDefinition::new(
+            ParameterId::from_bytes([0xbc; 16]),
+            "named",
+            12,
+            ResolvedType::named(left),
+            None,
+        ));
+        server_parameters.push(ParameterDefinition::new(
+            ParameterId::from_bytes([0xbd; 16]),
+            "reference",
+            13,
+            ResolvedType::reference(right),
+            None,
+        ));
+        let server = FunctionDefinition::new(
+            server_id,
+            QualifiedSemanticName::new(["café", "server_rows"])?,
+            FunctionDomain::Server,
+            server_parameters,
+            FunctionReturn::Rows(vec![
+                FunctionReturnColumnDefinition::new(
+                    "value",
+                    0,
+                    ResolvedType::scalar(StandardScalar::Integer),
+                ),
+                FunctionReturnColumnDefinition::new("owner", 1, ResolvedType::named(left)),
+                FunctionReturnColumnDefinition::new("related", 2, ResolvedType::reference(right)),
+            ]),
+            server_revision,
+            FunctionSecurity::Definer,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Stable,
+        );
+        let client = FunctionDefinition::new(
+            client_id,
+            QualifiedSemanticName::new(["café", "client_single"])?,
+            FunctionDomain::Client,
+            vec![ParameterDefinition::new(
+                ParameterId::from_bytes([0xb0; 16]),
+                "duplicate_owner_qualified_parameter",
+                0,
+                ResolvedType::scalar(StandardScalar::Boolean),
+                None,
+            )],
+            FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Void)),
+            client_revision,
+            FunctionSecurity::Invoker,
+            None,
+            FunctionVolatility::Immutable,
+        );
+        let volatile = FunctionDefinition::new(
+            volatile_id,
+            QualifiedSemanticName::new(["café", "volatile_single"])?,
+            FunctionDomain::Server,
+            Vec::new(),
+            FunctionReturn::Single(ResolvedType::reference(left)),
+            volatile_revision,
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::Atomic),
+            FunctionVolatility::Volatile,
+        );
+        let functions = vec![server.clone(), client.clone(), volatile.clone()];
+        let server_artifact = executable_artifact(
+            ExecutableArtifactKind::Server,
+            "orna.server-plan",
+            b"ORNASP\0\0\0\0\0\x01fixture".to_vec(),
+        )?;
+        let client_artifact = executable_artifact(
+            ExecutableArtifactKind::Client,
+            "orna.client-bytecode",
+            b"ORNACB\0\0\0\0\0\x01fixture".to_vec(),
+        )?;
+        let volatile_artifact = executable_artifact(
+            ExecutableArtifactKind::Server,
+            "orna.server-plan",
+            b"ORNASP\0\0\0\0\0\x01volatile".to_vec(),
+        )?;
+        let references = vec![
+            DefinitionReference::new(
+                server_id,
+                server_revision,
+                0,
+                DefinitionReferenceTarget::ObjectType(left),
+                DefinitionReferenceKind::QueryObject,
+                source,
+            ),
+            DefinitionReference::new(
+                server_id,
+                server_revision,
+                1,
+                DefinitionReferenceTarget::Field {
+                    owner: left,
+                    field: object.catalogue.object_types()[0].fields()[1].id(),
+                },
+                DefinitionReferenceKind::QueryField,
+                source,
+            ),
+            DefinitionReference::new(
+                server_id,
+                server_revision,
+                2,
+                DefinitionReferenceTarget::Parameter {
+                    owner: server_id,
+                    parameter: server.parameters()[0].id(),
+                },
+                DefinitionReferenceKind::ParameterRead,
+                source,
+            ),
+            DefinitionReference::new(
+                server_id,
+                server_revision,
+                3,
+                DefinitionReferenceTarget::Function(client_id),
+                DefinitionReferenceKind::FunctionCall,
+                source,
+            ),
+            DefinitionReference::new(
+                server_id,
+                server_revision,
+                4,
+                DefinitionReferenceTarget::Expression(expression.id()),
+                DefinitionReferenceKind::Expression,
+                source,
+            ),
+        ];
+        let language = "orna-1";
+        let declaration_hash = function_declaration_digest(object.unit.content().as_bytes())?;
+        let revisions = vec![
+            function_revision(
+                &server,
+                language,
+                server_artifact,
+                &object,
+                &references,
+                declaration_hash,
+                source,
+            )?,
+            function_revision(
+                &client,
+                language,
+                client_artifact,
+                &object,
+                &references,
+                declaration_hash,
+                source,
+            )?,
+            function_revision(
+                &volatile,
+                language,
+                volatile_artifact,
+                &object,
+                &references,
+                declaration_hash,
+                source,
+            )?,
+        ];
+        let catalogue = CatalogueSnapshot::new_with_functions(
+            catalogue_id,
+            object.catalogue.schemas().to_vec(),
+            object.catalogue.object_types().to_vec(),
+            functions.clone(),
+        )?;
+        let mut origins = object.origins.clone();
+        for function in &functions {
+            origins.extend(function.parameters().iter().map(|parameter| {
+                DefinitionOrigin::new(
+                    DefinitionIdentity::Parameter {
+                        owner: function.id(),
+                        parameter: parameter.id(),
+                    },
+                    source,
+                )
+            }));
+            if let FunctionReturn::Rows(columns) = function.return_type() {
+                origins.extend(columns.iter().map(|column| {
+                    DefinitionOrigin::new(
+                        DefinitionIdentity::FunctionReturnColumn {
+                            owner: function.id(),
+                            ordinal: column.ordinal(),
+                        },
+                        source,
+                    )
+                }));
+            }
+            origins.push(DefinitionOrigin::new(
+                DefinitionIdentity::Function(function.id()),
+                source,
+            ));
+        }
+        let catalogue_hash = catalogue_digest(
+            &catalogue,
+            &revisions,
+            std::slice::from_ref(&expression),
+            &origins,
+            &references,
+        )?;
+
+        session
+            .client()
+            .batch_execute("BEGIN; SET CONSTRAINTS ALL DEFERRED")
+            .await?;
+        for function in &functions {
+            insert_function_record(
+                session.client(),
+                catalogue_id,
+                schema.id(),
+                function,
+                source,
+            )
+            .await?;
+            for parameter in function.parameters() {
+                insert_parameter_record(
+                    session.client(),
+                    catalogue_id,
+                    function.id(),
+                    parameter,
+                    source,
+                )
+                .await?;
+            }
+            if let FunctionReturn::Rows(columns) = function.return_type() {
+                for column in columns {
+                    insert_return_record(
+                        session.client(),
+                        catalogue_id,
+                        function.id(),
+                        column,
+                        source,
+                    )
+                    .await?;
+                }
+            }
+        }
+        for revision in &revisions {
+            insert_revision_record(session.client(), catalogue_id, revision).await?;
+        }
+        for reference in &references {
+            insert_reference_record(session.client(), catalogue_id, reference).await?;
+        }
+        session
+            .client()
+            .execute(
+                "UPDATE _orna_kernel.catalogue_revisions SET content_hash = $2 WHERE id = $1",
+                &[
+                    &catalogue_id.to_bytes().to_vec(),
+                    &catalogue_hash.to_bytes().to_vec(),
+                ],
+            )
+            .await?;
+        session.client().batch_execute("COMMIT").await?;
+        Ok(FunctionFixture {
+            unit: object.unit.clone(),
+            catalogue,
+            expression,
+            revisions,
+            references,
+            origins,
+        })
+    }
+    .await;
+    finish_session(
+        operation_result,
+        session.shutdown().await,
+        "function fixture",
+    )
+}
+
+struct FunctionHistoryFixture {
+    unit: StoredSourceUnit,
+    catalogue: CatalogueSnapshot,
+    current_revisions: Vec<FunctionRevisionRecord>,
+    retired_revision: FunctionRevisionRecord,
+    references: Vec<DefinitionReference>,
+    origins: Vec<DefinitionOrigin>,
+}
+
+async fn install_reused_function_catalogue(
+    database: &TestDatabase,
+    introduction: &FunctionFixture,
+) -> TestResult<FunctionHistoryFixture> {
+    let session = database.open().await?;
+    let operation_result: TestResult<FunctionHistoryFixture> = async {
+        let old_catalogue = introduction.catalogue.revision();
+        let row = session
+            .client()
+            .query_one(
+                "SELECT source_revision_id
+                 FROM _orna_kernel.catalogue_revisions
+                 WHERE id = $1",
+                &[&old_catalogue.to_bytes().to_vec()],
+            )
+            .await?;
+        let old_source = SourceRevisionId::from_bytes(exact_identity(
+            row.try_get("source_revision_id")?,
+            "introducing source revision identity",
+        )?);
+        let bundle = SourceBundleId::from_bytes([0xf1; 16]);
+        let source = SourceRevisionId::from_bytes([0xf2; 16]);
+        let catalogue_id = CatalogueRevisionId::from_bytes([0xf3; 16]);
+        let unit = StoredSourceUnit::new(
+            SourceUnitId::from_bytes([0xf4; 16]),
+            0,
+            "reused-functions.orna",
+            format!(
+                "{}\n// current declarations moved without recompiling\n",
+                introduction.unit.content()
+            ),
+            source_unit_content_digest(&format!(
+                "{}\n// current declarations moved without recompiling\n",
+                introduction.unit.content()
+            ))?,
+        )?;
+        let bundle_hash = source_bundle_digest(std::slice::from_ref(&unit))?;
+        let source_hash = source_revision_record_digest(bundle, Some(old_source), bundle_hash)?;
+        let active_functions = introduction.catalogue.functions()[..2].to_vec();
+        let retired_function = introduction.catalogue.functions()[2].id();
+        let catalogue = CatalogueSnapshot::new_with_functions(
+            catalogue_id,
+            introduction.catalogue.schemas().to_vec(),
+            introduction.catalogue.object_types().to_vec(),
+            active_functions,
+        )?;
+        let current_source = SourceOrigin::new(unit.id(), 0, u32::try_from(unit.content().len())?)?;
+        let origins = introduction
+            .origins
+            .iter()
+            .filter(|origin| !definition_owned_by_function(origin.identity(), retired_function))
+            .map(|origin| DefinitionOrigin::new(origin.identity(), current_source))
+            .collect::<Vec<_>>();
+        let references = introduction
+            .references
+            .iter()
+            .map(|reference| {
+                DefinitionReference::new(
+                    reference.source_function(),
+                    reference.source_revision(),
+                    reference.ordinal(),
+                    reference.target(),
+                    reference.kind(),
+                    current_source,
+                )
+            })
+            .collect::<Vec<_>>();
+        let current_revisions = introduction.revisions[..2].to_vec();
+        let retired_revision = introduction.revisions[2].clone();
+        let catalogue_hash = catalogue_digest(
+            &catalogue,
+            &current_revisions,
+            std::slice::from_ref(&introduction.expression),
+            &origins,
+            &references,
+        )?;
+
+        let full_start = 0_i64;
+        let full_end = i64::try_from(unit.content().len())?;
+        let old_catalogue_bytes = old_catalogue.to_bytes().to_vec();
+        let new_catalogue_bytes = catalogue_id.to_bytes().to_vec();
+        let unit_bytes = unit.id().to_bytes().to_vec();
+        let retained_function_ids = catalogue
+            .functions()
+            .iter()
+            .map(|function| function.id().to_bytes().to_vec())
+            .collect::<Vec<_>>();
+
+        session
+            .client()
+            .batch_execute("BEGIN; SET CONSTRAINTS ALL DEFERRED")
+            .await?;
+        session
+            .client()
+            .execute(
+                "INSERT INTO _orna_kernel.source_bundles (id, content_hash)
+                 VALUES ($1, $2)",
+                &[
+                    &bundle.to_bytes().to_vec(),
+                    &bundle_hash.to_bytes().to_vec(),
+                ],
+            )
+            .await?;
+        session
+            .client()
+            .execute(
+                "INSERT INTO _orna_kernel.source_units
+                    (id, bundle_id, ordinal, logical_path, content, content_hash)
+                 VALUES ($1, $2, $3, $4, $5, $6)",
+                &[
+                    &unit_bytes,
+                    &bundle.to_bytes().to_vec(),
+                    &i64::from(unit.ordinal()),
+                    &unit.logical_path(),
+                    &unit.content(),
+                    &unit.content_hash().to_bytes().to_vec(),
+                ],
+            )
+            .await?;
+        session
+            .client()
+            .execute(
+                "INSERT INTO _orna_kernel.source_revisions
+                    (id, parent_source_revision_id, bundle_id, content_hash)
+                 VALUES ($1, $2, $3, $4)",
+                &[
+                    &source.to_bytes().to_vec(),
+                    &old_source.to_bytes().to_vec(),
+                    &bundle.to_bytes().to_vec(),
+                    &source_hash.to_bytes().to_vec(),
+                ],
+            )
+            .await?;
+        session
+            .client()
+            .execute(
+                "INSERT INTO _orna_kernel.catalogue_revisions
+                    (id, source_revision_id, parent_catalogue_revision_id, content_hash)
+                 VALUES ($1, $2, $3, $4)",
+                &[
+                    &new_catalogue_bytes,
+                    &source.to_bytes().to_vec(),
+                    &old_catalogue_bytes,
+                    &catalogue_hash.to_bytes().to_vec(),
+                ],
+            )
+            .await?;
+        session
+            .client()
+            .execute(
+                "INSERT INTO _orna_kernel.catalogue_schemas
+                    (catalogue_revision_id, schema_id, name_parts,
+                     source_unit_id, source_start, source_end)
+                 SELECT $1, schema_id, name_parts, $2, $3, $4
+                 FROM _orna_kernel.catalogue_schemas
+                 WHERE catalogue_revision_id = $5",
+                &[
+                    &new_catalogue_bytes,
+                    &unit_bytes,
+                    &full_start,
+                    &full_end,
+                    &old_catalogue_bytes,
+                ],
+            )
+            .await?;
+        session
+            .client()
+            .execute(
+                "INSERT INTO _orna_kernel.catalogue_object_types
+                    (catalogue_revision_id, type_id, schema_id, name_parts,
+                     source_unit_id, source_start, source_end)
+                 SELECT $1, type_id, schema_id, name_parts, $2, $3, $4
+                 FROM _orna_kernel.catalogue_object_types
+                 WHERE catalogue_revision_id = $5",
+                &[
+                    &new_catalogue_bytes,
+                    &unit_bytes,
+                    &full_start,
+                    &full_end,
+                    &old_catalogue_bytes,
+                ],
+            )
+            .await?;
+        session
+            .client()
+            .execute(
+                "INSERT INTO _orna_kernel.catalogue_expressions
+                    (catalogue_revision_id, expression_id, format, format_version,
+                     payload, content_hash, hash_algorithm, hash_contract_version,
+                     source_unit_id, source_start, source_end)
+                 SELECT $1, expression_id, format, format_version,
+                        payload, content_hash, hash_algorithm, hash_contract_version,
+                        $2, $3, $4
+                 FROM _orna_kernel.catalogue_expressions
+                 WHERE catalogue_revision_id = $5",
+                &[
+                    &new_catalogue_bytes,
+                    &unit_bytes,
+                    &full_start,
+                    &full_end,
+                    &old_catalogue_bytes,
+                ],
+            )
+            .await?;
+        session
+            .client()
+            .execute(
+                "INSERT INTO _orna_kernel.catalogue_fields
+                    (catalogue_revision_id, owner_type_id, field_id, name, ordinal,
+                     type_kind, scalar_type, target_type_id, nullable, is_unique,
+                     default_expression_id, on_delete,
+                     source_unit_id, source_start, source_end)
+                 SELECT $1, owner_type_id, field_id, name, ordinal,
+                        type_kind, scalar_type, target_type_id, nullable, is_unique,
+                        default_expression_id, on_delete, $2, $3, $4
+                 FROM _orna_kernel.catalogue_fields
+                 WHERE catalogue_revision_id = $5",
+                &[
+                    &new_catalogue_bytes,
+                    &unit_bytes,
+                    &full_start,
+                    &full_end,
+                    &old_catalogue_bytes,
+                ],
+            )
+            .await?;
+        session
+            .client()
+            .execute(
+                "INSERT INTO _orna_kernel.catalogue_functions
+                    (catalogue_revision_id, function_id, schema_id, name_parts,
+                     domain, security_mode, transaction_mode, volatility,
+                     return_shape, return_type_kind, return_scalar_type,
+                     return_target_type_id, current_function_revision_id,
+                     source_unit_id, source_start, source_end)
+                 SELECT $1, function_id, schema_id, name_parts,
+                        domain, security_mode, transaction_mode, volatility,
+                        return_shape, return_type_kind, return_scalar_type,
+                        return_target_type_id, current_function_revision_id,
+                        $2, $3, $4
+                 FROM _orna_kernel.catalogue_functions
+                 WHERE catalogue_revision_id = $5
+                   AND function_id = ANY($6)",
+                &[
+                    &new_catalogue_bytes,
+                    &unit_bytes,
+                    &full_start,
+                    &full_end,
+                    &old_catalogue_bytes,
+                    &retained_function_ids,
+                ],
+            )
+            .await?;
+        session
+            .client()
+            .execute(
+                "INSERT INTO _orna_kernel.catalogue_function_parameters
+                    (catalogue_revision_id, function_id, parameter_id, name, ordinal,
+                     type_kind, scalar_type, target_type_id, default_expression_id,
+                     source_unit_id, source_start, source_end)
+                 SELECT $1, function_id, parameter_id, name, ordinal,
+                        type_kind, scalar_type, target_type_id, default_expression_id,
+                        $2, $3, $4
+                 FROM _orna_kernel.catalogue_function_parameters
+                 WHERE catalogue_revision_id = $5
+                   AND function_id = ANY($6)",
+                &[
+                    &new_catalogue_bytes,
+                    &unit_bytes,
+                    &full_start,
+                    &full_end,
+                    &old_catalogue_bytes,
+                    &retained_function_ids,
+                ],
+            )
+            .await?;
+        session
+            .client()
+            .execute(
+                "INSERT INTO _orna_kernel.catalogue_function_return_columns
+                    (catalogue_revision_id, function_id, name, ordinal,
+                     type_kind, scalar_type, target_type_id,
+                     source_unit_id, source_start, source_end)
+                 SELECT $1, function_id, name, ordinal,
+                        type_kind, scalar_type, target_type_id, $2, $3, $4
+                 FROM _orna_kernel.catalogue_function_return_columns
+                 WHERE catalogue_revision_id = $5
+                   AND function_id = ANY($6)",
+                &[
+                    &new_catalogue_bytes,
+                    &unit_bytes,
+                    &full_start,
+                    &full_end,
+                    &old_catalogue_bytes,
+                    &retained_function_ids,
+                ],
+            )
+            .await?;
+        session
+            .client()
+            .execute(
+                "INSERT INTO _orna_kernel.definition_references
+                    (catalogue_revision_id, source_function_id,
+                     source_function_revision_id, ordinal, target_definition_id,
+                     target_kind, reference_kind, source_subobject_id,
+                     target_owner_type_id, target_owner_function_id,
+                     source_unit_id, source_start, source_end)
+                 SELECT $1, source_function_id, source_function_revision_id,
+                        ordinal, target_definition_id, target_kind, reference_kind,
+                        source_subobject_id, target_owner_type_id,
+                        target_owner_function_id, $2, $3, $4
+                 FROM _orna_kernel.definition_references
+                 WHERE catalogue_revision_id = $5
+                   AND source_function_id = ANY($6)",
+                &[
+                    &new_catalogue_bytes,
+                    &unit_bytes,
+                    &full_start,
+                    &full_end,
+                    &old_catalogue_bytes,
+                    &retained_function_ids,
+                ],
+            )
+            .await?;
+        session
+            .client()
+            .execute(
+                "UPDATE _orna_kernel.function_revisions
+                 SET status = 'retired'
+                 WHERE id = $1",
+                &[&retired_revision.id().to_bytes().to_vec()],
+            )
+            .await?;
+        session
+            .client()
+            .execute(
+                "UPDATE _orna_kernel.active_revision
+                 SET source_revision_id = $1, catalogue_revision_id = $2",
+                &[&source.to_bytes().to_vec(), &new_catalogue_bytes],
+            )
+            .await?;
+        session.client().batch_execute("COMMIT").await?;
+
+        Ok(FunctionHistoryFixture {
+            unit,
+            catalogue,
+            current_revisions,
+            retired_revision,
+            references,
+            origins,
+        })
+    }
+    .await;
+    finish_session(
+        operation_result,
+        session.shutdown().await,
+        "reused function history fixture",
+    )
+}
+
+async fn install_valid_sibling_introduction(
+    database: &TestDatabase,
+    introduction: &FunctionFixture,
+) -> TestResult<()> {
+    let session = database.open().await?;
+    let operation_result: TestResult<()> = async {
+        let old_catalogue = introduction.catalogue.revision();
+        let row = session
+            .client()
+            .query_one(
+                "SELECT catalogue.source_revision_id,
+                        catalogue.parent_catalogue_revision_id,
+                        source.parent_source_revision_id
+                 FROM _orna_kernel.catalogue_revisions AS catalogue
+                 JOIN _orna_kernel.source_revisions AS source
+                   ON source.id = catalogue.source_revision_id
+                 WHERE catalogue.id = $1",
+                &[&old_catalogue.to_bytes().to_vec()],
+            )
+            .await?;
+        let source_parent = row
+            .try_get::<_, Option<Vec<u8>>>("parent_source_revision_id")?
+            .map(|value| exact_identity(value, "sibling source parent identity"))
+            .transpose()?
+            .map(SourceRevisionId::from_bytes);
+        let catalogue_parent = row
+            .try_get::<_, Option<Vec<u8>>>("parent_catalogue_revision_id")?
+            .map(|value| exact_identity(value, "sibling catalogue parent identity"))
+            .transpose()?
+            .map(CatalogueRevisionId::from_bytes);
+        let bundle = SourceBundleId::from_bytes([0xf6; 16]);
+        let source = SourceRevisionId::from_bytes([0xf7; 16]);
+        let catalogue_id = CatalogueRevisionId::from_bytes([0xf5; 16]);
+        let unit = StoredSourceUnit::new(
+            SourceUnitId::from_bytes([0xf8; 16]),
+            0,
+            introduction.unit.logical_path(),
+            introduction.unit.content(),
+            source_unit_content_digest(introduction.unit.content())?,
+        )?;
+        let bundle_hash = source_bundle_digest(std::slice::from_ref(&unit))?;
+        let source_hash = source_revision_record_digest(bundle, source_parent, bundle_hash)?;
+        let catalogue = CatalogueSnapshot::new_with_functions(
+            catalogue_id,
+            introduction.catalogue.schemas().to_vec(),
+            introduction.catalogue.object_types().to_vec(),
+            introduction.catalogue.functions().to_vec(),
+        )?;
+        let sibling_source = SourceOrigin::new(unit.id(), 0, u32::try_from(unit.content().len())?)?;
+        let origins = introduction
+            .origins
+            .iter()
+            .map(|origin| DefinitionOrigin::new(origin.identity(), sibling_source))
+            .collect::<Vec<_>>();
+        let references = introduction
+            .references
+            .iter()
+            .map(|reference| {
+                DefinitionReference::new(
+                    reference.source_function(),
+                    reference.source_revision(),
+                    reference.ordinal(),
+                    reference.target(),
+                    reference.kind(),
+                    sibling_source,
+                )
+            })
+            .collect::<Vec<_>>();
+        let catalogue_hash = catalogue_digest(
+            &catalogue,
+            &introduction.revisions,
+            std::slice::from_ref(&introduction.expression),
+            &origins,
+            &references,
+        )?;
+        let source_parent = source_parent.map(|parent| parent.to_bytes().to_vec());
+        let catalogue_parent = catalogue_parent.map(|parent| parent.to_bytes().to_vec());
+
+        session
+            .client()
+            .batch_execute("BEGIN; SET CONSTRAINTS ALL DEFERRED")
+            .await?;
+        session
+            .client()
+            .execute(
+                "INSERT INTO _orna_kernel.source_bundles (id, content_hash)
+                 VALUES ($1, $2)",
+                &[
+                    &bundle.to_bytes().to_vec(),
+                    &bundle_hash.to_bytes().to_vec(),
+                ],
+            )
+            .await?;
+        session
+            .client()
+            .execute(
+                "INSERT INTO _orna_kernel.source_units
+                    (id, bundle_id, ordinal, logical_path, content, content_hash)
+                 VALUES ($1, $2, $3, $4, $5, $6)",
+                &[
+                    &unit.id().to_bytes().to_vec(),
+                    &bundle.to_bytes().to_vec(),
+                    &i64::from(unit.ordinal()),
+                    &unit.logical_path(),
+                    &unit.content(),
+                    &unit.content_hash().to_bytes().to_vec(),
+                ],
+            )
+            .await?;
+        session
+            .client()
+            .execute(
+                "INSERT INTO _orna_kernel.source_revisions
+                    (id, parent_source_revision_id, bundle_id, content_hash)
+                 VALUES ($1, $2, $3, $4)",
+                &[
+                    &source.to_bytes().to_vec(),
+                    &source_parent,
+                    &bundle.to_bytes().to_vec(),
+                    &source_hash.to_bytes().to_vec(),
+                ],
+            )
+            .await?;
+        session
+            .client()
+            .execute(
+                "INSERT INTO _orna_kernel.catalogue_revisions
+                    (id, source_revision_id, parent_catalogue_revision_id, content_hash)
+                 VALUES ($1, $2, $3, $4)",
+                &[
+                    &catalogue_id.to_bytes().to_vec(),
+                    &source.to_bytes().to_vec(),
+                    &catalogue_parent,
+                    &catalogue_hash.to_bytes().to_vec(),
+                ],
+            )
+            .await?;
+        for schema in catalogue.schemas() {
+            insert_schema_record(session.client(), catalogue_id, schema, sibling_source).await?;
+        }
+        session
+            .client()
+            .execute(
+                "INSERT INTO _orna_kernel.catalogue_expressions
+                    (catalogue_revision_id, expression_id, format, format_version,
+                     payload, content_hash, source_unit_id, source_start, source_end)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                &[
+                    &catalogue_id.to_bytes().to_vec(),
+                    &introduction.expression.id().to_bytes().to_vec(),
+                    &introduction.expression.format(),
+                    &i32::try_from(introduction.expression.version())?,
+                    &introduction.expression.payload(),
+                    &introduction.expression.content_hash().to_bytes().to_vec(),
+                    &sibling_source.source_unit().to_bytes().to_vec(),
+                    &i64::from(sibling_source.byte_start()),
+                    &i64::from(sibling_source.byte_end()),
+                ],
+            )
+            .await?;
+        let schema = catalogue.schemas()[0].id();
+        for object in catalogue.object_types() {
+            session
+                .client()
+                .execute(
+                    "INSERT INTO _orna_kernel.catalogue_object_types
+                        (catalogue_revision_id, type_id, schema_id, name_parts,
+                         source_unit_id, source_start, source_end)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                    &[
+                        &catalogue_id.to_bytes().to_vec(),
+                        &object.id().to_bytes().to_vec(),
+                        &schema.to_bytes().to_vec(),
+                        &object.name().parts(),
+                        &sibling_source.source_unit().to_bytes().to_vec(),
+                        &i64::from(sibling_source.byte_start()),
+                        &i64::from(sibling_source.byte_end()),
+                    ],
+                )
+                .await?;
+            for field in object.fields() {
+                insert_field_record(
+                    session.client(),
+                    catalogue_id,
+                    object.id(),
+                    field,
+                    sibling_source,
+                )
+                .await?;
+            }
+        }
+        for function in catalogue.functions() {
+            insert_function_record(
+                session.client(),
+                catalogue_id,
+                schema,
+                function,
+                sibling_source,
+            )
+            .await?;
+            for parameter in function.parameters() {
+                insert_parameter_record(
+                    session.client(),
+                    catalogue_id,
+                    function.id(),
+                    parameter,
+                    sibling_source,
+                )
+                .await?;
+            }
+            if let FunctionReturn::Rows(columns) = function.return_type() {
+                for column in columns {
+                    insert_return_record(
+                        session.client(),
+                        catalogue_id,
+                        function.id(),
+                        column,
+                        sibling_source,
+                    )
+                    .await?;
+                }
+            }
+        }
+        for reference in &references {
+            insert_reference_record(session.client(), catalogue_id, reference).await?;
+        }
+        session
+            .client()
+            .execute(
+                "UPDATE _orna_kernel.function_revisions
+                 SET introduced_catalogue_revision_id = $1
+                 WHERE id = $2",
+                &[
+                    &catalogue_id.to_bytes().to_vec(),
+                    &FunctionRevisionId::from_bytes([0xe3; 16])
+                        .to_bytes()
+                        .to_vec(),
+                ],
+            )
+            .await?;
+        session.client().batch_execute("COMMIT").await?;
+        Ok(())
+    }
+    .await;
+    finish_session(
+        operation_result,
+        session.shutdown().await,
+        "valid sibling introduction fixture",
+    )
+}
+
+fn definition_owned_by_function(identity: DefinitionIdentity, function: FunctionId) -> bool {
+    match identity {
+        DefinitionIdentity::Function(owner)
+        | DefinitionIdentity::Parameter { owner, .. }
+        | DefinitionIdentity::FunctionReturnColumn { owner, .. } => owner == function,
+        DefinitionIdentity::Schema(_)
+        | DefinitionIdentity::ObjectType(_)
+        | DefinitionIdentity::Field { .. }
+        | DefinitionIdentity::Expression(_) => false,
+    }
+}
+
+fn executable_artifact(
+    kind: ExecutableArtifactKind,
+    format: &str,
+    payload: Vec<u8>,
+) -> TestResult<ExecutableArtifact> {
+    let hash = artifact_payload_digest(&payload)?;
+    Ok(ExecutableArtifact::new(kind, format, 1, payload, hash)?)
+}
+
+fn function_revision(
+    function: &FunctionDefinition,
+    language: &str,
+    artifact: ExecutableArtifact,
+    object: &ObjectFixture,
+    references: &[DefinitionReference],
+    declaration_hash: orna_core::revision::Sha256Digest,
+    source: SourceOrigin,
+) -> TestResult<FunctionRevisionRecord> {
+    let function_references = references
+        .iter()
+        .filter(|reference| reference.source_function() == function.id())
+        .cloned()
+        .collect::<Vec<_>>();
+    let semantic_hash = function_semantic_digest(
+        function,
+        language,
+        &artifact,
+        std::slice::from_ref(&object.expression),
+        &function_references,
+    )?;
+    Ok(FunctionRevisionRecord::new(
+        function.id(),
+        function.current_revision(),
+        1,
+        source,
+        declaration_hash,
+        semantic_hash,
+        language,
+        artifact,
+    )?)
+}
+
+async fn insert_function_record(
+    client: &tokio_postgres::Client,
+    catalogue: CatalogueRevisionId,
+    schema: SchemaId,
+    function: &FunctionDefinition,
+    source: SourceOrigin,
+) -> TestResult<()> {
+    let domain = match function.domain() {
+        FunctionDomain::Server => "server",
+        FunctionDomain::Client => "client",
+    };
+    let security = match function.security() {
+        FunctionSecurity::Invoker => "invoker",
+        FunctionSecurity::Definer => "definer",
+    };
+    let transaction = function.transaction().map(|transaction| match transaction {
+        FunctionTransaction::Atomic => "atomic".to_owned(),
+        FunctionTransaction::ReadOnly => "read_only".to_owned(),
+        FunctionTransaction::Manual => "manual".to_owned(),
+    });
+    let volatility = match function.volatility() {
+        FunctionVolatility::Immutable => "immutable",
+        FunctionVolatility::Stable => "stable",
+        FunctionVolatility::Volatile => "volatile",
+    };
+    let (return_shape, return_kind, return_scalar, return_target) = match function.return_type() {
+        FunctionReturn::Single(resolved) => {
+            let (kind, scalar, target) = resolved_type_columns(*resolved);
+            ("single", Some(kind), scalar, target)
+        }
+        FunctionReturn::Rows(_) => ("rows", None, None, None),
+    };
+    client
+        .execute(
+            "INSERT INTO _orna_kernel.catalogue_functions
+                (catalogue_revision_id, function_id, schema_id, name_parts,
+                 domain, security_mode, transaction_mode, volatility,
+                 return_shape, return_type_kind, return_scalar_type,
+                 return_target_type_id, current_function_revision_id,
+                 source_unit_id, source_start, source_end)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
+                     $9, $10, $11, $12, $13, $14, $15, $16)",
+            &[
+                &catalogue.to_bytes().to_vec(),
+                &function.id().to_bytes().to_vec(),
+                &schema.to_bytes().to_vec(),
+                &function.name().parts(),
+                &domain,
+                &security,
+                &transaction,
+                &volatility,
+                &return_shape,
+                &return_kind,
+                &return_scalar,
+                &return_target,
+                &function.current_revision().to_bytes().to_vec(),
+                &source.source_unit().to_bytes().to_vec(),
+                &i64::from(source.byte_start()),
+                &i64::from(source.byte_end()),
+            ],
+        )
+        .await?;
+    Ok(())
+}
+
+async fn insert_parameter_record(
+    client: &tokio_postgres::Client,
+    catalogue: CatalogueRevisionId,
+    owner: FunctionId,
+    parameter: &ParameterDefinition,
+    source: SourceOrigin,
+) -> TestResult<()> {
+    let (kind, scalar, target) = resolved_type_columns(parameter.resolved_type());
+    let default_expression = parameter
+        .default_expression()
+        .map(|expression| expression.to_bytes().to_vec());
+    client
+        .execute(
+            "INSERT INTO _orna_kernel.catalogue_function_parameters
+                (catalogue_revision_id, function_id, parameter_id, name,
+                 ordinal, type_kind, scalar_type, target_type_id,
+                 default_expression_id, source_unit_id, source_start, source_end)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+            &[
+                &catalogue.to_bytes().to_vec(),
+                &owner.to_bytes().to_vec(),
+                &parameter.id().to_bytes().to_vec(),
+                &parameter.name(),
+                &i64::from(parameter.ordinal()),
+                &kind,
+                &scalar,
+                &target,
+                &default_expression,
+                &source.source_unit().to_bytes().to_vec(),
+                &i64::from(source.byte_start()),
+                &i64::from(source.byte_end()),
+            ],
+        )
+        .await?;
+    Ok(())
+}
+
+async fn insert_return_record(
+    client: &tokio_postgres::Client,
+    catalogue: CatalogueRevisionId,
+    owner: FunctionId,
+    column: &FunctionReturnColumnDefinition,
+    source: SourceOrigin,
+) -> TestResult<()> {
+    let (kind, scalar, target) = resolved_type_columns(column.resolved_type());
+    client
+        .execute(
+            "INSERT INTO _orna_kernel.catalogue_function_return_columns
+                (catalogue_revision_id, function_id, name, ordinal,
+                 type_kind, scalar_type, target_type_id,
+                 source_unit_id, source_start, source_end)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+            &[
+                &catalogue.to_bytes().to_vec(),
+                &owner.to_bytes().to_vec(),
+                &column.name(),
+                &i64::from(column.ordinal()),
+                &kind,
+                &scalar,
+                &target,
+                &source.source_unit().to_bytes().to_vec(),
+                &i64::from(source.byte_start()),
+                &i64::from(source.byte_end()),
+            ],
+        )
+        .await?;
+    Ok(())
+}
+
+async fn insert_revision_record(
+    client: &tokio_postgres::Client,
+    catalogue: CatalogueRevisionId,
+    revision: &FunctionRevisionRecord,
+) -> TestResult<()> {
+    client
+        .execute(
+            "INSERT INTO _orna_kernel.function_revisions
+                (id, introduced_catalogue_revision_id, function_id,
+                 revision_number, content_hash, semantic_ir_hash,
+                 language_version, status)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, 'active')",
+            &[
+                &revision.id().to_bytes().to_vec(),
+                &catalogue.to_bytes().to_vec(),
+                &revision.function().to_bytes().to_vec(),
+                &i64::try_from(revision.revision_number())?,
+                &revision.declaration_content_hash().to_bytes().to_vec(),
+                &revision.semantic_hash().to_bytes().to_vec(),
+                &revision.language_version(),
+            ],
+        )
+        .await?;
+    let artifact = revision.artifact();
+    let artifact_kind = match artifact.kind() {
+        ExecutableArtifactKind::Server => "server_plan",
+        ExecutableArtifactKind::Client => "client_bytecode",
+    };
+    client
+        .execute(
+            "INSERT INTO _orna_kernel.function_artifacts
+                (function_revision_id, artifact_kind, format,
+                 format_version, payload, content_hash)
+             VALUES ($1, $2, $3, $4, $5, $6)",
+            &[
+                &revision.id().to_bytes().to_vec(),
+                &artifact_kind,
+                &artifact.format(),
+                &i32::try_from(artifact.version())?,
+                &artifact.payload(),
+                &artifact.content_hash().to_bytes().to_vec(),
+            ],
+        )
+        .await?;
+    Ok(())
+}
+
+async fn insert_reference_record(
+    client: &tokio_postgres::Client,
+    catalogue: CatalogueRevisionId,
+    reference: &DefinitionReference,
+) -> TestResult<()> {
+    let (target, target_kind, owner_type, owner_function) = match reference.target() {
+        DefinitionReferenceTarget::ObjectType(id) => {
+            (id.to_bytes().to_vec(), "object_type", None, None)
+        }
+        DefinitionReferenceTarget::Field { owner, field } => (
+            field.to_bytes().to_vec(),
+            "field",
+            Some(owner.to_bytes().to_vec()),
+            None,
+        ),
+        DefinitionReferenceTarget::Function(id) => (id.to_bytes().to_vec(), "function", None, None),
+        DefinitionReferenceTarget::Parameter { owner, parameter } => (
+            parameter.to_bytes().to_vec(),
+            "parameter",
+            None,
+            Some(owner.to_bytes().to_vec()),
+        ),
+        DefinitionReferenceTarget::Expression(id) => {
+            (id.to_bytes().to_vec(), "expression", None, None)
+        }
+    };
+    let kind = match reference.kind() {
+        DefinitionReferenceKind::FunctionCall => "function_call",
+        DefinitionReferenceKind::NamedType => "named_type",
+        DefinitionReferenceKind::ObjectReference => "object_reference",
+        DefinitionReferenceKind::ParameterRead => "parameter_read",
+        DefinitionReferenceKind::QueryObject => "query_object",
+        DefinitionReferenceKind::QueryField => "query_field",
+        DefinitionReferenceKind::Expression => "expression",
+    };
+    let source = reference.source_origin();
+    client
+        .execute(
+            "INSERT INTO _orna_kernel.definition_references
+                (catalogue_revision_id, source_function_id,
+                 source_function_revision_id, ordinal, target_definition_id,
+                 target_kind, reference_kind, source_subobject_id,
+                 target_owner_type_id, target_owner_function_id,
+                 source_unit_id, source_start, source_end)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, $8, $9, $10, $11, $12)",
+            &[
+                &catalogue.to_bytes().to_vec(),
+                &reference.source_function().to_bytes().to_vec(),
+                &reference.source_revision().to_bytes().to_vec(),
+                &i64::from(reference.ordinal()),
+                &target,
+                &target_kind,
+                &kind,
+                &owner_type,
+                &owner_function,
+                &source.source_unit().to_bytes().to_vec(),
+                &i64::from(source.byte_start()),
+                &i64::from(source.byte_end()),
+            ],
+        )
+        .await?;
+    Ok(())
+}
+
+fn resolved_type_columns(
+    resolved: ResolvedType,
+) -> (&'static str, Option<String>, Option<Vec<u8>>) {
+    match resolved {
+        ResolvedType::Scalar(scalar) => ("scalar", Some(scalar_storage(scalar).0.to_owned()), None),
+        ResolvedType::Named(target) => ("named", None, Some(target.to_bytes().to_vec())),
+        ResolvedType::Reference { target } => ("reference", None, Some(target.to_bytes().to_vec())),
+    }
 }
 
 async fn install_object_revision(
@@ -1291,6 +2926,14 @@ fn require_expected_error(
     expected: ExpectedRecoveryError,
 ) -> TestResult<()> {
     let matches = match expected {
+        ExpectedRecoveryError::AnyInvariant => matches!(
+            error,
+            PostgresKernelError::DurableInvariant { .. }
+                | PostgresKernelError::CanonicalHash(_)
+                | PostgresKernelError::CatalogueSnapshot(_)
+                | PostgresKernelError::RevisionInvariant(_)
+                | PostgresKernelError::RowDecode { .. }
+        ),
         ExpectedRecoveryError::AnyDurable => {
             matches!(error, PostgresKernelError::DurableInvariant { .. })
         }
