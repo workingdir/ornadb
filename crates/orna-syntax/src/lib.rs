@@ -1,6 +1,6 @@
 //! Lossless source parsing for the Orna language.
 //!
-//! This crate recognises schema declarations and object type declarations.
+//! This crate recognises supported declarations and SERVER function bodies.
 //! All source bytes remain in the CST, including whitespace and comments.
 
 use std::{fmt, ops::Range};
@@ -317,6 +317,8 @@ pub enum ServerFunctionBody {
     SqlQuery(SqlQueryBody),
     /// A parsed single-row Orna relational insert retained with its exact source.
     SqlInsert(SqlInsertBody),
+    /// A parsed single-object Orna relational update retained with its exact source.
+    SqlUpdate(SqlUpdateBody),
 }
 
 impl ServerFunctionBody {
@@ -341,6 +343,15 @@ impl ServerFunctionBody {
             _ => None,
         }
     }
+
+    /// Returns the relational update when this body contains one.
+    #[must_use]
+    pub fn as_sql_update(&self) -> Option<&SqlUpdateBody> {
+        match self {
+            Self::SqlUpdate(update) => Some(update),
+            _ => None,
+        }
+    }
 }
 
 /// The relational query body of a server function.
@@ -352,10 +363,10 @@ pub struct SqlQueryBody {
     pub query: SelectQuery,
 }
 
-/// The value forms supported by a single-row SQL insert body.
+/// The closed value forms supported by SQL mutation bodies.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum InsertValue {
+pub enum MutationValue {
     /// A bare declared server-function parameter name.
     Parameter(NamePart),
     /// A boolean literal, retaining its exact source spelling.
@@ -372,7 +383,7 @@ pub enum InsertValue {
     },
 }
 
-impl InsertValue {
+impl MutationValue {
     /// Return the complete source span for this value.
     pub fn span(&self) -> &SourceSpan {
         match self {
@@ -381,6 +392,9 @@ impl InsertValue {
         }
     }
 }
+
+/// The value forms supported by a single-row SQL insert body.
+pub type InsertValue = MutationValue;
 
 /// A parsed single-row `INSERT` body of a server function.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -405,6 +419,45 @@ pub struct InsertStatement {
     /// The alias written inside the `RETURNING REF(...)` expression.
     pub returning_alias: NamePart,
     /// The span from `INSERT` through the closing `RETURNING REF(...)` parenthesis.
+    pub span: SourceSpan,
+}
+
+/// A parsed single-object `UPDATE` body of a server function.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlUpdateBody {
+    /// The exact source text for the update body, without the declaration terminator.
+    pub source: SourceSlice,
+    /// The parsed update statement.
+    pub update: UpdateStatement,
+}
+
+/// One target-field assignment in an `UPDATE` statement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateAssignment {
+    /// The unqualified target field.
+    pub target_field: NamePart,
+    /// The assigned value.
+    pub value: MutationValue,
+    /// The span from the target field through the assigned value.
+    pub span: SourceSpan,
+}
+
+/// One parsed identity-selected `UPDATE` statement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateStatement {
+    /// The object type named after `UPDATE`.
+    pub target_object: QualifiedName,
+    /// The mandatory alias written after `AS`.
+    pub target_alias: NamePart,
+    /// The target-field assignments in source order.
+    pub assignments: Vec<UpdateAssignment>,
+    /// The alias written inside the selector `REF(...)` expression.
+    pub selector_alias: NamePart,
+    /// The declared function parameter that supplies the selected object identity.
+    pub selector_parameter: NamePart,
+    /// The alias written inside the `RETURNING REF(...)` expression.
+    pub returning_alias: NamePart,
+    /// The span from `UPDATE` through the closing `RETURNING REF(...)` parenthesis.
     pub span: SourceSpan,
 }
 
@@ -568,8 +621,8 @@ pub fn parse(source: &str) -> Parse {
 mod tests {
     use super::{
         FunctionReturnType, FunctionSecurity, FunctionTransaction, FunctionVolatility, InsertValue,
-        NullOrdering, OnDeletePolicy, OrderingDirection, QueryExpression, ServerFunctionBody,
-        SourceSpan, StandardLargeObjectKind, TypeSpecification, parse,
+        MutationValue, NullOrdering, OnDeletePolicy, OrderingDirection, QueryExpression,
+        ServerFunctionBody, SourceSpan, StandardLargeObjectKind, TypeSpecification, parse,
     };
 
     #[test]
@@ -722,7 +775,9 @@ mod tests {
                     NullOrdering::Unspecified
                 );
             }
-            ServerFunctionBody::SqlInsert(_) => panic!("tasks.overdue must use a SELECT body"),
+            ServerFunctionBody::SqlInsert(_) | ServerFunctionBody::SqlUpdate(_) => {
+                panic!("tasks.overdue must use a SELECT body")
+            }
         }
     }
 
@@ -1344,6 +1399,226 @@ mod tests {
     }
 
     #[test]
+    fn parses_single_object_update_bodies_losslessly() {
+        let source = "CREATE SERVER FUNCTION tasks.update(
+            p_task REF tasks.task,
+            p_title TEXT
+        )
+        RETURNS ROWS (updated REF tasks.task)
+        SECURITY INVOKER
+        TRANSACTION ATOMIC
+        VOLATILITY VOLATILE
+        AS UPDATE /* target */ tasks.task AS Updated
+            SET title = p_title, done = FALSE, note = NULL
+            WHERE REF(updated) = p_task
+            RETURNING REF(UPDATED);";
+        let parsed = parse(source);
+
+        assert!(parsed.diagnostics().is_empty());
+        assert_eq!(parsed.syntax().text(), source);
+        let function = &parsed.server_functions()[0];
+        let body = function
+            .body
+            .as_sql_update()
+            .expect("the function must have an UPDATE body");
+        assert!(function.body.as_sql_query().is_none());
+        assert!(function.body.as_sql_insert().is_none());
+        let update_start = source.find("UPDATE /* target */").unwrap();
+        let body_end = source.rfind(')').unwrap() + 1;
+        assert_eq!(body.source.text, &source[update_start..body_end]);
+        assert_eq!(
+            body.source.span,
+            SourceSpan {
+                start: update_start,
+                end: body_end
+            }
+        );
+        assert_eq!(body.update.span, body.source.span);
+        assert_eq!(body.update.target_object.parts[0].text, "tasks");
+        assert_eq!(body.update.target_object.parts[1].text, "task");
+        assert_eq!(body.update.target_alias.text, "Updated");
+        assert_eq!(body.update.assignments.len(), 3);
+        assert_eq!(body.update.assignments[0].target_field.text, "title");
+        assert!(matches!(
+            &body.update.assignments[0].value,
+            MutationValue::Parameter(name) if name.text == "p_title"
+        ));
+        assert!(matches!(
+            &body.update.assignments[1].value,
+            MutationValue::BooleanLiteral { value: false, source } if source.text == "FALSE"
+        ));
+        assert!(matches!(
+            &body.update.assignments[2].value,
+            MutationValue::NullLiteral { source } if source.text == "NULL"
+        ));
+        assert_eq!(body.update.selector_alias.text, "updated");
+        assert_eq!(body.update.selector_parameter.text, "p_task");
+        assert_eq!(body.update.returning_alias.text, "UPDATED");
+        assert_eq!(
+            body.update.assignments[0].span.start,
+            source.find("title = p_title").unwrap()
+        );
+        assert_eq!(
+            body.update.assignments[0].span.end,
+            source.find("p_title, done").unwrap() + "p_title".len()
+        );
+    }
+
+    #[test]
+    fn update_diagnostics_are_direct_and_select_the_offending_source() {
+        let cases = [
+            (
+                "UPDATE tasks.task AS updated SET Title = p_title, \"title\" = p_title WHERE REF(updated) = p_task RETURNING REF(updated)",
+                "field title appears more than once in this UPDATE",
+                "\"title\" =",
+                0,
+                "\"title\"".len(),
+            ),
+            (
+                "UPDATE tasks.task AS updated SET tasks.title = p_title WHERE REF(updated) = p_task RETURNING REF(updated)",
+                "write only the field name in SET; do not add an object or alias",
+                "tasks.title",
+                "tasks".len(),
+                1,
+            ),
+            (
+                "UPDATE tasks.task AS updated SET title = input.p_title WHERE REF(updated) = p_task RETURNING REF(updated)",
+                "use the declared parameter name by itself after '='; do not add an object or alias",
+                "input.p_title",
+                "input".len(),
+                1,
+            ),
+            (
+                "UPDATE tasks.task AS updated SET title = p_title WHERE REF(other) = p_task RETURNING REF(updated)",
+                "WHERE REF must use the UPDATE target alias updated, not other",
+                "REF(other)",
+                "REF(".len(),
+                "other".len(),
+            ),
+            (
+                "UPDATE tasks.task AS updated SET title = p_title WHERE REF(updated) = p_task RETURNING REF(other)",
+                "RETURNING REF must use the UPDATE target alias updated, not other",
+                "REF(other)",
+                "REF(".len(),
+                "other".len(),
+            ),
+            (
+                "UPDATE tasks.task AS updated SET title = make_title() WHERE REF(updated) = p_task RETURNING REF(updated)",
+                "this UPDATE does not support function calls in UPDATE values; expected a declared parameter name by itself",
+                "make_title()",
+                "make_title".len(),
+                1,
+            ),
+            (
+                "UPDATE tasks.task AS updated SET title = p_title WHERE REF(updated) = p_task RETURNING REF(updated) EXTRA",
+                "this UPDATE does not support EXTRA; expected the end of the UPDATE body",
+                "EXTRA",
+                0,
+                "EXTRA".len(),
+            ),
+        ];
+
+        for (body, message, marker, span_offset, span_length) in cases {
+            assert_update_diagnostic(body, message, marker, span_offset, span_length);
+        }
+    }
+
+    #[test]
+    fn rejects_closed_update_forms_and_recovers_to_a_later_declaration() {
+        let cases = [
+            (
+                "UPDATE tasks.task updated SET title = p_title WHERE REF(updated) = p_task RETURNING REF(updated)",
+                "expected AS before the UPDATE target alias in UPDATE body",
+                "updated SET",
+                0,
+                "updated".len(),
+            ),
+            (
+                "UPDATE tasks.task AS updated SET WHERE REF(updated) = p_task RETURNING REF(updated)",
+                "expected at least one field assignment after SET in UPDATE body",
+                "WHERE",
+                0,
+                "WHERE".len(),
+            ),
+            (
+                "UPDATE tasks.task AS updated SET title p_title WHERE REF(updated) = p_task RETURNING REF(updated)",
+                "expected '=' after the UPDATE field name in UPDATE body",
+                "p_title WHERE",
+                0,
+                "p_title".len(),
+            ),
+            (
+                "UPDATE tasks.task AS updated SET title = p_title, WHERE REF(updated) = p_task RETURNING REF(updated)",
+                "expected a field assignment after ',' in UPDATE body",
+                "WHERE",
+                0,
+                "WHERE".len(),
+            ),
+            (
+                "UPDATE tasks.task AS updated SET title = p_title WHERE updated.id = p_task RETURNING REF(updated)",
+                "expected REF(target_alias) after WHERE in UPDATE body",
+                "updated.id",
+                0,
+                "updated".len(),
+            ),
+            (
+                "UPDATE tasks.task AS updated SET title = p_title WHERE REF(updated) = TRUE RETURNING REF(updated)",
+                "expected a declared REF parameter after '=' in UPDATE body",
+                "TRUE",
+                0,
+                "TRUE".len(),
+            ),
+            (
+                "UPDATE tasks.task AS updated SET title = p_title WHERE REF(updated) = owner.p_task RETURNING REF(updated)",
+                "use the selector parameter name by itself after '='; do not add an object or alias",
+                "owner.p_task",
+                "owner".len(),
+                1,
+            ),
+            (
+                "UPDATE tasks.task AS updated SET title = p_title WHERE REF(updated) = find_task() RETURNING REF(updated)",
+                "this UPDATE does not support function calls as UPDATE selectors; expected a declared REF parameter name by itself",
+                "find_task()",
+                "find_task".len(),
+                1,
+            ),
+            (
+                "UPDATE tasks.task AS updated SET title = p_title WHERE REF(updated) = p_task RETURNING updated",
+                "expected REF in the RETURNING expression in UPDATE body",
+                "RETURNING updated",
+                "RETURNING ".len(),
+                "updated".len(),
+            ),
+        ];
+        for (body, message, marker, span_offset, span_length) in cases {
+            assert_update_diagnostic(body, message, marker, span_offset, span_length);
+        }
+
+        let source = "CREATE SERVER FUNCTION tasks.bad(p_task REF tasks.task, p_title TEXT) RETURNS ROWS (updated REF tasks.task) AS UPDATE tasks.task AS updated SET title = p_title WHERE REF(other) = p_task RETURNING REF(updated);
+            CREATE SERVER FUNCTION tasks.good(p_task REF tasks.task, p_title TEXT) RETURNS ROWS (updated REF tasks.task) AS UPDATE tasks.task AS updated SET title = p_title WHERE REF(updated) = p_task RETURNING REF(updated);";
+        let parsed = parse(source);
+        assert_eq!(parsed.server_functions().len(), 1);
+        assert_eq!(parsed.server_functions()[0].name.parts[1].text, "good");
+        assert!(parsed.server_functions()[0].body.as_sql_update().is_some());
+        assert_eq!(parsed.diagnostics().len(), 1);
+    }
+
+    #[test]
+    fn malformed_update_parentheses_do_not_consume_later_declarations() {
+        let source = "CREATE SERVER FUNCTION tasks.bad(p_task REF tasks.task, p_title TEXT) RETURNS ROWS (updated REF tasks.task) AS UPDATE tasks.task AS updated SET title = p_title WHERE REF(updated = p_task RETURNING REF(updated);
+            CREATE SERVER FUNCTION tasks.good(p_task REF tasks.task, p_title TEXT) RETURNS ROWS (updated REF tasks.task) AS UPDATE tasks.task AS updated SET title = p_title WHERE REF(updated) = p_task RETURNING REF(updated);";
+        let parsed = parse(source);
+
+        assert_eq!(parsed.syntax().text(), source);
+        assert_eq!(parsed.server_functions().len(), 1);
+        assert_eq!(parsed.server_functions()[0].name.parts[1].text, "good");
+        assert!(parsed.diagnostics().iter().any(|diagnostic| {
+            diagnostic.code == "ORNA0001"
+                && diagnostic.message == "expected ')' after the WHERE REF alias in UPDATE body"
+        }));
+    }
+
+    #[test]
     fn parses_object_type_fields_without_rewriting_aliases_or_defaults() {
         let source = "CREATE TYPE tasks.task AS OBJECT (\n\
             title TEXT NOT NULL,\n\
@@ -1704,8 +1979,43 @@ mod tests {
         span_offset: usize,
         span_length: usize,
     ) {
+        assert_body_diagnostic(
+            "p_title TEXT, p_done BOOL",
+            body,
+            message,
+            marker,
+            span_offset,
+            span_length,
+        );
+    }
+
+    fn assert_update_diagnostic(
+        body: &str,
+        message: &str,
+        marker: &str,
+        span_offset: usize,
+        span_length: usize,
+    ) {
+        assert_body_diagnostic(
+            "p_task REF tasks.task, p_title TEXT",
+            body,
+            message,
+            marker,
+            span_offset,
+            span_length,
+        );
+    }
+
+    fn assert_body_diagnostic(
+        parameters: &str,
+        body: &str,
+        message: &str,
+        marker: &str,
+        span_offset: usize,
+        span_length: usize,
+    ) {
         let source = format!(
-            "CREATE SERVER FUNCTION tasks.bad(p_title TEXT, p_done BOOL) RETURNS ROWS (created REF tasks.task) AS {body};"
+            "CREATE SERVER FUNCTION tasks.bad({parameters}) RETURNS ROWS (result REF tasks.task) AS {body};"
         );
         let parsed = parse(&source);
 
