@@ -3,6 +3,8 @@
 //! The resolver consumes the `Parse` values retained by [`super::parse_bundle`].
 //! It does not parse source text or expose syntax implementation values.
 
+mod identity;
+
 use std::collections::{HashMap, HashSet};
 
 use orna_core::{
