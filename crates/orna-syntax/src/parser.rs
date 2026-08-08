@@ -2,11 +2,12 @@ use rowan::{GreenNode, GreenNodeBuilder, Language};
 
 use crate::{
     CapabilitySpecification, Diagnostic, FunctionReturnType, FunctionSecurity, FunctionTransaction,
-    FunctionVolatility, NamePart, NullOrdering, ObjectFieldDeclaration, ObjectSource,
-    ObjectTypeDeclaration, OnDeletePolicy, OrderingDirection, OrderingExpression, Parse,
-    QualifiedName, QueryExpression, RowsColumnDeclaration, SchemaDeclaration, SelectQuery,
-    ServerFunctionBody, ServerFunctionDeclaration, ServerFunctionParameter, SourceSlice,
-    SourceSpan, SqlQueryBody, StandardLargeObjectKind, SyntaxTree, TypeSpecification,
+    FunctionVolatility, InsertStatement, InsertValue, NamePart, NullOrdering,
+    ObjectFieldDeclaration, ObjectSource, ObjectTypeDeclaration, OnDeletePolicy, OrderingDirection,
+    OrderingExpression, Parse, QualifiedName, QueryExpression, RowsColumnDeclaration,
+    SchemaDeclaration, SelectQuery, ServerFunctionBody, ServerFunctionDeclaration,
+    ServerFunctionParameter, SourceSlice, SourceSpan, SqlInsertBody, SqlQueryBody,
+    StandardLargeObjectKind, SyntaxTree, TypeSpecification,
     lexer::{Token, TokenKind, lex},
 };
 
@@ -41,6 +42,7 @@ pub(crate) enum SyntaxKind {
     CapabilityClause,
     CapabilitySpecification,
     CapabilityArguments,
+    SqlInsertBody,
 }
 
 impl From<SyntaxKind> for rowan::SyntaxKind {
@@ -85,6 +87,7 @@ impl Language for OrnaLanguage {
             25 => SyntaxKind::CapabilityClause,
             26 => SyntaxKind::CapabilitySpecification,
             27 => SyntaxKind::CapabilityArguments,
+            28 => SyntaxKind::SqlInsertBody,
             _ => panic!("unknown Orna syntax kind"),
         }
     }
@@ -333,16 +336,18 @@ impl<'source> Parser<'source> {
             return;
         }
         self.skip_trivia();
-        let Some(body) = self.parse_sql_query_body() else {
+        let Some(body) = self.parse_server_function_body() else {
             self.recover_statement();
             self.builder.finish_node();
             return;
         };
         self.skip_trivia();
-        let Some(semicolon) = self.expect_kind(
-            TokenKind::Semicolon,
-            "expected ';' after server function SQL query body",
-        ) else {
+        let terminator_error = if body.as_sql_insert().is_some() {
+            "expected ';' after server function INSERT body"
+        } else {
+            "expected ';' after server function SQL query body"
+        };
+        let Some(semicolon) = self.expect_kind(TokenKind::Semicolon, terminator_error) else {
             self.recover_statement();
             self.builder.finish_node();
             return;
@@ -722,55 +727,87 @@ impl<'source> Parser<'source> {
         result
     }
 
-    fn parse_sql_query_body(&mut self) -> Option<ServerFunctionBody> {
-        self.builder.start_node(SyntaxKind::SqlQueryBody.into());
-        let result = (|| {
-            let first = self.current()?;
-            if first.is_kind(TokenKind::Semicolon) {
-                self.error_current("ORNA0001", "expected a SQL query after AS");
-                return None;
-            }
-            let start = first.range.start;
-            let mut end = start;
-            let body_token_start = self.index;
-            let mut parenthesis_depth = 0usize;
+    fn collect_sql_body(
+        &mut self,
+        empty_body_message: &str,
+    ) -> Option<(SourceSlice, (usize, usize))> {
+        let first = self.current()?;
+        if first.is_kind(TokenKind::Semicolon) {
+            self.error_current("ORNA0001", empty_body_message);
+            return None;
+        }
+        let start = first.range.start;
+        let mut end = start;
+        let body_token_start = self.index;
 
-            while let Some(token) = self.current().cloned() {
-                if token.is_kind(TokenKind::Semicolon) && parenthesis_depth == 0 {
-                    break;
-                }
-                match token.kind {
-                    TokenKind::LeftParenthesis => parenthesis_depth += 1,
-                    TokenKind::RightParenthesis if parenthesis_depth > 0 => parenthesis_depth -= 1,
-                    _ => {}
-                }
-                if !token.kind.is_trivia() {
-                    end = token.range.end;
-                }
-                self.bump();
+        while let Some(token) = self.current().cloned() {
+            if token.is_kind(TokenKind::Semicolon) {
+                break;
             }
-            if end == start {
-                self.error_current("ORNA0001", "expected a SQL query after AS");
-                return None;
+            if !token.kind.is_trivia() {
+                end = token.range.end;
             }
-            let source = SourceSlice {
+            self.bump();
+        }
+        if end == start {
+            self.error_current("ORNA0001", empty_body_message);
+            return None;
+        }
+        Some((
+            SourceSlice {
                 text: self.source[start..end].to_owned(),
                 span: SourceSpan { start, end },
-            };
-            let body_token_end = self.index;
-            let query_tokens = &self.tokens[body_token_start..body_token_end];
-            let query = match parse_select_query(query_tokens) {
-                Ok(query) => query,
-                Err(error) => {
-                    self.diagnostics.push(Diagnostic {
-                        code: error.code,
-                        message: error.message,
-                        span: error.span,
-                    });
-                    return None;
-                }
-            };
-            Some(ServerFunctionBody::SqlQuery(SqlQueryBody { source, query }))
+            },
+            (body_token_start, self.index),
+        ))
+    }
+
+    fn parse_server_function_body(&mut self) -> Option<ServerFunctionBody> {
+        let is_insert = self.current().is_some_and(|token| token.is_word("INSERT"));
+        let syntax_kind = if is_insert {
+            SyntaxKind::SqlInsertBody
+        } else {
+            SyntaxKind::SqlQueryBody
+        };
+        self.builder.start_node(syntax_kind.into());
+        let result = (|| {
+            let (source, (body_token_start, body_token_end)) =
+                self.collect_sql_body(if is_insert {
+                    "expected a SQL INSERT after AS"
+                } else {
+                    "expected a SQL query after AS"
+                })?;
+            let body_tokens = &self.tokens[body_token_start..body_token_end];
+            if is_insert {
+                let insert = match parse_sql_insert(body_tokens) {
+                    Ok(insert) => insert,
+                    Err(error) => {
+                        self.diagnostics.push(Diagnostic {
+                            code: error.code,
+                            message: error.message,
+                            span: error.span,
+                        });
+                        return None;
+                    }
+                };
+                Some(ServerFunctionBody::SqlInsert(SqlInsertBody {
+                    source,
+                    insert,
+                }))
+            } else {
+                let query = match parse_select_query(body_tokens) {
+                    Ok(query) => query,
+                    Err(error) => {
+                        self.diagnostics.push(Diagnostic {
+                            code: error.code,
+                            message: error.message,
+                            span: error.span,
+                        });
+                        return None;
+                    }
+                };
+                Some(ServerFunctionBody::SqlQuery(SqlQueryBody { source, query }))
+            }
         })();
         self.builder.finish_node();
         result
@@ -1300,17 +1337,28 @@ struct QueryParseError {
     span: SourceSpan,
 }
 
-struct SelectQueryParser<'tokens, 'source> {
-    tokens: &'tokens [Token<'source>],
-    index: usize,
+#[derive(Debug, Clone, Copy)]
+enum SqlBodySyntax {
+    Select,
+    Insert,
 }
 
-impl<'tokens, 'source> SelectQueryParser<'tokens, 'source> {
-    fn new(tokens: &'tokens [Token<'source>]) -> Self {
-        Self { tokens, index: 0 }
+struct SqlBodyParser<'tokens, 'source> {
+    tokens: &'tokens [Token<'source>],
+    index: usize,
+    syntax: SqlBodySyntax,
+}
+
+impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
+    fn new(tokens: &'tokens [Token<'source>], syntax: SqlBodySyntax) -> Self {
+        Self {
+            tokens,
+            index: 0,
+            syntax,
+        }
     }
 
-    fn parse(mut self) -> Result<SelectQuery, QueryParseError> {
+    fn parse_select(mut self) -> Result<SelectQuery, QueryParseError> {
         let select = self
             .take_word("SELECT")
             .ok_or_else(|| self.implementation_gap("only SELECT query bodies", "a SELECT query"))?;
@@ -1549,16 +1597,264 @@ impl<'tokens, 'source> SelectQueryParser<'tokens, 'source> {
         })
     }
 
+    fn boolean_literal(&self, token: Token<'source>, value: bool) -> QueryExpression {
+        QueryExpression::BooleanLiteral {
+            value,
+            source: SourceSlice {
+                text: token.text.to_owned(),
+                span: token.span(),
+            },
+        }
+    }
+
+    fn unsupported_remaining_query_syntax(&self) -> QueryParseError {
+        let feature = self
+            .current()
+            .map_or("this SELECT query syntax", |token| token.text);
+        self.implementation_gap(feature, "the end of the implemented SELECT query slice")
+    }
+}
+
+fn parse_select_query(tokens: &[Token<'_>]) -> Result<SelectQuery, QueryParseError> {
+    SqlBodyParser::new(tokens, SqlBodySyntax::Select).parse_select()
+}
+
+impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
+    fn parse_insert(mut self) -> Result<InsertStatement, QueryParseError> {
+        let insert = self
+            .take_word("INSERT")
+            .ok_or_else(|| self.expected("INSERT"))?;
+        self.skip_trivia();
+        if self.take_word("INTO").is_none() {
+            return Err(self.expected("INTO after INSERT"));
+        }
+        self.skip_trivia();
+        let target_object = self.parse_qualified_name("an object type after INSERT INTO")?;
+        self.skip_trivia();
+        if self.take_word("AS").is_none() {
+            return Err(self.expected("mandatory AS before the INSERT target alias"));
+        }
+        self.skip_trivia();
+        let target_alias = self.parse_name_part("an INSERT target alias after AS")?;
+
+        self.skip_trivia();
+        self.take_kind(TokenKind::LeftParenthesis)
+            .ok_or_else(|| self.expected("'(' before the INSERT target fields"))?;
+        self.skip_trivia();
+        if self
+            .current()
+            .is_some_and(|token| token.kind == TokenKind::RightParenthesis)
+        {
+            return Err(self.expected("a non-empty INSERT target field list"));
+        }
+        let mut target_fields = Vec::new();
+        loop {
+            let field = self.parse_name_part("an unqualified INSERT target field")?;
+            if target_fields
+                .iter()
+                .any(|existing| identifiers_equal(existing, &field))
+            {
+                return Err(QueryParseError {
+                    code: "ORNA0001",
+                    message: "duplicate INSERT target fields are not supported".to_owned(),
+                    span: field.span.clone(),
+                });
+            }
+            self.skip_trivia();
+            if let Some(dot) = self.take_kind(TokenKind::Dot) {
+                return Err(QueryParseError {
+                    code: "ORNA0001",
+                    message: "the current Orna INSERT parser does not yet implement qualified INSERT target fields; expected an unqualified field identifier".to_owned(),
+                    span: dot.span(),
+                });
+            }
+            target_fields.push(field);
+            self.skip_trivia();
+            if self.take_kind(TokenKind::Comma).is_some() {
+                self.skip_trivia();
+                if self
+                    .current()
+                    .is_some_and(|token| token.kind == TokenKind::RightParenthesis)
+                {
+                    return Err(self.expected("an INSERT target field after ','"));
+                }
+                continue;
+            }
+            self.take_kind(TokenKind::RightParenthesis)
+                .ok_or_else(|| self.expected("',' or ')' after an INSERT target field"))?;
+            break;
+        }
+
+        self.skip_trivia();
+        if self.take_word("VALUES").is_none() {
+            return Err(self.expected("VALUES after the INSERT target fields"));
+        }
+        self.skip_trivia();
+        self.take_kind(TokenKind::LeftParenthesis)
+            .ok_or_else(|| self.expected("'(' after VALUES"))?;
+        self.skip_trivia();
+        if self
+            .current()
+            .is_some_and(|token| token.kind == TokenKind::RightParenthesis)
+        {
+            return Err(self.expected("a non-empty VALUES row"));
+        }
+        let mut values = Vec::new();
+        loop {
+            values.push(self.parse_value()?);
+            self.skip_trivia();
+            if self.take_kind(TokenKind::Comma).is_some() {
+                self.skip_trivia();
+                if self
+                    .current()
+                    .is_some_and(|token| token.kind == TokenKind::RightParenthesis)
+                {
+                    return Err(self.expected("an INSERT value after ','"));
+                }
+                continue;
+            }
+            let close = self
+                .take_kind(TokenKind::RightParenthesis)
+                .ok_or_else(|| self.expected("',' or ')' after an INSERT value"))?;
+            if values.len() != target_fields.len() {
+                let arity_span = values
+                    .get(target_fields.len())
+                    .map(InsertValue::span)
+                    .cloned()
+                    .unwrap_or_else(|| close.span());
+                return Err(QueryParseError {
+                    code: "ORNA0001",
+                    message: format!(
+                        "INSERT target field list and VALUES row must have the same arity ({} fields, {} values)",
+                        target_fields.len(),
+                        values.len()
+                    ),
+                    span: arity_span,
+                });
+            }
+            break;
+        }
+
+        self.skip_trivia();
+        if self.take_word("RETURNING").is_none() {
+            if self.current().is_some_and(|token| {
+                token.kind == TokenKind::LeftParenthesis || token.kind == TokenKind::Comma
+            }) {
+                return Err(self
+                    .implementation_gap("multiple VALUES rows", "RETURNING after one VALUES row"));
+            }
+            return Err(self.expected("RETURNING after one VALUES row"));
+        }
+        self.skip_trivia();
+        if self.take_word("REF").is_none() {
+            return Err(self.expected("REF in the RETURNING expression"));
+        }
+        self.skip_trivia();
+        self.take_kind(TokenKind::LeftParenthesis)
+            .ok_or_else(|| self.expected("'(' after RETURNING REF"))?;
+        self.skip_trivia();
+        let returning_alias = self.parse_name_part("the alias inside RETURNING REF(...)")?;
+        if !identifiers_equal(&target_alias, &returning_alias) {
+            return Err(QueryParseError {
+                code: "ORNA0001",
+                message: "RETURNING REF must use the INSERT target alias".to_owned(),
+                span: returning_alias.span.clone(),
+            });
+        }
+        self.skip_trivia();
+        let close = self
+            .take_kind(TokenKind::RightParenthesis)
+            .ok_or_else(|| self.expected("')' after the RETURNING REF alias"))?;
+        self.skip_trivia();
+        if self.current().is_some() {
+            return Err(self.implementation_gap(
+                self.current().expect("current token exists").text,
+                "the end of the INSERT body",
+            ));
+        }
+
+        Ok(InsertStatement {
+            target_object,
+            target_alias,
+            target_fields,
+            values,
+            returning_alias,
+            span: SourceSpan {
+                start: insert.range.start,
+                end: close.range.end,
+            },
+        })
+    }
+
+    fn parse_value(&mut self) -> Result<InsertValue, QueryParseError> {
+        if let Some(token) = self.take_word("TRUE") {
+            return Ok(InsertValue::BooleanLiteral {
+                value: true,
+                source: SourceSlice {
+                    text: token.text.to_owned(),
+                    span: token.span(),
+                },
+            });
+        }
+        if let Some(token) = self.take_word("FALSE") {
+            return Ok(InsertValue::BooleanLiteral {
+                value: false,
+                source: SourceSlice {
+                    text: token.text.to_owned(),
+                    span: token.span(),
+                },
+            });
+        }
+        if let Some(token) = self.take_word("NULL") {
+            return Ok(InsertValue::NullLiteral {
+                source: SourceSlice {
+                    text: token.text.to_owned(),
+                    span: token.span(),
+                },
+            });
+        }
+
+        let name = self.parse_name_part("a declared parameter, TRUE, FALSE, or NULL")?;
+        self.skip_trivia();
+        if self
+            .current()
+            .is_some_and(|token| token.kind == TokenKind::Dot)
+        {
+            let dot = self.current().expect("dot exists");
+            return Err(QueryParseError {
+                code: "ORNA0001",
+                message: "the current Orna INSERT parser does not yet implement qualified INSERT values; expected a bare declared parameter name".to_owned(),
+                span: dot.span(),
+            });
+        }
+        if self
+            .current()
+            .is_some_and(|token| token.kind == TokenKind::LeftParenthesis)
+        {
+            return Err(self.implementation_gap(
+                "function calls in INSERT values",
+                "a bare declared parameter name",
+            ));
+        }
+        Ok(InsertValue::Parameter(name))
+    }
+}
+
+impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
     fn parse_qualified_name(&mut self, expected: &str) -> Result<QualifiedName, QueryParseError> {
         let first = self.parse_name_part(expected)?;
         let mut parts = vec![first.clone()];
+        let after_dot = match self.syntax {
+            SqlBodySyntax::Select => "an identifier after '.' in an object type",
+            SqlBodySyntax::Insert => "an identifier after '.' in the INSERT target",
+        };
         loop {
             self.skip_trivia();
             if self.take_kind(TokenKind::Dot).is_none() {
                 break;
             }
             self.skip_trivia();
-            parts.push(self.parse_name_part("an identifier after '.' in an object type")?);
+            parts.push(self.parse_name_part(after_dot)?);
         }
         let end = parts.last().expect("qualified name has a part").span.end;
         Ok(QualifiedName {
@@ -1568,16 +1864,6 @@ impl<'tokens, 'source> SelectQueryParser<'tokens, 'source> {
                 end,
             },
         })
-    }
-
-    fn boolean_literal(&self, token: Token<'source>, value: bool) -> QueryExpression {
-        QueryExpression::BooleanLiteral {
-            value,
-            source: SourceSlice {
-                text: token.text.to_owned(),
-                span: token.span(),
-            },
-        }
     }
 
     fn parse_name_part(&mut self, expected: &str) -> Result<NamePart, QueryParseError> {
@@ -1624,31 +1910,6 @@ impl<'tokens, 'source> SelectQueryParser<'tokens, 'source> {
         self.tokens.get(self.index)
     }
 
-    fn expected(&self, expected: &str) -> QueryParseError {
-        QueryParseError {
-            code: "ORNA0001",
-            message: format!("expected {expected} in SELECT query"),
-            span: self.current_span(),
-        }
-    }
-
-    fn implementation_gap(&self, feature: &str, expected: &str) -> QueryParseError {
-        QueryParseError {
-            code: "ORNA0001",
-            message: format!(
-                "the current Orna SELECT parser does not yet implement {feature}; expected {expected}"
-            ),
-            span: self.current_span(),
-        }
-    }
-
-    fn unsupported_remaining_query_syntax(&self) -> QueryParseError {
-        let feature = self
-            .current()
-            .map_or("this SELECT query syntax", |token| token.text);
-        self.implementation_gap(feature, "the end of the implemented SELECT query slice")
-    }
-
     fn current_span(&self) -> SourceSpan {
         self.current().map_or_else(
             || {
@@ -1658,8 +1919,49 @@ impl<'tokens, 'source> SelectQueryParser<'tokens, 'source> {
             Token::span,
         )
     }
+
+    fn expected(&self, expected: &str) -> QueryParseError {
+        let context = match self.syntax {
+            SqlBodySyntax::Select => "SELECT query",
+            SqlBodySyntax::Insert => "SQL INSERT body",
+        };
+        QueryParseError {
+            code: "ORNA0001",
+            message: format!("expected {expected} in {context}"),
+            span: self.current_span(),
+        }
+    }
+
+    fn implementation_gap(&self, feature: &str, expected: &str) -> QueryParseError {
+        let context = match self.syntax {
+            SqlBodySyntax::Select => "SELECT parser",
+            SqlBodySyntax::Insert => "INSERT parser",
+        };
+        QueryParseError {
+            code: "ORNA0001",
+            message: format!(
+                "the current Orna {context} does not yet implement {feature}; expected {expected}"
+            ),
+            span: self.current_span(),
+        }
+    }
 }
 
-fn parse_select_query(tokens: &[Token<'_>]) -> Result<SelectQuery, QueryParseError> {
-    SelectQueryParser::new(tokens).parse()
+fn identifiers_equal(left: &NamePart, right: &NamePart) -> bool {
+    normalise_identifier(left) == normalise_identifier(right)
+}
+
+fn normalise_identifier(identifier: &NamePart) -> String {
+    if let Some(quoted) = identifier
+        .text
+        .strip_prefix('"')
+        .and_then(|text| text.strip_suffix('"'))
+    {
+        return quoted.replace("\"\"", "\"");
+    }
+    identifier.text.to_lowercase()
+}
+
+fn parse_sql_insert(tokens: &[Token<'_>]) -> Result<InsertStatement, QueryParseError> {
+    SqlBodyParser::new(tokens, SqlBodySyntax::Insert).parse_insert()
 }
