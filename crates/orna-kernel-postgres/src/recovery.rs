@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
+mod functions;
+
 use orna_core::{
     CatalogueRevisionId, ExpressionId, FieldId, SchemaId, SourceBundleId, SourceRevisionId,
     SourceUnitId, TypeId,
@@ -24,10 +26,12 @@ use crate::{
     bootstrap::require_current_migrations,
     decode::{
         DurableRecord, digest_bytes, exact_enum, identity_bytes, optional_identity_bytes,
-        u32_from_i64, u64_from_i64,
+        u32_from_i64,
     },
     physical::{establish_trusted_search_path, verify_physical_catalogue},
 };
+
+use self::functions::{RecoveredFunctionState, load_function_state};
 
 const ACTIVE_RELATION: &str = "_orna_kernel.active_revision";
 const SOURCE_UNIT_RELATION: &str = "_orna_kernel.source_units";
@@ -75,12 +79,19 @@ struct RecoveredExpression {
     origin: DefinitionOrigin,
 }
 
+struct RecoveredCatalogueSemantics {
+    catalogue: CatalogueSnapshot,
+    expressions: Vec<ExpressionArtifact>,
+    origins: Vec<DefinitionOrigin>,
+}
+
 impl PostgresKernel {
     /// Reconstructs and validates the complete active durable database revision.
     ///
-    /// This recovery slice supports schemas, object types, fields, and
-    /// expression artifacts. It fails closed when the active revision contains
-    /// functions or other durable members it cannot reconstruct completely.
+    /// This recovery slice supports schemas, object types, fields, expression
+    /// artifacts, compiler-deployable functions, immutable function history,
+    /// and active definition references. It fails closed on any semantic,
+    /// source, hash-chain, or physical-layout state it cannot prove complete.
     pub async fn recover(&self) -> Result<ActiveDatabaseRevision, PostgresKernelError> {
         let mut session = self.open().await?;
         let recovery_result = recover_client(&mut session.client).await;
@@ -107,14 +118,17 @@ async fn recover_client(
     establish_trusted_search_path(&transaction).await?;
     require_current_migrations(&transaction).await?;
     let header = load_active_header(&transaction).await?;
-    validate_revision_ancestry(&transaction, header.catalogue, header.source).await?;
-    reject_unsupported_durable_state(&transaction, header.catalogue).await?;
+    let active_ancestry =
+        validate_revision_ancestry(&transaction, header.catalogue, header.source).await?;
     let units = load_source_units(&transaction, header.bundle).await?;
-    let schemas = load_schemas(&transaction, header.catalogue).await?;
-    let objects = load_object_types(&transaction, header.catalogue).await?;
-    let fields = load_fields(&transaction, header.catalogue).await?;
-    let expressions = load_expressions(&transaction, header.catalogue).await?;
-    let active = assemble_revision(header, units, schemas, objects, fields, expressions)?;
+    let mut function_state =
+        load_function_state(&transaction, header.catalogue, &active_ancestry).await?;
+    let functions = std::mem::take(&mut function_state.functions);
+    let function_origins = std::mem::take(&mut function_state.origins);
+    let semantics =
+        load_catalogue_semantics(&transaction, header.catalogue, functions, function_origins)
+            .await?;
+    let active = assemble_revision(header, units, semantics, function_state)?;
     verify_physical_catalogue(&transaction, active.catalogue()).await?;
 
     transaction
@@ -128,11 +142,12 @@ async fn validate_revision_ancestry(
     transaction: &Transaction<'_>,
     active_catalogue: CatalogueRevisionId,
     active_source: SourceRevisionId,
-) -> Result<(), PostgresKernelError> {
+) -> Result<BTreeSet<(CatalogueRevisionId, SourceRevisionId)>, PostgresKernelError> {
     let mut catalogue = active_catalogue;
     let mut source = active_source;
     let mut seen_catalogues = HashSet::new();
     let mut seen_sources = HashSet::new();
+    let mut ancestry = BTreeSet::new();
 
     loop {
         let catalogue_record =
@@ -142,6 +157,7 @@ async fn validate_revision_ancestry(
                 "catalogue and source revision ancestry must terminate without repeated identities",
             ));
         }
+        ancestry.insert((catalogue, source));
 
         let rows = transaction
             .query(
@@ -200,7 +216,7 @@ async fn validate_revision_ancestry(
         .map(SourceRevisionId::from_bytes);
 
         match (catalogue_parent, source_parent, parent_catalogue_source) {
-            (None, None, None) => return Ok(()),
+            (None, None, None) => return Ok(ancestry),
             (Some(parent_catalogue), Some(parent_source), Some(joined_parent_source))
                 if parent_source == joined_parent_source =>
             {
@@ -483,67 +499,6 @@ fn require_hash_contract(
     let version: i16 = record.column(row, version_column, version_rule)?;
     if version != 1 {
         return Err(record.invariant(version_rule));
-    }
-    Ok(())
-}
-
-async fn reject_unsupported_durable_state(
-    transaction: &Transaction<'_>,
-    catalogue: CatalogueRevisionId,
-) -> Result<(), PostgresKernelError> {
-    let catalogue_bytes = catalogue.to_bytes().to_vec();
-    let row = transaction
-        .query_one(
-            "SELECT
-                (SELECT count(*) FROM _orna_kernel.catalogue_functions
-                 WHERE catalogue_revision_id = $1) AS catalogue_functions,
-                (SELECT count(*) FROM _orna_kernel.catalogue_function_parameters
-                 WHERE catalogue_revision_id = $1) AS catalogue_function_parameters,
-                (SELECT count(*) FROM _orna_kernel.catalogue_function_return_columns
-                 WHERE catalogue_revision_id = $1) AS catalogue_function_return_columns,
-                (SELECT count(*) FROM _orna_kernel.function_revisions) AS function_revisions,
-                (SELECT count(*) FROM _orna_kernel.function_artifacts) AS function_artifacts,
-                (SELECT count(*) FROM _orna_kernel.definition_references) AS definition_references",
-            &[&catalogue_bytes],
-        )
-        .await
-        .map_err(PostgresKernelError::Database)?;
-    let unsupported = [
-        ("_orna_kernel.catalogue_functions", "catalogue_functions"),
-        (
-            "_orna_kernel.catalogue_function_parameters",
-            "catalogue_function_parameters",
-        ),
-        (
-            "_orna_kernel.catalogue_function_return_columns",
-            "catalogue_function_return_columns",
-        ),
-        ("_orna_kernel.function_revisions", "function_revisions"),
-        ("_orna_kernel.function_artifacts", "function_artifacts"),
-        (
-            "_orna_kernel.definition_references",
-            "definition_references",
-        ),
-    ];
-
-    for (relation, column) in unsupported {
-        let count_record = DurableRecord::new(relation, catalogue.canonical());
-        let count = u64_from_i64(
-            count_record.column(
-                &row,
-                column,
-                "durable relation count must be a non-negative bigint",
-            )?,
-            &count_record,
-            "durable relation count must be non-negative",
-        )?;
-        if count != 0 {
-            return Err(PostgresKernelError::DurableInvariant {
-                relation,
-                record: catalogue.canonical(),
-                rule: "object catalogue recovery cannot omit present function durable records",
-            });
-        }
     }
     Ok(())
 }
@@ -1171,41 +1126,33 @@ fn decode_source_unit(
         .map_err(PostgresKernelError::RevisionInvariant)
 }
 
-fn assemble_revision(
-    header: RecoveredRevisionHeader,
-    units: Vec<StoredSourceUnit>,
+async fn load_catalogue_semantics(
+    transaction: &Transaction<'_>,
+    catalogue: CatalogueRevisionId,
+    functions: Vec<functions::RecoveredFunction>,
+    function_origins: Vec<DefinitionOrigin>,
+) -> Result<RecoveredCatalogueSemantics, PostgresKernelError> {
+    assemble_catalogue_semantics(
+        catalogue,
+        load_schemas(transaction, catalogue).await?,
+        load_object_types(transaction, catalogue).await?,
+        load_fields(transaction, catalogue).await?,
+        load_expressions(transaction, catalogue).await?,
+        functions,
+        function_origins,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn assemble_catalogue_semantics(
+    catalogue_id: CatalogueRevisionId,
     schemas: Vec<RecoveredSchema>,
     objects: Vec<RecoveredObjectType>,
     mut fields: BTreeMap<TypeId, Vec<RecoveredField>>,
     expressions: Vec<RecoveredExpression>,
-) -> Result<ActiveDatabaseRevision, PostgresKernelError> {
-    let bundle_record =
-        DurableRecord::new("_orna_kernel.source_bundles", header.bundle.canonical());
-    let source_record =
-        DurableRecord::new("_orna_kernel.source_revisions", header.source.canonical());
-    let computed_bundle_hash =
-        source_bundle_digest(&units).map_err(PostgresKernelError::CanonicalHash)?;
-    if computed_bundle_hash != header.bundle_hash {
-        return Err(bundle_record
-            .invariant("source bundle digest must match the ordered source unit records"));
-    }
-
-    let source = StoredSourceRevision::new(
-        header.bundle,
-        header.source,
-        header.source_parent,
-        units,
-        header.bundle_hash,
-        header.source_hash,
-    )
-    .map_err(PostgresKernelError::RevisionInvariant)?;
-    let computed_source_hash =
-        source_revision_digest(&source).map_err(PostgresKernelError::CanonicalHash)?;
-    if computed_source_hash != header.source_hash {
-        return Err(source_record
-            .invariant("source revision digest must match its bundle, parent, and bundle digest"));
-    }
-
+    functions: Vec<functions::RecoveredFunction>,
+    mut function_origins: Vec<DefinitionOrigin>,
+) -> Result<RecoveredCatalogueSemantics, PostgresKernelError> {
     let schema_names = schemas
         .iter()
         .map(|schema| (schema.definition.id(), schema.definition.name().clone()))
@@ -1264,19 +1211,89 @@ fn assemble_revision(
         origins.push(expression.origin);
         expression_artifacts.push(expression.artifact);
     }
-    let catalogue = CatalogueSnapshot::new(header.catalogue, schemas, object_definitions)
-        .map_err(PostgresKernelError::CatalogueSnapshot)?;
+    let mut function_definitions = Vec::with_capacity(functions.len());
+    for function in functions {
+        let record = DurableRecord::new(
+            "_orna_kernel.catalogue_functions",
+            function.definition.id().canonical(),
+        );
+        let schema_name = schema_names.get(&function.schema).ok_or_else(|| {
+            record.invariant("function stored schema identity must identify a recovered schema")
+        })?;
+        let parts = function.definition.name().parts();
+        let namespace = parts
+            .get(..parts.len().saturating_sub(1))
+            .filter(|parts| !parts.is_empty())
+            .ok_or_else(|| {
+                record.invariant("function qualified name must contain a schema namespace")
+            })?;
+        if namespace != schema_name.parts() {
+            return Err(record.invariant(
+                "function stored schema identity must equal the schema named by its namespace",
+            ));
+        }
+        function_definitions.push(function.definition);
+    }
+    origins.append(&mut function_origins);
+    let catalogue = CatalogueSnapshot::new_with_functions(
+        catalogue_id,
+        schemas,
+        object_definitions,
+        function_definitions,
+    )
+    .map_err(PostgresKernelError::CatalogueSnapshot)?;
     validate_field_links(&catalogue, &expression_artifacts)?;
+    validate_function_links(&catalogue, &expression_artifacts)?;
+    Ok(RecoveredCatalogueSemantics {
+        catalogue,
+        expressions: expression_artifacts,
+        origins,
+    })
+}
+
+fn assemble_revision(
+    header: RecoveredRevisionHeader,
+    units: Vec<StoredSourceUnit>,
+    semantics: RecoveredCatalogueSemantics,
+    function_state: RecoveredFunctionState,
+) -> Result<ActiveDatabaseRevision, PostgresKernelError> {
+    let bundle_record =
+        DurableRecord::new("_orna_kernel.source_bundles", header.bundle.canonical());
+    let source_record =
+        DurableRecord::new("_orna_kernel.source_revisions", header.source.canonical());
+    let computed_bundle_hash =
+        source_bundle_digest(&units).map_err(PostgresKernelError::CanonicalHash)?;
+    if computed_bundle_hash != header.bundle_hash {
+        return Err(bundle_record
+            .invariant("source bundle digest must match the ordered source unit records"));
+    }
+
+    let source = StoredSourceRevision::new(
+        header.bundle,
+        header.source,
+        header.source_parent,
+        units,
+        header.bundle_hash,
+        header.source_hash,
+    )
+    .map_err(PostgresKernelError::RevisionInvariant)?;
+    let computed_source_hash =
+        source_revision_digest(&source).map_err(PostgresKernelError::CanonicalHash)?;
+    if computed_source_hash != header.source_hash {
+        return Err(source_record
+            .invariant("source revision digest must match its bundle, parent, and bundle digest"));
+    }
+
     let active = ActiveDatabaseRevision::new_with_history(
         RevisionPair::new(header.source, header.catalogue),
         source,
-        catalogue,
+        semantics.catalogue,
         header.catalogue_hash,
-        expression_artifacts,
-        Vec::new(),
-        Vec::new(),
-        origins,
-        Vec::new(),
+        semantics.expressions,
+        function_state.active_revisions,
+        function_state.historical_revisions,
+        semantics.origins,
+        function_state.references,
     )
     .map_err(PostgresKernelError::RevisionInvariant)?;
     let computed_catalogue_hash = catalogue_digest(
@@ -1296,7 +1313,94 @@ fn assemble_revision(
             .invariant("catalogue digest must match the exact recovered semantic catalogue"));
     }
 
+    if let Some(introduction) = function_state.introductions.get(&header.catalogue)
+        && (introduction.catalogue_hash != active.catalogue_hash()
+            || introduction.source.id() != active.source().id())
+    {
+        return Err(DurableRecord::new(
+            "_orna_kernel.catalogue_revisions",
+            header.catalogue.canonical(),
+        )
+        .invariant(
+            "active function introduction must join the exact validated catalogue and source hashes",
+        ));
+    }
+
     Ok(active)
+}
+
+fn validate_function_links(
+    catalogue: &CatalogueSnapshot,
+    expressions: &[ExpressionArtifact],
+) -> Result<(), PostgresKernelError> {
+    let expression_ids = expressions
+        .iter()
+        .map(ExpressionArtifact::id)
+        .collect::<BTreeSet<_>>();
+    for function in catalogue.functions() {
+        for parameter in function.parameters() {
+            let record = DurableRecord::new(
+                "_orna_kernel.catalogue_function_parameters",
+                format!(
+                    "function={} parameter={}",
+                    function.id().canonical(),
+                    parameter.id().canonical()
+                ),
+            );
+            validate_function_type(catalogue, parameter.resolved_type(), &record)?;
+            if let Some(expression) = parameter.default_expression()
+                && !expression_ids.contains(&expression)
+            {
+                return Err(record.invariant(
+                    "every parameter default must identify a recovered expression artifact",
+                ));
+            }
+        }
+        match function.return_type() {
+            orna_core::catalogue::FunctionReturn::Single(resolved_type) => {
+                validate_function_type(
+                    catalogue,
+                    *resolved_type,
+                    &DurableRecord::new(
+                        "_orna_kernel.catalogue_functions",
+                        function.id().canonical(),
+                    ),
+                )?;
+            }
+            orna_core::catalogue::FunctionReturn::Rows(columns) => {
+                for column in columns {
+                    validate_function_type(
+                        catalogue,
+                        column.resolved_type(),
+                        &DurableRecord::new(
+                            "_orna_kernel.catalogue_function_return_columns",
+                            format!(
+                                "function={} ordinal={}",
+                                function.id().canonical(),
+                                column.ordinal()
+                            ),
+                        ),
+                    )?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_function_type(
+    catalogue: &CatalogueSnapshot,
+    resolved_type: ResolvedType,
+    record: &DurableRecord,
+) -> Result<(), PostgresKernelError> {
+    if let ResolvedType::Named(target) | ResolvedType::Reference { target } = resolved_type
+        && catalogue.object_type_by_id(target).is_none()
+    {
+        return Err(record.invariant(
+            "every named or reference function type target must be an active object type",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_field_links(
@@ -1348,7 +1452,10 @@ mod tests {
         revision::StoredSourceUnit,
     };
 
-    use super::{RecoveredRevisionHeader, assemble_revision};
+    use super::{
+        RecoveredCatalogueSemantics, RecoveredFunctionState, RecoveredRevisionHeader,
+        assemble_revision,
+    };
 
     #[test]
     fn assembles_the_exact_empty_semantic_revision() {
@@ -1374,10 +1481,12 @@ mod tests {
                 catalogue_hash,
             },
             Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Default::default(),
-            Vec::new(),
+            RecoveredCatalogueSemantics {
+                catalogue: empty_catalogue,
+                expressions: Vec::new(),
+                origins: Vec::new(),
+            },
+            RecoveredFunctionState::empty(),
         )
         .expect("exact empty revision");
 
@@ -1399,6 +1508,8 @@ mod tests {
         let bundle_hash = source_bundle_digest(&[]).expect("empty source bundle hash");
         let source_hash = source_revision_record_digest(bundle, None, bundle_hash)
             .expect("empty source revision hash");
+        let empty_catalogue =
+            CatalogueSnapshot::new(catalogue, Vec::new(), Vec::new()).expect("empty catalogue");
 
         assert!(
             assemble_revision(
@@ -1412,10 +1523,12 @@ mod tests {
                     catalogue_hash: bundle_hash,
                 },
                 Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                Default::default(),
-                Vec::new(),
+                RecoveredCatalogueSemantics {
+                    catalogue: empty_catalogue,
+                    expressions: Vec::new(),
+                    origins: Vec::new(),
+                },
+                RecoveredFunctionState::empty(),
             )
             .is_err()
         );
@@ -1455,10 +1568,12 @@ mod tests {
                 catalogue_hash,
             },
             units,
-            Vec::new(),
-            Vec::new(),
-            Default::default(),
-            Vec::new(),
+            RecoveredCatalogueSemantics {
+                catalogue: empty_catalogue,
+                expressions: Vec::new(),
+                origins: Vec::new(),
+            },
+            RecoveredFunctionState::empty(),
         )
         .expect("empty semantic revision with source");
 
