@@ -4,6 +4,7 @@
 //! random 128-bit representation is an implementation detail, not a UUID API.
 
 pub mod catalogue;
+pub mod revision;
 pub mod source;
 pub mod types;
 
