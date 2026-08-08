@@ -41,7 +41,7 @@ const UNSUPPORTED_FUNCTION_SQL: &str =
      FROM _orna_kernel.active_revision";
 
 #[test]
-fn supported_reference_kind_sql_maps_every_legacy_fixture_kind() -> TestResult<()> {
+fn supported_reference_kind_sql_maps_every_fixture_kind() -> TestResult<()> {
     assert_eq!(
         SUPPORTED_REFERENCE_KINDS,
         &[
@@ -52,6 +52,8 @@ fn supported_reference_kind_sql_maps_every_legacy_fixture_kind() -> TestResult<(
             (DefinitionReferenceKind::QueryObject, "query_object"),
             (DefinitionReferenceKind::QueryField, "query_field"),
             (DefinitionReferenceKind::Expression, "expression"),
+            (DefinitionReferenceKind::WriteObject, "write_object"),
+            (DefinitionReferenceKind::WriteField, "write_field"),
         ]
     );
     for (kind, expected) in SUPPORTED_REFERENCE_KINDS {
@@ -445,6 +447,138 @@ async fn rejects_function_signature_revision_artifact_and_reference_tampering() 
         })?;
     }
     Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn rejects_crossed_write_reference_updates_at_the_v6_compatibility_check() -> TestResult<()> {
+    with_test_database(|database| async move {
+        kernel(&database)?.bootstrap().await?;
+        install_function_revision(&database).await?;
+
+        let session = database.open().await?;
+        let operation_result: TestResult<()> = async {
+            for (ordinal, original_kind, crossed_kind) in [
+                (0_i64, "query_object", "write_field"),
+                (1_i64, "query_field", "write_object"),
+            ] {
+                session.client().batch_execute("BEGIN").await?;
+                let update_result = session
+                    .client()
+                    .execute(
+                        "UPDATE _orna_kernel.definition_references
+                         SET reference_kind = $1
+                         WHERE source_function_revision_id = decode(repeat('e1', 16), 'hex')
+                           AND ordinal = $2",
+                        &[&crossed_kind, &ordinal],
+                    )
+                    .await;
+                let rollback_result = session.client().batch_execute("ROLLBACK").await;
+                let constraint = update_result
+                    .as_ref()
+                    .err()
+                    .and_then(|error| error.as_db_error())
+                    .and_then(|error| error.constraint());
+                require(
+                    update_result.is_err(),
+                    format!("crossed write reference update {crossed_kind} at ordinal {ordinal} was accepted"),
+                )?;
+                require(
+                    constraint == Some("definition_references_reference_target_compatibility_check"),
+                    format!(
+                        "crossed write reference update {crossed_kind} at ordinal {ordinal} failed for {constraint:?}"
+                    ),
+                )?;
+                rollback_result?;
+
+                let row = session
+                    .client()
+                    .query_one(
+                        "SELECT reference_kind
+                         FROM _orna_kernel.definition_references
+                         WHERE source_function_revision_id = decode(repeat('e1', 16), 'hex')
+                           AND ordinal = $1",
+                        &[&ordinal],
+                    )
+                    .await?;
+                let recovered_kind: String = row.try_get(0)?;
+                require(
+                    recovered_kind == original_kind,
+                    format!(
+                        "rolled-back crossed write reference update changed ordinal {ordinal} to {recovered_kind:?}"
+                    ),
+                )?;
+            }
+            Ok(())
+        }
+        .await;
+        finish_session(
+            operation_result,
+            session.shutdown().await,
+            "crossed write-reference constraint probe",
+        )
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn rejects_crossed_write_reference_kinds_before_catalogue_hash_validation() -> TestResult<()>
+{
+    for (statement, crossed_kind) in [
+        (
+            "ALTER TABLE _orna_kernel.definition_references
+                 DROP CONSTRAINT definition_references_reference_target_compatibility_check;
+             UPDATE _orna_kernel.definition_references
+             SET reference_kind = 'write_field'
+             WHERE source_function_revision_id = decode(repeat('e1', 16), 'hex')
+               AND ordinal = 0",
+            "write_field",
+        ),
+        (
+            "ALTER TABLE _orna_kernel.definition_references
+                 DROP CONSTRAINT definition_references_reference_target_compatibility_check;
+             UPDATE _orna_kernel.definition_references
+             SET reference_kind = 'write_object'
+             WHERE source_function_revision_id = decode(repeat('e1', 16), 'hex')
+               AND ordinal = 1",
+            "write_object",
+        ),
+    ] {
+        reject_function_tamper_expected(
+            statement,
+            ExpectedRecoveryError::DurableExact {
+                relation: "_orna_kernel.definition_references",
+                rule: "reference kind must be compatible with its exact target kind",
+            },
+        )
+        .await
+        .map_err(|error| {
+            failure(format!(
+                "crossed {crossed_kind} recovery case failed: {error}"
+            ))
+        })?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn rejects_unknown_reference_kind_before_catalogue_hash_validation() -> TestResult<()> {
+    reject_function_tamper_expected(
+        "ALTER TABLE _orna_kernel.definition_references
+             DROP CONSTRAINT definition_references_reference_kind_check,
+             DROP CONSTRAINT definition_references_reference_target_compatibility_check;
+         UPDATE _orna_kernel.definition_references
+         SET reference_kind = 'future_reference_kind'
+         WHERE source_function_revision_id = decode(repeat('e1', 16), 'hex')
+           AND ordinal = 0",
+        ExpectedRecoveryError::DurableExact {
+            relation: "_orna_kernel.definition_references",
+            rule: "reference kind must be one exact supported semantic relation",
+        },
+    )
+    .await
 }
 
 #[tokio::test]
@@ -1026,6 +1160,10 @@ enum ExpectedRecoveryError {
     Canonical,
     Catalogue,
     Durable(&'static str),
+    DurableExact {
+        relation: &'static str,
+        rule: &'static str,
+    },
     Revision,
 }
 
@@ -2456,6 +2594,8 @@ const SUPPORTED_REFERENCE_KINDS: &[(DefinitionReferenceKind, &str)] = &[
     (DefinitionReferenceKind::QueryObject, "query_object"),
     (DefinitionReferenceKind::QueryField, "query_field"),
     (DefinitionReferenceKind::Expression, "expression"),
+    (DefinitionReferenceKind::WriteObject, "write_object"),
+    (DefinitionReferenceKind::WriteField, "write_field"),
 ];
 
 fn supported_reference_kind_sql(kind: DefinitionReferenceKind) -> TestResult<&'static str> {
@@ -2975,6 +3115,14 @@ fn require_expected_error(
             error,
             PostgresKernelError::DurableInvariant { relation, .. }
                 if relation == expected_relation
+        ),
+        ExpectedRecoveryError::DurableExact {
+            relation: expected_relation,
+            rule: expected_rule,
+        } => matches!(
+            error,
+            PostgresKernelError::DurableInvariant { relation, rule, .. }
+                if relation == expected_relation && rule == expected_rule
         ),
         ExpectedRecoveryError::Revision => {
             matches!(error, PostgresKernelError::RevisionInvariant(_))
