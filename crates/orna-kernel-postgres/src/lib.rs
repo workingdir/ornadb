@@ -20,6 +20,7 @@ mod bootstrap;
 mod decode;
 mod physical;
 mod recovery;
+mod storage;
 
 pub use bootstrap::ActiveRevision;
 
