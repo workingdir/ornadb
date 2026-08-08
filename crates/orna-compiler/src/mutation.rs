@@ -421,6 +421,9 @@ impl<T, F, G, P> MutationCheck<T, F, G, P> {
     }
 }
 
+const SUPPORTED_INSERT_TYPES: &str =
+    "BOOLEAN, INTEGER, BIGINT, FLOAT, CHARACTER LARGE OBJECT, BINARY LARGE OBJECT, and REF";
+
 /// Checks one parsed INSERT against a caller-supplied identity catalogue.
 pub(crate) fn check_insert_in<T, F, G, P>(
     insert: &InsertStatement,
@@ -446,7 +449,7 @@ where
                 Some(semantic_diagnostic(
                     DiagnosticCode::DomainIncompatible,
                     format!(
-                        "parameter {} uses a type outside the mutation domain",
+                        "INSERT does not yet support the type of parameter {}; supported types are {SUPPORTED_INSERT_TYPES}",
                         parameter.name()
                     ),
                     logical_path,
@@ -462,7 +465,7 @@ where
     if insert.target_fields.is_empty() || insert.values.is_empty() {
         return Err(vec![semantic_diagnostic(
             DiagnosticCode::DomainIncompatible,
-            "INSERT requires a non-empty field list and value list",
+            "INSERT requires at least one target field and one value",
             logical_path,
             &insert.span,
         )]);
@@ -470,7 +473,21 @@ where
     if insert.target_fields.len() != insert.values.len() {
         return Err(vec![semantic_diagnostic(
             DiagnosticCode::TypeMismatch,
-            "INSERT field and value lists must have equal arity",
+            format!(
+                "INSERT lists {} {} but {} {}; each field requires one value",
+                insert.target_fields.len(),
+                if insert.target_fields.len() == 1 {
+                    "field"
+                } else {
+                    "fields"
+                },
+                insert.values.len(),
+                if insert.values.len() == 1 {
+                    "value"
+                } else {
+                    "values"
+                }
+            ),
             logical_path,
             &insert.span,
         )]);
@@ -501,7 +518,7 @@ where
         {
             return Err(vec![semantic_diagnostic(
                 DiagnosticCode::DuplicateDefinition,
-                format!("duplicate target field {normalized_field_name}"),
+                format!("field {normalized_field_name} appears more than once in this INSERT"),
                 logical_path,
                 &field_name.span,
             )]);
@@ -511,7 +528,7 @@ where
         let Some(field) = catalogue.field_by_name(target_object, &normalized_field_name) else {
             return Err(vec![semantic_diagnostic(
                 DiagnosticCode::UnknownQualifiedName,
-                format!("unknown field {normalized_field_name} on {target_name}"),
+                format!("object type {target_name} has no field named {normalized_field_name}"),
                 logical_path,
                 &field_name.span,
             )]);
@@ -519,7 +536,9 @@ where
         if !supported_semantic_type(field.semantic_type()) {
             return Err(vec![semantic_diagnostic(
                 DiagnosticCode::DomainIncompatible,
-                format!("field {normalized_field_name} uses a type outside the mutation domain"),
+                format!(
+                    "INSERT does not yet support the type of field {normalized_field_name}; supported types are {SUPPORTED_INSERT_TYPES}"
+                ),
                 logical_path,
                 &field_name.span,
             )]);
@@ -540,7 +559,7 @@ where
                 else {
                     return Err(vec![semantic_diagnostic(
                         DiagnosticCode::UnknownQualifiedName,
-                        format!("unknown function parameter {normalized_parameter_name}"),
+                        format!("this function has no parameter named {normalized_parameter_name}"),
                         logical_path,
                         &parameter_name.span,
                     )]);
@@ -549,7 +568,9 @@ where
                 if parameter_type != field.semantic_type() {
                     return Err(vec![semantic_diagnostic(
                         DiagnosticCode::TypeMismatch,
-                        "INSERT value type does not match target field",
+                        format!(
+                            "parameter {normalized_parameter_name} cannot be inserted into field {normalized_field_name} because their types do not match"
+                        ),
                         logical_path,
                         &parameter_name.span,
                     )]);
@@ -572,7 +593,9 @@ where
                 if field.semantic_type() != expected {
                     return Err(vec![semantic_diagnostic(
                         DiagnosticCode::TypeMismatch,
-                        "BOOLEAN INSERT value does not match target field",
+                        format!(
+                            "field {normalized_field_name} is not BOOLEAN, so it cannot accept TRUE or FALSE"
+                        ),
                         logical_path,
                         &source.span,
                     )]);
@@ -586,7 +609,7 @@ where
                 if !field.nullable() {
                     return Err(vec![semantic_diagnostic(
                         DiagnosticCode::TypeMismatch,
-                        "NULL cannot be assigned to a non-nullable target field",
+                        format!("field {normalized_field_name} does not allow NULL"),
                         logical_path,
                         &source.span,
                     )]);
@@ -599,7 +622,7 @@ where
             _ => {
                 return Err(vec![semantic_diagnostic(
                     DiagnosticCode::DomainIncompatible,
-                    "INSERT value form is outside the mutation domain",
+                    "INSERT values can only be function parameters, TRUE, FALSE, or NULL",
                     logical_path,
                     value.span(),
                 )]);
@@ -625,7 +648,7 @@ where
             .map(|name| {
                 semantic_diagnostic(
                     DiagnosticCode::TypeMismatch,
-                    format!("mandatory target field {name} is omitted"),
+                    format!("field {name} is required, but this INSERT does not provide a value"),
                     logical_path,
                     &insert.target_object.span,
                 )
@@ -639,7 +662,7 @@ where
         return Err(vec![semantic_diagnostic(
             DiagnosticCode::UnknownQualifiedName,
             format!(
-                "RETURNING REF alias {normalized_returning_alias} does not name the INSERT target"
+                "RETURNING REF must use the INSERT target alias {normalized_target_alias}, not {normalized_returning_alias}"
             ),
             logical_path,
             &insert.returning_alias.span,
@@ -961,6 +984,10 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error[0].code(), DiagnosticCode::DuplicateDefinition);
+        assert_eq!(
+            error[0].message(),
+            "field name appears more than once in this INSERT"
+        );
         assert_eq!(error[0].location().span().start(), 31);
     }
 
@@ -980,7 +1007,12 @@ mod tests {
             &parameters,
             "mutation.orna",
         );
-        assert_eq!(check.unwrap_err()[0].code(), DiagnosticCode::TypeMismatch);
+        let error = check.unwrap_err();
+        assert_eq!(error[0].code(), DiagnosticCode::TypeMismatch);
+        assert_eq!(
+            error[0].message(),
+            "field active is required, but this INSERT does not provide a value"
+        );
 
         let valid = check_insert_in(
             &insert(
@@ -1026,8 +1058,43 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error[0].code(), DiagnosticCode::DomainIncompatible);
+        assert_eq!(
+            error[0].message(),
+            "INSERT does not yet support the type of parameter unused; supported types are BOOLEAN, INTEGER, BIGINT, FLOAT, CHARACTER LARGE OBJECT, BINARY LARGE OBJECT, and REF"
+        );
         assert_eq!(error[0].location().span().start(), 100);
         assert_eq!(error[0].location().span().end(), 106);
+    }
+
+    #[test]
+    fn rejects_unsupported_field_type_with_the_field_name() {
+        let mut catalogue = catalogue();
+        catalogue.fields[0].1 = MutationField::new(
+            FieldId::from_bytes([2; 16]),
+            SemanticType::scalar(StandardScalar::Decimal),
+            false,
+        );
+        let parameters = vec![MutationParameter::new(
+            "name",
+            ParameterId::from_bytes([6; 16]),
+            SemanticType::scalar(StandardScalar::CharacterLargeObject),
+            span(100, 104),
+        )];
+
+        let error = check_insert_in(
+            &insert(vec![name("name", 25)], vec![parameter("name", 31)], "p"),
+            &catalogue,
+            FunctionId::from_bytes([5; 16]),
+            &parameters,
+            "mutation.orna",
+        )
+        .unwrap_err();
+
+        assert_eq!(error[0].code(), DiagnosticCode::DomainIncompatible);
+        assert_eq!(
+            error[0].message(),
+            "INSERT does not yet support the type of field name; supported types are BOOLEAN, INTEGER, BIGINT, FLOAT, CHARACTER LARGE OBJECT, BINARY LARGE OBJECT, and REF"
+        );
     }
 
     #[test]
@@ -1069,6 +1136,10 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(malformed[0].code(), DiagnosticCode::DomainIncompatible);
+        assert_eq!(
+            malformed[0].message(),
+            "INSERT requires at least one target field and one value"
+        );
 
         let arity = check_insert_in(
             &insert(
@@ -1083,7 +1154,28 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(arity[0].code(), DiagnosticCode::TypeMismatch);
+        assert_eq!(
+            arity[0].message(),
+            "INSERT lists 2 fields but 1 value; each field requires one value"
+        );
         assert_eq!(arity[0].location().span().start(), 0);
+
+        let singular_field_count = check_insert_in(
+            &insert(
+                vec![name("name", 25)],
+                vec![parameter("name", 39), parameter("name", 46)],
+                "p",
+            ),
+            &catalogue,
+            FunctionId::from_bytes([5; 16]),
+            &parameters,
+            "mutation.orna",
+        )
+        .unwrap_err();
+        assert_eq!(
+            singular_field_count[0].message(),
+            "INSERT lists 1 field but 2 values; each field requires one value"
+        );
     }
 
     #[test]
@@ -1129,6 +1221,10 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(diagnostic[0].code(), DiagnosticCode::UnknownQualifiedName);
+        assert_eq!(
+            diagnostic[0].message(),
+            "object type crm.person has no field named missing"
+        );
         assert_eq!(diagnostic[0].location().span().start(), 25);
 
         let unknown_parameter = insert(
@@ -1145,6 +1241,10 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(diagnostic[0].code(), DiagnosticCode::UnknownQualifiedName);
+        assert_eq!(
+            diagnostic[0].message(),
+            "this function has no parameter named missing"
+        );
         assert_eq!(diagnostic[0].location().span().start(), 39);
 
         let unknown_alias = insert(
@@ -1161,6 +1261,10 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(diagnostic[0].code(), DiagnosticCode::UnknownQualifiedName);
+        assert_eq!(
+            diagnostic[0].message(),
+            "RETURNING REF must use the INSERT target alias p, not other"
+        );
         assert_eq!(diagnostic[0].location().span().start(), 50);
         assert_eq!(diagnostic[0].location().span().end(), 55);
     }
@@ -1193,6 +1297,10 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(scalar_ref[0].code(), DiagnosticCode::TypeMismatch);
+        assert_eq!(
+            scalar_ref[0].message(),
+            "parameter count cannot be inserted into field name because their types do not match"
+        );
 
         let ref_target = check_insert_in(
             &insert(vec![name("owner", 25)], vec![parameter("owner", 31)], "p"),
@@ -1203,6 +1311,10 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(ref_target[0].code(), DiagnosticCode::TypeMismatch);
+        assert_eq!(
+            ref_target[0].message(),
+            "parameter owner cannot be inserted into field owner because their types do not match"
+        );
 
         let bool_wrong = check_insert_in(
             &insert(vec![name("name", 25)], vec![boolean(true, 31)], "p"),
@@ -1213,6 +1325,10 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(bool_wrong[0].code(), DiagnosticCode::TypeMismatch);
+        assert_eq!(
+            bool_wrong[0].message(),
+            "field name is not BOOLEAN, so it cannot accept TRUE or FALSE"
+        );
 
         let null_mandatory = check_insert_in(
             &insert(vec![name("active", 25)], vec![null(32)], "p"),
@@ -1223,6 +1339,10 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(null_mandatory[0].code(), DiagnosticCode::TypeMismatch);
+        assert_eq!(
+            null_mandatory[0].message(),
+            "field active does not allow NULL"
+        );
     }
 
     #[test]
