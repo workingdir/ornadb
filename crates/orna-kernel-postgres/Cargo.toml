@@ -6,6 +6,8 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+orna-core = { path = "../orna-core" }
+sha2 = "0.11.0"
 tokio = { version = "1.53.1", features = ["net", "rt"] }
 tokio-postgres = "0.7.18"
 

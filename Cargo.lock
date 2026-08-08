@@ -332,6 +332,8 @@ dependencies = [
 name = "orna-kernel-postgres"
 version = "0.1.0"
 dependencies = [
+ "orna-core",
+ "sha2",
  "tokio",
  "tokio-postgres",
 ]
