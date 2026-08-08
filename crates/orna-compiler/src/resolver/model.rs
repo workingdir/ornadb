@@ -673,6 +673,15 @@ pub struct CheckedObjectType {
     pub(super) location: SourceLocation,
 }
 
+/// One accepted field-name transition bound to a stable checked identity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CheckedFieldRename {
+    pub(crate) owner: CheckedTypeId,
+    pub(crate) field: CheckedFieldId,
+    pub(crate) old_name: String,
+    pub(crate) new_name: String,
+}
+
 impl CheckedObjectType {
     /// Returns the identity of the object type.
     pub const fn id(&self) -> CheckedTypeId {
@@ -699,6 +708,7 @@ pub struct CheckedBundle {
     pub(super) schemas: Vec<CheckedSchema>,
     pub(super) object_types: Vec<CheckedObjectType>,
     pub(super) server_functions: Vec<CheckedServerFunction>,
+    pub(super) field_renames: Vec<CheckedFieldRename>,
 }
 
 impl CheckedBundle {
@@ -720,6 +730,10 @@ impl CheckedBundle {
     /// Returns submitted checked SERVER functions in source order.
     pub fn server_functions(&self) -> &[CheckedServerFunction] {
         &self.server_functions
+    }
+
+    pub(crate) fn field_renames(&self) -> &[CheckedFieldRename] {
+        &self.field_renames
     }
 }
 

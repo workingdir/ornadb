@@ -17,7 +17,7 @@ pub use model::{
     CheckedServerFunction, CheckedServerFunctionParameter, CheckedServerFunctionReturnColumn,
     ConstantValue, SemanticType,
 };
-pub(crate) use model::{CheckedServerFunctionBody, QueryCatalogue, QueryField};
+pub(crate) use model::{CheckedFieldRename, CheckedServerFunctionBody, QueryCatalogue, QueryField};
 
 use std::collections::{HashMap, HashSet};
 
@@ -33,7 +33,7 @@ use orna_core::{
     types::StandardScalar,
 };
 use orna_syntax::{
-    FunctionReturnType, FunctionSecurity as SyntaxFunctionSecurity,
+    FieldRenameDeclaration, FunctionReturnType, FunctionSecurity as SyntaxFunctionSecurity,
     FunctionTransaction as SyntaxFunctionTransaction,
     FunctionVolatility as SyntaxFunctionVolatility, ObjectTypeDeclaration, OnDeletePolicy,
     QualifiedName, ServerFunctionBody, ServerFunctionDeclaration, SourceSlice, SourceSpan,
@@ -65,6 +65,12 @@ struct Header<'a> {
     declaration: &'a ObjectTypeDeclaration,
     logical_path: &'a str,
     id: CheckedTypeId,
+}
+
+#[derive(Clone, Copy)]
+struct FieldRenameInput<'a> {
+    declaration: &'a FieldRenameDeclaration,
+    logical_path: &'a str,
 }
 
 /// Resolved metadata for a SERVER function before relational planning.
@@ -207,6 +213,12 @@ fn check_parsed(parse_report: ParseReport, base: &CatalogueSnapshot) -> CheckRep
         submitted_ids.insert(semantic_name(&header.declaration.name), header.id);
     }
 
+    let field_renames = check_field_renames(&parse_report, base, &headers, &mut diagnostics);
+    let rename_bindings: HashMap<_, _> = field_renames
+        .iter()
+        .map(|rename| ((rename.owner, rename.new_name.clone()), rename))
+        .collect();
+
     let mut checked_types = Vec::with_capacity(headers.len());
     for header in headers {
         let type_name = semantic_name(&header.declaration.name);
@@ -258,14 +270,13 @@ fn check_parsed(parse_report: ParseReport, base: &CatalogueSnapshot) -> CheckRep
                 ));
             }
 
-            let id = assignments.field_id(
-                base_type
-                    .and_then(|object_type| object_type.field_by_name(&name))
-                    .map(|field| field.id()),
-            );
-            let existing_default = base_type
-                .and_then(|object_type| object_type.field_by_name(&name))
-                .and_then(|field| field.default_expression());
+            let rename_bound = rename_bindings.get(&(header.id, name.clone()));
+            let existing_field = rename_bound
+                .and_then(|rename| rename.field.existing())
+                .and_then(|id| base_type.and_then(|object_type| object_type.field_by_id(id)))
+                .or_else(|| base_type.and_then(|object_type| object_type.field_by_name(&name)));
+            let id = assignments.field_id(existing_field.map(|field| field.id()));
+            let existing_default = existing_field.and_then(|field| field.default_expression());
             let default = match (field.default_expression.as_ref(), semantic_type) {
                 (Some(source), Some(semantic_type)) => checked_default(
                     source,
@@ -353,8 +364,190 @@ fn check_parsed(parse_report: ParseReport, base: &CatalogueSnapshot) -> CheckRep
             schemas: checked_schemas,
             object_types: checked_types,
             server_functions: checked_functions,
+            field_renames: field_renames
+                .into_iter()
+                .map(|rename| CheckedFieldRename {
+                    owner: rename.owner,
+                    field: rename.field,
+                    old_name: rename.old_name,
+                    new_name: rename.new_name,
+                })
+                .collect(),
         }),
     }
+}
+
+#[derive(Clone)]
+struct AcceptedFieldRename {
+    owner: CheckedTypeId,
+    field: CheckedFieldId,
+    old_name: String,
+    new_name: String,
+}
+
+fn check_field_renames(
+    parse_report: &ParseReport,
+    base: &CatalogueSnapshot,
+    headers: &[Header<'_>],
+    diagnostics: &mut Vec<CompilerDiagnostic>,
+) -> Vec<AcceptedFieldRename> {
+    let candidates: HashMap<_, _> = headers
+        .iter()
+        .map(|header| (semantic_name(&header.declaration.name), header))
+        .collect();
+    let mut inputs = Vec::new();
+    for unit in parse_report.units() {
+        inputs.extend(
+            unit.parsed()
+                .field_renames()
+                .iter()
+                .map(|declaration| FieldRenameInput {
+                    declaration,
+                    logical_path: unit.logical_path(),
+                }),
+        );
+    }
+    let mut consumed = HashSet::new();
+    let mut produced = HashSet::new();
+    let mut valid = Vec::new();
+    for input in inputs {
+        let owner_name = semantic_name(&input.declaration.type_name);
+        let old_name = semantic_part(&input.declaration.old_field_name);
+        let new_name = semantic_part(&input.declaration.new_field_name);
+        let Some(header) = candidates.get(&owner_name) else {
+            diagnostics.push(diagnostic(
+                DiagnosticCode::UnknownQualifiedName,
+                format!("object type {owner_name} must be declared in this source"),
+                input.logical_path,
+                &input.declaration.type_name.span,
+            ));
+            continue;
+        };
+        let Some(base_type) = base.object_type_by_name(&owner_name) else {
+            diagnostics.push(diagnostic(
+                DiagnosticCode::UnknownQualifiedName,
+                format!("field rename requires existing object type {owner_name}"),
+                input.logical_path,
+                &input.declaration.type_name.span,
+            ));
+            continue;
+        };
+        if old_name == new_name {
+            diagnostics.push(diagnostic(
+                DiagnosticCode::DuplicateDefinition,
+                format!("field {old_name} cannot be renamed to the same name"),
+                input.logical_path,
+                &input.declaration.old_field_name.span,
+            ));
+            continue;
+        }
+        if !consumed.insert((header.id, old_name.clone())) {
+            diagnostics.push(diagnostic(
+                DiagnosticCode::DuplicateDefinition,
+                format!("field {old_name} is renamed more than once"),
+                input.logical_path,
+                &input.declaration.old_field_name.span,
+            ));
+            continue;
+        }
+        if !produced.insert((header.id, new_name.clone())) {
+            diagnostics.push(diagnostic(
+                DiagnosticCode::DuplicateDefinition,
+                format!("more than one field is renamed to {new_name}"),
+                input.logical_path,
+                &input.declaration.new_field_name.span,
+            ));
+            continue;
+        }
+        let final_names: HashSet<_> = header
+            .declaration
+            .fields
+            .iter()
+            .map(|field| semantic_part(&field.name))
+            .collect();
+        valid.push((input, header.id, base_type, final_names, old_name, new_name));
+    }
+
+    let mut chained = HashSet::new();
+    for index in 0..valid.len() {
+        for other_index in index + 1..valid.len() {
+            let (input, owner, _, _, old_name, new_name) = &valid[index];
+            let (_, other_owner, _, _, other_old_name, other_new_name) = &valid[other_index];
+            if owner == other_owner && (new_name == other_old_name || old_name == other_new_name) {
+                diagnostics.push(diagnostic(
+                    DiagnosticCode::DuplicateDefinition,
+                    format!(
+                        "field rename chain or swap is not supported: {old_name} to {new_name}"
+                    ),
+                    input.logical_path,
+                    &input.declaration.new_field_name.span,
+                ));
+                chained.insert(index);
+                chained.insert(other_index);
+            }
+        }
+    }
+    let mut accepted = Vec::new();
+    for (index, (input, owner, base_type, final_names, old_name, new_name)) in
+        valid.into_iter().enumerate()
+    {
+        if chained.contains(&index) {
+            continue;
+        }
+        let owner_name = semantic_name(&input.declaration.type_name);
+        if final_names.contains(&old_name) {
+            diagnostics.push(diagnostic(
+                DiagnosticCode::DuplicateDefinition,
+                format!("object type {owner_name} still declares old field {old_name}"),
+                input.logical_path,
+                &input.declaration.old_field_name.span,
+            ));
+            continue;
+        }
+        if !final_names.contains(&new_name) {
+            diagnostics.push(diagnostic(
+                DiagnosticCode::UnknownQualifiedName,
+                format!("object type {owner_name} must declare renamed field {new_name}"),
+                input.logical_path,
+                &input.declaration.new_field_name.span,
+            ));
+            continue;
+        }
+        let old = base_type.field_by_name(&old_name);
+        let new = base_type.field_by_name(&new_name);
+        let Some(field) = (match (old, new) {
+            (Some(_), Some(_)) => {
+                diagnostics.push(diagnostic(
+                    DiagnosticCode::DuplicateDefinition,
+                    format!(
+                        "object type {owner_name} already has a different field named {new_name}"
+                    ),
+                    input.logical_path,
+                    &input.declaration.new_field_name.span,
+                ));
+                None
+            }
+            (None, None) => {
+                diagnostics.push(diagnostic(
+                    DiagnosticCode::UnknownQualifiedName,
+                    format!("object type {owner_name} has no field named {old_name}"),
+                    input.logical_path,
+                    &input.declaration.old_field_name.span,
+                ));
+                None
+            }
+            (Some(field), None) | (None, Some(field)) => Some(field),
+        }) else {
+            continue;
+        };
+        accepted.push(AcceptedFieldRename {
+            owner,
+            field: CheckedFieldId::Existing(field.id()),
+            old_name,
+            new_name,
+        });
+    }
+    accepted
 }
 
 fn resolve_server_function_headers<'a>(
@@ -1561,6 +1754,309 @@ mod tests {
         let revised = &report.checked_bundle().unwrap().object_types()[0];
         assert_eq!(revised.fields()[0].id().existing(), Some(name_id));
         assert_eq!(revised.fields()[1].id().to_string(), "provisional:field:0");
+    }
+
+    fn rename_base(fields: Vec<FieldDefinition>) -> CatalogueSnapshot {
+        catalogue(
+            vec![schema(1, &["people"])],
+            vec![object_type(2, &["people", "person"], fields)],
+            Vec::new(),
+        )
+    }
+
+    #[test]
+    fn field_rename_binds_the_old_identity_default_and_quoted_name() {
+        let field_id = FieldId::from_bytes([3; 16]);
+        let expression_id = ExpressionId::from_bytes([4; 16]);
+        let base = rename_base(vec![field(
+            3,
+            "Email",
+            0,
+            ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+            Some(expression_id),
+        )]);
+        let source = "CREATE SCHEMA people; CREATE TYPE people.person AS OBJECT (\"Primary Email\" TEXT DEFAULT 'x'); ALTER TYPE people.person RENAME FIELD \"Email\" TO \"Primary Email\";";
+
+        let report = check(&bundle([("rename.orna", source)]), &base);
+
+        assert!(report.diagnostics().is_empty());
+        let checked = report.checked_bundle().unwrap();
+        let field = &checked.object_types()[0].fields()[0];
+        assert_eq!(field.id().existing(), Some(field_id));
+        assert_eq!(
+            field.default().unwrap().id().existing(),
+            Some(expression_id)
+        );
+        assert_eq!(field.name(), "Primary Email");
+        assert_eq!(checked.field_renames().len(), 1);
+        assert_eq!(checked.field_renames()[0].old_name, "Email");
+        assert_eq!(checked.field_renames()[0].new_name, "Primary Email");
+    }
+
+    #[test]
+    fn field_rename_is_source_order_independent_and_replay_safe() {
+        let field_id = FieldId::from_bytes([3; 16]);
+        let base = rename_base(vec![field(
+            3,
+            "email",
+            0,
+            ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+            None,
+        )]);
+        let create_then_alter = "CREATE SCHEMA people; CREATE TYPE people.person AS OBJECT (primary_email TEXT); ALTER TYPE people.person RENAME FIELD email TO primary_email;";
+        let alter_then_create = "ALTER TYPE people.person RENAME FIELD email TO primary_email; CREATE SCHEMA people; CREATE TYPE people.person AS OBJECT (primary_email TEXT);";
+        let first = check(&bundle([("rename.orna", create_then_alter)]), &base);
+        let second = check(&bundle([("rename.orna", alter_then_create)]), &base);
+        let first_checked = first.checked_bundle().unwrap();
+        let second_checked = second.checked_bundle().unwrap();
+        assert_eq!(
+            first_checked.object_types()[0].id(),
+            second_checked.object_types()[0].id()
+        );
+        assert_eq!(
+            first_checked.object_types()[0].fields()[0].id(),
+            second_checked.object_types()[0].fields()[0].id()
+        );
+        assert_eq!(
+            first_checked.field_renames(),
+            second_checked.field_renames()
+        );
+        let replay_base = rename_base(vec![field(
+            3,
+            "primary_email",
+            0,
+            ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+            None,
+        )]);
+        let replay = check(&bundle([("rename.orna", create_then_alter)]), &replay_base);
+        assert!(replay.diagnostics().is_empty());
+        assert_eq!(
+            replay.checked_bundle().unwrap().object_types()[0].fields()[0]
+                .id()
+                .existing(),
+            Some(field_id)
+        );
+    }
+
+    #[test]
+    fn replacing_a_same_shape_field_without_a_rename_is_provisional() {
+        let base = rename_base(vec![field(
+            3,
+            "email",
+            0,
+            ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+            None,
+        )]);
+        let report = check(
+            &bundle([(
+                "rename.orna",
+                "CREATE SCHEMA people; CREATE TYPE people.person AS OBJECT (primary_email TEXT);",
+            )]),
+            &base,
+        );
+        assert!(report.diagnostics().is_empty());
+        assert!(
+            report.checked_bundle().unwrap().object_types()[0].fields()[0]
+                .id()
+                .is_provisional()
+        );
+    }
+
+    #[test]
+    fn field_rename_rejects_a_base_without_either_name() {
+        let base = rename_base(vec![field(
+            3,
+            "other",
+            0,
+            ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+            None,
+        )]);
+        let source = "CREATE SCHEMA people; CREATE TYPE people.person AS OBJECT (primary_email TEXT); ALTER TYPE people.person RENAME FIELD email TO primary_email;";
+        let report = check(&bundle([("rename.orna", source)]), &base);
+        assert_eq!(report.diagnostics().len(), 1);
+        let diagnostic = &report.diagnostics()[0];
+        assert_eq!(diagnostic.code(), DiagnosticCode::UnknownQualifiedName);
+        assert_eq!(
+            diagnostic.message(),
+            "object type people.person has no field named email"
+        );
+        let old = source.find("RENAME FIELD email").unwrap() + "RENAME FIELD ".len();
+        assert_eq!(diagnostic.location().span().start(), old);
+        assert_eq!(diagnostic.location().span().end(), old + "email".len());
+        assert_no_checked_bundle(&report);
+    }
+
+    #[test]
+    fn invalid_rename_owners_take_precedence_over_chain_detection() {
+        let source = "CREATE SCHEMA people; CREATE TYPE people.person AS OBJECT (last TEXT); ALTER TYPE people.missing RENAME FIELD email TO first; ALTER TYPE people.missing RENAME FIELD first TO last;";
+        let report = check(&bundle([("rename.orna", source)]), &empty_catalogue());
+        assert_eq!(report.diagnostics().len(), 2);
+        for diagnostic in report.diagnostics() {
+            assert_eq!(diagnostic.code(), DiagnosticCode::UnknownQualifiedName);
+            assert_eq!(
+                diagnostic.message(),
+                "object type people.missing must be declared in this source"
+            );
+        }
+        assert_no_checked_bundle(&report);
+    }
+
+    #[test]
+    fn field_rename_negative_contracts_use_exact_diagnostics() {
+        struct Case {
+            source: &'static str,
+            base: CatalogueSnapshot,
+            name: &'static str,
+            code: DiagnosticCode,
+            message: &'static str,
+        }
+        let old = || {
+            field(
+                3,
+                "email",
+                0,
+                ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+                None,
+            )
+        };
+        let new = || {
+            field(
+                4,
+                "primary_email",
+                1,
+                ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+                None,
+            )
+        };
+        let cases = vec![
+            Case {
+                source: "CREATE SCHEMA people; CREATE TYPE people.person AS OBJECT (email TEXT); ALTER TYPE people.person RENAME FIELD email TO email;",
+                base: rename_base(vec![old()]),
+                name: "email",
+                code: DiagnosticCode::DuplicateDefinition,
+                message: "field email cannot be renamed to the same name",
+            },
+            Case {
+                source: "CREATE SCHEMA people; CREATE TYPE people.person AS OBJECT (primary_email TEXT); ALTER TYPE people.person RENAME FIELD email TO primary_email;",
+                base: catalogue(vec![schema(1, &["people"])], Vec::new(), Vec::new()),
+                name: "people.person",
+                code: DiagnosticCode::UnknownQualifiedName,
+                message: "field rename requires existing object type people.person",
+            },
+            Case {
+                source: "CREATE SCHEMA people; ALTER TYPE people.person RENAME FIELD email TO primary_email;",
+                base: rename_base(vec![old()]),
+                name: "people.person",
+                code: DiagnosticCode::UnknownQualifiedName,
+                message: "object type people.person must be declared in this source",
+            },
+            Case {
+                source: "CREATE SCHEMA people; CREATE TYPE people.person AS OBJECT (other TEXT); ALTER TYPE people.person RENAME FIELD email TO primary_email;",
+                base: rename_base(vec![old()]),
+                name: "primary_email",
+                code: DiagnosticCode::UnknownQualifiedName,
+                message: "object type people.person must declare renamed field primary_email",
+            },
+            Case {
+                source: "CREATE SCHEMA people; CREATE TYPE people.person AS OBJECT (email TEXT); ALTER TYPE people.person RENAME FIELD email TO primary_email;",
+                base: rename_base(vec![old()]),
+                name: "email",
+                code: DiagnosticCode::DuplicateDefinition,
+                message: "object type people.person still declares old field email",
+            },
+            Case {
+                source: "CREATE SCHEMA people; CREATE TYPE people.person AS OBJECT (primary_email TEXT); ALTER TYPE people.person RENAME FIELD email TO primary_email;",
+                base: rename_base(vec![old(), new()]),
+                name: "primary_email",
+                code: DiagnosticCode::DuplicateDefinition,
+                message: "object type people.person already has a different field named primary_email",
+            },
+            Case {
+                source: "CREATE SCHEMA people; CREATE TYPE people.person AS OBJECT (first TEXT, primary_email TEXT); ALTER TYPE people.person RENAME FIELD email TO primary_email; ALTER TYPE people.person RENAME FIELD email TO first;",
+                base: rename_base(vec![old()]),
+                name: "email",
+                code: DiagnosticCode::DuplicateDefinition,
+                message: "field email is renamed more than once",
+            },
+            Case {
+                source: "CREATE SCHEMA people; CREATE TYPE people.person AS OBJECT (first TEXT, primary_email TEXT); ALTER TYPE people.person RENAME FIELD email TO primary_email; ALTER TYPE people.person RENAME FIELD first TO primary_email;",
+                base: rename_base(vec![
+                    old(),
+                    field(
+                        5,
+                        "first",
+                        1,
+                        ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+                        None,
+                    ),
+                ]),
+                name: "primary_email",
+                code: DiagnosticCode::DuplicateDefinition,
+                message: "more than one field is renamed to primary_email",
+            },
+            Case {
+                source: "CREATE SCHEMA people; CREATE TYPE people.person AS OBJECT (last TEXT); ALTER TYPE people.person RENAME FIELD email TO first; ALTER TYPE people.person RENAME FIELD first TO last;",
+                base: rename_base(vec![
+                    old(),
+                    field(
+                        5,
+                        "first",
+                        1,
+                        ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+                        None,
+                    ),
+                ]),
+                name: "first",
+                code: DiagnosticCode::DuplicateDefinition,
+                message: "field rename chain or swap is not supported: email to first",
+            },
+            Case {
+                source: "CREATE SCHEMA people; CREATE TYPE people.person AS OBJECT (email TEXT, first TEXT); ALTER TYPE people.person RENAME FIELD email TO first; ALTER TYPE people.person RENAME FIELD first TO email;",
+                base: rename_base(vec![
+                    old(),
+                    field(
+                        5,
+                        "first",
+                        1,
+                        ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+                        None,
+                    ),
+                ]),
+                name: "first",
+                code: DiagnosticCode::DuplicateDefinition,
+                message: "field rename chain or swap is not supported: email to first",
+            },
+        ];
+        for case in cases {
+            let report = check(&bundle([("rename.orna", case.source)]), &case.base);
+            assert_eq!(report.diagnostics().len(), 1, "{}", case.message);
+            let diagnostic = &report.diagnostics()[0];
+            assert_eq!(diagnostic.code(), case.code, "{}", case.source);
+            assert_eq!(diagnostic.message(), case.message);
+            let start = if case.message == "field email cannot be renamed to the same name"
+                || case.message == "field email is renamed more than once"
+                || case.message == "object type people.person still declares old field email"
+            {
+                case.source.rfind("RENAME FIELD email").unwrap() + "RENAME FIELD ".len()
+            } else if case.message == "more than one field is renamed to primary_email" {
+                case.source
+                    .rfind("RENAME FIELD first TO primary_email")
+                    .unwrap()
+                    + "RENAME FIELD first TO ".len()
+            } else if case.message.starts_with("field rename chain or swap") {
+                case.source.find("RENAME FIELD email TO").unwrap() + "RENAME FIELD email TO ".len()
+            } else {
+                case.source.rfind(case.name).unwrap()
+            };
+            assert_eq!(
+                diagnostic.location().span().start(),
+                start,
+                "{}",
+                case.source
+            );
+            assert_eq!(diagnostic.location().span().end(), start + case.name.len());
+            assert_no_checked_bundle(&report);
+        }
     }
 
     #[test]
