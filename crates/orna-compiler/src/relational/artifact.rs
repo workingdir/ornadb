@@ -6,15 +6,16 @@
 //! backend concepts.
 
 use orna_artifact::server_plan::{
-    Expression, ExpressionKind, FieldStep, NullOrder, Ordering, Scan, ServerPlan, ServerPlanError,
-    SortDirection, ValueType,
+    Expression, ExpressionKind, FieldStep, IdentitySelectedServerPlan, IdentitySelector, NullOrder,
+    Ordering, Scan, ServerPlan, ServerPlanError, SortDirection, ValueType,
 };
-use orna_core::{FieldId, TypeId};
+use orna_core::{FieldId, FunctionId, ParameterId, TypeId};
 
 use super::{
-    ExpressionIr, ExpressionKind as CompilerExpressionKind, InputSlot,
-    NullOrder as CompilerNullOrder, OrderingIr, RelationalQueryIr, ResolvedFieldStep, ScanIr,
-    SortDirection as CompilerSortDirection, ValueType as CompilerValueType,
+    EncodedIdentitySelectedServerPlan, ExpressionIr, ExpressionKind as CompilerExpressionKind,
+    IdentitySelectedQueryIr, InputSlot, NullOrder as CompilerNullOrder, OrderingIr,
+    RelationalQueryIr, ResolvedFieldStep, ScanIr, SortDirection as CompilerSortDirection,
+    ValueType as CompilerValueType,
 };
 /// Converts and encodes one checked relational query into canonical bytes.
 pub(super) fn encode(
@@ -30,6 +31,27 @@ fn adapt(query: &RelationalQueryIr<TypeId, FieldId>) -> ServerPlan {
         selection: query.selection.as_ref().map(adapt_expression),
         ordering: query.ordering.iter().map(adapt_ordering).collect(),
     }
+}
+
+/// Converts and encodes one checked identity-selected query into version-2 bytes.
+pub(super) fn encode_identity_selected(
+    query: &IdentitySelectedQueryIr<TypeId, FieldId, FunctionId, ParameterId>,
+) -> Result<EncodedIdentitySelectedServerPlan, ServerPlanError> {
+    let plan = adapt_identity_selected(query)?;
+    Ok(EncodedIdentitySelectedServerPlan {
+        format_version: plan.format_version(),
+        payload: plan.encode()?,
+    })
+}
+
+fn adapt_identity_selected(
+    query: &IdentitySelectedQueryIr<TypeId, FieldId, FunctionId, ParameterId>,
+) -> Result<IdentitySelectedServerPlan, ServerPlanError> {
+    IdentitySelectedServerPlan::new(
+        adapt_scan(&query.scan),
+        query.projections.iter().map(adapt_expression),
+        IdentitySelector::new(query.selector.owner, query.selector.parameter),
+    )
 }
 
 fn adapt_scan(scan: &ScanIr<TypeId>) -> Scan {
@@ -106,10 +128,11 @@ mod tests {
     use std::collections::HashMap;
 
     use orna_artifact::server_plan::{
-        Expression, ExpressionKind, NullOrder, ServerPlan, SortDirection,
+        Expression, ExpressionKind, IdentitySelectedServerPlan, NullOrder, ServerPlan,
+        SortDirection,
     };
     use orna_core::{
-        CatalogueRevisionId, FieldId, SchemaId, TypeId,
+        CatalogueRevisionId, FieldId, FunctionId, ParameterId, SchemaId, TypeId,
         catalogue::{
             CatalogueSnapshot, FieldDefinition, ObjectTypeDefinition, QualifiedSemanticName,
             SchemaDefinition,
@@ -121,7 +144,7 @@ mod tests {
 
     use crate::{CheckedFieldId, CheckedTypeId};
 
-    use super::super::RelationalQueryIr;
+    use super::super::{QueryParameter, RelationalQueryIr, check_identity_selected_query_in};
 
     const TASK_TYPE: TypeId = TypeId::from_bytes([1; 16]);
     const PERSON_TYPE: TypeId = TypeId::from_bytes([2; 16]);
@@ -129,6 +152,8 @@ mod tests {
     const COMPLETED_FIELD: FieldId = FieldId::from_bytes([12; 16]);
     const TITLE_FIELD: FieldId = FieldId::from_bytes([13; 16]);
     const PERSON_NAME_FIELD: FieldId = FieldId::from_bytes([21; 16]);
+    const SELECTOR_OWNER: FunctionId = FunctionId::from_bytes([31; 16]);
+    const SELECTOR_PARAMETER: ParameterId = ParameterId::from_bytes([32; 16]);
 
     const SOURCE: &str = "CREATE SCHEMA semantic_schema_marker; \
         CREATE TYPE semantic_schema_marker.person_type_marker AS OBJECT ( \
@@ -156,6 +181,15 @@ mod tests {
             t_alias_marker.title_marker, \
             t_alias_marker.assignee_marker.person_name_marker ASC, \
             t_alias_marker.completed_marker DESC;";
+
+    const IDENTITY_SELECTED_SOURCE: &str = "CREATE SERVER FUNCTION semantic_schema_marker.get( \
+        p_task REF semantic_schema_marker.task_type_marker \
+        ) RETURNS ROWS ( \
+            task_marker REF semantic_schema_marker.task_type_marker, \
+            title_marker TEXT \
+        ) AS SELECT REF(t_alias_marker), t_alias_marker.title_marker \
+        FROM semantic_schema_marker.task_type_marker t_alias_marker \
+        WHERE REF(t_alias_marker) = p_task;";
 
     #[test]
     fn encodes_a_checked_server_function_without_source_semantics() {
@@ -275,6 +309,49 @@ mod tests {
                 "artifact contains submitted source name {text:?}"
             );
         }
+    }
+
+    #[test]
+    fn encodes_identity_selected_queries_with_coupled_version_and_payload() {
+        let parsed = parse(IDENTITY_SELECTED_SOURCE);
+        assert!(
+            parsed.diagnostics().is_empty(),
+            "{:?}",
+            parsed.diagnostics()
+        );
+        let body = parsed.server_functions()[0]
+            .body
+            .as_sql_query()
+            .expect("test function has a SELECT body");
+        let checked = check_identity_selected_query_in(
+            &body.query,
+            &catalogue(),
+            SELECTOR_OWNER,
+            &[QueryParameter::new(
+                "p_task",
+                SELECTOR_PARAMETER,
+                crate::resolver::SemanticType::reference(TASK_TYPE),
+            )],
+            "identity_selected.orna",
+        )
+        .unwrap();
+
+        let encoded = checked
+            .plan()
+            .encode_identity_selected_server_plan()
+            .unwrap();
+        let decoded = IdentitySelectedServerPlan::decode(encoded.payload()).unwrap();
+        assert_eq!(encoded.format_version(), decoded.format_version());
+        assert_eq!(decoded.selector().owner(), SELECTOR_OWNER);
+        assert_eq!(decoded.selector().parameter(), SELECTOR_PARAMETER);
+        assert_eq!(decoded.projections().len(), 2);
+        assert_object_reference(&decoded.projections()[0], TASK_TYPE);
+        assert_field_path(
+            &decoded.projections()[1],
+            &[(TASK_TYPE, TITLE_FIELD)],
+            ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+            true,
+        );
     }
 
     #[test]
