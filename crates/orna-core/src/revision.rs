@@ -565,6 +565,7 @@ impl FunctionRevisionRecord {
 }
 
 /// The explicit semantic relation recorded between durable definitions.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum DefinitionReferenceKind {
     /// A function invokes another function.
@@ -581,6 +582,10 @@ pub enum DefinitionReferenceKind {
     QueryField,
     /// A declaration or executable expression uses another expression.
     Expression,
+    /// A mutation writes an object of the target object type.
+    WriteObject,
+    /// A mutation writes one owner-qualified object field.
+    WriteField,
 }
 
 /// One resolved definition reference from an immutable function revision.
@@ -1353,7 +1358,7 @@ fn reference_target_exists(
     definition_exists(catalogue, expression_ids, target.into())
 }
 
-const fn reference_kind_accepts_target(
+pub(crate) const fn reference_kind_accepts_target(
     kind: DefinitionReferenceKind,
     target: DefinitionReferenceTarget,
 ) -> bool {
@@ -1376,6 +1381,12 @@ const fn reference_kind_accepts_target(
         ) | (
             DefinitionReferenceKind::Expression,
             DefinitionReferenceTarget::Expression(_)
+        ) | (
+            DefinitionReferenceKind::WriteObject,
+            DefinitionReferenceTarget::ObjectType(_)
+        ) | (
+            DefinitionReferenceKind::WriteField,
+            DefinitionReferenceTarget::Field { .. }
         )
     )
 }
@@ -1667,8 +1678,9 @@ mod tests {
     use super::*;
     use crate::{
         catalogue::{
-            FunctionDefinition, FunctionDomain, FunctionReturn, FunctionReturnColumnDefinition,
-            FunctionSecurity, FunctionVolatility, QualifiedSemanticName, SchemaDefinition,
+            FieldDefinition, FunctionDefinition, FunctionDomain, FunctionReturn,
+            FunctionReturnColumnDefinition, FunctionSecurity, FunctionVolatility,
+            ObjectTypeDefinition, QualifiedSemanticName, SchemaDefinition,
         },
         types::{ResolvedType, StandardScalar},
     };
@@ -1715,6 +1727,13 @@ mod tests {
     }
 
     fn function_catalogue(function_revision: FunctionRevisionId) -> CatalogueSnapshot {
+        function_catalogue_with_objects(function_revision, vec![])
+    }
+
+    fn function_catalogue_with_objects(
+        function_revision: FunctionRevisionId,
+        object_types: Vec<ObjectTypeDefinition>,
+    ) -> CatalogueSnapshot {
         let schema = SchemaDefinition::new(
             SchemaId::from_bytes(id::<8>()),
             QualifiedSemanticName::new(["crm"]).unwrap(),
@@ -1737,10 +1756,28 @@ mod tests {
         CatalogueSnapshot::new_with_functions(
             CatalogueRevisionId::from_bytes(id::<7>()),
             vec![schema],
-            vec![],
+            object_types,
             vec![function],
         )
         .unwrap()
+    }
+
+    fn write_catalogue(function_revision: FunctionRevisionId) -> CatalogueSnapshot {
+        let object_type = ObjectTypeDefinition::new(
+            TypeId::from_bytes(id::<12>()),
+            QualifiedSemanticName::new(["crm", "contact"]).unwrap(),
+            vec![FieldDefinition::new(
+                FieldId::from_bytes(id::<13>()),
+                "active",
+                0,
+                ResolvedType::scalar(StandardScalar::Boolean),
+                false,
+                true,
+                None,
+                None,
+            )],
+        );
+        function_catalogue_with_objects(function_revision, vec![object_type])
     }
 
     fn artifact() -> ExecutableArtifact {
@@ -1827,6 +1864,25 @@ mod tests {
                 revision.declaration_origin(),
             ),
         ]
+    }
+
+    fn write_origins(revision: &FunctionRevisionRecord) -> Vec<DefinitionOrigin> {
+        let mut origins = function_origins(revision);
+        let source = SourceUnitId::from_bytes(id::<3>());
+        origins.extend([
+            DefinitionOrigin::new(
+                DefinitionIdentity::ObjectType(TypeId::from_bytes(id::<12>())),
+                SourceOrigin::new(source, 0, 10).unwrap(),
+            ),
+            DefinitionOrigin::new(
+                DefinitionIdentity::Field {
+                    owner: TypeId::from_bytes(id::<12>()),
+                    field: FieldId::from_bytes(id::<13>()),
+                },
+                SourceOrigin::new(source, 10, 18).unwrap(),
+            ),
+        ]);
+        origins
     }
 
     #[test]
@@ -2299,5 +2355,96 @@ mod tests {
             )
         );
         assert_eq!(deployable.catalogue_hash(), digest::<7>());
+    }
+
+    #[test]
+    fn accepts_write_references_and_rejects_crossed_or_other_targets() {
+        let expected = RevisionPair::new(
+            SourceRevisionId::from_bytes(id::<20>()),
+            CatalogueRevisionId::from_bytes(id::<21>()),
+        );
+        let revision = function_revision();
+        let object_type = TypeId::from_bytes(id::<12>());
+        let field = FieldId::from_bytes(id::<13>());
+        let valid_references = vec![
+            DefinitionReference::new(
+                revision.function(),
+                revision.id(),
+                0,
+                DefinitionReferenceTarget::ObjectType(object_type),
+                DefinitionReferenceKind::WriteObject,
+                revision.declaration_origin(),
+            ),
+            DefinitionReference::new(
+                revision.function(),
+                revision.id(),
+                1,
+                DefinitionReferenceTarget::Field {
+                    owner: object_type,
+                    field,
+                },
+                DefinitionReferenceKind::WriteField,
+                revision.declaration_origin(),
+            ),
+        ];
+        assert!(
+            DeployableRevision::new(
+                expected,
+                source(Some(expected.source())),
+                expected.catalogue(),
+                write_catalogue(revision.id()),
+                digest::<7>(),
+                write_origins(&revision),
+                vec![],
+                vec![revision.clone()],
+                valid_references,
+            )
+            .is_ok()
+        );
+
+        for (kind, target) in [
+            (
+                DefinitionReferenceKind::WriteObject,
+                DefinitionReferenceTarget::Field {
+                    owner: object_type,
+                    field,
+                },
+            ),
+            (
+                DefinitionReferenceKind::WriteField,
+                DefinitionReferenceTarget::ObjectType(object_type),
+            ),
+            (
+                DefinitionReferenceKind::WriteObject,
+                DefinitionReferenceTarget::Function(revision.function()),
+            ),
+            (
+                DefinitionReferenceKind::WriteField,
+                DefinitionReferenceTarget::Function(revision.function()),
+            ),
+        ] {
+            let reference = DefinitionReference::new(
+                revision.function(),
+                revision.id(),
+                0,
+                target,
+                kind,
+                revision.declaration_origin(),
+            );
+            assert!(matches!(
+                DeployableRevision::new(
+                    expected,
+                    source(Some(expected.source())),
+                    expected.catalogue(),
+                    write_catalogue(revision.id()),
+                    digest::<7>(),
+                    write_origins(&revision),
+                    vec![],
+                    vec![revision.clone()],
+                    vec![reference],
+                ),
+                Err(RevisionInvariantError::ReferenceKindTargetMismatch { .. })
+            ));
+        }
     }
 }
