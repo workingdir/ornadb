@@ -7,11 +7,9 @@
 
 use std::fmt;
 
-use orna_core::{
-    FieldId, TypeId,
-    catalogue::CatalogueSnapshot,
-    types::{ResolvedType, StandardScalar},
-};
+use orna_core::{FieldId, TypeId, types::StandardScalar};
+#[cfg(test)]
+use orna_core::{catalogue::CatalogueSnapshot, types::ResolvedType};
 use orna_syntax::{NamePart, QueryExpression, SelectQuery, SourceSpan};
 
 use crate::resolver::{QueryCatalogue, SemanticType};
@@ -265,6 +263,7 @@ impl<T> ValueType<T> {
     }
 }
 
+#[cfg(test)]
 impl ValueType<TypeId> {
     /// Returns the durable core type for compatibility with existing callers.
     pub(crate) const fn resolved_type(&self) -> ResolvedType {
@@ -286,6 +285,7 @@ impl RelationalQueryIr<TypeId, FieldId> {
 ///
 /// The result contains stable catalogue identities only. Any semantic error
 /// rejects the complete query and returns source-located diagnostics.
+#[cfg(test)]
 pub(crate) fn check_query(
     query: &SelectQuery,
     catalogue: &CatalogueSnapshot,
