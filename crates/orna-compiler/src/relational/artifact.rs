@@ -431,7 +431,10 @@ mod tests {
         assert!(field_ids.keys().all(|id| id.is_provisional()));
 
         CheckedPlanFixture {
-            plan: checked.server_functions()[0].plan().clone(),
+            plan: checked.server_functions()[0]
+                .query_plan()
+                .expect("fixture has a SELECT body")
+                .clone(),
             type_ids,
             field_ids,
             checked_markers,
