@@ -46,7 +46,7 @@ pub(crate) async fn install_physical_plan(
     Ok(())
 }
 
-async fn establish_trusted_search_path(
+pub(crate) async fn establish_trusted_search_path(
     transaction: &Transaction<'_>,
 ) -> Result<(), PostgresKernelError> {
     transaction
