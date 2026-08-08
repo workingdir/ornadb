@@ -144,7 +144,11 @@ macro_rules! define_id {
 
 define_id!(TypeId, "type");
 define_id!(FieldId, "field");
+define_id!(SchemaId, "schema");
 define_id!(CatalogueRevisionId, "catalogue-revision");
+define_id!(SourceBundleId, "source-bundle");
+define_id!(SourceUnitId, "source-unit");
+define_id!(SourceRevisionId, "source-revision");
 define_id!(ExpressionId, "expression");
 define_id!(ObjectId, "object");
 define_id!(FunctionId, "function");
@@ -174,9 +178,11 @@ mod tests {
 
     #[test]
     fn catalogue_identifiers_use_their_own_canonical_type_tags() {
+        let schema = SchemaId::from_bytes([0x12; 16]);
         let revision = CatalogueRevisionId::from_bytes([0x12; 16]);
         let expression = ExpressionId::from_bytes([0x12; 16]);
 
+        assert_eq!(schema.canonical(), "schema:289144gj289144gj289144gj28");
         assert_eq!(
             revision.canonical(),
             "catalogue-revision:289144gj289144gj289144gj28"
@@ -185,6 +191,7 @@ mod tests {
             expression.canonical(),
             "expression:289144gj289144gj289144gj28"
         );
+        assert_eq!(SchemaId::from_canonical(&schema.canonical()), Ok(schema));
         assert_eq!(
             CatalogueRevisionId::from_canonical(&revision.canonical()),
             Ok(revision)
@@ -241,5 +248,39 @@ mod tests {
         accepts_type_id(TypeId::new());
         let field_id = FieldId::new();
         assert!(field_id.canonical().starts_with("field:"));
+    }
+
+    #[test]
+    fn durable_source_and_schema_identifiers_are_typed_and_round_trip() {
+        let bytes = [0x34; 16];
+        let schema = SchemaId::from_bytes(bytes);
+        let bundle = SourceBundleId::from_bytes(bytes);
+        let unit = SourceUnitId::from_bytes(bytes);
+        let revision = SourceRevisionId::from_bytes(bytes);
+
+        assert_eq!(schema.canonical(), "schema:6gt38d1m6gt38d1m6gt38d1m6g");
+        assert_eq!(
+            bundle.canonical(),
+            "source-bundle:6gt38d1m6gt38d1m6gt38d1m6g"
+        );
+        assert_eq!(unit.canonical(), "source-unit:6gt38d1m6gt38d1m6gt38d1m6g");
+        assert_eq!(
+            revision.canonical(),
+            "source-revision:6gt38d1m6gt38d1m6gt38d1m6g"
+        );
+        assert_eq!(SchemaId::from_canonical(&schema.canonical()), Ok(schema));
+        assert_eq!(
+            SourceBundleId::from_canonical(&bundle.canonical()),
+            Ok(bundle)
+        );
+        assert_eq!(SourceUnitId::from_canonical(&unit.canonical()), Ok(unit));
+        assert_eq!(
+            SourceRevisionId::from_canonical(&revision.canonical()),
+            Ok(revision)
+        );
+        assert_eq!(
+            SchemaId::from_canonical(&bundle.canonical()),
+            Err(InvalidCanonicalId)
+        );
     }
 }

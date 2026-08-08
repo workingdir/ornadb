@@ -6,12 +6,12 @@
 use std::collections::{HashMap, HashSet};
 
 use orna_core::{
-    CatalogueRevisionId, ExpressionId, FieldId, FunctionId, ParameterId, TypeId,
+    CatalogueRevisionId, ExpressionId, FieldId, FunctionId, ParameterId, SchemaId, TypeId,
     catalogue::{
         CatalogueSnapshot, FieldDefinition, FunctionSecurity as CatalogueFunctionSecurity,
         FunctionTransaction as CatalogueFunctionTransaction,
         FunctionVolatility as CatalogueFunctionVolatility, ObjectTypeDefinition, OnDeleteAction,
-        QualifiedSemanticName,
+        QualifiedSemanticName, SchemaDefinition,
     },
     source::SourceBundle,
     types::{ResolvedType, StandardScalar},
@@ -173,11 +173,17 @@ impl CheckedBundle {
 /// A checked logical schema declaration.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CheckedSchema {
+    id: SchemaId,
     name: QualifiedSemanticName,
     location: SourceLocation,
 }
 
 impl CheckedSchema {
+    /// Returns the stable identity of the schema.
+    pub const fn id(&self) -> SchemaId {
+        self.id
+    }
+
     /// Returns the resolved logical schema name.
     pub fn name(&self) -> &QualifiedSemanticName {
         &self.name
@@ -316,14 +322,9 @@ fn check_parsed(parse_report: ParseReport, base: &CatalogueSnapshot) -> CheckRep
 
     let mut checked_schemas = Vec::new();
     let mut known_schemas = base
-        .object_types()
+        .schemas()
         .iter()
-        .filter_map(|object_type| namespace_of(object_type.name()))
-        .chain(
-            base.functions()
-                .iter()
-                .filter_map(|function| namespace_of(function.name())),
-        )
+        .map(|schema| schema.name().clone())
         .collect::<HashSet<_>>();
     let mut submitted_schemas = HashSet::new();
     for unit in parse_report.units() {
@@ -340,6 +341,9 @@ fn check_parsed(parse_report: ParseReport, base: &CatalogueSnapshot) -> CheckRep
             }
             known_schemas.insert(name.clone());
             checked_schemas.push(CheckedSchema {
+                id: base
+                    .schema_by_name(&name)
+                    .map_or_else(SchemaId::new, SchemaDefinition::id),
                 name,
                 location: location(unit.logical_path(), &declaration.span),
             });
@@ -531,8 +535,21 @@ fn check_parsed(parse_report: ParseReport, base: &CatalogueSnapshot) -> CheckRep
             object_types.push(definition);
         }
     }
+    let mut schemas = base.schemas().to_vec();
+    for checked_schema in &checked_schemas {
+        let definition = SchemaDefinition::new(checked_schema.id, checked_schema.name.clone());
+        if let Some(index) = schemas
+            .iter()
+            .position(|candidate| candidate.id() == checked_schema.id)
+        {
+            schemas[index] = definition;
+        } else {
+            schemas.push(definition);
+        }
+    }
     let candidate = CatalogueSnapshot::new_with_functions(
         CatalogueRevisionId::new(),
+        schemas,
         object_types,
         base.functions().to_vec(),
     )
@@ -1034,11 +1051,11 @@ mod tests {
     use std::collections::{HashMap, HashSet};
 
     use orna_core::{
-        CatalogueRevisionId, FunctionId, FunctionRevisionId, ParameterId,
+        CatalogueRevisionId, FunctionId, FunctionRevisionId, ParameterId, SchemaId,
         catalogue::{
             CatalogueSnapshot, FunctionDefinition, FunctionDomain, FunctionReturn,
             FunctionSecurity, FunctionTransaction, FunctionVolatility, OnDeleteAction,
-            ParameterDefinition, QualifiedSemanticName,
+            ParameterDefinition, QualifiedSemanticName, SchemaDefinition,
         },
         source::{SourceBundle, SourceUnit},
         types::{ResolvedType, StandardScalar},
@@ -1050,7 +1067,14 @@ mod tests {
     };
 
     fn empty_catalogue() -> CatalogueSnapshot {
-        CatalogueSnapshot::new(CatalogueRevisionId::new(), Vec::new()).unwrap()
+        CatalogueSnapshot::new(CatalogueRevisionId::new(), Vec::new(), Vec::new()).unwrap()
+    }
+
+    fn schema(id: u8, parts: &[&str]) -> SchemaDefinition {
+        SchemaDefinition::new(
+            SchemaId::from_bytes([id; 16]),
+            QualifiedSemanticName::new(parts.iter().copied()).unwrap(),
+        )
     }
 
     fn bundle(units: impl IntoIterator<Item = (&'static str, &'static str)>) -> SourceBundle {
@@ -1095,6 +1119,64 @@ mod tests {
         assert_eq!(
             task.fields()[0].resolved_type(),
             ResolvedType::reference(person.id())
+        );
+    }
+
+    #[test]
+    fn empty_schema_declaration_persists_with_a_stable_identity() {
+        let initial = successful_candidate("CREATE SCHEMA crm;");
+        let schema_id = initial.schemas()[0].id();
+
+        assert_eq!(initial.schemas().len(), 1);
+        assert_eq!(initial.schemas()[0].name().to_string(), "crm");
+        assert!(initial.object_types().is_empty());
+
+        let report = check(&bundle([("schema.orna", "CREATE SCHEMA CRM;")]), &initial);
+
+        assert!(report.diagnostics().is_empty());
+        assert_eq!(report.candidate().unwrap().schemas()[0].id(), schema_id);
+    }
+
+    #[test]
+    fn base_schema_definitions_authorise_object_and_function_namespaces() {
+        let base = CatalogueSnapshot::new(
+            CatalogueRevisionId::new(),
+            vec![schema(1, &["crm"])],
+            vec![],
+        )
+        .unwrap();
+
+        let object_report = check(
+            &bundle([(
+                "types.orna",
+                "CREATE TYPE crm.contact AS OBJECT (name TEXT);",
+            )]),
+            &base,
+        );
+        assert!(object_report.diagnostics().is_empty());
+        assert!(
+            object_report
+                .candidate()
+                .unwrap()
+                .object_type_by_name(&QualifiedSemanticName::new(["crm", "contact"]).unwrap())
+                .is_some()
+        );
+
+        let function_report = check(
+            &bundle([(
+                "functions.orna",
+                "CREATE SERVER FUNCTION crm.probe() RETURNS BOOL AS SELECT TRUE FROM crm.probe p;",
+            )]),
+            &base,
+        );
+        assert_eq!(function_report.diagnostics().len(), 1);
+        assert_eq!(
+            function_report.diagnostics()[0].code(),
+            DiagnosticCode::TypeMismatch
+        );
+        assert_eq!(
+            function_report.diagnostics()[0].message(),
+            "SERVER function body planning is not implemented"
         );
     }
 
@@ -1295,7 +1377,7 @@ mod tests {
         let report = check(
             &bundle([(
                 "functions.orna",
-                "CREATE SCHEMA people; CREATE SERVER FUNCTION people.find() RETURNS TEXT AS SELECT 'x';",
+                "CREATE SCHEMA people; CREATE SERVER FUNCTION people.find() RETURNS TEXT AS SELECT TRUE FROM people.person p;",
             )]),
             &empty_catalogue(),
         );
@@ -1309,9 +1391,9 @@ mod tests {
         let report = check(
             &bundle([(
                 "functions.orna",
-                "CREATE SERVER FUNCTION find() RETURNS TEXT AS SELECT 'x';\
+                "CREATE SERVER FUNCTION find() RETURNS TEXT AS SELECT TRUE FROM people.person p;\
                  CREATE SCHEMA people;\
-                 CREATE SERVER FUNCTION people.find() RETURNS TEXT TRANSACTION MANUAL AS SELECT 'x';",
+                 CREATE SERVER FUNCTION people.find() RETURNS TEXT TRANSACTION MANUAL AS SELECT TRUE FROM people.person p;",
             )]),
             &empty_catalogue(),
         );
@@ -1332,8 +1414,8 @@ mod tests {
             &bundle([(
                 "functions.orna",
                 "CREATE SCHEMA people;\
-                 CREATE SERVER FUNCTION People.Find() RETURNS TEXT AS SELECT 'x';\
-                 CREATE SERVER FUNCTION people.find() RETURNS TEXT AS SELECT 'y';",
+                 CREATE SERVER FUNCTION People.Find() RETURNS TEXT AS SELECT TRUE FROM people.person p;\
+                 CREATE SERVER FUNCTION people.find() RETURNS TEXT AS SELECT FALSE FROM people.person p;",
             )]),
             &empty_catalogue(),
         );
@@ -1347,7 +1429,7 @@ mod tests {
 
     #[test]
     fn fails_closed_at_a_clean_server_function_body() {
-        let source = "CREATE SCHEMA people; CREATE SERVER FUNCTION people.find() RETURNS TEXT AS SELECT 'x';";
+        let source = "CREATE SCHEMA people; CREATE SERVER FUNCTION people.find() RETURNS TEXT AS SELECT TRUE FROM people.person p;";
         let report = check(&bundle([("functions.orna", source)]), &empty_catalogue());
 
         assert_eq!(report.diagnostics().len(), 1);
@@ -1372,7 +1454,7 @@ mod tests {
                 "functions.orna",
                 "CREATE SCHEMA people;\
                  CREATE TYPE people.person AS OBJECT (manager REF missing.person);\
-                 CREATE SERVER FUNCTION people.find() RETURNS TEXT AS SELECT 'x';",
+                 CREATE SERVER FUNCTION people.find() RETURNS TEXT AS SELECT TRUE FROM people.person p;",
             )]),
             &empty_catalogue(),
         );
@@ -1391,7 +1473,7 @@ mod tests {
     }
 
     #[test]
-    fn recognises_schemas_from_base_server_functions() {
+    fn recognises_schemas_from_base_schema_definitions() {
         let base_function = FunctionDefinition::new(
             FunctionId::new(),
             QualifiedSemanticName::new(["sys", "health"]).unwrap(),
@@ -1405,6 +1487,7 @@ mod tests {
         );
         let base = CatalogueSnapshot::new_with_functions(
             CatalogueRevisionId::new(),
+            vec![schema(1, &["sys"])],
             vec![],
             vec![base_function],
         )
@@ -1413,7 +1496,7 @@ mod tests {
         let report = check(
             &bundle([(
                 "functions.orna",
-                "CREATE SERVER FUNCTION sys.probe() RETURNS BOOL AS SELECT TRUE;",
+                "CREATE SERVER FUNCTION sys.probe() RETURNS BOOL AS SELECT TRUE FROM sys.health h;",
             )]),
             &base,
         );
@@ -1442,14 +1525,15 @@ mod tests {
         let existing_id = existing.id();
         let base = CatalogueSnapshot::new_with_functions(
             CatalogueRevisionId::new(),
+            vec![schema(1, &["sys"])],
             vec![],
             vec![existing],
         )
         .unwrap();
         let parsed = parse_bundle(&bundle([(
             "functions.orna",
-            "CREATE SERVER FUNCTION Sys.Health() RETURNS BOOL SECURITY DEFINER TRANSACTION READ ONLY VOLATILITY STABLE AS SELECT TRUE;\
-             CREATE SERVER FUNCTION sys.defaults() RETURNS BOOL AS SELECT TRUE;",
+            "CREATE SERVER FUNCTION Sys.Health() RETURNS BOOL SECURITY DEFINER TRANSACTION READ ONLY VOLATILITY STABLE AS SELECT TRUE FROM sys.health h;\
+             CREATE SERVER FUNCTION sys.defaults() RETURNS BOOL AS SELECT TRUE FROM sys.health h;",
         )]));
         let known_schemas = HashSet::from([QualifiedSemanticName::new(["sys"]).unwrap()]);
         let mut diagnostics = Vec::new();
@@ -1475,8 +1559,8 @@ mod tests {
                 "functions.orna",
                 "CREATE SCHEMA people;\
                  CREATE SERVER FUNCTION people.duplicate(p_value TEXT, P_VALUE INT)\
-                 RETURNS ROWS (value TEXT, VALUE INT) AS SELECT 'x';\
-                 CREATE SERVER FUNCTION people.empty() RETURNS ROWS () AS SELECT 'x';",
+                 RETURNS ROWS (value TEXT, VALUE INT) AS SELECT TRUE FROM people.person p;\
+                 CREATE SERVER FUNCTION people.empty() RETURNS ROWS () AS SELECT TRUE FROM people.person p;",
             )]),
             &empty_catalogue(),
         );
@@ -1533,6 +1617,7 @@ mod tests {
         let existing_id = existing.id();
         let base = CatalogueSnapshot::new_with_functions(
             CatalogueRevisionId::new(),
+            vec![schema(1, &["sys"])],
             vec![],
             vec![existing],
         )
@@ -1542,7 +1627,7 @@ mod tests {
             RETURNS ROWS (label TEXT, count INT) SECURITY DEFINER \
             TRANSACTION READ ONLY VOLATILITY STABLE \
             REQUIRES CAPABILITY sys.fs.read(p_old), sys.jobs.noop(), sys.launch.start \
-            AS SELECT p_old || '!';";
+            AS SELECT REF(h) FROM sys.health h;";
         let parsed = parse_bundle(&bundle([("functions.orna", source)]));
         assert_eq!(parsed.diagnostics().len(), 0, "{:?}", parsed.diagnostics());
         assert_eq!(parsed.units()[0].parsed().server_functions().len(), 1);
@@ -1628,7 +1713,7 @@ mod tests {
             columns[1].resolved_type,
             ResolvedType::scalar(StandardScalar::Integer)
         );
-        assert_eq!(input.body.source, "SELECT p_old || '!'");
+        assert_eq!(input.body.source, "SELECT REF(h) FROM sys.health h");
         assert_eq!(
             input.body.location.span().start(),
             source.find("SELECT").unwrap()
@@ -1652,6 +1737,7 @@ mod tests {
         let function_id = function.id();
         let base = CatalogueSnapshot::new_with_functions(
             CatalogueRevisionId::new(),
+            vec![schema(1, &["sys"])],
             vec![],
             vec![function],
         )
