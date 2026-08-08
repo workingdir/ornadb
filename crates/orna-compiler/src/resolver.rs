@@ -10,6 +10,8 @@ pub use model::{
     CheckReport, CheckedBundle, CheckedDefault, CheckedField, CheckedObjectType, CheckedSchema,
     CheckedServerFunction, ConstantValue,
 };
+#[allow(unused_imports)]
+pub(crate) use model::{QueryCatalogue, QueryField, SemanticType};
 
 use std::collections::{HashMap, HashSet};
 
