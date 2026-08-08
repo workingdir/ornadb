@@ -45,6 +45,12 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../migrations/0004_canonical_hash_contract.sql"),
         data_step: Some(MigrationDataStep::CanonicalHashV1EmptySeed),
     },
+    Migration {
+        version: 5,
+        name: "owner-qualified reference targets",
+        sql: include_str!("../migrations/0005_owner_qualified_reference_targets.sql"),
+        data_step: None,
+    },
 ];
 const MIGRATION_DATA_STEP_SEPARATOR: &[u8] = b"\0orna.kernel.migration-step\0";
 const CANONICAL_HASH_V1_EMPTY_SEED_STEP: &[u8] = b"canonical-hash-v1-empty-seed/v1";
@@ -696,12 +702,13 @@ mod tests {
             validated_migration_registry()
                 .expect("registry is valid")
                 .len(),
-            4
+            5
         );
         assert_eq!(MIGRATIONS[0].version, 1);
         assert_eq!(MIGRATIONS[1].version, 2);
         assert_eq!(MIGRATIONS[2].version, 3);
         assert_eq!(MIGRATIONS[3].version, 4);
+        assert_eq!(MIGRATIONS[4].version, 5);
     }
 
     #[tokio::test]
