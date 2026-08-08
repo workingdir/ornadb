@@ -7,7 +7,7 @@ use std::{collections::HashMap, error::Error, fmt, hash::Hash};
 
 use crate::{
     CatalogueRevisionId, ExpressionId, FieldId, FunctionId, FunctionRevisionId, ParameterId,
-    TypeId, types::ResolvedType,
+    SchemaId, TypeId, types::ResolvedType,
 };
 
 /// A resolved, qualified semantic name.
@@ -75,6 +75,33 @@ impl fmt::Display for SemanticNameError {
 }
 
 impl Error for SemanticNameError {}
+
+/// One declared logical schema.
+///
+/// A schema is a durable semantic definition. It can exist without object
+/// types or functions.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SchemaDefinition {
+    id: SchemaId,
+    name: QualifiedSemanticName,
+}
+
+impl SchemaDefinition {
+    /// Creates a schema definition from resolved semantic data.
+    pub fn new(id: SchemaId, name: QualifiedSemanticName) -> Self {
+        Self { id, name }
+    }
+
+    /// Returns this schema's stable identity.
+    pub const fn id(&self) -> SchemaId {
+        self.id
+    }
+
+    /// Returns this schema's resolved qualified name.
+    pub fn name(&self) -> &QualifiedSemanticName {
+        &self.name
+    }
+}
 
 /// The action to take when a referenced object is deleted.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -452,6 +479,9 @@ impl FunctionDefinition {
 #[derive(Clone, Debug)]
 pub struct CatalogueSnapshot {
     revision: CatalogueRevisionId,
+    schemas: Vec<SchemaDefinition>,
+    schema_indices_by_name: HashMap<QualifiedSemanticName, usize>,
+    schema_indices_by_id: HashMap<SchemaId, usize>,
     object_types: Vec<ObjectTypeDefinition>,
     object_type_indices_by_name: HashMap<QualifiedSemanticName, usize>,
     object_type_indices_by_id: HashMap<TypeId, usize>,
@@ -461,24 +491,46 @@ pub struct CatalogueSnapshot {
 }
 
 impl CatalogueSnapshot {
-    /// Validates and creates an immutable catalogue snapshot.
+    /// Validates and creates an immutable catalogue snapshot with schemas and object types.
     pub fn new(
         revision: CatalogueRevisionId,
+        schemas: Vec<SchemaDefinition>,
         object_types: Vec<ObjectTypeDefinition>,
     ) -> Result<Self, CatalogueSnapshotError> {
-        Self::new_with_functions(revision, object_types, Vec::new())
+        Self::new_with_functions(revision, schemas, object_types, Vec::new())
     }
 
-    /// Validates and creates a snapshot with object types and functions.
+    /// Validates and creates a snapshot with schemas, object types, and functions.
     pub fn new_with_functions(
         revision: CatalogueRevisionId,
+        schemas: Vec<SchemaDefinition>,
         object_types: Vec<ObjectTypeDefinition>,
         functions: Vec<FunctionDefinition>,
     ) -> Result<Self, CatalogueSnapshotError> {
+        let mut schema_indices_by_name = HashMap::with_capacity(schemas.len());
+        let mut schema_indices_by_id = HashMap::with_capacity(schemas.len());
         let mut object_type_indices_by_name = HashMap::with_capacity(object_types.len());
         let mut object_type_indices_by_id = HashMap::with_capacity(object_types.len());
         let mut function_indices_by_name = HashMap::with_capacity(functions.len());
         let mut function_indices_by_id = HashMap::with_capacity(functions.len());
+
+        for (schema_index, schema) in schemas.iter().enumerate() {
+            if schema_indices_by_name
+                .insert(schema.name.clone(), schema_index)
+                .is_some()
+            {
+                return Err(CatalogueSnapshotError::DuplicateSchemaName {
+                    name: schema.name.clone(),
+                });
+            }
+
+            if schema_indices_by_id
+                .insert(schema.id, schema_index)
+                .is_some()
+            {
+                return Err(CatalogueSnapshotError::DuplicateSchemaId { id: schema.id });
+            }
+        }
 
         for (type_index, object_type) in object_types.iter().enumerate() {
             if object_type_indices_by_name
@@ -495,6 +547,18 @@ impl CatalogueSnapshot {
                 .is_some()
             {
                 return Err(CatalogueSnapshotError::DuplicateObjectTypeId { id: object_type.id });
+            }
+
+            let namespace = namespace_of(&object_type.name).ok_or(
+                CatalogueSnapshotError::ObjectTypeHasNoSchema {
+                    object_type: object_type.id,
+                },
+            )?;
+            if !schema_indices_by_name.contains_key(&namespace) {
+                return Err(CatalogueSnapshotError::ObjectTypeSchemaNotDeclared {
+                    object_type: object_type.id,
+                    schema: namespace,
+                });
             }
 
             Self::validate_fields(object_type)?;
@@ -517,11 +581,26 @@ impl CatalogueSnapshot {
                 return Err(CatalogueSnapshotError::DuplicateFunctionId { id: function.id });
             }
 
+            let namespace = namespace_of(&function.name).ok_or(
+                CatalogueSnapshotError::FunctionHasNoSchema {
+                    function: function.id,
+                },
+            )?;
+            if !schema_indices_by_name.contains_key(&namespace) {
+                return Err(CatalogueSnapshotError::FunctionSchemaNotDeclared {
+                    function: function.id,
+                    schema: namespace,
+                });
+            }
+
             Self::validate_function(function)?;
         }
 
         Ok(Self {
             revision,
+            schemas,
+            schema_indices_by_name,
+            schema_indices_by_id,
             object_types,
             object_type_indices_by_name,
             object_type_indices_by_id,
@@ -534,6 +613,25 @@ impl CatalogueSnapshot {
     /// Returns the stable identity of this catalogue revision.
     pub const fn revision(&self) -> CatalogueRevisionId {
         self.revision
+    }
+
+    /// Returns declared schemas in their snapshot order.
+    pub fn schemas(&self) -> &[SchemaDefinition] {
+        &self.schemas
+    }
+
+    /// Finds a schema by its exact resolved qualified name.
+    pub fn schema_by_name(&self, name: &QualifiedSemanticName) -> Option<&SchemaDefinition> {
+        self.schema_indices_by_name
+            .get(name)
+            .map(|index| &self.schemas[*index])
+    }
+
+    /// Finds a schema by its stable identity.
+    pub fn schema_by_id(&self, id: SchemaId) -> Option<&SchemaDefinition> {
+        self.schema_indices_by_id
+            .get(&id)
+            .map(|index| &self.schemas[*index])
     }
 
     /// Returns the object type definitions in their snapshot order.
@@ -755,6 +853,18 @@ impl CatalogueSnapshot {
     }
 }
 
+/// Returns the exact schema that owns a qualified definition name.
+///
+/// A schema can be qualified itself. This does not infer ancestor schemas or
+/// add a schema hierarchy. The final definition part is removed exactly.
+fn namespace_of(name: &QualifiedSemanticName) -> Option<QualifiedSemanticName> {
+    let namespace_parts = name.parts().get(..name.parts().len().checked_sub(1)?)?;
+    if namespace_parts.is_empty() {
+        return None;
+    }
+    QualifiedSemanticName::new(namespace_parts.iter().cloned()).ok()
+}
+
 /// An error returned when definitions cannot form a coherent snapshot.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CatalogueSnapshotError {
@@ -768,6 +878,28 @@ pub enum CatalogueSnapshotError {
         /// The repeated identity.
         id: TypeId,
     },
+    /// More than one schema has the same resolved qualified name.
+    DuplicateSchemaName {
+        /// The repeated name.
+        name: QualifiedSemanticName,
+    },
+    /// More than one schema has the same stable identity.
+    DuplicateSchemaId {
+        /// The repeated identity.
+        id: SchemaId,
+    },
+    /// An object type has no namespace that can refer to a declared schema.
+    ObjectTypeHasNoSchema {
+        /// The invalid object type identity.
+        object_type: TypeId,
+    },
+    /// An object type refers to an undeclared exact namespace.
+    ObjectTypeSchemaNotDeclared {
+        /// The object type identity.
+        object_type: TypeId,
+        /// The missing exact schema name.
+        schema: QualifiedSemanticName,
+    },
     /// More than one function has the same resolved qualified name.
     DuplicateFunctionName {
         /// The repeated name.
@@ -777,6 +909,18 @@ pub enum CatalogueSnapshotError {
     DuplicateFunctionId {
         /// The repeated identity.
         id: FunctionId,
+    },
+    /// A function has no namespace that can refer to a declared schema.
+    FunctionHasNoSchema {
+        /// The invalid function identity.
+        function: FunctionId,
+    },
+    /// A function refers to an undeclared exact namespace.
+    FunctionSchemaNotDeclared {
+        /// The function identity.
+        function: FunctionId,
+        /// The missing exact schema name.
+        schema: QualifiedSemanticName,
     },
     /// A client function declares server transaction behaviour.
     ClientFunctionTransaction {
@@ -926,12 +1070,38 @@ impl fmt::Display for CatalogueSnapshotError {
             Self::DuplicateObjectTypeId { id } => {
                 write!(formatter, "duplicate object type identity {id}")
             }
+            Self::DuplicateSchemaName { name } => {
+                write!(formatter, "duplicate schema name {name}")
+            }
+            Self::DuplicateSchemaId { id } => {
+                write!(formatter, "duplicate schema identity {id}")
+            }
+            Self::ObjectTypeHasNoSchema { object_type } => {
+                write!(
+                    formatter,
+                    "object type {object_type} has no declared schema"
+                )
+            }
+            Self::ObjectTypeSchemaNotDeclared {
+                object_type,
+                schema,
+            } => write!(
+                formatter,
+                "object type {object_type} refers to undeclared schema {schema}"
+            ),
             Self::DuplicateFunctionName { name } => {
                 write!(formatter, "duplicate function name {name}")
             }
             Self::DuplicateFunctionId { id } => {
                 write!(formatter, "duplicate function identity {id}")
             }
+            Self::FunctionHasNoSchema { function } => {
+                write!(formatter, "function {function} has no declared schema")
+            }
+            Self::FunctionSchemaNotDeclared { function, schema } => write!(
+                formatter,
+                "function {function} refers to undeclared schema {schema}"
+            ),
             Self::ClientFunctionTransaction { function } => {
                 write!(
                     formatter,
@@ -1066,11 +1236,11 @@ mod tests {
         CatalogueSnapshot, CatalogueSnapshotError, FieldDefinition, FunctionDefinition,
         FunctionDomain, FunctionReturn, FunctionReturnColumnDefinition, FunctionSecurity,
         FunctionTransaction, FunctionVolatility, ObjectTypeDefinition, OnDeleteAction,
-        ParameterDefinition, QualifiedSemanticName, SemanticNameError,
+        ParameterDefinition, QualifiedSemanticName, SchemaDefinition, SemanticNameError,
     };
     use crate::{
         CatalogueRevisionId, ExpressionId, FieldId, FunctionId, FunctionRevisionId, ParameterId,
-        TypeId,
+        SchemaId, TypeId,
         types::{ResolvedType, StandardScalar},
     };
 
@@ -1095,8 +1265,15 @@ mod tests {
         ObjectTypeDefinition::new(TypeId::from_bytes([id; 16]), name(name_parts), fields)
     }
 
-    fn snapshot(types: Vec<ObjectTypeDefinition>) -> CatalogueSnapshot {
-        CatalogueSnapshot::new(CatalogueRevisionId::from_bytes([7; 16]), types).unwrap()
+    fn schema(id: u8, name_parts: &[&str]) -> SchemaDefinition {
+        SchemaDefinition::new(SchemaId::from_bytes([id; 16]), name(name_parts))
+    }
+
+    fn snapshot(
+        schemas: Vec<SchemaDefinition>,
+        types: Vec<ObjectTypeDefinition>,
+    ) -> CatalogueSnapshot {
+        CatalogueSnapshot::new(CatalogueRevisionId::from_bytes([7; 16]), schemas, types).unwrap()
     }
 
     fn parameter(id: u8, name: &str, ordinal: u32) -> ParameterDefinition {
@@ -1156,7 +1333,7 @@ mod tests {
                 Some(OnDeleteAction::Restrict),
             )],
         );
-        let catalogue = snapshot(vec![contact]);
+        let catalogue = snapshot(vec![schema(1, &["crm"])], vec![contact]);
 
         let contact = catalogue
             .object_type_by_name(&name(&["crm", "contact"]))
@@ -1200,18 +1377,82 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_retains_empty_schemas_and_resolves_them_by_name_and_id() {
+        let sales = schema(3, &["crm", "sales"]);
+        let catalogue = snapshot(vec![sales.clone()], vec![]);
+
+        assert_eq!(catalogue.schemas(), std::slice::from_ref(&sales));
+        assert_eq!(catalogue.schema_by_name(sales.name()), Some(&sales));
+        assert_eq!(catalogue.schema_by_id(sales.id()), Some(&sales));
+    }
+
+    #[test]
+    fn snapshot_rejects_duplicate_schema_names_and_ids() {
+        let first = schema(1, &["crm"]);
+        let same_name = schema(2, &["crm"]);
+        let same_id = schema(1, &["tasks"]);
+
+        assert!(matches!(
+            CatalogueSnapshot::new(CatalogueRevisionId::new(), vec![first.clone(), same_name], vec![]),
+            Err(CatalogueSnapshotError::DuplicateSchemaName { name: duplicate_name })
+                if duplicate_name == name(&["crm"])
+        ));
+        assert!(matches!(
+            CatalogueSnapshot::new(CatalogueRevisionId::new(), vec![first, same_id], vec![]),
+            Err(CatalogueSnapshotError::DuplicateSchemaId { id }) if id == SchemaId::from_bytes([1; 16])
+        ));
+    }
+
+    #[test]
+    fn snapshot_requires_an_exact_declared_schema_for_definitions() {
+        let object_type = object(1, &["crm", "contact"], vec![]);
+        let function = function(
+            2,
+            &["crm", "find"],
+            FunctionDomain::Server,
+            vec![],
+            FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Void)),
+            None,
+        );
+
+        assert!(matches!(
+            CatalogueSnapshot::new(CatalogueRevisionId::new(), vec![], vec![object_type]),
+            Err(CatalogueSnapshotError::ObjectTypeSchemaNotDeclared { schema, .. })
+                if schema == name(&["crm"])
+        ));
+        assert!(matches!(
+            CatalogueSnapshot::new_with_functions(
+                CatalogueRevisionId::new(),
+                vec![],
+                vec![],
+                vec![function]
+            ),
+            Err(CatalogueSnapshotError::FunctionSchemaNotDeclared { schema, .. })
+                if schema == name(&["crm"])
+        ));
+    }
+
+    #[test]
     fn snapshot_rejects_duplicate_type_names_and_ids() {
         let first = object(1, &["crm", "contact"], vec![]);
         let same_name = object(2, &["crm", "contact"], vec![]);
         let same_id = object(1, &["crm", "person"], vec![]);
 
         assert!(matches!(
-            CatalogueSnapshot::new(CatalogueRevisionId::new(), vec![first.clone(), same_name]),
+            CatalogueSnapshot::new(
+                CatalogueRevisionId::new(),
+                vec![schema(1, &["crm"])],
+                vec![first.clone(), same_name]
+            ),
             Err(CatalogueSnapshotError::DuplicateObjectTypeName { name: duplicate_name })
                 if duplicate_name == name(&["crm", "contact"])
         ));
         assert!(matches!(
-            CatalogueSnapshot::new(CatalogueRevisionId::new(), vec![first, same_id]),
+            CatalogueSnapshot::new(
+                CatalogueRevisionId::new(),
+                vec![schema(1, &["crm"])],
+                vec![first, same_id]
+            ),
             Err(CatalogueSnapshotError::DuplicateObjectTypeId { id }) if id == TypeId::from_bytes([1; 16])
         ));
     }
@@ -1235,15 +1476,27 @@ mod tests {
         );
 
         assert!(matches!(
-            CatalogueSnapshot::new(CatalogueRevisionId::new(), vec![duplicate_name]),
+            CatalogueSnapshot::new(
+                CatalogueRevisionId::new(),
+                vec![schema(1, &["crm"])],
+                vec![duplicate_name]
+            ),
             Err(CatalogueSnapshotError::DuplicateFieldName { .. })
         ));
         assert!(matches!(
-            CatalogueSnapshot::new(CatalogueRevisionId::new(), vec![duplicate_id]),
+            CatalogueSnapshot::new(
+                CatalogueRevisionId::new(),
+                vec![schema(1, &["crm"])],
+                vec![duplicate_id]
+            ),
             Err(CatalogueSnapshotError::DuplicateFieldId { .. })
         ));
         assert!(matches!(
-            CatalogueSnapshot::new(CatalogueRevisionId::new(), vec![duplicate_ordinal]),
+            CatalogueSnapshot::new(
+                CatalogueRevisionId::new(),
+                vec![schema(1, &["crm"])],
+                vec![duplicate_ordinal]
+            ),
             Err(CatalogueSnapshotError::DuplicateFieldOrdinal { .. })
         ));
     }
@@ -1258,7 +1511,11 @@ mod tests {
         );
 
         assert!(matches!(
-            CatalogueSnapshot::new(CatalogueRevisionId::new(), vec![missing_first_ordinal]),
+            CatalogueSnapshot::new(
+                CatalogueRevisionId::new(),
+                vec![schema(1, &["crm"])],
+                vec![missing_first_ordinal]
+            ),
             Err(CatalogueSnapshotError::FieldOrdinalOutOfSequence {
                 expected: 0,
                 actual: 1,
@@ -1266,7 +1523,11 @@ mod tests {
             })
         ));
         assert!(matches!(
-            CatalogueSnapshot::new(CatalogueRevisionId::new(), vec![out_of_order]),
+            CatalogueSnapshot::new(
+                CatalogueRevisionId::new(),
+                vec![schema(1, &["crm"])],
+                vec![out_of_order]
+            ),
             Err(CatalogueSnapshotError::FieldOrdinalOutOfSequence {
                 expected: 0,
                 actual: 1,
@@ -1309,6 +1570,7 @@ mod tests {
         );
         let catalogue = CatalogueSnapshot::new_with_functions(
             CatalogueRevisionId::from_bytes([7; 16]),
+            vec![schema(1, &["tasks"])],
             vec![],
             vec![function],
         )
@@ -1402,6 +1664,7 @@ mod tests {
         assert!(matches!(
             CatalogueSnapshot::new_with_functions(
                 CatalogueRevisionId::new(),
+                vec![schema(1, &["tasks"])],
                 vec![],
                 vec![first.clone(), same_name]
             ),
@@ -1410,6 +1673,7 @@ mod tests {
         assert!(matches!(
             CatalogueSnapshot::new_with_functions(
                 CatalogueRevisionId::new(),
+                vec![schema(1, &["tasks"])],
                 vec![],
                 vec![first, same_id]
             ),
@@ -1418,6 +1682,7 @@ mod tests {
         assert!(matches!(
             CatalogueSnapshot::new_with_functions(
                 CatalogueRevisionId::new(),
+                vec![schema(1, &["tasks"])],
                 vec![],
                 vec![duplicate_parameter_name]
             ),
@@ -1426,6 +1691,7 @@ mod tests {
         assert!(matches!(
             CatalogueSnapshot::new_with_functions(
                 CatalogueRevisionId::new(),
+                vec![schema(1, &["tasks"])],
                 vec![],
                 vec![duplicate_parameter_id]
             ),
@@ -1479,6 +1745,7 @@ mod tests {
         assert!(matches!(
             CatalogueSnapshot::new_with_functions(
                 CatalogueRevisionId::new(),
+                vec![schema(1, &["studio"])],
                 vec![],
                 vec![client_transaction]
             ),
@@ -1487,6 +1754,7 @@ mod tests {
         assert!(matches!(
             CatalogueSnapshot::new_with_functions(
                 CatalogueRevisionId::new(),
+                vec![schema(1, &["tasks"])],
                 vec![],
                 vec![non_contiguous_parameters]
             ),
@@ -1495,6 +1763,7 @@ mod tests {
         assert!(matches!(
             CatalogueSnapshot::new_with_functions(
                 CatalogueRevisionId::new(),
+                vec![schema(1, &["tasks"])],
                 vec![],
                 vec![duplicate_return_column]
             ),
@@ -1503,6 +1772,7 @@ mod tests {
         assert!(matches!(
             CatalogueSnapshot::new_with_functions(
                 CatalogueRevisionId::new(),
+                vec![schema(1, &["tasks"])],
                 vec![],
                 vec![non_contiguous_return_column]
             ),
@@ -1511,6 +1781,7 @@ mod tests {
         assert!(matches!(
             CatalogueSnapshot::new_with_functions(
                 CatalogueRevisionId::new(),
+                vec![schema(1, &["tasks"])],
                 vec![],
                 vec![empty_rows]
             ),
