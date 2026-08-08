@@ -37,6 +37,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "revision catalogue integrity",
         include_str!("../migrations/0002_revisions.sql"),
     ),
+    (
+        3,
+        "definition reference integrity",
+        include_str!("../migrations/0003_reference_integrity.sql"),
+    ),
 ];
 const ORIGIN_TABLES: &[&str] = &[
     "catalogue_schemas",
@@ -419,7 +424,6 @@ async fn inspect_definition_references(client: &Client) -> TestResult<()> {
     )
     .await?;
     for target_kind in [
-        "schema",
         "object_type",
         "field",
         "function",
@@ -433,12 +437,37 @@ async fn inspect_definition_references(client: &Client) -> TestResult<()> {
             ),
         )?;
     }
-    require(
-        !target_kind_constraint.contains("'return_column'::text"),
-        format!(
-            "definition_references incorrectly accepts ordinal return columns as stable targets: {target_kind_constraint:?}"
-        ),
-    )?;
+    for unsupported_kind in ["schema", "return_column"] {
+        require(
+            !target_kind_constraint.contains(&format!("'{unsupported_kind}'::text")),
+            format!(
+                "definition_references incorrectly accepts {unsupported_kind:?} as a stable target: {target_kind_constraint:?}"
+            ),
+        )?;
+    }
+
+    let reference_kind_constraint = constraint_definition(
+        client,
+        "definition_references",
+        "definition_references_reference_kind_check",
+    )
+    .await?;
+    for reference_kind in [
+        "function_call",
+        "named_type",
+        "object_reference",
+        "parameter_read",
+        "query_object",
+        "query_field",
+        "expression",
+    ] {
+        require(
+            reference_kind_constraint.contains(&format!("'{reference_kind}'::text")),
+            format!(
+                "definition_references reference kind constraint omits {reference_kind:?}: {reference_kind_constraint:?}"
+            ),
+        )?;
+    }
     Ok(())
 }
 
