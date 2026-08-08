@@ -2,10 +2,11 @@ use rowan::{GreenNode, GreenNodeBuilder, Language};
 
 use crate::{
     CapabilitySpecification, Diagnostic, FunctionReturnType, FunctionSecurity, FunctionTransaction,
-    FunctionVolatility, NamePart, ObjectFieldDeclaration, ObjectTypeDeclaration, OnDeletePolicy,
-    Parse, QualifiedName, RowsColumnDeclaration, SchemaDeclaration, ServerFunctionBody,
-    ServerFunctionDeclaration, ServerFunctionParameter, SourceSlice, SourceSpan,
-    StandardLargeObjectKind, SyntaxTree, TypeSpecification,
+    FunctionVolatility, NamePart, NullOrdering, ObjectFieldDeclaration, ObjectSource,
+    ObjectTypeDeclaration, OnDeletePolicy, OrderingDirection, OrderingExpression, Parse,
+    QualifiedName, QueryExpression, RowsColumnDeclaration, SchemaDeclaration, SelectQuery,
+    ServerFunctionBody, ServerFunctionDeclaration, ServerFunctionParameter, SourceSlice,
+    SourceSpan, SqlQueryBody, StandardLargeObjectKind, SyntaxTree, TypeSpecification,
     lexer::{Token, TokenKind, lex},
 };
 
@@ -731,6 +732,7 @@ impl<'source> Parser<'source> {
             }
             let start = first.range.start;
             let mut end = start;
+            let body_token_start = self.index;
             let mut parenthesis_depth = 0usize;
 
             while let Some(token) = self.current().cloned() {
@@ -751,10 +753,24 @@ impl<'source> Parser<'source> {
                 self.error_current("ORNA0001", "expected a SQL query after AS");
                 return None;
             }
-            Some(ServerFunctionBody::SqlQuery(SourceSlice {
+            let source = SourceSlice {
                 text: self.source[start..end].to_owned(),
                 span: SourceSpan { start, end },
-            }))
+            };
+            let body_token_end = self.index;
+            let query_tokens = &self.tokens[body_token_start..body_token_end];
+            let query = match parse_select_query(query_tokens) {
+                Ok(query) => query,
+                Err(error) => {
+                    self.diagnostics.push(Diagnostic {
+                        code: error.code,
+                        message: error.message,
+                        span: error.span,
+                    });
+                    return None;
+                }
+            };
+            Some(ServerFunctionBody::SqlQuery(SqlQueryBody { source, query }))
         })();
         self.builder.finish_node();
         result
@@ -1276,4 +1292,374 @@ impl<'source> Parser<'source> {
             .token(token.kind.syntax_kind().into(), token.text);
         self.index += 1;
     }
+}
+
+struct QueryParseError {
+    code: &'static str,
+    message: String,
+    span: SourceSpan,
+}
+
+struct SelectQueryParser<'tokens, 'source> {
+    tokens: &'tokens [Token<'source>],
+    index: usize,
+}
+
+impl<'tokens, 'source> SelectQueryParser<'tokens, 'source> {
+    fn new(tokens: &'tokens [Token<'source>]) -> Self {
+        Self { tokens, index: 0 }
+    }
+
+    fn parse(mut self) -> Result<SelectQuery, QueryParseError> {
+        let select = self
+            .take_word("SELECT")
+            .ok_or_else(|| self.implementation_gap("only SELECT query bodies", "a SELECT query"))?;
+
+        self.skip_trivia();
+        let mut projections = vec![self.parse_expression()?];
+        loop {
+            self.skip_trivia();
+            if self.take_kind(TokenKind::Comma).is_some() {
+                self.skip_trivia();
+                projections.push(self.parse_expression()?);
+                continue;
+            }
+            break;
+        }
+
+        self.skip_trivia();
+        if self.take_word("FROM").is_none() {
+            if self.current().is_none()
+                || self
+                    .current()
+                    .is_some_and(|token| token.is_word("WHERE") || token.is_word("ORDER"))
+            {
+                return Err(self.implementation_gap(
+                    "SELECT query bodies without FROM",
+                    "FROM followed by an aliased object source",
+                ));
+            }
+            return Err(self.expected("FROM after the SELECT list"));
+        }
+        self.skip_trivia();
+        let source_object = self.parse_object_source()?;
+
+        self.skip_trivia();
+        let predicate = if self.take_word("WHERE").is_some() {
+            self.skip_trivia();
+            let predicate = self.parse_expression()?;
+            if !matches!(predicate, QueryExpression::Equality { .. }) {
+                return Err(self.implementation_gap(
+                    "WHERE predicates other than equality",
+                    "an equality predicate",
+                ));
+            }
+            Some(predicate)
+        } else {
+            None
+        };
+
+        self.skip_trivia();
+        let ordering = if self.take_word("ORDER").is_some() {
+            self.skip_trivia();
+            if self.take_word("BY").is_none() {
+                return Err(self.expected("BY after ORDER"));
+            }
+            self.skip_trivia();
+            self.parse_ordering()?
+        } else {
+            Vec::new()
+        };
+
+        self.skip_trivia();
+        if self.current().is_some() {
+            return Err(self.unsupported_remaining_query_syntax());
+        }
+
+        let end = ordering
+            .last()
+            .map(|ordering| ordering.span.end)
+            .or_else(|| predicate.as_ref().map(|predicate| predicate.span().end))
+            .unwrap_or(source_object.span.end);
+        Ok(SelectQuery {
+            projections,
+            source_object,
+            predicate,
+            ordering,
+            span: SourceSpan {
+                start: select.range.start,
+                end,
+            },
+        })
+    }
+
+    fn parse_object_source(&mut self) -> Result<ObjectSource, QueryParseError> {
+        let object_type = self.parse_qualified_name("an object type after FROM")?;
+        self.skip_trivia();
+        if self.take_word("AS").is_some() {
+            self.skip_trivia();
+        }
+        if self.current().is_none()
+            || self
+                .current()
+                .is_some_and(|token| token.is_word("WHERE") || token.is_word("ORDER"))
+        {
+            return Err(self.implementation_gap(
+                "object sources without aliases",
+                "an object source alias after FROM",
+            ));
+        }
+        let alias = self.parse_name_part("an object source alias after FROM")?;
+        Ok(ObjectSource {
+            span: SourceSpan {
+                start: object_type.span.start,
+                end: alias.span.end,
+            },
+            object_type,
+            alias,
+        })
+    }
+
+    fn parse_ordering(&mut self) -> Result<Vec<OrderingExpression>, QueryParseError> {
+        let mut ordering = Vec::new();
+        loop {
+            let expression = self.parse_expression()?;
+            if !matches!(expression, QueryExpression::FieldPath { .. }) {
+                return Err(self.implementation_gap(
+                    "ORDER BY expressions other than field paths",
+                    "a field path",
+                ));
+            }
+            self.skip_trivia();
+            let direction = if let Some(token) = self.take_word("ASC") {
+                (OrderingDirection::Ascending, token.range.end)
+            } else if let Some(token) = self.take_word("DESC") {
+                (OrderingDirection::Descending, token.range.end)
+            } else {
+                (OrderingDirection::Unspecified, expression.span().end)
+            };
+            self.skip_trivia();
+            if self.current().is_some_and(|token| token.is_word("NULLS")) {
+                return Err(self.implementation_gap(
+                    "explicit NULLS FIRST or NULLS LAST ordering",
+                    "the end of this ordering expression",
+                ));
+            }
+            ordering.push(OrderingExpression {
+                span: SourceSpan {
+                    start: expression.span().start,
+                    end: direction.1,
+                },
+                expression,
+                direction: direction.0,
+                null_order: NullOrdering::Unspecified,
+            });
+            if self.take_kind(TokenKind::Comma).is_some() {
+                self.skip_trivia();
+                continue;
+            }
+            return Ok(ordering);
+        }
+    }
+
+    fn parse_expression(&mut self) -> Result<QueryExpression, QueryParseError> {
+        let left = self.parse_primary_expression()?;
+        self.skip_trivia();
+        if self
+            .current()
+            .is_some_and(|token| token.kind == TokenKind::Other && token.text == "=")
+        {
+            self.index += 1;
+            self.skip_trivia();
+            let right = self.parse_primary_expression()?;
+            let span = SourceSpan {
+                start: left.span().start,
+                end: right.span().end,
+            };
+            return Ok(QueryExpression::Equality {
+                left: Box::new(left),
+                right: Box::new(right),
+                span,
+            });
+        }
+        Ok(left)
+    }
+
+    fn parse_primary_expression(&mut self) -> Result<QueryExpression, QueryParseError> {
+        if let Some(reference) = self.take_word("REF") {
+            self.skip_trivia();
+            if self.take_kind(TokenKind::LeftParenthesis).is_none() {
+                return Err(self.expected("'(' after REF"));
+            }
+            self.skip_trivia();
+            let alias = self.parse_name_part("an alias inside REF(...)")?;
+            self.skip_trivia();
+            let close = self
+                .take_kind(TokenKind::RightParenthesis)
+                .ok_or_else(|| self.expected("')' after the REF alias"))?;
+            return Ok(QueryExpression::ObjectReference {
+                alias,
+                span: SourceSpan {
+                    start: reference.range.start,
+                    end: close.range.end,
+                },
+            });
+        }
+        if let Some(literal) = self.take_word("TRUE") {
+            return Ok(self.boolean_literal(literal, true));
+        }
+        if let Some(literal) = self.take_word("FALSE") {
+            return Ok(self.boolean_literal(literal, false));
+        }
+        self.parse_field_path()
+    }
+
+    fn parse_field_path(&mut self) -> Result<QueryExpression, QueryParseError> {
+        let root = self.parse_name_part("a query expression")?;
+        self.skip_trivia();
+        if self.take_kind(TokenKind::Dot).is_none() {
+            return Err(self.implementation_gap("bare alias expressions", "a field path"));
+        }
+        self.skip_trivia();
+        let mut members = Vec::new();
+        loop {
+            if self
+                .current()
+                .is_some_and(|token| token.kind == TokenKind::Other && token.text == "*")
+            {
+                return Err(
+                    self.implementation_gap("wildcard field paths", "a field name after '.'")
+                );
+            }
+            members.push(self.parse_name_part("a field name after '.'")?);
+            self.skip_trivia();
+            if self.take_kind(TokenKind::Dot).is_none() {
+                break;
+            }
+            self.skip_trivia();
+        }
+        let end = members.last().expect("field path has a member").span.end;
+        Ok(QueryExpression::FieldPath {
+            root: root.clone(),
+            members,
+            span: SourceSpan {
+                start: root.span.start,
+                end,
+            },
+        })
+    }
+
+    fn parse_qualified_name(&mut self, expected: &str) -> Result<QualifiedName, QueryParseError> {
+        let first = self.parse_name_part(expected)?;
+        let mut parts = vec![first.clone()];
+        loop {
+            self.skip_trivia();
+            if self.take_kind(TokenKind::Dot).is_none() {
+                break;
+            }
+            self.skip_trivia();
+            parts.push(self.parse_name_part("an identifier after '.' in an object type")?);
+        }
+        let end = parts.last().expect("qualified name has a part").span.end;
+        Ok(QualifiedName {
+            parts,
+            span: SourceSpan {
+                start: first.span.start,
+                end,
+            },
+        })
+    }
+
+    fn boolean_literal(&self, token: Token<'source>, value: bool) -> QueryExpression {
+        QueryExpression::BooleanLiteral {
+            value,
+            source: SourceSlice {
+                text: token.text.to_owned(),
+                span: token.span(),
+            },
+        }
+    }
+
+    fn parse_name_part(&mut self, expected: &str) -> Result<NamePart, QueryParseError> {
+        let Some(token) = self.current().cloned() else {
+            return Err(self.expected(expected));
+        };
+        if !token.is_identifier() {
+            return Err(self.expected(expected));
+        }
+        self.index += 1;
+        Ok(NamePart {
+            text: token.text.to_owned(),
+            span: token.span(),
+        })
+    }
+
+    fn take_word(&mut self, expected: &str) -> Option<Token<'source>> {
+        let token = self.current().cloned()?;
+        if token.is_word(expected) {
+            self.index += 1;
+            Some(token)
+        } else {
+            None
+        }
+    }
+
+    fn take_kind(&mut self, kind: TokenKind) -> Option<Token<'source>> {
+        let token = self.current().cloned()?;
+        if token.kind == kind {
+            self.index += 1;
+            Some(token)
+        } else {
+            None
+        }
+    }
+
+    fn skip_trivia(&mut self) {
+        while self.current().is_some_and(|token| token.kind.is_trivia()) {
+            self.index += 1;
+        }
+    }
+
+    fn current(&self) -> Option<&Token<'source>> {
+        self.tokens.get(self.index)
+    }
+
+    fn expected(&self, expected: &str) -> QueryParseError {
+        QueryParseError {
+            code: "ORNA0001",
+            message: format!("expected {expected} in SELECT query"),
+            span: self.current_span(),
+        }
+    }
+
+    fn implementation_gap(&self, feature: &str, expected: &str) -> QueryParseError {
+        QueryParseError {
+            code: "ORNA0001",
+            message: format!(
+                "the current Orna SELECT parser does not yet implement {feature}; expected {expected}"
+            ),
+            span: self.current_span(),
+        }
+    }
+
+    fn unsupported_remaining_query_syntax(&self) -> QueryParseError {
+        let feature = self
+            .current()
+            .map_or("this SELECT query syntax", |token| token.text);
+        self.implementation_gap(feature, "the end of the implemented SELECT query slice")
+    }
+
+    fn current_span(&self) -> SourceSpan {
+        self.current().map_or_else(
+            || {
+                let end = self.tokens.last().map_or(0, |token| token.range.end);
+                SourceSpan { start: end, end }
+            },
+            Token::span,
+        )
+    }
+}
+
+fn parse_select_query(tokens: &[Token<'_>]) -> Result<SelectQuery, QueryParseError> {
+    SelectQueryParser::new(tokens).parse()
 }

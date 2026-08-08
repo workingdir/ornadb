@@ -117,6 +117,112 @@ pub struct SourceSlice {
     pub span: SourceSpan,
 }
 
+/// One parsed `SELECT` query.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectQuery {
+    /// The expressions selected in source order.
+    pub projections: Vec<QueryExpression>,
+    /// The object source for the query.
+    pub source_object: ObjectSource,
+    /// The optional predicate after `WHERE`.
+    pub predicate: Option<QueryExpression>,
+    /// The ordering expressions after `ORDER BY`, in source order.
+    pub ordering: Vec<OrderingExpression>,
+    /// The span from `SELECT` through the final query token.
+    pub span: SourceSpan,
+}
+
+/// An object type read by a `SELECT` query.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectSource {
+    /// The object type named after `FROM`.
+    pub object_type: QualifiedName,
+    /// The alias that roots field paths and `REF` expressions.
+    pub alias: NamePart,
+    /// The span from the object type through the alias.
+    pub span: SourceSpan,
+}
+
+/// One expression supported by the initial relational query slice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QueryExpression {
+    /// The identity of one object source alias, written as `REF(alias)`.
+    ObjectReference {
+        /// The alias supplied to `REF`.
+        alias: NamePart,
+        /// The span from `REF` through the closing parenthesis.
+        span: SourceSpan,
+    },
+    /// A path from an object source alias through one or more fields.
+    FieldPath {
+        /// The object source alias at the start of the path.
+        root: NamePart,
+        /// The fields selected from the object source in source order.
+        members: Vec<NamePart>,
+        /// The span from the alias through the final field.
+        span: SourceSpan,
+    },
+    /// A boolean literal, retaining its exact source spelling.
+    BooleanLiteral {
+        /// The boolean value selected by the source text.
+        value: bool,
+        /// The exact source spelling of the literal.
+        source: SourceSlice,
+    },
+    /// Equality between two supported query expressions.
+    Equality {
+        /// The expression to the left of `=`.
+        left: Box<QueryExpression>,
+        /// The expression to the right of `=`.
+        right: Box<QueryExpression>,
+        /// The span from the left expression through the right expression.
+        span: SourceSpan,
+    },
+}
+
+impl QueryExpression {
+    /// Return the complete source span for this expression.
+    pub fn span(&self) -> &SourceSpan {
+        match self {
+            Self::ObjectReference { span, .. }
+            | Self::FieldPath { span, .. }
+            | Self::Equality { span, .. } => span,
+            Self::BooleanLiteral { source, .. } => &source.span,
+        }
+    }
+}
+
+/// One expression in an `ORDER BY` clause.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrderingExpression {
+    /// The expression that determines the order.
+    pub expression: QueryExpression,
+    /// The explicitly written direction, or the language default.
+    pub direction: OrderingDirection,
+    /// The explicitly written null order, or the language default.
+    pub null_order: NullOrdering,
+    /// The span from the expression through its optional direction.
+    pub span: SourceSpan,
+}
+
+/// The direction of an ordering expression.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrderingDirection {
+    /// No direction was written. Later semantic planning applies the language default.
+    Unspecified,
+    /// `ASC` was written.
+    Ascending,
+    /// `DESC` was written.
+    Descending,
+}
+
+/// The null ordering of an ordering expression.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NullOrdering {
+    /// No null ordering was written. Later semantic planning applies the language default.
+    Unspecified,
+}
+
 /// A parameter declared by a server function.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerFunctionParameter {
@@ -206,8 +312,17 @@ pub struct CapabilitySpecification {
 /// The body of a server function.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServerFunctionBody {
-    /// An unparsed SQL query retained as exact source for a later SQL stage.
-    SqlQuery(SourceSlice),
+    /// A parsed Orna relational query retained with its exact source.
+    SqlQuery(SqlQueryBody),
+}
+
+/// The relational query body of a server function.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlQueryBody {
+    /// The exact source text for the query body, without the declaration terminator.
+    pub source: SourceSlice,
+    /// The typed Orna query syntax.
+    pub query: SelectQuery,
 }
 
 /// A parsed `CREATE SERVER FUNCTION` declaration.
@@ -348,7 +463,8 @@ pub fn parse(source: &str) -> Parse {
 mod tests {
     use super::{
         FunctionReturnType, FunctionSecurity, FunctionTransaction, FunctionVolatility,
-        OnDeletePolicy, ServerFunctionBody, StandardLargeObjectKind, TypeSpecification, parse,
+        NullOrdering, OnDeletePolicy, OrderingDirection, QueryExpression, ServerFunctionBody,
+        StandardLargeObjectKind, TypeSpecification, parse,
     };
 
     #[test]
@@ -400,7 +516,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_server_functions_with_rows_returns_and_opaque_sql_bodies() {
+    fn parses_server_functions_with_rows_returns_and_select_bodies() {
         let source = "CREATE SERVER FUNCTION tasks.overdue (\n\
             p_principal REF sys.security.principal DEFAULT sys.security.session_principal(),\n\
             p_before TIMESTAMP DEFAULT tasks.window(sys.time.now(), sys.time.plus(1, 2))\n\
@@ -412,7 +528,7 @@ mod tests {
         SECURITY INVOKER\n\
         TRANSACTION READ ONLY\n\
         VOLATILITY STABLE\n\
-        AS SELECT tasks.rank(p_before, tasks.weight(1, 2)), p_before FROM tasks.task;";
+        AS SELECT REF(t), t.title, t.assignee.name FROM tasks.task t WHERE t.completed = FALSE ORDER BY t.due_at;";
         let parsed = parse(source);
 
         assert!(parsed.diagnostics().is_empty());
@@ -467,12 +583,38 @@ mod tests {
         match &function.body {
             ServerFunctionBody::SqlQuery(query) => {
                 assert_eq!(
-                    query.text,
-                    "SELECT tasks.rank(p_before, tasks.weight(1, 2)), p_before FROM tasks.task",
+                    query.source.text,
+                    "SELECT REF(t), t.title, t.assignee.name FROM tasks.task t WHERE t.completed = FALSE ORDER BY t.due_at",
                 );
                 assert_eq!(
-                    query.span.start,
+                    query.source.span.start,
                     source.find("SELECT").expect("query exists")
+                );
+                assert_eq!(query.query.projections.len(), 3);
+                assert!(matches!(
+                    query.query.projections[0],
+                    QueryExpression::ObjectReference { .. }
+                ));
+                match &query.query.projections[2] {
+                    QueryExpression::FieldPath { root, members, .. } => {
+                        assert_eq!(root.text, "t");
+                        assert_eq!(members[0].text, "assignee");
+                        assert_eq!(members[1].text, "name");
+                    }
+                    _ => panic!("third projection must be a field path"),
+                }
+                assert!(matches!(
+                    query.query.predicate,
+                    Some(QueryExpression::Equality { .. })
+                ));
+                assert_eq!(query.query.ordering.len(), 1);
+                assert_eq!(
+                    query.query.ordering[0].direction,
+                    OrderingDirection::Unspecified
+                );
+                assert_eq!(
+                    query.query.ordering[0].null_order,
+                    NullOrdering::Unspecified
                 );
             }
         }
@@ -490,7 +632,7 @@ mod tests {
             RETURNS TEXT\n\
             TRANSACTION MANUAL\n\
             VOLATILITY VOLATILE\n\
-            AS SELECT tasks.audit_event(1, tasks.detail(2, 3));";
+            AS SELECT t.title FROM tasks.task t;";
         let parsed = parse(source);
 
         assert!(parsed.diagnostics().is_empty());
@@ -538,7 +680,7 @@ mod tests {
                 ),\n\
                 sys.job.submit,\n\
                 sys.job.noop()\n\
-            AS SELECT TRUE;";
+            AS SELECT t.completed FROM tasks.task t;";
         let parsed = parse(source);
 
         assert!(parsed.diagnostics().is_empty());
@@ -624,10 +766,10 @@ mod tests {
         let source = "CREATE TYPE files.document AS OBJECT (body CHARACTER LARGE OBJECT, content BINARY LARGE OBJECT);\n\
             CREATE SERVER FUNCTION files.encode(input CHARACTER LARGE OBJECT)\n\
             RETURNS BINARY LARGE OBJECT\n\
-            AS SELECT input;\n\
+            AS SELECT REF(d) FROM files.document d;\n\
             CREATE SERVER FUNCTION files.describe()\n\
             RETURNS ROWS (body CHARACTER LARGE OBJECT, content BINARY LARGE OBJECT)\n\
-            AS SELECT body, content FROM files.document;";
+            AS SELECT REF(d) FROM files.document d;";
         let parsed = parse(source);
 
         assert!(parsed.diagnostics().is_empty());
@@ -735,6 +877,98 @@ mod tests {
             assert_eq!(parsed.diagnostics()[0].code, "ORNA0001");
             assert!(parsed.diagnostics()[0].message.contains("trailing commas"));
         }
+    }
+
+    #[test]
+    fn preserves_select_source_spans_and_trivia() {
+        let source = "CREATE SERVER FUNCTION tasks.list() RETURNS ROWS (task REF tasks.task, title TEXT) AS\n\
+            SELECT /* identity */ REF( t ), t /* title root */ . title, t.assignee /* member */ . name\n\
+            FROM tasks /* object namespace */ . task AS t\n\
+            WHERE t.completed /* equality */ = fAlSe\n\
+            ORDER BY t.due_at DESC, t.title ASC;";
+        let parsed = parse(source);
+
+        assert!(parsed.diagnostics().is_empty());
+        assert_eq!(parsed.syntax().text(), source);
+        let ServerFunctionBody::SqlQuery(body) = &parsed.server_functions()[0].body;
+        let query_start = source.find("SELECT").expect("query exists");
+        let query_end = source.rfind("ASC").expect("ordering direction exists") + "ASC".len();
+        assert_eq!(&body.source.text, &source[query_start..query_end]);
+        assert_eq!(body.source.span.start, query_start);
+        assert_eq!(body.source.span.end, query_end);
+        assert_eq!(body.query.span.start, query_start);
+        assert_eq!(body.query.span.end, query_end);
+        assert_eq!(body.query.source_object.object_type.parts[0].text, "tasks");
+        assert_eq!(body.query.source_object.object_type.parts[1].text, "task");
+        assert_eq!(body.query.source_object.alias.text, "t");
+        assert_eq!(
+            body.query.ordering[0].direction,
+            OrderingDirection::Descending
+        );
+        assert_eq!(body.query.ordering[0].null_order, NullOrdering::Unspecified);
+        assert_eq!(
+            body.query.ordering[1].direction,
+            OrderingDirection::Ascending
+        );
+        assert_eq!(body.query.ordering[1].null_order, NullOrdering::Unspecified);
+
+        match &body.query.predicate {
+            Some(QueryExpression::Equality { left, right, .. }) => {
+                assert_eq!(&source[left.span().start..left.span().end], "t.completed");
+                match right.as_ref() {
+                    QueryExpression::BooleanLiteral { value, source } => {
+                        assert!(!value);
+                        assert_eq!(source.text, "fAlSe");
+                    }
+                    _ => panic!("right equality expression must be a boolean literal"),
+                }
+            }
+            _ => panic!("query must contain its equality predicate"),
+        }
+    }
+
+    #[test]
+    fn reports_malformed_and_unimplemented_select_bodies_without_losing_recovery() {
+        let malformed =
+            "CREATE SERVER FUNCTION tasks.bad() RETURNS TEXT AS SELECT REF() FROM tasks.task t;";
+        let parsed = parse(malformed);
+        assert_eq!(parsed.syntax().text(), malformed);
+        assert!(parsed.server_functions().is_empty());
+        assert!(parsed.diagnostics().iter().any(|diagnostic| {
+            diagnostic.code == "ORNA0001" && diagnostic.message.contains("alias inside REF")
+        }));
+
+        let unsupported = "CREATE SERVER FUNCTION tasks.unsupported() RETURNS TEXT AS SELECT t.* FROM tasks.task t;\n\
+            CREATE SERVER FUNCTION tasks.ok() RETURNS TEXT AS SELECT t.title FROM tasks.task t;";
+        let parsed = parse(unsupported);
+        assert_eq!(parsed.syntax().text(), unsupported);
+        assert_eq!(parsed.server_functions().len(), 1);
+        assert_eq!(parsed.server_functions()[0].name.parts[1].text, "ok");
+        assert!(parsed.diagnostics().iter().any(|diagnostic| {
+            diagnostic.code == "ORNA0001"
+                && diagnostic
+                    .message
+                    .contains("does not yet implement wildcard field paths")
+                && diagnostic.span.start == unsupported.find('*').expect("wildcard exists")
+        }));
+    }
+
+    #[test]
+    fn defers_query_alias_resolution_to_later_semantic_stages() {
+        let source = "CREATE SERVER FUNCTION tasks.unresolved() RETURNS TEXT AS\n\
+            SELECT REF(other), other.title FROM tasks.task t;";
+        let parsed = parse(source);
+
+        assert!(parsed.diagnostics().is_empty());
+        let ServerFunctionBody::SqlQuery(body) = &parsed.server_functions()[0].body;
+        assert!(matches!(
+            body.query.projections[0],
+            QueryExpression::ObjectReference { ref alias, .. } if alias.text == "other"
+        ));
+        assert!(matches!(
+            body.query.projections[1],
+            QueryExpression::FieldPath { ref root, .. } if root.text == "other"
+        ));
     }
 
     #[test]
