@@ -1031,13 +1031,16 @@ mod tests {
         assert_eq!(parsed.syntax().text(), unsupported);
         assert_eq!(parsed.server_functions().len(), 1);
         assert_eq!(parsed.server_functions()[0].name.parts[1].text, "ok");
-        assert!(parsed.diagnostics().iter().any(|diagnostic| {
-            diagnostic.code == "ORNA0001"
-                && diagnostic
-                    .message
-                    .contains("does not yet implement wildcard field paths")
-                && diagnostic.span.start == unsupported.find('*').expect("wildcard exists")
-        }));
+        assert_eq!(parsed.diagnostics().len(), 1);
+        let diagnostic = &parsed.diagnostics()[0];
+        assert_eq!(diagnostic.code, "ORNA0001");
+        assert_eq!(
+            diagnostic.message,
+            "the current Orna SELECT parser does not yet implement wildcard field paths; expected a field name after '.'"
+        );
+        let wildcard = unsupported.find('*').expect("wildcard exists");
+        assert_eq!(diagnostic.span.start, wildcard);
+        assert_eq!(diagnostic.span.end, wildcard + 1);
     }
 
     #[test]
@@ -1154,18 +1157,22 @@ mod tests {
             assert!(!parsed.diagnostics().is_empty(), "invalid body: {body}");
         }
 
-        let source = "CREATE SERVER FUNCTION tasks.bad(p_title TEXT) RETURNS ROWS (created REF tasks.task) AS INSERT INTO tasks.task AS created (title) VALUES (p_title) RETURNING REF(other);\n\
+        let source = "CREATE SERVER FUNCTION tasks.bad(p_title TEXT) RETURNS ROWS (created REF tasks.task) AS INSERT INTO tasks.task AS Created (title) VALUES (p_title) RETURNING REF(OTHER);\n\
             CREATE SERVER FUNCTION tasks.good(p_title TEXT) RETURNS ROWS (result REF tasks.task) AS INSERT INTO tasks.task AS created (title) VALUES (p_title) RETURNING REF(created);";
         let parsed = parse(source);
         assert_eq!(parsed.syntax().text(), source);
         assert_eq!(parsed.server_functions().len(), 1);
         assert_eq!(parsed.server_functions()[0].name.parts[1].text, "good");
-        assert!(parsed.diagnostics().iter().any(|diagnostic| {
-            diagnostic
-                .message
-                .contains("RETURNING REF must use the INSERT target alias")
-                && diagnostic.span.start == source.find("other").expect("other exists")
-        }));
+        assert_eq!(parsed.diagnostics().len(), 1);
+        let diagnostic = &parsed.diagnostics()[0];
+        assert_eq!(diagnostic.code, "ORNA0001");
+        assert_eq!(
+            diagnostic.message,
+            "RETURNING REF must use the INSERT target alias created, not other"
+        );
+        let other = source.find("OTHER").expect("wrong alias exists");
+        assert_eq!(diagnostic.span.start, other);
+        assert_eq!(diagnostic.span.end, other + "OTHER".len());
     }
 
     #[test]
@@ -1191,21 +1198,98 @@ mod tests {
     }
 
     #[test]
-    fn insert_diagnostics_point_at_the_offending_syntax() {
-        let source = "CREATE SERVER FUNCTION tasks.bad(p_title TEXT) RETURNS ROWS (result REF tasks.task) AS INSERT INTO tasks.task AS created (title, title) VALUES (p_title, p_title) RETURNING REF(created);";
+    fn duplicate_insert_field_diagnostic_uses_the_normalised_name_and_exact_span() {
+        let source = "CREATE SERVER FUNCTION tasks.bad(p_title TEXT) RETURNS ROWS (result REF tasks.task) AS INSERT INTO tasks.task AS created (Title, \"title\") VALUES (p_title, p_title) RETURNING REF(created);";
         let parsed = parse(source);
 
         assert!(parsed.server_functions().is_empty());
         assert_eq!(parsed.diagnostics().len(), 1);
+        assert_eq!(parsed.diagnostics()[0].code, "ORNA0001");
         assert_eq!(
             parsed.diagnostics()[0].message,
-            "duplicate INSERT target fields are not supported"
+            "field title appears more than once in this INSERT"
         );
-        let duplicate = source
-            .rfind("title) VALUES")
-            .expect("duplicate field exists");
+        let duplicate = source.find("\"title\"").expect("duplicate field exists");
         assert_eq!(parsed.diagnostics()[0].span.start, duplicate);
-        assert_eq!(parsed.diagnostics()[0].span.end, duplicate + "title".len());
+        assert_eq!(
+            parsed.diagnostics()[0].span.end,
+            duplicate + "\"title\"".len()
+        );
+    }
+
+    #[test]
+    fn insert_count_diagnostics_use_grammatical_nouns_and_exact_spans() {
+        let cases = [
+            (
+                "INSERT INTO tasks.task AS created (title, done) VALUES (p_title) RETURNING REF(created)",
+                "INSERT lists 2 fields but 1 value; each field requires one value",
+                ") RETURNING",
+                1,
+            ),
+            (
+                "INSERT INTO tasks.task AS created (title) VALUES (p_title, p_done) RETURNING REF(created)",
+                "INSERT lists 1 field but 2 values; each field requires one value",
+                "p_done) RETURNING",
+                "p_done".len(),
+            ),
+        ];
+
+        for (body, message, marker, span_length) in cases {
+            assert_insert_diagnostic(body, message, marker, 0, span_length);
+        }
+    }
+
+    #[test]
+    fn qualified_insert_names_report_guidance_at_the_dot() {
+        let cases = [
+            (
+                "INSERT INTO tasks.task AS created (tasks.title) VALUES (p_title) RETURNING REF(created)",
+                "write only the field name in the INSERT field list; do not add an object or alias",
+                "tasks.title",
+                "tasks".len(),
+            ),
+            (
+                "INSERT INTO tasks.task AS created (title) VALUES (other.p_title) RETURNING REF(created)",
+                "use the declared parameter name by itself in VALUES; do not add an object or alias",
+                "other.p_title",
+                "other".len(),
+            ),
+        ];
+
+        for (body, message, marker, dot_offset) in cases {
+            assert_insert_diagnostic(body, message, marker, dot_offset, 1);
+        }
+    }
+
+    #[test]
+    fn insert_implementation_gap_diagnostics_use_exact_copy_and_spans() {
+        let cases = [
+            (
+                "INSERT INTO tasks.task AS created (title) VALUES (p_title), (p_title) RETURNING REF(created)",
+                "this INSERT does not support multiple VALUES rows; expected RETURNING after one VALUES row",
+                ", (p_title) RETURNING",
+                0,
+                1,
+            ),
+            (
+                "INSERT INTO tasks.task AS created (title) VALUES (p_title) RETURNING REF(created) EXTRA",
+                "this INSERT does not support EXTRA; expected the end of the INSERT body",
+                "EXTRA",
+                0,
+                "EXTRA".len(),
+            ),
+            (
+                "INSERT INTO tasks.task AS created (title) VALUES (make_title()) RETURNING REF(created)",
+                "this INSERT does not support function calls in INSERT values; expected a declared parameter name by itself",
+                "make_title()",
+                "make_title".len(),
+                1,
+            ),
+        ];
+
+        for (body, message, marker, span_offset, span_length) in cases {
+            assert_insert_diagnostic(body, message, marker, span_offset, span_length);
+        }
     }
 
     #[test]
@@ -1335,6 +1419,29 @@ mod tests {
             parsed.diagnostics()[0].span.start,
             source.find("PRIMARY").expect("PRIMARY exists")
         );
+    }
+
+    fn assert_insert_diagnostic(
+        body: &str,
+        message: &str,
+        marker: &str,
+        span_offset: usize,
+        span_length: usize,
+    ) {
+        let source = format!(
+            "CREATE SERVER FUNCTION tasks.bad(p_title TEXT, p_done BOOL) RETURNS ROWS (created REF tasks.task) AS {body};"
+        );
+        let parsed = parse(&source);
+
+        assert_eq!(parsed.syntax().text(), source);
+        assert!(parsed.server_functions().is_empty(), "invalid body: {body}");
+        assert_eq!(parsed.diagnostics().len(), 1, "invalid body: {body}");
+        let diagnostic = &parsed.diagnostics()[0];
+        assert_eq!(diagnostic.code, "ORNA0001");
+        assert_eq!(diagnostic.message, message);
+        let offending = source.find(marker).expect("offending syntax exists") + span_offset;
+        assert_eq!(diagnostic.span.start, offending);
+        assert_eq!(diagnostic.span.end, offending + span_length);
     }
 
     fn assert_named_type(type_specification: &TypeSpecification, expected: &str) {
