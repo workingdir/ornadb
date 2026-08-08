@@ -2,8 +2,10 @@
 
 #![allow(
     dead_code,
-    reason = "the atomic apply slice will call this transaction-local installer"
+    reason = "the atomic apply and recovery slices will call these transaction-local operations"
 )]
+
+mod verify;
 
 use orna_core::{
     FieldId, TypeId,
@@ -15,8 +17,15 @@ use tokio_postgres::Transaction;
 
 use crate::PostgresKernelError;
 
+#[allow(
+    unused_imports,
+    reason = "the atomic apply and recovery slices consume this physical verifier through this module seam"
+)]
+pub(crate) use verify::verify_physical_catalogue;
+
 const DATA_SCHEMA: &str = "_orna_data";
 const OBJECT_ID_COLUMN: &str = "_orna_object_id";
+const TRUSTED_SEARCH_PATH_STATEMENT: &str = "SET LOCAL search_path = pg_catalog";
 
 /// Installs one validated physical plan in the caller's transaction.
 ///
@@ -26,6 +35,7 @@ pub(crate) async fn install_physical_plan(
     transaction: &Transaction<'_>,
     plan: &PhysicalPlan,
 ) -> Result<(), PostgresKernelError> {
+    establish_trusted_search_path(transaction).await?;
     let statements = lower_physical_plan(plan)?;
     for statement in statements.creates.iter().chain(&statements.references) {
         transaction
@@ -34,6 +44,15 @@ pub(crate) async fn install_physical_plan(
             .map_err(PostgresKernelError::Database)?;
     }
     Ok(())
+}
+
+async fn establish_trusted_search_path(
+    transaction: &Transaction<'_>,
+) -> Result<(), PostgresKernelError> {
+    transaction
+        .batch_execute(TRUSTED_SEARCH_PATH_STATEMENT)
+        .await
+        .map_err(PostgresKernelError::Database)
 }
 
 struct PhysicalStatements {
@@ -203,6 +222,14 @@ mod tests {
         assert_eq!(field_name(field_id), "f_abababababababababababababababab");
         assert!(format!("ck_{}_object_id", type_id_hex(type_id)).len() < 63);
         assert!(format!("ck_{}_object_id", field_id_hex(field_id)).len() < 63);
+    }
+
+    #[test]
+    fn physical_transactions_set_an_exact_trusted_catalogue_search_path() {
+        assert_eq!(
+            TRUSTED_SEARCH_PATH_STATEMENT,
+            "SET LOCAL search_path = pg_catalog"
+        );
     }
 
     #[test]
