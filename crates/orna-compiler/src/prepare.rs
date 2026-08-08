@@ -53,7 +53,7 @@ use crate::{
 };
 use crate::{
     mutation::{MutationExpressionKind, MutationOperation, MutationPlanIr},
-    resolver::{CheckedFieldRename, CheckedServerFunctionBody},
+    resolver::CheckedFieldRename,
 };
 
 /// One encoded SERVER artifact with the language version that defines it.
@@ -1550,58 +1550,60 @@ impl<'a> CandidateBuilder<'a> {
         function: &FunctionDefinition,
         object_types: &[ObjectTypeDefinition],
     ) -> Result<PreparedServerArtifact, PrepareError> {
-        match checked.body() {
-            CheckedServerFunctionBody::Query(checked_plan) => {
-                let plan = checked_plan.try_map_identities(
-                    |id| self.identities.type_id(id),
-                    |id| self.identities.field(id),
-                )?;
-                let payload = plan.encode_server_plan()?;
-                let hash = artifact_payload_digest(&payload)?;
-                Ok(PreparedServerArtifact {
-                    artifact: ExecutableArtifact::new(
-                        ExecutableArtifactKind::Server,
-                        SERVER_PLAN_FORMAT,
-                        SERVER_PLAN_VERSION,
-                        payload,
-                        hash,
-                    )?,
-                    language_version: SERVER_PLAN_LANGUAGE_VERSION,
-                })
-            }
-            CheckedServerFunctionBody::Mutation(checked_plan) => {
-                let plan = checked_plan.try_map_identities(
-                    |id| self.identities.type_id(id),
-                    |id| self.identities.field(id),
-                    |id| self.identities.function(id),
-                    |id| self.identities.parameter(id),
-                )?;
-                let references = checked
-                    .references()
-                    .iter()
-                    .map(|reference| {
-                        Ok((
-                            reference.kind(),
-                            self.identities.reference_target(reference.target())?,
-                        ))
-                    })
-                    .collect::<Result<Vec<_>, PrepareError>>()?;
-                let plan = server_mutation_plan(&plan, function, object_types, &references)?;
-                let format_version = plan.format_version();
-                let payload = plan.encode()?;
-                let hash = artifact_payload_digest(&payload)?;
-                Ok(PreparedServerArtifact {
-                    artifact: ExecutableArtifact::new(
-                        ExecutableArtifactKind::Server,
-                        SERVER_MUTATION_PLAN_FORMAT,
-                        format_version,
-                        payload,
-                        hash,
-                    )?,
-                    language_version: SERVER_MUTATION_PLAN_LANGUAGE_VERSION,
-                })
-            }
+        if let Some(checked_plan) = checked.query_plan() {
+            let plan = checked_plan.try_map_identities(
+                |id| self.identities.type_id(id),
+                |id| self.identities.field(id),
+            )?;
+            let payload = plan.encode_server_plan()?;
+            let hash = artifact_payload_digest(&payload)?;
+            return Ok(PreparedServerArtifact {
+                artifact: ExecutableArtifact::new(
+                    ExecutableArtifactKind::Server,
+                    SERVER_PLAN_FORMAT,
+                    SERVER_PLAN_VERSION,
+                    payload,
+                    hash,
+                )?,
+                language_version: SERVER_PLAN_LANGUAGE_VERSION,
+            });
         }
+
+        let checked_plan = checked
+            .mutation_plan()
+            .ok_or(PrepareError::InvalidCheckedBundle {
+                reason: "checked SERVER function body cannot be prepared",
+            })?;
+        let plan = checked_plan.try_map_identities(
+            |id| self.identities.type_id(id),
+            |id| self.identities.field(id),
+            |id| self.identities.function(id),
+            |id| self.identities.parameter(id),
+        )?;
+        let references = checked
+            .references()
+            .iter()
+            .map(|reference| {
+                Ok((
+                    reference.kind(),
+                    self.identities.reference_target(reference.target())?,
+                ))
+            })
+            .collect::<Result<Vec<_>, PrepareError>>()?;
+        let plan = server_mutation_plan(&plan, function, object_types, &references)?;
+        let format_version = plan.format_version();
+        let payload = plan.encode()?;
+        let hash = artifact_payload_digest(&payload)?;
+        Ok(PreparedServerArtifact {
+            artifact: ExecutableArtifact::new(
+                ExecutableArtifactKind::Server,
+                SERVER_MUTATION_PLAN_FORMAT,
+                format_version,
+                payload,
+                hash,
+            )?,
+            language_version: SERVER_MUTATION_PLAN_LANGUAGE_VERSION,
+        })
     }
 
     fn function_references(
