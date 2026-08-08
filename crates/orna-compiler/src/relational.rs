@@ -70,16 +70,14 @@ pub(crate) struct IdentityQuerySelector<G = FunctionId, P = ParameterId> {
     parameter: P,
 }
 
-/// The durable version and payload emitted for one identity-selected query.
+/// The durable version and payload emitted for one checked server query.
 #[derive(Clone, Debug, Eq, PartialEq)]
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) struct EncodedIdentitySelectedServerPlan {
+pub(crate) struct EncodedServerPlan {
     format_version: u32,
     payload: Vec<u8>,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
-impl EncodedIdentitySelectedServerPlan {
+impl EncodedServerPlan {
     /// Returns the artifact version selected by the artifact model.
     pub(crate) const fn format_version(&self) -> u32 {
         self.format_version
@@ -382,13 +380,6 @@ impl<T, F> RelationalQueryIr<T, F> {
 
 impl<T, F> DistinctQueryIr<T, F> {
     /// Returns the query scan.
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "the preparation stage consumes checked DISTINCT plans in the next slice"
-        )
-    )]
     pub(crate) fn scan(&self) -> &ScanIr<T> {
         &self.scan
     }
@@ -399,13 +390,6 @@ impl<T, F> DistinctQueryIr<T, F> {
     }
 
     /// Returns the optional query predicate.
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "the preparation stage consumes checked DISTINCT plans in the next slice"
-        )
-    )]
     pub(crate) fn selection(&self) -> Option<&ExpressionIr<T, F>> {
         self.selection.as_ref()
     }
@@ -728,9 +712,24 @@ impl IdentitySelectedQueryIr<TypeId, FieldId, FunctionId, ParameterId> {
     /// Encodes this checked identity-selected query as a version-2 server plan.
     pub(crate) fn encode_identity_selected_server_plan(
         &self,
-    ) -> Result<EncodedIdentitySelectedServerPlan, orna_artifact::server_plan::ServerPlanError>
-    {
+    ) -> Result<EncodedServerPlan, orna_artifact::server_plan::ServerPlanError> {
         artifact::encode_identity_selected(self)
+    }
+}
+
+impl DistinctQueryIr<TypeId, FieldId> {
+    /// Encodes this checked DISTINCT query as a version-3 server plan.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "the preparation stage consumes encoded DISTINCT plans in the next slice"
+        )
+    )]
+    pub(crate) fn encode_distinct_server_plan(
+        &self,
+    ) -> Result<EncodedServerPlan, orna_artifact::server_plan::ServerPlanError> {
+        artifact::encode_distinct(self)
     }
 }
 
