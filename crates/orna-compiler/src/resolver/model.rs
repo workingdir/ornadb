@@ -960,7 +960,6 @@ impl CheckedServerFunction {
     }
 
     /// Returns the checked DELETE plan when the function has a DELETE body.
-    #[cfg(test)]
     pub(crate) fn delete_plan(
         &self,
     ) -> Option<&crate::mutation::DeletePlanIr<CheckedTypeId, CheckedFunctionId, CheckedParameterId>>

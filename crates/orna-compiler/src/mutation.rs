@@ -119,8 +119,16 @@ pub(crate) struct DeletePlanIr<T = TypeId, G = FunctionId, P = ParameterId> {
 }
 
 impl<T, G, P> DeletePlanIr<T, G, P> {
+    /// Creates one checked DELETE plan from resolved identities.
+    pub(crate) const fn new(target_object: T, selector_owner: G, selector_parameter: P) -> Self {
+        Self {
+            target_object,
+            selector_owner,
+            selector_parameter,
+        }
+    }
+
     /// Returns the object type selected for deletion.
-    #[cfg(test)]
     pub(crate) const fn target_object(&self) -> T
     where
         T: Copy,
@@ -129,7 +137,6 @@ impl<T, G, P> DeletePlanIr<T, G, P> {
     }
 
     /// Returns the function that owns the selector parameter.
-    #[cfg(test)]
     pub(crate) const fn selector_owner(&self) -> G
     where
         G: Copy,
@@ -138,7 +145,6 @@ impl<T, G, P> DeletePlanIr<T, G, P> {
     }
 
     /// Returns the owner-qualified selector parameter identity.
-    #[cfg(test)]
     pub(crate) const fn selector_parameter(&self) -> P
     where
         P: Copy,
@@ -154,7 +160,6 @@ where
     P: Copy,
 {
     /// Rewrites every identity, rejecting the complete plan when any mapping fails.
-    #[cfg(test)]
     pub(crate) fn try_map_identities<T2, G2, P2, E>(
         &self,
         mut map_type: impl FnMut(T) -> Result<T2, E>,
@@ -760,11 +765,7 @@ where
     )?;
 
     Ok(DeleteCheck {
-        plan: DeletePlanIr {
-            target_object,
-            selector_owner: function,
-            selector_parameter,
-        },
+        plan: DeletePlanIr::new(target_object, function, selector_parameter),
         references: vec![
             MutationReference::WriteObject {
                 object_type: target_object,
