@@ -5,6 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+test-hooks = ["tokio/sync"]
+
 [dependencies]
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 orna-artifact = { path = "../orna-artifact" }
