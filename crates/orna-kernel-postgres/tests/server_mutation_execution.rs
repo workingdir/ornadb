@@ -1,0 +1,1625 @@
+//! Live PostgreSQL tests for atomic single-row SERVER INSERT execution.
+
+mod support;
+
+use std::{collections::BTreeSet, str::FromStr};
+
+#[cfg(feature = "test-hooks")]
+use std::{
+    io::{Read, Write},
+    net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread::JoinHandle as ThreadJoinHandle,
+    time::{Duration, Instant},
+};
+
+use orna_compiler::{check, prepare};
+use orna_core::{
+    FieldId, FunctionId, FunctionRevisionId, ObjectId, ParameterId, TypeId,
+    revision::{ActiveDatabaseRevision, DeployableRevision, RevisionPair},
+    source::{SourceBundle, SourceUnit},
+    types::ResolvedType,
+    value::{FunctionArgument, RuntimeFloat, RuntimeValue},
+};
+use orna_kernel_postgres::{
+    PostgresKernel, PostgresKernelError, ServerInsertCommitState, ServerInsertError,
+    ServerInsertResult,
+};
+use support::{TestDatabase, TestResult, TestSession, failure, with_test_database};
+use tokio_postgres::error::SqlState;
+#[cfg(feature = "test-hooks")]
+use tokio_postgres::{
+    Config,
+    config::{Host, SslMode},
+};
+
+const MUTATION_SOURCE: &str = "CREATE SCHEMA tasks;\n\
+    CREATE TYPE tasks.owner AS OBJECT (name TEXT NOT NULL);\n\
+    CREATE TYPE tasks.task AS OBJECT (\n\
+      active BOOL NOT NULL, count INT NOT NULL, amount BIGINT NOT NULL,\n\
+      score FLOAT NOT NULL, title TEXT NOT NULL, payload BYTES NOT NULL,\n\
+      owner REF tasks.owner NOT NULL, note TEXT\n\
+    );\n\
+    CREATE SERVER FUNCTION tasks.create_owner(p_name TEXT)\n\
+    RETURNS ROWS (created_owner REF tasks.owner)\n\
+    SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE\n\
+    AS INSERT INTO tasks.owner AS made_owner (name)\n\
+    VALUES (p_name) RETURNING REF(made_owner);\n\
+    CREATE SERVER FUNCTION tasks.create_task(\n\
+      p_active BOOL, p_count INT, p_amount BIGINT, p_score FLOAT,\n\
+      p_title TEXT, p_payload BYTES, p_owner REF tasks.owner\n\
+    )\n\
+    RETURNS ROWS (created_task REF tasks.task)\n\
+    SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE\n\
+    AS INSERT INTO tasks.task AS made_task\n\
+    (active, count, amount, score, title, payload, owner)\n\
+    VALUES (p_active, p_count, p_amount, p_score, p_title, p_payload, p_owner)\n\
+    RETURNING REF(made_task);\n";
+
+#[cfg(feature = "test-hooks")]
+const MUTATION_SOURCE_EDIT: &str = "-- source-only edit\n\
+    CREATE SCHEMA tasks;\n\
+    CREATE TYPE tasks.owner AS OBJECT ( name TEXT NOT NULL );\n\
+    CREATE TYPE tasks.task AS OBJECT ( active BOOL NOT NULL, count INT NOT NULL,\n\
+      amount BIGINT NOT NULL, score FLOAT NOT NULL, title TEXT NOT NULL,\n\
+      payload BYTES NOT NULL, owner REF tasks.owner NOT NULL, note TEXT );\n\
+    CREATE SERVER FUNCTION tasks.create_owner( p_name TEXT )\n\
+    RETURNS ROWS ( created_owner REF tasks.owner ) SECURITY INVOKER\n\
+    TRANSACTION ATOMIC VOLATILITY VOLATILE\n\
+    AS INSERT INTO tasks.owner AS made_owner ( name )\n\
+    VALUES ( p_name ) RETURNING REF(made_owner);\n\
+    CREATE SERVER FUNCTION tasks.create_task( p_active BOOL, p_count INT,\n\
+      p_amount BIGINT, p_score FLOAT, p_title TEXT, p_payload BYTES,\n\
+      p_owner REF tasks.owner )\n\
+    RETURNS ROWS ( created_task REF tasks.task ) SECURITY INVOKER\n\
+    TRANSACTION ATOMIC VOLATILITY VOLATILE\n\
+    AS INSERT INTO tasks.task AS made_task\n\
+    ( active, count, amount, score, title, payload, owner )\n\
+    VALUES ( p_active, p_count, p_amount, p_score, p_title, p_payload, p_owner )\n\
+    RETURNING REF(made_task);\n";
+
+#[cfg(feature = "test-hooks")]
+const WAIT: Duration = Duration::from_secs(10);
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn commits_exact_typed_rows_uses_private_ids_and_allocates_unique_ids() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = hostile_kernel(&database)?;
+        kernel.bootstrap().await?;
+        let empty = kernel.recover().await?;
+        let applied = kernel.apply(&candidate(MUTATION_SOURCE, &empty)?).await?;
+        let fixture = Fixture::from_active(&applied)?;
+        install_public_decoy(&database, fixture.task).await?;
+
+        let owner = kernel
+            .execute_server_insert(
+                fixture.create_owner,
+                &[FunctionArgument::new(
+                    fixture.owner_name_parameter,
+                    RuntimeValue::Text(String::from("Ada")),
+                )?],
+            )
+            .await?;
+        require_insert_result(
+            &owner,
+            applied.pair(),
+            fixture.create_owner,
+            fixture.create_owner_revision,
+            fixture.owner,
+            "created_owner",
+        )?;
+        require_owner_row(&database, fixture, owner.object(), "Ada").await?;
+
+        let exact = ExactTask {
+            active: true,
+            count: -17,
+            amount: 9_000_000_001,
+            score: 3.25,
+            title: String::from("exact task"),
+            payload: vec![0, 1, 255],
+            owner: owner.object(),
+        };
+        let task = kernel
+            .execute_server_insert(fixture.create_task, &task_arguments(fixture, &exact)?)
+            .await?;
+        require_insert_result(
+            &task,
+            applied.pair(),
+            fixture.create_task,
+            fixture.create_task_revision,
+            fixture.task,
+            "created_task",
+        )?;
+        require_task_row(&database, fixture, task.object(), &exact).await?;
+
+        let mut identities = BTreeSet::from([task.object()]);
+        for index in 1..100_i32 {
+            let value = ExactTask {
+                active: index % 2 == 0,
+                count: index,
+                amount: i64::from(index) * 10_000,
+                score: f64::from(index) / 4.0,
+                title: format!("task {index}"),
+                payload: index.to_be_bytes().to_vec(),
+                owner: owner.object(),
+            };
+            let inserted = kernel
+                .execute_server_insert(fixture.create_task, &task_arguments(fixture, &value)?)
+                .await?;
+            require_insert_result(
+                &inserted,
+                applied.pair(),
+                fixture.create_task,
+                fixture.create_task_revision,
+                fixture.task,
+                "created_task",
+            )?;
+            require(
+                identities.insert(inserted.object()),
+                "SERVER INSERT allocated a duplicate object identity",
+            )?;
+        }
+        require(
+            identities.len() == 100,
+            "the 100 committed inserts did not return 100 unique identities",
+        )?;
+        require(
+            count_rows(&database, fixture.task).await? == 100,
+            "the private task relation does not contain all 100 committed rows",
+        )?;
+        require(
+            count_public_decoy_rows(&database, fixture.task).await? == 0,
+            "hostile public search_path redirected the private INSERT",
+        )?;
+        require(
+            kernel.recover().await?.pair() == applied.pair(),
+            "row execution changed the active revision pair",
+        )?;
+        require_no_session_leaks(&database).await
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn reference_failures_are_preflight_or_database_integrity_rejections() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = kernel(&database)?;
+        kernel.bootstrap().await?;
+        let empty = kernel.recover().await?;
+        let applied = kernel.apply(&candidate(MUTATION_SOURCE, &empty)?).await?;
+        let fixture = Fixture::from_active(&applied)?;
+        let owner = insert_owner(&kernel, fixture, "owner").await?;
+        let base = ExactTask::new(owner.object());
+
+        let mut wrong_target = task_arguments(fixture, &base)?;
+        replace_owner_argument(
+            &mut wrong_target,
+            fixture,
+            RuntimeValue::Reference {
+                target: fixture.task,
+                object: ObjectId::from_bytes([0x91; 16]),
+            },
+        )?;
+        let wrong_error = kernel
+            .execute_server_insert(fixture.create_task, &wrong_target)
+            .await
+            .expect_err("wrong-target REF must fail before the INSERT");
+        require_not_committed_argument_error(
+            &wrong_error,
+            applied.pair(),
+            fixture.create_task,
+            fixture.create_task_revision,
+        )?;
+        require(
+            count_rows(&database, fixture.task).await? == 0,
+            "wrong-target REF left a task row",
+        )?;
+
+        let missing_owner = ObjectId::from_bytes([0x92; 16]);
+        let mut nonexistent = task_arguments(fixture, &base)?;
+        replace_owner_argument(
+            &mut nonexistent,
+            fixture,
+            RuntimeValue::Reference {
+                target: fixture.owner,
+                object: missing_owner,
+            },
+        )?;
+        let missing_error = kernel
+            .execute_server_insert(fixture.create_task, &nonexistent)
+            .await
+            .expect_err("missing same-target REF must fail the physical foreign key");
+        require_wrapped_database_failure(
+            &missing_error,
+            applied.pair(),
+            fixture.create_task,
+            fixture.create_task_revision,
+            &SqlState::FOREIGN_KEY_VIOLATION,
+        )?;
+        require(
+            count_rows(&database, fixture.task).await? == 0,
+            "foreign-key rejection left a task row",
+        )?;
+        require(
+            kernel.recover().await?.pair() == applied.pair(),
+            "reference failures changed the active pair",
+        )?;
+        require_no_session_leaks(&database).await
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn unknown_and_tampered_functions_fail_before_the_target_insert() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = kernel(&database)?;
+        kernel.bootstrap().await?;
+        let empty = kernel.recover().await?;
+        let applied = kernel.apply(&candidate(MUTATION_SOURCE, &empty)?).await?;
+        let fixture = Fixture::from_active(&applied)?;
+        let unknown = FunctionId::from_bytes([0xa1; 16]);
+        let error = kernel
+            .execute_server_insert(unknown, &[])
+            .await
+            .expect_err("unknown function must fail before target INSERT");
+        require(
+            matches!(
+                error,
+                PostgresKernelError::ServerInsert(ServerInsertError::FunctionNotActive {
+                    pair,
+                    function,
+                }) if pair == applied.pair() && function == unknown
+            ),
+            "unknown function did not retain the recovered pair and function identity",
+        )?;
+        require_unchanged_state(&database, fixture.task, applied.pair(), 0).await?;
+        require_no_session_leaks(&database).await
+    })
+    .await?;
+
+    assert_tamper_rejected_before_insert(Tamper::Artifact).await?;
+    assert_tamper_rejected_before_insert(Tamper::Reference).await
+}
+
+#[cfg(feature = "test-hooks")]
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn row_and_deferred_trigger_failures_roll_back_with_not_committed_state() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = kernel(&database)?;
+        kernel.bootstrap().await?;
+        let empty = kernel.recover().await?;
+        let applied = kernel.apply(&candidate(MUTATION_SOURCE, &empty)?).await?;
+        let fixture = Fixture::from_active(&applied)?;
+        let owner = insert_owner(&kernel, fixture, "owner").await?;
+        let arguments = task_arguments(fixture, &ExactTask::new(owner.object()))?;
+
+        let after_error = execute_with_installed_trigger(
+            &database,
+            &kernel,
+            fixture,
+            &arguments,
+            TriggerKind::AfterRow,
+        )
+        .await?;
+        require_wrapped_database_failure(
+            &after_error,
+            applied.pair(),
+            fixture.create_task,
+            fixture.create_task_revision,
+            &SqlState::RAISE_EXCEPTION,
+        )?;
+        require(
+            count_rows(&database, fixture.task).await? == 0,
+            "AFTER INSERT failure left a task row",
+        )?;
+
+        let deferred_error = execute_with_installed_trigger(
+            &database,
+            &kernel,
+            fixture,
+            &arguments,
+            TriggerKind::DeferredConstraint,
+        )
+        .await?;
+        require_commit_rejected(
+            &deferred_error,
+            applied.pair(),
+            fixture.create_task,
+            fixture.create_task_revision,
+            fixture.task,
+        )?;
+        require(
+            count_rows(&database, fixture.task).await? == 0,
+            "deferred constraint-trigger failure left a task row",
+        )?;
+        require(
+            kernel.recover().await?.pair() == applied.pair(),
+            "trigger failures changed the active pair",
+        )?;
+        require_no_session_leaks(&database).await
+    })
+    .await
+}
+
+#[cfg(feature = "test-hooks")]
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn insert_pins_snapshot_while_source_only_apply_advances() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = kernel(&database)?;
+        kernel.bootstrap().await?;
+        let empty = kernel.recover().await?;
+        let first = kernel.apply(&candidate(MUTATION_SOURCE, &empty)?).await?;
+        let fixture = Fixture::from_active(&first)?;
+        let owner = insert_owner(&kernel, fixture, "owner").await?;
+        let arguments = task_arguments(fixture, &ExactTask::new(owner.object()))?;
+        let source_only = candidate(MUTATION_SOURCE_EDIT, &first)?;
+        require(
+            source_only.new_function_revisions().is_empty(),
+            "source-only edit unexpectedly created a function revision",
+        )?;
+
+        let reached = Arc::new(tokio::sync::Barrier::new(2));
+        let resume = Arc::new(tokio::sync::Barrier::new(2));
+        let executor = kernel.clone();
+        let execution_reached = reached.clone();
+        let execution_resume = resume.clone();
+        let mut execution = tokio::spawn(async move {
+            executor
+                .execute_server_insert_with_test_barrier(
+                    fixture.create_task,
+                    &arguments,
+                    execution_reached,
+                    execution_resume,
+                )
+                .await
+        });
+        wait_for_barrier(&mut execution, reached, "snapshot insert").await?;
+
+        let advancement = kernel.apply(&source_only).await;
+        resume.wait().await;
+        let second = match advancement {
+            Ok(active) => active,
+            Err(error) => {
+                abort_and_wait(execution).await;
+                return Err(error.into());
+            }
+        };
+        let running = wait_for_insert(execution, "snapshot insert").await?;
+
+        require(
+            first.pair() != second.pair(),
+            "source-only apply did not advance the pair",
+        )?;
+        require(
+            fixture.create_task_revision == function_revision(&second, fixture.create_task)?,
+            "source-only apply did not reuse the immutable INSERT function revision",
+        )?;
+        require_insert_result(
+            &running,
+            first.pair(),
+            fixture.create_task,
+            fixture.create_task_revision,
+            fixture.task,
+            "created_task",
+        )?;
+
+        let later = kernel
+            .execute_server_insert(
+                fixture.create_task,
+                &task_arguments(fixture, &ExactTask::new(owner.object()))?,
+            )
+            .await?;
+        require_insert_result(
+            &later,
+            second.pair(),
+            fixture.create_task,
+            fixture.create_task_revision,
+            fixture.task,
+            "created_task",
+        )?;
+        require(
+            count_rows(&database, fixture.task).await? == 2,
+            "snapshot test did not commit both task rows",
+        )?;
+        require_no_session_leaks(&database).await
+    })
+    .await
+}
+
+#[cfg(feature = "test-hooks")]
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn confirmed_commit_retains_full_result_when_driver_shutdown_fails() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = kernel(&database)?;
+        kernel.bootstrap().await?;
+        let empty = kernel.recover().await?;
+        let applied = kernel.apply(&candidate(MUTATION_SOURCE, &empty)?).await?;
+        let fixture = Fixture::from_active(&applied)?;
+        let owner = insert_owner(&kernel, fixture, "owner").await?;
+        let exact = ExactTask::new(owner.object());
+
+        let error = kernel
+            .execute_server_insert_with_forced_post_commit_driver_shutdown(
+                fixture.create_task,
+                &task_arguments(fixture, &exact)?,
+            )
+            .await
+            .expect_err("forced post-commit shutdown must retain committed outcome");
+        require(
+            matches!(
+                &error,
+                PostgresKernelError::ServerInsert(insert)
+                    if insert.commit_state() == ServerInsertCommitState::Committed
+            ),
+            "post-confirmed-commit shutdown failure has the wrong commit state",
+        )?;
+        let PostgresKernelError::ServerInsert(ServerInsertError::CommittedButShutdownFailed {
+            result,
+            ..
+        }) = error
+        else {
+            return Err(failure(
+                "post-confirmed-commit error did not retain the committed result",
+            ));
+        };
+        require_insert_result(
+            &result,
+            applied.pair(),
+            fixture.create_task,
+            fixture.create_task_revision,
+            fixture.task,
+            "created_task",
+        )?;
+        require_task_row(&database, fixture, result.object(), &exact).await?;
+        require_no_session_leaks(&database).await
+    })
+    .await
+}
+
+#[cfg(feature = "test-hooks")]
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn withheld_commit_confirmation_is_unknown_but_the_row_exists_once() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let direct_kernel = kernel(&database)?;
+        direct_kernel.bootstrap().await?;
+        let empty = direct_kernel.recover().await?;
+        let applied = direct_kernel
+            .apply(&candidate(MUTATION_SOURCE, &empty)?)
+            .await?;
+        let fixture = Fixture::from_active(&applied)?;
+        let owner = insert_owner(&direct_kernel, fixture, "owner").await?;
+        let exact = ExactTask::new(owner.object());
+        let arguments = task_arguments(fixture, &exact)?;
+        let (proxy_config, proxy) = start_commit_drop_proxy(&database).await?;
+        let proxy_kernel = PostgresKernel::new(proxy_config);
+
+        let outcome = proxy_kernel
+            .execute_server_insert(fixture.create_task, &arguments)
+            .await;
+        wait_for_proxy(proxy).await?;
+        let error = match outcome {
+            Ok(_) => {
+                return Err(failure(
+                    "withheld COMMIT confirmation unexpectedly returned success",
+                ));
+            }
+            Err(error) => error,
+        };
+        require(
+            matches!(
+                &error,
+                PostgresKernelError::ServerInsert(insert)
+                    if insert.commit_state() == ServerInsertCommitState::Unknown
+            ),
+            "withheld COMMIT confirmation has the wrong commit state",
+        )?;
+        let PostgresKernelError::ServerInsert(ServerInsertError::CommitOutcomeUnknown {
+            context,
+            target,
+            candidate,
+            ..
+        }) = &error
+        else {
+            return Err(failure(
+                "withheld COMMIT confirmation did not retain the unknown candidate",
+            ));
+        };
+        require_context(
+            *context,
+            applied.pair(),
+            fixture.create_task,
+            fixture.create_task_revision,
+        )?;
+        require(*target == fixture.task, "unknown commit target differs")?;
+        require(
+            error.to_string()
+                == format!(
+                    "row creation failed: the connection failed while saving object {}; it is not known whether the row was added; do not retry automatically",
+                    candidate.canonical(),
+                ),
+            "unknown commit error lost its no-retry warning",
+        )?;
+        require_task_row(&database, fixture, *candidate, &exact).await?;
+        require(
+            count_rows(&database, fixture.task).await? == 1,
+            "unknown commit outcome did not leave exactly one durable row",
+        )?;
+        require_no_session_leaks(&database).await
+    })
+    .await
+}
+
+#[derive(Clone, Copy)]
+struct Fixture {
+    owner: TypeId,
+    owner_name: FieldId,
+    task: TypeId,
+    active: FieldId,
+    count: FieldId,
+    amount: FieldId,
+    score: FieldId,
+    title: FieldId,
+    payload: FieldId,
+    owner_field: FieldId,
+    note: FieldId,
+    create_owner: FunctionId,
+    create_owner_revision: FunctionRevisionId,
+    owner_name_parameter: ParameterId,
+    create_task: FunctionId,
+    create_task_revision: FunctionRevisionId,
+    task_active_parameter: ParameterId,
+    task_count_parameter: ParameterId,
+    task_amount_parameter: ParameterId,
+    task_score_parameter: ParameterId,
+    task_title_parameter: ParameterId,
+    task_payload_parameter: ParameterId,
+    task_owner_parameter: ParameterId,
+}
+
+impl Fixture {
+    fn from_active(active: &ActiveDatabaseRevision) -> TestResult<Self> {
+        let owner = active
+            .catalogue()
+            .object_types()
+            .iter()
+            .find(|object| name_is(object.name().parts(), &["tasks", "owner"]))
+            .ok_or_else(|| failure("owner type is absent"))?;
+        let task = active
+            .catalogue()
+            .object_types()
+            .iter()
+            .find(|object| name_is(object.name().parts(), &["tasks", "task"]))
+            .ok_or_else(|| failure("task type is absent"))?;
+        let create_owner = active
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|function| name_is(function.name().parts(), &["tasks", "create_owner"]))
+            .ok_or_else(|| failure("create_owner function is absent"))?;
+        let create_task = active
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|function| name_is(function.name().parts(), &["tasks", "create_task"]))
+            .ok_or_else(|| failure("create_task function is absent"))?;
+        let object_field = |object: &orna_core::catalogue::ObjectTypeDefinition, name| {
+            object
+                .field_by_name(name)
+                .map(|field| field.id())
+                .ok_or_else(|| failure(format!("field {name} is absent")))
+        };
+        let parameter = |function: &orna_core::catalogue::FunctionDefinition, name| {
+            function
+                .parameter_by_name(name)
+                .map(|parameter| parameter.id())
+                .ok_or_else(|| failure(format!("parameter {name} is absent")))
+        };
+        Ok(Self {
+            owner: owner.id(),
+            owner_name: object_field(owner, "name")?,
+            task: task.id(),
+            active: object_field(task, "active")?,
+            count: object_field(task, "count")?,
+            amount: object_field(task, "amount")?,
+            score: object_field(task, "score")?,
+            title: object_field(task, "title")?,
+            payload: object_field(task, "payload")?,
+            owner_field: object_field(task, "owner")?,
+            note: object_field(task, "note")?,
+            create_owner: create_owner.id(),
+            create_owner_revision: create_owner.current_revision(),
+            owner_name_parameter: parameter(create_owner, "p_name")?,
+            create_task: create_task.id(),
+            create_task_revision: create_task.current_revision(),
+            task_active_parameter: parameter(create_task, "p_active")?,
+            task_count_parameter: parameter(create_task, "p_count")?,
+            task_amount_parameter: parameter(create_task, "p_amount")?,
+            task_score_parameter: parameter(create_task, "p_score")?,
+            task_title_parameter: parameter(create_task, "p_title")?,
+            task_payload_parameter: parameter(create_task, "p_payload")?,
+            task_owner_parameter: parameter(create_task, "p_owner")?,
+        })
+    }
+}
+
+struct ExactTask {
+    active: bool,
+    count: i32,
+    amount: i64,
+    score: f64,
+    title: String,
+    payload: Vec<u8>,
+    owner: ObjectId,
+}
+
+struct StoredTaskRow {
+    object: Vec<u8>,
+    active: bool,
+    count: i32,
+    amount: i64,
+    score: f64,
+    title: String,
+    payload: Vec<u8>,
+    owner: Vec<u8>,
+    note: Option<String>,
+}
+
+impl ExactTask {
+    fn new(owner: ObjectId) -> Self {
+        Self {
+            active: false,
+            count: 42,
+            amount: 420_000,
+            score: 1.5,
+            title: String::from("task"),
+            payload: vec![4, 2],
+            owner,
+        }
+    }
+}
+
+fn kernel(database: &TestDatabase) -> TestResult<PostgresKernel> {
+    Ok(PostgresKernel::from_str(&database.connection_string())?)
+}
+
+fn hostile_kernel(database: &TestDatabase) -> TestResult<PostgresKernel> {
+    let mut config = database.config()?;
+    config.options("-c search_path=public,pg_catalog");
+    Ok(PostgresKernel::new(config))
+}
+
+fn candidate(source: &str, active: &ActiveDatabaseRevision) -> TestResult<DeployableRevision> {
+    let bundle = SourceBundle::new([SourceUnit::new("main.orna", source)])?;
+    let report = check(&bundle, active.catalogue());
+    if !report.diagnostics().is_empty() {
+        return Err(failure(format!(
+            "compiler diagnostics prevented candidate preparation: {:?}",
+            report.diagnostics()
+        )));
+    }
+    Ok(prepare(&report, active.pair(), active)?)
+}
+
+async fn insert_owner(
+    kernel: &PostgresKernel,
+    fixture: Fixture,
+    name: &str,
+) -> TestResult<ServerInsertResult> {
+    Ok(kernel
+        .execute_server_insert(
+            fixture.create_owner,
+            &[FunctionArgument::new(
+                fixture.owner_name_parameter,
+                RuntimeValue::Text(name.to_owned()),
+            )?],
+        )
+        .await?)
+}
+
+fn task_arguments(fixture: Fixture, task: &ExactTask) -> TestResult<Vec<FunctionArgument>> {
+    Ok(vec![
+        FunctionArgument::new(
+            fixture.task_payload_parameter,
+            RuntimeValue::Bytes(task.payload.clone()),
+        )?,
+        FunctionArgument::new(
+            fixture.task_owner_parameter,
+            RuntimeValue::Reference {
+                target: fixture.owner,
+                object: task.owner,
+            },
+        )?,
+        FunctionArgument::new(
+            fixture.task_title_parameter,
+            RuntimeValue::Text(task.title.clone()),
+        )?,
+        FunctionArgument::new(
+            fixture.task_score_parameter,
+            RuntimeValue::Float(RuntimeFloat::new(task.score)?),
+        )?,
+        FunctionArgument::new(
+            fixture.task_amount_parameter,
+            RuntimeValue::BigInt(task.amount),
+        )?,
+        FunctionArgument::new(
+            fixture.task_count_parameter,
+            RuntimeValue::Integer(task.count),
+        )?,
+        FunctionArgument::new(
+            fixture.task_active_parameter,
+            RuntimeValue::Boolean(task.active),
+        )?,
+    ])
+}
+
+fn replace_owner_argument(
+    arguments: &mut [FunctionArgument],
+    fixture: Fixture,
+    value: RuntimeValue,
+) -> TestResult<()> {
+    let slot = arguments
+        .iter_mut()
+        .find(|argument| argument.parameter() == fixture.task_owner_parameter)
+        .ok_or_else(|| failure("task owner argument is absent"))?;
+    *slot = FunctionArgument::new(fixture.task_owner_parameter, value)?;
+    Ok(())
+}
+
+fn require_insert_result(
+    result: &ServerInsertResult,
+    pair: RevisionPair,
+    function: FunctionId,
+    revision: FunctionRevisionId,
+    target: TypeId,
+    return_column: &str,
+) -> TestResult<()> {
+    require(
+        result.context().pair() == pair,
+        "insert context pair differs",
+    )?;
+    require(
+        result.context().function() == function,
+        "insert context function differs",
+    )?;
+    require(
+        result.context().function_revision() == revision,
+        "insert context function revision differs",
+    )?;
+    require(result.pair() == pair, "insert result pair differs")?;
+    require(
+        result.function() == function,
+        "insert result function differs",
+    )?;
+    require(
+        result.function_revision() == revision,
+        "insert result function revision differs",
+    )?;
+    require(result.target() == target, "insert result target differs")?;
+    let [column] = result.rows().columns() else {
+        return Err(failure("insert result does not have exactly one column"));
+    };
+    require(
+        column.name() == return_column,
+        "insert result lost its declared return-column name",
+    )?;
+    require(
+        column.resolved_type() == ResolvedType::reference(target),
+        "insert result column has the wrong reference type",
+    )?;
+    require(!column.nullable(), "insert result column became nullable")?;
+    let [row] = result.rows().rows() else {
+        return Err(failure("insert result does not have exactly one row"));
+    };
+    require(
+        row.values()
+            == [RuntimeValue::Reference {
+                target,
+                object: result.object(),
+            }],
+        "insert result row is not the allocated typed reference",
+    )
+}
+
+async fn require_owner_row(
+    database: &TestDatabase,
+    fixture: Fixture,
+    object: ObjectId,
+    expected_name: &str,
+) -> TestResult<()> {
+    let session = database.open().await?;
+    let operation: TestResult<(Vec<u8>, String)> = async {
+        let row = session
+            .client()
+            .query_one(
+                &format!(
+                    "SELECT _orna_object_id, {} FROM {} WHERE _orna_object_id = $1",
+                    field(fixture.owner_name),
+                    relation(fixture.owner),
+                ),
+                &[&object.to_bytes().to_vec()],
+            )
+            .await?;
+        Ok((row.try_get(0)?, row.try_get(1)?))
+    }
+    .await;
+    let (stored_object, stored_name) =
+        finish_session(session, operation, "owner row inspection").await?;
+    require(
+        stored_object == object.to_bytes(),
+        "returned owner identity differs from the stored identity",
+    )?;
+    require(stored_name == expected_name, "stored owner name differs")
+}
+
+async fn require_task_row(
+    database: &TestDatabase,
+    fixture: Fixture,
+    object: ObjectId,
+    expected: &ExactTask,
+) -> TestResult<()> {
+    let session = database.open().await?;
+    let operation: TestResult<StoredTaskRow> = async {
+        let row = session
+            .client()
+            .query_one(
+                &format!(
+                    "SELECT _orna_object_id, {}, {}, {}, {}, {}, {}, {}, {} FROM {} \
+                     WHERE _orna_object_id = $1",
+                    field(fixture.active),
+                    field(fixture.count),
+                    field(fixture.amount),
+                    field(fixture.score),
+                    field(fixture.title),
+                    field(fixture.payload),
+                    field(fixture.owner_field),
+                    field(fixture.note),
+                    relation(fixture.task),
+                ),
+                &[&object.to_bytes().to_vec()],
+            )
+            .await?;
+        Ok(StoredTaskRow {
+            object: row.try_get(0)?,
+            active: row.try_get(1)?,
+            count: row.try_get(2)?,
+            amount: row.try_get(3)?,
+            score: row.try_get(4)?,
+            title: row.try_get(5)?,
+            payload: row.try_get(6)?,
+            owner: row.try_get(7)?,
+            note: row.try_get(8)?,
+        })
+    }
+    .await;
+    let stored = finish_session(session, operation, "task row inspection").await?;
+    require(
+        stored.object == object.to_bytes(),
+        "returned task identity differs from the stored identity",
+    )?;
+    require(stored.active == expected.active, "stored BOOL differs")?;
+    require(stored.count == expected.count, "stored INT differs")?;
+    require(stored.amount == expected.amount, "stored BIGINT differs")?;
+    require(stored.score == expected.score, "stored FLOAT differs")?;
+    require(stored.title == expected.title, "stored TEXT differs")?;
+    require(stored.payload == expected.payload, "stored BYTES differs")?;
+    require(
+        stored.owner == expected.owner.to_bytes(),
+        "stored REF differs",
+    )?;
+    require(stored.note.is_none(), "omitted nullable field is not NULL")
+}
+
+async fn install_public_decoy(database: &TestDatabase, target: TypeId) -> TestResult<()> {
+    let session = database.open().await?;
+    let operation: TestResult<()> = async {
+        session
+            .client()
+            .batch_execute(&format!(
+                "CREATE TABLE public.{} (_orna_object_id bytea)",
+                relation_component(target),
+            ))
+            .await?;
+        Ok(())
+    }
+    .await;
+    finish_session(session, operation, "public decoy installation").await
+}
+
+async fn count_public_decoy_rows(database: &TestDatabase, target: TypeId) -> TestResult<i64> {
+    let session = database.open().await?;
+    let operation: TestResult<i64> = async {
+        Ok(session
+            .client()
+            .query_one(
+                &format!("SELECT count(*) FROM public.{}", relation_component(target)),
+                &[],
+            )
+            .await?
+            .try_get(0)?)
+    }
+    .await;
+    finish_session(session, operation, "public decoy row count").await
+}
+
+async fn count_rows(database: &TestDatabase, object: TypeId) -> TestResult<i64> {
+    let session = database.open().await?;
+    let operation: TestResult<i64> = async {
+        Ok(session
+            .client()
+            .query_one(&format!("SELECT count(*) FROM {}", relation(object)), &[])
+            .await?
+            .try_get(0)?)
+    }
+    .await;
+    finish_session(session, operation, "private row count").await
+}
+
+fn require_not_committed_argument_error(
+    error: &PostgresKernelError,
+    pair: RevisionPair,
+    function: FunctionId,
+    revision: FunctionRevisionId,
+) -> TestResult<()> {
+    let PostgresKernelError::ServerInsert(insert) = error else {
+        return Err(failure("argument rejection is not a SERVER INSERT error"));
+    };
+    require(
+        insert.commit_state() == ServerInsertCommitState::NotCommitted,
+        "argument rejection has the wrong commit state",
+    )?;
+    let ServerInsertError::NotCommitted { context, source } = insert else {
+        return Err(failure("argument rejection lacks its pinned context"));
+    };
+    require_context(*context, pair, function, revision)?;
+    require(
+        matches!(source.as_ref(), ServerInsertError::Argument { .. }),
+        "wrong-target REF did not fail argument validation",
+    )
+}
+
+#[cfg(feature = "test-hooks")]
+fn require_commit_rejected(
+    error: &PostgresKernelError,
+    pair: RevisionPair,
+    function: FunctionId,
+    revision: FunctionRevisionId,
+    target: TypeId,
+) -> TestResult<()> {
+    let PostgresKernelError::ServerInsert(insert) = error else {
+        return Err(failure("commit rejection is not a SERVER INSERT error"));
+    };
+    require(
+        insert.commit_state() == ServerInsertCommitState::NotCommitted,
+        "commit rejection has the wrong commit state",
+    )?;
+    let ServerInsertError::CommitRejected {
+        context,
+        target: rejected_target,
+        source,
+        ..
+    } = insert
+    else {
+        return Err(failure("failure did not occur during COMMIT"));
+    };
+    require_context(*context, pair, function, revision)?;
+    require(
+        *rejected_target == target,
+        "commit rejection target differs",
+    )?;
+    let code = source
+        .as_db_error()
+        .map(|error| error.code())
+        .ok_or_else(|| failure("commit rejection has no database error code"))?;
+    require(
+        code == &SqlState::RAISE_EXCEPTION,
+        "deferred trigger commit error code differs",
+    )
+}
+
+fn require_wrapped_database_failure(
+    error: &PostgresKernelError,
+    pair: RevisionPair,
+    function: FunctionId,
+    revision: FunctionRevisionId,
+    expected_code: &SqlState,
+) -> TestResult<()> {
+    let PostgresKernelError::ServerInsert(insert) = error else {
+        return Err(failure(
+            "database write failure is not a SERVER INSERT error",
+        ));
+    };
+    require(
+        insert.commit_state() == ServerInsertCommitState::NotCommitted,
+        "database write failure has the wrong commit state",
+    )?;
+    let ServerInsertError::NotCommitted { context, source } = insert else {
+        return Err(failure("database write failure lacks its pinned context"));
+    };
+    require_context(*context, pair, function, revision)?;
+    let ServerInsertError::Database { source } = source.as_ref() else {
+        return Err(failure("failure did not occur during the database write"));
+    };
+    let code = source
+        .as_db_error()
+        .map(|error| error.code())
+        .ok_or_else(|| failure("database write failure has no database error code"))?;
+    require(code == expected_code, "database write error code differs")
+}
+
+fn require_context(
+    context: orna_kernel_postgres::ServerInsertContext,
+    pair: RevisionPair,
+    function: FunctionId,
+    revision: FunctionRevisionId,
+) -> TestResult<()> {
+    require(context.pair() == pair, "error context pair differs")?;
+    require(
+        context.function() == function,
+        "error context function differs",
+    )?;
+    require(
+        context.function_revision() == revision,
+        "error context function revision differs",
+    )
+}
+
+#[derive(Clone, Copy)]
+enum Tamper {
+    Artifact,
+    Reference,
+}
+
+async fn assert_tamper_rejected_before_insert(tamper: Tamper) -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = kernel(&database)?;
+        kernel.bootstrap().await?;
+        let empty = kernel.recover().await?;
+        let applied = kernel.apply(&candidate(MUTATION_SOURCE, &empty)?).await?;
+        let fixture = Fixture::from_active(&applied)?;
+        let session = database.open().await?;
+        let operation: TestResult<u64> = async {
+            match tamper {
+                Tamper::Artifact => Ok(session
+                    .client()
+                    .execute(
+                        "UPDATE _orna_kernel.function_artifacts SET payload = $1 \
+                         WHERE function_revision_id = $2",
+                        &[
+                            &vec![0_u8],
+                            &fixture.create_task_revision.to_bytes().to_vec(),
+                        ],
+                    )
+                    .await?),
+                Tamper::Reference => Ok(session
+                    .client()
+                    .execute(
+                        "UPDATE _orna_kernel.definition_references SET ordinal = ordinal + 1000 \
+                         WHERE catalogue_revision_id = $1 AND source_function_id = $2 \
+                         AND ordinal = (SELECT max(ordinal) FROM _orna_kernel.definition_references \
+                           WHERE catalogue_revision_id = $1 AND source_function_id = $2)",
+                        &[
+                            &applied.pair().catalogue().to_bytes().to_vec(),
+                            &fixture.create_task.to_bytes().to_vec(),
+                        ],
+                    )
+                    .await?),
+            }
+        }
+        .await;
+        let changed = finish_session(session, operation, "durable function tamper").await?;
+        require(changed == 1, "tamper fixture changed the wrong row count")?;
+
+        let error = kernel
+            .execute_server_insert(fixture.create_task, &[])
+            .await
+            .expect_err("tampered durable function must fail before target INSERT");
+        let PostgresKernelError::ServerInsert(ServerInsertError::Kernel { source }) = &error else {
+            return Err(failure(
+                "tampered function did not fail during active database recovery",
+            ));
+        };
+        let expected_relation = match tamper {
+            Tamper::Artifact => "_orna_kernel.function_artifacts",
+            Tamper::Reference => "_orna_kernel.definition_references",
+        };
+        require(
+            matches!(
+                source.as_ref(),
+                PostgresKernelError::DurableInvariant { relation, .. }
+                    if *relation == expected_relation
+            ),
+            format!(
+                "tampered function recovery source was not a durable invariant for \
+                 {expected_relation}: {source:?}"
+            ),
+        )?;
+        require_unchanged_state(&database, fixture.task, applied.pair(), 0).await?;
+        require_no_session_leaks(&database).await
+    })
+    .await
+}
+
+async fn require_unchanged_state(
+    database: &TestDatabase,
+    target: TypeId,
+    pair: RevisionPair,
+    expected_rows: i64,
+) -> TestResult<()> {
+    require(
+        count_rows(database, target).await? == expected_rows,
+        "failed INSERT changed the target row count",
+    )?;
+    let session = database.open().await?;
+    let operation: TestResult<(Vec<u8>, Vec<u8>)> = async {
+        let row = session
+            .client()
+            .query_one(
+                "SELECT source_revision_id, catalogue_revision_id \
+                 FROM _orna_kernel.active_revision WHERE singleton",
+                &[],
+            )
+            .await?;
+        Ok((row.try_get(0)?, row.try_get(1)?))
+    }
+    .await;
+    let (source, catalogue) =
+        finish_session(session, operation, "active revision inspection").await?;
+    require(
+        source == pair.source().to_bytes(),
+        "failed INSERT changed the active source revision",
+    )?;
+    require(
+        catalogue == pair.catalogue().to_bytes(),
+        "failed INSERT changed the active catalogue revision",
+    )
+}
+
+#[cfg(feature = "test-hooks")]
+#[derive(Clone, Copy)]
+enum TriggerKind {
+    AfterRow,
+    DeferredConstraint,
+}
+
+#[cfg(feature = "test-hooks")]
+async fn execute_with_installed_trigger(
+    database: &TestDatabase,
+    kernel: &PostgresKernel,
+    fixture: Fixture,
+    arguments: &[FunctionArgument],
+    kind: TriggerKind,
+) -> TestResult<PostgresKernelError> {
+    let reached = Arc::new(tokio::sync::Barrier::new(2));
+    let resume = Arc::new(tokio::sync::Barrier::new(2));
+    let executor = kernel.clone();
+    let owned_arguments = arguments.to_vec();
+    let execution_reached = reached.clone();
+    let execution_resume = resume.clone();
+    let mut execution = tokio::spawn(async move {
+        executor
+            .execute_server_insert_with_test_barrier(
+                fixture.create_task,
+                &owned_arguments,
+                execution_reached,
+                execution_resume,
+            )
+            .await
+    });
+    wait_for_barrier(&mut execution, reached, "triggered insert").await?;
+
+    let install = install_failure_trigger(database, fixture.task, kind).await;
+    resume.wait().await;
+    if let Err(error) = install {
+        abort_and_wait(execution).await;
+        return Err(error);
+    }
+    let outcome = wait_for_insert_error(execution, "triggered insert").await;
+    let cleanup = remove_failure_trigger(database, fixture.task, kind).await;
+    match (outcome, cleanup) {
+        (Ok(error), Ok(())) => Ok(error),
+        (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+        (Err(execution_error), Err(cleanup_error)) => Err(failure(format!(
+            "triggered insert failed: {execution_error}; trigger cleanup failed: {cleanup_error}"
+        ))),
+    }
+}
+
+#[cfg(feature = "test-hooks")]
+async fn install_failure_trigger(
+    database: &TestDatabase,
+    target: TypeId,
+    kind: TriggerKind,
+) -> TestResult<()> {
+    let (function_name, trigger_sql) = match kind {
+        TriggerKind::AfterRow => (
+            "test_fail_after_insert",
+            "CREATE TRIGGER test_fail_after_insert AFTER INSERT",
+        ),
+        TriggerKind::DeferredConstraint => (
+            "test_fail_deferred_insert",
+            "CREATE CONSTRAINT TRIGGER test_fail_deferred_insert AFTER INSERT",
+        ),
+    };
+    let deferred = match kind {
+        TriggerKind::AfterRow => "",
+        TriggerKind::DeferredConstraint => " DEFERRABLE INITIALLY DEFERRED",
+    };
+    let session = database.open().await?;
+    let operation: TestResult<()> = async {
+        session
+            .client()
+            .batch_execute(&format!(
+                "CREATE FUNCTION _orna_data.{function_name}() RETURNS trigger LANGUAGE plpgsql AS $$ \
+                 BEGIN RAISE EXCEPTION 'forced insert failure'; END; $$; \
+                 {trigger_sql} ON {}{deferred} FOR EACH ROW \
+                 EXECUTE FUNCTION _orna_data.{function_name}()",
+                relation(target),
+            ))
+            .await?;
+        Ok(())
+    }
+    .await;
+    finish_session(session, operation, "failure trigger installation").await
+}
+
+#[cfg(feature = "test-hooks")]
+async fn remove_failure_trigger(
+    database: &TestDatabase,
+    target: TypeId,
+    kind: TriggerKind,
+) -> TestResult<()> {
+    let name = match kind {
+        TriggerKind::AfterRow => "test_fail_after_insert",
+        TriggerKind::DeferredConstraint => "test_fail_deferred_insert",
+    };
+    let session = database.open().await?;
+    let operation: TestResult<()> = async {
+        session
+            .client()
+            .batch_execute(&format!(
+                "DROP TRIGGER IF EXISTS {name} ON {}; \
+                 DROP FUNCTION IF EXISTS _orna_data.{name}()",
+                relation(target),
+            ))
+            .await?;
+        Ok(())
+    }
+    .await;
+    finish_session(session, operation, "failure trigger removal").await
+}
+
+#[cfg(feature = "test-hooks")]
+async fn wait_for_barrier<T>(
+    task: &mut tokio::task::JoinHandle<T>,
+    barrier: Arc<tokio::sync::Barrier>,
+    operation: &str,
+) -> TestResult<()> {
+    if tokio::time::timeout(WAIT, barrier.wait()).await.is_ok() {
+        Ok(())
+    } else {
+        task.abort();
+        let _ = task.await;
+        Err(failure(format!(
+            "{operation} did not reach the post-recovery barrier"
+        )))
+    }
+}
+
+#[cfg(feature = "test-hooks")]
+async fn wait_for_insert(
+    mut task: tokio::task::JoinHandle<Result<ServerInsertResult, PostgresKernelError>>,
+    operation: &str,
+) -> TestResult<ServerInsertResult> {
+    match tokio::time::timeout(WAIT, &mut task).await {
+        Ok(result) => result
+            .map_err(|error| failure(format!("{operation} task failed: {error}")))?
+            .map_err(|error| failure(format!("{operation} failed: {error}"))),
+        Err(_) => {
+            abort_and_wait(task).await;
+            Err(failure(format!("{operation} exceeded the bounded wait")))
+        }
+    }
+}
+
+#[cfg(feature = "test-hooks")]
+async fn wait_for_insert_error(
+    mut task: tokio::task::JoinHandle<Result<ServerInsertResult, PostgresKernelError>>,
+    operation: &str,
+) -> TestResult<PostgresKernelError> {
+    match tokio::time::timeout(WAIT, &mut task).await {
+        Ok(result) => {
+            match result.map_err(|error| failure(format!("{operation} task failed: {error}")))? {
+                Ok(_) => Err(failure(format!("{operation} unexpectedly committed"))),
+                Err(error) => Ok(error),
+            }
+        }
+        Err(_) => {
+            abort_and_wait(task).await;
+            Err(failure(format!("{operation} exceeded the bounded wait")))
+        }
+    }
+}
+
+#[cfg(feature = "test-hooks")]
+async fn abort_and_wait<T>(task: tokio::task::JoinHandle<T>) {
+    task.abort();
+    let _ = task.await;
+}
+
+#[cfg(feature = "test-hooks")]
+fn function_revision(
+    active: &ActiveDatabaseRevision,
+    function: FunctionId,
+) -> TestResult<FunctionRevisionId> {
+    active
+        .catalogue()
+        .function_by_id(function)
+        .map(|definition| definition.current_revision())
+        .ok_or_else(|| failure("INSERT function is absent from the active catalogue"))
+}
+
+#[cfg(feature = "test-hooks")]
+async fn start_commit_drop_proxy(
+    database: &TestDatabase,
+) -> TestResult<(Config, ThreadJoinHandle<TestResult<()>>)> {
+    let base = database.config()?;
+    let upstream = configured_tcp_address(&base)?;
+    let listener = TcpListener::bind(("127.0.0.1", 0))?;
+    let address = listener.local_addr()?;
+    let proxy_config = proxy_config(&base, address.port())?;
+    let proxy = std::thread::spawn(move || run_commit_drop_proxy(listener, upstream));
+    Ok((proxy_config, proxy))
+}
+
+#[cfg(feature = "test-hooks")]
+fn configured_tcp_address(config: &Config) -> TestResult<SocketAddr> {
+    let host = match config.get_hosts().first() {
+        Some(Host::Tcp(host)) => host,
+        #[cfg(unix)]
+        Some(Host::Unix(_)) => {
+            return Err(failure(
+                "commit-drop proxy requires a TCP PostgreSQL test connection",
+            ));
+        }
+        None => return Err(failure("PostgreSQL test connection has no configured host")),
+    };
+    let port = config.get_ports().first().copied().unwrap_or(5432);
+    (host.as_str(), port)
+        .to_socket_addrs()?
+        .next()
+        .ok_or_else(|| failure("PostgreSQL test host did not resolve to a TCP address"))
+}
+
+#[cfg(feature = "test-hooks")]
+fn proxy_config(base: &Config, port: u16) -> TestResult<Config> {
+    let mut config = Config::new();
+    config.host("127.0.0.1");
+    config.port(port);
+    config.ssl_mode(SslMode::Disable);
+    if let Some(user) = base.get_user() {
+        config.user(user);
+    }
+    if let Some(password) = base.get_password() {
+        config.password(password);
+    }
+    if let Some(database) = base.get_dbname() {
+        config.dbname(database);
+    }
+    if let Some(options) = base.get_options() {
+        config.options(options);
+    }
+    if config.get_dbname().is_none() {
+        return Err(failure("proxy kernel has no target database"));
+    }
+    Ok(config)
+}
+
+#[cfg(feature = "test-hooks")]
+fn run_commit_drop_proxy(listener: TcpListener, upstream: SocketAddr) -> TestResult<()> {
+    listener.set_nonblocking(true)?;
+    let deadline = Instant::now() + WAIT;
+    let (client, _) = loop {
+        match listener.accept() {
+            Ok(connection) => break connection,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                if Instant::now() >= deadline {
+                    return Err(failure("commit-drop proxy accepted no client connection"));
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => return Err(error.into()),
+        }
+    };
+    let backend = TcpStream::connect_timeout(&upstream, WAIT)?;
+    client.set_nodelay(true)?;
+    backend.set_nodelay(true)?;
+    client.set_read_timeout(Some(WAIT))?;
+    client.set_write_timeout(Some(WAIT))?;
+    backend.set_read_timeout(Some(WAIT))?;
+    backend.set_write_timeout(Some(WAIT))?;
+
+    let commit_seen = Arc::new(AtomicBool::new(false));
+    let frontend_client = client.try_clone()?;
+    let frontend_backend = backend.try_clone()?;
+    let frontend_commit = commit_seen.clone();
+    let frontend = std::thread::spawn(move || {
+        forward_frontend(frontend_client, frontend_backend, &frontend_commit)
+    });
+    let backend_result = forward_backend_until_committed(&client, backend, &commit_seen);
+    let _ = client.shutdown(Shutdown::Both);
+    let frontend_result = frontend
+        .join()
+        .map_err(|_| failure("commit-drop proxy frontend thread panicked"))?;
+    match backend_result {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            frontend_result?;
+            Err(error)
+        }
+    }
+}
+
+#[cfg(feature = "test-hooks")]
+fn forward_frontend(
+    mut client: TcpStream,
+    mut backend: TcpStream,
+    commit_seen: &AtomicBool,
+) -> TestResult<()> {
+    let mut length = [0_u8; 4];
+    client.read_exact(&mut length)?;
+    let length = checked_frame_length(length)?;
+    let mut startup = vec![0_u8; length - 4];
+    client.read_exact(&mut startup)?;
+    backend.write_all(&(length as u32).to_be_bytes())?;
+    backend.write_all(&startup)?;
+    backend.flush()?;
+
+    loop {
+        let (tag, payload) = match read_protocol_frame(&mut client) {
+            Ok(frame) => frame,
+            Err(_) if commit_seen.load(Ordering::SeqCst) => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        if tag == b'Q' && payload == b"COMMIT\0" {
+            // Arm the backend interceptor before the server can acknowledge
+            // the COMMIT that this thread is about to forward.
+            commit_seen.store(true, Ordering::SeqCst);
+        }
+        write_protocol_frame(&mut backend, tag, &payload)?;
+    }
+}
+
+#[cfg(feature = "test-hooks")]
+fn forward_backend_until_committed(
+    client: &TcpStream,
+    mut backend: TcpStream,
+    commit_seen: &AtomicBool,
+) -> TestResult<()> {
+    let mut client = client.try_clone()?;
+    loop {
+        let (tag, payload) = read_protocol_frame(&mut backend)?;
+        if commit_seen.load(Ordering::SeqCst) && tag == b'C' && payload == b"COMMIT\0" {
+            return Ok(());
+        }
+        write_protocol_frame(&mut client, tag, &payload)?;
+    }
+}
+
+#[cfg(feature = "test-hooks")]
+fn read_protocol_frame(stream: &mut TcpStream) -> TestResult<(u8, Vec<u8>)> {
+    let mut tag = [0_u8; 1];
+    stream.read_exact(&mut tag)?;
+    let mut length = [0_u8; 4];
+    stream.read_exact(&mut length)?;
+    let length = checked_frame_length(length)?;
+    let mut payload = vec![0_u8; length - 4];
+    stream.read_exact(&mut payload)?;
+    Ok((tag[0], payload))
+}
+
+#[cfg(feature = "test-hooks")]
+fn write_protocol_frame(stream: &mut TcpStream, tag: u8, payload: &[u8]) -> TestResult<()> {
+    let length = payload
+        .len()
+        .checked_add(4)
+        .and_then(|length| u32::try_from(length).ok())
+        .ok_or_else(|| failure("PostgreSQL proxy frame length overflowed"))?;
+    stream.write_all(&[tag])?;
+    stream.write_all(&length.to_be_bytes())?;
+    stream.write_all(payload)?;
+    stream.flush()?;
+    Ok(())
+}
+
+#[cfg(feature = "test-hooks")]
+fn checked_frame_length(bytes: [u8; 4]) -> TestResult<usize> {
+    const MAX_FRAME_LENGTH: usize = 64 * 1024 * 1024;
+    let length = u32::from_be_bytes(bytes) as usize;
+    if (4..=MAX_FRAME_LENGTH).contains(&length) {
+        Ok(length)
+    } else {
+        Err(failure("PostgreSQL proxy received an invalid frame length"))
+    }
+}
+
+#[cfg(feature = "test-hooks")]
+async fn wait_for_proxy(proxy: ThreadJoinHandle<TestResult<()>>) -> TestResult<()> {
+    tokio::task::spawn_blocking(move || proxy.join())
+        .await
+        .map_err(|error| failure(format!("commit-drop proxy join task failed: {error}")))?
+        .map_err(|_| failure("commit-drop proxy thread panicked"))?
+}
+
+async fn require_no_session_leaks(database: &TestDatabase) -> TestResult<()> {
+    let session = database.open().await?;
+    let operation: TestResult<(i64, i64)> = async {
+        let row = session
+            .client()
+            .query_one(
+                "SELECT count(*) FILTER (WHERE state = 'idle in transaction'), \
+                        count(*) FILTER (WHERE pid <> pg_catalog.pg_backend_pid()) \
+                 FROM pg_catalog.pg_stat_activity \
+                 WHERE datname = pg_catalog.current_database()",
+                &[],
+            )
+            .await?;
+        Ok((row.try_get(0)?, row.try_get(1)?))
+    }
+    .await;
+    let (idle, others) = finish_session(session, operation, "session leak inspection").await?;
+    require(idle == 0, format!("found {idle} idle transaction(s)"))?;
+    require(others == 0, format!("found {others} leaked session(s)"))
+}
+
+async fn finish_session<T>(
+    session: TestSession,
+    operation: TestResult<T>,
+    context: &str,
+) -> TestResult<T> {
+    let shutdown = session.shutdown().await;
+    match (operation, shutdown) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+        (Err(operation_error), Err(shutdown_error)) => Err(failure(format!(
+            "{context} failed: {operation_error}; connection shutdown also failed: {shutdown_error}"
+        ))),
+    }
+}
+
+fn relation(type_id: TypeId) -> String {
+    format!("_orna_data.{}", relation_component(type_id))
+}
+
+fn relation_component(type_id: TypeId) -> String {
+    format!("t_{:032x}", u128::from_be_bytes(type_id.to_bytes()))
+}
+
+fn field(field_id: FieldId) -> String {
+    format!("f_{:032x}", u128::from_be_bytes(field_id.to_bytes()))
+}
+
+fn name_is(actual: &[String], expected: &[&str]) -> bool {
+    actual
+        .iter()
+        .map(String::as_str)
+        .eq(expected.iter().copied())
+}
+
+fn require(condition: bool, message: impl Into<String>) -> TestResult<()> {
+    if condition {
+        Ok(())
+    } else {
+        Err(failure(message.into()))
+    }
+}
