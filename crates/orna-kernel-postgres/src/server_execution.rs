@@ -45,6 +45,15 @@ const JOIN_LIMIT: usize = 1_024;
 const SQL_LIMIT: usize = 1024 * 1024;
 const TARGET_ENTRY_LIMIT: usize = 1_600;
 
+#[cfg(feature = "test-hooks")]
+struct SelectTestBarrier {
+    reached: std::sync::Arc<tokio::sync::Barrier>,
+    resume: std::sync::Arc<tokio::sync::Barrier>,
+}
+
+#[cfg(not(feature = "test-hooks"))]
+struct SelectTestBarrier;
+
 /// Immutable active state pinned for one SERVER SELECT execution.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ServerSelectContext {
@@ -381,8 +390,36 @@ impl PostgresKernel {
         &self,
         function: FunctionId,
     ) -> Result<ServerSelectResult, PostgresKernelError> {
+        self.execute_server_select_with_barrier(function, None)
+            .await
+    }
+
+    /// Pauses a live execution after it has recovered its active snapshot.
+    ///
+    /// This hook is compiled only for the PostgreSQL integration harness. Both
+    /// barriers must have exactly two participants: the executor and the test.
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub async fn execute_server_select_with_test_barrier(
+        &self,
+        function: FunctionId,
+        reached: std::sync::Arc<tokio::sync::Barrier>,
+        resume: std::sync::Arc<tokio::sync::Barrier>,
+    ) -> Result<ServerSelectResult, PostgresKernelError> {
+        self.execute_server_select_with_barrier(
+            function,
+            Some(SelectTestBarrier { reached, resume }),
+        )
+        .await
+    }
+
+    async fn execute_server_select_with_barrier(
+        &self,
+        function: FunctionId,
+        barrier: Option<SelectTestBarrier>,
+    ) -> Result<ServerSelectResult, PostgresKernelError> {
         let mut session = self.open().await?;
-        let execution = execute_client(&mut session.client, function).await;
+        let execution = execute_client(&mut session.client, function, barrier.as_ref()).await;
         let shutdown = session.shutdown().await;
         match (execution, shutdown) {
             (Ok(result), Ok(())) => Ok(result),
@@ -395,6 +432,7 @@ impl PostgresKernel {
 async fn execute_client(
     client: &mut Client,
     function: FunctionId,
+    test_barrier: Option<&SelectTestBarrier>,
 ) -> Result<ServerSelectResult, PostgresKernelError> {
     let transaction = client
         .build_transaction()
@@ -403,7 +441,7 @@ async fn execute_client(
         .start()
         .await
         .map_err(PostgresKernelError::Database)?;
-    let result = execute_transaction(&transaction, function).await;
+    let result = execute_transaction(&transaction, function, test_barrier).await;
     match result {
         Ok(result) => {
             let context = context_from_result(&result);
@@ -426,6 +464,7 @@ async fn execute_client(
 async fn execute_transaction(
     transaction: &Transaction<'_>,
     function_id: FunctionId,
+    test_barrier: Option<&SelectTestBarrier>,
 ) -> Result<ServerSelectResult, PostgresKernelError> {
     establish_trusted_search_path(transaction).await?;
     transaction
@@ -449,9 +488,21 @@ async fn execute_transaction(
             })
         })?;
     let context = ServerSelectContext::new(active.pair(), function_id, function.current_revision());
+    pause_after_recovery(test_barrier).await;
     let result = execute_active_transaction(transaction, &active, function, context).await;
     result.map_err(|error| contextualize(context, error))
 }
+
+#[cfg(feature = "test-hooks")]
+async fn pause_after_recovery(test_barrier: Option<&SelectTestBarrier>) {
+    if let Some(test_barrier) = test_barrier {
+        test_barrier.reached.wait().await;
+        test_barrier.resume.wait().await;
+    }
+}
+
+#[cfg(not(feature = "test-hooks"))]
+async fn pause_after_recovery(_test_barrier: Option<&SelectTestBarrier>) {}
 
 async fn execute_active_transaction(
     transaction: &Transaction<'_>,
