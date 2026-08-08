@@ -40,7 +40,7 @@ use orna_syntax::{
     StandardLargeObjectKind, TypeSpecification,
 };
 
-use crate::mutation::{MutationParameter, MutationReference, check_insert_in};
+use crate::mutation::{MutationParameter, MutationReference, check_insert_in, check_update_in};
 use crate::relational::{QueryReference, QueryReferenceKind, QueryReferenceTarget, check_query_in};
 use crate::{
     CompilerDiagnostic, DiagnosticCode, ParseReport, SourceLocation,
@@ -813,6 +813,8 @@ fn check_server_functions(
             "SELECT"
         } else if input.body.as_sql_insert().is_some() {
             "INSERT"
+        } else if input.body.as_sql_update().is_some() {
+            "UPDATE"
         } else {
             diagnostics.push(DiagnosticCode::semantic(
                 DiagnosticCode::DomainIncompatible,
@@ -892,12 +894,17 @@ fn check_server_functions(
                     .map(query_reference)
                     .collect::<Vec<_>>(),
             )
-        } else if let Some(insert_body) = input.body.as_sql_insert() {
+        } else if input.body.as_sql_insert().is_some() || input.body.as_sql_update().is_some() {
+            let mutation_name = if input.body.as_sql_insert().is_some() {
+                "INSERT"
+            } else {
+                "UPDATE"
+            };
             let mut mode_is_valid = true;
             if input.security != CatalogueFunctionSecurity::Invoker {
                 diagnostics.push(DiagnosticCode::semantic(
                     DiagnosticCode::DomainIncompatible,
-                    "INSERT SERVER functions require SECURITY INVOKER",
+                    format!("{mutation_name} SERVER functions require SECURITY INVOKER"),
                     input.location.clone(),
                 ));
                 mode_is_valid = false;
@@ -905,7 +912,7 @@ fn check_server_functions(
             if input.transaction != Some(CatalogueFunctionTransaction::Atomic) {
                 diagnostics.push(DiagnosticCode::semantic(
                     DiagnosticCode::DomainIncompatible,
-                    "INSERT SERVER functions require TRANSACTION ATOMIC",
+                    format!("{mutation_name} SERVER functions require TRANSACTION ATOMIC"),
                     input.location.clone(),
                 ));
                 mode_is_valid = false;
@@ -913,7 +920,7 @@ fn check_server_functions(
             if input.volatility != CatalogueFunctionVolatility::Volatile {
                 diagnostics.push(DiagnosticCode::semantic(
                     DiagnosticCode::DomainIncompatible,
-                    "INSERT SERVER functions require VOLATILITY VOLATILE",
+                    format!("{mutation_name} SERVER functions require VOLATILITY VOLATILE"),
                     input.location.clone(),
                 ));
                 mode_is_valid = false;
@@ -924,7 +931,9 @@ fn check_server_functions(
             if columns.len() != 1 {
                 diagnostics.push(DiagnosticCode::semantic(
                     DiagnosticCode::TypeMismatch,
-                    "An INSERT SERVER function must declare exactly one column in RETURNS ROWS (...)",
+                    format!(
+                        "An {mutation_name} SERVER function must declare exactly one column in RETURNS ROWS (...)"
+                    ),
                     return_location.clone(),
                 ));
                 continue;
@@ -936,7 +945,9 @@ fn check_server_functions(
             else {
                 diagnostics.push(DiagnosticCode::semantic(
                     DiagnosticCode::TypeMismatch,
-                    "The RETURNS ROWS (...) column for an INSERT SERVER function must use REF",
+                    format!(
+                        "The RETURNS ROWS (...) column for an {mutation_name} SERVER function must use REF"
+                    ),
                     column.location.clone(),
                 ));
                 continue;
@@ -953,13 +964,26 @@ fn check_server_functions(
                     )
                 })
                 .collect::<Vec<_>>();
-            let mutation_check = match check_insert_in(
-                &insert_body.insert,
-                catalogue,
-                input.id,
-                &parameters,
-                input.location.logical_path(),
-            ) {
+            let checked_mutation = if let Some(insert_body) = input.body.as_sql_insert() {
+                check_insert_in(
+                    &insert_body.insert,
+                    catalogue,
+                    input.id,
+                    &parameters,
+                    input.location.logical_path(),
+                )
+            } else if let Some(update_body) = input.body.as_sql_update() {
+                check_update_in(
+                    &update_body.update,
+                    catalogue,
+                    input.id,
+                    &parameters,
+                    input.location.logical_path(),
+                )
+            } else {
+                continue;
+            };
+            let mutation_check = match checked_mutation {
                 Ok(mutation_check) => mutation_check,
                 Err(mutation_diagnostics) => {
                     diagnostics.extend(mutation_diagnostics);
@@ -970,7 +994,14 @@ fn check_server_functions(
             if declared_target != mutation_plan.returned_object() {
                 diagnostics.push(DiagnosticCode::semantic(
                     DiagnosticCode::TypeMismatch,
-                    "The returned REF must point to the object type being inserted",
+                    format!(
+                        "The returned REF must point to the object type being {}",
+                        if mutation_name == "INSERT" {
+                            "inserted"
+                        } else {
+                            "updated"
+                        }
+                    ),
                     column
                         .reference_location
                         .clone()
@@ -2802,6 +2833,145 @@ mod tests {
     }
 
     #[test]
+    fn checks_server_update_with_selector_and_exact_evidence_order() {
+        let source = "CREATE SCHEMA tasks; \
+            CREATE TYPE tasks.person AS OBJECT (name TEXT NOT NULL); \
+            CREATE TYPE tasks.task AS OBJECT (title TEXT NOT NULL, done BOOL NOT NULL, owner REF tasks.person); \
+            CREATE SERVER FUNCTION tasks.update(p_task REF tasks.task, p_title TEXT, p_owner REF tasks.person) \
+            RETURNS ROWS (updated REF tasks.task) TRANSACTION ATOMIC \
+            AS UPDATE tasks.task AS changed SET title = p_title, owner = p_owner \
+            WHERE REF(changed) = p_task RETURNING REF(changed);";
+        let report = check(&bundle([("functions.orna", source)]), &empty_catalogue());
+
+        assert!(
+            report.diagnostics().is_empty(),
+            "{:?}",
+            report.diagnostics()
+        );
+        let bundle = report.checked_bundle().unwrap();
+        let checked = &bundle.server_functions()[0];
+        let person = &bundle.object_types()[0];
+        let task = &bundle.object_types()[1];
+        let CheckedServerFunctionBody::Mutation(plan) = checked.body() else {
+            panic!("expected an UPDATE body");
+        };
+        let parameters = checked.parameters();
+        assert_eq!(
+            plan.operation(),
+            &crate::mutation::MutationOperation::Update {
+                selector_owner: checked.id(),
+                selector_parameter: parameters[0].id(),
+            }
+        );
+        assert_eq!(plan.target_object(), task.id());
+        assert_eq!(plan.returned_object(), task.id());
+        assert_eq!(plan.assignments().len(), 2);
+        assert_eq!(plan.assignments()[0].field(), task.fields()[0].id());
+        assert_eq!(plan.assignments()[1].field(), task.fields()[2].id());
+        assert_eq!(
+            checked
+                .references()
+                .iter()
+                .map(|reference| (reference.kind(), reference.target()))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    DefinitionReferenceKind::ObjectReference,
+                    CheckedDefinitionReferenceTarget::ObjectType(task.id()),
+                ),
+                (
+                    DefinitionReferenceKind::ObjectReference,
+                    CheckedDefinitionReferenceTarget::ObjectType(person.id()),
+                ),
+                (
+                    DefinitionReferenceKind::ObjectReference,
+                    CheckedDefinitionReferenceTarget::ObjectType(task.id()),
+                ),
+                (
+                    DefinitionReferenceKind::WriteObject,
+                    CheckedDefinitionReferenceTarget::ObjectType(task.id()),
+                ),
+                (
+                    DefinitionReferenceKind::WriteField,
+                    CheckedDefinitionReferenceTarget::Field {
+                        owner: task.id(),
+                        field: task.fields()[0].id(),
+                    },
+                ),
+                (
+                    DefinitionReferenceKind::ParameterRead,
+                    CheckedDefinitionReferenceTarget::Parameter {
+                        owner: checked.id(),
+                        parameter: parameters[1].id(),
+                    },
+                ),
+                (
+                    DefinitionReferenceKind::WriteField,
+                    CheckedDefinitionReferenceTarget::Field {
+                        owner: task.id(),
+                        field: task.fields()[2].id(),
+                    },
+                ),
+                (
+                    DefinitionReferenceKind::ParameterRead,
+                    CheckedDefinitionReferenceTarget::Parameter {
+                        owner: checked.id(),
+                        parameter: parameters[2].id(),
+                    },
+                ),
+                (
+                    DefinitionReferenceKind::ObjectReference,
+                    CheckedDefinitionReferenceTarget::ObjectType(task.id()),
+                ),
+                (
+                    DefinitionReferenceKind::ParameterRead,
+                    CheckedDefinitionReferenceTarget::Parameter {
+                        owner: checked.id(),
+                        parameter: parameters[0].id(),
+                    },
+                ),
+                (
+                    DefinitionReferenceKind::ObjectReference,
+                    CheckedDefinitionReferenceTarget::ObjectType(task.id()),
+                ),
+            ]
+        );
+        let token_span = |context: &str, prefix: &str, token: &str| {
+            let context_start = source.find(context).unwrap();
+            let start = context_start + prefix.len();
+            (start, start + token.len())
+        };
+        assert_eq!(
+            checked
+                .references()
+                .iter()
+                .map(|reference| {
+                    (
+                        reference.location().span().start(),
+                        reference.location().span().end(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                token_span("p_task REF tasks.task", "p_task REF ", "tasks.task"),
+                token_span("p_owner REF tasks.person", "p_owner REF ", "tasks.person"),
+                token_span("updated REF tasks.task", "updated REF ", "tasks.task"),
+                token_span("UPDATE tasks.task", "UPDATE ", "tasks.task"),
+                token_span("SET title", "SET ", "title"),
+                token_span("= p_title", "= ", "p_title"),
+                {
+                    let start = source.rfind(", owner").unwrap() + ", ".len();
+                    (start, start + "owner".len())
+                },
+                token_span("= p_owner", "= ", "p_owner"),
+                token_span("WHERE REF(changed)", "WHERE REF(", "changed"),
+                token_span("= p_task RETURNING", "= ", "p_task"),
+                token_span("RETURNING REF(changed)", "RETURNING REF(", "changed"),
+            ]
+        );
+    }
+
+    #[test]
     fn rejects_insert_return_and_execution_modes() {
         let prefix =
             "CREATE SCHEMA tasks; CREATE TYPE tasks.task AS OBJECT (title TEXT NOT NULL); ";
@@ -2903,6 +3073,71 @@ mod tests {
                 assert_eq!(diagnostic.location().span().end(), expected_end);
             }
         }
+    }
+
+    #[test]
+    fn rejects_update_return_target_and_execution_modes_exactly() {
+        let prefix = "CREATE SCHEMA tasks; \
+            CREATE TYPE tasks.task AS OBJECT (title TEXT NOT NULL); \
+            CREATE TYPE tasks.other AS OBJECT (title TEXT NOT NULL); ";
+        let wrong_modes = format!(
+            "{prefix}CREATE SERVER FUNCTION tasks.update(p_task REF tasks.task, p_title TEXT) \
+             RETURNS ROWS (updated REF tasks.task) SECURITY DEFINER TRANSACTION READ ONLY VOLATILITY STABLE \
+             AS UPDATE tasks.task AS changed SET title = p_title WHERE REF(changed) = p_task RETURNING REF(changed);"
+        );
+        let source_bundle =
+            SourceBundle::new([SourceUnit::new("functions.orna", &wrong_modes)]).unwrap();
+        let report = check(&source_bundle, &empty_catalogue());
+        assert_no_checked_bundle(&report);
+        assert_eq!(report.diagnostics().len(), 3);
+        assert_eq!(
+            report
+                .diagnostics()
+                .iter()
+                .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    DiagnosticCode::DomainIncompatible,
+                    "UPDATE SERVER functions require SECURITY INVOKER",
+                ),
+                (
+                    DiagnosticCode::DomainIncompatible,
+                    "UPDATE SERVER functions require TRANSACTION ATOMIC",
+                ),
+                (
+                    DiagnosticCode::DomainIncompatible,
+                    "UPDATE SERVER functions require VOLATILITY VOLATILE",
+                ),
+            ]
+        );
+        assert!(report.diagnostics().iter().all(|diagnostic| {
+            diagnostic.location().span().start()
+                == wrong_modes.rfind("CREATE SERVER FUNCTION").unwrap()
+                && diagnostic.location().span().end() == wrong_modes.len()
+        }));
+
+        let wrong_return = format!(
+            "{prefix}CREATE SERVER FUNCTION tasks.update(p_task REF tasks.task, p_title TEXT) \
+             RETURNS ROWS (updated REF tasks.other) TRANSACTION ATOMIC \
+             AS UPDATE tasks.task AS changed SET title = p_title WHERE REF(changed) = p_task RETURNING REF(changed);"
+        );
+        let source_bundle =
+            SourceBundle::new([SourceUnit::new("functions.orna", &wrong_return)]).unwrap();
+        let report = check(&source_bundle, &empty_catalogue());
+        assert_no_checked_bundle(&report);
+        assert_eq!(report.diagnostics().len(), 1);
+        assert_eq!(report.diagnostics()[0].code(), DiagnosticCode::TypeMismatch);
+        assert_eq!(
+            report.diagnostics()[0].message(),
+            "The returned REF must point to the object type being updated"
+        );
+        let start = wrong_return.rfind("tasks.other").unwrap();
+        assert_eq!(report.diagnostics()[0].location().span().start(), start);
+        assert_eq!(
+            report.diagnostics()[0].location().span().end(),
+            start + "tasks.other".len()
+        );
     }
 
     #[test]
