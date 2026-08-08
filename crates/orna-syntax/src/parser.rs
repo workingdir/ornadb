@@ -2,12 +2,13 @@ use rowan::{GreenNode, GreenNodeBuilder, Language};
 
 use crate::{
     CapabilitySpecification, Diagnostic, FieldRenameDeclaration, FunctionReturnType,
-    FunctionSecurity, FunctionTransaction, FunctionVolatility, InsertStatement, InsertValue,
+    FunctionSecurity, FunctionTransaction, FunctionVolatility, InsertStatement, MutationValue,
     NamePart, NullOrdering, ObjectFieldDeclaration, ObjectSource, ObjectTypeDeclaration,
     OnDeletePolicy, OrderingDirection, OrderingExpression, Parse, QualifiedName, QueryExpression,
     RowsColumnDeclaration, SchemaDeclaration, SelectQuery, ServerFunctionBody,
     ServerFunctionDeclaration, ServerFunctionParameter, SourceSlice, SourceSpan, SqlInsertBody,
-    SqlQueryBody, StandardLargeObjectKind, SyntaxTree, TypeSpecification,
+    SqlQueryBody, SqlUpdateBody, StandardLargeObjectKind, SyntaxTree, TypeSpecification,
+    UpdateAssignment, UpdateStatement,
     lexer::{Token, TokenKind, lex},
 };
 
@@ -44,6 +45,7 @@ pub(crate) enum SyntaxKind {
     CapabilityArguments,
     SqlInsertBody,
     AlterTypeRenameFieldStatement,
+    SqlUpdateBody,
 }
 
 impl From<SyntaxKind> for rowan::SyntaxKind {
@@ -90,6 +92,7 @@ impl Language for OrnaLanguage {
             27 => SyntaxKind::CapabilityArguments,
             28 => SyntaxKind::SqlInsertBody,
             29 => SyntaxKind::AlterTypeRenameFieldStatement,
+            30 => SyntaxKind::SqlUpdateBody,
             _ => panic!("unknown Orna syntax kind"),
         }
     }
@@ -870,8 +873,11 @@ impl<'source> Parser<'source> {
 
     fn parse_server_function_body(&mut self) -> Option<ServerFunctionBody> {
         let is_insert = self.current().is_some_and(|token| token.is_word("INSERT"));
+        let is_update = self.current().is_some_and(|token| token.is_word("UPDATE"));
         let syntax_kind = if is_insert {
             SyntaxKind::SqlInsertBody
+        } else if is_update {
+            SyntaxKind::SqlUpdateBody
         } else {
             SyntaxKind::SqlQueryBody
         };
@@ -880,6 +886,8 @@ impl<'source> Parser<'source> {
             let (source, (body_token_start, body_token_end)) =
                 self.collect_sql_body(if is_insert {
                     "expected a SQL INSERT after AS"
+                } else if is_update {
+                    "expected an UPDATE after AS"
                 } else {
                     "expected a SQL query after AS"
                 })?;
@@ -899,6 +907,22 @@ impl<'source> Parser<'source> {
                 Some(ServerFunctionBody::SqlInsert(SqlInsertBody {
                     source,
                     insert,
+                }))
+            } else if is_update {
+                let update = match parse_sql_update(body_tokens) {
+                    Ok(update) => update,
+                    Err(error) => {
+                        self.diagnostics.push(Diagnostic {
+                            code: error.code,
+                            message: error.message,
+                            span: error.span,
+                        });
+                        return None;
+                    }
+                };
+                Some(ServerFunctionBody::SqlUpdate(SqlUpdateBody {
+                    source,
+                    update,
                 }))
             } else {
                 let query = match parse_select_query(body_tokens) {
@@ -1478,6 +1502,7 @@ struct QueryParseError {
 enum SqlBodySyntax {
     Select,
     Insert,
+    Update,
 }
 
 struct SqlBodyParser<'tokens, 'source> {
@@ -1766,13 +1791,8 @@ impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
             return Err(self.expected("INTO after INSERT"));
         }
         self.skip_trivia();
-        let target_object = self.parse_qualified_name("an object type after INSERT INTO")?;
-        self.skip_trivia();
-        if self.take_word("AS").is_none() {
-            return Err(self.expected("mandatory AS before the INSERT target alias"));
-        }
-        self.skip_trivia();
-        let target_alias = self.parse_name_part("an INSERT target alias after AS")?;
+        let (target_object, target_alias) =
+            self.parse_aliased_mutation_target("INSERT", "INSERT INTO")?;
 
         self.skip_trivia();
         self.take_kind(TokenKind::LeftParenthesis)
@@ -1841,7 +1861,10 @@ impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
         }
         let mut values = Vec::new();
         loop {
-            values.push(self.parse_value()?);
+            values.push(self.parse_mutation_value(
+                "use the declared parameter name by itself in VALUES; do not add an object or alias",
+                "function calls in INSERT values",
+            )?);
             self.skip_trivia();
             if self.take_kind(TokenKind::Comma).is_some() {
                 self.skip_trivia();
@@ -1859,7 +1882,7 @@ impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
             if values.len() != target_fields.len() {
                 let arity_span = values
                     .get(target_fields.len())
-                    .map(InsertValue::span)
+                    .map(MutationValue::span)
                     .cloned()
                     .unwrap_or_else(|| close.span());
                 return Err(QueryParseError {
@@ -1882,7 +1905,10 @@ impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
         }
 
         self.skip_trivia();
-        if self.take_word("RETURNING").is_none() {
+        if !self
+            .current()
+            .is_some_and(|token| token.is_word("RETURNING"))
+        {
             if self.current().is_some_and(|token| {
                 token.kind == TokenKind::LeftParenthesis || token.kind == TokenKind::Comma
             }) {
@@ -1891,30 +1917,7 @@ impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
             }
             return Err(self.expected("RETURNING after one VALUES row"));
         }
-        self.skip_trivia();
-        if self.take_word("REF").is_none() {
-            return Err(self.expected("REF in the RETURNING expression"));
-        }
-        self.skip_trivia();
-        self.take_kind(TokenKind::LeftParenthesis)
-            .ok_or_else(|| self.expected("'(' after RETURNING REF"))?;
-        self.skip_trivia();
-        let returning_alias = self.parse_name_part("the alias inside RETURNING REF(...)")?;
-        if !identifiers_equal(&target_alias, &returning_alias) {
-            return Err(QueryParseError {
-                code: "ORNA0001",
-                message: format!(
-                    "RETURNING REF must use the INSERT target alias {}, not {}",
-                    normalise_identifier(&target_alias),
-                    normalise_identifier(&returning_alias)
-                ),
-                span: returning_alias.span.clone(),
-            });
-        }
-        self.skip_trivia();
-        let close = self
-            .take_kind(TokenKind::RightParenthesis)
-            .ok_or_else(|| self.expected("')' after the RETURNING REF alias"))?;
+        let (returning_alias, close) = self.parse_returning_ref(&target_alias, "INSERT")?;
         self.skip_trivia();
         if self.current().is_some() {
             return Err(self.implementation_gap(
@@ -1936,9 +1939,13 @@ impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
         })
     }
 
-    fn parse_value(&mut self) -> Result<InsertValue, QueryParseError> {
+    fn parse_mutation_value(
+        &mut self,
+        qualified_name_message: &str,
+        function_call_feature: &str,
+    ) -> Result<MutationValue, QueryParseError> {
         if let Some(token) = self.take_word("TRUE") {
-            return Ok(InsertValue::BooleanLiteral {
+            return Ok(MutationValue::BooleanLiteral {
                 value: true,
                 source: SourceSlice {
                     text: token.text.to_owned(),
@@ -1947,7 +1954,7 @@ impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
             });
         }
         if let Some(token) = self.take_word("FALSE") {
-            return Ok(InsertValue::BooleanLiteral {
+            return Ok(MutationValue::BooleanLiteral {
                 value: false,
                 source: SourceSlice {
                     text: token.text.to_owned(),
@@ -1956,7 +1963,7 @@ impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
             });
         }
         if let Some(token) = self.take_word("NULL") {
-            return Ok(InsertValue::NullLiteral {
+            return Ok(MutationValue::NullLiteral {
                 source: SourceSlice {
                     text: token.text.to_owned(),
                     span: token.span(),
@@ -1973,7 +1980,130 @@ impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
             let dot = self.current().expect("dot exists");
             return Err(QueryParseError {
                 code: "ORNA0001",
-                message: "use the declared parameter name by itself in VALUES; do not add an object or alias".to_owned(),
+                message: qualified_name_message.to_owned(),
+                span: dot.span(),
+            });
+        }
+        if self
+            .current()
+            .is_some_and(|token| token.kind == TokenKind::LeftParenthesis)
+        {
+            return Err(self
+                .implementation_gap(function_call_feature, "a declared parameter name by itself"));
+        }
+        Ok(MutationValue::Parameter(name))
+    }
+}
+
+impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
+    fn parse_update(mut self) -> Result<UpdateStatement, QueryParseError> {
+        let update = self
+            .take_word("UPDATE")
+            .ok_or_else(|| self.expected("UPDATE"))?;
+        self.skip_trivia();
+        let (target_object, target_alias) =
+            self.parse_aliased_mutation_target("UPDATE", "UPDATE")?;
+        self.skip_trivia();
+        if self.take_word("SET").is_none() {
+            return Err(self.expected("SET after the UPDATE target alias"));
+        }
+        self.skip_trivia();
+
+        let mut assignments = Vec::new();
+        loop {
+            if self.current().is_some_and(|token| token.is_word("WHERE")) {
+                return Err(self.expected("at least one field assignment after SET"));
+            }
+            let target_field = self.parse_name_part("a field name after SET")?;
+            if assignments.iter().any(|assignment: &UpdateAssignment| {
+                identifiers_equal(&assignment.target_field, &target_field)
+            }) {
+                return Err(QueryParseError {
+                    code: "ORNA0001",
+                    message: format!(
+                        "field {} appears more than once in this UPDATE",
+                        normalise_identifier(&target_field)
+                    ),
+                    span: target_field.span.clone(),
+                });
+            }
+            self.skip_trivia();
+            if let Some(dot) = self.take_kind(TokenKind::Dot) {
+                return Err(QueryParseError {
+                    code: "ORNA0001",
+                    message: "write only the field name in SET; do not add an object or alias"
+                        .to_owned(),
+                    span: dot.span(),
+                });
+            }
+            if self.take_symbol("=").is_none() {
+                return Err(self.expected("'=' after the UPDATE field name"));
+            }
+            self.skip_trivia();
+            let value = self.parse_mutation_value(
+                "use the declared parameter name by itself after '='; do not add an object or alias",
+                "function calls in UPDATE values",
+            )?;
+            let assignment_span = SourceSpan {
+                start: target_field.span.start,
+                end: value.span().end,
+            };
+            assignments.push(UpdateAssignment {
+                target_field,
+                value,
+                span: assignment_span,
+            });
+            self.skip_trivia();
+            if self.take_kind(TokenKind::Comma).is_some() {
+                self.skip_trivia();
+                if self.current().is_some_and(|token| token.is_word("WHERE")) {
+                    return Err(self.expected("a field assignment after ','"));
+                }
+                continue;
+            }
+            break;
+        }
+
+        if self.take_word("WHERE").is_none() {
+            return Err(self.expected("WHERE after the UPDATE assignments"));
+        }
+        self.skip_trivia();
+        if self.take_word("REF").is_none() {
+            return Err(self.expected("REF(target_alias) after WHERE"));
+        }
+        self.skip_trivia();
+        self.take_kind(TokenKind::LeftParenthesis)
+            .ok_or_else(|| self.expected("'(' after WHERE REF"))?;
+        self.skip_trivia();
+        let selector_alias = self.parse_name_part("the alias inside WHERE REF(...)")?;
+        if !identifiers_equal(&target_alias, &selector_alias) {
+            return Err(alias_mismatch(
+                "WHERE REF",
+                &target_alias,
+                &selector_alias,
+                "UPDATE",
+            ));
+        }
+        self.skip_trivia();
+        self.take_kind(TokenKind::RightParenthesis)
+            .ok_or_else(|| self.expected("')' after the WHERE REF alias"))?;
+        self.skip_trivia();
+        if self.take_symbol("=").is_none() {
+            return Err(self.expected("'=' after WHERE REF(target_alias)"));
+        }
+        self.skip_trivia();
+        if self.current().is_some_and(|token| {
+            token.is_word("TRUE") || token.is_word("FALSE") || token.is_word("NULL")
+        }) {
+            return Err(self.expected("a declared REF parameter after '='"));
+        }
+        let selector_parameter = self.parse_name_part("a declared REF parameter after '='")?;
+        self.skip_trivia();
+        if let Some(dot) = self.take_kind(TokenKind::Dot) {
+            return Err(QueryParseError {
+                code: "ORNA0001",
+                message: "use the selector parameter name by itself after '='; do not add an object or alias"
+                    .to_owned(),
                 span: dot.span(),
             });
         }
@@ -1982,21 +2112,95 @@ impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
             .is_some_and(|token| token.kind == TokenKind::LeftParenthesis)
         {
             return Err(self.implementation_gap(
-                "function calls in INSERT values",
-                "a declared parameter name by itself",
+                "function calls as UPDATE selectors",
+                "a declared REF parameter name by itself",
             ));
         }
-        Ok(InsertValue::Parameter(name))
+
+        if !self
+            .current()
+            .is_some_and(|token| token.is_word("RETURNING"))
+        {
+            return Err(self.expected("RETURNING after the UPDATE selector"));
+        }
+        let (returning_alias, close) = self.parse_returning_ref(&target_alias, "UPDATE")?;
+        self.skip_trivia();
+        if self.current().is_some() {
+            return Err(self.implementation_gap(
+                self.current().expect("current token exists").text,
+                "the end of the UPDATE body",
+            ));
+        }
+
+        Ok(UpdateStatement {
+            target_object,
+            target_alias,
+            assignments,
+            selector_alias,
+            selector_parameter,
+            returning_alias,
+            span: SourceSpan {
+                start: update.range.start,
+                end: close.range.end,
+            },
+        })
     }
 }
 
 impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
+    fn parse_aliased_mutation_target(
+        &mut self,
+        statement: &str,
+        after: &str,
+    ) -> Result<(QualifiedName, NamePart), QueryParseError> {
+        let target_object = self.parse_qualified_name(&format!("an object type after {after}"))?;
+        self.skip_trivia();
+        if self.take_word("AS").is_none() {
+            return Err(self.expected(&format!("AS before the {statement} target alias")));
+        }
+        self.skip_trivia();
+        let target_alias = self.parse_name_part(&format!("a {statement} target alias after AS"))?;
+        Ok((target_object, target_alias))
+    }
+
+    fn parse_returning_ref(
+        &mut self,
+        target_alias: &NamePart,
+        statement: &str,
+    ) -> Result<(NamePart, Token<'source>), QueryParseError> {
+        self.take_word("RETURNING")
+            .ok_or_else(|| self.expected("RETURNING"))?;
+        self.skip_trivia();
+        if self.take_word("REF").is_none() {
+            return Err(self.expected("REF in the RETURNING expression"));
+        }
+        self.skip_trivia();
+        self.take_kind(TokenKind::LeftParenthesis)
+            .ok_or_else(|| self.expected("'(' after RETURNING REF"))?;
+        self.skip_trivia();
+        let returning_alias = self.parse_name_part("the alias inside RETURNING REF(...)")?;
+        if !identifiers_equal(target_alias, &returning_alias) {
+            return Err(alias_mismatch(
+                "RETURNING REF",
+                target_alias,
+                &returning_alias,
+                statement,
+            ));
+        }
+        self.skip_trivia();
+        let close = self
+            .take_kind(TokenKind::RightParenthesis)
+            .ok_or_else(|| self.expected("')' after the RETURNING REF alias"))?;
+        Ok((returning_alias, close))
+    }
+
     fn parse_qualified_name(&mut self, expected: &str) -> Result<QualifiedName, QueryParseError> {
         let first = self.parse_name_part(expected)?;
         let mut parts = vec![first.clone()];
         let after_dot = match self.syntax {
             SqlBodySyntax::Select => "an identifier after '.' in an object type",
             SqlBodySyntax::Insert => "an identifier after '.' in the INSERT target",
+            SqlBodySyntax::Update => "an identifier after '.' in the UPDATE target",
         };
         loop {
             self.skip_trivia();
@@ -2050,6 +2254,16 @@ impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
         }
     }
 
+    fn take_symbol(&mut self, symbol: &str) -> Option<Token<'source>> {
+        let token = self.current().cloned()?;
+        if token.kind == TokenKind::Other && token.text == symbol {
+            self.index += 1;
+            Some(token)
+        } else {
+            None
+        }
+    }
+
     fn skip_trivia(&mut self) {
         while self.current().is_some_and(|token| token.kind.is_trivia()) {
             self.index += 1;
@@ -2074,6 +2288,7 @@ impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
         let context = match self.syntax {
             SqlBodySyntax::Select => "SELECT query",
             SqlBodySyntax::Insert => "SQL INSERT body",
+            SqlBodySyntax::Update => "UPDATE body",
         };
         QueryParseError {
             code: "ORNA0001",
@@ -2090,6 +2305,9 @@ impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
             SqlBodySyntax::Insert => {
                 format!("this INSERT does not support {feature}; expected {expected}")
             }
+            SqlBodySyntax::Update => {
+                format!("this UPDATE does not support {feature}; expected {expected}")
+            }
         };
         QueryParseError {
             code: "ORNA0001",
@@ -2101,6 +2319,23 @@ impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
 
 fn identifiers_equal(left: &NamePart, right: &NamePart) -> bool {
     normalise_identifier(left) == normalise_identifier(right)
+}
+
+fn alias_mismatch(
+    expression: &str,
+    expected: &NamePart,
+    actual: &NamePart,
+    statement: &str,
+) -> QueryParseError {
+    QueryParseError {
+        code: "ORNA0001",
+        message: format!(
+            "{expression} must use the {statement} target alias {}, not {}",
+            normalise_identifier(expected),
+            normalise_identifier(actual)
+        ),
+        span: actual.span.clone(),
+    }
 }
 
 fn normalise_identifier(identifier: &NamePart) -> String {
@@ -2116,4 +2351,8 @@ fn normalise_identifier(identifier: &NamePart) -> String {
 
 fn parse_sql_insert(tokens: &[Token<'_>]) -> Result<InsertStatement, QueryParseError> {
     SqlBodyParser::new(tokens, SqlBodySyntax::Insert).parse_insert()
+}
+
+fn parse_sql_update(tokens: &[Token<'_>]) -> Result<UpdateStatement, QueryParseError> {
+    SqlBodyParser::new(tokens, SqlBodySyntax::Update).parse_update()
 }
