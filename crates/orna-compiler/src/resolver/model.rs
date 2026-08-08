@@ -9,7 +9,11 @@ use orna_core::{
     types::{ResolvedType, StandardScalar},
 };
 
-use crate::{CompilerDiagnostic, ParseReport, SourceLocation, relational::RelationalQueryIr};
+use crate::{
+    CompilerDiagnostic, ParseReport, SourceLocation,
+    mutation::{MutationCatalogue, MutationField},
+    relational::RelationalQueryIr,
+};
 
 use super::{
     CheckedExpressionId, CheckedFieldId, CheckedFunctionId, CheckedParameterId, CheckedSchemaId,
@@ -292,6 +296,33 @@ where
         self.field_indices_by_id
             .get(&(owner, id))
             .map(|(type_index, field_index)| self.object_types[*type_index].fields[*field_index].1)
+    }
+}
+
+impl<T, F> MutationCatalogue<T, F> for ResolutionCatalogue<T, F>
+where
+    T: Copy + Eq + Hash,
+    F: Copy + Eq + Hash,
+{
+    fn object_type_id_by_name(&self, name: &QualifiedSemanticName) -> Option<T> {
+        QueryCatalogue::object_type_id_by_name(self, name)
+    }
+
+    fn field_by_name(&self, owner: T, name: &str) -> Option<MutationField<T, F>> {
+        QueryCatalogue::field_by_name(self, owner, name)
+            .map(|field| MutationField::new(field.id(), field.semantic_type(), field.nullable()))
+    }
+
+    fn visit_fields(&self, owner: T, visitor: &mut dyn FnMut(&str, MutationField<T, F>)) {
+        let Some(index) = self.object_type_indices_by_id.get(&owner) else {
+            return;
+        };
+        for (name, field) in &self.object_types[*index].fields {
+            visitor(
+                name,
+                MutationField::new(field.id(), field.semantic_type(), field.nullable()),
+            );
+        }
     }
 }
 
@@ -810,7 +841,23 @@ impl CheckedDefinitionReference {
     }
 }
 
-/// A checked SERVER function with an Orna-owned relational execution plan.
+/// A checked SERVER function body with its source-free execution plan.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum CheckedServerFunctionBody {
+    /// A checked relational query body.
+    Query(RelationalQueryIr<CheckedTypeId, CheckedFieldId>),
+    /// A checked single-row insert body.
+    Mutation(
+        crate::mutation::MutationPlanIr<
+            CheckedTypeId,
+            CheckedFieldId,
+            CheckedFunctionId,
+            CheckedParameterId,
+        >,
+    ),
+}
+
+/// A checked SERVER function with an Orna-owned execution plan.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CheckedServerFunction {
     pub(super) id: CheckedFunctionId,
@@ -821,7 +868,7 @@ pub struct CheckedServerFunction {
     pub(super) transaction: Option<orna_core::catalogue::FunctionTransaction>,
     pub(super) volatility: orna_core::catalogue::FunctionVolatility,
     pub(super) location: SourceLocation,
-    pub(super) plan: RelationalQueryIr<CheckedTypeId, CheckedFieldId>,
+    pub(super) body: CheckedServerFunctionBody,
     pub(super) references: Vec<CheckedDefinitionReference>,
 }
 
@@ -871,15 +918,18 @@ impl CheckedServerFunction {
         &self.references
     }
 
+    /// Returns the checked source-free function body.
+    pub(crate) fn body(&self) -> &CheckedServerFunctionBody {
+        &self.body
+    }
+
     /// Returns the checked relational query when the function has a `SELECT` body.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn query_plan(&self) -> Option<&RelationalQueryIr<CheckedTypeId, CheckedFieldId>> {
-        Some(&self.plan)
-    }
-
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn plan(&self) -> &RelationalQueryIr<CheckedTypeId, CheckedFieldId> {
-        &self.plan
+        match &self.body {
+            CheckedServerFunctionBody::Query(plan) => Some(plan),
+            CheckedServerFunctionBody::Mutation(_) => None,
+        }
     }
 }
 

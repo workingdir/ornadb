@@ -17,7 +17,7 @@ pub use model::{
     CheckedServerFunction, CheckedServerFunctionParameter, CheckedServerFunctionReturnColumn,
     ConstantValue, SemanticType,
 };
-pub(crate) use model::{QueryCatalogue, QueryField};
+pub(crate) use model::{CheckedServerFunctionBody, QueryCatalogue, QueryField};
 
 use std::collections::{HashMap, HashSet};
 
@@ -40,6 +40,7 @@ use orna_syntax::{
     StandardLargeObjectKind, TypeSpecification,
 };
 
+use crate::mutation::{MutationParameter, MutationReference, check_insert_in};
 use crate::relational::{QueryReference, QueryReferenceKind, QueryReferenceTarget, check_query_in};
 use crate::{
     CompilerDiagnostic, DiagnosticCode, ParseReport, SourceLocation,
@@ -84,6 +85,7 @@ struct ResolvedServerFunctionParameter {
     name: String,
     ordinal: u32,
     semantic_type: SemanticType<CheckedTypeId>,
+    name_span: SourceSpan,
     location: SourceLocation,
     reference_location: Option<SourceLocation>,
 }
@@ -470,6 +472,7 @@ fn resolve_server_function_inputs<'a>(
                 name: parameter_name,
                 ordinal: parameter.order as u32,
                 semantic_type,
+                name_span: parameter.name.span.clone(),
                 location: location(header.logical_path, &parameter.span),
                 reference_location: reference_location(
                     &parameter.type_specification,
@@ -613,18 +616,11 @@ fn check_server_functions(
     let mut functions = Vec::with_capacity(inputs.len());
 
     for input in inputs {
-        let ResolvedServerFunctionReturn::Rows { columns, location } = &input.return_type else {
-            let ResolvedServerFunctionReturn::Single { location } = &input.return_type else {
-                unreachable!("SERVER function return resolution has two variants")
-            };
-            diagnostics.push(DiagnosticCode::semantic(
-                DiagnosticCode::TypeMismatch,
-                "SELECT SERVER functions require RETURNS ROWS (...)",
-                location.clone(),
-            ));
-            continue;
-        };
-        let Some(body) = input.body.as_sql_query() else {
+        let body_name = if input.body.as_sql_query().is_some() {
+            "SELECT"
+        } else if input.body.as_sql_insert().is_some() {
+            "INSERT"
+        } else {
             diagnostics.push(DiagnosticCode::semantic(
                 DiagnosticCode::DomainIncompatible,
                 "SERVER function body is not supported by this compiler",
@@ -632,83 +628,173 @@ fn check_server_functions(
             ));
             continue;
         };
-        let query_check =
-            match check_query_in(&body.query, catalogue, input.location.logical_path()) {
-                Ok(query_check) => query_check,
-                Err(query_diagnostics) => {
-                    diagnostics.extend(query_diagnostics);
-                    continue;
-                }
-            };
-        let plan = query_check.plan();
+        let (columns, return_location) = match &input.return_type {
+            ResolvedServerFunctionReturn::Rows { columns, location } => (columns, location),
+            ResolvedServerFunctionReturn::Single { location } => {
+                diagnostics.push(DiagnosticCode::semantic(
+                    DiagnosticCode::TypeMismatch,
+                    format!("{body_name} SERVER functions require RETURNS ROWS (...)"),
+                    location.clone(),
+                ));
+                continue;
+            }
+        };
 
-        if plan.projections().len() != columns.len() {
-            diagnostics.push(DiagnosticCode::semantic(
-                DiagnosticCode::TypeMismatch,
-                format!(
-                    "SELECT projection count {} does not match RETURNS ROWS column count {}",
-                    plan.projections().len(),
-                    columns.len()
-                ),
-                location.clone(),
-            ));
-            continue;
-        }
-
-        let mut matches_return = true;
-        for (projection, column) in plan.projections().iter().zip(columns) {
-            if projection.value_type().semantic_type() != column.semantic_type {
+        let (body, body_references) = if let Some(query_body) = input.body.as_sql_query() {
+            let query_check =
+                match check_query_in(&query_body.query, catalogue, input.location.logical_path()) {
+                    Ok(query_check) => query_check,
+                    Err(query_diagnostics) => {
+                        diagnostics.extend(query_diagnostics);
+                        continue;
+                    }
+                };
+            let plan = query_check.plan();
+            if plan.projections().len() != columns.len() {
                 diagnostics.push(DiagnosticCode::semantic(
                     DiagnosticCode::TypeMismatch,
                     format!(
-                        "SELECT projection {} type does not match RETURNS ROWS column {}",
-                        column.ordinal + 1,
-                        column.name
+                        "SELECT projection count {} does not match RETURNS ROWS column count {}",
+                        plan.projections().len(),
+                        columns.len()
                     ),
+                    return_location.clone(),
+                ));
+                continue;
+            }
+
+            let mut matches_return = true;
+            for (projection, column) in plan.projections().iter().zip(columns) {
+                if projection.value_type().semantic_type() != column.semantic_type {
+                    diagnostics.push(DiagnosticCode::semantic(
+                        DiagnosticCode::TypeMismatch,
+                        format!(
+                            "SELECT projection {} type does not match RETURNS ROWS column {}",
+                            column.ordinal + 1,
+                            column.name
+                        ),
+                        column.location.clone(),
+                    ));
+                    matches_return = false;
+                }
+            }
+            if !matches_return {
+                continue;
+            }
+            (
+                CheckedServerFunctionBody::Query(plan.clone()),
+                query_check
+                    .references()
+                    .iter()
+                    .map(query_reference)
+                    .collect::<Vec<_>>(),
+            )
+        } else if let Some(insert_body) = input.body.as_sql_insert() {
+            let mut mode_is_valid = true;
+            if input.security != CatalogueFunctionSecurity::Invoker {
+                diagnostics.push(DiagnosticCode::semantic(
+                    DiagnosticCode::DomainIncompatible,
+                    "INSERT SERVER functions require SECURITY INVOKER",
+                    input.location.clone(),
+                ));
+                mode_is_valid = false;
+            }
+            if input.transaction != Some(CatalogueFunctionTransaction::Atomic) {
+                diagnostics.push(DiagnosticCode::semantic(
+                    DiagnosticCode::DomainIncompatible,
+                    "INSERT SERVER functions require TRANSACTION ATOMIC",
+                    input.location.clone(),
+                ));
+                mode_is_valid = false;
+            }
+            if input.volatility != CatalogueFunctionVolatility::Volatile {
+                diagnostics.push(DiagnosticCode::semantic(
+                    DiagnosticCode::DomainIncompatible,
+                    "INSERT SERVER functions require VOLATILITY VOLATILE",
+                    input.location.clone(),
+                ));
+                mode_is_valid = false;
+            }
+            if !mode_is_valid {
+                continue;
+            }
+            if columns.len() != 1 {
+                diagnostics.push(DiagnosticCode::semantic(
+                    DiagnosticCode::TypeMismatch,
+                    "INSERT SERVER functions require exactly one RETURNS ROWS column",
+                    return_location.clone(),
+                ));
+                continue;
+            }
+            let column = &columns[0];
+            let SemanticType::Reference {
+                target: declared_target,
+            } = column.semantic_type
+            else {
+                diagnostics.push(DiagnosticCode::semantic(
+                    DiagnosticCode::TypeMismatch,
+                    "INSERT SERVER functions require a REF return column",
                     column.location.clone(),
                 ));
-                matches_return = false;
-            }
-        }
-        if !matches_return {
-            continue;
-        }
-
-        let mut references = signature_references(&input.parameters, columns);
-        references.extend(query_check.references().iter().map(query_reference));
-
-        functions.push(CheckedServerFunction {
-            id: input.id,
-            name: input.name.clone(),
-            parameters: input
+                continue;
+            };
+            let parameters = input
                 .parameters
                 .iter()
-                .cloned()
-                .map(|parameter| CheckedServerFunctionParameter {
-                    id: parameter.id,
-                    name: parameter.name,
-                    ordinal: parameter.ordinal,
-                    semantic_type: parameter.semantic_type,
-                    location: parameter.location,
+                .map(|parameter| {
+                    MutationParameter::new(
+                        parameter.name.clone(),
+                        parameter.id,
+                        parameter.semantic_type,
+                        parameter.name_span.clone(),
+                    )
                 })
-                .collect(),
-            return_columns: columns
-                .iter()
-                .cloned()
-                .map(|column| CheckedServerFunctionReturnColumn {
-                    name: column.name,
-                    ordinal: column.ordinal,
-                    semantic_type: column.semantic_type,
-                    location: column.location,
-                })
-                .collect(),
-            security: input.security,
-            transaction: input.transaction,
-            volatility: input.volatility,
-            location: input.location.clone(),
-            plan: plan.clone(),
-            references,
-        });
+                .collect::<Vec<_>>();
+            let mutation_check = match check_insert_in(
+                &insert_body.insert,
+                catalogue,
+                input.id,
+                &parameters,
+                input.location.logical_path(),
+            ) {
+                Ok(mutation_check) => mutation_check,
+                Err(mutation_diagnostics) => {
+                    diagnostics.extend(mutation_diagnostics);
+                    continue;
+                }
+            };
+            let mutation_plan = mutation_check.plan();
+            if declared_target != mutation_plan.returned_object() {
+                diagnostics.push(DiagnosticCode::semantic(
+                    DiagnosticCode::TypeMismatch,
+                    "INSERT return REF target does not match the returned object",
+                    column
+                        .reference_location
+                        .clone()
+                        .unwrap_or_else(|| column.location.clone()),
+                ));
+                continue;
+            }
+            (
+                CheckedServerFunctionBody::Mutation(mutation_plan.clone()),
+                mutation_check
+                    .references()
+                    .iter()
+                    .map(mutation_reference)
+                    .collect(),
+            )
+        } else {
+            diagnostics.push(DiagnosticCode::semantic(
+                DiagnosticCode::DomainIncompatible,
+                "SERVER function body is not supported by this compiler",
+                input.location.clone(),
+            ));
+            continue;
+        };
+
+        let mut references = signature_references(&input.parameters, columns);
+        references.extend(body_references);
+        functions.push(checked_server_function(input, columns, body, references));
     }
 
     if diagnostics.len() != diagnostics_before {
@@ -716,6 +802,46 @@ fn check_server_functions(
     }
 
     functions
+}
+
+fn checked_server_function(
+    input: &ResolvedServerFunctionInput<'_>,
+    columns: &[ResolvedServerFunctionReturnColumn],
+    body: CheckedServerFunctionBody,
+    references: Vec<CheckedDefinitionReference>,
+) -> CheckedServerFunction {
+    CheckedServerFunction {
+        id: input.id,
+        name: input.name.clone(),
+        parameters: input
+            .parameters
+            .iter()
+            .cloned()
+            .map(|parameter| CheckedServerFunctionParameter {
+                id: parameter.id,
+                name: parameter.name,
+                ordinal: parameter.ordinal,
+                semantic_type: parameter.semantic_type,
+                location: parameter.location,
+            })
+            .collect(),
+        return_columns: columns
+            .iter()
+            .cloned()
+            .map(|column| CheckedServerFunctionReturnColumn {
+                name: column.name,
+                ordinal: column.ordinal,
+                semantic_type: column.semantic_type,
+                location: column.location,
+            })
+            .collect(),
+        security: input.security,
+        transaction: input.transaction,
+        volatility: input.volatility,
+        location: input.location.clone(),
+        body,
+        references,
+    }
 }
 
 fn checked_query_catalogue(
@@ -794,6 +920,47 @@ fn query_reference(
             DefinitionReferenceKind::QueryField,
         ),
         _ => unreachable!("relational query evidence has an invalid kind and target pair"),
+    };
+    CheckedDefinitionReference {
+        target,
+        kind,
+        location: reference.location().clone(),
+    }
+}
+
+fn mutation_reference(
+    reference: &MutationReference<
+        CheckedTypeId,
+        CheckedFieldId,
+        CheckedFunctionId,
+        CheckedParameterId,
+    >,
+) -> CheckedDefinitionReference {
+    let (target, kind) = match reference {
+        MutationReference::WriteObject { object_type, .. } => (
+            CheckedDefinitionReferenceTarget::ObjectType(*object_type),
+            DefinitionReferenceKind::WriteObject,
+        ),
+        MutationReference::WriteField { owner, field, .. } => (
+            CheckedDefinitionReferenceTarget::Field {
+                owner: *owner,
+                field: *field,
+            },
+            DefinitionReferenceKind::WriteField,
+        ),
+        MutationReference::ParameterRead {
+            owner, parameter, ..
+        } => (
+            CheckedDefinitionReferenceTarget::Parameter {
+                owner: *owner,
+                parameter: *parameter,
+            },
+            DefinitionReferenceKind::ParameterRead,
+        ),
+        MutationReference::ObjectReference { object_type, .. } => (
+            CheckedDefinitionReferenceTarget::ObjectType(*object_type),
+            DefinitionReferenceKind::ObjectReference,
+        ),
     };
     CheckedDefinitionReference {
         target,
@@ -1032,7 +1199,8 @@ mod tests {
     use crate::relational::ExpressionKind;
 
     use super::{
-        CheckedDefinitionReferenceTarget, ConstantValue, DiagnosticCode, SemanticType, check,
+        CheckedDefinitionReferenceTarget, CheckedServerFunctionBody, ConstantValue, DiagnosticCode,
+        SemanticType, check,
     };
 
     fn empty_catalogue() -> CatalogueSnapshot {
@@ -1610,7 +1778,9 @@ mod tests {
         let checked = report.checked_bundle().unwrap();
         let task = &checked.object_types()[0];
         let title = &task.fields()[0];
-        let plan = checked.server_functions()[0].plan();
+        let plan = checked.server_functions()[0]
+            .query_plan()
+            .expect("fixture has a SELECT body");
         assert_eq!(plan.scan().object_type(), task.id());
         let ExpressionKind::FieldPath { steps, .. } = plan.projections()[0].kind() else {
             panic!("expected a field projection");
@@ -1950,8 +2120,279 @@ mod tests {
         assert_eq!(checked.volatility(), FunctionVolatility::Stable);
         assert_eq!(checked.parameters().len(), 1);
         assert_eq!(checked.return_columns().len(), 2);
-        assert_eq!(checked.plan().projections().len(), 2);
-        assert!(checked.plan().selection().is_some());
+        let plan = checked.query_plan().expect("fixture has a SELECT body");
+        assert_eq!(plan.projections().len(), 2);
+        assert!(plan.selection().is_some());
+    }
+
+    #[test]
+    fn checks_server_insert_with_exact_body_identities_and_evidence() {
+        let source = "CREATE SCHEMA tasks; \
+            CREATE TYPE tasks.person AS OBJECT (name TEXT NOT NULL); \
+            CREATE TYPE tasks.task AS OBJECT (title TEXT NOT NULL, done BOOL NOT NULL, note TEXT, owner REF tasks.person); \
+            CREATE SERVER FUNCTION tasks.create(p_title TEXT, p_unused INT, p_owner REF tasks.person) \
+            RETURNS ROWS (result REF tasks.task) TRANSACTION ATOMIC \
+            AS INSERT INTO tasks.task AS created (title, done, note, owner) \
+            VALUES (p_title, FALSE, NULL, p_owner) RETURNING REF(created);";
+        let report = check(&bundle([("functions.orna", source)]), &empty_catalogue());
+
+        assert!(report.diagnostics().is_empty());
+        let checked = &report.checked_bundle().unwrap().server_functions()[0];
+        assert!(checked.query_plan().is_none());
+        let task = &report.checked_bundle().unwrap().object_types()[1];
+        let person = &report.checked_bundle().unwrap().object_types()[0];
+        let CheckedServerFunctionBody::Mutation(plan) = checked.body() else {
+            panic!("expected an INSERT body");
+        };
+        assert_eq!(plan.target_object(), task.id());
+        assert_eq!(plan.returned_object(), task.id());
+        assert_eq!(plan.assignments().len(), 4);
+        assert_eq!(plan.assignments()[0].field(), task.fields()[0].id());
+        assert_eq!(plan.assignments()[1].field(), task.fields()[1].id());
+        assert_eq!(plan.assignments()[2].field(), task.fields()[2].id());
+        assert_eq!(plan.assignments()[3].field(), task.fields()[3].id());
+        assert_eq!(checked.return_columns()[0].name(), "result");
+        assert_eq!(checked.security(), FunctionSecurity::Invoker);
+        assert_eq!(checked.transaction(), Some(FunctionTransaction::Atomic));
+        assert_eq!(checked.volatility(), FunctionVolatility::Volatile);
+
+        let parameter_ids = checked
+            .parameters()
+            .iter()
+            .map(|parameter| parameter.id())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            checked
+                .references()
+                .iter()
+                .map(|reference| (reference.kind(), reference.target()))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    DefinitionReferenceKind::ObjectReference,
+                    CheckedDefinitionReferenceTarget::ObjectType(person.id()),
+                ),
+                (
+                    DefinitionReferenceKind::ObjectReference,
+                    CheckedDefinitionReferenceTarget::ObjectType(task.id()),
+                ),
+                (
+                    DefinitionReferenceKind::WriteObject,
+                    CheckedDefinitionReferenceTarget::ObjectType(task.id()),
+                ),
+                (
+                    DefinitionReferenceKind::WriteField,
+                    CheckedDefinitionReferenceTarget::Field {
+                        owner: task.id(),
+                        field: task.fields()[0].id()
+                    },
+                ),
+                (
+                    DefinitionReferenceKind::ParameterRead,
+                    CheckedDefinitionReferenceTarget::Parameter {
+                        owner: checked.id(),
+                        parameter: parameter_ids[0]
+                    },
+                ),
+                (
+                    DefinitionReferenceKind::WriteField,
+                    CheckedDefinitionReferenceTarget::Field {
+                        owner: task.id(),
+                        field: task.fields()[1].id()
+                    },
+                ),
+                (
+                    DefinitionReferenceKind::WriteField,
+                    CheckedDefinitionReferenceTarget::Field {
+                        owner: task.id(),
+                        field: task.fields()[2].id()
+                    },
+                ),
+                (
+                    DefinitionReferenceKind::WriteField,
+                    CheckedDefinitionReferenceTarget::Field {
+                        owner: task.id(),
+                        field: task.fields()[3].id()
+                    },
+                ),
+                (
+                    DefinitionReferenceKind::ParameterRead,
+                    CheckedDefinitionReferenceTarget::Parameter {
+                        owner: checked.id(),
+                        parameter: parameter_ids[2]
+                    },
+                ),
+                (
+                    DefinitionReferenceKind::ObjectReference,
+                    CheckedDefinitionReferenceTarget::ObjectType(task.id()),
+                ),
+            ]
+        );
+        assert!(
+            checked
+                .references()
+                .iter()
+                .all(|reference| reference.location().logical_path() == "functions.orna")
+        );
+        assert_eq!(
+            checked
+                .references()
+                .iter()
+                .map(|reference| {
+                    (
+                        reference.location().span().start(),
+                        reference.location().span().end(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                {
+                    let start =
+                        source.find("p_owner REF tasks.person").unwrap() + "p_owner REF ".len();
+                    (start, start + "tasks.person".len())
+                },
+                {
+                    let start = source.find("result REF tasks.task").unwrap() + "result REF ".len();
+                    (start, start + "tasks.task".len())
+                },
+                {
+                    let start = source.rfind("tasks.task AS created").unwrap();
+                    (start, start + "tasks.task".len())
+                },
+                {
+                    let start = source.rfind("(title, done").unwrap() + 1;
+                    (start, start + "title".len())
+                },
+                {
+                    let start = source.rfind("p_title").unwrap();
+                    (start, start + "p_title".len())
+                },
+                {
+                    let start = source.rfind("done, note").unwrap();
+                    (start, start + "done".len())
+                },
+                {
+                    let start = source.rfind("note, owner").unwrap();
+                    (start, start + "note".len())
+                },
+                {
+                    let start = source.rfind("note, owner)").unwrap() + "note, ".len();
+                    (start, start + "owner".len())
+                },
+                {
+                    let start = source.rfind("p_owner").unwrap();
+                    (start, start + "p_owner".len())
+                },
+                {
+                    let start = source.rfind("created)").unwrap();
+                    (start, start + "created".len())
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_insert_return_and_execution_modes() {
+        let prefix =
+            "CREATE SCHEMA tasks; CREATE TYPE tasks.task AS OBJECT (title TEXT NOT NULL); ";
+        let cases = [
+            (
+                format!(
+                    "{prefix}CREATE SERVER FUNCTION tasks.create(p TEXT) RETURNS ROWS (a REF tasks.task, b REF tasks.task) TRANSACTION ATOMIC AS INSERT INTO tasks.task AS made (title) VALUES (p) RETURNING REF(made);"
+                ),
+                vec![(
+                    DiagnosticCode::TypeMismatch,
+                    "INSERT SERVER functions require exactly one RETURNS ROWS column",
+                    "ROWS (a",
+                )],
+            ),
+            (
+                format!(
+                    "{prefix}CREATE SERVER FUNCTION tasks.create(p TEXT) RETURNS ROWS (a TEXT) TRANSACTION ATOMIC AS INSERT INTO tasks.task AS made (title) VALUES (p) RETURNING REF(made);"
+                ),
+                vec![(
+                    DiagnosticCode::TypeMismatch,
+                    "INSERT SERVER functions require a REF return column",
+                    "a TEXT",
+                )],
+            ),
+            (
+                format!(
+                    "{prefix}CREATE TYPE tasks.other AS OBJECT (title TEXT NOT NULL); CREATE SERVER FUNCTION tasks.create(p TEXT) RETURNS ROWS (a REF tasks.other) TRANSACTION ATOMIC AS INSERT INTO tasks.task AS made (title) VALUES (p) RETURNING REF(made);"
+                ),
+                vec![(
+                    DiagnosticCode::TypeMismatch,
+                    "INSERT return REF target does not match the returned object",
+                    "tasks.other",
+                )],
+            ),
+            (
+                format!(
+                    "{prefix}CREATE SERVER FUNCTION tasks.create(p TEXT) RETURNS ROWS (a REF tasks.task) SECURITY DEFINER TRANSACTION ATOMIC AS INSERT INTO tasks.task AS made (title) VALUES (p) RETURNING REF(made);"
+                ),
+                vec![(
+                    DiagnosticCode::DomainIncompatible,
+                    "INSERT SERVER functions require SECURITY INVOKER",
+                    "CREATE SERVER FUNCTION",
+                )],
+            ),
+            (
+                format!(
+                    "{prefix}CREATE SERVER FUNCTION tasks.create(p TEXT) RETURNS ROWS (a REF tasks.task) AS INSERT INTO tasks.task AS made (title) VALUES (p) RETURNING REF(made);"
+                ),
+                vec![(
+                    DiagnosticCode::DomainIncompatible,
+                    "INSERT SERVER functions require TRANSACTION ATOMIC",
+                    "CREATE SERVER FUNCTION",
+                )],
+            ),
+            (
+                format!(
+                    "{prefix}CREATE SERVER FUNCTION tasks.create(p TEXT) RETURNS ROWS (a REF tasks.task) TRANSACTION READ ONLY AS INSERT INTO tasks.task AS made (title) VALUES (p) RETURNING REF(made);"
+                ),
+                vec![(
+                    DiagnosticCode::DomainIncompatible,
+                    "INSERT SERVER functions require TRANSACTION ATOMIC",
+                    "CREATE SERVER FUNCTION",
+                )],
+            ),
+            (
+                format!(
+                    "{prefix}CREATE SERVER FUNCTION tasks.create(p TEXT) RETURNS ROWS (a REF tasks.task) TRANSACTION ATOMIC VOLATILITY STABLE AS INSERT INTO tasks.task AS made (title) VALUES (p) RETURNING REF(made);"
+                ),
+                vec![(
+                    DiagnosticCode::DomainIncompatible,
+                    "INSERT SERVER functions require VOLATILITY VOLATILE",
+                    "CREATE SERVER FUNCTION",
+                )],
+            ),
+        ];
+        for (source, expected) in cases {
+            let bundle = SourceBundle::new([SourceUnit::new("functions.orna", &source)]).unwrap();
+            let report = check(&bundle, &empty_catalogue());
+            assert_no_checked_bundle(&report);
+            assert_eq!(report.diagnostics().len(), expected.len());
+            for (diagnostic, (code, message, marker)) in report.diagnostics().iter().zip(expected) {
+                assert_eq!(diagnostic.code(), code);
+                assert_eq!(diagnostic.message(), message);
+                assert_eq!(diagnostic.location().logical_path(), "functions.orna");
+                let expected_start = source.rfind(marker).unwrap();
+                assert_eq!(diagnostic.location().span().start(), expected_start);
+                let expected_end = match message {
+                    "INSERT SERVER functions require exactly one RETURNS ROWS column" => {
+                        source.find(") TRANSACTION").unwrap() + 1
+                    }
+                    "INSERT SERVER functions require a REF return column" => {
+                        expected_start + "a TEXT".len()
+                    }
+                    "INSERT return REF target does not match the returned object" => {
+                        expected_start + "tasks.other".len()
+                    }
+                    _ => source.len(),
+                };
+                assert_eq!(diagnostic.location().span().end(), expected_end);
+            }
+        }
     }
 
     #[test]
