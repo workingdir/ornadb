@@ -117,7 +117,7 @@ mod tests {
         source::{SourceBundle, SourceUnit},
         types::{ResolvedType, StandardScalar},
     };
-    use orna_syntax::{ServerFunctionBody, parse};
+    use orna_syntax::parse;
 
     use crate::{CheckedFieldId, CheckedTypeId};
 
@@ -165,7 +165,10 @@ mod tests {
             "{:?}",
             parsed.diagnostics()
         );
-        let ServerFunctionBody::SqlQuery(body) = &parsed.server_functions()[0].body;
+        let body = parsed.server_functions()[0]
+            .body
+            .as_sql_query()
+            .expect("test function has a SELECT body");
         let catalogue = catalogue();
         let checked =
             super::super::check_query(&body.query, &catalogue, "source_semantic_marker.orna")
@@ -300,7 +303,10 @@ mod tests {
         let encoded = mapped.encode_server_plan().unwrap();
         let decoded = ServerPlan::decode(&encoded).unwrap();
         let parsed = parse(SOURCE);
-        let ServerFunctionBody::SqlQuery(body) = &parsed.server_functions()[0].body;
+        let body = parsed.server_functions()[0]
+            .body
+            .as_sql_query()
+            .expect("test function has a SELECT body");
         let expected =
             super::super::check_query(&body.query, &catalogue(), "source_semantic_marker.orna")
                 .unwrap();
