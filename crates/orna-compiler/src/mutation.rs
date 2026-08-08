@@ -8,9 +8,9 @@ use orna_core::{
     FieldId, FunctionId, ParameterId, TypeId, catalogue::QualifiedSemanticName,
     types::StandardScalar,
 };
-#[cfg(test)]
-use orna_syntax::NamePart;
-use orna_syntax::{InsertStatement, InsertValue, SourceSpan};
+use orna_syntax::{
+    InsertStatement, MutationValue, NamePart, QualifiedName, SourceSpan, UpdateStatement,
+};
 
 use crate::resolver::SemanticType;
 use crate::{
@@ -21,12 +21,18 @@ use crate::{
 /// A source-free checked one-row mutation plan.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct MutationPlanIr<T = TypeId, F = FieldId, G = FunctionId, P = ParameterId> {
+    operation: MutationOperation<G, P>,
     target_object: T,
     assignments: Vec<MutationAssignment<T, F, G, P>>,
     returned_object: T,
 }
 
 impl<T, F, G, P> MutationPlanIr<T, F, G, P> {
+    /// Returns the checked mutation operation.
+    pub(crate) const fn operation(&self) -> &MutationOperation<G, P> {
+        &self.operation
+    }
+
     /// Returns the target object identity.
     pub(crate) const fn target_object(&self) -> T
     where
@@ -67,6 +73,16 @@ where
     ) -> Result<MutationPlanIr<T2, F2, G2, P2>, E> {
         let target_object = map_type(self.target_object)?;
         let returned_object = map_type(self.returned_object)?;
+        let operation = match self.operation {
+            MutationOperation::Insert => MutationOperation::Insert,
+            MutationOperation::Update {
+                selector_owner,
+                selector_parameter,
+            } => MutationOperation::Update {
+                selector_owner: map_function(selector_owner)?,
+                selector_parameter: map_parameter(selector_parameter)?,
+            },
+        };
         let assignments = self
             .assignments
             .iter()
@@ -85,11 +101,24 @@ where
             .collect::<Result<Vec<_>, E>>()?;
 
         Ok(MutationPlanIr {
+            operation,
             target_object,
             assignments,
             returned_object,
         })
     }
+}
+
+/// The closed source-free mutation operation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MutationOperation<G = FunctionId, P = ParameterId> {
+    /// Inserts one object.
+    Insert,
+    /// Updates the object selected by one owner-qualified parameter.
+    Update {
+        selector_owner: G,
+        selector_parameter: P,
+    },
 }
 
 fn map_expression<T, G, P, T2, G2, P2, E>(
@@ -215,7 +244,7 @@ impl<T, G, P> MutationExpression<T, G, P> {
     }
 }
 
-/// The closed expression forms supported by a server INSERT.
+/// The closed expression forms supported by SERVER mutations.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum MutationExpressionKind<G = FunctionId, P = ParameterId> {
     /// Reads one declared parameter of the enclosing function.
@@ -366,7 +395,7 @@ pub(crate) trait MutationCatalogue<T, F> {
 /// Evidence retained for every identity touched by a checked mutation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum MutationReference<T = TypeId, F = FieldId, G = FunctionId, P = ParameterId> {
-    /// The target object type selected by `INSERT INTO`.
+    /// The target object type written by the mutation.
     WriteObject {
         object_type: T,
         location: SourceLocation,
@@ -383,7 +412,7 @@ pub(crate) enum MutationReference<T = TypeId, F = FieldId, G = FunctionId, P = P
         parameter: P,
         location: SourceLocation,
     },
-    /// The returned object reference.
+    /// An object identity referenced by a selector or returned result.
     ObjectReference {
         object_type: T,
         location: SourceLocation,
@@ -421,7 +450,7 @@ impl<T, F, G, P> MutationCheck<T, F, G, P> {
     }
 }
 
-const SUPPORTED_INSERT_TYPES: &str =
+const SUPPORTED_MUTATION_TYPES: &str =
     "BOOLEAN, INTEGER, BIGINT, FLOAT, CHARACTER LARGE OBJECT, BINARY LARGE OBJECT, and REF";
 
 /// Checks one parsed INSERT against a caller-supplied identity catalogue.
@@ -438,29 +467,7 @@ where
     G: Copy,
     P: Copy,
 {
-    // Validate every declaration before looking at whether that parameter is
-    // used. This keeps unsupported parameter domains fail-closed.
-    let parameter_diagnostics = parameters
-        .iter()
-        .filter_map(|parameter| {
-            if supported_semantic_type(parameter.semantic_type()) {
-                None
-            } else {
-                Some(semantic_diagnostic(
-                    DiagnosticCode::DomainIncompatible,
-                    format!(
-                        "INSERT does not yet support the type of parameter {}; supported types are {SUPPORTED_INSERT_TYPES}",
-                        parameter.name()
-                    ),
-                    logical_path,
-                    parameter.location(),
-                ))
-            }
-        })
-        .collect::<Vec<_>>();
-    if !parameter_diagnostics.is_empty() {
-        return Err(parameter_diagnostics);
-    }
+    validate_parameter_types("INSERT", parameters, logical_path)?;
 
     if insert.target_fields.is_empty() || insert.values.is_empty() {
         return Err(vec![semantic_diagnostic(
@@ -493,168 +500,24 @@ where
         )]);
     }
 
-    let target_name = normalise_qualified_name(&insert.target_object);
-    let Some(target_object) = catalogue.object_type_id_by_name(&target_name) else {
-        return Err(vec![semantic_diagnostic(
-            DiagnosticCode::UnknownQualifiedName,
-            format!("unknown object type {target_name}"),
+    let (target_name, target_object) =
+        resolve_mutation_target(&insert.target_object, logical_path, catalogue)?;
+    let checked_assignments = check_assignments(
+        &AssignmentCheckContext {
+            operation: "INSERT",
+            function,
+            parameters,
             logical_path,
-            &insert.target_object.span,
-        )]);
-    };
-
-    let mut references = vec![MutationReference::WriteObject {
-        object_type: target_object,
-        location: SourceLocation::from_syntax(logical_path, &insert.target_object.span),
-    }];
-    let mut assignments = Vec::with_capacity(insert.target_fields.len());
-    let mut assigned_names = Vec::<String>::with_capacity(insert.target_fields.len());
-
-    for (field_name, value) in insert.target_fields.iter().zip(&insert.values) {
-        let normalized_field_name = normalise_name_part(field_name);
-        if assigned_names
-            .iter()
-            .any(|name| name == &normalized_field_name)
-        {
-            return Err(vec![semantic_diagnostic(
-                DiagnosticCode::DuplicateDefinition,
-                format!("field {normalized_field_name} appears more than once in this INSERT"),
-                logical_path,
-                &field_name.span,
-            )]);
-        }
-        assigned_names.push(normalized_field_name.clone());
-
-        let Some(field) = catalogue.field_by_name(target_object, &normalized_field_name) else {
-            return Err(vec![semantic_diagnostic(
-                DiagnosticCode::UnknownQualifiedName,
-                format!("object type {target_name} has no field named {normalized_field_name}"),
-                logical_path,
-                &field_name.span,
-            )]);
-        };
-        if !supported_semantic_type(field.semantic_type()) {
-            return Err(vec![semantic_diagnostic(
-                DiagnosticCode::DomainIncompatible,
-                format!(
-                    "INSERT does not yet support the type of field {normalized_field_name}; supported types are {SUPPORTED_INSERT_TYPES}"
-                ),
-                logical_path,
-                &field_name.span,
-            )]);
-        }
-
-        references.push(MutationReference::WriteField {
-            owner: target_object,
-            field: field.id(),
-            location: SourceLocation::from_syntax(logical_path, &field_name.span),
-        });
-
-        let expression = match value {
-            InsertValue::Parameter(parameter_name) => {
-                let normalized_parameter_name = normalise_name_part(parameter_name);
-                let Some(parameter) = parameters
-                    .iter()
-                    .find(|parameter| parameter.name() == normalized_parameter_name)
-                else {
-                    return Err(vec![semantic_diagnostic(
-                        DiagnosticCode::UnknownQualifiedName,
-                        format!("this function has no parameter named {normalized_parameter_name}"),
-                        logical_path,
-                        &parameter_name.span,
-                    )]);
-                };
-                let parameter_type = parameter.semantic_type();
-                if parameter_type != field.semantic_type() {
-                    return Err(vec![semantic_diagnostic(
-                        DiagnosticCode::TypeMismatch,
-                        format!(
-                            "parameter {normalized_parameter_name} cannot be inserted into field {normalized_field_name} because their types do not match"
-                        ),
-                        logical_path,
-                        &parameter_name.span,
-                    )]);
-                }
-                references.push(MutationReference::ParameterRead {
-                    owner: function,
-                    parameter: parameter.id(),
-                    location: SourceLocation::from_syntax(logical_path, &parameter_name.span),
-                });
-                MutationExpression::new(
-                    MutationExpressionKind::ParameterRead {
-                        owner: function,
-                        parameter: parameter.id(),
-                    },
-                    MutationValueType::new(parameter_type, false),
-                )
-            }
-            InsertValue::BooleanLiteral { value, source } => {
-                let expected = SemanticType::scalar(StandardScalar::Boolean);
-                if field.semantic_type() != expected {
-                    return Err(vec![semantic_diagnostic(
-                        DiagnosticCode::TypeMismatch,
-                        format!(
-                            "field {normalized_field_name} is not BOOLEAN, so it cannot accept TRUE or FALSE"
-                        ),
-                        logical_path,
-                        &source.span,
-                    )]);
-                }
-                MutationExpression::new(
-                    MutationExpressionKind::BooleanLiteral { value: *value },
-                    MutationValueType::new(expected, false),
-                )
-            }
-            InsertValue::NullLiteral { source } => {
-                if !field.nullable() {
-                    return Err(vec![semantic_diagnostic(
-                        DiagnosticCode::TypeMismatch,
-                        format!("field {normalized_field_name} does not allow NULL"),
-                        logical_path,
-                        &source.span,
-                    )]);
-                }
-                MutationExpression::new(
-                    MutationExpressionKind::TypedNull,
-                    MutationValueType::new(field.semantic_type(), true),
-                )
-            }
-            _ => {
-                return Err(vec![semantic_diagnostic(
-                    DiagnosticCode::DomainIncompatible,
-                    "INSERT values can only be function parameters, TRUE, FALSE, or NULL",
-                    logical_path,
-                    value.span(),
-                )]);
-            }
-        };
-
-        assignments.push(MutationAssignment::new(
-            target_object,
-            field.id(),
-            expression,
-        ));
-    }
-
-    let mut missing_required = Vec::new();
-    catalogue.visit_fields(target_object, &mut |name, field| {
-        if !field.nullable() && !assigned_names.iter().any(|assigned| assigned == name) {
-            missing_required.push(name.to_owned());
-        }
-    });
-    if !missing_required.is_empty() {
-        return Err(missing_required
-            .into_iter()
-            .map(|name| {
-                semantic_diagnostic(
-                    DiagnosticCode::TypeMismatch,
-                    format!("field {name} is required, but this INSERT does not provide a value"),
-                    logical_path,
-                    &insert.target_object.span,
-                )
-            })
-            .collect());
-    }
+        },
+        &insert.target_object,
+        &target_name,
+        target_object,
+        insert.target_fields.iter().zip(&insert.values),
+        true,
+        catalogue,
+    )?;
+    let assignments = checked_assignments.assignments;
+    let mut references = checked_assignments.references;
 
     let normalized_target_alias = normalise_name_part(&insert.target_alias);
     let normalized_returning_alias = normalise_name_part(&insert.returning_alias);
@@ -676,12 +539,409 @@ where
 
     Ok(MutationCheck {
         plan: MutationPlanIr {
+            operation: MutationOperation::Insert,
             target_object,
             assignments,
             returned_object: target_object,
         },
         references,
     })
+}
+
+/// Checks one parsed UPDATE against a caller-supplied identity catalogue.
+pub(crate) fn check_update_in<T, F, G, P>(
+    update: &UpdateStatement,
+    catalogue: &impl MutationCatalogue<T, F>,
+    function: G,
+    parameters: &[MutationParameter<T, P>],
+    logical_path: &str,
+) -> Result<MutationCheck<T, F, G, P>, Vec<CompilerDiagnostic>>
+where
+    T: Copy + Eq,
+    F: Copy + Eq,
+    G: Copy,
+    P: Copy,
+{
+    validate_parameter_types("UPDATE", parameters, logical_path)?;
+    if update.assignments.is_empty() {
+        return Err(vec![semantic_diagnostic(
+            DiagnosticCode::DomainIncompatible,
+            "UPDATE requires at least one field assignment",
+            logical_path,
+            &update.span,
+        )]);
+    }
+
+    let (target_name, target_object) =
+        resolve_mutation_target(&update.target_object, logical_path, catalogue)?;
+
+    let normalized_target_alias = normalise_name_part(&update.target_alias);
+    let normalized_selector_alias = normalise_name_part(&update.selector_alias);
+    if normalized_target_alias != normalized_selector_alias {
+        return Err(vec![semantic_diagnostic(
+            DiagnosticCode::UnknownQualifiedName,
+            format!(
+                "WHERE REF must use the UPDATE target alias {normalized_target_alias}, not {normalized_selector_alias}"
+            ),
+            logical_path,
+            &update.selector_alias.span,
+        )]);
+    }
+    let normalized_returning_alias = normalise_name_part(&update.returning_alias);
+    if normalized_target_alias != normalized_returning_alias {
+        return Err(vec![semantic_diagnostic(
+            DiagnosticCode::UnknownQualifiedName,
+            format!(
+                "RETURNING REF must use the UPDATE target alias {normalized_target_alias}, not {normalized_returning_alias}"
+            ),
+            logical_path,
+            &update.returning_alias.span,
+        )]);
+    }
+
+    let checked_assignments = check_assignments(
+        &AssignmentCheckContext {
+            operation: "UPDATE",
+            function,
+            parameters,
+            logical_path,
+        },
+        &update.target_object,
+        &target_name,
+        target_object,
+        update
+            .assignments
+            .iter()
+            .map(|assignment| (&assignment.target_field, &assignment.value)),
+        false,
+        catalogue,
+    )?;
+
+    let assignments = checked_assignments.assignments;
+    let mut references = checked_assignments.references;
+
+    let normalized_selector_parameter = normalise_name_part(&update.selector_parameter);
+    let Some(selector) = parameters
+        .iter()
+        .find(|parameter| parameter.name() == normalized_selector_parameter)
+    else {
+        return Err(vec![semantic_diagnostic(
+            DiagnosticCode::UnknownQualifiedName,
+            format!("this function has no parameter named {normalized_selector_parameter}"),
+            logical_path,
+            &update.selector_parameter.span,
+        )]);
+    };
+    if selector.semantic_type() != SemanticType::reference(target_object) {
+        return Err(vec![semantic_diagnostic(
+            DiagnosticCode::TypeMismatch,
+            format!(
+                "selector parameter {normalized_selector_parameter} must use REF {target_name}"
+            ),
+            logical_path,
+            &update.selector_parameter.span,
+        )]);
+    }
+
+    references.push(MutationReference::ObjectReference {
+        object_type: target_object,
+        location: SourceLocation::from_syntax(logical_path, &update.selector_alias.span),
+    });
+    references.push(MutationReference::ParameterRead {
+        owner: function,
+        parameter: selector.id(),
+        location: SourceLocation::from_syntax(logical_path, &update.selector_parameter.span),
+    });
+    references.push(MutationReference::ObjectReference {
+        object_type: target_object,
+        location: SourceLocation::from_syntax(logical_path, &update.returning_alias.span),
+    });
+
+    Ok(MutationCheck {
+        plan: MutationPlanIr {
+            operation: MutationOperation::Update {
+                selector_owner: function,
+                selector_parameter: selector.id(),
+            },
+            target_object,
+            assignments,
+            returned_object: target_object,
+        },
+        references,
+    })
+}
+
+struct CheckedAssignments<T, F, G, P> {
+    assignments: Vec<MutationAssignment<T, F, G, P>>,
+    references: Vec<MutationReference<T, F, G, P>>,
+}
+
+fn resolve_mutation_target<T, F>(
+    target_source: &QualifiedName,
+    logical_path: &str,
+    catalogue: &impl MutationCatalogue<T, F>,
+) -> Result<(QualifiedSemanticName, T), Vec<CompilerDiagnostic>>
+where
+    T: Copy,
+{
+    let target_name = normalise_qualified_name(target_source);
+    let Some(target_object) = catalogue.object_type_id_by_name(&target_name) else {
+        return Err(vec![semantic_diagnostic(
+            DiagnosticCode::UnknownQualifiedName,
+            format!("unknown object type {target_name}"),
+            logical_path,
+            &target_source.span,
+        )]);
+    };
+    Ok((target_name, target_object))
+}
+
+fn check_assignments<'a, T, F, G, P>(
+    context: &AssignmentCheckContext<'_, T, G, P>,
+    target_source: &QualifiedName,
+    target_name: &QualifiedSemanticName,
+    target_object: T,
+    assignment_sources: impl IntoIterator<Item = (&'a NamePart, &'a MutationValue)>,
+    require_all_non_nullable_fields: bool,
+    catalogue: &impl MutationCatalogue<T, F>,
+) -> Result<CheckedAssignments<T, F, G, P>, Vec<CompilerDiagnostic>>
+where
+    T: Copy + Eq,
+    F: Copy + Eq,
+    G: Copy,
+    P: Copy,
+{
+    let mut references = vec![MutationReference::WriteObject {
+        object_type: target_object,
+        location: SourceLocation::from_syntax(context.logical_path, &target_source.span),
+    }];
+    let mut assignments = Vec::new();
+    let mut assigned_names = Vec::<String>::new();
+    for (field_name, value) in assignment_sources {
+        let normalized_field_name = normalise_name_part(field_name);
+        if assigned_names
+            .iter()
+            .any(|name| name == &normalized_field_name)
+        {
+            return Err(vec![semantic_diagnostic(
+                DiagnosticCode::DuplicateDefinition,
+                format!(
+                    "field {normalized_field_name} appears more than once in this {}",
+                    context.operation
+                ),
+                context.logical_path,
+                &field_name.span,
+            )]);
+        }
+        assigned_names.push(normalized_field_name.clone());
+        let Some(field) = catalogue.field_by_name(target_object, &normalized_field_name) else {
+            return Err(vec![semantic_diagnostic(
+                DiagnosticCode::UnknownQualifiedName,
+                format!("object type {target_name} has no field named {normalized_field_name}"),
+                context.logical_path,
+                &field_name.span,
+            )]);
+        };
+        if !supported_semantic_type(field.semantic_type()) {
+            return Err(vec![semantic_diagnostic(
+                DiagnosticCode::DomainIncompatible,
+                format!(
+                    "{} does not yet support the type of field {normalized_field_name}; supported types are {SUPPORTED_MUTATION_TYPES}",
+                    context.operation
+                ),
+                context.logical_path,
+                &field_name.span,
+            )]);
+        }
+        references.push(MutationReference::WriteField {
+            owner: target_object,
+            field: field.id(),
+            location: SourceLocation::from_syntax(context.logical_path, &field_name.span),
+        });
+        let expression = check_assignment_expression(
+            context,
+            &normalized_field_name,
+            field,
+            value,
+            &mut references,
+        )?;
+        assignments.push(MutationAssignment::new(
+            target_object,
+            field.id(),
+            expression,
+        ));
+    }
+    if require_all_non_nullable_fields {
+        let mut missing_required = Vec::new();
+        catalogue.visit_fields(target_object, &mut |name, field| {
+            if !field.nullable() && !assigned_names.iter().any(|assigned| assigned == name) {
+                missing_required.push(name.to_owned());
+            }
+        });
+        if !missing_required.is_empty() {
+            return Err(missing_required
+                .into_iter()
+                .map(|name| {
+                    semantic_diagnostic(
+                        DiagnosticCode::TypeMismatch,
+                        format!(
+                            "field {name} is required, but this {} does not provide a value",
+                            context.operation
+                        ),
+                        context.logical_path,
+                        &target_source.span,
+                    )
+                })
+                .collect());
+        }
+    }
+    Ok(CheckedAssignments {
+        assignments,
+        references,
+    })
+}
+
+struct AssignmentCheckContext<'a, T, G, P> {
+    operation: &'static str,
+    function: G,
+    parameters: &'a [MutationParameter<T, P>],
+    logical_path: &'a str,
+}
+
+fn check_assignment_expression<T, F, G, P>(
+    context: &AssignmentCheckContext<'_, T, G, P>,
+    field_name: &str,
+    field: MutationField<T, F>,
+    value: &MutationValue,
+    references: &mut Vec<MutationReference<T, F, G, P>>,
+) -> Result<MutationExpression<T, G, P>, Vec<CompilerDiagnostic>>
+where
+    T: Copy + Eq,
+    F: Copy,
+    G: Copy,
+    P: Copy,
+{
+    let expression = match value {
+        MutationValue::Parameter(parameter_name) => {
+            let normalized_parameter_name = normalise_name_part(parameter_name);
+            let Some(parameter) = context
+                .parameters
+                .iter()
+                .find(|parameter| parameter.name() == normalized_parameter_name)
+            else {
+                return Err(vec![semantic_diagnostic(
+                    DiagnosticCode::UnknownQualifiedName,
+                    format!("this function has no parameter named {normalized_parameter_name}"),
+                    context.logical_path,
+                    &parameter_name.span,
+                )]);
+            };
+            let parameter_type = parameter.semantic_type();
+            if parameter_type != field.semantic_type() {
+                let action = if context.operation == "INSERT" {
+                    "inserted into"
+                } else {
+                    "assigned to"
+                };
+                return Err(vec![semantic_diagnostic(
+                    DiagnosticCode::TypeMismatch,
+                    format!(
+                        "parameter {normalized_parameter_name} cannot be {action} field {field_name} because their types do not match"
+                    ),
+                    context.logical_path,
+                    &parameter_name.span,
+                )]);
+            }
+            references.push(MutationReference::ParameterRead {
+                owner: context.function,
+                parameter: parameter.id(),
+                location: SourceLocation::from_syntax(context.logical_path, &parameter_name.span),
+            });
+            MutationExpression::new(
+                MutationExpressionKind::ParameterRead {
+                    owner: context.function,
+                    parameter: parameter.id(),
+                },
+                MutationValueType::new(parameter_type, false),
+            )
+        }
+        MutationValue::BooleanLiteral { value, source } => {
+            let expected = SemanticType::scalar(StandardScalar::Boolean);
+            if field.semantic_type() != expected {
+                return Err(vec![semantic_diagnostic(
+                    DiagnosticCode::TypeMismatch,
+                    format!("field {field_name} is not BOOLEAN, so it cannot accept TRUE or FALSE"),
+                    context.logical_path,
+                    &source.span,
+                )]);
+            }
+            MutationExpression::new(
+                MutationExpressionKind::BooleanLiteral { value: *value },
+                MutationValueType::new(expected, false),
+            )
+        }
+        MutationValue::NullLiteral { source } => {
+            if !field.nullable() {
+                return Err(vec![semantic_diagnostic(
+                    DiagnosticCode::TypeMismatch,
+                    format!("field {field_name} does not allow NULL"),
+                    context.logical_path,
+                    &source.span,
+                )]);
+            }
+            MutationExpression::new(
+                MutationExpressionKind::TypedNull,
+                MutationValueType::new(field.semantic_type(), true),
+            )
+        }
+        _ => {
+            return Err(vec![semantic_diagnostic(
+                DiagnosticCode::DomainIncompatible,
+                format!(
+                    "{} values can only be function parameters, TRUE, FALSE, or NULL",
+                    context.operation
+                ),
+                context.logical_path,
+                value.span(),
+            )]);
+        }
+    };
+    Ok(expression)
+}
+
+fn validate_parameter_types<T, P>(
+    operation: &str,
+    parameters: &[MutationParameter<T, P>],
+    logical_path: &str,
+) -> Result<(), Vec<CompilerDiagnostic>>
+where
+    T: Copy,
+{
+    // Validate every declaration before looking at whether that parameter is
+    // used. This keeps unsupported parameter types fail-closed.
+    let diagnostics = parameters
+        .iter()
+        .filter_map(|parameter| {
+            if supported_semantic_type(parameter.semantic_type()) {
+                None
+            } else {
+                Some(semantic_diagnostic(
+                    DiagnosticCode::DomainIncompatible,
+                    format!(
+                        "{operation} does not yet support the type of parameter {}; supported types are {SUPPORTED_MUTATION_TYPES}",
+                        parameter.name()
+                    ),
+                    logical_path,
+                    parameter.location(),
+                ))
+            }
+        })
+        .collect::<Vec<_>>();
+    if diagnostics.is_empty() {
+        Ok(())
+    } else {
+        Err(diagnostics)
+    }
 }
 
 fn supported_semantic_type<T>(semantic_type: SemanticType<T>) -> bool {
@@ -703,7 +963,9 @@ fn supported_semantic_type<T>(semantic_type: SemanticType<T>) -> bool {
 mod tests {
     use super::*;
     use orna_core::{FieldId, FunctionId, ParameterId, TypeId};
-    use orna_syntax::{QualifiedName, SourceSlice, SourceSpan};
+    use orna_syntax::{
+        InsertValue, QualifiedName, SourceSlice, SourceSpan, UpdateAssignment, UpdateStatement,
+    };
 
     #[derive(Clone)]
     struct TestCatalogue {
@@ -767,6 +1029,35 @@ mod tests {
             values,
             returning_alias: name(returning, 50),
             span: span(0, 60),
+        }
+    }
+
+    fn update(
+        assignments: Vec<UpdateAssignment>,
+        selector_alias: &str,
+        selector_parameter: &str,
+        returning_alias: &str,
+    ) -> UpdateStatement {
+        UpdateStatement {
+            target_object: QualifiedName {
+                parts: vec![name("crm", 7), name("person", 11)],
+                span: span(7, 18),
+            },
+            target_alias: name("p", 22),
+            assignments,
+            selector_alias: name(selector_alias, 80),
+            selector_parameter: name(selector_parameter, 90),
+            returning_alias: name(returning_alias, 110),
+            span: span(0, 120),
+        }
+    }
+
+    fn update_assignment(field: &str, field_start: usize, value: InsertValue) -> UpdateAssignment {
+        let value_end = value.span().end;
+        UpdateAssignment {
+            target_field: name(field, field_start),
+            value,
+            span: span(field_start, value_end),
         }
     }
 
@@ -865,6 +1156,7 @@ mod tests {
         .unwrap();
 
         let expected_plan = MutationPlanIr {
+            operation: MutationOperation::Insert,
             target_object: catalogue.target,
             assignments: vec![
                 MutationAssignment::new(
@@ -955,6 +1247,146 @@ mod tests {
                 .value_type()
                 .nullable()
         );
+    }
+
+    #[test]
+    fn checks_identity_selected_update_and_orders_evidence() {
+        let catalogue = catalogue();
+        let function = FunctionId::from_bytes([5; 16]);
+        let selector_id = ParameterId::from_bytes([6; 16]);
+        let name_id = ParameterId::from_bytes([7; 16]);
+        let parameters = vec![
+            MutationParameter::new(
+                "p_person",
+                selector_id,
+                SemanticType::reference(catalogue.target),
+                span(200, 208),
+            ),
+            MutationParameter::new(
+                "p_name",
+                name_id,
+                SemanticType::scalar(StandardScalar::CharacterLargeObject),
+                span(210, 216),
+            ),
+        ];
+        let update = update(
+            vec![
+                update_assignment("name", 30, parameter("p_name", 37)),
+                update_assignment("active", 47, boolean(false, 56)),
+                update_assignment("note", 64, null(71)),
+            ],
+            "p",
+            "p_person",
+            "p",
+        );
+
+        let check =
+            check_update_in(&update, &catalogue, function, &parameters, "mutation.orna").unwrap();
+
+        assert_eq!(
+            check.plan().operation(),
+            &MutationOperation::Update {
+                selector_owner: function,
+                selector_parameter: selector_id,
+            }
+        );
+        assert_eq!(check.plan().target_object(), catalogue.target);
+        assert_eq!(check.plan().returned_object(), catalogue.target);
+        assert_eq!(check.plan().assignments().len(), 3);
+        let location = |start, end| SourceLocation::from_syntax("mutation.orna", &span(start, end));
+        assert_eq!(
+            check.references(),
+            [
+                MutationReference::WriteObject {
+                    object_type: catalogue.target,
+                    location: location(7, 18),
+                },
+                MutationReference::WriteField {
+                    owner: catalogue.target,
+                    field: FieldId::from_bytes([2; 16]),
+                    location: location(30, 34),
+                },
+                MutationReference::ParameterRead {
+                    owner: function,
+                    parameter: name_id,
+                    location: location(37, 43),
+                },
+                MutationReference::WriteField {
+                    owner: catalogue.target,
+                    field: FieldId::from_bytes([3; 16]),
+                    location: location(47, 53),
+                },
+                MutationReference::WriteField {
+                    owner: catalogue.target,
+                    field: FieldId::from_bytes([4; 16]),
+                    location: location(64, 68),
+                },
+                MutationReference::ObjectReference {
+                    object_type: catalogue.target,
+                    location: location(80, 81),
+                },
+                MutationReference::ParameterRead {
+                    owner: function,
+                    parameter: selector_id,
+                    location: location(90, 98),
+                },
+                MutationReference::ObjectReference {
+                    object_type: catalogue.target,
+                    location: location(110, 111),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_update_selector_with_unknown_or_wrong_reference_type() {
+        let catalogue = catalogue();
+        let function = FunctionId::from_bytes([5; 16]);
+        let update = update(
+            vec![update_assignment("note", 30, null(37))],
+            "p",
+            "selected",
+            "p",
+        );
+
+        let unknown = check_update_in(
+            &update,
+            &catalogue,
+            function,
+            &[] as &[MutationParameter<TypeId, ParameterId>],
+            "mutation.orna",
+        )
+        .unwrap_err();
+        assert_eq!(unknown.len(), 1);
+        assert_eq!(unknown[0].code(), DiagnosticCode::UnknownQualifiedName);
+        assert_eq!(
+            unknown[0].message(),
+            "this function has no parameter named selected"
+        );
+        assert_eq!(unknown[0].location().span().start(), 90);
+        assert_eq!(unknown[0].location().span().end(), 98);
+
+        let wrong_type = check_update_in(
+            &update,
+            &catalogue,
+            function,
+            &[MutationParameter::new(
+                "selected",
+                ParameterId::from_bytes([6; 16]),
+                SemanticType::scalar(StandardScalar::BigInt),
+                span(200, 208),
+            )],
+            "mutation.orna",
+        )
+        .unwrap_err();
+        assert_eq!(wrong_type.len(), 1);
+        assert_eq!(wrong_type[0].code(), DiagnosticCode::TypeMismatch);
+        assert_eq!(
+            wrong_type[0].message(),
+            "selector parameter selected must use REF crm.person"
+        );
+        assert_eq!(wrong_type[0].location().span().start(), 90);
+        assert_eq!(wrong_type[0].location().span().end(), 98);
     }
 
     #[test]
@@ -1348,6 +1780,7 @@ mod tests {
     #[test]
     fn maps_all_identity_classes_and_rejects_any_failed_mapping() {
         let plan = MutationPlanIr {
+            operation: MutationOperation::Insert,
             target_object: 1_u8,
             assignments: vec![
                 MutationAssignment::new(
@@ -1396,6 +1829,30 @@ mod tests {
                 .value_type()
                 .semantic_type(),
             SemanticType::Named(16)
+        );
+        let update_plan = MutationPlanIr {
+            operation: MutationOperation::Update {
+                selector_owner: 8_u8,
+                selector_parameter: 9_u8,
+            },
+            target_object: plan.target_object,
+            assignments: plan.assignments.clone(),
+            returned_object: plan.returned_object,
+        };
+        let mapped_update = update_plan
+            .try_map_identities(
+                |value| Ok::<_, ()>(value + 10),
+                |value| Ok::<_, ()>(value + 20),
+                |value| Ok::<_, ()>(value + 30),
+                |value| Ok::<_, ()>(value + 40),
+            )
+            .unwrap();
+        assert_eq!(
+            mapped_update.operation(),
+            &MutationOperation::Update {
+                selector_owner: 38,
+                selector_parameter: 49,
+            }
         );
         assert!(
             plan.try_map_identities(

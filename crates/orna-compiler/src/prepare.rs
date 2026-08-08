@@ -13,12 +13,11 @@ use orna_artifact::{
     },
     server_mutation_plan::{
         FORMAT_IDENTITY as SERVER_MUTATION_PLAN_FORMAT,
-        FORMAT_VERSION as SERVER_MUTATION_PLAN_VERSION,
         FieldAssignment as ServerMutationFieldAssignment,
         LANGUAGE_VERSION_IDENTITY as SERVER_MUTATION_PLAN_LANGUAGE_VERSION,
         MutationExpression as ServerMutationExpression,
-        MutationExpressionKind as ServerMutationExpressionKind, ServerMutationPlan,
-        ServerMutationPlanError,
+        MutationExpressionKind as ServerMutationExpressionKind, MutationSelector,
+        ServerMutationPlan, ServerMutationPlanError,
     },
     server_plan::{
         FORMAT_IDENTITY as SERVER_PLAN_FORMAT, FORMAT_VERSION as SERVER_PLAN_VERSION,
@@ -53,7 +52,7 @@ use crate::{
     ConstantValue, SemanticType, SourceLocation,
 };
 use crate::{
-    mutation::{MutationExpressionKind, MutationPlanIr},
+    mutation::{MutationExpressionKind, MutationOperation, MutationPlanIr},
     resolver::{CheckedFieldRename, CheckedServerFunctionBody},
 };
 
@@ -261,13 +260,67 @@ fn server_mutation_plan(
     }
 
     validate_mutation_parameters(function, object_types)?;
-    let assignments = validate_mutation_assignments(plan.assignments(), target, function)?;
+    let assignments = validate_mutation_assignments(
+        plan.assignments(),
+        target,
+        function,
+        matches!(plan.operation(), MutationOperation::Insert),
+    )?;
     validate_mutation_reference_sequence(&mutation_reference_sequence(plan, function), references)?;
-    Ok(ServerMutationPlan::new_insert(
-        plan.target_object(),
-        assignments,
-        plan.returned_object(),
-    )?)
+    Ok(match plan.operation() {
+        MutationOperation::Insert => ServerMutationPlan::new_insert(
+            plan.target_object(),
+            assignments,
+            plan.returned_object(),
+        )?,
+        MutationOperation::Update {
+            selector_owner,
+            selector_parameter,
+        } => {
+            validate_mutation_selector(
+                *selector_owner,
+                *selector_parameter,
+                plan.target_object(),
+                function,
+            )?;
+            ServerMutationPlan::new_update(
+                plan.target_object(),
+                MutationSelector::new(*selector_owner, *selector_parameter),
+                assignments,
+                plan.returned_object(),
+            )?
+        }
+    })
+}
+
+fn validate_mutation_selector(
+    owner: FunctionId,
+    parameter: ParameterId,
+    target: TypeId,
+    function: &FunctionDefinition,
+) -> Result<(), PrepareError> {
+    if owner != function.id() {
+        return Err(PrepareError::InvalidCheckedBundle {
+            reason: "mutation selector owner differs from its enclosing function",
+        });
+    }
+    let selector =
+        function
+            .parameter_by_id(parameter)
+            .ok_or(PrepareError::InvalidCheckedBundle {
+                reason: "mutation selector parameter is not declared by its enclosing function",
+            })?;
+    if selector.default_expression().is_some() {
+        return Err(PrepareError::InvalidCheckedBundle {
+            reason: "mutation selector parameter has an unsupported default expression",
+        });
+    }
+    if selector.resolved_type() != (ResolvedType::Reference { target }) {
+        return Err(PrepareError::InvalidCheckedBundle {
+            reason: "mutation selector parameter does not reference its target object",
+        });
+    }
+    Ok(())
 }
 
 fn validate_mutation_parameters(
@@ -312,6 +365,7 @@ fn validate_mutation_assignments(
     assignments: &[crate::mutation::MutationAssignment<TypeId, FieldId, FunctionId, ParameterId>],
     target: &ObjectTypeDefinition,
     function: &FunctionDefinition,
+    require_all_non_nullable_fields: bool,
 ) -> Result<Vec<ServerMutationFieldAssignment>, PrepareError> {
     let mut durable_assignments = Vec::with_capacity(assignments.len());
     let mut assigned_fields = HashSet::with_capacity(assignments.len());
@@ -339,10 +393,11 @@ fn validate_mutation_assignments(
             expression,
         ));
     }
-    if target
-        .fields()
-        .iter()
-        .any(|field| !field.nullable() && !assigned_fields.contains(&field.id()))
+    if require_all_non_nullable_fields
+        && target
+            .fields()
+            .iter()
+            .any(|field| !field.nullable() && !assigned_fields.contains(&field.id()))
     {
         return Err(PrepareError::InvalidCheckedBundle {
             reason: "mutation omits a non-nullable target field",
@@ -510,6 +565,23 @@ fn mutation_reference_sequence(
                 },
             ));
         }
+    }
+    if let MutationOperation::Update {
+        selector_owner,
+        selector_parameter,
+    } = plan.operation()
+    {
+        references.push((
+            DefinitionReferenceKind::ObjectReference,
+            DefinitionReferenceTarget::ObjectType(plan.target_object()),
+        ));
+        references.push((
+            DefinitionReferenceKind::ParameterRead,
+            DefinitionReferenceTarget::Parameter {
+                owner: *selector_owner,
+                parameter: *selector_parameter,
+            },
+        ));
     }
     references.push((
         DefinitionReferenceKind::ObjectReference,
@@ -1515,13 +1587,14 @@ impl<'a> CandidateBuilder<'a> {
                     })
                     .collect::<Result<Vec<_>, PrepareError>>()?;
                 let plan = server_mutation_plan(&plan, function, object_types, &references)?;
+                let format_version = plan.format_version();
                 let payload = plan.encode()?;
                 let hash = artifact_payload_digest(&payload)?;
                 Ok(PreparedServerArtifact {
                     artifact: ExecutableArtifact::new(
                         ExecutableArtifactKind::Server,
                         SERVER_MUTATION_PLAN_FORMAT,
-                        SERVER_MUTATION_PLAN_VERSION,
+                        format_version,
                         payload,
                         hash,
                     )?,
@@ -1617,7 +1690,8 @@ mod tests {
     use orna_artifact::{
         constant_expression::ConstantExpression,
         server_mutation_plan::{
-            MutationExpressionKind as DurableMutationExpressionKind, ServerMutationPlan,
+            MutationExpressionKind as DurableMutationExpressionKind, ServerMutationOperation,
+            ServerMutationPlan,
         },
         server_plan::{ExpressionKind, ServerPlan},
     };
@@ -1784,6 +1858,14 @@ mod tests {
         RETURNS ROWS ( result REF tasks.task ) TRANSACTION ATOMIC\n\
         AS INSERT INTO tasks.task AS created ( title, done, note, owner )\n\
         VALUES ( p_title, FALSE, NULL, p_owner ) RETURNING REF(created);\n";
+
+    const UPDATE_SOURCE: &str = "CREATE SCHEMA tasks;\n\
+        CREATE TYPE tasks.person AS OBJECT (name TEXT NOT NULL);\n\
+        CREATE TYPE tasks.task AS OBJECT (title TEXT NOT NULL, done BOOL NOT NULL, owner REF tasks.person);\n\
+        CREATE SERVER FUNCTION tasks.update(p_task REF tasks.task, p_title TEXT, p_owner REF tasks.person)\n\
+        RETURNS ROWS (updated REF tasks.task) TRANSACTION ATOMIC\n\
+        AS UPDATE tasks.task AS changed SET title = p_title, owner = p_owner\n\
+        WHERE REF(changed) = p_task RETURNING REF(changed);\n";
 
     const MUTATION_CHANGED_SOURCE: &str = "CREATE SCHEMA tasks;\n\
         CREATE TYPE tasks.person AS OBJECT (name TEXT NOT NULL);\n\
@@ -1991,7 +2073,10 @@ mod tests {
         let revision = &initial.new_function_revisions()[0];
         assert_eq!(revision.artifact().kind(), ExecutableArtifactKind::Server);
         assert_eq!(revision.artifact().format(), SERVER_MUTATION_PLAN_FORMAT);
-        assert_eq!(revision.artifact().version(), SERVER_MUTATION_PLAN_VERSION);
+        assert_eq!(
+            revision.artifact().version(),
+            orna_artifact::server_mutation_plan::INSERT_FORMAT_VERSION
+        );
         assert_eq!(
             revision.language_version(),
             SERVER_MUTATION_PLAN_LANGUAGE_VERSION
@@ -2165,6 +2250,127 @@ mod tests {
     }
 
     #[test]
+    fn prepares_update_version_two_with_selector_and_exact_references() {
+        let empty = empty_active();
+        let prepared = prepare(
+            &checked_report(UPDATE_SOURCE, empty.catalogue()),
+            empty.pair(),
+            &empty,
+        )
+        .unwrap();
+
+        let catalogue = prepared.candidate();
+        let person = catalogue
+            .object_type_by_name(&semantic_name(&["tasks", "person"]))
+            .unwrap();
+        let task = catalogue
+            .object_type_by_name(&semantic_name(&["tasks", "task"]))
+            .unwrap();
+        let function = &catalogue.functions()[0];
+        let revision = &prepared.new_function_revisions()[0];
+        assert_eq!(
+            revision.artifact().version(),
+            orna_artifact::server_mutation_plan::UPDATE_FORMAT_VERSION
+        );
+        assert_eq!(
+            artifact_payload_digest(revision.artifact().payload()).unwrap(),
+            revision.artifact().content_hash()
+        );
+        let plan = ServerMutationPlan::decode(revision.artifact().payload()).unwrap();
+        assert_eq!(plan.format_version(), 2);
+        assert_eq!(plan.target(), task.id());
+        assert_eq!(plan.returned_object(), task.id());
+        assert_eq!(plan.assignments().len(), 2);
+        assert_eq!(plan.assignments()[0].field(), task.fields()[0].id());
+        assert_eq!(plan.assignments()[1].field(), task.fields()[2].id());
+        assert_eq!(
+            plan.operation(),
+            &ServerMutationOperation::Update {
+                selector: orna_artifact::server_mutation_plan::MutationSelector::new(
+                    function.id(),
+                    function.parameters()[0].id(),
+                )
+            }
+        );
+        assert_eq!(
+            prepared
+                .references()
+                .iter()
+                .map(|reference| (reference.kind(), reference.target()))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    DefinitionReferenceKind::ObjectReference,
+                    DefinitionReferenceTarget::ObjectType(task.id()),
+                ),
+                (
+                    DefinitionReferenceKind::ObjectReference,
+                    DefinitionReferenceTarget::ObjectType(person.id()),
+                ),
+                (
+                    DefinitionReferenceKind::ObjectReference,
+                    DefinitionReferenceTarget::ObjectType(task.id()),
+                ),
+                (
+                    DefinitionReferenceKind::WriteObject,
+                    DefinitionReferenceTarget::ObjectType(task.id()),
+                ),
+                (
+                    DefinitionReferenceKind::WriteField,
+                    DefinitionReferenceTarget::Field {
+                        owner: task.id(),
+                        field: task.fields()[0].id(),
+                    },
+                ),
+                (
+                    DefinitionReferenceKind::ParameterRead,
+                    DefinitionReferenceTarget::Parameter {
+                        owner: function.id(),
+                        parameter: function.parameters()[1].id(),
+                    },
+                ),
+                (
+                    DefinitionReferenceKind::WriteField,
+                    DefinitionReferenceTarget::Field {
+                        owner: task.id(),
+                        field: task.fields()[2].id(),
+                    },
+                ),
+                (
+                    DefinitionReferenceKind::ParameterRead,
+                    DefinitionReferenceTarget::Parameter {
+                        owner: function.id(),
+                        parameter: function.parameters()[2].id(),
+                    },
+                ),
+                (
+                    DefinitionReferenceKind::ObjectReference,
+                    DefinitionReferenceTarget::ObjectType(task.id()),
+                ),
+                (
+                    DefinitionReferenceKind::ParameterRead,
+                    DefinitionReferenceTarget::Parameter {
+                        owner: function.id(),
+                        parameter: function.parameters()[0].id(),
+                    },
+                ),
+                (
+                    DefinitionReferenceKind::ObjectReference,
+                    DefinitionReferenceTarget::ObjectType(task.id()),
+                ),
+            ]
+        );
+        assert_eq!(
+            prepared
+                .references()
+                .iter()
+                .map(|reference| reference.ordinal())
+                .collect::<Vec<_>>(),
+            (0..11).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn mutation_preparation_revalidates_durable_catalogue_and_reference_facts() {
         let target_id = TypeId::from_bytes([41; 16]);
         let title_id = FieldId::from_bytes([42; 16]);
@@ -2212,8 +2418,13 @@ mod tests {
             ),
         );
         assert!(
-            validate_mutation_assignments(std::slice::from_ref(&parameter), &target, &function)
-                .is_ok()
+            validate_mutation_assignments(
+                std::slice::from_ref(&parameter),
+                &target,
+                &function,
+                true,
+            )
+            .is_ok()
         );
 
         let cross_owner = MutationAssignment::new(
@@ -2283,13 +2494,14 @@ mod tests {
             vec![nullable_null],
             Vec::new(),
         ] {
-            assert!(validate_mutation_assignments(&assignments, &target, &function).is_err());
+            assert!(validate_mutation_assignments(&assignments, &target, &function, true).is_err());
         }
         assert!(matches!(
             validate_mutation_assignments(
                 &[wrong_parameter_type],
                 &target,
                 &function_with_wrong_parameter_type,
+                true,
             ),
             Err(PrepareError::InvalidCheckedBundle {
                 reason: "mutation parameter type differs from its expression"
@@ -2366,6 +2578,70 @@ mod tests {
             validate_mutation_parameters(&defaulted, &[]),
             Err(PrepareError::InvalidCheckedBundle {
                 reason: "mutation parameter has an unsupported default expression"
+            })
+        ));
+    }
+
+    #[test]
+    fn mutation_selector_validation_requires_exact_owner_parameter_and_target() {
+        let function_id = FunctionId::from_bytes([61; 16]);
+        let parameter_id = ParameterId::from_bytes([62; 16]);
+        let target = TypeId::from_bytes([63; 16]);
+        let function_with = |resolved_type| {
+            FunctionDefinition::new(
+                function_id,
+                semantic_name(&["tasks", "update"]),
+                FunctionDomain::Server,
+                vec![ParameterDefinition::new(
+                    parameter_id,
+                    "selected",
+                    0,
+                    resolved_type,
+                    None,
+                )],
+                FunctionReturn::Rows(Vec::new()),
+                FunctionRevisionId::from_bytes([64; 16]),
+                FunctionSecurity::Invoker,
+                Some(FunctionTransaction::Atomic),
+                FunctionVolatility::Volatile,
+            )
+        };
+        let valid = function_with(ResolvedType::reference(target));
+        assert!(validate_mutation_selector(function_id, parameter_id, target, &valid).is_ok());
+        assert!(matches!(
+            validate_mutation_selector(
+                FunctionId::from_bytes([65; 16]),
+                parameter_id,
+                target,
+                &valid,
+            ),
+            Err(PrepareError::InvalidCheckedBundle {
+                reason: "mutation selector owner differs from its enclosing function"
+            })
+        ));
+        assert!(matches!(
+            validate_mutation_selector(
+                function_id,
+                ParameterId::from_bytes([66; 16]),
+                target,
+                &valid,
+            ),
+            Err(PrepareError::InvalidCheckedBundle {
+                reason: "mutation selector parameter is not declared by its enclosing function"
+            })
+        ));
+        let wrong_type = function_with(ResolvedType::scalar(StandardScalar::BigInt));
+        assert!(matches!(
+            validate_mutation_selector(function_id, parameter_id, target, &wrong_type),
+            Err(PrepareError::InvalidCheckedBundle {
+                reason: "mutation selector parameter does not reference its target object"
+            })
+        ));
+        let wrong_target = function_with(ResolvedType::reference(TypeId::from_bytes([67; 16])));
+        assert!(matches!(
+            validate_mutation_selector(function_id, parameter_id, target, &wrong_target),
+            Err(PrepareError::InvalidCheckedBundle {
+                reason: "mutation selector parameter does not reference its target object"
             })
         ));
     }

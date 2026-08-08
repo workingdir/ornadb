@@ -860,7 +860,7 @@ impl CheckedDefinitionReference {
 pub(crate) enum CheckedServerFunctionBody {
     /// A checked relational query body.
     Query(RelationalQueryIr<CheckedTypeId, CheckedFieldId>),
-    /// A checked single-row insert body.
+    /// A checked single-object mutation body.
     Mutation(
         crate::mutation::MutationPlanIr<
             CheckedTypeId,
