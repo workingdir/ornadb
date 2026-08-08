@@ -624,7 +624,14 @@ fn check_server_functions(
             ));
             continue;
         };
-        let ServerFunctionBody::SqlQuery(body) = input.body;
+        let Some(body) = input.body.as_sql_query() else {
+            diagnostics.push(DiagnosticCode::semantic(
+                DiagnosticCode::DomainIncompatible,
+                "SERVER function body is not supported by this compiler",
+                input.location.clone(),
+            ));
+            continue;
+        };
         let query_check =
             match check_query_in(&body.query, catalogue, input.location.logical_path()) {
                 Ok(query_check) => query_check,

@@ -745,7 +745,7 @@ mod tests {
         },
         types::{ResolvedType, StandardScalar},
     };
-    use orna_syntax::{ServerFunctionBody, parse};
+    use orna_syntax::parse;
 
     use super::{
         ExpressionKind, NullOrder, QueryReferenceKind, QueryReferenceTarget, SortDirection,
@@ -845,7 +845,10 @@ mod tests {
             "{:?}",
             parsed.diagnostics()
         );
-        let ServerFunctionBody::SqlQuery(body) = &parsed.server_functions()[0].body;
+        let body = parsed.server_functions()[0]
+            .body
+            .as_sql_query()
+            .expect("test function has a SELECT body");
         body.query.clone()
     }
 
