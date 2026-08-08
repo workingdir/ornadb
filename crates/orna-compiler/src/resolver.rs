@@ -6,12 +6,13 @@
 mod identity;
 mod model;
 
+#[cfg(test)]
+pub(crate) use model::QueryField;
 pub use model::{
     CheckReport, CheckedBundle, CheckedDefault, CheckedField, CheckedObjectType, CheckedSchema,
     CheckedServerFunction, ConstantValue,
 };
-#[allow(unused_imports)]
-pub(crate) use model::{QueryCatalogue, QueryField, SemanticType};
+pub(crate) use model::{QueryCatalogue, SemanticType};
 
 use std::collections::{HashMap, HashSet};
 

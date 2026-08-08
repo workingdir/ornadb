@@ -12,13 +12,6 @@ use crate::{CompilerDiagnostic, ParseReport, SourceLocation, relational::Relatio
 
 /// A resolved semantic type whose identities belong to the checking context.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "generic relational checking consumes this type in the next slice"
-    )
-)]
 pub(crate) enum SemanticType<T> {
     /// A standard scalar type.
     Scalar(StandardScalar),
@@ -31,13 +24,6 @@ pub(crate) enum SemanticType<T> {
     },
 }
 
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "generic relational checking consumes this type in the next slice"
-    )
-)]
 impl<T> SemanticType<T> {
     /// Creates a standard scalar type.
     pub(crate) const fn scalar(scalar: StandardScalar) -> Self {
@@ -50,13 +36,6 @@ impl<T> SemanticType<T> {
     }
 }
 
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "generic relational checking consumes this type in the next slice"
-    )
-)]
 impl SemanticType<TypeId> {
     /// Converts a durable core type into the compiler identity domain.
     pub(crate) const fn from_core(resolved_type: ResolvedType) -> Self {
@@ -79,26 +58,12 @@ impl SemanticType<TypeId> {
 
 /// One query-visible field in a catalogue used during semantic checking.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "generic relational checking consumes this type in the next slice"
-    )
-)]
 pub(crate) struct QueryField<T, F> {
     id: F,
     resolved_type: SemanticType<T>,
     nullable: bool,
 }
 
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "generic relational checking consumes this type in the next slice"
-    )
-)]
 impl<T, F> QueryField<T, F> {
     /// Creates one query-visible field.
     pub(crate) fn new(id: F, resolved_type: SemanticType<T>, nullable: bool) -> Self {
@@ -183,13 +148,6 @@ impl<T, F> QueryObjectType<T, F> {
 }
 
 /// The query lookup contract shared by durable and resolver-local catalogues.
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "generic relational checking consumes this trait in the next slice"
-    )
-)]
 pub(crate) trait QueryCatalogue<T, F> {
     /// Finds an object type identity by its exact resolved qualified name.
     fn object_type_id_by_name(&self, name: &QualifiedSemanticName) -> Option<T>;
