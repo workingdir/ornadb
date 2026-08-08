@@ -4,4 +4,5 @@
 //! backend. Each artifact decoder validates its complete input before it
 //! returns an executable representation.
 
+pub mod constant_expression;
 pub mod server_plan;
