@@ -36,8 +36,8 @@ use orna_syntax::{
     FieldRenameDeclaration, FunctionReturnType, FunctionSecurity as SyntaxFunctionSecurity,
     FunctionTransaction as SyntaxFunctionTransaction,
     FunctionVolatility as SyntaxFunctionVolatility, ObjectTypeDeclaration, OnDeletePolicy,
-    QualifiedName, ServerFunctionBody, ServerFunctionDeclaration, SourceSlice, SourceSpan,
-    StandardLargeObjectKind, TypeSpecification,
+    QualifiedName, SelectQuantifier, ServerFunctionBody, ServerFunctionDeclaration, SourceSlice,
+    SourceSpan, StandardLargeObjectKind, TypeSpecification,
 };
 
 use crate::mutation::{
@@ -45,7 +45,8 @@ use crate::mutation::{
 };
 use crate::relational::{
     ExpressionIr, IdentitySelectedQueryReference, QueryParameter, QueryReference,
-    QueryReferenceKind, QueryReferenceTarget, check_identity_selected_query_in, check_query_in,
+    QueryReferenceKind, QueryReferenceTarget, check_distinct_query_in,
+    check_identity_selected_query_in, check_query_in,
 };
 use crate::{
     CompilerDiagnostic, DiagnosticCode, ParseReport, SourceLocation,
@@ -843,73 +844,119 @@ fn check_server_functions(
         };
 
         let (body, body_references) = if let Some(query_body) = input.body.as_sql_query() {
-            let has_selector = matches!(
-                &query_body.query.predicate,
-                Some(orna_syntax::QueryExpression::Equality { right, .. })
-                    if matches!(right.as_ref(), orna_syntax::QueryExpression::ParameterRead { .. })
-            );
-            if input.parameters.is_empty() && !has_selector {
-                let query_check = match check_query_in(
-                    &query_body.query,
-                    catalogue,
-                    input.location.logical_path(),
-                ) {
-                    Ok(query_check) => query_check,
-                    Err(query_diagnostics) => {
-                        diagnostics.extend(query_diagnostics);
+            match &query_body.query.quantifier {
+                SelectQuantifier::Distinct { .. } => {
+                    let query_check = match check_distinct_query_in(
+                        &query_body.query,
+                        catalogue,
+                        input.location.logical_path(),
+                    ) {
+                        Ok(query_check) => query_check,
+                        Err(query_diagnostics) => {
+                            diagnostics.extend(query_diagnostics);
+                            continue;
+                        }
+                    };
+                    if !query_return_matches(
+                        query_check.plan().projections(),
+                        columns,
+                        return_location,
+                        diagnostics,
+                    ) {
                         continue;
                     }
-                };
-                if !query_return_matches(
-                    query_check.plan().projections(),
-                    columns,
-                    return_location,
-                    diagnostics,
-                ) {
-                    continue;
-                }
-                (
-                    CheckedServerFunctionBody::Query(query_check.plan().clone()),
-                    query_check
-                        .references()
-                        .iter()
-                        .map(query_reference)
-                        .collect::<Vec<_>>(),
-                )
-            } else {
-                if !identity_selected_query_execution_mode_is_valid(input, diagnostics) {
-                    continue;
-                }
-                let parameters = identity_selected_query_parameters(input);
-                let query_check = match check_identity_selected_query_in(
-                    &query_body.query,
-                    catalogue,
-                    input.id,
-                    &parameters,
-                    input.location.logical_path(),
-                ) {
-                    Ok(query_check) => query_check,
-                    Err(query_diagnostics) => {
-                        diagnostics.extend(query_diagnostics);
+                    if !distinct_query_execution_shape_is_valid(input, diagnostics) {
                         continue;
                     }
-                };
-                if !query_return_matches(
-                    query_check.plan().projections(),
-                    columns,
-                    return_location,
-                    diagnostics,
-                ) {
+                    (
+                        CheckedServerFunctionBody::DistinctQuery(query_check.plan().clone()),
+                        query_check
+                            .references()
+                            .iter()
+                            .map(query_reference)
+                            .collect::<Vec<_>>(),
+                    )
+                }
+                SelectQuantifier::All => {
+                    let has_selector = matches!(
+                        &query_body.query.predicate,
+                        Some(orna_syntax::QueryExpression::Equality { right, .. })
+                            if matches!(right.as_ref(), orna_syntax::QueryExpression::ParameterRead { .. })
+                    );
+                    if input.parameters.is_empty() && !has_selector {
+                        let query_check = match check_query_in(
+                            &query_body.query,
+                            catalogue,
+                            input.location.logical_path(),
+                        ) {
+                            Ok(query_check) => query_check,
+                            Err(query_diagnostics) => {
+                                diagnostics.extend(query_diagnostics);
+                                continue;
+                            }
+                        };
+                        if !query_return_matches(
+                            query_check.plan().projections(),
+                            columns,
+                            return_location,
+                            diagnostics,
+                        ) {
+                            continue;
+                        }
+                        (
+                            CheckedServerFunctionBody::Query(query_check.plan().clone()),
+                            query_check
+                                .references()
+                                .iter()
+                                .map(query_reference)
+                                .collect::<Vec<_>>(),
+                        )
+                    } else {
+                        if !identity_selected_query_execution_mode_is_valid(input, diagnostics) {
+                            continue;
+                        }
+                        let parameters = identity_selected_query_parameters(input);
+                        let query_check = match check_identity_selected_query_in(
+                            &query_body.query,
+                            catalogue,
+                            input.id,
+                            &parameters,
+                            input.location.logical_path(),
+                        ) {
+                            Ok(query_check) => query_check,
+                            Err(query_diagnostics) => {
+                                diagnostics.extend(query_diagnostics);
+                                continue;
+                            }
+                        };
+                        if !query_return_matches(
+                            query_check.plan().projections(),
+                            columns,
+                            return_location,
+                            diagnostics,
+                        ) {
+                            continue;
+                        }
+                        (
+                            CheckedServerFunctionBody::IdentitySelectedQuery(
+                                query_check.plan().clone(),
+                            ),
+                            query_check
+                                .references()
+                                .iter()
+                                .map(identity_selected_query_reference)
+                                .collect::<Vec<_>>(),
+                        )
+                    }
+                }
+                _ => {
+                    diagnostics.push(DiagnosticCode::semantic(
+                        DiagnosticCode::DomainIncompatible,
+                        "this SELECT form is not available yet",
+                        location(input.location.logical_path(), &query_body.query.span),
+                    ));
                     continue;
                 }
-                (
-                    CheckedServerFunctionBody::IdentitySelectedQuery(query_check.plan().clone()),
-                    query_check
-                        .references()
-                        .iter()
-                        .map(identity_selected_query_reference)
-                        .collect::<Vec<_>>(),
-                )
             }
         } else if let Some(delete_body) = input.body.as_sql_delete() {
             if !mutation_execution_mode_is_valid(input, "DELETE", diagnostics) {
@@ -1088,6 +1135,46 @@ fn mutation_execution_mode_is_valid(
         diagnostics.push(DiagnosticCode::semantic(
             DiagnosticCode::DomainIncompatible,
             format!("{mutation_name} SERVER functions require VOLATILITY VOLATILE"),
+            input.location.clone(),
+        ));
+        valid = false;
+    }
+    valid
+}
+
+fn distinct_query_execution_shape_is_valid(
+    input: &ResolvedServerFunctionInput<'_>,
+    diagnostics: &mut Vec<CompilerDiagnostic>,
+) -> bool {
+    let mut valid = true;
+    if !input.parameters.is_empty() {
+        diagnostics.push(DiagnosticCode::semantic(
+            DiagnosticCode::DomainIncompatible,
+            "SELECT DISTINCT SERVER functions require zero declared parameters",
+            input.location.clone(),
+        ));
+        valid = false;
+    }
+    if input.security != CatalogueFunctionSecurity::Invoker {
+        diagnostics.push(DiagnosticCode::semantic(
+            DiagnosticCode::DomainIncompatible,
+            "SELECT DISTINCT SERVER functions require SECURITY INVOKER",
+            input.location.clone(),
+        ));
+        valid = false;
+    }
+    if input.transaction != Some(CatalogueFunctionTransaction::ReadOnly) {
+        diagnostics.push(DiagnosticCode::semantic(
+            DiagnosticCode::DomainIncompatible,
+            "SELECT DISTINCT SERVER functions require TRANSACTION READ ONLY",
+            input.location.clone(),
+        ));
+        valid = false;
+    }
+    if input.volatility != CatalogueFunctionVolatility::Stable {
+        diagnostics.push(DiagnosticCode::semantic(
+            DiagnosticCode::DomainIncompatible,
+            "SELECT DISTINCT SERVER functions require VOLATILITY STABLE",
             input.location.clone(),
         ));
         valid = false;
@@ -2571,6 +2658,7 @@ mod tests {
             .identity_selected_query_plan()
             .expect("fixture has an identity-selected SELECT body");
         assert!(function.query_plan().is_none());
+        assert!(function.distinct_query_plan().is_none());
         assert_eq!(plan.scan().object_type(), task.id());
         assert_eq!(plan.selector().owner(), function.id());
         assert_eq!(plan.selector().parameter(), function.parameters()[0].id());
@@ -2689,6 +2777,7 @@ mod tests {
         let function = &checked.server_functions()[0];
         assert!(function.query_plan().is_some());
         assert!(function.identity_selected_query_plan().is_none());
+        assert!(function.distinct_query_plan().is_none());
         let query_start = source.find("SELECT REF(t)").unwrap();
         let assignee_starts = source
             .match_indices("t.assignee.name")
@@ -2787,6 +2876,139 @@ mod tests {
             assert_eq!(reference.kind(), kind);
             assert_eq!(reference.target(), target);
             assert_eq!(reference.location().logical_path(), "v1_references.orna");
+            assert_eq!(reference.location().span().start(), start);
+            assert_eq!(reference.location().span().end(), start + length);
+        }
+    }
+
+    #[test]
+    fn checks_distinct_query_identities_and_orders_signature_then_body_evidence() {
+        let source = "CREATE SCHEMA people; CREATE SCHEMA tasks; \
+            CREATE TYPE people.person AS OBJECT (active BOOL NOT NULL); \
+            CREATE TYPE tasks.task AS OBJECT (assignee REF people.person, completed BOOL NOT NULL); \
+            CREATE SERVER FUNCTION tasks.values() \
+            RETURNS ROWS (task REF tasks.task, active BOOL, completed BOOL) \
+            SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE \
+            AS SELECT DISTINCT REF(t), t.assignee.active, t.completed FROM tasks.task t \
+            WHERE t.completed = t.completed;";
+        let report = check(
+            &bundle([("distinct_references.orna", source)]),
+            &empty_catalogue(),
+        );
+
+        assert!(report.diagnostics().is_empty());
+        let checked = report.checked_bundle().unwrap();
+        let person = &checked.object_types()[0];
+        let task = &checked.object_types()[1];
+        let active = &person.fields()[0];
+        let assignee = &task.fields()[0];
+        let completed = &task.fields()[1];
+        let function = &checked.server_functions()[0];
+        let plan = function
+            .distinct_query_plan()
+            .expect("fixture has a DISTINCT SELECT body");
+        assert!(function.query_plan().is_none());
+        assert!(function.identity_selected_query_plan().is_none());
+        assert_eq!(plan.scan().object_type(), task.id());
+        assert_eq!(plan.projections().len(), 3);
+        assert!(!plan.projections()[0].value_type().nullable());
+        assert!(plan.projections()[1].value_type().nullable());
+        assert!(!plan.projections()[2].value_type().nullable());
+        assert!(plan.selection().is_some());
+        let ExpressionKind::FieldPath { steps, .. } = plan.projections()[1].kind() else {
+            panic!("second DISTINCT projection must be a field path");
+        };
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0].owner(), task.id());
+        assert_eq!(steps[0].field(), assignee.id());
+        assert_eq!(steps[1].owner(), person.id());
+        assert_eq!(steps[1].field(), active.id());
+
+        let query_start = source.find("SELECT DISTINCT").unwrap();
+        let query_object_start = query_start + source[query_start..].find("tasks.task").unwrap();
+        let projection_reference_start =
+            query_start + source[query_start..].find("REF(t)").unwrap() + "REF(".len();
+        let assignee_start = source.find("t.assignee.active").unwrap();
+        let completed_starts = source
+            .match_indices("t.completed")
+            .map(|(start, _)| start)
+            .collect::<Vec<_>>();
+        let return_target_start = source.find("task REF tasks.task").unwrap() + "task REF ".len();
+        let expected = [
+            (
+                DefinitionReferenceKind::ObjectReference,
+                CheckedDefinitionReferenceTarget::ObjectType(task.id()),
+                return_target_start,
+                "tasks.task".len(),
+            ),
+            (
+                DefinitionReferenceKind::QueryObject,
+                CheckedDefinitionReferenceTarget::ObjectType(task.id()),
+                query_object_start,
+                "tasks.task".len(),
+            ),
+            (
+                DefinitionReferenceKind::ObjectReference,
+                CheckedDefinitionReferenceTarget::ObjectType(task.id()),
+                projection_reference_start,
+                1,
+            ),
+            (
+                DefinitionReferenceKind::QueryField,
+                CheckedDefinitionReferenceTarget::Field {
+                    owner: task.id(),
+                    field: assignee.id(),
+                },
+                assignee_start + "t.".len(),
+                "assignee".len(),
+            ),
+            (
+                DefinitionReferenceKind::QueryField,
+                CheckedDefinitionReferenceTarget::Field {
+                    owner: person.id(),
+                    field: active.id(),
+                },
+                assignee_start + "t.assignee.".len(),
+                "active".len(),
+            ),
+            (
+                DefinitionReferenceKind::QueryField,
+                CheckedDefinitionReferenceTarget::Field {
+                    owner: task.id(),
+                    field: completed.id(),
+                },
+                completed_starts[0] + "t.".len(),
+                "completed".len(),
+            ),
+            (
+                DefinitionReferenceKind::QueryField,
+                CheckedDefinitionReferenceTarget::Field {
+                    owner: task.id(),
+                    field: completed.id(),
+                },
+                completed_starts[1] + "t.".len(),
+                "completed".len(),
+            ),
+            (
+                DefinitionReferenceKind::QueryField,
+                CheckedDefinitionReferenceTarget::Field {
+                    owner: task.id(),
+                    field: completed.id(),
+                },
+                completed_starts[2] + "t.".len(),
+                "completed".len(),
+            ),
+        ];
+
+        assert_eq!(function.references().len(), expected.len());
+        for (reference, (kind, target, start, length)) in function.references().iter().zip(expected)
+        {
+            assert_eq!(reference.kind(), kind);
+            assert_eq!(reference.target(), target);
+            assert_eq!(
+                reference.location().logical_path(),
+                "distinct_references.orna"
+            );
             assert_eq!(reference.location().span().start(), start);
             assert_eq!(reference.location().span().end(), start + length);
         }
@@ -3648,6 +3870,136 @@ mod tests {
         assert_eq!(
             report.diagnostics()[0].location().span().end(),
             start + "tasks.other".len()
+        );
+    }
+
+    #[test]
+    fn rejects_distinct_function_shape_with_four_ordered_declaration_diagnostics() {
+        let source = "CREATE SCHEMA tasks; \
+            CREATE TYPE tasks.task AS OBJECT (completed BOOL NOT NULL); \
+            CREATE SERVER FUNCTION tasks.values(p_flag BOOL) RETURNS ROWS (completed BOOL) \
+            SECURITY DEFINER TRANSACTION ATOMIC VOLATILITY IMMUTABLE \
+            AS SELECT DISTINCT t.completed FROM tasks.task t;";
+        let report = check(
+            &bundle([("distinct_shape.orna", source)]),
+            &empty_catalogue(),
+        );
+
+        assert_no_checked_bundle(&report);
+        assert_eq!(
+            report
+                .diagnostics()
+                .iter()
+                .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    DiagnosticCode::DomainIncompatible,
+                    "SELECT DISTINCT SERVER functions require zero declared parameters",
+                ),
+                (
+                    DiagnosticCode::DomainIncompatible,
+                    "SELECT DISTINCT SERVER functions require SECURITY INVOKER",
+                ),
+                (
+                    DiagnosticCode::DomainIncompatible,
+                    "SELECT DISTINCT SERVER functions require TRANSACTION READ ONLY",
+                ),
+                (
+                    DiagnosticCode::DomainIncompatible,
+                    "SELECT DISTINCT SERVER functions require VOLATILITY STABLE",
+                ),
+            ]
+        );
+        for diagnostic in report.diagnostics() {
+            assert_eq!(diagnostic.location().logical_path(), "distinct_shape.orna");
+            assert_eq!(
+                diagnostic.location().span().start(),
+                source.find("CREATE SERVER FUNCTION").unwrap()
+            );
+            assert_eq!(diagnostic.location().span().end(), source.len());
+        }
+    }
+
+    #[test]
+    fn distinct_semantic_and_return_errors_precede_function_shape_diagnostics() {
+        let semantic_source = "CREATE SCHEMA tasks; \
+            CREATE TYPE tasks.task AS OBJECT (completed BOOL NOT NULL); \
+            CREATE SERVER FUNCTION tasks.values(p_flag BOOL) RETURNS ROWS (completed BOOL) \
+            SECURITY DEFINER TRANSACTION ATOMIC VOLATILITY IMMUTABLE \
+            AS SELECT DISTINCT t.unknown FROM tasks.task t;";
+        let report = check(
+            &bundle([("distinct_semantic.orna", semantic_source)]),
+            &empty_catalogue(),
+        );
+        assert_no_checked_bundle(&report);
+        assert_eq!(report.diagnostics().len(), 1);
+        let diagnostic = &report.diagnostics()[0];
+        assert_eq!(diagnostic.code(), DiagnosticCode::UnknownQualifiedName);
+        assert_eq!(diagnostic.message(), "unknown field unknown on tasks.task");
+        assert_eq!(
+            diagnostic.location().logical_path(),
+            "distinct_semantic.orna"
+        );
+        let unknown_start = semantic_source.rfind("unknown").unwrap();
+        assert_eq!(diagnostic.location().span().start(), unknown_start);
+        assert_eq!(
+            diagnostic.location().span().end(),
+            unknown_start + "unknown".len()
+        );
+
+        let return_source = "CREATE SCHEMA tasks; \
+            CREATE TYPE tasks.task AS OBJECT (completed BOOL NOT NULL); \
+            CREATE SERVER FUNCTION tasks.values(p_flag BOOL) RETURNS ROWS (completed TEXT) \
+            SECURITY DEFINER TRANSACTION ATOMIC VOLATILITY IMMUTABLE \
+            AS SELECT DISTINCT t.completed FROM tasks.task t;";
+        let report = check(
+            &bundle([("distinct_return.orna", return_source)]),
+            &empty_catalogue(),
+        );
+        assert_no_checked_bundle(&report);
+        assert_eq!(report.diagnostics().len(), 1);
+        let diagnostic = &report.diagnostics()[0];
+        assert_eq!(diagnostic.code(), DiagnosticCode::TypeMismatch);
+        assert_eq!(
+            diagnostic.message(),
+            "SELECT column 1 does not have the same type as RETURNS ROWS column completed"
+        );
+        assert_eq!(diagnostic.location().logical_path(), "distinct_return.orna");
+        let return_start = return_source.find("completed TEXT").unwrap();
+        assert_eq!(diagnostic.location().span().start(), return_start);
+        assert_eq!(
+            diagnostic.location().span().end(),
+            return_start + "completed TEXT".len()
+        );
+    }
+
+    #[test]
+    fn rejects_unsupported_distinct_projections_with_the_relational_diagnostic() {
+        let source = "CREATE SCHEMA tasks; \
+            CREATE TYPE tasks.task AS OBJECT (title TEXT); \
+            CREATE SERVER FUNCTION tasks.values() RETURNS ROWS (title TEXT) \
+            SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE \
+            AS SELECT DISTINCT t.title FROM tasks.task t;";
+        let report = check(
+            &bundle([("distinct_domain.orna", source)]),
+            &empty_catalogue(),
+        );
+
+        assert_no_checked_bundle(&report);
+        assert_eq!(report.diagnostics().len(), 1);
+        let diagnostic = &report.diagnostics()[0];
+        assert_eq!(diagnostic.code(), DiagnosticCode::DomainIncompatible);
+        assert_eq!(
+            diagnostic.message(),
+            "SELECT DISTINCT projections support only BOOLEAN, INTEGER, BIGINT, BYTES, and REF values"
+        );
+        assert_eq!(diagnostic.location().logical_path(), "distinct_domain.orna");
+        let projection_start = source.rfind("t.title").unwrap();
+        assert_eq!(diagnostic.location().span().start(), projection_start);
+        assert_eq!(
+            diagnostic.location().span().end(),
+            projection_start + "t.title".len()
         );
     }
 
