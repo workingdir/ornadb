@@ -30,7 +30,7 @@ pub fn plan_physical_changes(
                 object_type: existing.id(),
             });
         };
-        if revised != existing {
+        if !same_storage_projection(existing, revised) {
             return Err(PhysicalPlanError::UnsupportedExistingObjectChange {
                 object_type: existing.id(),
             });
@@ -134,7 +134,7 @@ pub enum PhysicalPlanError {
     },
     /// An active durable object type is absent from the complete candidate.
     UnsupportedObjectDrop { object_type: TypeId },
-    /// An active durable object type changed in any way.
+    /// An active durable object type has an unsupported storage change.
     UnsupportedExistingObjectChange { object_type: TypeId },
     /// A new field uses a named value type without a storage contract.
     UnsupportedNamedFieldType { object_type: TypeId, field: FieldId },
@@ -164,7 +164,7 @@ impl fmt::Display for PhysicalPlanError {
                 formatter.write_str("durable object drops are not supported")
             }
             Self::UnsupportedExistingObjectChange { .. } => {
-                formatter.write_str("changes to existing durable objects are not supported")
+                formatter.write_str("changes to existing object storage are not supported")
             }
             Self::UnsupportedNamedFieldType { .. } => {
                 formatter.write_str("named field storage is not supported")
@@ -189,6 +189,27 @@ impl fmt::Display for PhysicalPlanError {
 }
 
 impl Error for PhysicalPlanError {}
+
+fn same_storage_projection(
+    existing: &ObjectTypeDefinition,
+    revised: &ObjectTypeDefinition,
+) -> bool {
+    existing.id() == revised.id()
+        && existing.fields().len() == revised.fields().len()
+        && existing
+            .fields()
+            .iter()
+            .zip(revised.fields())
+            .all(|(existing, revised)| {
+                existing.id() == revised.id()
+                    && existing.ordinal() == revised.ordinal()
+                    && existing.resolved_type() == revised.resolved_type()
+                    && existing.nullable() == revised.nullable()
+                    && existing.unique() == revised.unique()
+                    && existing.default_expression() == revised.default_expression()
+                    && existing.on_delete() == revised.on_delete()
+            })
+}
 
 fn plan_new_object(
     object_type: &ObjectTypeDefinition,
@@ -455,7 +476,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_every_existing_object_change_category() {
+    fn semantic_names_do_not_change_existing_object_storage() {
         let baseline = object(
             FIRST_TYPE,
             "first",
@@ -477,8 +498,61 @@ mod tests {
             ],
         );
         let active = active(vec![baseline.clone()], 1);
-        let mut variants = vec![
-            object(FIRST_TYPE, "renamed", baseline.fields().to_vec()),
+        let renamed = object(
+            FIRST_TYPE,
+            "renamed",
+            vec![
+                field(
+                    FIRST_FIELD,
+                    "renamed_first",
+                    0,
+                    ResolvedType::scalar(StandardScalar::Integer),
+                    true,
+                ),
+                field(
+                    SECOND_FIELD,
+                    "renamed_second",
+                    1,
+                    ResolvedType::scalar(StandardScalar::Integer),
+                    true,
+                ),
+            ],
+        );
+        let candidate = candidate(&active, vec![renamed], 2);
+
+        assert_eq!(
+            plan_physical_changes(&active, &candidate),
+            Ok(PhysicalPlan {
+                create_objects: Vec::new(),
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_every_existing_object_storage_change_category() {
+        let baseline = object(
+            FIRST_TYPE,
+            "first",
+            vec![
+                field(
+                    FIRST_FIELD,
+                    "first",
+                    0,
+                    ResolvedType::scalar(StandardScalar::Integer),
+                    true,
+                ),
+                reference_field(
+                    SECOND_FIELD,
+                    "second",
+                    1,
+                    SECOND_TYPE,
+                    true,
+                    Some(OnDeleteAction::Restrict),
+                ),
+            ],
+        );
+        let active = active(vec![baseline.clone()], 1);
+        let variants = vec![
             object(FIRST_TYPE, "first", vec![baseline.fields()[0].clone()]),
             object(
                 FIRST_TYPE,
@@ -490,7 +564,7 @@ mod tests {
                         FieldId::from_bytes([22; 16]),
                         "third",
                         2,
-                        ResolvedType::scalar(StandardScalar::Integer),
+                        ResolvedType::reference(SECOND_TYPE),
                         true,
                     ),
                 ],
@@ -500,8 +574,8 @@ mod tests {
                 "first",
                 vec![
                     field(
-                        FIRST_FIELD,
-                        "changed",
+                        FieldId::from_bytes([22; 16]),
+                        "first",
                         0,
                         ResolvedType::scalar(StandardScalar::Integer),
                         true,
@@ -542,56 +616,78 @@ mod tests {
                 "first",
                 vec![
                     field(
+                        FIRST_FIELD,
+                        "first",
+                        0,
+                        ResolvedType::scalar(StandardScalar::Integer),
+                        true,
+                    ),
+                    reference_field(
+                        SECOND_FIELD,
+                        "second",
+                        1,
+                        SECOND_TYPE,
+                        true,
+                        Some(OnDeleteAction::Cascade),
+                    ),
+                ],
+            ),
+            object(
+                FIRST_TYPE,
+                "first",
+                vec![
+                    field_with_options(
+                        FIRST_FIELD,
+                        "first",
+                        0,
+                        ResolvedType::scalar(StandardScalar::Integer),
+                        true,
+                        true,
+                        None,
+                        None,
+                    ),
+                    baseline.fields()[1].clone(),
+                ],
+            ),
+            object(
+                FIRST_TYPE,
+                "first",
+                vec![
+                    field_with_options(
+                        FIRST_FIELD,
+                        "first",
+                        0,
+                        ResolvedType::scalar(StandardScalar::Integer),
+                        true,
+                        false,
+                        Some(ExpressionId::from_bytes([30; 16])),
+                        None,
+                    ),
+                    baseline.fields()[1].clone(),
+                ],
+            ),
+            object(
+                FIRST_TYPE,
+                "first",
+                vec![
+                    field(
                         SECOND_FIELD,
                         "second",
                         0,
                         ResolvedType::scalar(StandardScalar::Integer),
                         true,
                     ),
-                    field(
+                    reference_field(
                         FIRST_FIELD,
                         "first",
                         1,
-                        ResolvedType::scalar(StandardScalar::Integer),
+                        SECOND_TYPE,
                         true,
+                        Some(OnDeleteAction::Restrict),
                     ),
                 ],
             ),
         ];
-        variants.push(object(
-            FIRST_TYPE,
-            "first",
-            vec![
-                field_with_options(
-                    FIRST_FIELD,
-                    "first",
-                    0,
-                    ResolvedType::scalar(StandardScalar::Integer),
-                    true,
-                    true,
-                    None,
-                    None,
-                ),
-                baseline.fields()[1].clone(),
-            ],
-        ));
-        variants.push(object(
-            FIRST_TYPE,
-            "first",
-            vec![
-                field_with_options(
-                    FIRST_FIELD,
-                    "first",
-                    0,
-                    ResolvedType::scalar(StandardScalar::Integer),
-                    true,
-                    false,
-                    Some(ExpressionId::from_bytes([30; 16])),
-                    None,
-                ),
-                baseline.fields()[1].clone(),
-            ],
-        ));
 
         for (index, variant) in variants.into_iter().enumerate() {
             let candidate = candidate(&active, vec![variant], 10 + index as u8);
@@ -602,6 +698,36 @@ mod tests {
                 })
             );
         }
+    }
+
+    #[test]
+    fn storage_projection_compares_type_and_field_ordinals() {
+        let baseline = object(
+            FIRST_TYPE,
+            "first",
+            vec![field(
+                FIRST_FIELD,
+                "first",
+                0,
+                ResolvedType::scalar(StandardScalar::Integer),
+                true,
+            )],
+        );
+        let different_type = object(SECOND_TYPE, "first", baseline.fields().to_vec());
+        let different_ordinal = object(
+            FIRST_TYPE,
+            "first",
+            vec![field(
+                FIRST_FIELD,
+                "first",
+                1,
+                ResolvedType::scalar(StandardScalar::Integer),
+                true,
+            )],
+        );
+
+        assert!(!same_storage_projection(&baseline, &different_type));
+        assert!(!same_storage_projection(&baseline, &different_ordinal));
     }
 
     #[test]
