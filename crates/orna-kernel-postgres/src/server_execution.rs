@@ -7,19 +7,24 @@ use std::{collections::BTreeMap, error::Error, fmt};
 
 use futures_util::TryStreamExt;
 use orna_artifact::server_plan::{
-    self, Expression, ExpressionKind, FieldStep, ServerPlan, SortDirection,
+    self, Expression, ExpressionKind, FieldStep, IdentitySelectedServerPlan, ServerPlan,
+    SortDirection,
 };
 use orna_core::{
-    FieldId, FunctionId, FunctionRevisionId, ObjectId, TypeId,
+    FieldId, FunctionId, FunctionRevisionId, ObjectId, ParameterId, TypeId,
     catalogue::{
         FunctionDefinition, FunctionDomain, FunctionReturn, FunctionSecurity, FunctionTransaction,
+        FunctionVolatility,
     },
     revision::{
         ActiveDatabaseRevision, DefinitionReferenceKind, DefinitionReferenceTarget,
         ExecutableArtifactKind, RevisionPair,
     },
     types::{ResolvedType, StandardScalar},
-    value::{ResultColumn, ResultRow, ResultRows, ResultRowsError, RuntimeFloat, RuntimeValue},
+    value::{
+        FunctionArgument, ResultColumn, ResultRow, ResultRows, ResultRowsError, RuntimeFloat,
+        RuntimeValue,
+    },
 };
 use tokio_postgres::{
     Client, IsolationLevel, Row, Statement, Transaction,
@@ -37,6 +42,7 @@ use crate::{
 
 const SERVER_PLAN_FORMAT: &str = server_plan::FORMAT_IDENTITY;
 const SERVER_PLAN_VERSION: u32 = server_plan::FORMAT_VERSION;
+const IDENTITY_SELECTED_SERVER_PLAN_VERSION: u32 = server_plan::IDENTITY_SELECTED_FORMAT_VERSION;
 const ROW_LIMIT: usize = 10_000;
 const CELL_LIMIT: usize = 1_000_000;
 const PAYLOAD_LIMIT: usize = 16 * 1024 * 1024;
@@ -44,6 +50,8 @@ const FIELD_PATH_STEP_LIMIT: usize = 8_192;
 const JOIN_LIMIT: usize = 1_024;
 const SQL_LIMIT: usize = 1024 * 1024;
 const TARGET_ENTRY_LIMIT: usize = 1_600;
+const VERSION_ONE_EQUALITY_RULE: &str = "version 1 SERVER SELECT equality supports only BOOLEAN, INTEGER, BIGINT, BYTES, and references";
+const PARAMETERISED_EQUALITY_RULE: &str = "parameterised SERVER SELECT equality supports only BOOLEAN, INTEGER, BIGINT, BYTES, and references";
 
 #[cfg(feature = "test-hooks")]
 struct SelectTestBarrier {
@@ -168,7 +176,7 @@ pub enum ServerSelectError {
     },
     /// The function does not execute in the server domain.
     FunctionDomain { function: FunctionId },
-    /// The function signature is outside this no-argument ROWS subset.
+    /// The function signature is outside the supported SERVER SELECT forms.
     FunctionSignature {
         function: FunctionId,
         rule: &'static str,
@@ -192,6 +200,15 @@ pub enum ServerSelectError {
         function: FunctionId,
         rule: &'static str,
     },
+    /// Supplied runtime arguments do not equal the active signature.
+    Argument {
+        /// The related parameter identity, when one is available.
+        parameter: Option<ParameterId>,
+        /// The exact rejected rule.
+        rule: &'static str,
+    },
+    /// A version-2 identity selection returned more than its one permitted row.
+    Cardinality { rule: &'static str },
     /// The plan result cannot enter the initial runtime value subset.
     ResultRows(ResultRowsError),
     /// PostgreSQL did not prepare the exact generated result shape.
@@ -307,6 +324,12 @@ impl fmt::Display for ServerSelectError {
                 "function {} has invalid definition-reference evidence: {rule}",
                 function.canonical(),
             ),
+            Self::Argument { rule, .. } => {
+                write!(formatter, "a supplied function argument is invalid: {rule}")
+            }
+            Self::Cardinality { rule } => {
+                write!(formatter, "SERVER SELECT returned too many rows: {rule}")
+            }
             Self::ResultRows(error) => write!(formatter, "invalid server result shape: {error}"),
             Self::PreparedResult { rule } => {
                 write!(formatter, "prepared server result is invalid: {rule}")
@@ -368,6 +391,8 @@ impl Error for ServerSelectError {
             | Self::Artifact { .. }
             | Self::PlanInvariant { .. }
             | Self::ReferenceEvidence { .. }
+            | Self::Argument { .. }
+            | Self::Cardinality { .. }
             | Self::PreparedResult { .. }
             | Self::ValueInvariant { .. }
             | Self::VariablePayload { .. }
@@ -390,7 +415,23 @@ impl PostgresKernel {
         &self,
         function: FunctionId,
     ) -> Result<ServerSelectResult, PostgresKernelError> {
-        self.execute_server_select_with_barrier(function, None)
+        self.execute_server_select_with_arguments(function, &[])
+            .await
+    }
+
+    /// Executes an active SERVER `ROWS` function with its exact typed arguments.
+    ///
+    /// Version 1 functions accept no arguments. Version 2 functions accept
+    /// exactly one non-null `REF` argument, identified by the stable
+    /// [`ParameterId`] from the active function signature. This method does
+    /// not resolve semantic names, authenticate or authorise a caller, attach
+    /// an invocation identity, or retry a failed operation automatically.
+    pub async fn execute_server_select_with_arguments(
+        &self,
+        function: FunctionId,
+        arguments: &[FunctionArgument],
+    ) -> Result<ServerSelectResult, PostgresKernelError> {
+        self.execute_server_select_with_options(function, arguments, None, false)
             .await
     }
 
@@ -406,20 +447,71 @@ impl PostgresKernel {
         reached: std::sync::Arc<tokio::sync::Barrier>,
         resume: std::sync::Arc<tokio::sync::Barrier>,
     ) -> Result<ServerSelectResult, PostgresKernelError> {
-        self.execute_server_select_with_barrier(
+        self.execute_server_select_with_arguments_and_test_barrier(function, &[], reached, resume)
+            .await
+    }
+
+    /// Pauses an argument-capable execution after active recovery.
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub async fn execute_server_select_with_arguments_and_test_barrier(
+        &self,
+        function: FunctionId,
+        arguments: &[FunctionArgument],
+        reached: std::sync::Arc<tokio::sync::Barrier>,
+        resume: std::sync::Arc<tokio::sync::Barrier>,
+    ) -> Result<ServerSelectResult, PostgresKernelError> {
+        self.execute_server_select_with_options(
             function,
+            arguments,
             Some(SelectTestBarrier { reached, resume }),
+            false,
         )
         .await
     }
 
-    async fn execute_server_select_with_barrier(
+    /// Forces a driver shutdown after PostgreSQL confirms the read-only COMMIT.
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub async fn execute_server_select_with_forced_post_commit_driver_shutdown(
         &self,
         function: FunctionId,
+    ) -> Result<ServerSelectResult, PostgresKernelError> {
+        self.execute_server_select_with_arguments_and_forced_post_commit_driver_shutdown(
+            function,
+            &[],
+        )
+        .await
+    }
+
+    /// Forces a driver shutdown after PostgreSQL confirms an argument-capable read-only COMMIT.
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub async fn execute_server_select_with_arguments_and_forced_post_commit_driver_shutdown(
+        &self,
+        function: FunctionId,
+        arguments: &[FunctionArgument],
+    ) -> Result<ServerSelectResult, PostgresKernelError> {
+        self.execute_server_select_with_options(function, arguments, None, true)
+            .await
+    }
+
+    async fn execute_server_select_with_options(
+        &self,
+        function: FunctionId,
+        arguments: &[FunctionArgument],
         barrier: Option<SelectTestBarrier>,
+        force_post_commit_driver_shutdown: bool,
     ) -> Result<ServerSelectResult, PostgresKernelError> {
         let mut session = self.open().await?;
-        let execution = execute_client(&mut session.client, function, barrier.as_ref()).await;
+        let execution =
+            execute_client(&mut session.client, function, arguments, barrier.as_ref()).await;
+        #[cfg(feature = "test-hooks")]
+        if execution.is_ok() && force_post_commit_driver_shutdown {
+            session.abort_driver();
+        }
+        #[cfg(not(feature = "test-hooks"))]
+        let _ = force_post_commit_driver_shutdown;
         let shutdown = session.shutdown().await;
         match (execution, shutdown) {
             (Ok(result), Ok(())) => Ok(result),
@@ -432,6 +524,7 @@ impl PostgresKernel {
 async fn execute_client(
     client: &mut Client,
     function: FunctionId,
+    arguments: &[FunctionArgument],
     test_barrier: Option<&SelectTestBarrier>,
 ) -> Result<ServerSelectResult, PostgresKernelError> {
     let transaction = client
@@ -441,7 +534,7 @@ async fn execute_client(
         .start()
         .await
         .map_err(PostgresKernelError::Database)?;
-    let result = execute_transaction(&transaction, function, test_barrier).await;
+    let result = execute_transaction(&transaction, function, arguments, test_barrier).await;
     match result {
         Ok(result) => {
             let context = context_from_result(&result);
@@ -464,6 +557,7 @@ async fn execute_client(
 async fn execute_transaction(
     transaction: &Transaction<'_>,
     function_id: FunctionId,
+    arguments: &[FunctionArgument],
     test_barrier: Option<&SelectTestBarrier>,
 ) -> Result<ServerSelectResult, PostgresKernelError> {
     let active = configure_and_recover(transaction).await?;
@@ -480,7 +574,8 @@ async fn execute_transaction(
         })?;
     let context = ServerSelectContext::new(active.pair(), function_id, function.current_revision());
     pause_after_recovery(test_barrier).await;
-    let result = execute_active_transaction(transaction, &active, function, context).await;
+    let result =
+        execute_active_transaction(transaction, &active, function, context, arguments).await;
     result.map_err(|error| contextualize(context, error))
 }
 
@@ -500,8 +595,8 @@ async fn execute_active_transaction(
     active: &ActiveDatabaseRevision,
     function: &FunctionDefinition,
     context: ServerSelectContext,
+    arguments: &[FunctionArgument],
 ) -> Result<ServerSelectResult, PostgresKernelError> {
-    validate_function_signature(function)?;
     let revision = active
         .function_revisions()
         .iter()
@@ -522,29 +617,52 @@ async fn execute_active_transaction(
             rule: "current revision must contain a SERVER artifact",
         }));
     }
-    if artifact.format() != SERVER_PLAN_FORMAT || artifact.version() != SERVER_PLAN_VERSION {
-        return Err(server_error(ServerSelectError::Artifact {
-            function: context.function(),
-            rule: "current SERVER artifact must use orna.server-plan version 1",
-        }));
-    }
     if revision.language_version() != server_plan::LANGUAGE_VERSION_IDENTITY {
         return Err(server_error(ServerSelectError::Artifact {
             function: context.function(),
             rule: "current SERVER revision must use the server-plan language version",
         }));
     }
-    let plan = ServerPlan::decode(artifact.payload())
-        .map_err(ServerSelectError::PlanDecode)
-        .map_err(server_error)?;
-    validate_plan(active, function, &plan)?;
-    validate_reference_evidence(active, function, &plan)?;
-    let columns = result_columns(function, &plan)?;
-    validate_target_entries(&plan, &columns)?;
-    let lowered = lower_plan(active.catalogue(), &plan, &columns)?;
-    let bind_types = boolean_bind_types(&lowered.binds);
+    let decoded = decode_plan(
+        context.function(),
+        artifact.format(),
+        artifact.version(),
+        artifact.payload(),
+    )?;
+    let (columns, lowered, identity_selected) = match &decoded {
+        DecodedServerPlan::V1(plan) => {
+            validate_function_signature(function)?;
+            if !arguments.is_empty() {
+                return Err(argument_error(
+                    None,
+                    "this function does not accept arguments",
+                ));
+            }
+            validate_plan(active, function, plan)?;
+            validate_reference_evidence(active, function, plan)?;
+            let columns = result_columns_for_projections(function, &plan.projections)?;
+            validate_target_entries(plan.projections.len(), &columns, plan.ordering.len())?;
+            let lowered = lower_plan(active.catalogue(), plan, &columns)?;
+            (columns, lowered, false)
+        }
+        DecodedServerPlan::V2(plan) => {
+            validate_identity_selected_function_signature(active.catalogue(), function)?;
+            validate_identity_selected_plan(active.catalogue(), function, plan)?;
+            validate_identity_selected_reference_evidence(active, function, plan)?;
+            let object = validate_identity_selected_arguments(
+                active.catalogue(),
+                function,
+                plan,
+                arguments,
+            )?;
+            let columns = result_columns_for_projections(function, plan.projections())?;
+            validate_target_entries(plan.projections().len(), &columns, 0)?;
+            let lowered = lower_identity_selected_plan(active.catalogue(), plan, &columns, object)?;
+            (columns, lowered, true)
+        }
+    };
     let statement = transaction
-        .prepare_typed(&lowered.sql, &bind_types)
+        .prepare_typed(&lowered.sql, &lowered.bind_types)
         .await
         .map_err(PostgresKernelError::Database)?;
     validate_prepared_columns(&statement, &columns, &lowered.guards)?;
@@ -555,6 +673,7 @@ async fn execute_active_transaction(
         &columns,
         &lowered.guards,
         lowered.variable_payload_limit,
+        identity_selected,
     )
     .await?;
     Ok(ServerSelectResult::new(
@@ -565,8 +684,37 @@ async fn execute_active_transaction(
     ))
 }
 
-fn boolean_bind_types(binds: &[bool]) -> Vec<Type> {
-    vec![Type::BOOL; binds.len()]
+enum DecodedServerPlan {
+    V1(ServerPlan),
+    V2(IdentitySelectedServerPlan),
+}
+
+fn decode_plan(
+    function: FunctionId,
+    format: &str,
+    version: u32,
+    payload: &[u8],
+) -> Result<DecodedServerPlan, PostgresKernelError> {
+    if format != SERVER_PLAN_FORMAT {
+        return Err(artifact_error(
+            function,
+            "current SERVER artifact must use orna.server-plan",
+        ));
+    }
+    match version {
+        SERVER_PLAN_VERSION => ServerPlan::decode(payload)
+            .map(DecodedServerPlan::V1)
+            .map_err(ServerSelectError::PlanDecode)
+            .map_err(server_error),
+        IDENTITY_SELECTED_SERVER_PLAN_VERSION => IdentitySelectedServerPlan::decode(payload)
+            .map(DecodedServerPlan::V2)
+            .map_err(ServerSelectError::PlanDecode)
+            .map_err(server_error),
+        _ => Err(artifact_error(
+            function,
+            "current SERVER artifact must use supported orna.server-plan version 1 or version 2",
+        )),
+    }
 }
 
 fn validate_function_signature(function: &FunctionDefinition) -> Result<(), PostgresKernelError> {
@@ -603,6 +751,220 @@ fn validate_function_signature(function: &FunctionDefinition) -> Result<(), Post
         }));
     }
     Ok(())
+}
+
+fn validate_identity_selected_function_signature(
+    catalogue: &orna_core::catalogue::CatalogueSnapshot,
+    function: &FunctionDefinition,
+) -> Result<(), PostgresKernelError> {
+    if function.domain() != FunctionDomain::Server {
+        return Err(server_error(ServerSelectError::FunctionDomain {
+            function: function.id(),
+        }));
+    }
+    if !matches!(function.return_type(), FunctionReturn::Rows(columns) if !columns.is_empty()) {
+        return Err(function_signature_error(
+            function.id(),
+            "SERVER SELECT functions must return nonempty ROWS",
+        ));
+    }
+    if function.security() != FunctionSecurity::Invoker {
+        return Err(function_signature_error(
+            function.id(),
+            "parameterised SERVER SELECT functions must use INVOKER security",
+        ));
+    }
+    if function.transaction() != Some(FunctionTransaction::ReadOnly) {
+        return Err(function_signature_error(
+            function.id(),
+            "parameterised SERVER SELECT functions must use READ ONLY transactions",
+        ));
+    }
+    if function.volatility() != FunctionVolatility::Stable {
+        return Err(function_signature_error(
+            function.id(),
+            "parameterised SERVER SELECT functions must use STABLE volatility",
+        ));
+    }
+    let [parameter] = function.parameters() else {
+        return Err(function_signature_error(
+            function.id(),
+            "parameterised SERVER SELECT functions must declare exactly one parameter",
+        ));
+    };
+    if parameter.default_expression().is_some() {
+        return Err(function_signature_error(
+            function.id(),
+            "the identity selector parameter cannot have a default expression",
+        ));
+    }
+    let ResolvedType::Reference { target } = parameter.resolved_type() else {
+        return Err(function_signature_error(
+            function.id(),
+            "the selector parameter must use REF to an available object type",
+        ));
+    };
+    if catalogue.object_type_by_id(target).is_none() {
+        return Err(function_signature_error(
+            function.id(),
+            "the selector parameter must use REF to an available object type",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_identity_selected_plan(
+    catalogue: &orna_core::catalogue::CatalogueSnapshot,
+    function: &FunctionDefinition,
+    plan: &IdentitySelectedServerPlan,
+) -> Result<(), PostgresKernelError> {
+    validate_execution_complexity_for_projections(plan.projections())?;
+    let scan = plan.scan();
+    if scan.input != 0 || catalogue.object_type_by_id(scan.object_type).is_none() {
+        return Err(plan_invariant(
+            "scan must use active input zero and an active object type",
+        ));
+    }
+    let FunctionReturn::Rows(return_columns) = function.return_type() else {
+        return Err(plan_invariant("function return shape must be ROWS"));
+    };
+    if plan.projections().len() != return_columns.len() {
+        return Err(plan_invariant(
+            "projection count must equal ROWS column count",
+        ));
+    }
+    for (projection, column) in plan.projections().iter().zip(return_columns) {
+        validate_expression_with_equality_rule(
+            catalogue,
+            scan.object_type,
+            projection,
+            PARAMETERISED_EQUALITY_RULE,
+        )?;
+        if projection.value_type.resolved_type != column.resolved_type() {
+            return Err(plan_invariant("projection type must equal its ROWS column"));
+        }
+        if !supports_result_type(projection.value_type.resolved_type) {
+            return Err(plan_invariant(
+                "projection type is outside the initial runtime result subset",
+            ));
+        }
+    }
+    let selector = plan.selector();
+    let [parameter] = function.parameters() else {
+        return Err(plan_invariant(
+            "parameterised SERVER SELECT function must have one declared selector parameter",
+        ));
+    };
+    if selector.owner() != function.id() || selector.parameter() != parameter.id() {
+        return Err(plan_invariant(
+            "identity selector owner and parameter must equal the active function signature",
+        ));
+    }
+    if parameter.resolved_type() != ResolvedType::reference(scan.object_type) {
+        return Err(plan_invariant(
+            "the selector parameter must use REF to the object type selected in FROM",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_execution_complexity_for_projections(
+    projections: &[Expression],
+) -> Result<(), PostgresKernelError> {
+    let mut steps = 0usize;
+    let mut binds = 0usize;
+    for expression in projections {
+        count_expression_complexity(expression, &mut steps, &mut binds)?;
+    }
+    if steps > FIELD_PATH_STEP_LIMIT {
+        return Err(server_error(ServerSelectError::ComplexityLimit {
+            category: "field path steps",
+            maximum: FIELD_PATH_STEP_LIMIT,
+        }));
+    }
+    if binds > server_plan::MAX_EXPRESSION_NODES as usize {
+        return Err(server_error(ServerSelectError::ComplexityLimit {
+            category: "boolean binds",
+            maximum: server_plan::MAX_EXPRESSION_NODES as usize,
+        }));
+    }
+    Ok(())
+}
+
+fn validate_identity_selected_arguments(
+    catalogue: &orna_core::catalogue::CatalogueSnapshot,
+    function: &FunctionDefinition,
+    plan: &IdentitySelectedServerPlan,
+    arguments: &[FunctionArgument],
+) -> Result<ObjectId, PostgresKernelError> {
+    let mut supplied = BTreeMap::new();
+    for argument in arguments {
+        let parameter_id = argument.parameter();
+        if supplied.insert(parameter_id, argument.value()).is_some() {
+            return Err(argument_error(
+                Some(parameter_id),
+                "the same parameter was supplied twice",
+            ));
+        }
+        let parameter = function.parameter_by_id(parameter_id).ok_or_else(|| {
+            argument_error(
+                Some(parameter_id),
+                "an argument was supplied for a parameter that this function does not declare",
+            )
+        })?;
+        let value = argument.value();
+        if value.is_null() {
+            return Err(argument_error(
+                Some(parameter_id),
+                "function arguments cannot be NULL",
+            ));
+        }
+        if !runtime_type_is_active(catalogue, value.resolved_type()) {
+            return Err(argument_error(
+                Some(parameter_id),
+                "the argument uses an unsupported type or refers to an unavailable object type",
+            ));
+        }
+        if value.resolved_type() != parameter.resolved_type() {
+            return Err(argument_error(
+                Some(parameter_id),
+                "the argument type does not match the declared parameter type",
+            ));
+        }
+    }
+    let selector = plan.selector();
+    let value = supplied.get(&selector.parameter()).ok_or_else(|| {
+        argument_error(Some(selector.parameter()), "a required argument is missing")
+    })?;
+    match value {
+        RuntimeValue::Reference { target, object } if *target == plan.scan().object_type => {
+            Ok(*object)
+        }
+        _ => Err(argument_error(
+            Some(selector.parameter()),
+            "the selector argument must refer to the object type selected by this function",
+        )),
+    }
+}
+
+fn runtime_type_is_active(
+    catalogue: &orna_core::catalogue::CatalogueSnapshot,
+    resolved_type: ResolvedType,
+) -> bool {
+    postgres_type(resolved_type).is_some()
+        && !matches!(resolved_type, ResolvedType::Reference { target } if catalogue.object_type_by_id(target).is_none())
+}
+
+fn function_signature_error(function: FunctionId, rule: &'static str) -> PostgresKernelError {
+    server_error(ServerSelectError::FunctionSignature { function, rule })
+}
+
+fn argument_error(parameter: Option<ParameterId>, rule: &'static str) -> PostgresKernelError {
+    server_error(ServerSelectError::Argument { parameter, rule })
+}
+
+fn artifact_error(function: FunctionId, rule: &'static str) -> PostgresKernelError {
+    server_error(ServerSelectError::Artifact { function, rule })
 }
 
 fn validate_plan(
@@ -658,6 +1020,15 @@ fn validate_expression(
     scan: TypeId,
     expression: &Expression,
 ) -> Result<(), PostgresKernelError> {
+    validate_expression_with_equality_rule(catalogue, scan, expression, VERSION_ONE_EQUALITY_RULE)
+}
+
+fn validate_expression_with_equality_rule(
+    catalogue: &orna_core::catalogue::CatalogueSnapshot,
+    scan: TypeId,
+    expression: &Expression,
+    equality_rule: &'static str,
+) -> Result<(), PostgresKernelError> {
     match &expression.kind {
         ExpressionKind::ObjectReference { input } => {
             if *input != 0
@@ -692,8 +1063,8 @@ fn validate_expression(
             }
         }
         ExpressionKind::Equality { left, right } => {
-            validate_expression(catalogue, scan, left)?;
-            validate_expression(catalogue, scan, right)?;
+            validate_expression_with_equality_rule(catalogue, scan, left, equality_rule)?;
+            validate_expression_with_equality_rule(catalogue, scan, right, equality_rule)?;
             if left.value_type.resolved_type != right.value_type.resolved_type
                 || expression.value_type.resolved_type
                     != ResolvedType::scalar(StandardScalar::Boolean)
@@ -705,9 +1076,7 @@ fn validate_expression(
                 ));
             }
             if !supports_equality_type(left.value_type.resolved_type) {
-                return Err(plan_invariant(
-                    "version 1 SERVER SELECT equality supports only BOOLEAN, INTEGER, BIGINT, BYTES, and references",
-                ));
+                return Err(plan_invariant(equality_rule));
             }
         }
     }
@@ -775,14 +1144,15 @@ fn validate_execution_complexity(plan: &ServerPlan) -> Result<(), PostgresKernel
 }
 
 fn validate_target_entries(
-    plan: &ServerPlan,
+    projections: usize,
     columns: &[ResultColumn],
+    ordering: usize,
 ) -> Result<(), PostgresKernelError> {
     let guards = columns
         .iter()
         .filter(|column| is_variable_type(column.resolved_type()))
         .count();
-    validate_target_entry_count(plan.projections.len(), guards, plan.ordering.len())
+    validate_target_entry_count(projections, guards, ordering)
 }
 
 fn validate_target_entry_count(
@@ -882,18 +1252,68 @@ fn validate_reference_evidence(
     function: &FunctionDefinition,
     plan: &ServerPlan,
 ) -> Result<(), PostgresKernelError> {
-    let expected = expected_body_references(plan);
-    validate_function_reference_replay(active, function, &expected).map_err(|mismatch| {
+    validate_body_reference_evidence(
+        active,
+        function,
+        &expected_body_references(plan),
+        "reference count must match signature and plan traversal",
+        "references must be ordered signature evidence followed by plan traversal",
+    )
+}
+
+fn validate_identity_selected_reference_evidence(
+    active: &ActiveDatabaseRevision,
+    function: &FunctionDefinition,
+    plan: &IdentitySelectedServerPlan,
+) -> Result<(), PostgresKernelError> {
+    validate_body_reference_evidence(
+        active,
+        function,
+        &expected_identity_selected_body_references(plan),
+        "recorded dependencies must match the function signature and query",
+        "recorded dependencies must appear in the same order as the function signature and query",
+    )
+}
+
+fn validate_body_reference_evidence(
+    active: &ActiveDatabaseRevision,
+    function: &FunctionDefinition,
+    expected: &[ExpectedDefinitionReference],
+    count_rule: &'static str,
+    sequence_rule: &'static str,
+) -> Result<(), PostgresKernelError> {
+    validate_function_reference_replay(active, function, expected).map_err(|mismatch| {
         let rule = match mismatch {
-            ReferenceReplayMismatch::Count => {
-                "reference count must match signature and plan traversal"
-            }
-            ReferenceReplayMismatch::Sequence => {
-                "references must be ordered signature evidence followed by plan traversal"
-            }
+            ReferenceReplayMismatch::Count => count_rule,
+            ReferenceReplayMismatch::Sequence => sequence_rule,
         };
         reference_error(function.id(), rule)
     })
+}
+
+fn expected_identity_selected_body_references(
+    plan: &IdentitySelectedServerPlan,
+) -> Vec<ExpectedDefinitionReference> {
+    let mut expected = vec![ExpectedDefinitionReference::new(
+        DefinitionReferenceKind::QueryObject,
+        DefinitionReferenceTarget::ObjectType(plan.scan().object_type),
+    )];
+    for projection in plan.projections() {
+        add_expression_references(&mut expected, plan.scan().object_type, projection);
+    }
+    expected.push(ExpectedDefinitionReference::new(
+        DefinitionReferenceKind::ObjectReference,
+        DefinitionReferenceTarget::ObjectType(plan.scan().object_type),
+    ));
+    let selector = plan.selector();
+    expected.push(ExpectedDefinitionReference::new(
+        DefinitionReferenceKind::ParameterRead,
+        DefinitionReferenceTarget::Parameter {
+            owner: selector.owner(),
+            parameter: selector.parameter(),
+        },
+    ));
+    expected
 }
 
 fn expected_body_references(plan: &ServerPlan) -> Vec<ExpectedDefinitionReference> {
@@ -944,16 +1364,16 @@ fn add_expression_references(
     }
 }
 
-fn result_columns(
+fn result_columns_for_projections(
     function: &FunctionDefinition,
-    plan: &ServerPlan,
+    projections: &[Expression],
 ) -> Result<Vec<ResultColumn>, PostgresKernelError> {
     let FunctionReturn::Rows(columns) = function.return_type() else {
         return Err(plan_invariant("function return must be ROWS"));
     };
     columns
         .iter()
-        .zip(&plan.projections)
+        .zip(projections)
         .map(|(column, projection)| {
             ResultColumn::new(
                 column.name(),
@@ -968,9 +1388,32 @@ fn result_columns(
 
 struct LoweredPlan {
     sql: String,
-    binds: Vec<bool>,
+    bind_types: Vec<Type>,
+    binds: Vec<SelectBindValue>,
     guards: Vec<VariableGuard>,
     variable_payload_limit: usize,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum SelectBindValue {
+    Boolean(bool),
+    Bytes(Vec<u8>),
+}
+
+impl SelectBindValue {
+    fn bind_type(&self) -> Type {
+        match self {
+            Self::Boolean(_) => Type::BOOL,
+            Self::Bytes(_) => Type::BYTEA,
+        }
+    }
+
+    fn as_to_sql(&self) -> &(dyn ToSql + Sync) {
+        match self {
+            Self::Boolean(value) => value,
+            Self::Bytes(value) => value,
+        }
+    }
 }
 
 struct VariableGuard {
@@ -978,75 +1421,125 @@ struct VariableGuard {
     alias: String,
 }
 
+struct PartialLoweredSelect<'a> {
+    lowerer: Lowerer<'a>,
+    projections: Vec<String>,
+    guards: Vec<VariableGuard>,
+    variable_payload_limit: usize,
+}
+
 fn lower_plan(
     catalogue: &orna_core::catalogue::CatalogueSnapshot,
     plan: &ServerPlan,
     columns: &[ResultColumn],
 ) -> Result<LoweredPlan, PostgresKernelError> {
-    let mut lowerer = Lowerer {
-        catalogue,
-        scan: plan.scan.object_type,
-        joins: BTreeMap::new(),
-        join_sql: Vec::new(),
-        binds: Vec::new(),
-        field_path_steps: 0,
-    };
-    let variable_limit = variable_payload_limit(columns)?;
-    let mut projections = Vec::with_capacity(plan.projections.len());
-    let mut guard_projections = Vec::new();
-    let mut guards = Vec::new();
-    for (index, expression) in plan.projections.iter().enumerate() {
-        let expression = lowerer.expression(expression)?;
-        if is_variable_type(columns[index].resolved_type()) {
-            let alias = format!("g{}", guards.len());
-            projections.push(format!(
-                "CASE WHEN octet_length({expression}) <= {variable_limit} THEN {expression} ELSE NULL END AS c{index}"
-            ));
-            guards.push(VariableGuard {
-                column: index,
-                alias: alias.clone(),
-            });
-            guard_projections.push(format!(
-                "CASE WHEN {expression} IS NULL OR octet_length({expression}) <= {variable_limit} THEN TRUE ELSE FALSE END AS {alias}"
-            ));
-        } else {
-            projections.push(format!("{expression} AS c{index}"));
-        }
-    }
-    projections.extend(guard_projections);
+    let mut lowered =
+        lower_select_projections(catalogue, plan.scan.object_type, &plan.projections, columns)?;
     let selection = plan
         .selection
         .as_ref()
-        .map(|expression| lowerer.expression(expression))
+        .map(|expression| lowered.lowerer.expression(expression))
         .transpose()?;
     let mut ordering = Vec::with_capacity(plan.ordering.len());
     for item in &plan.ordering {
         let direction = ordering_sql(item.direction);
         ordering.push(format!(
             "{} {direction}",
-            lowerer.expression(&item.expression)?
+            lowered.lowerer.expression(&item.expression)?
         ));
     }
+    let mut suffix = String::new();
+    if let Some(selection) = selection {
+        suffix.push_str("\nWHERE ");
+        suffix.push_str(&selection);
+    }
+    if !ordering.is_empty() {
+        suffix.push_str("\nORDER BY ");
+        suffix.push_str(&ordering.join(", "));
+    }
+    let limit = effective_query_limit(plan.projections.len())?;
+    suffix.push_str(&format!("\nLIMIT {limit}"));
+    finish_lowered_select(lowered, &suffix)
+}
+
+fn lower_identity_selected_plan(
+    catalogue: &orna_core::catalogue::CatalogueSnapshot,
+    plan: &IdentitySelectedServerPlan,
+    columns: &[ResultColumn],
+    selector: ObjectId,
+) -> Result<LoweredPlan, PostgresKernelError> {
+    let scan = plan.scan();
+    let mut lowered =
+        lower_select_projections(catalogue, scan.object_type, plan.projections(), columns)?;
+    lowered
+        .lowerer
+        .binds
+        .push(SelectBindValue::Bytes(selector.to_bytes().to_vec()));
+    let selector_placeholder = lowered.lowerer.binds.len();
+    let suffix = format!("\nWHERE i0.{OBJECT_ID_COLUMN} = ${selector_placeholder}\nLIMIT 2");
+    finish_lowered_select(lowered, &suffix)
+}
+
+fn lower_select_projections<'a>(
+    catalogue: &'a orna_core::catalogue::CatalogueSnapshot,
+    scan: TypeId,
+    expressions: &[Expression],
+    columns: &[ResultColumn],
+) -> Result<PartialLoweredSelect<'a>, PostgresKernelError> {
+    let mut lowerer = Lowerer {
+        catalogue,
+        scan,
+        joins: BTreeMap::new(),
+        join_sql: Vec::new(),
+        binds: Vec::new(),
+        field_path_steps: 0,
+    };
+    let variable_payload_limit = variable_payload_limit(columns)?;
+    let mut projections = Vec::with_capacity(expressions.len());
+    let mut guard_projections = Vec::new();
+    let mut guards = Vec::new();
+    for (index, expression) in expressions.iter().enumerate() {
+        let expression = lowerer.expression(expression)?;
+        if is_variable_type(columns[index].resolved_type()) {
+            let alias = format!("g{}", guards.len());
+            projections.push(format!(
+                "CASE WHEN octet_length({expression}) <= {variable_payload_limit} THEN {expression} ELSE NULL END AS c{index}"
+            ));
+            guards.push(VariableGuard {
+                column: index,
+                alias: alias.clone(),
+            });
+            guard_projections.push(format!(
+                "CASE WHEN {expression} IS NULL OR octet_length({expression}) <= {variable_payload_limit} THEN TRUE ELSE FALSE END AS {alias}"
+            ));
+        } else {
+            projections.push(format!("{expression} AS c{index}"));
+        }
+    }
+    projections.extend(guard_projections);
+    Ok(PartialLoweredSelect {
+        lowerer,
+        projections,
+        guards,
+        variable_payload_limit,
+    })
+}
+
+fn finish_lowered_select(
+    lowered: PartialLoweredSelect<'_>,
+    suffix: &str,
+) -> Result<LoweredPlan, PostgresKernelError> {
     let mut sql = format!(
         "SELECT {}\nFROM {}.{} AS i0",
-        projections.join(", "),
+        lowered.projections.join(", "),
         DATA_SCHEMA,
-        relation_name(plan.scan.object_type),
+        relation_name(lowered.lowerer.scan),
     );
-    for join in &lowerer.join_sql {
+    for join in &lowered.lowerer.join_sql {
         sql.push('\n');
         sql.push_str(join);
     }
-    if let Some(selection) = selection {
-        sql.push_str("\nWHERE ");
-        sql.push_str(&selection);
-    }
-    if !ordering.is_empty() {
-        sql.push_str("\nORDER BY ");
-        sql.push_str(&ordering.join(", "));
-    }
-    let limit = effective_query_limit(plan.projections.len())?;
-    sql.push_str(&format!("\nLIMIT {limit}"));
+    sql.push_str(suffix);
     if sql.len() > SQL_LIMIT {
         return Err(server_error(ServerSelectError::ComplexityLimit {
             category: "generated SQL bytes",
@@ -1055,9 +1548,15 @@ fn lower_plan(
     }
     Ok(LoweredPlan {
         sql,
-        binds: lowerer.binds,
-        guards,
-        variable_payload_limit: variable_limit,
+        bind_types: lowered
+            .lowerer
+            .binds
+            .iter()
+            .map(SelectBindValue::bind_type)
+            .collect(),
+        binds: lowered.lowerer.binds,
+        guards: lowered.guards,
+        variable_payload_limit: lowered.variable_payload_limit,
     })
 }
 
@@ -1136,7 +1635,7 @@ struct Lowerer<'a> {
     scan: TypeId,
     joins: BTreeMap<Vec<(TypeId, FieldId)>, String>,
     join_sql: Vec<String>,
-    binds: Vec<bool>,
+    binds: Vec<SelectBindValue>,
     field_path_steps: usize,
 }
 
@@ -1152,7 +1651,7 @@ impl Lowerer<'_> {
                         maximum: server_plan::MAX_EXPRESSION_NODES as usize,
                     }));
                 }
-                self.binds.push(*value);
+                self.binds.push(SelectBindValue::Boolean(*value));
                 Ok(format!("${}", self.binds.len()))
             }
             ExpressionKind::Equality { left, right } => Ok(format!(
@@ -1265,14 +1764,15 @@ fn expected_postgres_type(resolved_type: ResolvedType) -> Result<Type, PostgresK
 async fn stream_rows(
     transaction: &Transaction<'_>,
     statement: &Statement,
-    binds: &[bool],
+    binds: &[SelectBindValue],
     columns: &[ResultColumn],
     guards: &[VariableGuard],
     variable_payload_limit: usize,
+    identity_selected: bool,
 ) -> Result<ResultRows, PostgresKernelError> {
     let parameters = binds
         .iter()
-        .map(|value| value as &(dyn ToSql + Sync))
+        .map(SelectBindValue::as_to_sql)
         .collect::<Vec<_>>();
     let stream = transaction
         .query_raw(statement, parameters)
@@ -1287,6 +1787,9 @@ async fn stream_rows(
         .await
         .map_err(PostgresKernelError::Database)?
     {
+        if identity_selected {
+            validate_identity_selected_cardinality(rows.len().saturating_add(1))?;
+        }
         if rows.len() == ROW_LIMIT {
             return Err(server_error(ServerSelectError::RowLimit {
                 maximum: ROW_LIMIT,
@@ -1332,6 +1835,15 @@ async fn stream_rows(
     ResultRows::new(columns.to_vec(), rows)
         .map_err(ServerSelectError::ResultRows)
         .map_err(server_error)
+}
+
+fn validate_identity_selected_cardinality(row_count: usize) -> Result<(), PostgresKernelError> {
+    if row_count > 1 {
+        return Err(server_error(ServerSelectError::Cardinality {
+            rule: "more than one row was returned for the requested object",
+        }));
+    }
+    Ok(())
 }
 
 fn initial_payload_len(columns: &[ResultColumn]) -> Result<usize, PostgresKernelError> {
@@ -1492,12 +2004,12 @@ fn reference_error(function: FunctionId, rule: &'static str) -> PostgresKernelEr
 
 #[cfg(test)]
 mod tests {
-    use orna_artifact::server_plan::{Scan, ValueType};
+    use orna_artifact::server_plan::{IdentitySelector, Scan, ValueType};
     use orna_core::{
-        CatalogueRevisionId, FieldId, SchemaId,
+        CatalogueRevisionId, FieldId, ParameterId, SchemaId,
         catalogue::{
             CatalogueSnapshot, FieldDefinition, FunctionReturnColumnDefinition,
-            ObjectTypeDefinition, QualifiedSemanticName, SchemaDefinition,
+            ObjectTypeDefinition, ParameterDefinition, QualifiedSemanticName, SchemaDefinition,
         },
     };
 
@@ -1587,6 +2099,24 @@ mod tests {
         security: FunctionSecurity,
         transaction: Option<FunctionTransaction>,
     ) -> FunctionDefinition {
+        function_with_volatility(
+            domain,
+            parameters,
+            return_type,
+            security,
+            transaction,
+            FunctionVolatility::Stable,
+        )
+    }
+
+    fn function_with_volatility(
+        domain: FunctionDomain,
+        parameters: Vec<orna_core::catalogue::ParameterDefinition>,
+        return_type: FunctionReturn,
+        security: FunctionSecurity,
+        transaction: Option<FunctionTransaction>,
+        volatility: FunctionVolatility,
+    ) -> FunctionDefinition {
         FunctionDefinition::new(
             FunctionId::from_bytes([0x31; 16]),
             name(&["test", "function"]),
@@ -1596,7 +2126,7 @@ mod tests {
             FunctionRevisionId::from_bytes([0x32; 16]),
             security,
             transaction,
-            orna_core::catalogue::FunctionVolatility::Stable,
+            volatility,
         )
     }
 
@@ -1606,6 +2136,55 @@ mod tests {
             0,
             ResolvedType::scalar(StandardScalar::Integer),
         )])
+    }
+
+    fn boolean_rows_return() -> FunctionReturn {
+        FunctionReturn::Rows(vec![FunctionReturnColumnDefinition::new(
+            "selected",
+            0,
+            ResolvedType::scalar(StandardScalar::Boolean),
+        )])
+    }
+
+    fn assert_signature_rule(
+        result: Result<(), PostgresKernelError>,
+        function: FunctionId,
+        expected: &'static str,
+    ) {
+        let Err(PostgresKernelError::ServerSelect(ServerSelectError::FunctionSignature {
+            function: actual_function,
+            rule,
+        })) = result
+        else {
+            panic!("expected a function-signature rejection");
+        };
+        assert_eq!(actual_function, function);
+        assert_eq!(rule, expected);
+    }
+
+    fn assert_plan_rule(result: Result<(), PostgresKernelError>, expected: &'static str) {
+        let Err(PostgresKernelError::ServerSelect(ServerSelectError::PlanInvariant { rule })) =
+            result
+        else {
+            panic!("expected a saved-query rejection");
+        };
+        assert_eq!(rule, expected);
+    }
+
+    fn assert_argument_rule(
+        result: Result<ObjectId, PostgresKernelError>,
+        parameter: Option<ParameterId>,
+        expected: &'static str,
+    ) {
+        let Err(PostgresKernelError::ServerSelect(ServerSelectError::Argument {
+            parameter: actual_parameter,
+            rule,
+        })) = result
+        else {
+            panic!("expected a function-argument rejection");
+        };
+        assert_eq!(actual_parameter, parameter);
+        assert_eq!(rule, expected);
     }
 
     #[test]
@@ -1649,7 +2228,7 @@ mod tests {
         ];
         let lowered = lower_plan(&catalogue, &plan, &columns).unwrap();
 
-        assert_eq!(lowered.binds, vec![true]);
+        assert_eq!(lowered.binds, vec![SelectBindValue::Boolean(true)]);
         assert_eq!(lowered.sql.matches("LEFT JOIN").count(), 1);
         assert!(
             lowered
@@ -1672,6 +2251,601 @@ mod tests {
         assert!(!lowered.sql.contains("semantic_reference"));
         assert!(!lowered.sql.contains("semantic_target"));
         assert!(!lowered.sql.contains("semantic_value"));
+    }
+
+    #[test]
+    fn identity_selected_lowering_keeps_projection_bind_order_and_appends_selector() {
+        let (catalogue, source, _, _) = catalogue();
+        let function = FunctionId::from_bytes([0x31; 16]);
+        let parameter = ParameterId::from_bytes([0x33; 16]);
+        let plan = IdentitySelectedServerPlan::new(
+            Scan {
+                input: 0,
+                object_type: source,
+            },
+            [Expression {
+                kind: ExpressionKind::BooleanLiteral { value: true },
+                value_type: ValueType {
+                    resolved_type: ResolvedType::scalar(StandardScalar::Boolean),
+                    nullable: false,
+                },
+            }],
+            IdentitySelector::new(function, parameter),
+        )
+        .unwrap();
+        let columns = [ResultColumn::new(
+            "selected",
+            ResolvedType::scalar(StandardScalar::Boolean),
+            false,
+        )
+        .unwrap()];
+        let object = ObjectId::from_bytes([0x41; 16]);
+        let lowered = lower_identity_selected_plan(&catalogue, &plan, &columns, object).unwrap();
+
+        assert_eq!(
+            lowered.binds,
+            vec![
+                SelectBindValue::Boolean(true),
+                SelectBindValue::Bytes(object.to_bytes().to_vec()),
+            ]
+        );
+        assert_eq!(lowered.bind_types, vec![Type::BOOL, Type::BYTEA]);
+        assert!(lowered.sql.contains("SELECT $1 AS c0"));
+        assert!(lowered.sql.contains("WHERE i0._orna_object_id = $2"));
+        assert!(lowered.sql.ends_with("LIMIT 2"));
+        assert!(!lowered.sql.contains("semantic_source"));
+    }
+
+    #[test]
+    fn artifact_versions_decode_only_their_matching_plan_model() {
+        let (_, source, _, _) = catalogue();
+        let projection = Expression {
+            kind: ExpressionKind::BooleanLiteral { value: true },
+            value_type: ValueType {
+                resolved_type: ResolvedType::scalar(StandardScalar::Boolean),
+                nullable: false,
+            },
+        };
+        let v1 = ServerPlan {
+            scan: Scan {
+                input: 0,
+                object_type: source,
+            },
+            projections: vec![projection.clone()],
+            selection: None,
+            ordering: Vec::new(),
+        }
+        .encode()
+        .unwrap();
+        let v2 = IdentitySelectedServerPlan::new(
+            Scan {
+                input: 0,
+                object_type: source,
+            },
+            [projection],
+            IdentitySelector::new(
+                FunctionId::from_bytes([0x31; 16]),
+                ParameterId::from_bytes([0x33; 16]),
+            ),
+        )
+        .unwrap()
+        .encode()
+        .unwrap();
+        let function = FunctionId::from_bytes([0x31; 16]);
+
+        assert!(matches!(
+            decode_plan(function, SERVER_PLAN_FORMAT, SERVER_PLAN_VERSION, &v1),
+            Ok(DecodedServerPlan::V1(_))
+        ));
+        assert!(matches!(
+            decode_plan(
+                function,
+                SERVER_PLAN_FORMAT,
+                IDENTITY_SELECTED_SERVER_PLAN_VERSION,
+                &v2,
+            ),
+            Ok(DecodedServerPlan::V2(_))
+        ));
+        assert!(matches!(
+            decode_plan(
+                function,
+                SERVER_PLAN_FORMAT,
+                IDENTITY_SELECTED_SERVER_PLAN_VERSION,
+                &v1,
+            ),
+            Err(PostgresKernelError::ServerSelect(
+                ServerSelectError::PlanDecode(server_plan::ServerPlanError::UnsupportedVersion(
+                    SERVER_PLAN_VERSION
+                ))
+            ))
+        ));
+        assert!(matches!(
+            decode_plan(function, SERVER_PLAN_FORMAT, SERVER_PLAN_VERSION, &v2),
+            Err(PostgresKernelError::ServerSelect(
+                ServerSelectError::PlanDecode(server_plan::ServerPlanError::UnsupportedVersion(
+                    IDENTITY_SELECTED_SERVER_PLAN_VERSION
+                ))
+            ))
+        ));
+        assert!(matches!(
+            decode_plan(function, "unknown", SERVER_PLAN_VERSION, &v1),
+            Err(PostgresKernelError::ServerSelect(ServerSelectError::Artifact {
+                function: actual,
+                rule: "current SERVER artifact must use orna.server-plan",
+            })) if actual == function
+        ));
+        assert!(matches!(
+            decode_plan(function, SERVER_PLAN_FORMAT, 99, &v1),
+            Err(PostgresKernelError::ServerSelect(ServerSelectError::Artifact {
+                function: actual,
+                rule: "current SERVER artifact must use supported orna.server-plan version 1 or version 2",
+            })) if actual == function
+        ));
+    }
+
+    #[test]
+    fn identity_selected_signature_rejects_each_unsupported_shape_exactly() {
+        let (catalogue, source, _, _) = catalogue();
+        let function_id = FunctionId::from_bytes([0x31; 16]);
+        let parameter_id = ParameterId::from_bytes([0x33; 16]);
+        let selector_parameter = |resolved_type, default_expression| {
+            ParameterDefinition::new(
+                parameter_id,
+                "selected",
+                0,
+                resolved_type,
+                default_expression,
+            )
+        };
+        let valid_parameter = || selector_parameter(ResolvedType::reference(source), None);
+
+        let valid = function(
+            FunctionDomain::Server,
+            vec![valid_parameter()],
+            boolean_rows_return(),
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+        );
+        assert!(validate_identity_selected_function_signature(&catalogue, &valid).is_ok());
+
+        let wrong_domain = function(
+            FunctionDomain::Client,
+            vec![valid_parameter()],
+            boolean_rows_return(),
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+        );
+        assert!(matches!(
+            validate_identity_selected_function_signature(&catalogue, &wrong_domain),
+            Err(PostgresKernelError::ServerSelect(
+                ServerSelectError::FunctionDomain { function }
+            )) if function == function_id
+        ));
+
+        assert_signature_rule(
+            validate_identity_selected_function_signature(
+                &catalogue,
+                &function(
+                    FunctionDomain::Server,
+                    vec![valid_parameter()],
+                    FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Boolean)),
+                    FunctionSecurity::Invoker,
+                    Some(FunctionTransaction::ReadOnly),
+                ),
+            ),
+            function_id,
+            "SERVER SELECT functions must return nonempty ROWS",
+        );
+        assert_signature_rule(
+            validate_identity_selected_function_signature(
+                &catalogue,
+                &function(
+                    FunctionDomain::Server,
+                    vec![valid_parameter()],
+                    boolean_rows_return(),
+                    FunctionSecurity::Definer,
+                    Some(FunctionTransaction::ReadOnly),
+                ),
+            ),
+            function_id,
+            "parameterised SERVER SELECT functions must use INVOKER security",
+        );
+        for transaction in [
+            None,
+            Some(FunctionTransaction::Atomic),
+            Some(FunctionTransaction::Manual),
+        ] {
+            assert_signature_rule(
+                validate_identity_selected_function_signature(
+                    &catalogue,
+                    &function(
+                        FunctionDomain::Server,
+                        vec![valid_parameter()],
+                        boolean_rows_return(),
+                        FunctionSecurity::Invoker,
+                        transaction,
+                    ),
+                ),
+                function_id,
+                "parameterised SERVER SELECT functions must use READ ONLY transactions",
+            );
+        }
+        for volatility in [FunctionVolatility::Immutable, FunctionVolatility::Volatile] {
+            assert_signature_rule(
+                validate_identity_selected_function_signature(
+                    &catalogue,
+                    &function_with_volatility(
+                        FunctionDomain::Server,
+                        vec![valid_parameter()],
+                        boolean_rows_return(),
+                        FunctionSecurity::Invoker,
+                        Some(FunctionTransaction::ReadOnly),
+                        volatility,
+                    ),
+                ),
+                function_id,
+                "parameterised SERVER SELECT functions must use STABLE volatility",
+            );
+        }
+        for parameters in [
+            Vec::new(),
+            vec![
+                valid_parameter(),
+                ParameterDefinition::new(
+                    ParameterId::from_bytes([0x34; 16]),
+                    "other",
+                    1,
+                    ResolvedType::reference(source),
+                    None,
+                ),
+            ],
+        ] {
+            assert_signature_rule(
+                validate_identity_selected_function_signature(
+                    &catalogue,
+                    &function(
+                        FunctionDomain::Server,
+                        parameters,
+                        boolean_rows_return(),
+                        FunctionSecurity::Invoker,
+                        Some(FunctionTransaction::ReadOnly),
+                    ),
+                ),
+                function_id,
+                "parameterised SERVER SELECT functions must declare exactly one parameter",
+            );
+        }
+        assert_signature_rule(
+            validate_identity_selected_function_signature(
+                &catalogue,
+                &function(
+                    FunctionDomain::Server,
+                    vec![selector_parameter(
+                        ResolvedType::reference(source),
+                        Some(orna_core::ExpressionId::from_bytes([0x35; 16])),
+                    )],
+                    boolean_rows_return(),
+                    FunctionSecurity::Invoker,
+                    Some(FunctionTransaction::ReadOnly),
+                ),
+            ),
+            function_id,
+            "the identity selector parameter cannot have a default expression",
+        );
+        for unsupported in [
+            ResolvedType::scalar(StandardScalar::Integer),
+            ResolvedType::reference(TypeId::from_bytes([0x99; 16])),
+        ] {
+            assert_signature_rule(
+                validate_identity_selected_function_signature(
+                    &catalogue,
+                    &function(
+                        FunctionDomain::Server,
+                        vec![selector_parameter(unsupported, None)],
+                        boolean_rows_return(),
+                        FunctionSecurity::Invoker,
+                        Some(FunctionTransaction::ReadOnly),
+                    ),
+                ),
+                function_id,
+                "the selector parameter must use REF to an available object type",
+            );
+        }
+    }
+
+    #[test]
+    fn identity_selected_plan_requires_the_exact_selector_owner_parameter_and_target() {
+        let (catalogue, source, _, _) = catalogue();
+        let other_active = TypeId::from_bytes([0x20; 16]);
+        let function_id = FunctionId::from_bytes([0x31; 16]);
+        let parameter_id = ParameterId::from_bytes([0x33; 16]);
+        let projection = Expression {
+            kind: ExpressionKind::BooleanLiteral { value: true },
+            value_type: ValueType {
+                resolved_type: ResolvedType::scalar(StandardScalar::Boolean),
+                nullable: false,
+            },
+        };
+        let plan = |owner, parameter| {
+            IdentitySelectedServerPlan::new(
+                Scan {
+                    input: 0,
+                    object_type: source,
+                },
+                [projection.clone()],
+                IdentitySelector::new(owner, parameter),
+            )
+            .unwrap()
+        };
+        let function_for_target = |target| {
+            function(
+                FunctionDomain::Server,
+                vec![ParameterDefinition::new(
+                    parameter_id,
+                    "selected",
+                    0,
+                    ResolvedType::reference(target),
+                    None,
+                )],
+                boolean_rows_return(),
+                FunctionSecurity::Invoker,
+                Some(FunctionTransaction::ReadOnly),
+            )
+        };
+        let valid = function_for_target(source);
+        assert!(
+            validate_identity_selected_plan(&catalogue, &valid, &plan(function_id, parameter_id))
+                .is_ok()
+        );
+
+        for invalid in [
+            plan(FunctionId::from_bytes([0x98; 16]), parameter_id),
+            plan(function_id, ParameterId::from_bytes([0x97; 16])),
+        ] {
+            assert_plan_rule(
+                validate_identity_selected_plan(&catalogue, &valid, &invalid),
+                "identity selector owner and parameter must equal the active function signature",
+            );
+        }
+        assert_plan_rule(
+            validate_identity_selected_plan(
+                &catalogue,
+                &function_for_target(other_active),
+                &plan(function_id, parameter_id),
+            ),
+            "the selector parameter must use REF to the object type selected in FROM",
+        );
+    }
+
+    #[test]
+    fn identity_selected_equality_rejection_names_the_parameterised_query() {
+        let (catalogue, source, reference, value) = catalogue();
+        let target = TypeId::from_bytes([0x20; 16]);
+        let function_id = FunctionId::from_bytes([0x31; 16]);
+        let parameter_id = ParameterId::from_bytes([0x33; 16]);
+        let text = nullable_text_path(source, reference, target, value);
+        let plan = IdentitySelectedServerPlan::new(
+            Scan {
+                input: 0,
+                object_type: source,
+            },
+            [Expression {
+                kind: ExpressionKind::Equality {
+                    left: Box::new(text.clone()),
+                    right: Box::new(text),
+                },
+                value_type: ValueType {
+                    resolved_type: ResolvedType::scalar(StandardScalar::Boolean),
+                    nullable: true,
+                },
+            }],
+            IdentitySelector::new(function_id, parameter_id),
+        )
+        .unwrap();
+        let function = function(
+            FunctionDomain::Server,
+            vec![ParameterDefinition::new(
+                parameter_id,
+                "selected",
+                0,
+                ResolvedType::reference(source),
+                None,
+            )],
+            boolean_rows_return(),
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+        );
+
+        assert_plan_rule(
+            validate_identity_selected_plan(&catalogue, &function, &plan),
+            PARAMETERISED_EQUALITY_RULE,
+        );
+    }
+
+    #[test]
+    fn identity_selector_arguments_are_exact_complete_and_target_typed() {
+        let (catalogue, source, _, _) = catalogue();
+        let function_id = FunctionId::from_bytes([0x31; 16]);
+        let parameter_id = ParameterId::from_bytes([0x33; 16]);
+        let function = function(
+            FunctionDomain::Server,
+            vec![ParameterDefinition::new(
+                parameter_id,
+                "selected",
+                0,
+                ResolvedType::reference(source),
+                None,
+            )],
+            rows_return(),
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+        );
+        let plan = IdentitySelectedServerPlan::new(
+            Scan {
+                input: 0,
+                object_type: source,
+            },
+            [Expression {
+                kind: ExpressionKind::BooleanLiteral { value: true },
+                value_type: ValueType {
+                    resolved_type: ResolvedType::scalar(StandardScalar::Boolean),
+                    nullable: false,
+                },
+            }],
+            IdentitySelector::new(function_id, parameter_id),
+        )
+        .unwrap();
+        let object = ObjectId::from_bytes([0x42; 16]);
+        let argument = FunctionArgument::new(
+            parameter_id,
+            RuntimeValue::Reference {
+                target: source,
+                object,
+            },
+        )
+        .unwrap();
+
+        assert!(validate_identity_selected_function_signature(&catalogue, &function).is_ok());
+        assert_eq!(
+            validate_identity_selected_arguments(
+                &catalogue,
+                &function,
+                &plan,
+                std::slice::from_ref(&argument),
+            )
+            .unwrap(),
+            object
+        );
+        assert_argument_rule(
+            validate_identity_selected_arguments(&catalogue, &function, &plan, &[]),
+            Some(parameter_id),
+            "a required argument is missing",
+        );
+        assert_argument_rule(
+            validate_identity_selected_arguments(
+                &catalogue,
+                &function,
+                &plan,
+                &[argument.clone(), argument],
+            ),
+            Some(parameter_id),
+            "the same parameter was supplied twice",
+        );
+        let unknown_parameter = ParameterId::from_bytes([0x98; 16]);
+        let unknown = FunctionArgument::new(
+            unknown_parameter,
+            RuntimeValue::Reference {
+                target: source,
+                object,
+            },
+        )
+        .unwrap();
+        assert_argument_rule(
+            validate_identity_selected_arguments(&catalogue, &function, &plan, &[unknown]),
+            Some(unknown_parameter),
+            "an argument was supplied for a parameter that this function does not declare",
+        );
+        let wrong_scalar = FunctionArgument::new(parameter_id, RuntimeValue::Integer(7)).unwrap();
+        assert_argument_rule(
+            validate_identity_selected_arguments(&catalogue, &function, &plan, &[wrong_scalar]),
+            Some(parameter_id),
+            "the argument type does not match the declared parameter type",
+        );
+        let wrong_active_target = FunctionArgument::new(
+            parameter_id,
+            RuntimeValue::Reference {
+                target: TypeId::from_bytes([0x20; 16]),
+                object,
+            },
+        )
+        .unwrap();
+        assert_argument_rule(
+            validate_identity_selected_arguments(
+                &catalogue,
+                &function,
+                &plan,
+                &[wrong_active_target],
+            ),
+            Some(parameter_id),
+            "the argument type does not match the declared parameter type",
+        );
+        let wrong_inactive_target = FunctionArgument::new(
+            parameter_id,
+            RuntimeValue::Reference {
+                target: TypeId::from_bytes([0x99; 16]),
+                object,
+            },
+        )
+        .unwrap();
+        assert_argument_rule(
+            validate_identity_selected_arguments(
+                &catalogue,
+                &function,
+                &plan,
+                &[wrong_inactive_target],
+            ),
+            Some(parameter_id),
+            "the argument uses an unsupported type or refers to an unavailable object type",
+        );
+    }
+
+    #[test]
+    fn identity_selected_evidence_orders_query_projection_selector_and_parameter() {
+        let (_, source, _, _) = catalogue();
+        let owner = FunctionId::from_bytes([0x31; 16]);
+        let parameter = ParameterId::from_bytes([0x33; 16]);
+        let plan = IdentitySelectedServerPlan::new(
+            Scan {
+                input: 0,
+                object_type: source,
+            },
+            [Expression {
+                kind: ExpressionKind::ObjectReference { input: 0 },
+                value_type: ValueType {
+                    resolved_type: ResolvedType::reference(source),
+                    nullable: false,
+                },
+            }],
+            IdentitySelector::new(owner, parameter),
+        )
+        .unwrap();
+
+        assert_eq!(
+            expected_identity_selected_body_references(&plan),
+            vec![
+                ExpectedDefinitionReference::new(
+                    DefinitionReferenceKind::QueryObject,
+                    DefinitionReferenceTarget::ObjectType(source),
+                ),
+                ExpectedDefinitionReference::new(
+                    DefinitionReferenceKind::ObjectReference,
+                    DefinitionReferenceTarget::ObjectType(source),
+                ),
+                ExpectedDefinitionReference::new(
+                    DefinitionReferenceKind::ObjectReference,
+                    DefinitionReferenceTarget::ObjectType(source),
+                ),
+                ExpectedDefinitionReference::new(
+                    DefinitionReferenceKind::ParameterRead,
+                    DefinitionReferenceTarget::Parameter { owner, parameter },
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn identity_selected_cardinality_accepts_zero_or_one_and_rejects_two() {
+        assert!(validate_identity_selected_cardinality(0).is_ok());
+        assert!(validate_identity_selected_cardinality(1).is_ok());
+        let error = validate_identity_selected_cardinality(2).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "server SELECT failed: SERVER SELECT returned too many rows: more than one row was returned for the requested object"
+        );
+        assert!(matches!(
+            error,
+            PostgresKernelError::ServerSelect(ServerSelectError::Cardinality { .. })
+        ));
     }
 
     #[test]
@@ -1908,10 +3082,16 @@ mod tests {
     }
 
     #[test]
-    fn boolean_binds_are_prepared_with_exact_boolean_types() {
-        assert!(boolean_bind_types(&[]).is_empty());
+    fn select_binds_are_prepared_with_exact_types() {
+        assert!(Vec::<SelectBindValue>::new().is_empty());
         assert_eq!(
-            boolean_bind_types(&[true, false]),
+            [
+                SelectBindValue::Boolean(true),
+                SelectBindValue::Boolean(false)
+            ]
+            .iter()
+            .map(SelectBindValue::bind_type)
+            .collect::<Vec<_>>(),
             vec![Type::BOOL, Type::BOOL]
         );
     }
