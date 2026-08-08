@@ -11,28 +11,26 @@ pub use identity::{
     CheckedTypeId, ProvisionalExpressionId, ProvisionalFieldId, ProvisionalFunctionId,
     ProvisionalParameterId, ProvisionalSchemaId, ProvisionalTypeId,
 };
-#[cfg(test)]
-pub(crate) use model::QueryField;
 pub use model::{
-    CheckReport, CheckedBundle, CheckedDefault, CheckedField, CheckedObjectType, CheckedSchema,
-    CheckedServerFunction, ConstantValue,
+    CheckReport, CheckedBundle, CheckedDefault, CheckedDefinitionReference,
+    CheckedDefinitionReferenceTarget, CheckedField, CheckedObjectType, CheckedSchema,
+    CheckedServerFunction, CheckedServerFunctionParameter, CheckedServerFunctionReturnColumn,
+    ConstantValue, SemanticType,
 };
-pub(crate) use model::{QueryCatalogue, SemanticType};
+pub(crate) use model::{QueryCatalogue, QueryField};
 
 use std::collections::{HashMap, HashSet};
 
 use orna_core::{
-    CatalogueRevisionId, ExpressionId, FieldId, FunctionId, FunctionRevisionId, ParameterId,
-    SchemaId, TypeId,
+    ExpressionId,
     catalogue::{
-        CatalogueSnapshot, FieldDefinition, FunctionDefinition, FunctionDomain, FunctionReturn,
-        FunctionReturnColumnDefinition, FunctionSecurity as CatalogueFunctionSecurity,
+        CatalogueSnapshot, FunctionSecurity as CatalogueFunctionSecurity,
         FunctionTransaction as CatalogueFunctionTransaction,
-        FunctionVolatility as CatalogueFunctionVolatility, ObjectTypeDefinition, OnDeleteAction,
-        ParameterDefinition, QualifiedSemanticName, SchemaDefinition,
+        FunctionVolatility as CatalogueFunctionVolatility, OnDeleteAction, QualifiedSemanticName,
     },
+    revision::DefinitionReferenceKind,
     source::SourceBundle,
-    types::{ResolvedType, StandardScalar},
+    types::StandardScalar,
 };
 use orna_syntax::{
     FunctionReturnType, FunctionSecurity as SyntaxFunctionSecurity,
@@ -42,10 +40,15 @@ use orna_syntax::{
     StandardLargeObjectKind, TypeSpecification,
 };
 
-use crate::relational::{RelationalQueryIr, check_query};
+use crate::relational::{QueryReference, QueryReferenceKind, QueryReferenceTarget, check_query_in};
 use crate::{
-    ByteSpan, CompilerDiagnostic, DiagnosticCode, ParseReport, SourceLocation,
+    CompilerDiagnostic, DiagnosticCode, ParseReport, SourceLocation,
     normalise_name_part as semantic_part, normalise_qualified_name as semantic_name, parse_bundle,
+};
+
+use self::{
+    identity::{CheckAssignments, IdentityAssignments},
+    model::{QueryObjectType, ResolutionCatalogue},
 };
 
 /// Checks one source bundle against an immutable catalogue snapshot.
@@ -60,7 +63,7 @@ pub fn check(bundle: &SourceBundle, base: &CatalogueSnapshot) -> CheckReport {
 struct Header<'a> {
     declaration: &'a ObjectTypeDeclaration,
     logical_path: &'a str,
-    id: TypeId,
+    id: CheckedTypeId,
 }
 
 /// Resolved metadata for a SERVER function before relational planning.
@@ -68,7 +71,7 @@ struct Header<'a> {
 struct ServerFunctionHeader<'a> {
     declaration: &'a ServerFunctionDeclaration,
     logical_path: &'a str,
-    id: FunctionId,
+    id: CheckedFunctionId,
     security: CatalogueFunctionSecurity,
     transaction: Option<CatalogueFunctionTransaction>,
     volatility: CatalogueFunctionVolatility,
@@ -77,10 +80,12 @@ struct ServerFunctionHeader<'a> {
 /// One resolved parameter accepted by this SERVER function slice.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ResolvedServerFunctionParameter {
-    id: ParameterId,
+    id: CheckedParameterId,
     name: String,
     ordinal: u32,
-    resolved_type: ResolvedType,
+    semantic_type: SemanticType<CheckedTypeId>,
+    location: SourceLocation,
+    reference_location: Option<SourceLocation>,
 }
 
 /// One resolved column in a `ROWS` result.
@@ -88,8 +93,9 @@ struct ResolvedServerFunctionParameter {
 struct ResolvedServerFunctionReturnColumn {
     name: String,
     ordinal: u32,
-    resolved_type: ResolvedType,
+    semantic_type: SemanticType<CheckedTypeId>,
     location: SourceLocation,
+    reference_location: Option<SourceLocation>,
 }
 
 /// The resolved result shape before relational planning.
@@ -107,7 +113,7 @@ enum ResolvedServerFunctionReturn {
 /// A resolved SERVER function that is ready for relational body checking.
 #[derive(Clone, Debug)]
 struct ResolvedServerFunctionInput<'a> {
-    id: FunctionId,
+    id: CheckedFunctionId,
     name: QualifiedSemanticName,
     parameters: Vec<ResolvedServerFunctionParameter>,
     return_type: ResolvedServerFunctionReturn,
@@ -118,26 +124,13 @@ struct ResolvedServerFunctionInput<'a> {
     location: SourceLocation,
 }
 
-/// A fully checked SERVER function before its revision identity is allocated.
-#[derive(Clone, Debug)]
-struct PlannedServerFunction {
-    id: FunctionId,
-    name: QualifiedSemanticName,
-    parameters: Vec<ResolvedServerFunctionParameter>,
-    columns: Vec<ResolvedServerFunctionReturnColumn>,
-    security: CatalogueFunctionSecurity,
-    transaction: Option<CatalogueFunctionTransaction>,
-    volatility: CatalogueFunctionVolatility,
-    location: SourceLocation,
-    plan: RelationalQueryIr,
-}
-
 fn check_parsed(parse_report: ParseReport, base: &CatalogueSnapshot) -> CheckReport {
     let mut diagnostics = parse_report.diagnostics().to_vec();
     if !diagnostics.is_empty() {
         return failed(parse_report, diagnostics);
     }
 
+    let mut assignments = CheckAssignments::new();
     let mut checked_schemas = Vec::new();
     let mut known_schemas = HashSet::new();
     let mut submitted_schemas = HashSet::new();
@@ -155,9 +148,7 @@ fn check_parsed(parse_report: ParseReport, base: &CatalogueSnapshot) -> CheckRep
             }
             known_schemas.insert(name.clone());
             checked_schemas.push(CheckedSchema {
-                id: base
-                    .schema_by_name(&name)
-                    .map_or_else(SchemaId::new, SchemaDefinition::id),
+                id: assignments.schema_id(base.schema_by_name(&name).map(|schema| schema.id())),
                 name,
                 location: location(unit.logical_path(), &declaration.span),
             });
@@ -197,9 +188,10 @@ fn check_parsed(parse_report: ParseReport, base: &CatalogueSnapshot) -> CheckRep
                 continue;
             }
             declarations_by_name.insert(name.clone(), headers.len());
-            let id = base
-                .object_type_by_name(&name)
-                .map_or_else(TypeId::new, ObjectTypeDefinition::id);
+            let id = assignments.type_id(
+                base.object_type_by_name(&name)
+                    .map(|object_type| object_type.id()),
+            );
             headers.push(Header {
                 declaration,
                 logical_path: unit.logical_path(),
@@ -215,7 +207,8 @@ fn check_parsed(parse_report: ParseReport, base: &CatalogueSnapshot) -> CheckRep
 
     let mut checked_types = Vec::with_capacity(headers.len());
     for header in headers {
-        let base_type = base.object_type_by_id(header.id);
+        let type_name = semantic_name(&header.declaration.name);
+        let base_type = base.object_type_by_name(&type_name);
         let mut field_names = HashSet::new();
         let mut checked_fields = Vec::with_capacity(header.declaration.fields.len());
 
@@ -234,7 +227,7 @@ fn check_parsed(parse_report: ParseReport, base: &CatalogueSnapshot) -> CheckRep
                 continue;
             }
 
-            let resolved_type = resolve_type(
+            let semantic_type = resolve_type(
                 &field.type_specification,
                 &submitted_ids,
                 header.logical_path,
@@ -263,30 +256,33 @@ fn check_parsed(parse_report: ParseReport, base: &CatalogueSnapshot) -> CheckRep
                 ));
             }
 
-            let id = base_type
-                .and_then(|object_type| object_type.field_by_name(&name))
-                .map_or_else(FieldId::new, FieldDefinition::id);
+            let id = assignments.field_id(
+                base_type
+                    .and_then(|object_type| object_type.field_by_name(&name))
+                    .map(|field| field.id()),
+            );
             let existing_default = base_type
                 .and_then(|object_type| object_type.field_by_name(&name))
-                .and_then(FieldDefinition::default_expression);
-            let default = match (field.default_expression.as_ref(), resolved_type) {
-                (Some(source), Some(resolved_type)) => checked_default(
+                .and_then(|field| field.default_expression());
+            let default = match (field.default_expression.as_ref(), semantic_type) {
+                (Some(source), Some(semantic_type)) => checked_default(
                     source,
-                    resolved_type,
+                    semantic_type,
                     field.nullable,
                     existing_default,
                     header.logical_path,
+                    &mut assignments,
                     &mut diagnostics,
                 ),
                 _ => None,
             };
 
-            if let Some(resolved_type) = resolved_type {
+            if let Some(semantic_type) = semantic_type {
                 checked_fields.push(CheckedField {
                     id,
                     name,
                     ordinal: field.order as u32,
-                    resolved_type,
+                    semantic_type,
                     nullable: field.nullable,
                     unique: field.unique,
                     default,
@@ -313,53 +309,27 @@ fn check_parsed(parse_report: ParseReport, base: &CatalogueSnapshot) -> CheckRep
         return failed(parse_report, diagnostics);
     }
 
-    let mut object_types: Vec<ObjectTypeDefinition> = Vec::with_capacity(checked_types.len());
-    for checked_type in &checked_types {
-        let definition = ObjectTypeDefinition::new(
-            checked_type.id,
-            checked_type.name.clone(),
-            checked_type
-                .fields
-                .iter()
-                .map(as_field_definition)
-                .collect(),
-        );
-        if let Some(index) = object_types
-            .iter()
-            .position(|candidate| candidate.id() == checked_type.id)
-        {
-            object_types[index] = definition;
-        } else {
-            object_types.push(definition);
-        }
-    }
-    let mut schemas: Vec<SchemaDefinition> = Vec::with_capacity(checked_schemas.len());
-    for checked_schema in &checked_schemas {
-        let definition = SchemaDefinition::new(checked_schema.id, checked_schema.name.clone());
-        if let Some(index) = schemas
-            .iter()
-            .position(|candidate| candidate.id() == checked_schema.id)
-        {
-            schemas[index] = definition;
-        } else {
-            schemas.push(definition);
-        }
-    }
-    let query_catalogue = CatalogueSnapshot::new_with_functions(
-        CatalogueRevisionId::new(),
-        schemas,
-        object_types,
-        Vec::new(),
-    )
-    .expect("checked definitions satisfy catalogue invariants");
+    let query_catalogue = checked_query_catalogue(&checked_types);
 
     let function_headers = if diagnostics.is_empty() {
-        resolve_server_function_headers(&parse_report, base, &known_schemas, &mut diagnostics)
+        resolve_server_function_headers(
+            &parse_report,
+            base,
+            &known_schemas,
+            &mut assignments,
+            &mut diagnostics,
+        )
     } else {
         Vec::new()
     };
     let function_inputs = if diagnostics.is_empty() {
-        resolve_server_function_inputs(&function_headers, &submitted_ids, base, &mut diagnostics)
+        resolve_server_function_inputs(
+            &function_headers,
+            &submitted_ids,
+            base,
+            &mut assignments,
+            &mut diagnostics,
+        )
     } else {
         Vec::new()
     };
@@ -373,34 +343,15 @@ fn check_parsed(parse_report: ParseReport, base: &CatalogueSnapshot) -> CheckRep
         return failed(parse_report, diagnostics);
     }
 
-    let mut functions: Vec<FunctionDefinition> = Vec::with_capacity(checked_functions.len());
-    for checked_function in &checked_functions {
-        let definition = checked_function.definition.clone();
-        if let Some(index) = functions
-            .iter()
-            .position(|candidate| candidate.id() == definition.id())
-        {
-            functions[index] = definition;
-        } else {
-            functions.push(definition);
-        }
-    }
-    let candidate = CatalogueSnapshot::new_with_functions(
-        CatalogueRevisionId::new(),
-        query_catalogue.schemas().to_vec(),
-        query_catalogue.object_types().to_vec(),
-        functions,
-    )
-    .expect("checked definitions satisfy catalogue invariants");
     CheckReport {
         parse_report,
         diagnostics,
         checked_bundle: Some(CheckedBundle {
+            base_catalogue_revision: base.revision(),
             schemas: checked_schemas,
             object_types: checked_types,
             server_functions: checked_functions,
         }),
-        candidate: Some(candidate),
     }
 }
 
@@ -408,6 +359,7 @@ fn resolve_server_function_headers<'a>(
     parse_report: &'a ParseReport,
     base: &CatalogueSnapshot,
     known_schemas: &HashSet<QualifiedSemanticName>,
+    assignments: &mut CheckAssignments,
     diagnostics: &mut Vec<CompilerDiagnostic>,
 ) -> Vec<ServerFunctionHeader<'a>> {
     let mut headers = Vec::new();
@@ -460,9 +412,8 @@ fn resolve_server_function_headers<'a>(
             headers.push(ServerFunctionHeader {
                 declaration,
                 logical_path: unit.logical_path(),
-                id: base
-                    .function_by_name(&name)
-                    .map_or_else(FunctionId::new, |function| function.id()),
+                id: assignments
+                    .function_id(base.function_by_name(&name).map(|function| function.id())),
                 security,
                 transaction,
                 volatility,
@@ -475,8 +426,9 @@ fn resolve_server_function_headers<'a>(
 
 fn resolve_server_function_inputs<'a>(
     headers: &[ServerFunctionHeader<'a>],
-    submitted_ids: &HashMap<QualifiedSemanticName, TypeId>,
+    submitted_ids: &HashMap<QualifiedSemanticName, CheckedTypeId>,
     base: &CatalogueSnapshot,
+    assignments: &mut CheckAssignments,
     diagnostics: &mut Vec<CompilerDiagnostic>,
 ) -> Vec<ResolvedServerFunctionInput<'a>> {
     let mut inputs = Vec::with_capacity(headers.len());
@@ -500,7 +452,7 @@ fn resolve_server_function_inputs<'a>(
                 continue;
             }
 
-            let Some(resolved_type) = resolve_type(
+            let Some(semantic_type) = resolve_type(
                 &parameter.type_specification,
                 submitted_ids,
                 header.logical_path,
@@ -508,14 +460,21 @@ fn resolve_server_function_inputs<'a>(
             ) else {
                 continue;
             };
-            let id = base_function
-                .and_then(|function| function.parameter_by_name(&parameter_name))
-                .map_or_else(ParameterId::new, |parameter| parameter.id());
+            let id = assignments.parameter_id(
+                base_function
+                    .and_then(|function| function.parameter_by_name(&parameter_name))
+                    .map(|parameter| parameter.id()),
+            );
             parameters.push(ResolvedServerFunctionParameter {
                 id,
                 name: parameter_name,
                 ordinal: parameter.order as u32,
-                resolved_type,
+                semantic_type,
+                location: location(header.logical_path, &parameter.span),
+                reference_location: reference_location(
+                    &parameter.type_specification,
+                    header.logical_path,
+                ),
             });
         }
 
@@ -578,7 +537,7 @@ fn reject_unplanned_server_function_features(
 
 fn resolve_server_function_return(
     return_type: &FunctionReturnType,
-    submitted_ids: &HashMap<QualifiedSemanticName, TypeId>,
+    submitted_ids: &HashMap<QualifiedSemanticName, CheckedTypeId>,
     logical_path: &str,
     diagnostics: &mut Vec<CompilerDiagnostic>,
 ) -> Option<ResolvedServerFunctionReturn> {
@@ -615,7 +574,7 @@ fn resolve_server_function_return(
                     ));
                     continue;
                 }
-                let Some(resolved_type) = resolve_type(
+                let Some(semantic_type) = resolve_type(
                     &column.type_specification,
                     submitted_ids,
                     logical_path,
@@ -626,8 +585,12 @@ fn resolve_server_function_return(
                 resolved_columns.push(ResolvedServerFunctionReturnColumn {
                     name,
                     ordinal: column.order as u32,
-                    resolved_type,
+                    semantic_type,
                     location: location(logical_path, &column.span),
+                    reference_location: reference_location(
+                        &column.type_specification,
+                        logical_path,
+                    ),
                 });
             }
             if diagnostics.len() != diagnostics_before {
@@ -643,11 +606,11 @@ fn resolve_server_function_return(
 
 fn check_server_functions(
     inputs: &[ResolvedServerFunctionInput<'_>],
-    catalogue: &CatalogueSnapshot,
+    catalogue: &ResolutionCatalogue<CheckedTypeId, CheckedFieldId>,
     diagnostics: &mut Vec<CompilerDiagnostic>,
 ) -> Vec<CheckedServerFunction> {
     let diagnostics_before = diagnostics.len();
-    let mut plans = Vec::with_capacity(inputs.len());
+    let mut functions = Vec::with_capacity(inputs.len());
 
     for input in inputs {
         let ResolvedServerFunctionReturn::Rows { columns, location } = &input.return_type else {
@@ -662,13 +625,15 @@ fn check_server_functions(
             continue;
         };
         let ServerFunctionBody::SqlQuery(body) = input.body;
-        let plan = match check_query(&body.query, catalogue, input.location.logical_path()) {
-            Ok(plan) => plan,
-            Err(query_diagnostics) => {
-                diagnostics.extend(query_diagnostics);
-                continue;
-            }
-        };
+        let query_check =
+            match check_query_in(&body.query, catalogue, input.location.logical_path()) {
+                Ok(query_check) => query_check,
+                Err(query_diagnostics) => {
+                    diagnostics.extend(query_diagnostics);
+                    continue;
+                }
+            };
+        let plan = query_check.plan();
 
         if plan.projections().len() != columns.len() {
             diagnostics.push(DiagnosticCode::semantic(
@@ -685,7 +650,7 @@ fn check_server_functions(
 
         let mut matches_return = true;
         for (projection, column) in plan.projections().iter().zip(columns) {
-            if projection.value_type().resolved_type() != column.resolved_type {
+            if projection.value_type().semantic_type() != column.semantic_type {
                 diagnostics.push(DiagnosticCode::semantic(
                     DiagnosticCode::TypeMismatch,
                     format!(
@@ -702,16 +667,40 @@ fn check_server_functions(
             continue;
         }
 
-        plans.push(PlannedServerFunction {
+        let mut references = signature_references(&input.parameters, columns);
+        references.extend(query_check.references().iter().map(query_reference));
+
+        functions.push(CheckedServerFunction {
             id: input.id,
             name: input.name.clone(),
-            parameters: input.parameters.clone(),
-            columns: columns.clone(),
+            parameters: input
+                .parameters
+                .iter()
+                .cloned()
+                .map(|parameter| CheckedServerFunctionParameter {
+                    id: parameter.id,
+                    name: parameter.name,
+                    ordinal: parameter.ordinal,
+                    semantic_type: parameter.semantic_type,
+                    location: parameter.location,
+                })
+                .collect(),
+            return_columns: columns
+                .iter()
+                .cloned()
+                .map(|column| CheckedServerFunctionReturnColumn {
+                    name: column.name,
+                    ordinal: column.ordinal,
+                    semantic_type: column.semantic_type,
+                    location: column.location,
+                })
+                .collect(),
             security: input.security,
             transaction: input.transaction,
             volatility: input.volatility,
             location: input.location.clone(),
-            plan,
+            plan: plan.clone(),
+            references,
         });
     }
 
@@ -719,46 +708,101 @@ fn check_server_functions(
         return Vec::new();
     }
 
-    plans
-        .into_iter()
-        .map(|plan| CheckedServerFunction {
-            definition: FunctionDefinition::new(
-                plan.id,
-                plan.name,
-                FunctionDomain::Server,
-                plan.parameters
-                    .into_iter()
-                    .map(|parameter| {
-                        ParameterDefinition::new(
-                            parameter.id,
-                            parameter.name,
-                            parameter.ordinal,
-                            parameter.resolved_type,
-                            None,
-                        )
-                    })
-                    .collect(),
-                FunctionReturn::Rows(
-                    plan.columns
-                        .into_iter()
-                        .map(|column| {
-                            FunctionReturnColumnDefinition::new(
-                                column.name,
-                                column.ordinal,
-                                column.resolved_type,
+    functions
+}
+
+fn checked_query_catalogue(
+    object_types: &[CheckedObjectType],
+) -> ResolutionCatalogue<CheckedTypeId, CheckedFieldId> {
+    ResolutionCatalogue::new(
+        object_types
+            .iter()
+            .map(|object_type| {
+                QueryObjectType::new(
+                    object_type.id,
+                    object_type.name.clone(),
+                    object_type
+                        .fields
+                        .iter()
+                        .map(|field| {
+                            (
+                                field.name.clone(),
+                                QueryField::new(field.id, field.semantic_type, field.nullable),
                             )
                         })
                         .collect(),
-                ),
-                FunctionRevisionId::new(),
-                plan.security,
-                plan.transaction,
-                plan.volatility,
-            ),
-            location: plan.location,
-            plan: plan.plan,
-        })
-        .collect()
+                )
+            })
+            .collect(),
+    )
+    .expect("checked definitions satisfy resolver-local query catalogue invariants")
+}
+
+fn signature_references(
+    parameters: &[ResolvedServerFunctionParameter],
+    columns: &[ResolvedServerFunctionReturnColumn],
+) -> Vec<CheckedDefinitionReference> {
+    let mut references = Vec::new();
+    references.extend(parameters.iter().filter_map(|parameter| {
+        object_reference(
+            parameter.semantic_type,
+            parameter.reference_location.as_ref(),
+        )
+    }));
+    references.extend(columns.iter().filter_map(|column| {
+        object_reference(column.semantic_type, column.reference_location.as_ref())
+    }));
+    references
+}
+
+fn object_reference(
+    semantic_type: SemanticType<CheckedTypeId>,
+    location: Option<&SourceLocation>,
+) -> Option<CheckedDefinitionReference> {
+    let SemanticType::Reference { target } = semantic_type else {
+        return None;
+    };
+    let location = location?.clone();
+    Some(CheckedDefinitionReference {
+        target: CheckedDefinitionReferenceTarget::ObjectType(target),
+        kind: DefinitionReferenceKind::ObjectReference,
+        location,
+    })
+}
+
+fn query_reference(
+    reference: &QueryReference<CheckedTypeId, CheckedFieldId>,
+) -> CheckedDefinitionReference {
+    let (target, kind) = match (reference.kind(), *reference.target()) {
+        (QueryReferenceKind::QueryObject, QueryReferenceTarget::Object(object_type)) => (
+            CheckedDefinitionReferenceTarget::ObjectType(object_type),
+            DefinitionReferenceKind::QueryObject,
+        ),
+        (QueryReferenceKind::ObjectReference, QueryReferenceTarget::Object(object_type)) => (
+            CheckedDefinitionReferenceTarget::ObjectType(object_type),
+            DefinitionReferenceKind::ObjectReference,
+        ),
+        (QueryReferenceKind::QueryField, QueryReferenceTarget::Field { owner, field }) => (
+            CheckedDefinitionReferenceTarget::Field { owner, field },
+            DefinitionReferenceKind::QueryField,
+        ),
+        _ => unreachable!("relational query evidence has an invalid kind and target pair"),
+    };
+    CheckedDefinitionReference {
+        target,
+        kind,
+        location: reference.location().clone(),
+    }
+}
+
+fn reference_location(
+    specification: &TypeSpecification,
+    logical_path: &str,
+) -> Option<SourceLocation> {
+    let TypeSpecification::Reference { target, .. } = specification else {
+        return None;
+    };
+    Some(location(logical_path, &target.span))
 }
 
 fn map_function_security(mode: Option<SyntaxFunctionSecurity>) -> CatalogueFunctionSecurity {
@@ -792,20 +836,19 @@ fn failed(parse_report: ParseReport, diagnostics: Vec<CompilerDiagnostic>) -> Ch
         parse_report,
         diagnostics,
         checked_bundle: None,
-        candidate: None,
     }
 }
 
 fn resolve_type(
     specification: &TypeSpecification,
-    submitted_ids: &HashMap<QualifiedSemanticName, TypeId>,
+    submitted_ids: &HashMap<QualifiedSemanticName, CheckedTypeId>,
     logical_path: &str,
     diagnostics: &mut Vec<CompilerDiagnostic>,
-) -> Option<ResolvedType> {
+) -> Option<SemanticType<CheckedTypeId>> {
     match specification {
         TypeSpecification::Named(name) => {
             if let Some(scalar) = resolve_closed_scalar(name) {
-                return Some(ResolvedType::scalar(scalar));
+                return Some(SemanticType::scalar(scalar));
             }
             let semantic_name = semantic_name(name);
             if submitted_ids.contains_key(&semantic_name) {
@@ -830,7 +873,7 @@ fn resolve_type(
                 StandardLargeObjectKind::Character => StandardScalar::CharacterLargeObject,
                 StandardLargeObjectKind::Binary => StandardScalar::BinaryLargeObject,
             };
-            Some(ResolvedType::scalar(scalar))
+            Some(SemanticType::scalar(scalar))
         }
         TypeSpecification::Reference { target, .. } => {
             if resolve_closed_scalar(target).is_some() {
@@ -844,7 +887,7 @@ fn resolve_type(
             }
             let name = semantic_name(target);
             if let Some(id) = submitted_ids.get(&name).copied() {
-                Some(ResolvedType::reference(id))
+                Some(SemanticType::reference(id))
             } else {
                 diagnostics.push(diagnostic(
                     DiagnosticCode::UnknownQualifiedName,
@@ -867,10 +910,11 @@ fn resolve_closed_scalar(name: &QualifiedName) -> Option<StandardScalar> {
 
 fn checked_default(
     source: &SourceSlice,
-    resolved_type: ResolvedType,
+    semantic_type: SemanticType<CheckedTypeId>,
     nullable: bool,
     existing_id: Option<ExpressionId>,
     logical_path: &str,
+    assignments: &mut CheckAssignments,
     diagnostics: &mut Vec<CompilerDiagnostic>,
 ) -> Option<CheckedDefault> {
     let value = match parse_constant(&source.text) {
@@ -885,14 +929,14 @@ fn checked_default(
             return None;
         }
     };
-    let valid = match (&value, resolved_type) {
+    let valid = match (&value, semantic_type) {
         (ConstantValue::Null, _) => nullable,
-        (ConstantValue::Boolean(_), ResolvedType::Scalar(StandardScalar::Boolean)) => true,
+        (ConstantValue::Boolean(_), SemanticType::Scalar(StandardScalar::Boolean)) => true,
         (
             ConstantValue::Integer(_),
-            ResolvedType::Scalar(StandardScalar::Integer | StandardScalar::BigInt),
+            SemanticType::Scalar(StandardScalar::Integer | StandardScalar::BigInt),
         ) => true,
-        (ConstantValue::Text(_), ResolvedType::Scalar(StandardScalar::CharacterLargeObject)) => {
+        (ConstantValue::Text(_), SemanticType::Scalar(StandardScalar::CharacterLargeObject)) => {
             true
         }
         _ => false,
@@ -907,7 +951,7 @@ fn checked_default(
         return None;
     }
     Some(CheckedDefault {
-        id: existing_id.unwrap_or_default(),
+        id: assignments.expression_id(existing_id),
         value,
         location: location(logical_path, &source.span),
     })
@@ -941,19 +985,6 @@ fn map_on_delete(policy: Option<OnDeletePolicy>) -> Option<OnDeleteAction> {
     }
 }
 
-fn as_field_definition(field: &CheckedField) -> FieldDefinition {
-    FieldDefinition::new(
-        field.id,
-        field.name.clone(),
-        field.ordinal,
-        field.resolved_type,
-        field.nullable,
-        field.unique,
-        field.default.as_ref().map(CheckedDefault::id),
-        field.on_delete,
-    )
-}
-
 fn namespace_of(name: &QualifiedSemanticName) -> Option<QualifiedSemanticName> {
     let namespace_parts = name.parts().get(..name.parts().len().checked_sub(1)?)?;
     if namespace_parts.is_empty() {
@@ -963,10 +994,7 @@ fn namespace_of(name: &QualifiedSemanticName) -> Option<QualifiedSemanticName> {
 }
 
 fn location(logical_path: &str, span: &SourceSpan) -> SourceLocation {
-    SourceLocation {
-        logical_path: logical_path.to_owned(),
-        span: ByteSpan::from_syntax_span(span),
-    }
+    SourceLocation::from_syntax(logical_path, span)
 }
 
 fn diagnostic(
@@ -980,31 +1008,121 @@ fn diagnostic(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
-
     use orna_core::{
-        CatalogueRevisionId, FunctionId, FunctionRevisionId, SchemaId,
+        CatalogueRevisionId, ExpressionId, FieldId, FunctionId, FunctionRevisionId, ParameterId,
+        SchemaId, TypeId,
         catalogue::{
-            CatalogueSnapshot, FunctionDefinition, FunctionDomain, FunctionReturn,
-            FunctionSecurity, FunctionTransaction, FunctionVolatility, OnDeleteAction,
+            CatalogueSnapshot, FieldDefinition, FunctionDefinition, FunctionDomain, FunctionReturn,
+            FunctionReturnColumnDefinition, FunctionSecurity, FunctionTransaction,
+            FunctionVolatility, ObjectTypeDefinition, OnDeleteAction, ParameterDefinition,
             QualifiedSemanticName, SchemaDefinition,
         },
+        revision::DefinitionReferenceKind,
         source::{SourceBundle, SourceUnit},
         types::{ResolvedType, StandardScalar},
     };
 
+    use crate::relational::ExpressionKind;
+
     use super::{
-        ConstantValue, DiagnosticCode, check, parse_bundle, resolve_server_function_headers,
+        CheckedDefinitionReferenceTarget, ConstantValue, DiagnosticCode, SemanticType, check,
     };
 
     fn empty_catalogue() -> CatalogueSnapshot {
-        CatalogueSnapshot::new(CatalogueRevisionId::new(), Vec::new(), Vec::new()).unwrap()
+        catalogue(Vec::new(), Vec::new(), Vec::new())
+    }
+
+    fn catalogue(
+        schemas: Vec<SchemaDefinition>,
+        object_types: Vec<ObjectTypeDefinition>,
+        functions: Vec<FunctionDefinition>,
+    ) -> CatalogueSnapshot {
+        CatalogueSnapshot::new_with_functions(
+            CatalogueRevisionId::from_bytes([1; 16]),
+            schemas,
+            object_types,
+            functions,
+        )
+        .unwrap()
     }
 
     fn schema(id: u8, parts: &[&str]) -> SchemaDefinition {
         SchemaDefinition::new(
             SchemaId::from_bytes([id; 16]),
             QualifiedSemanticName::new(parts.iter().copied()).unwrap(),
+        )
+    }
+
+    fn object_type(id: u8, parts: &[&str], fields: Vec<FieldDefinition>) -> ObjectTypeDefinition {
+        ObjectTypeDefinition::new(
+            TypeId::from_bytes([id; 16]),
+            QualifiedSemanticName::new(parts.iter().copied()).unwrap(),
+            fields,
+        )
+    }
+
+    fn field(
+        id: u8,
+        name: &str,
+        ordinal: u32,
+        resolved_type: ResolvedType,
+        default_expression: Option<ExpressionId>,
+    ) -> FieldDefinition {
+        FieldDefinition::new(
+            FieldId::from_bytes([id; 16]),
+            name,
+            ordinal,
+            resolved_type,
+            true,
+            false,
+            default_expression,
+            None,
+        )
+    }
+
+    fn parameter(
+        id: u8,
+        name: &str,
+        ordinal: u32,
+        resolved_type: ResolvedType,
+    ) -> ParameterDefinition {
+        ParameterDefinition::new(
+            ParameterId::from_bytes([id; 16]),
+            name,
+            ordinal,
+            resolved_type,
+            None,
+        )
+    }
+
+    fn rows_column(
+        name: &str,
+        ordinal: u32,
+        resolved_type: ResolvedType,
+    ) -> FunctionReturnColumnDefinition {
+        FunctionReturnColumnDefinition::new(name, ordinal, resolved_type)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn server_function(
+        id: u8,
+        parts: &[&str],
+        parameters: Vec<ParameterDefinition>,
+        return_columns: Vec<FunctionReturnColumnDefinition>,
+        security: FunctionSecurity,
+        transaction: Option<FunctionTransaction>,
+        volatility: FunctionVolatility,
+    ) -> FunctionDefinition {
+        FunctionDefinition::new(
+            FunctionId::from_bytes([id; 16]),
+            QualifiedSemanticName::new(parts.iter().copied()).unwrap(),
+            FunctionDomain::Server,
+            parameters,
+            FunctionReturn::Rows(return_columns),
+            FunctionRevisionId::from_bytes([id.saturating_add(100); 16]),
+            security,
+            transaction,
+            volatility,
         )
     }
 
@@ -1017,11 +1135,9 @@ mod tests {
         .unwrap()
     }
 
-    fn successful_candidate(source: &'static str) -> CatalogueSnapshot {
-        check(&bundle([("schema.orna", source)]), &empty_catalogue())
-            .candidate()
-            .cloned()
-            .expect("source must check")
+    fn assert_no_checked_bundle(report: &super::CheckReport) {
+        assert!(!report.diagnostics().is_empty());
+        assert!(report.checked_bundle().is_none());
     }
 
     #[test]
@@ -1048,34 +1164,30 @@ mod tests {
         let task = &checked.object_types()[0];
         let person = &checked.object_types()[1];
         assert_eq!(
-            task.fields()[0].resolved_type(),
-            ResolvedType::reference(person.id())
+            task.fields()[0].semantic_type(),
+            SemanticType::reference(person.id())
         );
+        assert_eq!(task.id().to_string(), "provisional:type:0");
+        assert_eq!(person.id().to_string(), "provisional:type:1");
     }
 
     #[test]
     fn empty_schema_declaration_persists_with_a_stable_identity() {
-        let initial = successful_candidate("CREATE SCHEMA crm;");
-        let schema_id = initial.schemas()[0].id();
-
-        assert_eq!(initial.schemas().len(), 1);
-        assert_eq!(initial.schemas()[0].name().to_string(), "crm");
-        assert!(initial.object_types().is_empty());
-
-        let report = check(&bundle([("schema.orna", "CREATE SCHEMA CRM;")]), &initial);
+        let schema_id = SchemaId::from_bytes([2; 16]);
+        let base = catalogue(vec![schema(2, &["crm"])], Vec::new(), Vec::new());
+        let report = check(&bundle([("schema.orna", "CREATE SCHEMA CRM;")]), &base);
 
         assert!(report.diagnostics().is_empty());
-        assert_eq!(report.candidate().unwrap().schemas()[0].id(), schema_id);
+        let checked = report.checked_bundle().unwrap();
+        assert_eq!(checked.base_catalogue_revision(), base.revision());
+        assert_eq!(checked.schemas().len(), 1);
+        assert_eq!(checked.schemas()[0].name().to_string(), "crm");
+        assert_eq!(checked.schemas()[0].id().existing(), Some(schema_id));
     }
 
     #[test]
     fn requires_submitted_schema_declarations_even_when_base_has_them() {
-        let base = CatalogueSnapshot::new(
-            CatalogueRevisionId::new(),
-            vec![schema(1, &["crm"])],
-            vec![],
-        )
-        .unwrap();
+        let base = catalogue(vec![schema(1, &["crm"])], Vec::new(), Vec::new());
 
         let object_report = check(
             &bundle([(
@@ -1089,7 +1201,7 @@ mod tests {
             object_report.diagnostics()[0].code(),
             DiagnosticCode::UnknownQualifiedName
         );
-        assert!(object_report.candidate().is_none());
+        assert_no_checked_bundle(&object_report);
 
         let function_report = check(
             &bundle([(
@@ -1104,7 +1216,7 @@ mod tests {
             function_report.diagnostics()[0].code(),
             DiagnosticCode::UnknownQualifiedName
         );
-        assert!(function_report.candidate().is_none());
+        assert_no_checked_bundle(&function_report);
     }
 
     #[test]
@@ -1129,8 +1241,8 @@ mod tests {
         assert!(report.diagnostics().is_empty());
         let fields = report.checked_bundle().unwrap().object_types()[1].fields();
         assert_eq!(
-            fields[0].resolved_type(),
-            ResolvedType::scalar(StandardScalar::Boolean)
+            fields[0].semantic_type(),
+            SemanticType::scalar(StandardScalar::Boolean)
         );
         assert!(!fields[0].nullable());
         assert_eq!(
@@ -1138,8 +1250,8 @@ mod tests {
             &ConstantValue::Boolean(false)
         );
         assert_eq!(
-            fields[1].resolved_type(),
-            ResolvedType::scalar(StandardScalar::Integer)
+            fields[1].semantic_type(),
+            SemanticType::scalar(StandardScalar::Integer)
         );
         assert_eq!(
             fields[1].default().unwrap().value(),
@@ -1152,12 +1264,12 @@ mod tests {
         assert!(fields[3].nullable());
         assert_eq!(fields[3].on_delete(), Some(OnDeleteAction::SetNull));
         assert_eq!(
-            fields[4].resolved_type(),
-            ResolvedType::scalar(StandardScalar::CharacterLargeObject)
+            fields[4].semantic_type(),
+            SemanticType::scalar(StandardScalar::CharacterLargeObject)
         );
         assert_eq!(
-            fields[5].resolved_type(),
-            ResolvedType::scalar(StandardScalar::BinaryLargeObject)
+            fields[5].semantic_type(),
+            SemanticType::scalar(StandardScalar::BinaryLargeObject)
         );
     }
 
@@ -1174,63 +1286,469 @@ mod tests {
         assert!(report.diagnostics().is_empty());
         let fields = report.checked_bundle().unwrap().object_types()[0].fields();
         assert_eq!(
-            fields[0].resolved_type(),
-            ResolvedType::scalar(StandardScalar::CharacterLargeObject)
+            fields[0].semantic_type(),
+            SemanticType::scalar(StandardScalar::CharacterLargeObject)
         );
         assert_eq!(
-            fields[1].resolved_type(),
-            ResolvedType::scalar(StandardScalar::BinaryLargeObject)
+            fields[1].semantic_type(),
+            SemanticType::scalar(StandardScalar::BinaryLargeObject)
         );
     }
 
     #[test]
     fn repeated_checks_preserve_matching_ids_even_when_fields_reorder() {
-        let initial = successful_candidate(
-            "CREATE SCHEMA people; CREATE TYPE people.person AS OBJECT (name TEXT, age INT DEFAULT 1);",
+        let name_id = FieldId::from_bytes([3; 16]);
+        let age_id = FieldId::from_bytes([4; 16]);
+        let default_id = ExpressionId::from_bytes([5; 16]);
+        let base = catalogue(
+            vec![schema(1, &["people"])],
+            vec![object_type(
+                2,
+                &["people", "person"],
+                vec![
+                    field(
+                        3,
+                        "name",
+                        0,
+                        ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+                        None,
+                    ),
+                    field(
+                        4,
+                        "age",
+                        1,
+                        ResolvedType::scalar(StandardScalar::Integer),
+                        Some(default_id),
+                    ),
+                ],
+            )],
+            Vec::new(),
         );
-        let original = initial.object_types()[0].clone();
-        let name_id = original.field_by_name("name").unwrap().id();
-        let age = original.field_by_name("age").unwrap();
 
         let report = check(
             &bundle([(
                 "renamed-file.orna",
                 "CREATE SCHEMA people; CREATE TYPE people.person AS OBJECT (age INT DEFAULT 1, name TEXT);",
             )]),
-            &initial,
+            &base,
         );
 
         assert!(report.diagnostics().is_empty());
-        let revised = &report.candidate().unwrap().object_types()[0];
-        assert_eq!(revised.id(), original.id());
-        assert_eq!(revised.field_by_name("name").unwrap().id(), name_id);
-        assert_eq!(revised.field_by_name("age").unwrap().id(), age.id());
+        let revised = &report.checked_bundle().unwrap().object_types()[0];
+        assert_eq!(revised.id().existing(), Some(TypeId::from_bytes([2; 16])));
+        assert_eq!(revised.fields()[0].name(), "age");
+        assert_eq!(revised.fields()[0].id().existing(), Some(age_id));
+        assert_eq!(revised.fields()[1].name(), "name");
+        assert_eq!(revised.fields()[1].id().existing(), Some(name_id));
         assert_eq!(
-            revised.field_by_name("age").unwrap().default_expression(),
-            age.default_expression()
+            revised.fields()[0].default().unwrap().id().existing(),
+            Some(default_id)
         );
     }
 
     #[test]
     fn added_field_gets_a_new_identity() {
-        let initial = successful_candidate(
-            "CREATE SCHEMA people; CREATE TYPE people.person AS OBJECT (name TEXT);",
+        let name_id = FieldId::from_bytes([3; 16]);
+        let base = catalogue(
+            vec![schema(1, &["people"])],
+            vec![object_type(
+                2,
+                &["people", "person"],
+                vec![field(
+                    3,
+                    "name",
+                    0,
+                    ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+                    None,
+                )],
+            )],
+            Vec::new(),
         );
         let report = check(
             &bundle([(
                 "schema.orna",
                 "CREATE SCHEMA people; CREATE TYPE people.person AS OBJECT (name TEXT, email TEXT);",
             )]),
-            &initial,
+            &base,
         );
 
-        let initial_name = initial.object_types()[0]
-            .field_by_name("name")
-            .unwrap()
-            .id();
-        let revised = &report.candidate().unwrap().object_types()[0];
-        assert_eq!(revised.field_by_name("name").unwrap().id(), initial_name);
-        assert_ne!(revised.field_by_name("email").unwrap().id(), initial_name);
+        assert!(report.diagnostics().is_empty());
+        let revised = &report.checked_bundle().unwrap().object_types()[0];
+        assert_eq!(revised.fields()[0].id().existing(), Some(name_id));
+        assert_eq!(revised.fields()[1].id().to_string(), "provisional:field:0");
+    }
+
+    #[test]
+    fn identical_checks_return_equal_checked_bundles() {
+        let source = "CREATE SCHEMA demo; CREATE TYPE demo.item AS OBJECT (value INT DEFAULT 1);";
+        let first = check(&bundle([("demo.orna", source)]), &empty_catalogue());
+        let second = check(&bundle([("demo.orna", source)]), &empty_catalogue());
+
+        assert!(first.diagnostics().is_empty());
+        assert_eq!(first.checked_bundle(), second.checked_bundle());
+    }
+
+    #[test]
+    fn syntax_errors_do_not_return_a_checked_bundle() {
+        let report = check(
+            &bundle([("broken.orna", "CREATE SCHEMA ;")]),
+            &empty_catalogue(),
+        );
+
+        assert_no_checked_bundle(&report);
+    }
+
+    #[test]
+    fn assigns_exact_kind_local_provisional_counters() {
+        let source = "CREATE SCHEMA alpha; CREATE SCHEMA beta; \
+            CREATE TYPE alpha.one AS OBJECT (number INT DEFAULT 1); \
+            CREATE TYPE beta.two AS OBJECT (one REF alpha.one, number INT DEFAULT 2); \
+            CREATE SERVER FUNCTION alpha.first(p_one REF alpha.one, p_number INT) \
+            RETURNS ROWS (number INT) AS SELECT o.number FROM alpha.one o; \
+            CREATE SERVER FUNCTION beta.second(p_two REF beta.two) \
+            RETURNS ROWS (number INT) AS SELECT t.number FROM beta.two t;";
+        let report = check(&bundle([("counters.orna", source)]), &empty_catalogue());
+
+        assert!(report.diagnostics().is_empty());
+        let checked = report.checked_bundle().unwrap();
+        assert_eq!(
+            checked.schemas()[0].id().to_string(),
+            "provisional:schema:0"
+        );
+        assert_eq!(
+            checked.schemas()[1].id().to_string(),
+            "provisional:schema:1"
+        );
+        assert_eq!(
+            checked.object_types()[0].id().to_string(),
+            "provisional:type:0"
+        );
+        assert_eq!(
+            checked.object_types()[1].id().to_string(),
+            "provisional:type:1"
+        );
+        assert_eq!(
+            checked.object_types()[0].fields()[0].id().to_string(),
+            "provisional:field:0"
+        );
+        assert_eq!(
+            checked.object_types()[1].fields()[0].id().to_string(),
+            "provisional:field:1"
+        );
+        assert_eq!(
+            checked.object_types()[1].fields()[1].id().to_string(),
+            "provisional:field:2"
+        );
+        assert_eq!(
+            checked.object_types()[0].fields()[0]
+                .default()
+                .unwrap()
+                .id()
+                .to_string(),
+            "provisional:expression:0"
+        );
+        assert_eq!(
+            checked.object_types()[1].fields()[1]
+                .default()
+                .unwrap()
+                .id()
+                .to_string(),
+            "provisional:expression:1"
+        );
+        assert_eq!(
+            checked.server_functions()[0].id().to_string(),
+            "provisional:function:0"
+        );
+        assert_eq!(
+            checked.server_functions()[1].id().to_string(),
+            "provisional:function:1"
+        );
+        assert_eq!(
+            checked.server_functions()[0].parameters()[0]
+                .id()
+                .to_string(),
+            "provisional:parameter:0"
+        );
+        assert_eq!(
+            checked.server_functions()[0].parameters()[1]
+                .id()
+                .to_string(),
+            "provisional:parameter:1"
+        );
+        assert_eq!(
+            checked.server_functions()[1].parameters()[0]
+                .id()
+                .to_string(),
+            "provisional:parameter:2"
+        );
+    }
+
+    #[test]
+    fn preserves_existing_schema_type_field_default_function_and_parameter_identities() {
+        let schema_id = SchemaId::from_bytes([1; 16]);
+        let type_id = TypeId::from_bytes([2; 16]);
+        let field_id = FieldId::from_bytes([3; 16]);
+        let default_id = ExpressionId::from_bytes([4; 16]);
+        let function_id = FunctionId::from_bytes([5; 16]);
+        let parameter_id = ParameterId::from_bytes([6; 16]);
+        let base = catalogue(
+            vec![schema(1, &["tasks"])],
+            vec![object_type(
+                2,
+                &["tasks", "task"],
+                vec![field(
+                    3,
+                    "title",
+                    0,
+                    ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+                    Some(default_id),
+                )],
+            )],
+            vec![server_function(
+                5,
+                &["tasks", "open"],
+                vec![parameter(
+                    6,
+                    "p_limit",
+                    0,
+                    ResolvedType::scalar(StandardScalar::Integer),
+                )],
+                vec![rows_column(
+                    "title",
+                    0,
+                    ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+                )],
+                FunctionSecurity::Invoker,
+                None,
+                FunctionVolatility::Volatile,
+            )],
+        );
+        let report = check(
+            &bundle([(
+                "tasks.orna",
+                "CREATE SCHEMA TASKS; CREATE TYPE tasks.task AS OBJECT (title TEXT DEFAULT 'old'); \
+                 CREATE SERVER FUNCTION TASKS.OPEN(P_LIMIT INT) RETURNS ROWS (title TEXT) \
+                 AS SELECT t.title FROM tasks.task t;",
+            )]),
+            &base,
+        );
+
+        assert!(report.diagnostics().is_empty());
+        let checked = report.checked_bundle().unwrap();
+        assert_eq!(checked.schemas()[0].id().existing(), Some(schema_id));
+        assert_eq!(checked.object_types()[0].id().existing(), Some(type_id));
+        assert_eq!(
+            checked.object_types()[0].fields()[0].id().existing(),
+            Some(field_id)
+        );
+        assert_eq!(
+            checked.object_types()[0].fields()[0]
+                .default()
+                .unwrap()
+                .id()
+                .existing(),
+            Some(default_id)
+        );
+        assert_eq!(
+            checked.server_functions()[0].id().existing(),
+            Some(function_id)
+        );
+        assert_eq!(
+            checked.server_functions()[0].parameters()[0]
+                .id()
+                .existing(),
+            Some(parameter_id)
+        );
+    }
+
+    #[test]
+    fn distinct_new_defaults_receive_distinct_provisional_expression_ids() {
+        let report = check(
+            &bundle([(
+                "defaults.orna",
+                "CREATE SCHEMA people; CREATE TYPE people.person AS OBJECT (first INT DEFAULT 1, second INT DEFAULT 2);",
+            )]),
+            &empty_catalogue(),
+        );
+
+        assert!(report.diagnostics().is_empty());
+        let fields = report.checked_bundle().unwrap().object_types()[0].fields();
+        assert_eq!(
+            fields[0].default().unwrap().id().to_string(),
+            "provisional:expression:0"
+        );
+        assert_eq!(
+            fields[1].default().unwrap().id().to_string(),
+            "provisional:expression:1"
+        );
+        assert_ne!(
+            fields[0].default().unwrap().id(),
+            fields[1].default().unwrap().id()
+        );
+    }
+
+    #[test]
+    fn checked_function_plan_uses_checked_type_and_field_ids() {
+        let report = check(
+            &bundle([(
+                "tasks.orna",
+                "CREATE SCHEMA tasks; CREATE TYPE tasks.task AS OBJECT (title TEXT); \
+                 CREATE SERVER FUNCTION tasks.open() RETURNS ROWS (title TEXT) \
+                 AS SELECT t.title FROM tasks.task t;",
+            )]),
+            &empty_catalogue(),
+        );
+
+        assert!(report.diagnostics().is_empty());
+        let checked = report.checked_bundle().unwrap();
+        let task = &checked.object_types()[0];
+        let title = &task.fields()[0];
+        let plan = checked.server_functions()[0].plan();
+        assert_eq!(plan.scan().object_type(), task.id());
+        let ExpressionKind::FieldPath { steps, .. } = plan.projections()[0].kind() else {
+            panic!("expected a field projection");
+        };
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].owner(), task.id());
+        assert_eq!(steps[0].field(), title.id());
+        assert_eq!(
+            plan.projections()[0].value_type().semantic_type(),
+            title.semantic_type()
+        );
+    }
+
+    #[test]
+    fn records_signature_and_query_references_in_order_with_exact_spans() {
+        let source = "CREATE SCHEMA people; CREATE SCHEMA tasks; \
+            CREATE TYPE people.person AS OBJECT (name TEXT); \
+            CREATE TYPE tasks.task AS OBJECT (assignee REF people.person, completed BOOL NOT NULL); \
+            CREATE SERVER FUNCTION tasks.find(p_person REF people.person) \
+            RETURNS ROWS (task REF tasks.task, name TEXT) \
+            AS SELECT REF(t), t.assignee.name FROM tasks.task t \
+            WHERE t.completed = t.completed ORDER BY t.assignee.name DESC;";
+        let report = check(&bundle([("references.orna", source)]), &empty_catalogue());
+
+        assert!(report.diagnostics().is_empty());
+        let checked = report.checked_bundle().unwrap();
+        let person = &checked.object_types()[0];
+        let task = &checked.object_types()[1];
+        let assignee = &task.fields()[0];
+        let completed = &task.fields()[1];
+        let name = &person.fields()[0];
+        let function = &checked.server_functions()[0];
+        let query_start = source.find("SELECT REF(t)").unwrap();
+        let assignee_starts = source
+            .match_indices("t.assignee.name")
+            .map(|(start, _)| start)
+            .collect::<Vec<_>>();
+        let completed_starts = source
+            .match_indices("t.completed")
+            .map(|(start, _)| start)
+            .collect::<Vec<_>>();
+        let parameter_target_start =
+            source.find("p_person REF people.person").unwrap() + "p_person REF ".len();
+        let return_target_start = source.find("task REF tasks.task").unwrap() + "task REF ".len();
+        let query_object_start = query_start + source[query_start..].find("tasks.task").unwrap();
+        let object_reference_start =
+            query_start + source[query_start..].find("REF(t)").unwrap() + 4;
+        let expected = [
+            (
+                DefinitionReferenceKind::ObjectReference,
+                CheckedDefinitionReferenceTarget::ObjectType(person.id()),
+                parameter_target_start,
+                "people.person".len(),
+            ),
+            (
+                DefinitionReferenceKind::ObjectReference,
+                CheckedDefinitionReferenceTarget::ObjectType(task.id()),
+                return_target_start,
+                "tasks.task".len(),
+            ),
+            (
+                DefinitionReferenceKind::QueryObject,
+                CheckedDefinitionReferenceTarget::ObjectType(task.id()),
+                query_object_start,
+                "tasks.task".len(),
+            ),
+            (
+                DefinitionReferenceKind::ObjectReference,
+                CheckedDefinitionReferenceTarget::ObjectType(task.id()),
+                object_reference_start,
+                1,
+            ),
+            (
+                DefinitionReferenceKind::QueryField,
+                CheckedDefinitionReferenceTarget::Field {
+                    owner: task.id(),
+                    field: assignee.id(),
+                },
+                assignee_starts[0] + 2,
+                "assignee".len(),
+            ),
+            (
+                DefinitionReferenceKind::QueryField,
+                CheckedDefinitionReferenceTarget::Field {
+                    owner: person.id(),
+                    field: name.id(),
+                },
+                assignee_starts[0] + 11,
+                "name".len(),
+            ),
+            (
+                DefinitionReferenceKind::QueryField,
+                CheckedDefinitionReferenceTarget::Field {
+                    owner: task.id(),
+                    field: completed.id(),
+                },
+                completed_starts[0] + 2,
+                "completed".len(),
+            ),
+            (
+                DefinitionReferenceKind::QueryField,
+                CheckedDefinitionReferenceTarget::Field {
+                    owner: task.id(),
+                    field: completed.id(),
+                },
+                completed_starts[1] + 2,
+                "completed".len(),
+            ),
+            (
+                DefinitionReferenceKind::QueryField,
+                CheckedDefinitionReferenceTarget::Field {
+                    owner: task.id(),
+                    field: assignee.id(),
+                },
+                assignee_starts[1] + 2,
+                "assignee".len(),
+            ),
+            (
+                DefinitionReferenceKind::QueryField,
+                CheckedDefinitionReferenceTarget::Field {
+                    owner: person.id(),
+                    field: name.id(),
+                },
+                assignee_starts[1] + 11,
+                "name".len(),
+            ),
+        ];
+
+        assert_eq!(
+            function.parameters()[0].location().span().start(),
+            source.find("p_person REF").unwrap()
+        );
+        assert_eq!(
+            function.return_columns()[0].location().span().start(),
+            source.find("task REF").unwrap()
+        );
+        assert_eq!(function.references().len(), expected.len());
+        for (reference, (kind, target, start, length)) in function.references().iter().zip(expected)
+        {
+            assert_eq!(reference.kind(), kind);
+            assert_eq!(reference.target(), target);
+            assert_eq!(reference.location().logical_path(), "references.orna");
+            assert_eq!(reference.location().span().start(), start);
+            assert_eq!(reference.location().span().end(), start + length);
+        }
     }
 
     #[test]
@@ -1260,51 +1778,84 @@ mod tests {
         assert!(codes.contains(&DiagnosticCode::UnknownQualifiedName));
         assert!(codes.contains(&DiagnosticCode::InvalidReferenceTarget));
         assert!(codes.contains(&DiagnosticCode::TypeMismatch));
-        assert!(report.candidate().is_none());
+        assert_no_checked_bundle(&report);
     }
 
     #[test]
-    fn candidate_contains_only_submitted_schemas_and_object_types() {
-        let initial = successful_candidate(
-            "CREATE SCHEMA people; CREATE SCHEMA tasks;\
-             CREATE TYPE people.person AS OBJECT (name TEXT);\
-             CREATE TYPE tasks.task AS OBJECT (title TEXT);",
+    fn checked_bundle_contains_only_submitted_schemas_and_object_types() {
+        let base = catalogue(
+            vec![schema(1, &["people"]), schema(2, &["tasks"])],
+            vec![
+                object_type(
+                    3,
+                    &["people", "person"],
+                    vec![field(
+                        4,
+                        "name",
+                        0,
+                        ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+                        None,
+                    )],
+                ),
+                object_type(
+                    5,
+                    &["tasks", "task"],
+                    vec![field(
+                        6,
+                        "title",
+                        0,
+                        ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+                        None,
+                    )],
+                ),
+            ],
+            Vec::new(),
         );
-        let person_id = initial.object_types()[0].id();
         let report = check(
             &bundle([(
                 "schema.orna",
                 "CREATE SCHEMA people; CREATE TYPE people.customer AS OBJECT (name TEXT);",
             )]),
-            &initial,
+            &base,
         );
 
-        let candidate = report.candidate().unwrap();
-        assert_eq!(candidate.schemas().len(), 1);
-        assert_eq!(candidate.schemas()[0].name().to_string(), "people");
-        assert_eq!(candidate.object_types().len(), 1);
-        assert_ne!(candidate.object_types()[0].id(), person_id);
-        assert!(
-            candidate
-                .object_type_by_name(&QualifiedSemanticName::new(["people", "person"]).unwrap())
-                .is_none()
+        assert!(report.diagnostics().is_empty());
+        let checked = report.checked_bundle().unwrap();
+        assert_eq!(checked.schemas().len(), 1);
+        assert_eq!(checked.schemas()[0].name().to_string(), "people");
+        assert_eq!(checked.object_types().len(), 1);
+        assert_eq!(
+            checked.object_types()[0].name().to_string(),
+            "people.customer"
         );
-        assert!(
-            candidate
-                .object_type_by_name(&QualifiedSemanticName::new(["tasks", "task"]).unwrap())
-                .is_none()
+        assert_eq!(
+            checked.object_types()[0].id().to_string(),
+            "provisional:type:0"
         );
+        assert!(checked.server_functions().is_empty());
     }
 
     #[test]
     fn rejects_references_to_base_object_types_omitted_from_the_bundle() {
-        let initial = successful_candidate(
-            "CREATE SCHEMA people; CREATE TYPE people.person AS OBJECT (name TEXT);",
+        let base = catalogue(
+            vec![schema(1, &["people"])],
+            vec![object_type(
+                2,
+                &["people", "person"],
+                vec![field(
+                    3,
+                    "name",
+                    0,
+                    ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+                    None,
+                )],
+            )],
+            Vec::new(),
         );
         let source = "CREATE SCHEMA tasks; \
             CREATE TYPE tasks.task AS OBJECT (owner REF people.person);";
 
-        let report = check(&bundle([("tasks.orna", source)]), &initial);
+        let report = check(&bundle([("tasks.orna", source)]), &base);
 
         assert_eq!(report.diagnostics().len(), 1);
         assert_eq!(
@@ -1315,8 +1866,7 @@ mod tests {
             report.diagnostics()[0].location().span().start(),
             source.find("people.person").unwrap()
         );
-        assert!(report.checked_bundle().is_none());
-        assert!(report.candidate().is_none());
+        assert_no_checked_bundle(&report);
     }
 
     #[test]
@@ -1335,7 +1885,7 @@ mod tests {
             report.diagnostics()[0].location().span().start(),
             source.rfind("TEXT AS").unwrap()
         );
-        assert!(report.candidate().is_none());
+        assert_no_checked_bundle(&report);
     }
 
     #[test]
@@ -1356,8 +1906,7 @@ mod tests {
         assert!(diagnostics.iter().all(|diagnostic| {
             diagnostic.message() != "SERVER function body planning is not implemented"
         }));
-        assert!(report.checked_bundle().is_none());
-        assert!(report.candidate().is_none());
+        assert_no_checked_bundle(&report);
     }
 
     #[test]
@@ -1375,8 +1924,7 @@ mod tests {
         let diagnostics = report.diagnostics();
         assert_eq!(diagnostics[0].code(), DiagnosticCode::DuplicateDefinition);
         assert_eq!(diagnostics.len(), 1);
-        assert!(report.checked_bundle().is_none());
-        assert!(report.candidate().is_none());
+        assert_no_checked_bundle(&report);
     }
 
     #[test]
@@ -1390,15 +1938,11 @@ mod tests {
 
         assert!(report.diagnostics().is_empty());
         let checked = &report.checked_bundle().unwrap().server_functions()[0];
-        let candidate = report.candidate().unwrap();
-        let definition = candidate.function_by_id(checked.id()).unwrap();
-        assert_eq!(definition.security(), FunctionSecurity::Definer);
-        assert_eq!(
-            definition.transaction(),
-            Some(FunctionTransaction::ReadOnly)
-        );
-        assert_eq!(definition.volatility(), FunctionVolatility::Stable);
-        assert_eq!(definition.parameters().len(), 1);
+        assert_eq!(checked.security(), FunctionSecurity::Definer);
+        assert_eq!(checked.transaction(), Some(FunctionTransaction::ReadOnly));
+        assert_eq!(checked.volatility(), FunctionVolatility::Stable);
+        assert_eq!(checked.parameters().len(), 1);
+        assert_eq!(checked.return_columns().len(), 2);
         assert_eq!(checked.plan().projections().len(), 2);
         assert!(checked.plan().selection().is_some());
     }
@@ -1429,23 +1973,54 @@ mod tests {
             report.diagnostics()[1].location().span().start(),
             source.rfind("title BOOL").unwrap()
         );
-        assert!(report.checked_bundle().is_none());
-        assert!(report.candidate().is_none());
+        assert_no_checked_bundle(&report);
     }
 
     #[test]
     fn preserves_existing_function_and_reordered_parameter_ids_by_semantic_name() {
-        let initial = successful_candidate(
-            "CREATE SCHEMA tasks; CREATE TYPE tasks.task AS OBJECT (title TEXT); \
-             CREATE SERVER FUNCTION tasks.open(p_limit INT, p_offset INT) RETURNS ROWS (title TEXT) \
-             AS SELECT t.title FROM tasks.task t;",
+        let function_id = FunctionId::from_bytes([4; 16]);
+        let parameter_id = ParameterId::from_bytes([5; 16]);
+        let offset_parameter_id = ParameterId::from_bytes([6; 16]);
+        let base = catalogue(
+            vec![schema(1, &["tasks"])],
+            vec![object_type(
+                2,
+                &["tasks", "task"],
+                vec![field(
+                    3,
+                    "title",
+                    0,
+                    ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+                    None,
+                )],
+            )],
+            vec![server_function(
+                4,
+                &["tasks", "open"],
+                vec![
+                    parameter(
+                        5,
+                        "p_limit",
+                        0,
+                        ResolvedType::scalar(StandardScalar::Integer),
+                    ),
+                    parameter(
+                        6,
+                        "p_offset",
+                        1,
+                        ResolvedType::scalar(StandardScalar::Integer),
+                    ),
+                ],
+                vec![rows_column(
+                    "title",
+                    0,
+                    ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+                )],
+                FunctionSecurity::Invoker,
+                None,
+                FunctionVolatility::Volatile,
+            )],
         );
-        let original = initial
-            .function_by_name(&QualifiedSemanticName::new(["tasks", "open"]).unwrap())
-            .unwrap();
-        let function_id = original.id();
-        let parameter_id = original.parameter_by_name("p_limit").unwrap().id();
-        let offset_parameter_id = original.parameter_by_name("p_offset").unwrap().id();
 
         let report = check(
             &bundle([(
@@ -1454,30 +2029,23 @@ mod tests {
                  CREATE SERVER FUNCTION tasks.open(p_offset INT, p_limit INT) RETURNS ROWS (title TEXT) \
                  AS SELECT t.title FROM tasks.task t;",
             )]),
-            &initial,
+            &base,
         );
 
         assert!(report.diagnostics().is_empty());
-        let revised = report
-            .candidate()
-            .unwrap()
-            .function_by_name(&QualifiedSemanticName::new(["tasks", "open"]).unwrap())
-            .unwrap();
-        assert_eq!(revised.id(), function_id);
-        assert_eq!(
-            revised.parameter_by_name("p_limit").unwrap().id(),
-            parameter_id
-        );
-        assert_eq!(
-            revised.parameter_by_name("p_offset").unwrap().id(),
-            offset_parameter_id
-        );
+        let revised = &report.checked_bundle().unwrap().server_functions()[0];
+        assert_eq!(revised.id().existing(), Some(function_id));
         assert_eq!(revised.parameters()[0].name(), "p_offset");
+        assert_eq!(
+            revised.parameters()[0].id().existing(),
+            Some(offset_parameter_id)
+        );
         assert_eq!(revised.parameters()[1].name(), "p_limit");
+        assert_eq!(revised.parameters()[1].id().existing(), Some(parameter_id));
     }
 
     #[test]
-    fn any_server_function_error_rejects_all_checked_definitions_and_candidates() {
+    fn any_server_function_error_rejects_all_checked_definitions() {
         let source = "CREATE SCHEMA tasks; CREATE TYPE tasks.task AS OBJECT (title TEXT); \
             CREATE SERVER FUNCTION tasks.valid() RETURNS ROWS (title TEXT) \
             AS SELECT t.title FROM tasks.task t; \
@@ -1486,8 +2054,7 @@ mod tests {
         let report = check(&bundle([("functions.orna", source)]), &empty_catalogue());
 
         assert_eq!(report.diagnostics().len(), 1);
-        assert!(report.checked_bundle().is_none());
-        assert!(report.candidate().is_none());
+        assert_no_checked_bundle(&report);
     }
 
     #[test]
@@ -1511,30 +2078,28 @@ mod tests {
             report.diagnostics()[0].message(),
             "SERVER function body planning is not implemented"
         );
-        assert!(report.checked_bundle().is_none());
-        assert!(report.candidate().is_none());
+        assert_no_checked_bundle(&report);
     }
 
     #[test]
     fn rejects_definitions_in_base_schemas_that_are_omitted_from_the_bundle() {
-        let base_function = FunctionDefinition::new(
-            FunctionId::new(),
-            QualifiedSemanticName::new(["sys", "health"]).unwrap(),
-            FunctionDomain::Server,
-            vec![],
-            FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Boolean)),
-            FunctionRevisionId::new(),
-            FunctionSecurity::Invoker,
-            None,
-            FunctionVolatility::Volatile,
-        );
-        let base = CatalogueSnapshot::new_with_functions(
-            CatalogueRevisionId::new(),
+        let base = catalogue(
             vec![schema(1, &["sys"])],
-            vec![],
-            vec![base_function],
-        )
-        .unwrap();
+            Vec::new(),
+            vec![server_function(
+                2,
+                &["sys", "health"],
+                Vec::new(),
+                vec![rows_column(
+                    "enabled",
+                    0,
+                    ResolvedType::scalar(StandardScalar::Boolean),
+                )],
+                FunctionSecurity::Invoker,
+                None,
+                FunctionVolatility::Volatile,
+            )],
+        );
 
         let report = check(
             &bundle([(
@@ -1551,50 +2116,65 @@ mod tests {
             report.diagnostics()[0].code(),
             DiagnosticCode::UnknownQualifiedName
         );
-        assert!(report.candidate().is_none());
+        assert_no_checked_bundle(&report);
     }
 
     #[test]
-    fn server_function_headers_preserve_ids_and_map_modifiers() {
-        let existing = FunctionDefinition::new(
-            FunctionId::new(),
-            QualifiedSemanticName::new(["sys", "health"]).unwrap(),
-            FunctionDomain::Server,
-            vec![],
-            FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Boolean)),
-            FunctionRevisionId::new(),
-            FunctionSecurity::Invoker,
-            None,
-            FunctionVolatility::Volatile,
-        );
-        let existing_id = existing.id();
-        let base = CatalogueSnapshot::new_with_functions(
-            CatalogueRevisionId::new(),
+    fn server_function_metadata_preserves_ids_and_maps_modifiers() {
+        let base = catalogue(
             vec![schema(1, &["sys"])],
-            vec![],
-            vec![existing],
-        )
-        .unwrap();
-        let parsed = parse_bundle(&bundle([(
-            "functions.orna",
-            "CREATE SERVER FUNCTION Sys.Health() RETURNS BOOL SECURITY DEFINER TRANSACTION READ ONLY VOLATILITY STABLE AS SELECT TRUE FROM sys.health h;\
-             CREATE SERVER FUNCTION sys.defaults() RETURNS BOOL AS SELECT TRUE FROM sys.health h;",
-        )]));
-        let known_schemas = HashSet::from([QualifiedSemanticName::new(["sys"]).unwrap()]);
-        let mut diagnostics = Vec::new();
+            vec![object_type(
+                2,
+                &["sys", "health"],
+                vec![field(
+                    3,
+                    "enabled",
+                    0,
+                    ResolvedType::scalar(StandardScalar::Boolean),
+                    None,
+                )],
+            )],
+            vec![server_function(
+                4,
+                &["sys", "health"],
+                Vec::new(),
+                vec![rows_column(
+                    "enabled",
+                    0,
+                    ResolvedType::scalar(StandardScalar::Boolean),
+                )],
+                FunctionSecurity::Invoker,
+                None,
+                FunctionVolatility::Volatile,
+            )],
+        );
+        let report = check(
+            &bundle([(
+                "functions.orna",
+                "CREATE SCHEMA sys; CREATE TYPE sys.health AS OBJECT (enabled BOOL);\
+                 CREATE SERVER FUNCTION Sys.Health() RETURNS ROWS (enabled BOOL) SECURITY DEFINER TRANSACTION READ ONLY VOLATILITY STABLE AS SELECT h.enabled FROM sys.health h;\
+                 CREATE SERVER FUNCTION sys.defaults() RETURNS ROWS (enabled BOOL) AS SELECT h.enabled FROM sys.health h;",
+            )]),
+            &base,
+        );
 
-        let headers =
-            resolve_server_function_headers(&parsed, &base, &known_schemas, &mut diagnostics);
-
-        assert!(diagnostics.is_empty());
-        assert_eq!(headers.len(), 2);
-        assert_eq!(headers[0].id, existing_id);
-        assert_eq!(headers[0].security, FunctionSecurity::Definer);
-        assert_eq!(headers[0].transaction, Some(FunctionTransaction::ReadOnly));
-        assert_eq!(headers[0].volatility, FunctionVolatility::Stable);
-        assert_eq!(headers[1].security, FunctionSecurity::Invoker);
-        assert_eq!(headers[1].transaction, None);
-        assert_eq!(headers[1].volatility, FunctionVolatility::Volatile);
+        assert!(report.diagnostics().is_empty());
+        let functions = report.checked_bundle().unwrap().server_functions();
+        assert_eq!(functions.len(), 2);
+        assert_eq!(
+            functions[0].id().existing(),
+            Some(FunctionId::from_bytes([4; 16]))
+        );
+        assert_eq!(functions[0].security(), FunctionSecurity::Definer);
+        assert_eq!(
+            functions[0].transaction(),
+            Some(FunctionTransaction::ReadOnly)
+        );
+        assert_eq!(functions[0].volatility(), FunctionVolatility::Stable);
+        assert_eq!(functions[1].id().to_string(), "provisional:function:0");
+        assert_eq!(functions[1].security(), FunctionSecurity::Invoker);
+        assert_eq!(functions[1].transaction(), None);
+        assert_eq!(functions[1].volatility(), FunctionVolatility::Volatile);
     }
 
     #[test]
@@ -1625,8 +2205,7 @@ mod tests {
         assert!(diagnostics.iter().all(|diagnostic| {
             diagnostic.message() != "SERVER function body planning is not implemented"
         }));
-        assert!(report.checked_bundle().is_none());
-        assert!(report.candidate().is_none());
+        assert_no_checked_bundle(&report);
     }
 
     #[test]
@@ -1654,30 +2233,28 @@ mod tests {
             report.diagnostics()[1].location().span().start(),
             source.find("sys.fs.read").unwrap()
         );
-        assert!(report.checked_bundle().is_none());
-        assert!(report.candidate().is_none());
+        assert_no_checked_bundle(&report);
     }
 
     #[test]
-    fn candidate_omits_unsubmitted_base_functions_and_schemas() {
-        let function = FunctionDefinition::new(
-            FunctionId::new(),
-            QualifiedSemanticName::new(["sys", "health"]).unwrap(),
-            FunctionDomain::Server,
-            vec![],
-            FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Boolean)),
-            FunctionRevisionId::new(),
-            FunctionSecurity::Invoker,
-            None,
-            FunctionVolatility::Stable,
-        );
-        let base = CatalogueSnapshot::new_with_functions(
-            CatalogueRevisionId::new(),
+    fn checked_bundle_omits_unsubmitted_base_functions_and_schemas() {
+        let base = catalogue(
             vec![schema(1, &["sys"])],
-            vec![],
-            vec![function],
-        )
-        .unwrap();
+            Vec::new(),
+            vec![server_function(
+                2,
+                &["sys", "health"],
+                Vec::new(),
+                vec![rows_column(
+                    "enabled",
+                    0,
+                    ResolvedType::scalar(StandardScalar::Boolean),
+                )],
+                FunctionSecurity::Invoker,
+                None,
+                FunctionVolatility::Stable,
+            )],
+        );
 
         let report = check(
             &bundle([(
@@ -1688,10 +2265,10 @@ mod tests {
         );
 
         assert!(report.diagnostics().is_empty());
-        let candidate = report.candidate().unwrap();
-        assert!(candidate.functions().is_empty());
-        assert_eq!(candidate.schemas().len(), 1);
-        assert_eq!(candidate.schemas()[0].name().to_string(), "people");
+        let checked = report.checked_bundle().unwrap();
+        assert!(checked.server_functions().is_empty());
+        assert_eq!(checked.schemas().len(), 1);
+        assert_eq!(checked.schemas()[0].name().to_string(), "people");
     }
 
     #[test]
@@ -1713,6 +2290,6 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(codes.contains(&DiagnosticCode::DuplicateDefinition));
         assert!(codes.contains(&DiagnosticCode::UnknownQualifiedName));
-        assert!(report.candidate().is_none());
+        assert_no_checked_bundle(&report);
     }
 }
