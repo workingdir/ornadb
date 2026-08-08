@@ -474,6 +474,22 @@ pub struct ObjectTypeDeclaration {
     pub span: SourceSpan,
 }
 
+/// A parsed `ALTER TYPE ... RENAME FIELD ... TO ...` declaration.
+///
+/// This declaration records source transition evidence. The compiler performs
+/// semantic validation and identity binding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldRenameDeclaration {
+    /// The object type that owns the renamed field.
+    pub type_name: QualifiedName,
+    /// The field name in the expected base catalogue.
+    pub old_field_name: NamePart,
+    /// The field name in the candidate declaration.
+    pub new_field_name: NamePart,
+    /// The declaration span, including its terminating semicolon.
+    pub span: SourceSpan,
+}
+
 /// A private wrapper around the lossless Rowan tree.
 ///
 /// It intentionally exposes text, rather than Rowan types, as the public CST
@@ -503,6 +519,7 @@ pub struct Parse {
     diagnostics: Vec<Diagnostic>,
     schemas: Vec<SchemaDeclaration>,
     object_types: Vec<ObjectTypeDeclaration>,
+    field_renames: Vec<FieldRenameDeclaration>,
     server_functions: Vec<ServerFunctionDeclaration>,
 }
 
@@ -527,6 +544,11 @@ impl Parse {
         &self.object_types
     }
 
+    /// Return successfully parsed field rename declarations in source order.
+    pub fn field_renames(&self) -> &[FieldRenameDeclaration] {
+        &self.field_renames
+    }
+
     /// Return successfully parsed server function declarations in source order.
     pub fn server_functions(&self) -> &[ServerFunctionDeclaration] {
         &self.server_functions
@@ -535,9 +557,9 @@ impl Parse {
 
 /// Parse one Orna source unit.
 ///
-/// The parser recognises schema declarations, object type declarations, and
-/// server function declarations. It keeps all source bytes in its CST,
-/// including bytes in malformed statements.
+/// The parser recognises schema declarations, object type declarations, field
+/// rename declarations, and server function declarations. It keeps all source
+/// bytes in its CST, including bytes in malformed statements.
 pub fn parse(source: &str) -> Parse {
     parser::parse(source)
 }
@@ -547,7 +569,7 @@ mod tests {
     use super::{
         FunctionReturnType, FunctionSecurity, FunctionTransaction, FunctionVolatility, InsertValue,
         NullOrdering, OnDeletePolicy, OrderingDirection, QueryExpression, ServerFunctionBody,
-        StandardLargeObjectKind, TypeSpecification, parse,
+        SourceSpan, StandardLargeObjectKind, TypeSpecification, parse,
     };
 
     #[test]
@@ -1399,6 +1421,260 @@ mod tests {
         assert_eq!(fields[0].on_delete, Some(OnDeletePolicy::Restrict));
         assert_eq!(fields[1].on_delete, Some(OnDeletePolicy::SetNull));
         assert_eq!(fields[2].on_delete, Some(OnDeletePolicy::Cascade));
+    }
+
+    #[test]
+    fn parses_simple_and_qualified_field_rename_declarations() {
+        let source = "ALTER TYPE person RENAME FIELD email TO primary_email;\n\
+            ALTER TYPE people.person RENAME FIELD email TO primary_email;";
+        let parsed = parse(source);
+
+        assert!(parsed.diagnostics().is_empty());
+        assert_eq!(parsed.syntax().text(), source);
+        assert_eq!(parsed.field_renames().len(), 2);
+
+        let simple = &parsed.field_renames()[0];
+        assert_eq!(simple.type_name.parts.len(), 1);
+        assert_eq!(simple.type_name.parts[0].text, "person");
+        assert_eq!(simple.old_field_name.text, "email");
+        assert_eq!(simple.new_field_name.text, "primary_email");
+        assert_eq!(simple.span.start, 0);
+        assert_eq!(
+            simple.span.end,
+            source.find('\n').expect("first declaration ends")
+        );
+
+        let qualified = &parsed.field_renames()[1];
+        assert_eq!(qualified.type_name.parts[0].text, "people");
+        assert_eq!(qualified.type_name.parts[1].text, "person");
+        assert_eq!(qualified.old_field_name.text, "email");
+        assert_eq!(qualified.new_field_name.text, "primary_email");
+    }
+
+    #[test]
+    fn preserves_quoted_field_rename_identifiers_and_spans() {
+        let source =
+            "ALTER TYPE \"People\".\"Person\" RENAME FIELD \"Email\" TO \"Primary\"\"Email\";";
+        let parsed = parse(source);
+
+        assert!(parsed.diagnostics().is_empty());
+        let rename = &parsed.field_renames()[0];
+        assert_eq!(rename.type_name.parts[0].text, "\"People\"");
+        assert_eq!(rename.type_name.parts[1].text, "\"Person\"");
+        assert_eq!(rename.old_field_name.text, "\"Email\"");
+        assert_eq!(rename.new_field_name.text, "\"Primary\"\"Email\"");
+        let people_start = source.find("\"People\"").unwrap();
+        let person_start = source.find("\"Person\"").unwrap();
+        let old_start = source.find("\"Email\"").unwrap();
+        let new_start = source.find("\"Primary\"\"Email\"").unwrap();
+        assert_eq!(
+            rename.type_name.parts[0].span,
+            SourceSpan {
+                start: people_start,
+                end: people_start + "\"People\"".len(),
+            }
+        );
+        assert_eq!(
+            rename.type_name.parts[1].span,
+            SourceSpan {
+                start: person_start,
+                end: person_start + "\"Person\"".len(),
+            }
+        );
+        assert_eq!(
+            rename.type_name.span,
+            SourceSpan {
+                start: people_start,
+                end: person_start + "\"Person\"".len(),
+            }
+        );
+        assert_eq!(
+            rename.old_field_name.span,
+            SourceSpan {
+                start: old_start,
+                end: old_start + "\"Email\"".len(),
+            }
+        );
+        assert_eq!(
+            rename.new_field_name.span,
+            SourceSpan {
+                start: new_start,
+                end: source.len() - 1,
+            }
+        );
+    }
+
+    #[test]
+    fn reports_field_rename_syntax_errors_with_exact_diagnostics() {
+        let cases = [
+            (
+                "ALTER people.person RENAME FIELD email TO primary_email;",
+                "ALTER must be followed by TYPE",
+                "people",
+            ),
+            (
+                "ALTER TYPE RENAME FIELD email TO primary_email;",
+                "expected the type name after ALTER TYPE",
+                "RENAME",
+            ),
+            (
+                "ALTER TYPE people. RENAME FIELD email TO primary_email;",
+                "expected the type name after '.'",
+                "RENAME",
+            ),
+            (
+                "ALTER TYPE people.person FIELD email TO primary_email;",
+                "expected RENAME after the type name",
+                "FIELD",
+            ),
+            (
+                "ALTER TYPE people.person RENAME email TO primary_email;",
+                "expected FIELD after RENAME",
+                "email",
+            ),
+            (
+                "ALTER TYPE people.person RENAME FIELD TO primary_email;",
+                "expected the old field name after RENAME FIELD",
+                "TO",
+            ),
+            (
+                "ALTER TYPE people.person RENAME FIELD email primary_email;",
+                "expected TO after the old field name",
+                "primary_email",
+            ),
+            (
+                "ALTER TYPE people.person RENAME FIELD email TO;",
+                "expected the new field name after TO",
+                ";",
+            ),
+            (
+                "ALTER TYPE people.person RENAME FIELD email TO primary_email",
+                "expected ';' after field rename declaration",
+                "",
+            ),
+            (
+                "ALTER TYPE people.person RENAME FIELD email TO primary_email EXTRA;",
+                "expected ';' after field rename declaration",
+                "EXTRA",
+            ),
+            (
+                "ALTER SCHEMA people RENAME FIELD email TO primary_email;",
+                "ALTER must be followed by TYPE",
+                "SCHEMA",
+            ),
+            (
+                "ALTER TYPE people.person RENAME TO person;",
+                "ALTER TYPE only supports RENAME FIELD",
+                "TO",
+            ),
+        ];
+
+        for (source, message, marker) in cases {
+            let parsed = parse(source);
+            assert_eq!(parsed.syntax().text(), source);
+            assert!(
+                parsed.field_renames().is_empty(),
+                "invalid source: {source}"
+            );
+            assert_eq!(parsed.diagnostics().len(), 1, "invalid source: {source}");
+            let diagnostic = &parsed.diagnostics()[0];
+            assert_eq!(diagnostic.code, "ORNA0001");
+            assert_eq!(diagnostic.message, message);
+            let offset = if marker.is_empty() {
+                source.len()
+            } else {
+                source.find(marker).expect("diagnostic marker exists")
+            };
+            assert_eq!(diagnostic.span.start, offset);
+            assert_eq!(diagnostic.span.end, offset + marker.len());
+
+            let recovered = parse(&format!("{source}\nCREATE SCHEMA recovered;"));
+            assert_eq!(
+                recovered.schemas().len(),
+                1,
+                "later declaration lost after: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn field_rename_recovery_preserves_later_declarations() {
+        let source = "ALTER TYPE people.person RENAME FIELD email TO;\n\
+            CREATE TYPE people.person AS OBJECT (primary_email TEXT);\n\
+            ALTER TYPE people.person RENAME FIELD email TO primary_email;";
+        let parsed = parse(source);
+
+        assert_eq!(parsed.syntax().text(), source);
+        assert_eq!(parsed.object_types().len(), 1);
+        assert_eq!(parsed.field_renames().len(), 1);
+        assert_eq!(
+            parsed.field_renames()[0].new_field_name.text,
+            "primary_email"
+        );
+        assert_eq!(parsed.diagnostics().len(), 1);
+    }
+
+    #[test]
+    fn malformed_field_rename_quotes_use_the_existing_lexer_diagnostic() {
+        let source = "ALTER TYPE people.person RENAME FIELD \"email TO primary_email;";
+        let parsed = parse(source);
+
+        assert_eq!(parsed.syntax().text(), source);
+        assert!(parsed.field_renames().is_empty());
+        assert_eq!(parsed.diagnostics().len(), 1);
+        assert_eq!(parsed.diagnostics()[0].code, "ORNA0002");
+        assert_eq!(
+            parsed.diagnostics()[0].message,
+            "unterminated quoted identifier"
+        );
+        assert_eq!(
+            parsed.diagnostics()[0].span,
+            SourceSpan {
+                start: source.find('"').unwrap(),
+                end: source.len(),
+            }
+        );
+    }
+
+    #[test]
+    fn unsupported_top_level_statements_report_one_clear_error() {
+        let source = "DROP TYPE people.person;";
+        let parsed = parse(source);
+
+        assert_eq!(parsed.syntax().text(), source);
+        assert!(parsed.schemas().is_empty());
+        assert!(parsed.object_types().is_empty());
+        assert!(parsed.field_renames().is_empty());
+        assert!(parsed.server_functions().is_empty());
+        assert_eq!(parsed.diagnostics().len(), 1);
+        assert_eq!(parsed.diagnostics()[0].code, "ORNA0001");
+        assert_eq!(
+            parsed.diagnostics()[0].message,
+            "expected a CREATE or ALTER declaration"
+        );
+        assert_eq!(
+            parsed.diagnostics()[0].span,
+            SourceSpan { start: 0, end: 4 }
+        );
+    }
+
+    #[test]
+    fn field_rename_parsing_does_not_change_create_or_select_parsing() {
+        let source = "CREATE TYPE people.person AS OBJECT (primary_email TEXT);\n\
+            ALTER TYPE people.person RENAME FIELD email TO primary_email;\n\
+            CREATE SERVER FUNCTION people.list_emails() RETURNS ROWS (email TEXT) AS SELECT person.primary_email FROM people.person person;";
+        let parsed = parse(source);
+
+        assert!(parsed.diagnostics().is_empty());
+        assert_eq!(parsed.object_types().len(), 1);
+        assert_eq!(parsed.field_renames().len(), 1);
+        assert_eq!(parsed.server_functions().len(), 1);
+        let query = parsed.server_functions()[0]
+            .body
+            .as_sql_query()
+            .expect("function must retain its SELECT query");
+        assert_eq!(query.query.projections.len(), 1);
+        assert_eq!(query.query.source_object.alias.text, "person");
     }
 
     #[test]
