@@ -9,7 +9,8 @@ use orna_core::{
     types::StandardScalar,
 };
 use orna_syntax::{
-    InsertStatement, MutationValue, NamePart, QualifiedName, SourceSpan, UpdateStatement,
+    DeleteStatement, InsertStatement, MutationValue, NamePart, QualifiedName, SourceSpan,
+    UpdateStatement,
 };
 
 use crate::resolver::SemanticType;
@@ -105,6 +106,65 @@ where
             target_object,
             assignments,
             returned_object,
+        })
+    }
+}
+
+/// A source-free checked single-object DELETE plan.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct DeletePlanIr<T = TypeId, G = FunctionId, P = ParameterId> {
+    target_object: T,
+    selector_owner: G,
+    selector_parameter: P,
+}
+
+impl<T, G, P> DeletePlanIr<T, G, P> {
+    /// Returns the object type selected for deletion.
+    #[cfg(test)]
+    pub(crate) const fn target_object(&self) -> T
+    where
+        T: Copy,
+    {
+        self.target_object
+    }
+
+    /// Returns the function that owns the selector parameter.
+    #[cfg(test)]
+    pub(crate) const fn selector_owner(&self) -> G
+    where
+        G: Copy,
+    {
+        self.selector_owner
+    }
+
+    /// Returns the owner-qualified selector parameter identity.
+    #[cfg(test)]
+    pub(crate) const fn selector_parameter(&self) -> P
+    where
+        P: Copy,
+    {
+        self.selector_parameter
+    }
+}
+
+impl<T, G, P> DeletePlanIr<T, G, P>
+where
+    T: Copy,
+    G: Copy,
+    P: Copy,
+{
+    /// Rewrites every identity, rejecting the complete plan when any mapping fails.
+    #[cfg(test)]
+    pub(crate) fn try_map_identities<T2, G2, P2, E>(
+        &self,
+        mut map_type: impl FnMut(T) -> Result<T2, E>,
+        mut map_function: impl FnMut(G) -> Result<G2, E>,
+        mut map_parameter: impl FnMut(P) -> Result<P2, E>,
+    ) -> Result<DeletePlanIr<T2, G2, P2>, E> {
+        Ok(DeletePlanIr {
+            target_object: map_type(self.target_object)?,
+            selector_owner: map_function(self.selector_owner)?,
+            selector_parameter: map_parameter(self.selector_parameter)?,
         })
     }
 }
@@ -285,7 +345,7 @@ impl<T> MutationValueType<T> {
     }
 }
 
-/// One declared function parameter available to INSERT checking.
+/// One declared function parameter available to mutation checking.
 ///
 /// The name is expected to be normalized according to Orna identifier rules;
 /// its location points at the declaration name for diagnostics.
@@ -450,6 +510,25 @@ impl<T, F, G, P> MutationCheck<T, F, G, P> {
     }
 }
 
+/// A checked DELETE plan and its source evidence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct DeleteCheck<T = TypeId, F = FieldId, G = FunctionId, P = ParameterId> {
+    plan: DeletePlanIr<T, G, P>,
+    references: Vec<MutationReference<T, F, G, P>>,
+}
+
+impl<T, F, G, P> DeleteCheck<T, F, G, P> {
+    /// Returns the source-free checked DELETE plan.
+    pub(crate) const fn plan(&self) -> &DeletePlanIr<T, G, P> {
+        &self.plan
+    }
+
+    /// Returns identity evidence in deterministic source order.
+    pub(crate) fn references(&self) -> &[MutationReference<T, F, G, P>] {
+        &self.references
+    }
+}
+
 const SUPPORTED_MUTATION_TYPES: &str =
     "BOOLEAN, INTEGER, BIGINT, FLOAT, CHARACTER LARGE OBJECT, BINARY LARGE OBJECT, and REF";
 
@@ -576,17 +655,6 @@ where
         resolve_mutation_target(&update.target_object, logical_path, catalogue)?;
 
     let normalized_target_alias = normalise_name_part(&update.target_alias);
-    let normalized_selector_alias = normalise_name_part(&update.selector_alias);
-    if normalized_target_alias != normalized_selector_alias {
-        return Err(vec![semantic_diagnostic(
-            DiagnosticCode::UnknownQualifiedName,
-            format!(
-                "WHERE REF must use the UPDATE target alias {normalized_target_alias}, not {normalized_selector_alias}"
-            ),
-            logical_path,
-            &update.selector_alias.span,
-        )]);
-    }
     let normalized_returning_alias = normalise_name_part(&update.returning_alias);
     if normalized_target_alias != normalized_returning_alias {
         return Err(vec![semantic_diagnostic(
@@ -620,28 +688,18 @@ where
     let assignments = checked_assignments.assignments;
     let mut references = checked_assignments.references;
 
-    let normalized_selector_parameter = normalise_name_part(&update.selector_parameter);
-    let Some(selector) = parameters
-        .iter()
-        .find(|parameter| parameter.name() == normalized_selector_parameter)
-    else {
-        return Err(vec![semantic_diagnostic(
-            DiagnosticCode::UnknownQualifiedName,
-            format!("this function has no parameter named {normalized_selector_parameter}"),
+    let selector_parameter = resolve_identity_selector(
+        &IdentitySelectorContext {
+            operation: "UPDATE",
+            target_name: &target_name,
+            target_alias: &update.target_alias,
+            selector_alias: &update.selector_alias,
+            selector_parameter: &update.selector_parameter,
             logical_path,
-            &update.selector_parameter.span,
-        )]);
-    };
-    if selector.semantic_type() != SemanticType::reference(target_object) {
-        return Err(vec![semantic_diagnostic(
-            DiagnosticCode::TypeMismatch,
-            format!(
-                "selector parameter {normalized_selector_parameter} must use REF {target_name}"
-            ),
-            logical_path,
-            &update.selector_parameter.span,
-        )]);
-    }
+        },
+        target_object,
+        parameters,
+    )?;
 
     references.push(MutationReference::ObjectReference {
         object_type: target_object,
@@ -649,7 +707,7 @@ where
     });
     references.push(MutationReference::ParameterRead {
         owner: function,
-        parameter: selector.id(),
+        parameter: selector_parameter,
         location: SourceLocation::from_syntax(logical_path, &update.selector_parameter.span),
     });
     references.push(MutationReference::ObjectReference {
@@ -661,13 +719,70 @@ where
         plan: MutationPlanIr {
             operation: MutationOperation::Update {
                 selector_owner: function,
-                selector_parameter: selector.id(),
+                selector_parameter,
             },
             target_object,
             assignments,
             returned_object: target_object,
         },
         references,
+    })
+}
+
+/// Checks one parsed DELETE against a caller-supplied identity catalogue.
+pub(crate) fn check_delete_in<T, F, G, P>(
+    delete: &DeleteStatement,
+    catalogue: &impl MutationCatalogue<T, F>,
+    function: G,
+    parameters: &[MutationParameter<T, P>],
+    logical_path: &str,
+) -> Result<DeleteCheck<T, F, G, P>, Vec<CompilerDiagnostic>>
+where
+    T: Copy + Eq,
+    F: Copy,
+    G: Copy,
+    P: Copy,
+{
+    validate_parameter_types("DELETE", parameters, logical_path)?;
+    let (target_name, target_object) =
+        resolve_mutation_target(&delete.target_object, logical_path, catalogue)?;
+    let selector_parameter = resolve_identity_selector(
+        &IdentitySelectorContext {
+            operation: "DELETE",
+            target_name: &target_name,
+            target_alias: &delete.target_alias,
+            selector_alias: &delete.selector_alias,
+            selector_parameter: &delete.selector_parameter,
+            logical_path,
+        },
+        target_object,
+        parameters,
+    )?;
+
+    Ok(DeleteCheck {
+        plan: DeletePlanIr {
+            target_object,
+            selector_owner: function,
+            selector_parameter,
+        },
+        references: vec![
+            MutationReference::WriteObject {
+                object_type: target_object,
+                location: SourceLocation::from_syntax(logical_path, &delete.target_object.span),
+            },
+            MutationReference::ObjectReference {
+                object_type: target_object,
+                location: SourceLocation::from_syntax(logical_path, &delete.selector_alias.span),
+            },
+            MutationReference::ParameterRead {
+                owner: function,
+                parameter: selector_parameter,
+                location: SourceLocation::from_syntax(
+                    logical_path,
+                    &delete.selector_parameter.span,
+                ),
+            },
+        ],
     })
 }
 
@@ -694,6 +809,64 @@ where
         )]);
     };
     Ok((target_name, target_object))
+}
+
+struct IdentitySelectorContext<'a> {
+    operation: &'static str,
+    target_name: &'a QualifiedSemanticName,
+    target_alias: &'a NamePart,
+    selector_alias: &'a NamePart,
+    selector_parameter: &'a NamePart,
+    logical_path: &'a str,
+}
+
+fn resolve_identity_selector<T, P>(
+    context: &IdentitySelectorContext<'_>,
+    target_object: T,
+    parameters: &[MutationParameter<T, P>],
+) -> Result<P, Vec<CompilerDiagnostic>>
+where
+    T: Copy + Eq,
+    P: Copy,
+{
+    let normalized_target_alias = normalise_name_part(context.target_alias);
+    let normalized_selector_alias = normalise_name_part(context.selector_alias);
+    if normalized_target_alias != normalized_selector_alias {
+        return Err(vec![semantic_diagnostic(
+            DiagnosticCode::UnknownQualifiedName,
+            format!(
+                "WHERE REF must use the {} target alias {normalized_target_alias}, not {normalized_selector_alias}",
+                context.operation
+            ),
+            context.logical_path,
+            &context.selector_alias.span,
+        )]);
+    }
+
+    let normalized_selector_parameter = normalise_name_part(context.selector_parameter);
+    let Some(selector) = parameters
+        .iter()
+        .find(|parameter| parameter.name() == normalized_selector_parameter)
+    else {
+        return Err(vec![semantic_diagnostic(
+            DiagnosticCode::UnknownQualifiedName,
+            format!("this function has no parameter named {normalized_selector_parameter}"),
+            context.logical_path,
+            &context.selector_parameter.span,
+        )]);
+    };
+    if selector.semantic_type() != SemanticType::reference(target_object) {
+        return Err(vec![semantic_diagnostic(
+            DiagnosticCode::TypeMismatch,
+            format!(
+                "selector parameter {normalized_selector_parameter} must use REF {}",
+                context.target_name
+            ),
+            context.logical_path,
+            &context.selector_parameter.span,
+        )]);
+    }
+    Ok(selector.id())
 }
 
 fn check_assignments<'a, T, F, G, P>(
@@ -964,7 +1137,8 @@ mod tests {
     use super::*;
     use orna_core::{FieldId, FunctionId, ParameterId, TypeId};
     use orna_syntax::{
-        InsertValue, QualifiedName, SourceSlice, SourceSpan, UpdateAssignment, UpdateStatement,
+        DeleteStatement, InsertValue, QualifiedName, SourceSlice, SourceSpan, UpdateAssignment,
+        UpdateStatement,
     };
 
     #[derive(Clone)]
@@ -1049,6 +1223,23 @@ mod tests {
             selector_parameter: name(selector_parameter, 90),
             returning_alias: name(returning_alias, 110),
             span: span(0, 120),
+        }
+    }
+
+    fn delete(selector_alias: &str, selector_parameter: &str) -> DeleteStatement {
+        DeleteStatement {
+            target_object: QualifiedName {
+                parts: vec![name("crm", 12), name("person", 16)],
+                span: span(12, 23),
+            },
+            target_alias: name("p", 27),
+            selector_alias: name(selector_alias, 40),
+            selector_parameter: name(selector_parameter, 50),
+            returning_true: SourceSlice {
+                text: "TRUE".to_owned(),
+                span: span(70, 74),
+            },
+            span: span(0, 74),
         }
     }
 
@@ -1387,6 +1578,226 @@ mod tests {
         );
         assert_eq!(wrong_type[0].location().span().start(), 90);
         assert_eq!(wrong_type[0].location().span().end(), 98);
+    }
+
+    #[test]
+    fn checks_identity_selected_delete_and_orders_evidence() {
+        let catalogue = catalogue();
+        let function = FunctionId::from_bytes([5; 16]);
+        let selector_id = ParameterId::from_bytes([6; 16]);
+        let parameters = [
+            MutationParameter::new(
+                "p_person",
+                selector_id,
+                SemanticType::reference(catalogue.target),
+                span(100, 108),
+            ),
+            MutationParameter::new(
+                "unused",
+                ParameterId::from_bytes([7; 16]),
+                SemanticType::scalar(StandardScalar::Boolean),
+                span(110, 116),
+            ),
+        ];
+
+        let check = check_delete_in(
+            &delete("p", "p_person"),
+            &catalogue,
+            function,
+            &parameters,
+            "mutation.orna",
+        )
+        .unwrap();
+
+        assert_eq!(check.plan().target_object(), catalogue.target);
+        assert_eq!(check.plan().selector_owner(), function);
+        assert_eq!(check.plan().selector_parameter(), selector_id);
+        let location = |start, end| SourceLocation::from_syntax("mutation.orna", &span(start, end));
+        assert_eq!(
+            check.references(),
+            [
+                MutationReference::WriteObject {
+                    object_type: catalogue.target,
+                    location: location(12, 23),
+                },
+                MutationReference::ObjectReference {
+                    object_type: catalogue.target,
+                    location: location(40, 41),
+                },
+                MutationReference::ParameterRead {
+                    owner: function,
+                    parameter: selector_id,
+                    location: location(50, 58),
+                },
+            ]
+        );
+
+        let mapped = check
+            .plan()
+            .try_map_identities(
+                |id| (id == catalogue.target).then_some(11).ok_or("type"),
+                |id| (id == function).then_some(12).ok_or("function"),
+                |id| (id == selector_id).then_some(13).ok_or("parameter"),
+            )
+            .unwrap();
+        assert_eq!(mapped.target_object(), 11);
+        assert_eq!(mapped.selector_owner(), 12);
+        assert_eq!(mapped.selector_parameter(), 13);
+    }
+
+    #[test]
+    fn rejects_invalid_delete_target_alias_selector_and_parameter_domain() {
+        let catalogue = catalogue();
+        let function = FunctionId::from_bytes([5; 16]);
+        let selector_id = ParameterId::from_bytes([6; 16]);
+        let valid_parameter = MutationParameter::new(
+            "p_person",
+            selector_id,
+            SemanticType::reference(catalogue.target),
+            span(100, 108),
+        );
+
+        let alias = check_delete_in(
+            &delete("other", "p_person"),
+            &catalogue,
+            function,
+            std::slice::from_ref(&valid_parameter),
+            "mutation.orna",
+        )
+        .unwrap_err();
+        assert_eq!(alias[0].code(), DiagnosticCode::UnknownQualifiedName);
+        assert_eq!(
+            alias[0].message(),
+            "WHERE REF must use the DELETE target alias p, not other"
+        );
+        assert_eq!(alias[0].location().span().start(), 40);
+        assert_eq!(alias[0].location().span().end(), 45);
+
+        let unknown = check_delete_in(
+            &delete("p", "missing"),
+            &catalogue,
+            function,
+            std::slice::from_ref(&valid_parameter),
+            "mutation.orna",
+        )
+        .unwrap_err();
+        assert_eq!(unknown[0].code(), DiagnosticCode::UnknownQualifiedName);
+        assert_eq!(
+            unknown[0].message(),
+            "this function has no parameter named missing"
+        );
+        assert_eq!(unknown[0].location().span().start(), 50);
+        assert_eq!(unknown[0].location().span().end(), 57);
+
+        for semantic_type in [
+            SemanticType::scalar(StandardScalar::BigInt),
+            SemanticType::reference(TypeId::from_bytes([9; 16])),
+        ] {
+            let wrong = check_delete_in(
+                &delete("p", "p_person"),
+                &catalogue,
+                function,
+                &[MutationParameter::new(
+                    "p_person",
+                    selector_id,
+                    semantic_type,
+                    span(100, 108),
+                )],
+                "mutation.orna",
+            )
+            .unwrap_err();
+            assert_eq!(wrong[0].code(), DiagnosticCode::TypeMismatch);
+            assert_eq!(
+                wrong[0].message(),
+                "selector parameter p_person must use REF crm.person"
+            );
+            assert_eq!(wrong[0].location().span().start(), 50);
+            assert_eq!(wrong[0].location().span().end(), 58);
+        }
+
+        let unsupported = check_delete_in(
+            &delete("p", "p_person"),
+            &catalogue,
+            function,
+            &[
+                valid_parameter,
+                MutationParameter::new(
+                    "unused",
+                    ParameterId::from_bytes([7; 16]),
+                    SemanticType::scalar(StandardScalar::Decimal),
+                    span(110, 116),
+                ),
+            ],
+            "mutation.orna",
+        )
+        .unwrap_err();
+        assert_eq!(unsupported[0].code(), DiagnosticCode::DomainIncompatible);
+        assert_eq!(
+            unsupported[0].message(),
+            "DELETE does not yet support the type of parameter unused; supported types are BOOLEAN, INTEGER, BIGINT, FLOAT, CHARACTER LARGE OBJECT, BINARY LARGE OBJECT, and REF"
+        );
+        assert_eq!(unsupported[0].location().span().start(), 110);
+        assert_eq!(unsupported[0].location().span().end(), 116);
+
+        let mut unknown_target = delete("p", "p_person");
+        unknown_target.target_object.parts[1].text = "missing".to_owned();
+        let unknown_target = check_delete_in(
+            &unknown_target,
+            &catalogue,
+            function,
+            &[MutationParameter::new(
+                "p_person",
+                selector_id,
+                SemanticType::reference(catalogue.target),
+                span(100, 108),
+            )],
+            "mutation.orna",
+        )
+        .unwrap_err();
+        assert_eq!(
+            unknown_target[0].code(),
+            DiagnosticCode::UnknownQualifiedName
+        );
+        assert_eq!(
+            unknown_target[0].message(),
+            "unknown object type crm.missing"
+        );
+        assert_eq!(unknown_target[0].location().span().start(), 12);
+        assert_eq!(unknown_target[0].location().span().end(), 23);
+    }
+
+    #[test]
+    fn delete_identity_mapping_fails_closed_for_each_identity_class() {
+        let plan = DeletePlanIr {
+            target_object: TypeId::from_bytes([1; 16]),
+            selector_owner: FunctionId::from_bytes([2; 16]),
+            selector_parameter: ParameterId::from_bytes([3; 16]),
+        };
+
+        assert_eq!(
+            plan.try_map_identities(
+                |_| Err::<u8, _>("type"),
+                |_| Ok::<_, &str>(2),
+                |_| Ok::<_, &str>(3),
+            ),
+            Err("type")
+        );
+        assert_eq!(
+            plan.try_map_identities(
+                |_| Ok::<_, &str>(1),
+                |_| Err::<u8, _>("function"),
+                |_| Ok::<_, &str>(3),
+            ),
+            Err("function")
+        );
+        assert_eq!(
+            plan.try_map_identities(
+                |_| Ok::<_, &str>(1),
+                |_| Ok::<_, &str>(2),
+                |_| Err::<u8, _>("parameter"),
+            ),
+            Err("parameter")
+        );
     }
 
     #[test]

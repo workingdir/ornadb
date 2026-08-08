@@ -40,7 +40,9 @@ use orna_syntax::{
     StandardLargeObjectKind, TypeSpecification,
 };
 
-use crate::mutation::{MutationParameter, MutationReference, check_insert_in, check_update_in};
+use crate::mutation::{
+    MutationParameter, MutationReference, check_delete_in, check_insert_in, check_update_in,
+};
 use crate::relational::{QueryReference, QueryReferenceKind, QueryReferenceTarget, check_query_in};
 use crate::{
     CompilerDiagnostic, DiagnosticCode, ParseReport, SourceLocation,
@@ -815,6 +817,8 @@ fn check_server_functions(
             "INSERT"
         } else if input.body.as_sql_update().is_some() {
             "UPDATE"
+        } else if input.body.as_sql_delete().is_some() {
+            "DELETE"
         } else {
             diagnostics.push(DiagnosticCode::semantic(
                 DiagnosticCode::DomainIncompatible,
@@ -894,38 +898,56 @@ fn check_server_functions(
                     .map(query_reference)
                     .collect::<Vec<_>>(),
             )
+        } else if let Some(delete_body) = input.body.as_sql_delete() {
+            if !mutation_execution_mode_is_valid(input, "DELETE", diagnostics) {
+                continue;
+            }
+            if columns.len() != 1 {
+                diagnostics.push(DiagnosticCode::semantic(
+                    DiagnosticCode::TypeMismatch,
+                    "A DELETE SERVER function must declare exactly one column in RETURNS ROWS (...)" ,
+                    return_location.clone(),
+                ));
+                continue;
+            }
+            let column = &columns[0];
+            if column.semantic_type != SemanticType::Scalar(StandardScalar::Boolean) {
+                diagnostics.push(DiagnosticCode::semantic(
+                    DiagnosticCode::TypeMismatch,
+                    "The RETURNS ROWS (...) column for a DELETE SERVER function must use BOOLEAN",
+                    column.location.clone(),
+                ));
+                continue;
+            }
+            let parameters = mutation_parameters(input);
+            let delete_check = match check_delete_in(
+                &delete_body.delete,
+                catalogue,
+                input.id,
+                &parameters,
+                input.location.logical_path(),
+            ) {
+                Ok(delete_check) => delete_check,
+                Err(delete_diagnostics) => {
+                    diagnostics.extend(delete_diagnostics);
+                    continue;
+                }
+            };
+            (
+                CheckedServerFunctionBody::Delete(delete_check.plan().clone()),
+                delete_check
+                    .references()
+                    .iter()
+                    .map(mutation_reference)
+                    .collect(),
+            )
         } else if input.body.as_sql_insert().is_some() || input.body.as_sql_update().is_some() {
             let mutation_name = if input.body.as_sql_insert().is_some() {
                 "INSERT"
             } else {
                 "UPDATE"
             };
-            let mut mode_is_valid = true;
-            if input.security != CatalogueFunctionSecurity::Invoker {
-                diagnostics.push(DiagnosticCode::semantic(
-                    DiagnosticCode::DomainIncompatible,
-                    format!("{mutation_name} SERVER functions require SECURITY INVOKER"),
-                    input.location.clone(),
-                ));
-                mode_is_valid = false;
-            }
-            if input.transaction != Some(CatalogueFunctionTransaction::Atomic) {
-                diagnostics.push(DiagnosticCode::semantic(
-                    DiagnosticCode::DomainIncompatible,
-                    format!("{mutation_name} SERVER functions require TRANSACTION ATOMIC"),
-                    input.location.clone(),
-                ));
-                mode_is_valid = false;
-            }
-            if input.volatility != CatalogueFunctionVolatility::Volatile {
-                diagnostics.push(DiagnosticCode::semantic(
-                    DiagnosticCode::DomainIncompatible,
-                    format!("{mutation_name} SERVER functions require VOLATILITY VOLATILE"),
-                    input.location.clone(),
-                ));
-                mode_is_valid = false;
-            }
-            if !mode_is_valid {
+            if !mutation_execution_mode_is_valid(input, mutation_name, diagnostics) {
                 continue;
             }
             if columns.len() != 1 {
@@ -952,18 +974,7 @@ fn check_server_functions(
                 ));
                 continue;
             };
-            let parameters = input
-                .parameters
-                .iter()
-                .map(|parameter| {
-                    MutationParameter::new(
-                        parameter.name.clone(),
-                        parameter.id,
-                        parameter.semantic_type,
-                        parameter.name_span.clone(),
-                    )
-                })
-                .collect::<Vec<_>>();
+            let parameters = mutation_parameters(input);
             let checked_mutation = if let Some(insert_body) = input.body.as_sql_insert() {
                 check_insert_in(
                     &insert_body.insert,
@@ -1036,6 +1047,56 @@ fn check_server_functions(
     }
 
     functions
+}
+
+fn mutation_execution_mode_is_valid(
+    input: &ResolvedServerFunctionInput<'_>,
+    mutation_name: &str,
+    diagnostics: &mut Vec<CompilerDiagnostic>,
+) -> bool {
+    let mut valid = true;
+    if input.security != CatalogueFunctionSecurity::Invoker {
+        diagnostics.push(DiagnosticCode::semantic(
+            DiagnosticCode::DomainIncompatible,
+            format!("{mutation_name} SERVER functions require SECURITY INVOKER"),
+            input.location.clone(),
+        ));
+        valid = false;
+    }
+    if input.transaction != Some(CatalogueFunctionTransaction::Atomic) {
+        diagnostics.push(DiagnosticCode::semantic(
+            DiagnosticCode::DomainIncompatible,
+            format!("{mutation_name} SERVER functions require TRANSACTION ATOMIC"),
+            input.location.clone(),
+        ));
+        valid = false;
+    }
+    if input.volatility != CatalogueFunctionVolatility::Volatile {
+        diagnostics.push(DiagnosticCode::semantic(
+            DiagnosticCode::DomainIncompatible,
+            format!("{mutation_name} SERVER functions require VOLATILITY VOLATILE"),
+            input.location.clone(),
+        ));
+        valid = false;
+    }
+    valid
+}
+
+fn mutation_parameters(
+    input: &ResolvedServerFunctionInput<'_>,
+) -> Vec<MutationParameter<CheckedTypeId, CheckedParameterId>> {
+    input
+        .parameters
+        .iter()
+        .map(|parameter| {
+            MutationParameter::new(
+                parameter.name.clone(),
+                parameter.id,
+                parameter.semantic_type,
+                parameter.name_span.clone(),
+            )
+        })
+        .collect()
 }
 
 fn checked_server_function(
@@ -2964,6 +3025,194 @@ mod tests {
                 token_span("RETURNING REF(changed)", "RETURNING REF(", "changed"),
             ]
         );
+    }
+
+    #[test]
+    fn checks_server_delete_with_boolean_result_and_exact_evidence_order() {
+        let source = "CREATE SCHEMA tasks; \
+            CREATE TYPE tasks.task AS OBJECT (title TEXT NOT NULL); \
+            CREATE SERVER FUNCTION tasks.remove(p_task REF tasks.task) \
+            RETURNS ROWS (deleted BOOL) TRANSACTION ATOMIC \
+            AS DELETE FROM tasks.task AS deleted_task \
+            WHERE REF(deleted_task) = p_task RETURNING TRUE;";
+        let report = check(&bundle([("functions.orna", source)]), &empty_catalogue());
+
+        assert!(
+            report.diagnostics().is_empty(),
+            "{:?}",
+            report.diagnostics()
+        );
+        let bundle = report.checked_bundle().expect("DELETE source is valid");
+        let checked = &bundle.server_functions()[0];
+        let task = &bundle.object_types()[0];
+        let parameter = &checked.parameters()[0];
+        let plan = checked.delete_plan().expect("expected a DELETE body");
+
+        assert_eq!(plan.target_object(), task.id());
+        assert_eq!(plan.selector_owner(), checked.id());
+        assert_eq!(plan.selector_parameter(), parameter.id());
+        assert_eq!(checked.return_columns()[0].name(), "deleted");
+        assert_eq!(
+            checked.return_columns()[0].semantic_type(),
+            SemanticType::Scalar(StandardScalar::Boolean)
+        );
+        assert_eq!(
+            checked
+                .references()
+                .iter()
+                .map(|reference| (reference.kind(), reference.target()))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    DefinitionReferenceKind::ObjectReference,
+                    CheckedDefinitionReferenceTarget::ObjectType(task.id()),
+                ),
+                (
+                    DefinitionReferenceKind::WriteObject,
+                    CheckedDefinitionReferenceTarget::ObjectType(task.id()),
+                ),
+                (
+                    DefinitionReferenceKind::ObjectReference,
+                    CheckedDefinitionReferenceTarget::ObjectType(task.id()),
+                ),
+                (
+                    DefinitionReferenceKind::ParameterRead,
+                    CheckedDefinitionReferenceTarget::Parameter {
+                        owner: checked.id(),
+                        parameter: parameter.id(),
+                    },
+                ),
+            ]
+        );
+        let span = |context: &str, prefix: &str, token: &str| {
+            let start = source.find(context).unwrap() + prefix.len();
+            (start, start + token.len())
+        };
+        assert_eq!(
+            checked
+                .references()
+                .iter()
+                .map(|reference| {
+                    (
+                        reference.location().span().start(),
+                        reference.location().span().end(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                span("p_task REF tasks.task", "p_task REF ", "tasks.task"),
+                span("DELETE FROM tasks.task", "DELETE FROM ", "tasks.task"),
+                span("WHERE REF(deleted_task)", "WHERE REF(", "deleted_task",),
+                span("= p_task RETURNING", "= ", "p_task"),
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_delete_return_shape_and_execution_modes_exactly() {
+        let prefix =
+            "CREATE SCHEMA tasks; CREATE TYPE tasks.task AS OBJECT (title TEXT NOT NULL); ";
+        let body =
+            "AS DELETE FROM tasks.task AS removed WHERE REF(removed) = p_task RETURNING TRUE;";
+        let cases = [
+            (
+                format!(
+                    "{prefix}CREATE SERVER FUNCTION tasks.remove(p_task REF tasks.task) RETURNS ROWS (a BOOL, b BOOL) TRANSACTION ATOMIC {body}"
+                ),
+                DiagnosticCode::TypeMismatch,
+                "A DELETE SERVER function must declare exactly one column in RETURNS ROWS (...)",
+                "ROWS (a BOOL, b BOOL)",
+            ),
+            (
+                format!(
+                    "{prefix}CREATE SERVER FUNCTION tasks.remove(p_task REF tasks.task) RETURNS ROWS (deleted REF tasks.task) TRANSACTION ATOMIC {body}"
+                ),
+                DiagnosticCode::TypeMismatch,
+                "The RETURNS ROWS (...) column for a DELETE SERVER function must use BOOLEAN",
+                "deleted REF tasks.task",
+            ),
+            (
+                format!(
+                    "{prefix}CREATE SERVER FUNCTION tasks.remove(p_task REF tasks.task) RETURNS BOOL TRANSACTION ATOMIC {body}"
+                ),
+                DiagnosticCode::TypeMismatch,
+                "DELETE SERVER functions require RETURNS ROWS (...)",
+                "BOOL",
+            ),
+        ];
+
+        for (source, code, message, marker) in cases {
+            let source_bundle =
+                SourceBundle::new([SourceUnit::new("functions.orna", &source)]).unwrap();
+            let report = check(&source_bundle, &empty_catalogue());
+            assert_no_checked_bundle(&report);
+            assert_eq!(report.diagnostics().len(), 1);
+            let diagnostic = &report.diagnostics()[0];
+            assert_eq!(diagnostic.code(), code);
+            assert_eq!(diagnostic.message(), message);
+            let start = source.rfind(marker).unwrap();
+            assert_eq!(diagnostic.location().span().start(), start);
+            assert_eq!(diagnostic.location().span().end(), start + marker.len());
+        }
+
+        let source = format!(
+            "{prefix}CREATE SERVER FUNCTION tasks.remove(p_task REF tasks.task) \
+             RETURNS ROWS (deleted BOOL) SECURITY DEFINER TRANSACTION READ ONLY VOLATILITY STABLE {body}"
+        );
+        let source_bundle =
+            SourceBundle::new([SourceUnit::new("functions.orna", &source)]).unwrap();
+        let report = check(&source_bundle, &empty_catalogue());
+        assert_no_checked_bundle(&report);
+        assert_eq!(report.diagnostics().len(), 3);
+        assert_eq!(
+            report
+                .diagnostics()
+                .iter()
+                .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    DiagnosticCode::DomainIncompatible,
+                    "DELETE SERVER functions require SECURITY INVOKER",
+                ),
+                (
+                    DiagnosticCode::DomainIncompatible,
+                    "DELETE SERVER functions require TRANSACTION ATOMIC",
+                ),
+                (
+                    DiagnosticCode::DomainIncompatible,
+                    "DELETE SERVER functions require VOLATILITY VOLATILE",
+                ),
+            ]
+        );
+        let declaration_start = source.find("CREATE SERVER FUNCTION").unwrap();
+        for diagnostic in report.diagnostics() {
+            assert_eq!(diagnostic.location().span().start(), declaration_start);
+            assert_eq!(diagnostic.location().span().end(), source.len());
+        }
+    }
+
+    #[test]
+    fn rejects_an_unused_delete_parameter_outside_the_runtime_types() {
+        let source = "CREATE SCHEMA tasks; \
+            CREATE TYPE tasks.task AS OBJECT (title TEXT NOT NULL); \
+            CREATE SERVER FUNCTION tasks.remove(p_task REF tasks.task, unused DECIMAL) \
+            RETURNS ROWS (deleted BOOL) TRANSACTION ATOMIC \
+            AS DELETE FROM tasks.task AS removed \
+            WHERE REF(removed) = p_task RETURNING TRUE;";
+        let report = check(&bundle([("functions.orna", source)]), &empty_catalogue());
+
+        assert_no_checked_bundle(&report);
+        assert_eq!(report.diagnostics().len(), 1);
+        let diagnostic = &report.diagnostics()[0];
+        assert_eq!(diagnostic.code(), DiagnosticCode::DomainIncompatible);
+        assert_eq!(
+            diagnostic.message(),
+            "DELETE does not yet support the type of parameter unused; supported types are BOOLEAN, INTEGER, BIGINT, FLOAT, CHARACTER LARGE OBJECT, BINARY LARGE OBJECT, and REF"
+        );
+        let start = source.find("unused DECIMAL").unwrap();
+        assert_eq!(diagnostic.location().span().start(), start);
+        assert_eq!(diagnostic.location().span().end(), start + "unused".len());
     }
 
     #[test]

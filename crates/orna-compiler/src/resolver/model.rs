@@ -869,6 +869,8 @@ pub(crate) enum CheckedServerFunctionBody {
             CheckedParameterId,
         >,
     ),
+    /// A checked single-object DELETE body.
+    Delete(crate::mutation::DeletePlanIr<CheckedTypeId, CheckedFunctionId, CheckedParameterId>),
 }
 
 /// A checked SERVER function with an Orna-owned execution plan.
@@ -936,7 +938,7 @@ impl CheckedServerFunction {
     pub(crate) fn query_plan(&self) -> Option<&RelationalQueryIr<CheckedTypeId, CheckedFieldId>> {
         match &self.body {
             CheckedServerFunctionBody::Query(plan) => Some(plan),
-            CheckedServerFunctionBody::Mutation(_) => None,
+            CheckedServerFunctionBody::Mutation(_) | CheckedServerFunctionBody::Delete(_) => None,
         }
     }
 
@@ -952,8 +954,20 @@ impl CheckedServerFunction {
         >,
     > {
         match &self.body {
-            CheckedServerFunctionBody::Query(_) => None,
+            CheckedServerFunctionBody::Query(_) | CheckedServerFunctionBody::Delete(_) => None,
             CheckedServerFunctionBody::Mutation(plan) => Some(plan),
+        }
+    }
+
+    /// Returns the checked DELETE plan when the function has a DELETE body.
+    #[cfg(test)]
+    pub(crate) fn delete_plan(
+        &self,
+    ) -> Option<&crate::mutation::DeletePlanIr<CheckedTypeId, CheckedFunctionId, CheckedParameterId>>
+    {
+        match &self.body {
+            CheckedServerFunctionBody::Delete(plan) => Some(plan),
+            CheckedServerFunctionBody::Query(_) | CheckedServerFunctionBody::Mutation(_) => None,
         }
     }
 }
