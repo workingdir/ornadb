@@ -832,7 +832,7 @@ fn map_function_volatility(mode: Option<SyntaxFunctionVolatility>) -> CatalogueF
 
 fn server_function_body_source(body: &ServerFunctionBody) -> &SourceSlice {
     match body {
-        ServerFunctionBody::SqlQuery(source) => source,
+        ServerFunctionBody::SqlQuery(body) => &body.source,
     }
 }
 
