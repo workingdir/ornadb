@@ -20,9 +20,11 @@ mod bootstrap;
 mod decode;
 mod physical;
 mod recovery;
+mod server_execution;
 mod storage;
 
 pub use bootstrap::ActiveRevision;
+pub use server_execution::{ServerSelectContext, ServerSelectError, ServerSelectResult};
 
 /// A concrete connection point for the private PostgreSQL kernel.
 #[derive(Clone)]
@@ -116,6 +118,8 @@ pub enum PostgresKernelError {
     },
     /// Backend-neutral physical planning rejected the candidate.
     PhysicalPlan(PhysicalPlanError),
+    /// A SERVER SELECT function cannot execute against the active revision.
+    ServerSelect(ServerSelectError),
     /// A durable row value could not be decoded as its selected PostgreSQL type.
     RowDecode {
         /// The relation that supplied the row.
@@ -180,6 +184,7 @@ impl fmt::Display for PostgresKernelError {
                 formatter.write_str("expected revision pair is not active")
             }
             Self::PhysicalPlan(error) => write!(formatter, "physical plan failed: {error}"),
+            Self::ServerSelect(error) => write!(formatter, "server SELECT failed: {error}"),
             Self::RowDecode {
                 relation,
                 record,
@@ -215,6 +220,7 @@ impl Error for PostgresKernelError {
             Self::RevisionInvariant(error) => Some(error),
             Self::CatalogueSnapshot(error) => Some(error),
             Self::PhysicalPlan(error) => Some(error),
+            Self::ServerSelect(error) => Some(error),
             Self::RowDecode { source, .. } => Some(source),
             Self::MigrationMismatch { .. }
             | Self::CatalogueInvariant(_)
