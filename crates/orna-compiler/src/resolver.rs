@@ -404,7 +404,7 @@ fn resolve_server_function_headers<'a>(
             if transaction == Some(CatalogueFunctionTransaction::Manual) {
                 diagnostics.push(diagnostic(
                     DiagnosticCode::DomainIncompatible,
-                    "TRANSACTION MANUAL is outside the MVP SERVER function domain",
+                    "SERVER functions do not yet support TRANSACTION MANUAL",
                     unit.logical_path(),
                     &declaration.span,
                 ));
@@ -520,7 +520,7 @@ fn reject_unplanned_server_function_features(
                 if let Some(default) = &parameter.default_expression {
                     diagnostics.push(diagnostic(
                         DiagnosticCode::TypeMismatch,
-                        "SERVER default-expression planning is not implemented",
+                        "SERVER function parameters do not yet support default values",
                         unit.logical_path(),
                         &default.span,
                     ));
@@ -529,7 +529,7 @@ fn reject_unplanned_server_function_features(
             for capability in &declaration.capabilities {
                 diagnostics.push(diagnostic(
                     DiagnosticCode::TypeMismatch,
-                    "SERVER capability checking/planning is not implemented",
+                    "SERVER functions do not yet support REQUIRES CAPABILITY",
                     unit.logical_path(),
                     &capability.span,
                 ));
@@ -623,7 +623,7 @@ fn check_server_functions(
         } else {
             diagnostics.push(DiagnosticCode::semantic(
                 DiagnosticCode::DomainIncompatible,
-                "SERVER function body is not supported by this compiler",
+                "SERVER functions do not yet support this body form",
                 input.location.clone(),
             ));
             continue;
@@ -654,9 +654,19 @@ fn check_server_functions(
                 diagnostics.push(DiagnosticCode::semantic(
                     DiagnosticCode::TypeMismatch,
                     format!(
-                        "SELECT projection count {} does not match RETURNS ROWS column count {}",
+                        "SELECT returns {} {}, but RETURNS ROWS (...) declares {} {}",
                         plan.projections().len(),
-                        columns.len()
+                        if plan.projections().len() == 1 {
+                            "column"
+                        } else {
+                            "columns"
+                        },
+                        columns.len(),
+                        if columns.len() == 1 {
+                            "column"
+                        } else {
+                            "columns"
+                        }
                     ),
                     return_location.clone(),
                 ));
@@ -669,7 +679,7 @@ fn check_server_functions(
                     diagnostics.push(DiagnosticCode::semantic(
                         DiagnosticCode::TypeMismatch,
                         format!(
-                            "SELECT projection {} type does not match RETURNS ROWS column {}",
+                            "SELECT column {} does not have the same type as RETURNS ROWS column {}",
                             column.ordinal + 1,
                             column.name
                         ),
@@ -721,7 +731,7 @@ fn check_server_functions(
             if columns.len() != 1 {
                 diagnostics.push(DiagnosticCode::semantic(
                     DiagnosticCode::TypeMismatch,
-                    "INSERT SERVER functions require exactly one RETURNS ROWS column",
+                    "An INSERT SERVER function must declare exactly one column in RETURNS ROWS (...)",
                     return_location.clone(),
                 ));
                 continue;
@@ -733,7 +743,7 @@ fn check_server_functions(
             else {
                 diagnostics.push(DiagnosticCode::semantic(
                     DiagnosticCode::TypeMismatch,
-                    "INSERT SERVER functions require a REF return column",
+                    "The RETURNS ROWS (...) column for an INSERT SERVER function must use REF",
                     column.location.clone(),
                 ));
                 continue;
@@ -767,7 +777,7 @@ fn check_server_functions(
             if declared_target != mutation_plan.returned_object() {
                 diagnostics.push(DiagnosticCode::semantic(
                     DiagnosticCode::TypeMismatch,
-                    "INSERT return REF target does not match the returned object",
+                    "The returned REF must point to the object type being inserted",
                     column
                         .reference_location
                         .clone()
@@ -786,7 +796,7 @@ fn check_server_functions(
         } else {
             diagnostics.push(DiagnosticCode::semantic(
                 DiagnosticCode::DomainIncompatible,
-                "SERVER function body is not supported by this compiler",
+                "SERVER functions do not yet support this body form",
                 input.location.clone(),
             ));
             continue;
@@ -2080,8 +2090,12 @@ mod tests {
         let diagnostics = report.diagnostics();
         assert_eq!(diagnostics[0].code(), DiagnosticCode::UnknownQualifiedName);
         assert_eq!(diagnostics[1].code(), DiagnosticCode::DomainIncompatible);
+        assert_eq!(
+            diagnostics[1].message(),
+            "SERVER functions do not yet support TRANSACTION MANUAL"
+        );
         assert!(diagnostics.iter().all(|diagnostic| {
-            diagnostic.message() != "SERVER function body planning is not implemented"
+            diagnostic.message() != "SERVER functions do not yet support this body form"
         }));
         assert_no_checked_bundle(&report);
     }
@@ -2302,7 +2316,7 @@ mod tests {
                 ),
                 vec![(
                     DiagnosticCode::TypeMismatch,
-                    "INSERT SERVER functions require exactly one RETURNS ROWS column",
+                    "An INSERT SERVER function must declare exactly one column in RETURNS ROWS (...)",
                     "ROWS (a",
                 )],
             ),
@@ -2312,7 +2326,7 @@ mod tests {
                 ),
                 vec![(
                     DiagnosticCode::TypeMismatch,
-                    "INSERT SERVER functions require a REF return column",
+                    "The RETURNS ROWS (...) column for an INSERT SERVER function must use REF",
                     "a TEXT",
                 )],
             ),
@@ -2322,7 +2336,7 @@ mod tests {
                 ),
                 vec![(
                     DiagnosticCode::TypeMismatch,
-                    "INSERT return REF target does not match the returned object",
+                    "The returned REF must point to the object type being inserted",
                     "tasks.other",
                 )],
             ),
@@ -2379,13 +2393,13 @@ mod tests {
                 let expected_start = source.rfind(marker).unwrap();
                 assert_eq!(diagnostic.location().span().start(), expected_start);
                 let expected_end = match message {
-                    "INSERT SERVER functions require exactly one RETURNS ROWS column" => {
+                    "An INSERT SERVER function must declare exactly one column in RETURNS ROWS (...)" => {
                         source.find(") TRANSACTION").unwrap() + 1
                     }
-                    "INSERT SERVER functions require a REF return column" => {
+                    "The RETURNS ROWS (...) column for an INSERT SERVER function must use REF" => {
                         expected_start + "a TEXT".len()
                     }
-                    "INSERT return REF target does not match the returned object" => {
+                    "The returned REF must point to the object type being inserted" => {
                         expected_start + "tasks.other".len()
                     }
                     _ => source.len(),
@@ -2401,13 +2415,15 @@ mod tests {
             CREATE SERVER FUNCTION tasks.count() RETURNS ROWS (first TEXT, second TEXT) \
             AS SELECT t.title FROM tasks.task t; \
             CREATE SERVER FUNCTION tasks.kind() RETURNS ROWS (title BOOL) \
-            AS SELECT t.title FROM tasks.task t;";
+            AS SELECT t.title FROM tasks.task t; \
+            CREATE SERVER FUNCTION tasks.wide() RETURNS ROWS (only TEXT) \
+            AS SELECT t.title, t.title FROM tasks.task t;";
         let report = check(&bundle([("functions.orna", source)]), &empty_catalogue());
 
-        assert_eq!(report.diagnostics().len(), 2);
+        assert_eq!(report.diagnostics().len(), 3);
         assert_eq!(
             report.diagnostics()[0].message(),
-            "SELECT projection count 1 does not match RETURNS ROWS column count 2"
+            "SELECT returns 1 column, but RETURNS ROWS (...) declares 2 columns"
         );
         assert_eq!(
             report.diagnostics()[0].location().span().start(),
@@ -2415,11 +2431,19 @@ mod tests {
         );
         assert_eq!(
             report.diagnostics()[1].message(),
-            "SELECT projection 1 type does not match RETURNS ROWS column title"
+            "SELECT column 1 does not have the same type as RETURNS ROWS column title"
         );
         assert_eq!(
             report.diagnostics()[1].location().span().start(),
-            source.rfind("title BOOL").unwrap()
+            source.find("title BOOL").unwrap()
+        );
+        assert_eq!(
+            report.diagnostics()[2].message(),
+            "SELECT returns 2 columns, but RETURNS ROWS (...) declares 1 column"
+        );
+        assert_eq!(
+            report.diagnostics()[2].location().span().start(),
+            source.rfind("ROWS (only").unwrap()
         );
         assert_no_checked_bundle(&report);
     }
@@ -2524,7 +2548,7 @@ mod tests {
         );
         assert_ne!(
             report.diagnostics()[0].message(),
-            "SERVER function body planning is not implemented"
+            "SERVER functions do not yet support this body form"
         );
         assert_no_checked_bundle(&report);
     }
@@ -2651,7 +2675,7 @@ mod tests {
                 && diagnostic.message() == "ROWS return type must contain at least one column"
         }));
         assert!(diagnostics.iter().all(|diagnostic| {
-            diagnostic.message() != "SERVER function body planning is not implemented"
+            diagnostic.message() != "SERVER functions do not yet support this body form"
         }));
         assert_no_checked_bundle(&report);
     }
@@ -2667,7 +2691,7 @@ mod tests {
         assert_eq!(report.diagnostics().len(), 2);
         assert_eq!(
             report.diagnostics()[0].message(),
-            "SERVER default-expression planning is not implemented"
+            "SERVER function parameters do not yet support default values"
         );
         assert_eq!(
             report.diagnostics()[0].location().span().start(),
@@ -2675,7 +2699,7 @@ mod tests {
         );
         assert_eq!(
             report.diagnostics()[1].message(),
-            "SERVER capability checking/planning is not implemented"
+            "SERVER functions do not yet support REQUIRES CAPABILITY"
         );
         assert_eq!(
             report.diagnostics()[1].location().span().start(),
