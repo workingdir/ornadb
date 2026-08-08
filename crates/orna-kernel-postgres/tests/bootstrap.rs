@@ -73,6 +73,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "owner-qualified reference targets",
         include_str!("../migrations/0005_owner_qualified_reference_targets.sql"),
     ),
+    (
+        6,
+        "definition reference write evidence",
+        include_str!("../migrations/0006_write_reference_evidence.sql"),
+    ),
 ];
 const MIGRATION_DATA_STEP_SEPARATOR: &[u8] = b"\0orna.kernel.migration-step\0";
 const CANONICAL_HASH_V1_EMPTY_SEED_STEP: &[u8] = b"canonical-hash-v1-empty-seed/v1";
@@ -115,6 +120,33 @@ const REGISTERED_V4_SOURCE: &str = concat!(
     "second_function_decl\n",
 );
 
+#[derive(Debug, Eq, PartialEq)]
+struct DefinitionReferenceSnapshot {
+    catalogue_revision_id: Vec<u8>,
+    source_function_id: Vec<u8>,
+    source_function_revision_id: Vec<u8>,
+    ordinal: i64,
+    target_definition_id: Vec<u8>,
+    target_kind: String,
+    reference_kind: String,
+    source_subobject_id: Option<Vec<u8>>,
+    source_unit_id: Vec<u8>,
+    source_start: i64,
+    source_end: i64,
+    target_owner_type_id: Option<Vec<u8>>,
+    target_owner_function_id: Option<Vec<u8>>,
+    xmin: String,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct UpgradeSnapshot {
+    active_pair: (Vec<u8>, Vec<u8>),
+    migrations: Vec<(i64, String, Vec<u8>)>,
+    references: Vec<DefinitionReferenceSnapshot>,
+    catalogue_hashes: Vec<(Vec<u8>, Vec<u8>)>,
+    function_hashes: Vec<(Vec<u8>, Vec<u8>)>,
+}
+
 #[test]
 fn registered_v4_semantic_fixture_is_a_valid_active_database_revision() -> TestResult<()> {
     let fixture = registered_v4_semantic_fixture()?;
@@ -146,6 +178,14 @@ fn supported_reference_kind_sql_maps_every_legacy_fixture_kind() -> TestResult<(
         assert_eq!(supported_reference_kind_sql(*kind)?, *expected);
     }
     Ok(())
+}
+
+#[test]
+fn write_reference_migration_checksum_binds_exact_sql_bytes() {
+    assert_eq!(
+        hex_bytes(expected_migration_checksum(6, MIGRATIONS[5].2)),
+        "e831811c0f42d6f4b3ab2601cf480fabaaed03b5547e2615400b9eec4b6b53bf"
+    );
 }
 
 #[tokio::test]
@@ -212,6 +252,112 @@ async fn bootstrap_owner_qualifies_registered_v4_semantic_references() -> TestRe
 
         kernel.bootstrap().await?;
         verify_owner_qualified_reference_backfill(&database).await
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn bootstrap_upgrades_v5_write_reference_evidence_without_mutating_semantics()
+-> TestResult<()> {
+    with_test_database(|database| async move {
+        seed_registered_v5_semantic_catalogue(&database).await?;
+        seed_registered_v4_physical_catalogue(&database).await?;
+        let kernel = PostgresKernel::from_str(&database.connection_string())?;
+        let expected_revision = registered_v4_semantic_fixture()?;
+        let before = snapshot_upgrade_state(&database).await?;
+
+        require(
+            before.migrations.len() == 5
+                && before.migrations.last().map(|migration| migration.0) == Some(5),
+            format!("manual v5 setup produced unexpected migrations: {:?}", before.migrations),
+        )?;
+        require(
+            before.active_pair
+                == (
+                    expected_revision.pair().source().to_bytes().to_vec(),
+                    expected_revision.pair().catalogue().to_bytes().to_vec(),
+                ),
+            format!("manual v5 setup changed the active pair: {:?}", before.active_pair),
+        )?;
+
+        kernel.bootstrap().await?;
+
+        let after = snapshot_upgrade_state(&database).await?;
+        require(
+            after.migrations.len() == 6 && after.migrations[..5] == before.migrations[..],
+            format!("v6 changed prior migration records: {:?}", after.migrations),
+        )?;
+        require(
+            after.migrations[5]
+                == (
+                    6,
+                    "definition reference write evidence".to_owned(),
+                    expected_migration_checksum(6, MIGRATIONS[5].2),
+                ),
+            format!("v6 migration record is not exact: {:?}", after.migrations[5]),
+        )?;
+        require(
+            after.active_pair == before.active_pair,
+            "v6 changed the active revision pair",
+        )?;
+        require(
+            after.references == before.references,
+            "v6 changed existing definition-reference rows or xmin values",
+        )?;
+        require(
+            after.catalogue_hashes == before.catalogue_hashes
+                && after.function_hashes == before.function_hashes,
+            "v6 changed catalogue or function semantic hash bytes",
+        )?;
+        let after_revision = kernel.recover().await?;
+        let pair_matches = expected_revision.pair() == after_revision.pair();
+        let source_matches = expected_revision.source() == after_revision.source();
+        let catalogue_hash_matches =
+            expected_revision.catalogue_hash() == after_revision.catalogue_hash();
+        let catalogue_revision_matches =
+            expected_revision.catalogue().revision() == after_revision.catalogue().revision();
+        let schemas_match =
+            expected_revision.catalogue().schemas() == after_revision.catalogue().schemas();
+        let object_types_match = expected_revision.catalogue().object_types()
+            == after_revision.catalogue().object_types();
+        let functions_match =
+            expected_revision.catalogue().functions() == after_revision.catalogue().functions();
+        let expressions_match = expected_revision.expressions() == after_revision.expressions();
+        let function_revisions_match =
+            expected_revision.function_revisions() == after_revision.function_revisions();
+        let historical_revisions_match = expected_revision.historical_function_revisions()
+            == after_revision.historical_function_revisions();
+        let origins_match = same_members(expected_revision.origins(), after_revision.origins());
+        let references_match = expected_revision.references() == after_revision.references();
+        require(
+            pair_matches
+                && source_matches
+                && catalogue_hash_matches
+                && catalogue_revision_matches
+                && schemas_match
+                && object_types_match
+                && functions_match
+                && expressions_match
+                && function_revisions_match
+                && historical_revisions_match
+                && origins_match
+                && references_match,
+            format!(
+                "v6 recovery differs: pair={pair_matches}, source={source_matches}, catalogue_hash={catalogue_hash_matches}, catalogue_revision={catalogue_revision_matches}, schemas={schemas_match}, object_types={object_types_match}, functions={functions_match}, expressions={expressions_match}, function_revisions={function_revisions_match}, historical={historical_revisions_match}, origins={origins_match}, references={references_match}"
+            ),
+        )?;
+
+        let session = database.open().await?;
+        let verification_result = verify_write_reference_compatibility(session.client()).await;
+        let shutdown_result = session.shutdown().await;
+        match (verification_result, shutdown_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+            (Err(verification_error), Err(shutdown_error)) => Err(failure(format!(
+                "write-reference compatibility verification failed: {verification_error}; verification driver shutdown failed: {shutdown_error}"
+            ))),
+        }
     })
     .await
 }
@@ -365,7 +511,7 @@ async fn bootstrap_rejects_tampered_gapped_and_newer_migration_history() -> Test
         Sha256::digest(MIGRATIONS[1].2.as_bytes()).to_vec(),
     )
     .await?;
-    reject_migration_history(6, "future migration", vec![0; 32]).await
+    reject_migration_history(7, "future migration", vec![0; 32]).await
 }
 
 async fn inspect_bootstrap_state(database: &TestDatabase) -> TestResult<()> {
@@ -520,6 +666,117 @@ fn expected_migration_checksum(version: i64, sql: &str) -> Vec<u8> {
         hash.update(CANONICAL_HASH_V1_EMPTY_SEED_STEP);
     }
     hash.finalize().to_vec()
+}
+
+fn hex_bytes(bytes: impl AsRef<[u8]>) -> String {
+    bytes
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+async fn snapshot_upgrade_state(database: &TestDatabase) -> TestResult<UpgradeSnapshot> {
+    let session = database.open().await?;
+    let snapshot_result = async {
+        let active = session
+            .client()
+            .query_one(
+                "SELECT source_revision_id, catalogue_revision_id
+                 FROM _orna_kernel.active_revision
+                 WHERE singleton = true",
+                &[],
+            )
+            .await?;
+        let active_pair = (value(&active, 0)?, value(&active, 1)?);
+        let migrations = session
+            .client()
+            .query(
+                "SELECT version, name, checksum
+                 FROM _orna_kernel.schema_migrations
+                 ORDER BY version",
+                &[],
+            )
+            .await?
+            .iter()
+            .map(|row| Ok((value(row, 0)?, value(row, 1)?, value(row, 2)?)))
+            .collect::<TestResult<Vec<(i64, String, Vec<u8>)>>>()?;
+        let references = session
+            .client()
+            .query(
+                "SELECT catalogue_revision_id, source_function_id,
+                        source_function_revision_id, ordinal,
+                        target_definition_id, target_kind, reference_kind,
+                        source_subobject_id, source_unit_id, source_start,
+                        source_end, target_owner_type_id,
+                        target_owner_function_id, xmin::text
+                 FROM _orna_kernel.definition_references
+                 ORDER BY ordinal",
+                &[],
+            )
+            .await?
+            .iter()
+            .map(|row| {
+                Ok(DefinitionReferenceSnapshot {
+                    catalogue_revision_id: value(row, 0)?,
+                    source_function_id: value(row, 1)?,
+                    source_function_revision_id: value(row, 2)?,
+                    ordinal: value(row, 3)?,
+                    target_definition_id: value(row, 4)?,
+                    target_kind: value(row, 5)?,
+                    reference_kind: value(row, 6)?,
+                    source_subobject_id: value(row, 7)?,
+                    source_unit_id: value(row, 8)?,
+                    source_start: value(row, 9)?,
+                    source_end: value(row, 10)?,
+                    target_owner_type_id: value(row, 11)?,
+                    target_owner_function_id: value(row, 12)?,
+                    xmin: value(row, 13)?,
+                })
+            })
+            .collect::<TestResult<Vec<DefinitionReferenceSnapshot>>>()?;
+        let catalogue_hashes = session
+            .client()
+            .query(
+                "SELECT id, content_hash
+                 FROM _orna_kernel.catalogue_revisions
+                 ORDER BY id",
+                &[],
+            )
+            .await?
+            .iter()
+            .map(|row| Ok((value(row, 0)?, value(row, 1)?)))
+            .collect::<TestResult<Vec<(Vec<u8>, Vec<u8>)>>>()?;
+        let function_hashes = session
+            .client()
+            .query(
+                "SELECT id, semantic_ir_hash
+                 FROM _orna_kernel.function_revisions
+                 ORDER BY id",
+                &[],
+            )
+            .await?
+            .iter()
+            .map(|row| Ok((value(row, 0)?, value(row, 1)?)))
+            .collect::<TestResult<Vec<(Vec<u8>, Vec<u8>)>>>()?;
+        Ok(UpgradeSnapshot {
+            active_pair,
+            migrations,
+            references,
+            catalogue_hashes,
+            function_hashes,
+        })
+    }
+    .await;
+    let shutdown_result = session.shutdown().await;
+
+    match (snapshot_result, shutdown_result) {
+        (Ok(snapshot), Ok(())) => Ok(snapshot),
+        (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+        (Err(snapshot_error), Err(shutdown_error)) => Err(failure(format!(
+            "upgrade snapshot failed: {snapshot_error}; snapshot driver shutdown failed: {shutdown_error}"
+        ))),
+    }
 }
 
 async fn inspect_empty_aggregate_hashes(client: &Client) -> TestResult<()> {
@@ -781,6 +1038,8 @@ async fn inspect_definition_references(client: &Client) -> TestResult<()> {
         "query_object",
         "query_field",
         "expression",
+        "write_object",
+        "write_field",
     ] {
         require(
             reference_kind_constraint.contains(&format!("'{reference_kind}'::text")),
@@ -847,6 +1106,8 @@ async fn inspect_definition_references(client: &Client) -> TestResult<()> {
         "target_kind = 'field'::text",
         "reference_kind = 'expression'::text",
         "target_kind = 'expression'::text",
+        "reference_kind = 'write_object'::text",
+        "reference_kind = 'write_field'::text",
     ] {
         require(
             compatibility_constraint.contains(expected_fragment),
@@ -1092,6 +1353,71 @@ async fn seed_registered_v4_semantic_catalogue(
         (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
         (Err(seed_error), Err(shutdown_error)) => Err(failure(format!(
             "registered v4 semantic catalogue seed failed: {seed_error}; seed driver shutdown failed: {shutdown_error}"
+        ))),
+    }
+}
+
+async fn seed_registered_v5_semantic_catalogue(database: &TestDatabase) -> TestResult<()> {
+    seed_registered_v4_semantic_catalogue(database, false).await?;
+    let session = database.open().await?;
+    let migration = &MIGRATIONS[4];
+    let seed_result = async {
+        session.client().batch_execute(migration.2).await?;
+        let checksum = expected_migration_checksum(migration.0, migration.2);
+        session
+            .client()
+            .execute(
+                "INSERT INTO _orna_kernel.schema_migrations (version, name, checksum)
+                 VALUES ($1, $2, $3)",
+                &[&migration.0, &migration.1, &checksum],
+            )
+            .await?;
+        Ok(())
+    }
+    .await;
+    let shutdown_result = session.shutdown().await;
+
+    match (seed_result, shutdown_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(seed_error), Err(shutdown_error)) => Err(failure(format!(
+            "registered v5 semantic catalogue seed failed: {seed_error}; seed driver shutdown failed: {shutdown_error}"
+        ))),
+    }
+}
+
+async fn seed_registered_v4_physical_catalogue(database: &TestDatabase) -> TestResult<()> {
+    let session = database.open().await?;
+    let result = session
+        .client()
+        .batch_execute(
+            "CREATE TABLE _orna_data.t_06060606060606060606060606060606 (
+                 _orna_object_id bytea NOT NULL,
+                 CONSTRAINT pk_06060606060606060606060606060606
+                     PRIMARY KEY (_orna_object_id),
+                 CONSTRAINT ck_06060606060606060606060606060606_object_id
+                     CHECK (octet_length(_orna_object_id) = 16),
+                 f_08080808080808080808080808080808 boolean NOT NULL
+             );
+             REVOKE ALL ON TABLE _orna_data.t_06060606060606060606060606060606 FROM PUBLIC;
+             CREATE TABLE _orna_data.t_07070707070707070707070707070707 (
+                 _orna_object_id bytea NOT NULL,
+                 CONSTRAINT pk_07070707070707070707070707070707
+                     PRIMARY KEY (_orna_object_id),
+                 CONSTRAINT ck_07070707070707070707070707070707_object_id
+                     CHECK (octet_length(_orna_object_id) = 16)
+             );
+             REVOKE ALL ON TABLE _orna_data.t_07070707070707070707070707070707 FROM PUBLIC;",
+        )
+        .await;
+    let shutdown_result = session.shutdown().await;
+
+    match (result, shutdown_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) => Err(Box::new(error)),
+        (Ok(()), Err(error)) => Err(error),
+        (Err(create_error), Err(shutdown_error)) => Err(failure(format!(
+            "registered v4 physical catalogue setup failed: {create_error}; setup driver shutdown failed: {shutdown_error}"
         ))),
     }
 }
@@ -1897,6 +2223,125 @@ async fn verify_owner_qualified_reference_backfill_client(client: &Client) -> Te
     .await
 }
 
+async fn verify_write_reference_compatibility(client: &Client) -> TestResult<()> {
+    let first_type_id = vec![6_u8; 16];
+    let field_id = vec![8_u8; 16];
+
+    client
+        .batch_execute("BEGIN; SET CONSTRAINTS ALL DEFERRED;")
+        .await?;
+    let valid_result: TestResult<()> = async {
+        insert_reference_probe(
+            client,
+            2,
+            first_type_id.clone(),
+            "object_type",
+            "write_object",
+            None,
+            None,
+        )
+        .await?;
+        insert_reference_probe(
+            client,
+            3,
+            field_id.clone(),
+            "field",
+            "write_field",
+            Some(first_type_id.clone()),
+            None,
+        )
+        .await?;
+        Ok(())
+    }
+    .await;
+    let valid_rollback = client.batch_execute("ROLLBACK").await;
+    match (valid_result, valid_rollback) {
+        (Ok(()), Ok(())) => {}
+        (Err(error), Ok(())) => return Err(error),
+        (Ok(()), Err(error)) => return Err(Box::new(error)),
+        (Err(insert_error), Err(rollback_error)) => {
+            return Err(failure(format!(
+                "valid write-reference probe failed: {insert_error}; rollback failed: {rollback_error}"
+            )));
+        }
+    }
+
+    for (ordinal, target_id, target_kind, reference_kind, owner_type_id) in [
+        (
+            2,
+            field_id.clone(),
+            "field",
+            "write_object",
+            Some(first_type_id.clone()),
+        ),
+        (3, first_type_id.clone(), "object_type", "write_field", None),
+    ] {
+        client.batch_execute("BEGIN").await?;
+        let insert_result = insert_reference_probe(
+            client,
+            ordinal,
+            target_id,
+            target_kind,
+            reference_kind,
+            owner_type_id,
+            None,
+        )
+        .await;
+        let rollback_result = client.batch_execute("ROLLBACK").await;
+        let constraint = insert_result
+            .as_ref()
+            .err()
+            .and_then(|error| error.as_db_error())
+            .and_then(|error| error.constraint());
+        require(
+            insert_result.is_err(),
+            format!("crossed {reference_kind}->{target_kind} write reference was accepted"),
+        )?;
+        require(
+            constraint == Some("definition_references_reference_target_compatibility_check"),
+            format!(
+                "crossed {reference_kind}->{target_kind} write reference failed for {constraint:?}"
+            ),
+        )?;
+        rollback_result?;
+    }
+
+    Ok(())
+}
+
+async fn insert_reference_probe(
+    client: &Client,
+    ordinal: i64,
+    target_definition_id: Vec<u8>,
+    target_kind: &str,
+    reference_kind: &str,
+    target_owner_type_id: Option<Vec<u8>>,
+    target_owner_function_id: Option<Vec<u8>>,
+) -> Result<u64, tokio_postgres::Error> {
+    client
+        .execute(
+            "INSERT INTO _orna_kernel.definition_references
+                (catalogue_revision_id, source_function_id,
+                 source_function_revision_id, ordinal, target_definition_id,
+                 target_kind, reference_kind, target_owner_type_id,
+                 target_owner_function_id, source_unit_id, source_start, source_end)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 0, 1)",
+            &[
+                &vec![3_u8; 16],
+                &vec![9_u8; 16],
+                &vec![11_u8; 16],
+                &ordinal,
+                &target_definition_id,
+                &target_kind,
+                &reference_kind,
+                &target_owner_type_id,
+                &target_owner_function_id,
+                &vec![4_u8; 16],
+            ],
+        )
+        .await
+}
+
 async fn insert_unsupported_initial_schema(database: &TestDatabase) -> TestResult<()> {
     let session = database.open().await?;
     let insert_result = session
@@ -2308,6 +2753,10 @@ fn require(condition: bool, message: impl Into<String>) -> TestResult<()> {
     } else {
         Err(failure(message))
     }
+}
+
+fn same_members<T: Eq>(left: &[T], right: &[T]) -> bool {
+    left.len() == right.len() && left.iter().all(|member| right.contains(member))
 }
 
 fn value<T>(row: &Row, index: usize) -> TestResult<T>
