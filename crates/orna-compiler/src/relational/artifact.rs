@@ -9,19 +9,21 @@ use orna_artifact::server_plan::{
     Expression, ExpressionKind, FieldStep, NullOrder, Ordering, Scan, ServerPlan, ServerPlanError,
     SortDirection, ValueType,
 };
+use orna_core::{FieldId, TypeId};
 
 use super::{
     ExpressionIr, ExpressionKind as CompilerExpressionKind, InputSlot,
     NullOrder as CompilerNullOrder, OrderingIr, RelationalQueryIr, ResolvedFieldStep, ScanIr,
     SortDirection as CompilerSortDirection, ValueType as CompilerValueType,
 };
-
 /// Converts and encodes one checked relational query into canonical bytes.
-pub(super) fn encode(query: &RelationalQueryIr) -> Result<Vec<u8>, ServerPlanError> {
+pub(super) fn encode(
+    query: &RelationalQueryIr<TypeId, FieldId>,
+) -> Result<Vec<u8>, ServerPlanError> {
     adapt(query).encode()
 }
 
-fn adapt(query: &RelationalQueryIr) -> ServerPlan {
+fn adapt(query: &RelationalQueryIr<TypeId, FieldId>) -> ServerPlan {
     ServerPlan {
         scan: adapt_scan(&query.scan),
         projections: query.projections.iter().map(adapt_expression).collect(),
@@ -30,14 +32,14 @@ fn adapt(query: &RelationalQueryIr) -> ServerPlan {
     }
 }
 
-fn adapt_scan(scan: &ScanIr) -> Scan {
+fn adapt_scan(scan: &ScanIr<TypeId>) -> Scan {
     Scan {
         input: adapt_input(scan.input),
         object_type: scan.object_type,
     }
 }
 
-fn adapt_ordering(ordering: &OrderingIr) -> Ordering {
+fn adapt_ordering(ordering: &OrderingIr<TypeId, FieldId>) -> Ordering {
     Ordering {
         expression: adapt_expression(&ordering.expression),
         direction: adapt_sort_direction(ordering.direction),
@@ -45,7 +47,7 @@ fn adapt_ordering(ordering: &OrderingIr) -> Ordering {
     }
 }
 
-fn adapt_expression(expression: &ExpressionIr) -> Expression {
+fn adapt_expression(expression: &ExpressionIr<TypeId, FieldId>) -> Expression {
     Expression {
         kind: match &expression.kind {
             CompilerExpressionKind::ObjectReference { input } => ExpressionKind::ObjectReference {
@@ -71,16 +73,16 @@ const fn adapt_input(input: InputSlot) -> u32 {
     input.0 as u32
 }
 
-const fn adapt_field_step(step: ResolvedFieldStep) -> FieldStep {
+const fn adapt_field_step(step: ResolvedFieldStep<TypeId, FieldId>) -> FieldStep {
     FieldStep {
         owner: step.owner,
         field: step.field,
     }
 }
 
-const fn adapt_value_type(value_type: CompilerValueType) -> ValueType {
+const fn adapt_value_type(value_type: CompilerValueType<TypeId>) -> ValueType {
     ValueType {
-        resolved_type: value_type.resolved_type,
+        resolved_type: value_type.semantic_type().into_core(),
         nullable: value_type.nullable,
     }
 }
