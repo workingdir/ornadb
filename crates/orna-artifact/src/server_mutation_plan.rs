@@ -1,15 +1,17 @@
 //! Canonical `orna.server-mutation-plan` artifact formats.
 //!
 //! The format carries only stable Orna identities and the closed expression
-//! set needed by the single-object `INSERT` and `UPDATE` execution slices. It contains
-//! no source names, SQL, PostgreSQL names, runtime object identities, or
-//! source locations.
+//! set needed by the single-object `INSERT`, `UPDATE`, and `DELETE` execution
+//! slices. It contains no source names, SQL, PostgreSQL names, runtime object
+//! identities, or source locations.
 //!
 //! Version 1 encodes one insert target, an ordered field-assignment list, and
 //! the returned object type. Version 2 encodes one update target, its selector
 //! parameter, the ordered field assignments, and the returned object type.
-//! Catalogue-dependent field and parameter checks remain outside this artifact
-//! boundary.
+//! Version 3 encodes one delete target and its selector parameter in a separate
+//! plan model because DELETE has a fixed BOOLEAN result and no assignments.
+//! Catalogue-dependent field, parameter, and result checks remain outside this
+//! artifact boundary.
 
 use std::fmt;
 
@@ -25,13 +27,17 @@ pub const LANGUAGE_VERSION_IDENTITY: &str = "orna.language/1";
 /// The version used by INSERT artifacts.
 ///
 /// This name is retained for source compatibility with the first format. New
-/// code that handles more than INSERT should use [`INSERT_FORMAT_VERSION`] and
-/// [`UPDATE_FORMAT_VERSION`] explicitly.
+/// code that handles more than INSERT should select
+/// [`INSERT_FORMAT_VERSION`], [`UPDATE_FORMAT_VERSION`], or
+/// [`DELETE_FORMAT_VERSION`] explicitly and use [`ServerDeletePlan`] for the
+/// distinct DELETE result shape.
 pub const FORMAT_VERSION: u32 = 1;
 /// The version used by INSERT artifacts.
 pub const INSERT_FORMAT_VERSION: u32 = FORMAT_VERSION;
 /// The version used by UPDATE artifacts.
 pub const UPDATE_FORMAT_VERSION: u32 = 2;
+/// The version used by DELETE artifacts.
+pub const DELETE_FORMAT_VERSION: u32 = 3;
 /// The exact first eight bytes of every server-mutation-plan artifact.
 pub const MAGIC: [u8; 8] = *b"ORNAMP\0\0";
 /// The maximum number of field assignments in one mutation plan.
@@ -41,6 +47,7 @@ pub const MAX_ARTIFACT_BYTES: usize = 16 * 1024 * 1024;
 
 const INSERT_OPERATION_TAG: u8 = 1;
 const UPDATE_OPERATION_TAG: u8 = 2;
+const DELETE_OPERATION_TAG: u8 = 3;
 const PARAMETER_EXPRESSION_TAG: u8 = 1;
 const BOOLEAN_EXPRESSION_TAG: u8 = 2;
 const TYPED_NULL_EXPRESSION_TAG: u8 = 3;
@@ -171,10 +178,7 @@ impl ServerMutationPlan {
     pub fn decode(bytes: &[u8]) -> Result<Self, ServerMutationPlanError> {
         validate_artifact_size(bytes.len())?;
         let mut reader = Reader::new(bytes);
-        if reader.array::<8>()? != MAGIC {
-            return Err(ServerMutationPlanError::InvalidMagic);
-        }
-        let version = reader.u32()?;
+        let version = decode_versioned_header(&mut reader)?;
         if !matches!(version, INSERT_FORMAT_VERSION | UPDATE_FORMAT_VERSION) {
             return Err(ServerMutationPlanError::UnsupportedVersion(version));
         }
@@ -217,6 +221,81 @@ impl ServerMutationPlan {
     }
 }
 
+/// A checked version-3 single-object DELETE plan.
+///
+/// DELETE is deliberately separate from [`ServerMutationPlan`]: it has no
+/// field assignments or returned object type, and its operation fixes the
+/// public result to zero or one BOOLEAN value.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ServerDeletePlan {
+    target: TypeId,
+    selector: MutationSelector,
+}
+
+impl ServerDeletePlan {
+    /// Builds a version-3 delete plan from stable Orna identities.
+    pub const fn new(target: TypeId, selector: MutationSelector) -> Self {
+        Self { target, selector }
+    }
+
+    /// Returns the canonical artifact version for DELETE.
+    pub const fn format_version(&self) -> u32 {
+        DELETE_FORMAT_VERSION
+    }
+
+    /// Returns the target object type identity.
+    pub const fn target(&self) -> TypeId {
+        self.target
+    }
+
+    /// Returns the parameter that supplies the deleted object identity.
+    pub const fn selector(&self) -> MutationSelector {
+        self.selector
+    }
+
+    /// Encodes this checked DELETE plan into canonical version-3 bytes.
+    pub fn encode(&self) -> Result<Vec<u8>, ServerMutationPlanError> {
+        let mut writer = Writer::new();
+        writer.bytes(&MAGIC);
+        writer.u32(DELETE_FORMAT_VERSION);
+        writer.u8(DELETE_OPERATION_TAG);
+        writer.type_id(self.target);
+        writer.function_id(self.selector.owner);
+        writer.parameter_id(self.selector.parameter);
+        let bytes = writer.finish();
+        validate_artifact_size(bytes.len())?;
+        Ok(bytes)
+    }
+
+    /// Decodes exactly one canonical version-3 DELETE artifact.
+    pub fn decode(bytes: &[u8]) -> Result<Self, ServerMutationPlanError> {
+        validate_artifact_size(bytes.len())?;
+        let mut reader = Reader::new(bytes);
+        let version = decode_versioned_header(&mut reader)?;
+        if version != DELETE_FORMAT_VERSION {
+            return Err(ServerMutationPlanError::UnsupportedVersion(version));
+        }
+        let operation = reader.u8()?;
+        if operation != DELETE_OPERATION_TAG {
+            return Err(ServerMutationPlanError::InvalidEnumTag {
+                kind: "operation",
+                tag: operation,
+            });
+        }
+        let target = reader.type_id()?;
+        let selector = MutationSelector::new(reader.function_id()?, reader.parameter_id()?);
+        reader.require_finished()?;
+        Ok(Self::new(target, selector))
+    }
+}
+
+fn decode_versioned_header(reader: &mut Reader<'_>) -> Result<u32, ServerMutationPlanError> {
+    if reader.array::<8>()? != MAGIC {
+        return Err(ServerMutationPlanError::InvalidMagic);
+    }
+    reader.u32()
+}
+
 fn collect_assignments(
     assignments: impl IntoIterator<Item = FieldAssignment>,
 ) -> Result<Vec<FieldAssignment>, ServerMutationPlanError> {
@@ -248,7 +327,7 @@ pub enum ServerMutationOperation {
     },
 }
 
-/// The owner-qualified parameter that selects one object for UPDATE.
+/// The owner-qualified parameter that selects one object for UPDATE or DELETE.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MutationSelector {
     owner: FunctionId,
@@ -1160,6 +1239,21 @@ mod tests {
     }
 
     #[test]
+    fn round_trips_delete_with_exact_target_selector_and_version() {
+        let plan = ServerDeletePlan::new(TARGET, MutationSelector::new(FUNCTION_A, PARAMETER_A));
+
+        let encoded = plan.encode().unwrap();
+        let decoded = ServerDeletePlan::decode(&encoded).unwrap();
+
+        assert_eq!(decoded, plan);
+        assert_eq!(decoded.encode(), Ok(encoded));
+        assert_eq!(decoded.format_version(), DELETE_FORMAT_VERSION);
+        assert_eq!(decoded.target(), TARGET);
+        assert_eq!(decoded.selector().owner(), FUNCTION_A);
+        assert_eq!(decoded.selector().parameter(), PARAMETER_A);
+    }
+
+    #[test]
     fn encodes_minimal_boolean_golden_exactly() {
         let plan = plan_with([(FIELD_A, MutationExpression::boolean_literal(true))]);
         assert_eq!(
@@ -1184,6 +1278,19 @@ mod tests {
                 7, 7, 7, 7, 7, 7, 7, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 3,
                 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2, 1, 1, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1,
                 1, 1, 1, 1, 1, 1, 1, 1,
+            ]
+        );
+    }
+
+    #[test]
+    fn encodes_minimal_delete_golden_exactly() {
+        let plan = ServerDeletePlan::new(TARGET, MutationSelector::new(FUNCTION_A, PARAMETER_A));
+        assert_eq!(
+            plan.encode().unwrap(),
+            vec![
+                79, 82, 78, 65, 77, 80, 0, 0, 0, 0, 0, 3, 3, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+                1, 1, 1, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+                7, 7, 7, 7, 7, 7, 7,
             ]
         );
     }
@@ -1234,8 +1341,10 @@ mod tests {
     fn private_tags_are_append_only() {
         assert_eq!(INSERT_OPERATION_TAG, 1);
         assert_eq!(UPDATE_OPERATION_TAG, 2);
+        assert_eq!(DELETE_OPERATION_TAG, 3);
         assert_eq!(INSERT_FORMAT_VERSION, 1);
         assert_eq!(UPDATE_FORMAT_VERSION, 2);
+        assert_eq!(DELETE_FORMAT_VERSION, 3);
         assert_eq!(
             [
                 PARAMETER_EXPRESSION_TAG,
@@ -1444,6 +1553,68 @@ mod tests {
                 Err(ServerMutationPlanError::Truncated)
             );
         }
+    }
+
+    #[test]
+    fn rejects_delete_header_truncation_and_trailing_corruption() {
+        let valid = ServerDeletePlan::new(TARGET, MutationSelector::new(FUNCTION_A, PARAMETER_A))
+            .encode()
+            .unwrap();
+
+        let mut magic = valid.clone();
+        magic[0] = b'X';
+        assert_eq!(
+            ServerDeletePlan::decode(&magic),
+            Err(ServerMutationPlanError::InvalidMagic)
+        );
+
+        for version in [INSERT_FORMAT_VERSION, UPDATE_FORMAT_VERSION, 99] {
+            let mut wrong_version = valid.clone();
+            wrong_version[8..12].copy_from_slice(&version.to_be_bytes());
+            assert_eq!(
+                ServerDeletePlan::decode(&wrong_version),
+                Err(ServerMutationPlanError::UnsupportedVersion(version))
+            );
+        }
+
+        for operation in [INSERT_OPERATION_TAG, UPDATE_OPERATION_TAG, 99] {
+            let mut wrong_operation = valid.clone();
+            wrong_operation[12] = operation;
+            assert_eq!(
+                ServerDeletePlan::decode(&wrong_operation),
+                Err(ServerMutationPlanError::InvalidEnumTag {
+                    kind: "operation",
+                    tag: operation,
+                })
+            );
+        }
+
+        assert_eq!(
+            ServerMutationPlan::decode(&valid),
+            Err(ServerMutationPlanError::UnsupportedVersion(
+                DELETE_FORMAT_VERSION
+            ))
+        );
+        for prefix in 0..valid.len() {
+            assert_eq!(
+                ServerDeletePlan::decode(&valid[..prefix]),
+                Err(ServerMutationPlanError::Truncated)
+            );
+        }
+        let mut trailing = valid;
+        trailing.push(0);
+        assert_eq!(
+            ServerDeletePlan::decode(&trailing),
+            Err(ServerMutationPlanError::TrailingBytes)
+        );
+        let oversized = vec![0; MAX_ARTIFACT_BYTES + 1];
+        assert_eq!(
+            ServerDeletePlan::decode(&oversized),
+            Err(ServerMutationPlanError::ArtifactSizeLimit {
+                size: MAX_ARTIFACT_BYTES + 1,
+                maximum: MAX_ARTIFACT_BYTES,
+            })
+        );
     }
 
     #[test]
@@ -1664,16 +1835,21 @@ mod tests {
             update_plan_with([(FIELD_A, MutationExpression::boolean_literal(true))])
                 .encode()
                 .unwrap(),
+            ServerDeletePlan::new(TARGET, MutationSelector::new(FUNCTION_A, PARAMETER_A))
+                .encode()
+                .unwrap(),
         ];
         for encoded in encoded_plans {
             for forbidden in [
                 b"INSERT".as_slice(),
                 b"UPDATE".as_slice(),
+                b"DELETE".as_slice(),
                 b"_orna".as_slice(),
                 b"source".as_slice(),
                 b"tasks".as_slice(),
                 b"created".as_slice(),
                 b"updated".as_slice(),
+                b"deleted".as_slice(),
             ] {
                 assert!(
                     !encoded
