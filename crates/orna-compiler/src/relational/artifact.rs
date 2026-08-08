@@ -107,13 +107,21 @@ mod tests {
         Expression, ExpressionKind, NullOrder, ServerPlan, SortDirection,
     };
     use orna_core::{
-        CatalogueRevisionId,
-        catalogue::{CatalogueSnapshot, QualifiedSemanticName},
-        source::{SourceBundle, SourceUnit},
+        CatalogueRevisionId, FieldId, SchemaId, TypeId,
+        catalogue::{
+            CatalogueSnapshot, FieldDefinition, ObjectTypeDefinition, QualifiedSemanticName,
+            SchemaDefinition,
+        },
         types::{ResolvedType, StandardScalar},
     };
+    use orna_syntax::{ServerFunctionBody, parse};
 
-    use crate::check;
+    const TASK_TYPE: TypeId = TypeId::from_bytes([1; 16]);
+    const PERSON_TYPE: TypeId = TypeId::from_bytes([2; 16]);
+    const ASSIGNEE_FIELD: FieldId = FieldId::from_bytes([11; 16]);
+    const COMPLETED_FIELD: FieldId = FieldId::from_bytes([12; 16]);
+    const TITLE_FIELD: FieldId = FieldId::from_bytes([13; 16]);
+    const PERSON_NAME_FIELD: FieldId = FieldId::from_bytes([21; 16]);
 
     const SOURCE: &str = "CREATE SCHEMA semantic_schema_marker; \
         CREATE TYPE semantic_schema_marker.person_type_marker AS OBJECT ( \
@@ -144,25 +152,26 @@ mod tests {
 
     #[test]
     fn encodes_a_checked_server_function_without_source_semantics() {
-        let bundle =
-            SourceBundle::new([SourceUnit::new("source_semantic_marker.orna", SOURCE)]).unwrap();
-        let base = CatalogueSnapshot::new(CatalogueRevisionId::from_bytes([0; 16]), vec![], vec![])
-            .unwrap();
-        let report = check(&bundle, &base);
-
+        let parsed = parse(SOURCE);
         assert!(
-            report.diagnostics().is_empty(),
+            parsed.diagnostics().is_empty(),
             "{:?}",
-            report.diagnostics()
+            parsed.diagnostics()
         );
-        let checked = &report.checked_bundle().unwrap().server_functions()[0];
-        let encoded = checked.plan().encode_server_plan().unwrap();
-        assert_eq!(checked.plan().encode_server_plan().unwrap(), encoded);
+        let ServerFunctionBody::SqlQuery(body) = &parsed.server_functions()[0].body;
+        let catalogue = catalogue();
+        let checked =
+            super::super::check_query(&body.query, &catalogue, "source_semantic_marker.orna")
+                .unwrap();
+        let encoded = checked.encode_server_plan().unwrap();
+        assert_eq!(checked.encode_server_plan().unwrap(), encoded);
 
         let decoded = ServerPlan::decode(&encoded).unwrap();
-        let catalogue = report.candidate().unwrap();
-        let task = object(catalogue, &["semantic_schema_marker", "task_type_marker"]);
-        let person = object(catalogue, &["semantic_schema_marker", "person_type_marker"]);
+        let task = object(&catalogue, &["semantic_schema_marker", "task_type_marker"]);
+        let person = object(
+            &catalogue,
+            &["semantic_schema_marker", "person_type_marker"],
+        );
         let assignee = task.field_by_name("assignee_marker").unwrap();
         let title = task.field_by_name("title_marker").unwrap();
         let completed = task.field_by_name("completed_marker").unwrap();
@@ -256,6 +265,80 @@ mod tests {
                 "artifact contains submitted source name {text:?}"
             );
         }
+    }
+
+    fn catalogue() -> CatalogueSnapshot {
+        CatalogueSnapshot::new(
+            CatalogueRevisionId::from_bytes([9; 16]),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes([1; 16]),
+                name(&["semantic_schema_marker"]),
+            )],
+            vec![
+                ObjectTypeDefinition::new(
+                    PERSON_TYPE,
+                    name(&["semantic_schema_marker", "person_type_marker"]),
+                    vec![field(
+                        PERSON_NAME_FIELD,
+                        "person_name_marker",
+                        0,
+                        ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+                        false,
+                    )],
+                ),
+                ObjectTypeDefinition::new(
+                    TASK_TYPE,
+                    name(&["semantic_schema_marker", "task_type_marker"]),
+                    vec![
+                        field(
+                            ASSIGNEE_FIELD,
+                            "assignee_marker",
+                            0,
+                            ResolvedType::reference(PERSON_TYPE),
+                            true,
+                        ),
+                        field(
+                            TITLE_FIELD,
+                            "title_marker",
+                            1,
+                            ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+                            true,
+                        ),
+                        field(
+                            COMPLETED_FIELD,
+                            "completed_marker",
+                            2,
+                            ResolvedType::scalar(StandardScalar::Boolean),
+                            false,
+                        ),
+                    ],
+                ),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn field(
+        id: FieldId,
+        name: &str,
+        ordinal: u32,
+        resolved_type: ResolvedType,
+        nullable: bool,
+    ) -> FieldDefinition {
+        FieldDefinition::new(
+            id,
+            name,
+            ordinal,
+            resolved_type,
+            nullable,
+            false,
+            None,
+            None,
+        )
+    }
+
+    fn name(parts: &[&str]) -> QualifiedSemanticName {
+        QualifiedSemanticName::new(parts.iter().copied()).unwrap()
     }
 
     fn object<'a>(
