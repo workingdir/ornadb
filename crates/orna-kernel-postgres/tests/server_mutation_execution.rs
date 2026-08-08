@@ -1,4 +1,4 @@
-//! Live PostgreSQL tests for atomic single-row SERVER INSERT execution.
+//! Live PostgreSQL tests for atomic single-row SERVER mutation execution.
 
 mod support;
 
@@ -26,7 +26,8 @@ use orna_core::{
 };
 use orna_kernel_postgres::{
     PostgresKernel, PostgresKernelError, ServerInsertCommitState, ServerInsertError,
-    ServerInsertResult,
+    ServerInsertResult, ServerMutationError, ServerUpdateCommitState, ServerUpdateError,
+    ServerUpdateResult,
 };
 use support::{TestDatabase, TestResult, TestSession, failure, with_test_database};
 use tokio_postgres::error::SqlState;
@@ -57,7 +58,18 @@ const MUTATION_SOURCE: &str = "CREATE SCHEMA tasks;\n\
     AS INSERT INTO tasks.task AS made_task\n\
     (active, count, amount, score, title, payload, owner)\n\
     VALUES (p_active, p_count, p_amount, p_score, p_title, p_payload, p_owner)\n\
-    RETURNING REF(made_task);\n";
+    RETURNING REF(made_task);\n\
+    CREATE SERVER FUNCTION tasks.update_task(\n\
+      p_task REF tasks.task, p_active BOOL, p_count INT,\n\
+      p_title TEXT, p_owner REF tasks.owner\n\
+    )\n\
+    RETURNS ROWS (updated_task REF tasks.task)\n\
+    SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE\n\
+    AS UPDATE tasks.task AS updated_task\n\
+    SET active = p_active, count = p_count, title = p_title,\n\
+        owner = p_owner, note = NULL\n\
+    WHERE REF(updated_task) = p_task\n\
+    RETURNING REF(updated_task);\n";
 
 #[cfg(feature = "test-hooks")]
 const MUTATION_SOURCE_EDIT: &str = "-- source-only edit\n\
@@ -79,7 +91,15 @@ const MUTATION_SOURCE_EDIT: &str = "-- source-only edit\n\
     AS INSERT INTO tasks.task AS made_task\n\
     ( active, count, amount, score, title, payload, owner )\n\
     VALUES ( p_active, p_count, p_amount, p_score, p_title, p_payload, p_owner )\n\
-    RETURNING REF(made_task);\n";
+    RETURNING REF(made_task);\n\
+    CREATE SERVER FUNCTION tasks.update_task( p_task REF tasks.task,\n\
+      p_active BOOL, p_count INT, p_title TEXT, p_owner REF tasks.owner )\n\
+    RETURNS ROWS ( updated_task REF tasks.task ) SECURITY INVOKER\n\
+    TRANSACTION ATOMIC VOLATILITY VOLATILE\n\
+    AS UPDATE tasks.task AS updated_task\n\
+    SET active = p_active, count = p_count, title = p_title,\n\
+      owner = p_owner, note = NULL\n\
+    WHERE REF(updated_task) = p_task RETURNING REF(updated_task);\n";
 
 #[cfg(feature = "test-hooks")]
 const WAIT: Duration = Duration::from_secs(10);
@@ -178,6 +198,81 @@ async fn commits_exact_typed_rows_uses_private_ids_and_allocates_unique_ids() ->
         require(
             kernel.recover().await?.pair() == applied.pair(),
             "row execution changed the active revision pair",
+        )?;
+        require_no_session_leaks(&database).await
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn update_returns_zero_or_one_row_and_rolls_back_reference_failures() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = hostile_kernel(&database)?;
+        kernel.bootstrap().await?;
+        let empty = kernel.recover().await?;
+        let applied = kernel.apply(&candidate(MUTATION_SOURCE, &empty)?).await?;
+        let fixture = Fixture::from_active(&applied)?;
+        install_public_decoy(&database, fixture.task).await?;
+
+        let first_owner = insert_owner(&kernel, fixture, "Ada").await?;
+        let second_owner = insert_owner(&kernel, fixture, "Grace").await?;
+        let original = ExactTask::new(first_owner.object());
+        let task = kernel
+            .execute_server_insert(fixture.create_task, &task_arguments(fixture, &original)?)
+            .await?;
+
+        let changed = ExactTask {
+            active: true,
+            count: -73,
+            amount: original.amount,
+            score: original.score,
+            title: String::from("updated task"),
+            payload: original.payload.clone(),
+            owner: second_owner.object(),
+        };
+        let updated = kernel
+            .execute_server_update(
+                fixture.update_task,
+                &update_arguments(fixture, task.object(), &changed)?,
+            )
+            .await?;
+        require_update_result(&updated, applied.pair(), fixture, task.object(), true)?;
+        require_task_row(&database, fixture, task.object(), &changed).await?;
+
+        let absent = ObjectId::from_bytes([0xb1; 16]);
+        let missing = kernel
+            .execute_server_update(
+                fixture.update_task,
+                &update_arguments(fixture, absent, &changed)?,
+            )
+            .await?;
+        require_update_result(&missing, applied.pair(), fixture, absent, false)?;
+        require(
+            count_rows(&database, fixture.task).await? == 1,
+            "updating an absent object changed the target relation",
+        )?;
+
+        let invalid_reference = ExactTask {
+            owner: ObjectId::from_bytes([0xb2; 16]),
+            ..changed.clone()
+        };
+        let error = kernel
+            .execute_server_update(
+                fixture.update_task,
+                &update_arguments(fixture, task.object(), &invalid_reference)?,
+            )
+            .await
+            .expect_err("a missing referenced owner must reject the update");
+        require_update_database_failure(&error, applied.pair(), fixture)?;
+        require_task_row(&database, fixture, task.object(), &changed).await?;
+        require(
+            count_public_decoy_rows(&database, fixture.task).await? == 0,
+            "hostile public search_path redirected the private UPDATE",
+        )?;
+        require(
+            kernel.recover().await?.pair() == applied.pair(),
+            "SERVER UPDATE execution changed the active revision pair",
         )?;
         require_no_session_leaks(&database).await
     })
@@ -584,6 +679,13 @@ struct Fixture {
     task_title_parameter: ParameterId,
     task_payload_parameter: ParameterId,
     task_owner_parameter: ParameterId,
+    update_task: FunctionId,
+    update_task_revision: FunctionRevisionId,
+    update_selector_parameter: ParameterId,
+    update_active_parameter: ParameterId,
+    update_count_parameter: ParameterId,
+    update_title_parameter: ParameterId,
+    update_owner_parameter: ParameterId,
 }
 
 impl Fixture {
@@ -612,6 +714,12 @@ impl Fixture {
             .iter()
             .find(|function| name_is(function.name().parts(), &["tasks", "create_task"]))
             .ok_or_else(|| failure("create_task function is absent"))?;
+        let update_task = active
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|function| name_is(function.name().parts(), &["tasks", "update_task"]))
+            .ok_or_else(|| failure("update_task function is absent"))?;
         let object_field = |object: &orna_core::catalogue::ObjectTypeDefinition, name| {
             object
                 .field_by_name(name)
@@ -648,10 +756,18 @@ impl Fixture {
             task_title_parameter: parameter(create_task, "p_title")?,
             task_payload_parameter: parameter(create_task, "p_payload")?,
             task_owner_parameter: parameter(create_task, "p_owner")?,
+            update_task: update_task.id(),
+            update_task_revision: update_task.current_revision(),
+            update_selector_parameter: parameter(update_task, "p_task")?,
+            update_active_parameter: parameter(update_task, "p_active")?,
+            update_count_parameter: parameter(update_task, "p_count")?,
+            update_title_parameter: parameter(update_task, "p_title")?,
+            update_owner_parameter: parameter(update_task, "p_owner")?,
         })
     }
 }
 
+#[derive(Clone)]
 struct ExactTask {
     active: bool,
     count: i32,
@@ -762,6 +878,41 @@ fn task_arguments(fixture: Fixture, task: &ExactTask) -> TestResult<Vec<Function
     ])
 }
 
+fn update_arguments(
+    fixture: Fixture,
+    selector: ObjectId,
+    task: &ExactTask,
+) -> TestResult<Vec<FunctionArgument>> {
+    Ok(vec![
+        FunctionArgument::new(
+            fixture.update_owner_parameter,
+            RuntimeValue::Reference {
+                target: fixture.owner,
+                object: task.owner,
+            },
+        )?,
+        FunctionArgument::new(
+            fixture.update_title_parameter,
+            RuntimeValue::Text(task.title.clone()),
+        )?,
+        FunctionArgument::new(
+            fixture.update_selector_parameter,
+            RuntimeValue::Reference {
+                target: fixture.task,
+                object: selector,
+            },
+        )?,
+        FunctionArgument::new(
+            fixture.update_count_parameter,
+            RuntimeValue::Integer(task.count),
+        )?,
+        FunctionArgument::new(
+            fixture.update_active_parameter,
+            RuntimeValue::Boolean(task.active),
+        )?,
+    ])
+}
+
 fn replace_owner_argument(
     arguments: &mut [FunctionArgument],
     fixture: Fixture,
@@ -828,6 +979,69 @@ fn require_insert_result(
             }],
         "insert result row is not the allocated typed reference",
     )
+}
+
+fn require_update_result(
+    result: &ServerUpdateResult,
+    pair: RevisionPair,
+    fixture: Fixture,
+    selector: ObjectId,
+    matched: bool,
+) -> TestResult<()> {
+    require(
+        result.context().pair() == pair,
+        "update context pair differs",
+    )?;
+    require(
+        result.context().function() == fixture.update_task,
+        "update context function differs",
+    )?;
+    require(
+        result.context().function_revision() == fixture.update_task_revision,
+        "update context function revision differs",
+    )?;
+    require(result.pair() == pair, "update result pair differs")?;
+    require(
+        result.function() == fixture.update_task,
+        "update result function differs",
+    )?;
+    require(
+        result.function_revision() == fixture.update_task_revision,
+        "update result function revision differs",
+    )?;
+    require(result.target() == fixture.task, "update target differs")?;
+    require(result.selector() == selector, "update selector differs")?;
+    require(result.matched() == matched, "update match state differs")?;
+    let [column] = result.rows().columns() else {
+        return Err(failure("update result does not have exactly one column"));
+    };
+    require(
+        column.name() == "updated_task",
+        "update result lost its declared return-column name",
+    )?;
+    require(
+        column.resolved_type() == ResolvedType::reference(fixture.task),
+        "update result column has the wrong reference type",
+    )?;
+    require(!column.nullable(), "update result column became nullable")?;
+    if matched {
+        let [row] = result.rows().rows() else {
+            return Err(failure("matched update does not have exactly one row"));
+        };
+        require(
+            row.values()
+                == [RuntimeValue::Reference {
+                    target: fixture.task,
+                    object: selector,
+                }],
+            "matched update did not return the selected typed reference",
+        )
+    } else {
+        require(
+            result.rows().rows().is_empty(),
+            "absent update returned a row",
+        )
+    }
 }
 
 async fn require_owner_row(
@@ -1054,6 +1268,42 @@ fn require_wrapped_database_failure(
         .map(|error| error.code())
         .ok_or_else(|| failure("database write failure has no database error code"))?;
     require(code == expected_code, "database write error code differs")
+}
+
+fn require_update_database_failure(
+    error: &PostgresKernelError,
+    pair: RevisionPair,
+    fixture: Fixture,
+) -> TestResult<()> {
+    let PostgresKernelError::ServerUpdate(update) = error else {
+        return Err(failure(
+            "database write failure is not a SERVER UPDATE error",
+        ));
+    };
+    require(
+        update.commit_state() == ServerUpdateCommitState::NotCommitted,
+        "database update failure has the wrong commit state",
+    )?;
+    let ServerUpdateError::NotCommitted { context, source } = update else {
+        return Err(failure("database update failure lacks its pinned context"));
+    };
+    require_context(
+        *context,
+        pair,
+        fixture.update_task,
+        fixture.update_task_revision,
+    )?;
+    let ServerMutationError::Database { source } = source.as_ref() else {
+        return Err(failure("failure did not occur during the database update"));
+    };
+    let code = source
+        .as_db_error()
+        .map(|error| error.code())
+        .ok_or_else(|| failure("database update failure has no database error code"))?;
+    require(
+        code == &SqlState::FOREIGN_KEY_VIOLATION,
+        "database update error code differs",
+    )
 }
 
 fn require_context(
