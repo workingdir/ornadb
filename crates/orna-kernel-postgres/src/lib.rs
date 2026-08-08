@@ -29,6 +29,8 @@ pub use bootstrap::ActiveRevision;
 pub use server_execution::{ServerSelectContext, ServerSelectError, ServerSelectResult};
 pub use server_mutation_execution::{
     ServerInsertCommitState, ServerInsertContext, ServerInsertError, ServerInsertResult,
+    ServerMutationCommitState, ServerMutationContext, ServerMutationError, ServerUpdateCommitState,
+    ServerUpdateContext, ServerUpdateError, ServerUpdateResult,
 };
 
 /// A concrete connection point for the private PostgreSQL kernel.
@@ -132,6 +134,8 @@ pub enum PostgresKernelError {
     ServerSelect(ServerSelectError),
     /// A SERVER INSERT function cannot execute or complete its commit lifecycle.
     ServerInsert(ServerInsertError),
+    /// A SERVER UPDATE function cannot execute or complete its commit lifecycle.
+    ServerUpdate(ServerUpdateError),
     /// A durable row value could not be decoded as its selected PostgreSQL type.
     RowDecode {
         /// The relation that supplied the row.
@@ -198,6 +202,7 @@ impl fmt::Display for PostgresKernelError {
             Self::PhysicalPlan(error) => write!(formatter, "physical plan failed: {error}"),
             Self::ServerSelect(error) => write!(formatter, "server SELECT failed: {error}"),
             Self::ServerInsert(error) => write!(formatter, "row creation failed: {error}"),
+            Self::ServerUpdate(error) => write!(formatter, "object update failed: {error}"),
             Self::RowDecode {
                 relation,
                 record,
@@ -235,6 +240,7 @@ impl Error for PostgresKernelError {
             Self::PhysicalPlan(error) => Some(error),
             Self::ServerSelect(error) => Some(error),
             Self::ServerInsert(error) => Some(error),
+            Self::ServerUpdate(error) => Some(error),
             Self::RowDecode { source, .. } => Some(source),
             Self::MigrationMismatch { .. }
             | Self::CatalogueInvariant(_)
