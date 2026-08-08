@@ -42,13 +42,6 @@ pub(crate) struct RelationalQueryIr<T = TypeId, F = FieldId> {
 /// This is deliberately separate from `RelationalQueryIr`. The operation
 /// excludes ordering and has its own projection type domain.
 #[derive(Clone, Debug, Eq, PartialEq)]
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "the preparation stage consumes checked DISTINCT plans in the next slice"
-    )
-)]
 pub(crate) struct DistinctQueryIr<T = TypeId, F = FieldId> {
     scan: ScanIr<T>,
     projections: Vec<ExpressionIr<T, F>>,
@@ -181,13 +174,6 @@ pub(crate) struct QueryCheck<T = TypeId, F = FieldId> {
 
 /// A checked `SELECT DISTINCT` query and its source evidence.
 #[derive(Clone, Debug, Eq, PartialEq)]
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "the resolver consumes checked DISTINCT queries in the next slice"
-    )
-)]
 pub(crate) struct DistinctQueryCheck<T = TypeId, F = FieldId> {
     plan: DistinctQueryIr<T, F>,
     references: Vec<QueryReference<T, F>>,
@@ -310,13 +296,6 @@ impl<T, F, G, P> IdentitySelectedQueryCheck<T, F, G, P> {
     }
 }
 
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "the resolver consumes checked DISTINCT queries in the next slice"
-    )
-)]
 impl<T, F> DistinctQueryCheck<T, F> {
     /// Returns the source-free checked DISTINCT query plan.
     pub(crate) fn plan(&self) -> &DistinctQueryIr<T, F> {
@@ -401,15 +380,15 @@ impl<T, F> RelationalQueryIr<T, F> {
     }
 }
 
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "the preparation stage consumes checked DISTINCT plans in the next slice"
-    )
-)]
 impl<T, F> DistinctQueryIr<T, F> {
     /// Returns the query scan.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "the preparation stage consumes checked DISTINCT plans in the next slice"
+        )
+    )]
     pub(crate) fn scan(&self) -> &ScanIr<T> {
         &self.scan
     }
@@ -420,6 +399,13 @@ impl<T, F> DistinctQueryIr<T, F> {
     }
 
     /// Returns the optional query predicate.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "the preparation stage consumes checked DISTINCT plans in the next slice"
+        )
+    )]
     pub(crate) fn selection(&self) -> Option<&ExpressionIr<T, F>> {
         self.selection.as_ref()
     }
@@ -837,13 +823,6 @@ where
 }
 
 /// Checks the closed parameter-free `SELECT DISTINCT` form from ADR 0010.
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "the resolver consumes checked DISTINCT queries in the next slice"
-    )
-)]
 pub(crate) fn check_distinct_query_in<T, F>(
     query: &SelectQuery,
     catalogue: &impl QueryCatalogue<T, F>,
