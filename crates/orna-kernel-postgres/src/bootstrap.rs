@@ -131,34 +131,9 @@ async fn bootstrap_client(client: &mut Client) -> Result<ActiveRevision, Postgre
 
 async fn apply_migrations(transaction: &Transaction<'_>) -> Result<(), PostgresKernelError> {
     let migrations = validated_migration_registry()?;
-    let applied = transaction
-        .query(
-            "SELECT version, name, checksum
-             FROM _orna_kernel.schema_migrations
-             ORDER BY version",
-            &[],
-        )
-        .await
-        .map_err(PostgresKernelError::Database)?;
+    let applied_count = validated_applied_migration_count(transaction, migrations).await?;
 
-    for (index, row) in applied.iter().enumerate() {
-        let version: i64 = row.get("version");
-        let Some(expected) = migrations.get(index) else {
-            return Err(PostgresKernelError::MigrationMismatch { version });
-        };
-        if version != expected.version {
-            return Err(PostgresKernelError::MigrationMismatch { version });
-        }
-
-        let applied_name: String = row.get("name");
-        let applied_checksum: Vec<u8> = row.get("checksum");
-        let expected_checksum = migration_checksum(expected);
-        if applied_name != expected.name || applied_checksum != expected_checksum {
-            return Err(PostgresKernelError::MigrationMismatch { version });
-        }
-    }
-
-    for migration in migrations.iter().skip(applied.len()) {
+    for migration in migrations.iter().skip(applied_count) {
         transaction
             .batch_execute(migration.sql)
             .await
@@ -176,6 +151,58 @@ async fn apply_migrations(transaction: &Transaction<'_>) -> Result<(), PostgresK
     }
 
     Ok(())
+}
+
+pub(crate) async fn require_current_migrations(
+    transaction: &Transaction<'_>,
+) -> Result<(), PostgresKernelError> {
+    let migrations = validated_migration_registry()?;
+    let applied_count = validated_applied_migration_count(transaction, migrations).await?;
+    if applied_count == migrations.len() {
+        return Ok(());
+    }
+
+    Err(PostgresKernelError::MigrationMismatch {
+        version: migrations[applied_count].version,
+    })
+}
+
+async fn validated_applied_migration_count(
+    transaction: &Transaction<'_>,
+    migrations: &[Migration],
+) -> Result<usize, PostgresKernelError> {
+    let applied = transaction
+        .query(
+            "SELECT version, name, checksum
+             FROM _orna_kernel.schema_migrations
+             ORDER BY version",
+            &[],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?;
+
+    for (index, row) in applied.iter().enumerate() {
+        let version: i64 = row
+            .try_get("version")
+            .map_err(PostgresKernelError::Database)?;
+        let Some(expected) = migrations.get(index) else {
+            return Err(PostgresKernelError::MigrationMismatch { version });
+        };
+        if version != expected.version {
+            return Err(PostgresKernelError::MigrationMismatch { version });
+        }
+
+        let applied_name: String = row.try_get("name").map_err(PostgresKernelError::Database)?;
+        let applied_checksum: Vec<u8> = row
+            .try_get("checksum")
+            .map_err(PostgresKernelError::Database)?;
+        let expected_checksum = migration_checksum(expected);
+        if applied_name != expected.name || applied_checksum != expected_checksum {
+            return Err(PostgresKernelError::MigrationMismatch { version });
+        }
+    }
+
+    Ok(applied.len())
 }
 
 fn validated_migration_registry() -> Result<&'static [Migration], PostgresKernelError> {
