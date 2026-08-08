@@ -871,6 +871,12 @@ impl CheckedServerFunction {
         &self.references
     }
 
+    /// Returns the checked relational query when the function has a `SELECT` body.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn query_plan(&self) -> Option<&RelationalQueryIr<CheckedTypeId, CheckedFieldId>> {
+        Some(&self.plan)
+    }
+
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn plan(&self) -> &RelationalQueryIr<CheckedTypeId, CheckedFieldId> {
         &self.plan
