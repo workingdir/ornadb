@@ -1,14 +1,14 @@
 use rowan::{GreenNode, GreenNodeBuilder, Language};
 
 use crate::{
-    CapabilitySpecification, Diagnostic, FieldRenameDeclaration, FunctionReturnType,
-    FunctionSecurity, FunctionTransaction, FunctionVolatility, InsertStatement, MutationValue,
-    NamePart, NullOrdering, ObjectFieldDeclaration, ObjectSource, ObjectTypeDeclaration,
-    OnDeletePolicy, OrderingDirection, OrderingExpression, Parse, QualifiedName, QueryExpression,
-    RowsColumnDeclaration, SchemaDeclaration, SelectQuery, ServerFunctionBody,
-    ServerFunctionDeclaration, ServerFunctionParameter, SourceSlice, SourceSpan, SqlInsertBody,
-    SqlQueryBody, SqlUpdateBody, StandardLargeObjectKind, SyntaxTree, TypeSpecification,
-    UpdateAssignment, UpdateStatement,
+    CapabilitySpecification, DeleteStatement, Diagnostic, FieldRenameDeclaration,
+    FunctionReturnType, FunctionSecurity, FunctionTransaction, FunctionVolatility, InsertStatement,
+    MutationValue, NamePart, NullOrdering, ObjectFieldDeclaration, ObjectSource,
+    ObjectTypeDeclaration, OnDeletePolicy, OrderingDirection, OrderingExpression, Parse,
+    QualifiedName, QueryExpression, RowsColumnDeclaration, SchemaDeclaration, SelectQuery,
+    ServerFunctionBody, ServerFunctionDeclaration, ServerFunctionParameter, SourceSlice,
+    SourceSpan, SqlDeleteBody, SqlInsertBody, SqlQueryBody, SqlUpdateBody, StandardLargeObjectKind,
+    SyntaxTree, TypeSpecification, UpdateAssignment, UpdateStatement,
     lexer::{Token, TokenKind, lex},
 };
 
@@ -46,6 +46,7 @@ pub(crate) enum SyntaxKind {
     SqlInsertBody,
     AlterTypeRenameFieldStatement,
     SqlUpdateBody,
+    SqlDeleteBody,
 }
 
 impl From<SyntaxKind> for rowan::SyntaxKind {
@@ -93,6 +94,7 @@ impl Language for OrnaLanguage {
             28 => SyntaxKind::SqlInsertBody,
             29 => SyntaxKind::AlterTypeRenameFieldStatement,
             30 => SyntaxKind::SqlUpdateBody,
+            31 => SyntaxKind::SqlDeleteBody,
             _ => panic!("unknown Orna syntax kind"),
         }
     }
@@ -874,10 +876,13 @@ impl<'source> Parser<'source> {
     fn parse_server_function_body(&mut self) -> Option<ServerFunctionBody> {
         let is_insert = self.current().is_some_and(|token| token.is_word("INSERT"));
         let is_update = self.current().is_some_and(|token| token.is_word("UPDATE"));
+        let is_delete = self.current().is_some_and(|token| token.is_word("DELETE"));
         let syntax_kind = if is_insert {
             SyntaxKind::SqlInsertBody
         } else if is_update {
             SyntaxKind::SqlUpdateBody
+        } else if is_delete {
+            SyntaxKind::SqlDeleteBody
         } else {
             SyntaxKind::SqlQueryBody
         };
@@ -888,6 +893,8 @@ impl<'source> Parser<'source> {
                     "expected a SQL INSERT after AS"
                 } else if is_update {
                     "expected an UPDATE after AS"
+                } else if is_delete {
+                    "expected a DELETE after AS"
                 } else {
                     "expected a SQL query after AS"
                 })?;
@@ -923,6 +930,22 @@ impl<'source> Parser<'source> {
                 Some(ServerFunctionBody::SqlUpdate(SqlUpdateBody {
                     source,
                     update,
+                }))
+            } else if is_delete {
+                let delete = match parse_sql_delete(body_tokens) {
+                    Ok(delete) => delete,
+                    Err(error) => {
+                        self.diagnostics.push(Diagnostic {
+                            code: error.code,
+                            message: error.message,
+                            span: error.span,
+                        });
+                        return None;
+                    }
+                };
+                Some(ServerFunctionBody::SqlDelete(SqlDeleteBody {
+                    source,
+                    delete,
                 }))
             } else {
                 let query = match parse_select_query(body_tokens) {
@@ -1503,6 +1526,7 @@ enum SqlBodySyntax {
     Select,
     Insert,
     Update,
+    Delete,
 }
 
 struct SqlBodyParser<'tokens, 'source> {
@@ -2068,54 +2092,8 @@ impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
             return Err(self.expected("WHERE after the UPDATE assignments"));
         }
         self.skip_trivia();
-        if self.take_word("REF").is_none() {
-            return Err(self.expected("REF(target_alias) after WHERE"));
-        }
-        self.skip_trivia();
-        self.take_kind(TokenKind::LeftParenthesis)
-            .ok_or_else(|| self.expected("'(' after WHERE REF"))?;
-        self.skip_trivia();
-        let selector_alias = self.parse_name_part("the alias inside WHERE REF(...)")?;
-        if !identifiers_equal(&target_alias, &selector_alias) {
-            return Err(alias_mismatch(
-                "WHERE REF",
-                &target_alias,
-                &selector_alias,
-                "UPDATE",
-            ));
-        }
-        self.skip_trivia();
-        self.take_kind(TokenKind::RightParenthesis)
-            .ok_or_else(|| self.expected("')' after the WHERE REF alias"))?;
-        self.skip_trivia();
-        if self.take_symbol("=").is_none() {
-            return Err(self.expected("'=' after WHERE REF(target_alias)"));
-        }
-        self.skip_trivia();
-        if self.current().is_some_and(|token| {
-            token.is_word("TRUE") || token.is_word("FALSE") || token.is_word("NULL")
-        }) {
-            return Err(self.expected("a declared REF parameter after '='"));
-        }
-        let selector_parameter = self.parse_name_part("a declared REF parameter after '='")?;
-        self.skip_trivia();
-        if let Some(dot) = self.take_kind(TokenKind::Dot) {
-            return Err(QueryParseError {
-                code: "ORNA0001",
-                message: "use the selector parameter name by itself after '='; do not add an object or alias"
-                    .to_owned(),
-                span: dot.span(),
-            });
-        }
-        if self
-            .current()
-            .is_some_and(|token| token.kind == TokenKind::LeftParenthesis)
-        {
-            return Err(self.implementation_gap(
-                "function calls as UPDATE selectors",
-                "a declared REF parameter name by itself",
-            ));
-        }
+        let (selector_alias, selector_parameter) =
+            self.parse_identity_selector(&target_alias, "UPDATE")?;
 
         if !self
             .current()
@@ -2148,6 +2126,116 @@ impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
 }
 
 impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
+    fn parse_delete(mut self) -> Result<DeleteStatement, QueryParseError> {
+        let delete = self
+            .take_word("DELETE")
+            .ok_or_else(|| self.expected("DELETE"))?;
+        self.skip_trivia();
+        if self.take_word("FROM").is_none() {
+            return Err(self.expected("FROM after DELETE"));
+        }
+        self.skip_trivia();
+        let (target_object, target_alias) =
+            self.parse_aliased_mutation_target("DELETE", "DELETE FROM")?;
+        self.skip_trivia();
+        if self.take_word("WHERE").is_none() {
+            return Err(self.expected("WHERE after the DELETE target alias"));
+        }
+        self.skip_trivia();
+        let (selector_alias, selector_parameter) =
+            self.parse_identity_selector(&target_alias, "DELETE")?;
+
+        if self.take_word("RETURNING").is_none() {
+            return Err(self.expected("RETURNING after the DELETE selector"));
+        }
+        self.skip_trivia();
+        let returned = self
+            .take_word("TRUE")
+            .ok_or_else(|| self.expected("TRUE after RETURNING"))?;
+        let returning_true = SourceSlice {
+            text: returned.text.to_owned(),
+            span: returned.span(),
+        };
+        self.skip_trivia();
+        if self.current().is_some() {
+            return Err(self.implementation_gap(
+                self.current().expect("current token exists").text,
+                "the end of the DELETE body",
+            ));
+        }
+
+        Ok(DeleteStatement {
+            target_object,
+            target_alias,
+            selector_alias,
+            selector_parameter,
+            returning_true,
+            span: SourceSpan {
+                start: delete.range.start,
+                end: returned.range.end,
+            },
+        })
+    }
+}
+
+impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
+    fn parse_identity_selector(
+        &mut self,
+        target_alias: &NamePart,
+        statement: &str,
+    ) -> Result<(NamePart, NamePart), QueryParseError> {
+        if self.take_word("REF").is_none() {
+            return Err(self.expected("REF(target_alias) after WHERE"));
+        }
+        self.skip_trivia();
+        self.take_kind(TokenKind::LeftParenthesis)
+            .ok_or_else(|| self.expected("'(' after WHERE REF"))?;
+        self.skip_trivia();
+        let selector_alias = self.parse_name_part("the alias inside WHERE REF(...)")?;
+        if !identifiers_equal(target_alias, &selector_alias) {
+            return Err(alias_mismatch(
+                "WHERE REF",
+                target_alias,
+                &selector_alias,
+                statement,
+            ));
+        }
+        self.skip_trivia();
+        self.take_kind(TokenKind::RightParenthesis)
+            .ok_or_else(|| self.expected("')' after the WHERE REF alias"))?;
+        self.skip_trivia();
+        if self.take_symbol("=").is_none() {
+            return Err(self.expected("'=' after WHERE REF(target_alias)"));
+        }
+        self.skip_trivia();
+        if self.current().is_some_and(|token| {
+            token.is_word("TRUE") || token.is_word("FALSE") || token.is_word("NULL")
+        }) {
+            return Err(self.expected("a declared REF parameter after '='"));
+        }
+        let selector_parameter = self.parse_name_part("a declared REF parameter after '='")?;
+        self.skip_trivia();
+        if let Some(dot) = self.take_kind(TokenKind::Dot) {
+            return Err(QueryParseError {
+                code: "ORNA0001",
+                message: "use the selector parameter name by itself after '='; do not add an object or alias"
+                    .to_owned(),
+                span: dot.span(),
+            });
+        }
+        if self
+            .current()
+            .is_some_and(|token| token.kind == TokenKind::LeftParenthesis)
+        {
+            return Err(self.implementation_gap(
+                &format!("function calls as {statement} selectors"),
+                "a declared REF parameter name by itself",
+            ));
+        }
+        self.skip_trivia();
+        Ok((selector_alias, selector_parameter))
+    }
+
     fn parse_aliased_mutation_target(
         &mut self,
         statement: &str,
@@ -2201,6 +2289,7 @@ impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
             SqlBodySyntax::Select => "an identifier after '.' in an object type",
             SqlBodySyntax::Insert => "an identifier after '.' in the INSERT target",
             SqlBodySyntax::Update => "an identifier after '.' in the UPDATE target",
+            SqlBodySyntax::Delete => "an identifier after '.' in the DELETE target",
         };
         loop {
             self.skip_trivia();
@@ -2289,6 +2378,7 @@ impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
             SqlBodySyntax::Select => "SELECT query",
             SqlBodySyntax::Insert => "SQL INSERT body",
             SqlBodySyntax::Update => "UPDATE body",
+            SqlBodySyntax::Delete => "DELETE body",
         };
         QueryParseError {
             code: "ORNA0001",
@@ -2307,6 +2397,9 @@ impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
             }
             SqlBodySyntax::Update => {
                 format!("this UPDATE does not support {feature}; expected {expected}")
+            }
+            SqlBodySyntax::Delete => {
+                format!("this DELETE does not support {feature}; expected {expected}")
             }
         };
         QueryParseError {
@@ -2355,4 +2448,8 @@ fn parse_sql_insert(tokens: &[Token<'_>]) -> Result<InsertStatement, QueryParseE
 
 fn parse_sql_update(tokens: &[Token<'_>]) -> Result<UpdateStatement, QueryParseError> {
     SqlBodyParser::new(tokens, SqlBodySyntax::Update).parse_update()
+}
+
+fn parse_sql_delete(tokens: &[Token<'_>]) -> Result<DeleteStatement, QueryParseError> {
+    SqlBodyParser::new(tokens, SqlBodySyntax::Delete).parse_delete()
 }
