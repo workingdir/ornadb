@@ -932,17 +932,28 @@ impl CheckedServerFunction {
         &self.references
     }
 
-    /// Returns the checked source-free function body.
-    pub(crate) fn body(&self) -> &CheckedServerFunctionBody {
-        &self.body
-    }
-
     /// Returns the checked relational query when the function has a `SELECT` body.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn query_plan(&self) -> Option<&RelationalQueryIr<CheckedTypeId, CheckedFieldId>> {
         match &self.body {
             CheckedServerFunctionBody::Query(plan) => Some(plan),
             CheckedServerFunctionBody::Mutation(_) => None,
+        }
+    }
+
+    /// Returns the checked INSERT or UPDATE plan when the function has that body.
+    pub(crate) fn mutation_plan(
+        &self,
+    ) -> Option<
+        &crate::mutation::MutationPlanIr<
+            CheckedTypeId,
+            CheckedFieldId,
+            CheckedFunctionId,
+            CheckedParameterId,
+        >,
+    > {
+        match &self.body {
+            CheckedServerFunctionBody::Query(_) => None,
+            CheckedServerFunctionBody::Mutation(plan) => Some(plan),
         }
     }
 }

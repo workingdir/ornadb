@@ -1433,8 +1433,7 @@ mod tests {
     use crate::relational::ExpressionKind;
 
     use super::{
-        CheckedDefinitionReferenceTarget, CheckedServerFunctionBody, ConstantValue, DiagnosticCode,
-        SemanticType, check,
+        CheckedDefinitionReferenceTarget, ConstantValue, DiagnosticCode, SemanticType, check,
     };
 
     fn empty_catalogue() -> CatalogueSnapshot {
@@ -2682,9 +2681,7 @@ mod tests {
         assert!(checked.query_plan().is_none());
         let task = &report.checked_bundle().unwrap().object_types()[1];
         let person = &report.checked_bundle().unwrap().object_types()[0];
-        let CheckedServerFunctionBody::Mutation(plan) = checked.body() else {
-            panic!("expected an INSERT body");
-        };
+        let plan = checked.mutation_plan().expect("expected an INSERT body");
         assert_eq!(plan.target_object(), task.id());
         assert_eq!(plan.returned_object(), task.id());
         assert_eq!(plan.assignments().len(), 4);
@@ -2852,9 +2849,7 @@ mod tests {
         let checked = &bundle.server_functions()[0];
         let person = &bundle.object_types()[0];
         let task = &bundle.object_types()[1];
-        let CheckedServerFunctionBody::Mutation(plan) = checked.body() else {
-            panic!("expected an UPDATE body");
-        };
+        let plan = checked.mutation_plan().expect("expected an UPDATE body");
         let parameters = checked.parameters();
         assert_eq!(
             plan.operation(),
