@@ -284,8 +284,6 @@ pub enum DefinitionIdentity {
 /// so they can own source origins but are not reference targets in this model.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum DefinitionReferenceTarget {
-    /// A declared logical schema.
-    Schema(SchemaId),
     /// A durable object type.
     ObjectType(TypeId),
     /// A stable field owned by an object type.
@@ -311,7 +309,6 @@ pub enum DefinitionReferenceTarget {
 impl From<DefinitionReferenceTarget> for DefinitionIdentity {
     fn from(target: DefinitionReferenceTarget) -> Self {
         match target {
-            DefinitionReferenceTarget::Schema(id) => Self::Schema(id),
             DefinitionReferenceTarget::ObjectType(id) => Self::ObjectType(id),
             DefinitionReferenceTarget::Field { owner, field } => Self::Field { owner, field },
             DefinitionReferenceTarget::Function(id) => Self::Function(id),
@@ -576,6 +573,8 @@ pub enum DefinitionReferenceKind {
     NamedType,
     /// A declaration uses a typed object reference.
     ObjectReference,
+    /// Executable code reads or binds a function parameter.
+    ParameterRead,
     /// A relational plan reads an object type.
     QueryObject,
     /// A relational plan reads a field.
@@ -1108,6 +1107,12 @@ fn validate_references(
                 target: reference.target,
             });
         }
+        if !reference_kind_accepts_target(reference.kind, reference.target) {
+            return Err(RevisionInvariantError::ReferenceKindTargetMismatch {
+                kind: reference.kind,
+                target: reference.target,
+            });
+        }
         let function = catalogue.function_by_id(reference.source_function).ok_or(
             RevisionInvariantError::ReferenceFunctionNotInCatalogue {
                 function: reference.source_function,
@@ -1255,6 +1260,33 @@ fn reference_target_exists(
     target: DefinitionReferenceTarget,
 ) -> bool {
     definition_exists(catalogue, expression_ids, target.into())
+}
+
+const fn reference_kind_accepts_target(
+    kind: DefinitionReferenceKind,
+    target: DefinitionReferenceTarget,
+) -> bool {
+    matches!(
+        (kind, target),
+        (
+            DefinitionReferenceKind::FunctionCall,
+            DefinitionReferenceTarget::Function(_)
+        ) | (
+            DefinitionReferenceKind::NamedType
+                | DefinitionReferenceKind::ObjectReference
+                | DefinitionReferenceKind::QueryObject,
+            DefinitionReferenceTarget::ObjectType(_)
+        ) | (
+            DefinitionReferenceKind::ParameterRead,
+            DefinitionReferenceTarget::Parameter { .. }
+        ) | (
+            DefinitionReferenceKind::QueryField,
+            DefinitionReferenceTarget::Field { .. }
+        ) | (
+            DefinitionReferenceKind::Expression,
+            DefinitionReferenceTarget::Expression(_)
+        )
+    )
 }
 
 /// An error returned when durable revision records violate a local invariant.
@@ -1406,6 +1438,11 @@ pub enum RevisionInvariantError {
     },
     /// A reference target is absent from the candidate catalogue and artifacts.
     ReferenceTargetNotInRevision { target: DefinitionReferenceTarget },
+    /// A reference category cannot target that definition kind.
+    ReferenceKindTargetMismatch {
+        kind: DefinitionReferenceKind,
+        target: DefinitionReferenceTarget,
+    },
     /// A source function revision has the same reference ordinal twice.
     DuplicateReferenceOrdinal {
         revision: FunctionRevisionId,
@@ -1515,6 +1552,9 @@ impl fmt::Display for RevisionInvariantError {
             }
             ReferenceTargetNotInRevision { .. } => {
                 formatter.write_str("reference target is absent from revision")
+            }
+            ReferenceKindTargetMismatch { .. } => {
+                formatter.write_str("reference kind cannot target that definition kind")
             }
             DuplicateReferenceOrdinal { .. } => formatter.write_str("duplicate reference ordinal"),
         }
@@ -1891,8 +1931,8 @@ mod tests {
             revision.function(),
             revision.id(),
             0,
-            DefinitionReferenceTarget::Schema(SchemaId::from_bytes(id::<8>())),
-            DefinitionReferenceKind::QueryObject,
+            DefinitionReferenceTarget::Function(revision.function()),
+            DefinitionReferenceKind::FunctionCall,
             revision.declaration_origin(),
         );
         assert!(matches!(
@@ -1934,13 +1974,37 @@ mod tests {
             Err(RevisionInvariantError::ReferenceTargetNotInRevision { .. })
         ));
 
+        let mismatched_revision = function_revision();
+        let mismatched_reference = DefinitionReference::new(
+            mismatched_revision.function(),
+            mismatched_revision.id(),
+            0,
+            DefinitionReferenceTarget::Function(mismatched_revision.function()),
+            DefinitionReferenceKind::QueryObject,
+            mismatched_revision.declaration_origin(),
+        );
+        assert!(matches!(
+            DeployableRevision::new(
+                expected,
+                source(Some(expected.source())),
+                expected.catalogue(),
+                function_catalogue(mismatched_revision.id()),
+                digest::<7>(),
+                function_origins(&mismatched_revision),
+                vec![],
+                vec![mismatched_revision],
+                vec![mismatched_reference],
+            ),
+            Err(RevisionInvariantError::ReferenceKindTargetMismatch { .. })
+        ));
+
         let candidate_revision = function_revision();
         let candidate_reference = DefinitionReference::new(
             candidate_revision.function(),
             candidate_revision.id(),
             0,
-            DefinitionReferenceTarget::Schema(SchemaId::from_bytes(id::<8>())),
-            DefinitionReferenceKind::QueryObject,
+            DefinitionReferenceTarget::Function(candidate_revision.function()),
+            DefinitionReferenceKind::FunctionCall,
             candidate_revision.declaration_origin(),
         );
         let deployable = DeployableRevision::new(
