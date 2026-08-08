@@ -4,9 +4,24 @@ use tokio_postgres::{Client, Row, Transaction};
 
 use crate::{PostgresKernel, PostgresKernelError};
 
-const MIGRATION_VERSION: i64 = 1;
-const MIGRATION_NAME: &str = "private kernel catalogue";
-const MIGRATION_SQL: &str = include_str!("../migrations/0001_kernel.sql");
+struct Migration {
+    version: i64,
+    name: &'static str,
+    sql: &'static str,
+}
+
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "private kernel catalogue",
+        sql: include_str!("../migrations/0001_kernel.sql"),
+    },
+    Migration {
+        version: 2,
+        name: "revision catalogue integrity",
+        sql: include_str!("../migrations/0002_revisions.sql"),
+    },
+];
 const MIGRATION_REGISTRY_SQL: &str = "
     CREATE SCHEMA IF NOT EXISTS _orna_kernel;
     REVOKE ALL ON SCHEMA _orna_kernel FROM PUBLIC;
@@ -73,7 +88,7 @@ async fn bootstrap_client(client: &mut Client) -> Result<ActiveRevision, Postgre
         .await
         .map_err(PostgresKernelError::Database)?;
 
-    apply_initial_migration(&transaction).await?;
+    apply_migrations(&transaction).await?;
     let active = load_or_seed_active_revision(&transaction).await?;
     transaction
         .commit()
@@ -82,53 +97,74 @@ async fn bootstrap_client(client: &mut Client) -> Result<ActiveRevision, Postgre
     Ok(active)
 }
 
-async fn apply_initial_migration(transaction: &Transaction<'_>) -> Result<(), PostgresKernelError> {
-    let expected_checksum = Sha256::digest(MIGRATION_SQL.as_bytes()).to_vec();
-    let newest_version = transaction
-        .query_one(
-            "SELECT max(version) FROM _orna_kernel.schema_migrations",
+async fn apply_migrations(transaction: &Transaction<'_>) -> Result<(), PostgresKernelError> {
+    let migrations = validated_migration_registry()?;
+    let applied = transaction
+        .query(
+            "SELECT version, name, checksum
+             FROM _orna_kernel.schema_migrations
+             ORDER BY version",
             &[],
         )
         .await
-        .map_err(PostgresKernelError::Database)?
-        .get::<_, Option<i64>>(0);
-    if let Some(version) = newest_version.filter(|version| *version > MIGRATION_VERSION) {
-        return Err(PostgresKernelError::MigrationMismatch { version });
-    }
-    let applied = transaction
-        .query_opt(
-            "SELECT name, checksum
-             FROM _orna_kernel.schema_migrations
-             WHERE version = $1",
-            &[&MIGRATION_VERSION],
-        )
-        .await
         .map_err(PostgresKernelError::Database)?;
 
-    if let Some(row) = applied {
+    for (index, row) in applied.iter().enumerate() {
+        let version: i64 = row.get("version");
+        let Some(expected) = migrations.get(index) else {
+            return Err(PostgresKernelError::MigrationMismatch { version });
+        };
+        if version != expected.version {
+            return Err(PostgresKernelError::MigrationMismatch { version });
+        }
+
         let applied_name: String = row.get("name");
         let applied_checksum: Vec<u8> = row.get("checksum");
-        if applied_name != MIGRATION_NAME || applied_checksum != expected_checksum {
-            return Err(PostgresKernelError::MigrationMismatch {
-                version: MIGRATION_VERSION,
-            });
+        let expected_checksum = migration_checksum(expected);
+        if applied_name != expected.name || applied_checksum != expected_checksum {
+            return Err(PostgresKernelError::MigrationMismatch { version });
         }
-        return Ok(());
     }
 
-    transaction
-        .batch_execute(MIGRATION_SQL)
-        .await
-        .map_err(PostgresKernelError::Database)?;
-    transaction
-        .execute(
-            "INSERT INTO _orna_kernel.schema_migrations (version, name, checksum)
-             VALUES ($1, $2, $3)",
-            &[&MIGRATION_VERSION, &MIGRATION_NAME, &expected_checksum],
-        )
-        .await
-        .map_err(PostgresKernelError::Database)?;
+    for migration in migrations.iter().skip(applied.len()) {
+        transaction
+            .batch_execute(migration.sql)
+            .await
+            .map_err(PostgresKernelError::Database)?;
+        let checksum = migration_checksum(migration);
+        transaction
+            .execute(
+                "INSERT INTO _orna_kernel.schema_migrations (version, name, checksum)
+                 VALUES ($1, $2, $3)",
+                &[&migration.version, &migration.name, &checksum],
+            )
+            .await
+            .map_err(PostgresKernelError::Database)?;
+    }
+
     Ok(())
+}
+
+fn validated_migration_registry() -> Result<&'static [Migration], PostgresKernelError> {
+    for (index, migration) in MIGRATIONS.iter().enumerate() {
+        let expected_version = i64::try_from(index + 1).map_err(|_| {
+            PostgresKernelError::CatalogueInvariant("migration registry exceeds bigint versions")
+        })?;
+        if migration.version != expected_version {
+            return Err(PostgresKernelError::CatalogueInvariant(
+                "migration registry versions are not contiguous",
+            ));
+        }
+    }
+    Ok(MIGRATIONS)
+}
+
+fn migration_checksum(migration: &Migration) -> Vec<u8> {
+    Sha256::digest(migration.sql.as_bytes()).to_vec()
+}
+
+fn empty_content_hash() -> Vec<u8> {
+    Sha256::digest([]).to_vec()
 }
 
 async fn load_or_seed_active_revision(
@@ -170,26 +206,29 @@ async fn load_or_seed_active_revision(
     let bundle_bytes = bundle.to_bytes().to_vec();
     let source_bytes = source.to_bytes().to_vec();
     let catalogue_bytes = catalogue.to_bytes().to_vec();
+    let content_hash = empty_content_hash();
 
     transaction
         .execute(
-            "INSERT INTO _orna_kernel.source_bundles (id) VALUES ($1)",
-            &[&bundle_bytes],
+            "INSERT INTO _orna_kernel.source_bundles (id, content_hash) VALUES ($1, $2)",
+            &[&bundle_bytes, &content_hash],
         )
         .await
         .map_err(PostgresKernelError::Database)?;
     transaction
         .execute(
-            "INSERT INTO _orna_kernel.source_revisions (id, bundle_id) VALUES ($1, $2)",
-            &[&source_bytes, &bundle_bytes],
+            "INSERT INTO _orna_kernel.source_revisions (id, bundle_id, content_hash)
+             VALUES ($1, $2, $3)",
+            &[&source_bytes, &bundle_bytes, &content_hash],
         )
         .await
         .map_err(PostgresKernelError::Database)?;
     transaction
         .execute(
-            "INSERT INTO _orna_kernel.catalogue_revisions (id, source_revision_id)
-             VALUES ($1, $2)",
-            &[&catalogue_bytes, &source_bytes],
+            "INSERT INTO _orna_kernel.catalogue_revisions
+                (id, source_revision_id, content_hash)
+             VALUES ($1, $2, $3)",
+            &[&catalogue_bytes, &source_bytes, &content_hash],
         )
         .await
         .map_err(PostgresKernelError::Database)?;
@@ -229,7 +268,19 @@ fn exact_id_bytes(bytes: Vec<u8>, message: &'static str) -> Result<[u8; 16], Pos
 mod tests {
     use std::{str::FromStr, sync::Arc};
 
-    use super::PostgresKernel;
+    use super::{MIGRATIONS, PostgresKernel, validated_migration_registry};
+
+    #[test]
+    fn migration_registry_is_a_strict_contiguous_sequence() {
+        assert_eq!(
+            validated_migration_registry()
+                .expect("registry is valid")
+                .len(),
+            2
+        );
+        assert_eq!(MIGRATIONS[0].version, 1);
+        assert_eq!(MIGRATIONS[1].version, 2);
+    }
 
     #[tokio::test]
     #[ignore = "requires an empty private PostgreSQL test database"]
