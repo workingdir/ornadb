@@ -25,6 +25,7 @@ use crate::{
         DefinitionIdentity, DefinitionOrigin, DefinitionReference, DefinitionReferenceKind,
         DefinitionReferenceTarget, ExecutableArtifact, ExecutableArtifactKind, ExpressionArtifact,
         FunctionRevisionRecord, Sha256Digest, SourceOrigin, StoredSourceRevision, StoredSourceUnit,
+        reference_kind_accepts_target,
     },
     types::{ResolvedType, StandardScalar},
 };
@@ -956,33 +957,6 @@ fn reference_target_exists(
     definition_identity_exists(catalogue, expressions, target.into())
 }
 
-const fn reference_kind_accepts_target(
-    kind: DefinitionReferenceKind,
-    target: DefinitionReferenceTarget,
-) -> bool {
-    matches!(
-        (kind, target),
-        (
-            DefinitionReferenceKind::FunctionCall,
-            DefinitionReferenceTarget::Function(_)
-        ) | (
-            DefinitionReferenceKind::NamedType
-                | DefinitionReferenceKind::ObjectReference
-                | DefinitionReferenceKind::QueryObject,
-            DefinitionReferenceTarget::ObjectType(_)
-        ) | (
-            DefinitionReferenceKind::ParameterRead,
-            DefinitionReferenceTarget::Parameter { .. }
-        ) | (
-            DefinitionReferenceKind::QueryField,
-            DefinitionReferenceTarget::Field { .. }
-        ) | (
-            DefinitionReferenceKind::Expression,
-            DefinitionReferenceTarget::Expression(_)
-        )
-    )
-}
-
 fn definition_identity_exists(
     catalogue: &CatalogueSnapshot,
     expressions: &HashMap<ExpressionId, &ExpressionArtifact>,
@@ -1398,21 +1372,27 @@ impl Encoder {
     }
 
     fn reference_kind(&mut self, kind: DefinitionReferenceKind) {
-        self.u8(match kind {
-            DefinitionReferenceKind::FunctionCall => 1,
-            DefinitionReferenceKind::NamedType => 2,
-            DefinitionReferenceKind::ObjectReference => 3,
-            DefinitionReferenceKind::ParameterRead => 4,
-            DefinitionReferenceKind::QueryObject => 5,
-            DefinitionReferenceKind::QueryField => 6,
-            DefinitionReferenceKind::Expression => 7,
-        });
+        self.u8(reference_kind_tag(kind));
     }
 
     fn source_origin(&mut self, origin: SourceOrigin) {
         self.source_unit_id(origin.source_unit());
         self.u32(origin.byte_start());
         self.u32(origin.byte_end());
+    }
+}
+
+const fn reference_kind_tag(kind: DefinitionReferenceKind) -> u8 {
+    match kind {
+        DefinitionReferenceKind::FunctionCall => 1,
+        DefinitionReferenceKind::NamedType => 2,
+        DefinitionReferenceKind::ObjectReference => 3,
+        DefinitionReferenceKind::ParameterRead => 4,
+        DefinitionReferenceKind::QueryObject => 5,
+        DefinitionReferenceKind::QueryField => 6,
+        DefinitionReferenceKind::Expression => 7,
+        DefinitionReferenceKind::WriteObject => 8,
+        DefinitionReferenceKind::WriteField => 9,
     }
 }
 
@@ -1523,20 +1503,65 @@ mod tests {
     }
 
     fn references() -> Vec<DefinitionReference> {
-        vec![DefinitionReference::new(
-            FunctionId::from_bytes(id::<4>()),
-            FunctionRevisionId::from_bytes(id::<6>()),
+        vec![reference(
             0,
             DefinitionReferenceTarget::Field {
                 owner: TypeId::from_bytes(id::<2>()),
                 field: FieldId::from_bytes(id::<3>()),
             },
             DefinitionReferenceKind::QueryField,
-            SourceOrigin::new(SourceUnitId::from_bytes(id::<10>()), 10, 18).unwrap(),
+            10,
+            18,
         )]
     }
 
+    fn reference(
+        ordinal: u32,
+        target: DefinitionReferenceTarget,
+        kind: DefinitionReferenceKind,
+        byte_start: u32,
+        byte_end: u32,
+    ) -> DefinitionReference {
+        DefinitionReference::new(
+            FunctionId::from_bytes(id::<4>()),
+            FunctionRevisionId::from_bytes(id::<6>()),
+            ordinal,
+            target,
+            kind,
+            SourceOrigin::new(SourceUnitId::from_bytes(id::<10>()), byte_start, byte_end).unwrap(),
+        )
+    }
+
+    fn write_references() -> Vec<DefinitionReference> {
+        vec![
+            reference(
+                0,
+                DefinitionReferenceTarget::ObjectType(TypeId::from_bytes(id::<2>())),
+                DefinitionReferenceKind::WriteObject,
+                10,
+                18,
+            ),
+            reference(
+                1,
+                DefinitionReferenceTarget::Field {
+                    owner: TypeId::from_bytes(id::<2>()),
+                    field: FieldId::from_bytes(id::<3>()),
+                },
+                DefinitionReferenceKind::WriteField,
+                18,
+                26,
+            ),
+        ]
+    }
+
     fn function_revision(catalogue: &CatalogueSnapshot) -> FunctionRevisionRecord {
+        function_revision_with_references(catalogue, &references())
+    }
+
+    fn function_revision_with_references(
+        catalogue: &CatalogueSnapshot,
+        references: &[DefinitionReference],
+    ) -> FunctionRevisionRecord {
         let function = catalogue
             .function_by_id(FunctionId::from_bytes(id::<4>()))
             .unwrap();
@@ -1547,14 +1572,8 @@ mod tests {
             1,
             SourceOrigin::new(SourceUnitId::from_bytes(id::<10>()), 0, 24).unwrap(),
             function_declaration_digest(b"FUNCTION crm.lookup").unwrap(),
-            function_semantic_digest(
-                function,
-                "orna-1",
-                &artifact,
-                &[expression()],
-                &references(),
-            )
-            .unwrap(),
+            function_semantic_digest(function, "orna-1", &artifact, &[expression()], references)
+                .unwrap(),
             "orna-1",
             artifact,
         )
@@ -1646,6 +1665,25 @@ mod tests {
         assert_eq!(
             hex(catalogue_digest(&empty_catalogue, &[], &[], &[], &[]).unwrap()),
             "02dc700934a603ff73b56e1f63e8051a103922aa267cbf1e984ed3cf7964160b"
+        );
+    }
+
+    #[test]
+    fn reference_kind_tags_are_append_only() {
+        assert_eq!(
+            [
+                DefinitionReferenceKind::FunctionCall,
+                DefinitionReferenceKind::NamedType,
+                DefinitionReferenceKind::ObjectReference,
+                DefinitionReferenceKind::ParameterRead,
+                DefinitionReferenceKind::QueryObject,
+                DefinitionReferenceKind::QueryField,
+                DefinitionReferenceKind::Expression,
+                DefinitionReferenceKind::WriteObject,
+                DefinitionReferenceKind::WriteField,
+            ]
+            .map(reference_kind_tag),
+            [1, 2, 3, 4, 5, 6, 7, 8, 9]
         );
     }
 
@@ -1779,6 +1817,38 @@ mod tests {
     }
 
     #[test]
+    fn write_reference_hashes_have_stable_tags_and_owner_qualified_targets() {
+        let catalogue = catalogue();
+        let function = catalogue.functions().first().unwrap();
+        let references = write_references();
+        let semantic = function_semantic_digest(
+            function,
+            "orna-1",
+            &artifact(),
+            &[expression()],
+            &references,
+        )
+        .unwrap();
+        let revision = function_revision_with_references(&catalogue, &references);
+        let catalogue_hash = catalogue_digest(
+            &catalogue,
+            std::slice::from_ref(&revision),
+            &[expression()],
+            &origins(),
+            &references,
+        )
+        .unwrap();
+        assert_eq!(
+            hex(semantic),
+            "e634a9f3e1b93ebb33cd4022c3521b1c241533924f3c628021138183b227cdae"
+        );
+        assert_eq!(
+            hex(catalogue_hash),
+            "249e26f6a1cf9f4ff6bfa0d253bb8c317aab3424ada0ddd52de23cbd061da0a9"
+        );
+    }
+
+    #[test]
     fn catalogue_hash_requires_exact_current_function_revision_coverage() {
         let catalogue = catalogue();
         assert!(matches!(
@@ -1790,27 +1860,53 @@ mod tests {
     #[test]
     fn catalogue_hash_rejects_incompatible_reference_kind_and_target() {
         let catalogue = catalogue();
-        let incompatible = DefinitionReference::new(
-            FunctionId::from_bytes(id::<4>()),
-            FunctionRevisionId::from_bytes(id::<6>()),
-            0,
-            DefinitionReferenceTarget::Field {
-                owner: TypeId::from_bytes(id::<2>()),
-                field: FieldId::from_bytes(id::<3>()),
-            },
-            DefinitionReferenceKind::QueryObject,
-            SourceOrigin::new(SourceUnitId::from_bytes(id::<10>()), 10, 18).unwrap(),
-        );
-        assert!(matches!(
-            catalogue_digest(
-                &catalogue,
-                &[function_revision(&catalogue)],
-                &[expression()],
-                &origins(),
-                &[incompatible],
+        for (kind, target) in [
+            (
+                DefinitionReferenceKind::QueryObject,
+                DefinitionReferenceTarget::Field {
+                    owner: TypeId::from_bytes(id::<2>()),
+                    field: FieldId::from_bytes(id::<3>()),
+                },
             ),
-            Err(CanonicalHashError::ReferenceKindTargetMismatch { .. })
-        ));
+            (
+                DefinitionReferenceKind::WriteObject,
+                DefinitionReferenceTarget::Field {
+                    owner: TypeId::from_bytes(id::<2>()),
+                    field: FieldId::from_bytes(id::<3>()),
+                },
+            ),
+            (
+                DefinitionReferenceKind::WriteField,
+                DefinitionReferenceTarget::ObjectType(TypeId::from_bytes(id::<2>())),
+            ),
+            (
+                DefinitionReferenceKind::WriteObject,
+                DefinitionReferenceTarget::Function(FunctionId::from_bytes(id::<4>())),
+            ),
+            (
+                DefinitionReferenceKind::WriteField,
+                DefinitionReferenceTarget::Expression(ExpressionId::from_bytes(id::<8>())),
+            ),
+        ] {
+            let incompatible = DefinitionReference::new(
+                FunctionId::from_bytes(id::<4>()),
+                FunctionRevisionId::from_bytes(id::<6>()),
+                0,
+                target,
+                kind,
+                SourceOrigin::new(SourceUnitId::from_bytes(id::<10>()), 10, 18).unwrap(),
+            );
+            assert!(matches!(
+                catalogue_digest(
+                    &catalogue,
+                    &[function_revision(&catalogue)],
+                    &[expression()],
+                    &origins(),
+                    &[incompatible],
+                ),
+                Err(CanonicalHashError::ReferenceKindTargetMismatch { .. })
+            ));
+        }
     }
 
     #[test]
