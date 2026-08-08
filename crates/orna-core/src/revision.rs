@@ -655,6 +655,7 @@ pub struct ActiveDatabaseRevision {
     catalogue_hash: Sha256Digest,
     expressions: Vec<ExpressionArtifact>,
     function_revisions: Vec<FunctionRevisionRecord>,
+    historical_function_revisions: Vec<FunctionRevisionRecord>,
     origins: Vec<DefinitionOrigin>,
     references: Vec<DefinitionReference>,
 }
@@ -672,6 +673,38 @@ impl ActiveDatabaseRevision {
         origins: Vec<DefinitionOrigin>,
         references: Vec<DefinitionReference>,
     ) -> Result<Self, RevisionInvariantError> {
+        Self::new_with_history(
+            pair,
+            source,
+            catalogue,
+            catalogue_hash,
+            expressions,
+            function_revisions,
+            Vec::new(),
+            origins,
+            references,
+        )
+    }
+
+    /// Validates and creates one complete active database revision together
+    /// with immutable function revisions that are not current.
+    ///
+    /// Historical revisions can belong to functions outside the active
+    /// catalogue. Their declaration origins can belong to earlier source
+    /// revisions. Function-revision identities and per-function revision
+    /// numbers must remain unique across the current and historical sets.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_history(
+        pair: RevisionPair,
+        source: StoredSourceRevision,
+        catalogue: CatalogueSnapshot,
+        catalogue_hash: Sha256Digest,
+        expressions: Vec<ExpressionArtifact>,
+        function_revisions: Vec<FunctionRevisionRecord>,
+        historical_function_revisions: Vec<FunctionRevisionRecord>,
+        origins: Vec<DefinitionOrigin>,
+        references: Vec<DefinitionReference>,
+    ) -> Result<Self, RevisionInvariantError> {
         validate_pair(&pair, &source, &catalogue)?;
         validate_expressions(&expressions)?;
         validate_origins(&source, &catalogue, &expressions, &origins)?;
@@ -682,6 +715,7 @@ impl ActiveDatabaseRevision {
             &function_revisions,
             FunctionRevisionSet::RecoveredActive,
         )?;
+        validate_function_revision_history(&function_revisions, &historical_function_revisions)?;
         validate_references(
             &source,
             &catalogue,
@@ -697,6 +731,7 @@ impl ActiveDatabaseRevision {
             catalogue_hash,
             expressions,
             function_revisions,
+            historical_function_revisions,
             origins,
             references,
         })
@@ -730,6 +765,11 @@ impl ActiveDatabaseRevision {
     /// Returns active function revisions by durable record order.
     pub fn function_revisions(&self) -> &[FunctionRevisionRecord] {
         &self.function_revisions
+    }
+
+    /// Returns immutable function revisions that are not current.
+    pub fn historical_function_revisions(&self) -> &[FunctionRevisionRecord] {
+        &self.historical_function_revisions
     }
 
     /// Returns known definition declaration origins.
@@ -1074,6 +1114,36 @@ fn validate_function_revisions(
             }
         }
     }
+    Ok(())
+}
+
+fn validate_function_revision_history(
+    current: &[FunctionRevisionRecord],
+    historical: &[FunctionRevisionRecord],
+) -> Result<(), RevisionInvariantError> {
+    let mut revision_ids = current
+        .iter()
+        .map(FunctionRevisionRecord::id)
+        .collect::<HashSet<_>>();
+    let mut function_numbers = current
+        .iter()
+        .map(|revision| (revision.function(), revision.revision_number()))
+        .collect::<HashSet<_>>();
+
+    for revision in historical {
+        if !revision_ids.insert(revision.id()) {
+            return Err(RevisionInvariantError::DuplicateFunctionRevisionId {
+                revision: revision.id(),
+            });
+        }
+        if !function_numbers.insert((revision.function(), revision.revision_number())) {
+            return Err(RevisionInvariantError::DuplicateFunctionRevisionNumber {
+                function: revision.function(),
+                revision_number: revision.revision_number(),
+            });
+        }
+    }
+
     Ok(())
 }
 
@@ -1669,6 +1739,47 @@ mod tests {
         .unwrap()
     }
 
+    fn historical_function_revision(
+        function: FunctionId,
+        revision: FunctionRevisionId,
+        revision_number: u64,
+        source_unit: SourceUnitId,
+    ) -> FunctionRevisionRecord {
+        FunctionRevisionRecord::new(
+            function,
+            revision,
+            revision_number,
+            SourceOrigin::new(source_unit, 4, 23).unwrap(),
+            digest::<31>(),
+            digest::<32>(),
+            "orna-1",
+            artifact(),
+        )
+        .unwrap()
+    }
+
+    fn active_with_history(
+        historical_function_revisions: Vec<FunctionRevisionRecord>,
+    ) -> Result<ActiveDatabaseRevision, RevisionInvariantError> {
+        let source = source(None);
+        let current_revision = function_revision();
+        let catalogue = function_catalogue(current_revision.id());
+        let origins = function_origins(&current_revision);
+        let pair = RevisionPair::new(source.id(), catalogue.revision());
+
+        ActiveDatabaseRevision::new_with_history(
+            pair,
+            source,
+            catalogue,
+            digest::<7>(),
+            vec![],
+            vec![current_revision],
+            historical_function_revisions,
+            origins,
+            vec![],
+        )
+    }
+
     fn function_origins(revision: &FunctionRevisionRecord) -> Vec<DefinitionOrigin> {
         vec![
             DefinitionOrigin::new(
@@ -1717,8 +1828,81 @@ mod tests {
 
         assert!(active.source().units().is_empty());
         assert!(active.function_revisions().is_empty());
+        assert!(active.historical_function_revisions().is_empty());
         assert_eq!(active.pair(), pair);
         assert_eq!(active.catalogue_hash(), digest::<7>());
+    }
+
+    #[test]
+    fn retains_history_for_removed_functions_with_earlier_source_origins() {
+        let removed_function = FunctionId::from_bytes(id::<40>());
+        let earlier_source_unit = SourceUnitId::from_bytes(id::<41>());
+        let historical_revision = historical_function_revision(
+            removed_function,
+            FunctionRevisionId::from_bytes(id::<42>()),
+            7,
+            earlier_source_unit,
+        );
+
+        let active = active_with_history(vec![historical_revision.clone()]).unwrap();
+
+        assert_eq!(
+            active.historical_function_revisions(),
+            [historical_revision]
+        );
+        assert_eq!(
+            active.historical_function_revisions()[0]
+                .declaration_origin()
+                .source_unit(),
+            earlier_source_unit
+        );
+        assert!(
+            active
+                .catalogue()
+                .function_by_id(removed_function)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn rejects_function_revision_id_reused_between_current_and_history() {
+        let current_revision = function_revision();
+        let duplicate = historical_function_revision(
+            FunctionId::from_bytes(id::<43>()),
+            current_revision.id(),
+            2,
+            SourceUnitId::from_bytes(id::<44>()),
+        );
+
+        let result = active_with_history(vec![duplicate]);
+
+        assert!(matches!(
+            result,
+            Err(RevisionInvariantError::DuplicateFunctionRevisionId { revision })
+                if revision == current_revision.id()
+        ));
+    }
+
+    #[test]
+    fn rejects_function_revision_number_reused_between_current_and_history() {
+        let current_revision = function_revision();
+        let duplicate = historical_function_revision(
+            current_revision.function(),
+            FunctionRevisionId::from_bytes(id::<45>()),
+            current_revision.revision_number(),
+            SourceUnitId::from_bytes(id::<46>()),
+        );
+
+        let result = active_with_history(vec![duplicate]);
+
+        assert!(matches!(
+            result,
+            Err(RevisionInvariantError::DuplicateFunctionRevisionNumber {
+                function,
+                revision_number,
+            }) if function == current_revision.function()
+                && revision_number == current_revision.revision_number()
+        ));
     }
 
     #[test]
