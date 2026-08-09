@@ -6,7 +6,7 @@ implemented, reviewed, committed, and pushed.
 
 ## Current focus
 
-- [ ] Produce the deterministic private PostgreSQL 18.4 runtime twice and
+- [x] Produce the deterministic private PostgreSQL 18.4 runtime twice and
   prove identical payload and manifest bytes.
 - [x] Accept the offline `orna source check <file.orna>` contract.
 - [ ] Verify and accept the first signed private PostgreSQL runtime.
