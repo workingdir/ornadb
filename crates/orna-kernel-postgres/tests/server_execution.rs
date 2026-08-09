@@ -82,7 +82,10 @@ const MANY_SOURCE: &str = "CREATE SCHEMA many;\n\
     AS SELECT r.value FROM many.row r ORDER BY r.value;\n";
 
 const DIRECT_BOOLEAN_PREDICATE_SOURCE: &str = r"CREATE SCHEMA predicate;
-    CREATE TYPE predicate.child AS OBJECT (active BOOL);
+    CREATE TYPE predicate.grandchild AS OBJECT (active BOOL);
+    CREATE TYPE predicate.child AS OBJECT (
+      active BOOL, grandchild REF predicate.grandchild
+    );
     CREATE TYPE predicate.row AS OBJECT (
       child REF predicate.child, active BOOL, value INT NOT NULL, label TEXT NOT NULL
     );
@@ -98,6 +101,18 @@ const DIRECT_BOOLEAN_PREDICATE_SOURCE: &str = r"CREATE SCHEMA predicate;
     CREATE SERVER FUNCTION predicate.never()
     RETURNS ROWS (value INT, label TEXT)
     AS SELECT r.value, r.label FROM predicate.row r WHERE FALSE ORDER BY r.value;
+    CREATE SERVER FUNCTION predicate.distinct_child_active()
+    RETURNS ROWS (value INT)
+    SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE
+    AS SELECT DISTINCT r.value FROM predicate.row r WHERE r.child.grandchild.active;
+    CREATE SERVER FUNCTION predicate.distinct_always()
+    RETURNS ROWS (value INT)
+    SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE
+    AS SELECT DISTINCT r.value FROM predicate.row r WHERE TRUE;
+    CREATE SERVER FUNCTION predicate.distinct_never()
+    RETURNS ROWS (value INT)
+    SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE
+    AS SELECT DISTINCT r.value FROM predicate.row r WHERE FALSE;
 ";
 
 #[cfg(feature = "test-hooks")]
@@ -136,7 +151,8 @@ async fn executes_the_active_server_select_subset_exactly() -> TestResult<()> {
 
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
-async fn direct_boolean_predicates_preserve_v1_truth_null_order_and_duplicates() -> TestResult<()> {
+async fn direct_boolean_predicates_preserve_v1_and_distinct_truth_null_order_and_duplicates()
+-> TestResult<()> {
     with_test_database(|database| async move {
         let kernel = hostile_kernel(&database)?;
         kernel.bootstrap().await?;
@@ -147,6 +163,9 @@ async fn direct_boolean_predicates_preserve_v1_truth_null_order_and_duplicates()
         let fixture = DirectBooleanPredicateFixture::from_active(&applied)?;
         insert_direct_boolean_predicate_rows(&database, fixture).await?;
         install_direct_boolean_predicate_decoy(&database, fixture).await?;
+        let before_grandchildren = count_rows(&database, fixture.grandchild).await?;
+        let before_children = count_rows(&database, fixture.child).await?;
+        let before_rows = count_rows(&database, fixture.row).await?;
 
         let root_active = kernel.execute_server_select(fixture.active).await?;
         require_result_identity(
@@ -222,6 +241,63 @@ async fn direct_boolean_predicates_preserve_v1_truth_null_order_and_duplicates()
         require(
             never.rows().rows().is_empty(),
             "FALSE Boolean predicate returned a row",
+        )?;
+
+        let distinct_child_active = kernel
+            .execute_server_select(fixture.distinct_child_active)
+            .await?;
+        require_result_identity(
+            &distinct_child_active,
+            applied.pair(),
+            fixture.distinct_child_active,
+            fixture.distinct_child_active_revision,
+        )?;
+        require_direct_boolean_distinct_columns(&distinct_child_active)?;
+        require_unordered_rows(
+            &distinct_child_active,
+            direct_boolean_distinct_values(&[10, 20, 30]),
+            "nullable multi-hop direct Boolean DISTINCT predicate",
+        )?;
+
+        let distinct_always = kernel
+            .execute_server_select(fixture.distinct_always)
+            .await?;
+        require_result_identity(
+            &distinct_always,
+            applied.pair(),
+            fixture.distinct_always,
+            fixture.distinct_always_revision,
+        )?;
+        require_direct_boolean_distinct_columns(&distinct_always)?;
+        require_unordered_rows(
+            &distinct_always,
+            direct_boolean_distinct_values(&[10, 20, 30, 40, 50, 60]),
+            "TRUE direct Boolean DISTINCT predicate",
+        )?;
+
+        let distinct_never = kernel.execute_server_select(fixture.distinct_never).await?;
+        require_result_identity(
+            &distinct_never,
+            applied.pair(),
+            fixture.distinct_never,
+            fixture.distinct_never_revision,
+        )?;
+        require_direct_boolean_distinct_columns(&distinct_never)?;
+        require(
+            distinct_never.rows().rows().is_empty(),
+            "FALSE direct Boolean DISTINCT predicate returned a row",
+        )?;
+        require(
+            count_rows(&database, fixture.row).await? == before_rows,
+            "direct Boolean predicate execution changed source rows",
+        )?;
+        require(
+            count_rows(&database, fixture.child).await? == before_children,
+            "direct Boolean predicate execution changed child rows",
+        )?;
+        require(
+            count_rows(&database, fixture.grandchild).await? == before_grandchildren,
+            "direct Boolean predicate execution changed grandchild rows",
         )?;
         require(
             kernel.recover().await?.pair() == applied.pair(),
@@ -1140,9 +1216,12 @@ struct Fixture {
 
 #[derive(Clone, Copy)]
 struct DirectBooleanPredicateFixture {
+    grandchild: TypeId,
     child: TypeId,
     row: TypeId,
+    grandchild_active: FieldId,
     child_active: FieldId,
+    child_grandchild: FieldId,
     row_child: FieldId,
     row_active: FieldId,
     row_value: FieldId,
@@ -1151,10 +1230,19 @@ struct DirectBooleanPredicateFixture {
     child_active_function: FunctionId,
     always: FunctionId,
     never: FunctionId,
+    distinct_child_active: FunctionId,
+    distinct_always: FunctionId,
+    distinct_never: FunctionId,
     active_revision: FunctionRevisionId,
     child_active_revision: FunctionRevisionId,
     always_revision: FunctionRevisionId,
     never_revision: FunctionRevisionId,
+    distinct_child_active_revision: FunctionRevisionId,
+    distinct_always_revision: FunctionRevisionId,
+    distinct_never_revision: FunctionRevisionId,
+    true_grandchild: ObjectId,
+    false_grandchild: ObjectId,
+    null_grandchild: ObjectId,
     true_child: ObjectId,
     false_child: ObjectId,
     null_child: ObjectId,
@@ -1162,6 +1250,12 @@ struct DirectBooleanPredicateFixture {
 
 impl DirectBooleanPredicateFixture {
     fn from_active(active: &ActiveDatabaseRevision) -> TestResult<Self> {
+        let grandchild = active
+            .catalogue()
+            .object_types()
+            .iter()
+            .find(|object| name_is(object.name().parts(), &["predicate", "grandchild"]))
+            .ok_or_else(|| failure("direct Boolean grandchild type is absent"))?;
         let child = active
             .catalogue()
             .object_types()
@@ -1174,6 +1268,12 @@ impl DirectBooleanPredicateFixture {
             .iter()
             .find(|object| name_is(object.name().parts(), &["predicate", "row"]))
             .ok_or_else(|| failure("direct Boolean row type is absent"))?;
+        let grandchild_field = |name| {
+            grandchild
+                .field_by_name(name)
+                .map(|field| field.id())
+                .ok_or_else(|| failure(format!("direct Boolean grandchild field {name} is absent")))
+        };
         let child_field = |name| {
             child
                 .field_by_name(name)
@@ -1197,10 +1297,16 @@ impl DirectBooleanPredicateFixture {
         let child_active_function = function("child_active")?;
         let always = function("always")?;
         let never = function("never")?;
+        let distinct_child_active = function("distinct_child_active")?;
+        let distinct_always = function("distinct_always")?;
+        let distinct_never = function("distinct_never")?;
         Ok(Self {
+            grandchild: grandchild.id(),
             child: child.id(),
             row: row.id(),
+            grandchild_active: grandchild_field("active")?,
             child_active: child_field("active")?,
+            child_grandchild: child_field("grandchild")?,
             row_child: row_field("child")?,
             row_active: row_field("active")?,
             row_value: row_field("value")?,
@@ -1209,10 +1315,19 @@ impl DirectBooleanPredicateFixture {
             child_active_function: child_active_function.id(),
             always: always.id(),
             never: never.id(),
+            distinct_child_active: distinct_child_active.id(),
+            distinct_always: distinct_always.id(),
+            distinct_never: distinct_never.id(),
             active_revision: active_function.current_revision(),
             child_active_revision: child_active_function.current_revision(),
             always_revision: always.current_revision(),
             never_revision: never.current_revision(),
+            distinct_child_active_revision: distinct_child_active.current_revision(),
+            distinct_always_revision: distinct_always.current_revision(),
+            distinct_never_revision: distinct_never.current_revision(),
+            true_grandchild: ObjectId::from_bytes([0x71; 16]),
+            false_grandchild: ObjectId::from_bytes([0x72; 16]),
+            null_grandchild: ObjectId::from_bytes([0x73; 16]),
             true_child: ObjectId::from_bytes([0x81; 16]),
             false_child: ObjectId::from_bytes([0x82; 16]),
             null_child: ObjectId::from_bytes([0x83; 16]),
@@ -1360,10 +1475,16 @@ async fn insert_direct_boolean_predicate_rows(
     database: &TestDatabase,
     fixture: DirectBooleanPredicateFixture,
 ) -> TestResult<()> {
-    let child_statement = format!(
+    let grandchild_statement = format!(
         "INSERT INTO {} (_orna_object_id, {}) VALUES ($1, $2)",
+        relation(fixture.grandchild),
+        field(fixture.grandchild_active),
+    );
+    let child_statement = format!(
+        "INSERT INTO {} (_orna_object_id, {}, {}) VALUES ($1, $2, $3)",
         relation(fixture.child),
         field(fixture.child_active),
+        field(fixture.child_grandchild),
     );
     let row_statement = format!(
         "INSERT INTO {} (_orna_object_id, {}, {}, {}, {}) VALUES ($1, $2, $3, $4, $5)",
@@ -1376,13 +1497,41 @@ async fn insert_direct_boolean_predicate_rows(
     let session = database.open().await?;
     let operation: TestResult<()> = async {
         for (object, active) in [
-            (fixture.true_child, Some(true)),
-            (fixture.false_child, Some(false)),
-            (fixture.null_child, None),
+            (fixture.true_grandchild, Some(true)),
+            (fixture.false_grandchild, Some(false)),
+            (fixture.null_grandchild, None),
         ] {
             session
                 .client()
-                .execute(&child_statement, &[&object.to_bytes().to_vec(), &active])
+                .execute(
+                    &grandchild_statement,
+                    &[&object.to_bytes().to_vec(), &active],
+                )
+                .await?;
+        }
+        for (object, active, grandchild) in [
+            (
+                fixture.true_child,
+                Some(true),
+                Some(fixture.true_grandchild),
+            ),
+            (
+                fixture.false_child,
+                Some(false),
+                Some(fixture.false_grandchild),
+            ),
+            (fixture.null_child, None, Some(fixture.null_grandchild)),
+        ] {
+            session
+                .client()
+                .execute(
+                    &child_statement,
+                    &[
+                        &object.to_bytes().to_vec(),
+                        &active,
+                        &grandchild.map(|object| object.to_bytes().to_vec()),
+                    ],
+                )
                 .await?;
         }
         for (object, child, active, value, label) in [
@@ -1974,6 +2123,35 @@ fn require_direct_boolean_predicate_rows(
         )?;
     }
     Ok(())
+}
+
+fn require_direct_boolean_distinct_columns(result: &ServerSelectResult) -> TestResult<()> {
+    let columns = result.rows().columns();
+    require(
+        columns.len() == 1,
+        "direct Boolean DISTINCT predicate must not become a result column",
+    )?;
+    let column = &columns[0];
+    require(
+        column.name() == "value",
+        "direct Boolean DISTINCT result column is not value",
+    )?;
+    require(
+        column.resolved_type() == ResolvedType::scalar(StandardScalar::Integer),
+        "direct Boolean DISTINCT result column has the wrong type",
+    )?;
+    require(
+        !column.nullable(),
+        "direct Boolean DISTINCT result column has the wrong nullability",
+    )
+}
+
+fn direct_boolean_distinct_values(values: &[i32]) -> Vec<Vec<RuntimeValue>> {
+    values
+        .iter()
+        .copied()
+        .map(|value| vec![RuntimeValue::Integer(value)])
+        .collect()
 }
 
 fn require_distinct_columns(result: &ServerSelectResult, fixture: Fixture) -> TestResult<()> {
