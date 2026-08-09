@@ -1,0 +1,34 @@
+name: PostgreSQL runtime
+
+on:
+  push:
+    paths:
+      - ".github/workflows/postgresql-runtime.yml"
+      - "packaging/postgresql/build-runtime.sh"
+      - "packaging/postgresql/runtime-build.toml"
+  pull_request:
+    paths:
+      - ".github/workflows/postgresql-runtime.yml"
+      - "packaging/postgresql/build-runtime.sh"
+      - "packaging/postgresql/runtime-build.toml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Reproduce PostgreSQL runtime
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Build the keyless runtime twice
+        run: packaging/postgresql/build-runtime.sh
+      - name: Upload the reviewed candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: postgresql-runtime-keyless-candidate
+          path: target/postgresql-runtime/*
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
