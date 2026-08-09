@@ -165,6 +165,7 @@ define_derived_id!(TypeBindingId, "type-binding");
 define_id!(FieldId, "field");
 define_id!(SchemaId, "schema");
 define_id!(CatalogueRevisionId, "catalogue-revision");
+define_derived_id!(StandardLibraryRevisionId, "standard-library-revision");
 define_id!(SourceBundleId, "source-bundle");
 define_id!(SourceUnitId, "source-unit");
 define_id!(SourceRevisionId, "source-revision");
