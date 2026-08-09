@@ -2882,6 +2882,246 @@ mod tests {
     }
 
     #[test]
+    fn records_direct_boolean_predicate_paths_after_projections_with_exact_spans() {
+        let source = "CREATE SCHEMA people; CREATE SCHEMA tasks; \
+            CREATE TYPE people.person AS OBJECT (active BOOL NOT NULL); \
+            CREATE TYPE tasks.task AS OBJECT (owner REF people.person, enabled BOOL NOT NULL); \
+            CREATE SERVER FUNCTION tasks.enabled() RETURNS ROWS (enabled BOOL) \
+            AS SELECT t.enabled FROM tasks.task t WHERE t.enabled; \
+            CREATE SERVER FUNCTION tasks.active() RETURNS ROWS (active BOOL) \
+            AS SELECT t.owner.active FROM tasks.task t WHERE t.owner.active;";
+        let report = check(
+            &bundle([("direct_predicates.orna", source)]),
+            &empty_catalogue(),
+        );
+
+        assert!(
+            report.diagnostics().is_empty(),
+            "{:?}",
+            report.diagnostics()
+        );
+        let checked = report
+            .checked_bundle()
+            .expect("direct predicates must check");
+        let person = &checked.object_types()[0];
+        let task = &checked.object_types()[1];
+        let owner = &task.fields()[0];
+        let enabled = &task.fields()[1];
+        let active = &person.fields()[0];
+        let enabled_function = &checked.server_functions()[0];
+        let active_function = &checked.server_functions()[1];
+
+        let enabled_starts = source
+            .match_indices("t.enabled")
+            .map(|(start, _)| start)
+            .collect::<Vec<_>>();
+        assert_eq!(enabled_starts.len(), 2);
+        assert_eq!(
+            enabled_function
+                .references()
+                .iter()
+                .map(|reference| (reference.kind(), reference.target()))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    DefinitionReferenceKind::QueryObject,
+                    CheckedDefinitionReferenceTarget::ObjectType(task.id()),
+                ),
+                (
+                    DefinitionReferenceKind::QueryField,
+                    CheckedDefinitionReferenceTarget::Field {
+                        owner: task.id(),
+                        field: enabled.id(),
+                    },
+                ),
+                (
+                    DefinitionReferenceKind::QueryField,
+                    CheckedDefinitionReferenceTarget::Field {
+                        owner: task.id(),
+                        field: enabled.id(),
+                    },
+                ),
+            ]
+        );
+        for (reference, start) in enabled_function
+            .references()
+            .iter()
+            .skip(1)
+            .zip(enabled_starts)
+        {
+            assert_eq!(
+                reference.location().logical_path(),
+                "direct_predicates.orna"
+            );
+            assert_eq!(reference.location().span().start(), start + "t.".len());
+            assert_eq!(reference.location().span().end(), start + "t.enabled".len());
+        }
+
+        let active_starts = source
+            .match_indices("t.owner.active")
+            .map(|(start, _)| start)
+            .collect::<Vec<_>>();
+        assert_eq!(active_starts.len(), 2);
+        assert_eq!(
+            active_function
+                .references()
+                .iter()
+                .map(|reference| (reference.kind(), reference.target()))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    DefinitionReferenceKind::QueryObject,
+                    CheckedDefinitionReferenceTarget::ObjectType(task.id()),
+                ),
+                (
+                    DefinitionReferenceKind::QueryField,
+                    CheckedDefinitionReferenceTarget::Field {
+                        owner: task.id(),
+                        field: owner.id(),
+                    },
+                ),
+                (
+                    DefinitionReferenceKind::QueryField,
+                    CheckedDefinitionReferenceTarget::Field {
+                        owner: person.id(),
+                        field: active.id(),
+                    },
+                ),
+                (
+                    DefinitionReferenceKind::QueryField,
+                    CheckedDefinitionReferenceTarget::Field {
+                        owner: task.id(),
+                        field: owner.id(),
+                    },
+                ),
+                (
+                    DefinitionReferenceKind::QueryField,
+                    CheckedDefinitionReferenceTarget::Field {
+                        owner: person.id(),
+                        field: active.id(),
+                    },
+                ),
+            ]
+        );
+        let active_plan = active_function
+            .query_plan()
+            .expect("direct Boolean function must use the v1 query plan");
+        assert!(active_plan.selection().is_some());
+        assert!(active_plan.selection().unwrap().value_type().nullable());
+        let expected_spans = [
+            (active_starts[0] + 2, "owner".len()),
+            (active_starts[0] + 8, "active".len()),
+            (active_starts[1] + 2, "owner".len()),
+            (active_starts[1] + 8, "active".len()),
+        ];
+        for (reference, (start, length)) in active_function
+            .references()
+            .iter()
+            .skip(1)
+            .zip(expected_spans)
+        {
+            assert_eq!(reference.location().span().start(), start);
+            assert_eq!(reference.location().span().end(), start + length);
+        }
+    }
+
+    #[test]
+    fn direct_boolean_literals_add_no_predicate_references() {
+        let source = "CREATE SCHEMA tasks; \
+            CREATE TYPE tasks.task AS OBJECT (enabled BOOL NOT NULL); \
+            CREATE SERVER FUNCTION tasks.all_tasks() RETURNS ROWS (enabled BOOL) \
+            AS SELECT t.enabled FROM tasks.task t WHERE TRUE; \
+            CREATE SERVER FUNCTION tasks.no_tasks() RETURNS ROWS (enabled BOOL) \
+            AS SELECT t.enabled FROM tasks.task t WHERE FALSE;";
+        let report = check(&bundle([("literals.orna", source)]), &empty_catalogue());
+
+        assert!(
+            report.diagnostics().is_empty(),
+            "{:?}",
+            report.diagnostics()
+        );
+        let checked = report
+            .checked_bundle()
+            .expect("literal predicates must check");
+        let task = &checked.object_types()[0];
+        let enabled = &task.fields()[0];
+        for function in checked.server_functions() {
+            assert_eq!(
+                function
+                    .references()
+                    .iter()
+                    .map(|reference| (reference.kind(), reference.target()))
+                    .collect::<Vec<_>>(),
+                vec![
+                    (
+                        DefinitionReferenceKind::QueryObject,
+                        CheckedDefinitionReferenceTarget::ObjectType(task.id()),
+                    ),
+                    (
+                        DefinitionReferenceKind::QueryField,
+                        CheckedDefinitionReferenceTarget::Field {
+                            owner: task.id(),
+                            field: enabled.id(),
+                        },
+                    ),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_non_boolean_direct_predicates_at_the_complete_predicate() {
+        let source = "CREATE SCHEMA tasks; CREATE TYPE tasks.task AS OBJECT (title TEXT); \
+            CREATE SERVER FUNCTION tasks.bad() RETURNS ROWS (title TEXT) \
+            AS SELECT t.title FROM tasks.task t WHERE t.title;";
+        let report = check(&bundle([("direct_type.orna", source)]), &empty_catalogue());
+
+        assert_no_checked_bundle(&report);
+        assert_eq!(report.diagnostics().len(), 1);
+        let diagnostic = &report.diagnostics()[0];
+        assert_eq!(diagnostic.code(), DiagnosticCode::TypeMismatch);
+        assert_eq!(diagnostic.message(), "WHERE requires a BOOLEAN expression");
+        let predicate_start = source.rfind("t.title").expect("predicate exists");
+        assert_eq!(diagnostic.location().logical_path(), "direct_type.orna");
+        assert_eq!(diagnostic.location().span().start(), predicate_start);
+        assert_eq!(
+            diagnostic.location().span().end(),
+            predicate_start + "t.title".len()
+        );
+    }
+
+    #[test]
+    fn rejects_parameterised_direct_predicates_through_the_identity_selector_boundary() {
+        let source = "CREATE SCHEMA tasks; CREATE TYPE tasks.task AS OBJECT (enabled BOOL NOT NULL); \
+            CREATE SERVER FUNCTION tasks.bad(p_task REF tasks.task) RETURNS ROWS (enabled BOOL) \
+            SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE \
+            AS SELECT t.enabled FROM tasks.task t WHERE t.enabled;";
+        let report = check(
+            &bundle([("parameter_direct.orna", source)]),
+            &empty_catalogue(),
+        );
+
+        assert_no_checked_bundle(&report);
+        assert_eq!(report.diagnostics().len(), 1);
+        let diagnostic = &report.diagnostics()[0];
+        assert_eq!(diagnostic.code(), DiagnosticCode::DomainIncompatible);
+        assert_eq!(
+            diagnostic.message(),
+            "parameterised SELECT SERVER functions require WHERE REF(source_alias) = selector_parameter"
+        );
+        let predicate_start = source.rfind("t.enabled").expect("predicate exists");
+        assert_eq!(
+            diagnostic.location().logical_path(),
+            "parameter_direct.orna"
+        );
+        assert_eq!(diagnostic.location().span().start(), predicate_start);
+        assert_eq!(
+            diagnostic.location().span().end(),
+            predicate_start + "t.enabled".len()
+        );
+    }
+
+    #[test]
     fn checks_distinct_query_identities_and_orders_signature_then_body_evidence() {
         let source = "CREATE SCHEMA people; CREATE SCHEMA tasks; \
             CREATE TYPE people.person AS OBJECT (active BOOL NOT NULL); \
