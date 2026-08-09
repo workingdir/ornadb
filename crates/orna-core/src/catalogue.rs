@@ -7,7 +7,15 @@ use std::{collections::HashMap, error::Error, fmt, hash::Hash};
 
 use crate::{
     CatalogueRevisionId, ExpressionId, FieldId, FunctionId, FunctionRevisionId, ParameterId,
-    SchemaId, TypeId, types::ResolvedType,
+    SchemaId, TypeBindingId, TypeId, types::ResolvedType,
+};
+
+mod types;
+
+pub use types::{
+    PreludeTypeName, PreludeTypeNameError, TypeBinding, TypeBindingError, TypeBindingKind,
+    TypeDefinition, TypeDefinitionKind, TypeLookupName, ValueTypeDefinition, ValueTypeKind,
+    ValueTypeMutability, ValueTypePersistence,
 };
 
 /// A resolved, qualified semantic name.
@@ -492,6 +500,14 @@ pub struct CatalogueSnapshot {
     object_types: Vec<ObjectTypeDefinition>,
     object_type_indices_by_name: HashMap<QualifiedSemanticName, usize>,
     object_type_indices_by_id: HashMap<TypeId, usize>,
+    value_types: Vec<ValueTypeDefinition>,
+    value_type_indices_by_name: HashMap<QualifiedSemanticName, usize>,
+    value_type_indices_by_id: HashMap<TypeId, usize>,
+    type_bindings: Vec<TypeBinding>,
+    type_binding_indices_by_name: HashMap<TypeLookupName, usize>,
+    type_binding_indices_by_id: HashMap<TypeBindingId, usize>,
+    type_ids_by_qualified_name: HashMap<QualifiedSemanticName, TypeId>,
+    type_ids_by_prelude_name: HashMap<PreludeTypeName, TypeId>,
     functions: Vec<FunctionDefinition>,
     function_indices_by_name: HashMap<QualifiedSemanticName, usize>,
     function_indices_by_id: HashMap<FunctionId, usize>,
@@ -504,7 +520,14 @@ impl CatalogueSnapshot {
         schemas: Vec<SchemaDefinition>,
         object_types: Vec<ObjectTypeDefinition>,
     ) -> Result<Self, CatalogueSnapshotError> {
-        Self::new_with_functions(revision, schemas, object_types, Vec::new())
+        Self::new_with_functions_and_types(
+            revision,
+            schemas,
+            object_types,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
     }
 
     /// Validates and creates a snapshot with schemas, object types, and functions.
@@ -514,10 +537,55 @@ impl CatalogueSnapshot {
         object_types: Vec<ObjectTypeDefinition>,
         functions: Vec<FunctionDefinition>,
     ) -> Result<Self, CatalogueSnapshotError> {
+        Self::new_with_functions_and_types(
+            revision,
+            schemas,
+            object_types,
+            Vec::new(),
+            Vec::new(),
+            functions,
+        )
+    }
+
+    /// Validates and creates a snapshot with object types, value types, and bindings.
+    pub fn new_with_types(
+        revision: CatalogueRevisionId,
+        schemas: Vec<SchemaDefinition>,
+        object_types: Vec<ObjectTypeDefinition>,
+        value_types: Vec<ValueTypeDefinition>,
+        type_bindings: Vec<TypeBinding>,
+    ) -> Result<Self, CatalogueSnapshotError> {
+        Self::new_with_functions_and_types(
+            revision,
+            schemas,
+            object_types,
+            value_types,
+            type_bindings,
+            Vec::new(),
+        )
+    }
+
+    /// Validates and creates a snapshot with functions and all catalogue type categories.
+    pub fn new_with_functions_and_types(
+        revision: CatalogueRevisionId,
+        schemas: Vec<SchemaDefinition>,
+        object_types: Vec<ObjectTypeDefinition>,
+        value_types: Vec<ValueTypeDefinition>,
+        type_bindings: Vec<TypeBinding>,
+        functions: Vec<FunctionDefinition>,
+    ) -> Result<Self, CatalogueSnapshotError> {
         let mut schema_indices_by_name = HashMap::with_capacity(schemas.len());
         let mut schema_indices_by_id = HashMap::with_capacity(schemas.len());
         let mut object_type_indices_by_name = HashMap::with_capacity(object_types.len());
         let mut object_type_indices_by_id = HashMap::with_capacity(object_types.len());
+        let mut value_type_indices_by_name = HashMap::with_capacity(value_types.len());
+        let mut value_type_indices_by_id = HashMap::with_capacity(value_types.len());
+        let mut type_binding_indices_by_name = HashMap::with_capacity(type_bindings.len());
+        let mut type_binding_indices_by_id = HashMap::with_capacity(type_bindings.len());
+        let mut type_ids_by_qualified_name =
+            HashMap::with_capacity(object_types.len() + value_types.len() + type_bindings.len());
+        let mut type_ids_by_prelude_name = HashMap::with_capacity(type_bindings.len());
+        let mut primary_type_ids = HashMap::with_capacity(object_types.len() + value_types.len());
         let mut function_indices_by_name = HashMap::with_capacity(functions.len());
         let mut function_indices_by_id = HashMap::with_capacity(functions.len());
 
@@ -556,6 +624,9 @@ impl CatalogueSnapshot {
                 return Err(CatalogueSnapshotError::DuplicateObjectTypeId { id: object_type.id });
             }
 
+            type_ids_by_qualified_name.insert(object_type.name.clone(), object_type.id);
+            primary_type_ids.insert(object_type.id, object_type.name.clone());
+
             let namespace = namespace_of(&object_type.name).ok_or(
                 CatalogueSnapshotError::ObjectTypeHasNoSchema {
                     object_type: object_type.id,
@@ -569,6 +640,126 @@ impl CatalogueSnapshot {
             }
 
             Self::validate_fields(object_type)?;
+        }
+
+        for (type_index, value_type) in value_types.iter().enumerate() {
+            if value_type.representation_contract().is_empty() {
+                return Err(
+                    CatalogueSnapshotError::EmptyValueTypeRepresentationContract {
+                        value_type: value_type.id(),
+                    },
+                );
+            }
+
+            if value_type_indices_by_name
+                .insert(value_type.name().clone(), type_index)
+                .is_some()
+            {
+                return Err(CatalogueSnapshotError::DuplicateValueTypeName {
+                    name: value_type.name().clone(),
+                });
+            }
+
+            if value_type_indices_by_id
+                .insert(value_type.id(), type_index)
+                .is_some()
+            {
+                return Err(CatalogueSnapshotError::DuplicateValueTypeId {
+                    id: value_type.id(),
+                });
+            }
+
+            if type_ids_by_qualified_name
+                .insert(value_type.name().clone(), value_type.id())
+                .is_some()
+            {
+                return Err(CatalogueSnapshotError::DuplicateTypeName {
+                    name: TypeLookupName::qualified(value_type.name().clone()),
+                });
+            }
+
+            if primary_type_ids
+                .insert(value_type.id(), value_type.name().clone())
+                .is_some()
+            {
+                return Err(CatalogueSnapshotError::DuplicateTypeId {
+                    id: value_type.id(),
+                });
+            }
+
+            let namespace = namespace_of(value_type.name()).ok_or(
+                CatalogueSnapshotError::ValueTypeHasNoSchema {
+                    value_type: value_type.id(),
+                },
+            )?;
+            if !schema_indices_by_name.contains_key(&namespace) {
+                return Err(CatalogueSnapshotError::ValueTypeSchemaNotDeclared {
+                    value_type: value_type.id(),
+                    schema: namespace,
+                });
+            }
+        }
+
+        for (binding_index, binding) in type_bindings.iter().enumerate() {
+            if type_binding_indices_by_name
+                .insert(binding.name().clone(), binding_index)
+                .is_some()
+            {
+                return Err(CatalogueSnapshotError::DuplicateTypeName {
+                    name: binding.name().clone(),
+                });
+            }
+
+            if type_binding_indices_by_id
+                .insert(binding.id(), binding_index)
+                .is_some()
+            {
+                return Err(CatalogueSnapshotError::DuplicateTypeBindingId { id: binding.id() });
+            }
+
+            if !primary_type_ids.contains_key(&binding.target()) {
+                return Err(CatalogueSnapshotError::TypeBindingTargetNotFound {
+                    binding: binding.id(),
+                    target: binding.target(),
+                });
+            }
+
+            match binding.name() {
+                TypeLookupName::Qualified(name) => {
+                    if type_ids_by_qualified_name
+                        .insert(name.clone(), binding.target())
+                        .is_some()
+                    {
+                        return Err(CatalogueSnapshotError::DuplicateTypeName {
+                            name: binding.name().clone(),
+                        });
+                    }
+
+                    let namespace = namespace_of(name).ok_or(
+                        CatalogueSnapshotError::QualifiedTypeBindingHasNoSchema {
+                            binding: binding.id(),
+                        },
+                    )?;
+                    if !schema_indices_by_name.contains_key(&namespace) {
+                        return Err(
+                            CatalogueSnapshotError::QualifiedTypeBindingSchemaNotDeclared {
+                                binding: binding.id(),
+                                schema: namespace,
+                            },
+                        );
+                    }
+                }
+                TypeLookupName::Prelude(name) => {
+                    if type_ids_by_prelude_name
+                        .insert(name.clone(), binding.target())
+                        .is_some()
+                    {
+                        return Err(CatalogueSnapshotError::DuplicateTypeName {
+                            name: binding.name().clone(),
+                        });
+                    }
+                }
+            }
         }
 
         for (function_index, function) in functions.iter().enumerate() {
@@ -611,6 +802,14 @@ impl CatalogueSnapshot {
             object_types,
             object_type_indices_by_name,
             object_type_indices_by_id,
+            value_types,
+            value_type_indices_by_name,
+            value_type_indices_by_id,
+            type_bindings,
+            type_binding_indices_by_name,
+            type_binding_indices_by_id,
+            type_ids_by_qualified_name,
+            type_ids_by_prelude_name,
             functions,
             function_indices_by_name,
             function_indices_by_id,
@@ -661,6 +860,65 @@ impl CatalogueSnapshot {
         self.object_type_indices_by_id
             .get(&id)
             .map(|index| &self.object_types[*index])
+    }
+
+    /// Returns the value type definitions in their snapshot order.
+    pub fn value_types(&self) -> &[ValueTypeDefinition] {
+        &self.value_types
+    }
+
+    /// Finds a value type by its exact canonical qualified name.
+    pub fn value_type_by_name(&self, name: &QualifiedSemanticName) -> Option<&ValueTypeDefinition> {
+        self.value_type_indices_by_name
+            .get(name)
+            .map(|index| &self.value_types[*index])
+    }
+
+    /// Finds a value type by its stable identity.
+    pub fn value_type_by_id(&self, id: TypeId) -> Option<&ValueTypeDefinition> {
+        self.value_type_indices_by_id
+            .get(&id)
+            .map(|index| &self.value_types[*index])
+    }
+
+    /// Returns direct type bindings in their snapshot order.
+    pub fn type_bindings(&self) -> &[TypeBinding] {
+        &self.type_bindings
+    }
+
+    /// Finds a direct type binding by its closed lookup name.
+    pub fn type_binding_by_name(&self, name: &TypeLookupName) -> Option<&TypeBinding> {
+        self.type_binding_indices_by_name
+            .get(name)
+            .map(|index| &self.type_bindings[*index])
+    }
+
+    /// Finds a direct type binding by its stable derived identity.
+    pub fn type_binding_by_id(&self, id: TypeBindingId) -> Option<&TypeBinding> {
+        self.type_binding_indices_by_id
+            .get(&id)
+            .map(|index| &self.type_bindings[*index])
+    }
+
+    /// Resolves one qualified primary name or direct binding to its stable type identity.
+    pub fn type_id_by_name(&self, name: &TypeLookupName) -> Option<TypeId> {
+        match name {
+            TypeLookupName::Qualified(name) => self.type_ids_by_qualified_name.get(name).copied(),
+            TypeLookupName::Prelude(name) => self.type_ids_by_prelude_name.get(name).copied(),
+        }
+    }
+
+    /// Finds one primary type definition by its stable identity.
+    pub fn type_definition_by_id(&self, id: TypeId) -> Option<TypeDefinition<'_>> {
+        self.object_type_by_id(id)
+            .map(TypeDefinition::Object)
+            .or_else(|| self.value_type_by_id(id).map(TypeDefinition::Value))
+    }
+
+    /// Finds a primary type definition through its exact name or direct binding.
+    pub fn type_definition_by_name(&self, name: &TypeLookupName) -> Option<TypeDefinition<'_>> {
+        self.type_id_by_name(name)
+            .and_then(|id| self.type_definition_by_id(id))
     }
 
     /// Returns the function definitions in their snapshot order.
@@ -875,6 +1133,16 @@ fn namespace_of(name: &QualifiedSemanticName) -> Option<QualifiedSemanticName> {
 /// An error returned when definitions cannot form a coherent snapshot.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CatalogueSnapshotError {
+    /// More than one primary type or binding has the same resolved name.
+    DuplicateTypeName {
+        /// The repeated name.
+        name: TypeLookupName,
+    },
+    /// More than one primary type has the same stable identity.
+    DuplicateTypeId {
+        /// The repeated identity.
+        id: TypeId,
+    },
     /// More than one object type has the same resolved qualified name.
     DuplicateObjectTypeName {
         /// The repeated name.
@@ -884,6 +1152,57 @@ pub enum CatalogueSnapshotError {
     DuplicateObjectTypeId {
         /// The repeated identity.
         id: TypeId,
+    },
+    /// More than one value type has the same resolved qualified name.
+    DuplicateValueTypeName {
+        /// The repeated name.
+        name: QualifiedSemanticName,
+    },
+    /// More than one value type has the same stable identity.
+    DuplicateValueTypeId {
+        /// The repeated identity.
+        id: TypeId,
+    },
+    /// A value type has no versioned representation contract.
+    EmptyValueTypeRepresentationContract {
+        /// The invalid value type identity.
+        value_type: TypeId,
+    },
+    /// A value type has no namespace that can refer to a declared schema.
+    ValueTypeHasNoSchema {
+        /// The invalid value type identity.
+        value_type: TypeId,
+    },
+    /// A value type refers to an undeclared exact namespace.
+    ValueTypeSchemaNotDeclared {
+        /// The value type identity.
+        value_type: TypeId,
+        /// The missing exact schema name.
+        schema: QualifiedSemanticName,
+    },
+    /// More than one direct type binding has the same derived identity.
+    DuplicateTypeBindingId {
+        /// The repeated identity.
+        id: TypeBindingId,
+    },
+    /// A direct type binding has no declared primary type target.
+    TypeBindingTargetNotFound {
+        /// The binding with the missing target.
+        binding: TypeBindingId,
+        /// The missing target type identity.
+        target: TypeId,
+    },
+    /// A qualified type binding has no namespace that can refer to a declared schema.
+    QualifiedTypeBindingHasNoSchema {
+        /// The invalid binding identity.
+        binding: TypeBindingId,
+    },
+    /// A qualified type binding refers to an undeclared exact namespace.
+    QualifiedTypeBindingSchemaNotDeclared {
+        /// The binding identity.
+        binding: TypeBindingId,
+        /// The missing exact schema name.
+        schema: QualifiedSemanticName,
     },
     /// More than one schema has the same resolved qualified name.
     DuplicateSchemaName {
@@ -1071,12 +1390,52 @@ pub enum CatalogueSnapshotError {
 impl fmt::Display for CatalogueSnapshotError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::DuplicateTypeName { name } => {
+                write!(formatter, "duplicate type name {name}")
+            }
+            Self::DuplicateTypeId { id } => {
+                write!(formatter, "duplicate type identity {id}")
+            }
             Self::DuplicateObjectTypeName { name } => {
                 write!(formatter, "duplicate object type name {name}")
             }
             Self::DuplicateObjectTypeId { id } => {
                 write!(formatter, "duplicate object type identity {id}")
             }
+            Self::DuplicateValueTypeName { name } => {
+                write!(formatter, "duplicate value type name {name}")
+            }
+            Self::DuplicateValueTypeId { id } => {
+                write!(formatter, "duplicate value type identity {id}")
+            }
+            Self::EmptyValueTypeRepresentationContract { value_type } => write!(
+                formatter,
+                "value type {value_type} has an empty representation contract"
+            ),
+            Self::ValueTypeHasNoSchema { value_type } => {
+                write!(formatter, "value type {value_type} has no declared schema")
+            }
+            Self::ValueTypeSchemaNotDeclared { value_type, schema } => write!(
+                formatter,
+                "value type {value_type} refers to undeclared schema {schema}"
+            ),
+            Self::DuplicateTypeBindingId { id } => {
+                write!(formatter, "duplicate type binding identity {id}")
+            }
+            Self::TypeBindingTargetNotFound { binding, target } => write!(
+                formatter,
+                "type binding {binding} refers to undeclared type {target}"
+            ),
+            Self::QualifiedTypeBindingHasNoSchema { binding } => {
+                write!(
+                    formatter,
+                    "qualified type binding {binding} has no declared schema"
+                )
+            }
+            Self::QualifiedTypeBindingSchemaNotDeclared { binding, schema } => write!(
+                formatter,
+                "qualified type binding {binding} refers to undeclared schema {schema}"
+            ),
             Self::DuplicateSchemaName { name } => {
                 write!(formatter, "duplicate schema name {name}")
             }
@@ -1243,7 +1602,9 @@ mod tests {
         CatalogueSnapshot, CatalogueSnapshotError, FieldDefinition, FunctionDefinition,
         FunctionDomain, FunctionReturn, FunctionReturnColumnDefinition, FunctionSecurity,
         FunctionTransaction, FunctionVolatility, ObjectTypeDefinition, OnDeleteAction,
-        ParameterDefinition, QualifiedSemanticName, SchemaDefinition, SemanticNameError,
+        ParameterDefinition, PreludeTypeName, QualifiedSemanticName, SchemaDefinition,
+        SemanticNameError, TypeBinding, TypeBindingKind, TypeDefinitionKind, TypeLookupName,
+        ValueTypeDefinition, ValueTypeMutability, ValueTypePersistence,
     };
     use crate::{
         CatalogueRevisionId, ExpressionId, FieldId, FunctionId, FunctionRevisionId, ParameterId,
@@ -1402,6 +1763,233 @@ mod tests {
             Some(ExpressionId::from_bytes([4; 16]))
         );
         assert_eq!(person.on_delete(), Some(OnDeleteAction::Restrict));
+    }
+
+    #[test]
+    fn snapshot_resolves_primary_value_types_and_direct_bindings_to_one_type_id() {
+        let boolean = TypeId::from_bytes([1; 16]);
+        let value_type = ValueTypeDefinition::primitive(
+            boolean,
+            name(&["std", "types", "boolean"]),
+            ValueTypeMutability::Immutable,
+            ValueTypePersistence::Persistable,
+            "orna.kernel.value.boolean@1",
+        );
+        let qualified = TypeBinding::qualified(name(&["std", "boolean"]), boolean).unwrap();
+        let prelude_name = PreludeTypeName::new(["BOOLEAN"]).unwrap();
+        let prelude = TypeBinding::prelude(prelude_name.clone(), boolean).unwrap();
+        let catalogue = CatalogueSnapshot::new_with_types(
+            CatalogueRevisionId::from_bytes([7; 16]),
+            vec![schema(1, &["std"]), schema(2, &["std", "types"])],
+            vec![],
+            vec![value_type],
+            vec![qualified, prelude],
+        )
+        .unwrap();
+
+        for type_name in [
+            TypeLookupName::qualified(name(&["std", "types", "boolean"])),
+            TypeLookupName::qualified(name(&["std", "boolean"])),
+            TypeLookupName::prelude(prelude_name),
+        ] {
+            assert_eq!(catalogue.type_id_by_name(&type_name), Some(boolean));
+            let definition = catalogue.type_definition_by_name(&type_name).unwrap();
+            assert_eq!(definition.id(), boolean);
+            assert_eq!(definition.kind(), TypeDefinitionKind::Value);
+            assert!(definition.as_value().is_some());
+            assert!(definition.as_object().is_none());
+        }
+
+        assert_eq!(catalogue.value_types().len(), 1);
+        assert_eq!(catalogue.type_bindings().len(), 2);
+        assert_eq!(
+            catalogue.type_bindings()[0].kind(),
+            TypeBindingKind::Qualified
+        );
+        assert_eq!(catalogue.object_types(), &[]);
+    }
+
+    #[test]
+    fn snapshot_rejects_a_binding_that_collides_with_a_primary_type_name() {
+        let object = object(1, &["std", "boolean"], vec![]);
+        let value_type = ValueTypeDefinition::primitive(
+            TypeId::from_bytes([2; 16]),
+            name(&["std", "types", "boolean"]),
+            ValueTypeMutability::Immutable,
+            ValueTypePersistence::Persistable,
+            "orna.kernel.value.boolean@1",
+        );
+        let binding = TypeBinding::qualified(name(&["std", "boolean"]), value_type.id()).unwrap();
+
+        let error = CatalogueSnapshot::new_with_types(
+            CatalogueRevisionId::from_bytes([7; 16]),
+            vec![schema(1, &["std"]), schema(2, &["std", "types"])],
+            vec![object],
+            vec![value_type],
+            vec![binding],
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            CatalogueSnapshotError::DuplicateTypeName {
+                name: TypeLookupName::qualified(name(&["std", "boolean"])),
+            }
+        );
+    }
+
+    #[test]
+    fn snapshot_rejects_cross_category_type_identity_collisions() {
+        let shared_id = TypeId::from_bytes([1; 16]);
+        let object = ObjectTypeDefinition::new(shared_id, name(&["std", "object"]), vec![]);
+        let value = ValueTypeDefinition::primitive(
+            shared_id,
+            name(&["std", "types", "boolean"]),
+            ValueTypeMutability::Immutable,
+            ValueTypePersistence::Persistable,
+            "orna.kernel.value.boolean@1",
+        );
+
+        let error = CatalogueSnapshot::new_with_types(
+            CatalogueRevisionId::from_bytes([7; 16]),
+            vec![schema(1, &["std"]), schema(2, &["std", "types"])],
+            vec![object],
+            vec![value],
+            vec![],
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            CatalogueSnapshotError::DuplicateTypeId { id: shared_id }
+        );
+    }
+
+    #[test]
+    fn snapshot_rejects_bindings_without_a_primary_type_target() {
+        let target = TypeId::from_bytes([9; 16]);
+        let binding =
+            TypeBinding::prelude(PreludeTypeName::new(["BOOLEAN"]).unwrap(), target).unwrap();
+
+        let error = CatalogueSnapshot::new_with_types(
+            CatalogueRevisionId::from_bytes([7; 16]),
+            vec![],
+            vec![],
+            vec![],
+            vec![binding.clone()],
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            CatalogueSnapshotError::TypeBindingTargetNotFound {
+                binding: binding.id(),
+                target,
+            }
+        );
+    }
+
+    #[test]
+    fn snapshot_keeps_prelude_keyword_words_distinct_from_qualified_name_parts() {
+        let object_id = TypeId::from_bytes([1; 16]);
+        let value_id = TypeId::from_bytes([2; 16]);
+        let object = object(
+            object_id.to_bytes()[0],
+            &["character", "large", "object"],
+            vec![],
+        );
+        let value = ValueTypeDefinition::primitive(
+            value_id,
+            name(&["std", "types", "text"]),
+            ValueTypeMutability::Immutable,
+            ValueTypePersistence::Persistable,
+            "orna.kernel.value.character-large-object@1",
+        );
+        let prelude = PreludeTypeName::new(["CHARACTER", "LARGE", "OBJECT"]).unwrap();
+        let binding = TypeBinding::prelude(prelude.clone(), value_id).unwrap();
+        let catalogue = CatalogueSnapshot::new_with_types(
+            CatalogueRevisionId::from_bytes([7; 16]),
+            vec![
+                schema(1, &["character", "large"]),
+                schema(2, &["std"]),
+                schema(3, &["std", "types"]),
+            ],
+            vec![object],
+            vec![value],
+            vec![binding],
+        )
+        .unwrap();
+
+        assert_eq!(
+            catalogue.type_id_by_name(&TypeLookupName::qualified(name(&[
+                "character",
+                "large",
+                "object",
+            ]))),
+            Some(object_id)
+        );
+        assert_eq!(
+            catalogue.type_id_by_name(&TypeLookupName::prelude(prelude)),
+            Some(value_id)
+        );
+    }
+
+    #[test]
+    fn snapshot_requires_an_exact_declared_schema_for_qualified_type_bindings() {
+        let value_id = TypeId::from_bytes([1; 16]);
+        let value = ValueTypeDefinition::primitive(
+            value_id,
+            name(&["std", "types", "boolean"]),
+            ValueTypeMutability::Immutable,
+            ValueTypePersistence::Persistable,
+            "orna.kernel.value.boolean@1",
+        );
+        let binding = TypeBinding::qualified(name(&["other", "boolean"]), value_id).unwrap();
+
+        let error = CatalogueSnapshot::new_with_types(
+            CatalogueRevisionId::from_bytes([7; 16]),
+            vec![schema(1, &["std"]), schema(2, &["std", "types"])],
+            vec![],
+            vec![value],
+            vec![binding.clone()],
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            CatalogueSnapshotError::QualifiedTypeBindingSchemaNotDeclared {
+                binding: binding.id(),
+                schema: name(&["other"]),
+            }
+        );
+    }
+
+    #[test]
+    fn snapshot_rejects_value_types_without_a_representation_contract() {
+        let value_id = TypeId::from_bytes([1; 16]);
+        let value = ValueTypeDefinition::primitive(
+            value_id,
+            name(&["std", "types", "boolean"]),
+            ValueTypeMutability::Immutable,
+            ValueTypePersistence::Persistable,
+            "",
+        );
+
+        let error = CatalogueSnapshot::new_with_types(
+            CatalogueRevisionId::from_bytes([7; 16]),
+            vec![schema(1, &["std"]), schema(2, &["std", "types"])],
+            vec![],
+            vec![value],
+            vec![],
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            CatalogueSnapshotError::EmptyValueTypeRepresentationContract {
+                value_type: value_id,
+            }
+        );
     }
 
     #[test]

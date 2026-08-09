@@ -75,18 +75,13 @@ fn decode_id(encoded: &str) -> Result<[u8; 16], InvalidCanonicalId> {
     Ok(decoded)
 }
 
-macro_rules! define_id {
+macro_rules! define_id_common {
     ($name:ident, $prefix:literal) => {
         #[doc = concat!("An opaque Orna ", stringify!($name), ".")]
         #[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
         pub struct $name([u8; 16]);
 
         impl $name {
-            /// Creates a new collision-resistant identifier.
-            pub fn new() -> Self {
-                Self(uuid::Uuid::new_v4().into_bytes())
-            }
-
             /// Creates an identifier from its persisted opaque bytes.
             ///
             /// This supports catalog recovery and protected import/restore.
@@ -108,12 +103,6 @@ macro_rules! define_id {
             /// Parses the canonical opaque Orna text form.
             pub fn from_canonical(value: &str) -> Result<Self, InvalidCanonicalId> {
                 value.parse()
-            }
-        }
-
-        impl Default for $name {
-            fn default() -> Self {
-                Self::new()
             }
         }
 
@@ -146,7 +135,33 @@ macro_rules! define_id {
     };
 }
 
+macro_rules! define_id {
+    ($name:ident, $prefix:literal) => {
+        define_id_common!($name, $prefix);
+
+        impl $name {
+            /// Creates a new collision-resistant identifier.
+            pub fn new() -> Self {
+                Self(uuid::Uuid::new_v4().into_bytes())
+            }
+        }
+
+        impl Default for $name {
+            fn default() -> Self {
+                Self::new()
+            }
+        }
+    };
+}
+
+macro_rules! define_derived_id {
+    ($name:ident, $prefix:literal) => {
+        define_id_common!($name, $prefix);
+    };
+}
+
 define_id!(TypeId, "type");
+define_derived_id!(TypeBindingId, "type-binding");
 define_id!(FieldId, "field");
 define_id!(SchemaId, "schema");
 define_id!(CatalogueRevisionId, "catalogue-revision");
