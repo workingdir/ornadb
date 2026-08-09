@@ -1687,7 +1687,10 @@ fn require_recovered_new_candidate(
 ) -> TestResult<()> {
     require_recovered_snapshot(candidate, active)?;
     require(
-        active.function_revisions() == candidate.new_function_revisions(),
+        same_members(
+            active.function_revisions(),
+            candidate.new_function_revisions(),
+        ),
         "recovered candidate current function revisions differ",
     )?;
     require(
@@ -1708,11 +1711,22 @@ fn require_recovered_snapshot(
         active.source() == candidate.source(),
         "recovered candidate source differs",
     )?;
+    // Recovery uses durable record order, while preparation uses candidate
+    // snapshot order. Stable identities and embedded ordinals carry equality.
     require(
         active.catalogue().revision() == candidate.candidate().revision()
-            && active.catalogue().schemas() == candidate.candidate().schemas()
-            && active.catalogue().object_types() == candidate.candidate().object_types()
-            && active.catalogue().functions() == candidate.candidate().functions(),
+            && same_members(
+                active.catalogue().schemas(),
+                candidate.candidate().schemas(),
+            )
+            && same_members(
+                active.catalogue().object_types(),
+                candidate.candidate().object_types(),
+            )
+            && same_members(
+                active.catalogue().functions(),
+                candidate.candidate().functions(),
+            ),
         "recovered candidate catalogue differs",
     )?;
     require(
@@ -1720,7 +1734,7 @@ fn require_recovered_snapshot(
         "recovered candidate catalogue hash differs",
     )?;
     require(
-        active.expressions() == candidate.expressions(),
+        same_members(active.expressions(), candidate.expressions()),
         "recovered candidate expressions differ",
     )?;
     require(
@@ -1728,7 +1742,7 @@ fn require_recovered_snapshot(
         "recovered candidate origins differ",
     )?;
     require(
-        active.references() == candidate.references(),
+        same_members(active.references(), candidate.references()),
         "recovered candidate references differ",
     )?;
     Ok(())
@@ -1738,7 +1752,17 @@ fn same_members<T>(left: &[T], right: &[T]) -> bool
 where
     T: Eq,
 {
-    left.len() == right.len() && left.iter().all(|member| right.contains(member))
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut unmatched = right.iter().collect::<Vec<_>>();
+    for member in left {
+        let Some(index) = unmatched.iter().position(|candidate| *candidate == member) else {
+            return false;
+        };
+        unmatched.swap_remove(index);
+    }
+    unmatched.is_empty()
 }
 
 fn relation(type_id: TypeId) -> String {
