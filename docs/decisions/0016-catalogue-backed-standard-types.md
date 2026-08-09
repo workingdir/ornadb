@@ -523,6 +523,130 @@ encoding over its lower-case keyword words, so `CHARACTER LARGE OBJECT` is the
 three parts `character`, `large`, and `object`. The first sixteen digest bytes
 form `TypeBindingId`. Bootstrap rejects a collision between two bindings.
 
+### Trusted compiler standard-source checker
+
+`orna-compiler` adds this exact public seam:
+
+```rust
+pub fn check_standard_library_source(
+    snapshot: &VerifiedStandardLibrarySnapshot,
+) -> Result<CheckedStandardLibrary, StandardLibraryCheckError>
+```
+
+The compiler accepts only the core-owned
+`VerifiedStandardLibrarySnapshot` capability. It accepts no raw standard
+snapshot, manifest, source bundle, boolean trust flag, or equivalent bypass.
+`orna-compiler` has no dependency on `orna-standard`. The caller supplies the
+verified core carrier after it has completed the applicable standard-library
+authority checks.
+
+`StandardLibraryCheckError` is public, `#[non_exhaustive]`, and derives
+`Clone`, `Debug`, `Eq`, and `PartialEq`. It has exactly these variants and
+fields:
+
+```rust
+#[non_exhaustive]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StandardLibraryCheckError {
+    SourceUnitCount { actual: usize },
+    Diagnostics { diagnostics: Vec<CompilerDiagnostic> },
+    SourceMismatch,
+}
+```
+
+Its public `Display` text is exact:
+
+| Variant | Display |
+| --- | --- |
+| `SourceUnitCount` | `the verified standard library has {actual} source units, expected exactly one` |
+| `Diagnostics` | `the verified standard library source has compiler diagnostics` |
+| `SourceMismatch` | `the verified standard library source does not match its catalogue and origins` |
+
+`{actual}` is the decimal `usize` value. `std::error::Error::source()` returns
+`None` for every variant. No other error variant or implicit conversion is
+accepted.
+
+`CheckedStandardLibrary` owns a clone of the verified snapshot and the checked
+families. It derives `Clone` and `Debug`. Its public read-only accessors are
+`verified_snapshot() -> &VerifiedStandardLibrarySnapshot`,
+`schemas() -> &[CheckedStandardSchema]`,
+`value_types() -> &[CheckedStandardValueType]`, and
+`type_bindings() -> &[CheckedStandardTypeBinding]`. The family accessors return
+slices in source order; they do not sort by durable identity. Each checked
+family model derives `Clone`, `Debug`, `Eq`, and `PartialEq`.
+
+```rust
+#[derive(Clone, Debug)]
+pub struct CheckedStandardLibrary { /* private fields */ }
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CheckedStandardSchema { /* private fields */ }
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CheckedStandardValueType { /* private fields */ }
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CheckedStandardTypeBinding { /* private fields */ }
+```
+
+| Checked family | Private fields | Read-only accessors |
+| --- | --- | --- |
+| `CheckedStandardSchema` | `id: SchemaId`, `name: QualifiedSemanticName`, `origin: SourceOrigin` | `id() -> SchemaId`, `name() -> &QualifiedSemanticName`, `origin() -> SourceOrigin` |
+| `CheckedStandardValueType` | `id: TypeId`, `name: QualifiedSemanticName`, `kind: ValueTypeKind`, `mutability: ValueTypeMutability`, `persistence: ValueTypePersistence`, `representation_contract: String`, `origin: SourceOrigin` | `id() -> TypeId`, `name() -> &QualifiedSemanticName`, `kind() -> ValueTypeKind`, `mutability() -> ValueTypeMutability`, `persistence() -> ValueTypePersistence`, `representation_contract() -> &str`, `origin() -> SourceOrigin` |
+| `CheckedStandardTypeBinding` | `id: TypeBindingId`, `kind: TypeBindingKind`, `name: TypeLookupName`, `target: TypeId`, `origin: SourceOrigin` | `id() -> TypeBindingId`, `kind() -> TypeBindingKind`, `name() -> &TypeLookupName`, `target() -> TypeId`, `origin() -> SourceOrigin` |
+
+Each checked item owns its durable identity, checked catalogue fields, and
+exact source origin. This model preserves the catalogue facts and source
+origins without allocating identities, preparing a revision, or constructing a
+type-use model. Identity, enum, origin, and target accessors return copied
+values. Name, contract, snapshot, and family accessors return borrows.
+
+The checker runs these gates in this exact order:
+
+1. Require exactly one stored source unit. If the count differs, return
+   `SourceUnitCount { actual }` before parsing or catalogue work.
+2. Parse that unit's exact logical path and content exactly once.
+3. If parsing reports diagnostics, return
+   `Diagnostics { diagnostics }` with the existing exact
+   `CompilerDiagnostic` vector before semantic reconciliation.
+4. Require lossless parsed text, only schema, primitive-value-type, and
+   type-export declaration categories, and the exact schema, primitive,
+   qualified-export, and prelude-export family counts from the supplied
+   verified catalogue.
+5. Reconcile every unquoted source fact one-to-one with the verified
+   catalogue. Reconcile schemas; primitive name, `Primitive`, `Immutable`,
+   parsed persistence, and decoded contract; qualified-export primary source,
+   binding name, kind, and direct target; and prelude-export source qualified
+   binding, prelude name, kind, and the same direct target. Consume each
+   catalogue fact exactly once. Durable identities come from those matched
+   catalogue facts; source-visible facts do not encode them.
+6. Key origins by `DefinitionIdentity`. Require the sole stored
+   `SourceUnitId` and each exact complete-declaration start and end range for
+   every fact. Consume every origin exactly once.
+7. Construct `CheckedStandardLibrary` with the cloned verified capability and
+   its source-ordered checked schema, value-type, and type-binding families.
+
+Any failure in gates 4 through 6 returns `SourceMismatch`. The checker is a
+separate trusted path and must never call ordinary `check_parsed`, directly or
+indirectly. It does not call `prepare`, access a database, install a standard
+library, resolve a type use, or convert to or from `StandardScalar`.
+
+Ordinary application checking remains separate. Its `ORNA0303` protected-source
+diagnostics, their syntax precedence and category order, and its existing
+scalar compatibility adapter remain unchanged.
+
+Core canonical verification can verify a self-consistent non-golden snapshot.
+This checker therefore proves only source, catalogue, and origin agreement
+with the supplied core-verified snapshot and accepts that case when those
+facts agree. It does not enforce the accepted `orna.std/1` golden, duplicate
+standard-digest verification, or produce directly installable state. Every
+production caller must first use
+`orna_standard::verify_standard_library_snapshot`. The later
+`feat(std): orchestrate standard upgrades` row and its proof own that
+integration ordering. This compiler row proves only the absence of an
+`orna-standard` dependency and acceptance of a core-verified non-golden
+agreement fixture.
+
 ### Standard-library digest version 1
 
 The canonical standard digest is SHA-256 over this exact sequence:
@@ -925,6 +1049,28 @@ together, or the previous version-1 active revision remains authoritative.
 
 ## Required proof
 
+### Trusted compiler checker proof matrix
+
+| Boundary | Required cases | Required result |
+| --- | --- | --- |
+| Public interface and model | The exact public function signature; no raw snapshot, manifest, source bundle, or trust flag; compiler dependency graph; each stated derive; `verified_snapshot()` and every checked family accessor with its exact return type | `check_standard_library_source` accepts only `&VerifiedStandardLibrarySnapshot`. `orna-compiler` has no `orna-standard` dependency. The checked result owns a clone of the supplied capability and source-ordered schema, value-type, and type-binding fields with durable IDs taken from the matched catalogue facts and exact `SourceOrigin` values. Copy and borrow accessor behaviour is exact. |
+| Error contract | Each `StandardLibraryCheckError` derive, variant, exact `Display`, and `Error::source()` | The error is public, non-exhaustive, derives `Clone`, `Debug`, `Eq`, and `PartialEq`, and exposes only `SourceUnitCount { actual }`, `Diagnostics { diagnostics }`, and `SourceMismatch`. Each display is exact and every error source is `None`. |
+| Count and parse precedence | Zero, one, and multiple stored source units; malformed sole source unit; malformed source with otherwise mismatched catalogue data | A non-one unit count returns `SourceUnitCount` before parsing or catalogue work. One unit parses once. Syntax diagnostics return the unchanged ordered `CompilerDiagnostic` vector in `Diagnostics` before every reconciliation check. |
+| Lossless shape | A test seam where parsed lossless text differs from the stored source text; object type, rename, SERVER function, CLIENT function, and unsupported declaration categories; each family count that differs from the supplied verified catalogue | Each case returns `SourceMismatch`. The accepted fixture proves two schemas, thirteen primitive value types, thirteen qualified exports, and seventeen prelude exports. A self-consistent non-golden snapshot can have different supported-family counts. |
+| Schema facts | Missing, extra, duplicate, renamed, quoted, or crossed schema source fact; a catalogue schema identity with a missing or crossed origin | Each case returns `SourceMismatch`. Each verified schema fact is consumed once, with no source fact left over. |
+| Primitive value-type facts | Missing, extra, duplicate, renamed, quoted, or crossed primitive; non-vacuous persistence and decoded-contract mismatches; a catalogue type identity with a missing or crossed origin; code review of current kind and mutability matches | Each case returns `SourceMismatch`. The implementation matches each current `ValueTypeKind` and `ValueTypeMutability` variant and has a fail-closed wildcard. Public core APIs cannot construct a future non-exhaustive variant, so executable hostile-variant proof is deferred until such a variant exists. Each source primitive matches one verified value-type fact and is consumed once. |
+| Qualified binding facts | Missing, extra, duplicate, renamed, quoted, or crossed qualified export; wrong primary source, binding name, binding kind, or direct target; a catalogue binding identity with a missing or crossed origin | Each case returns `SourceMismatch`. Each verified qualified binding fact is consumed once. |
+| Prelude binding facts | Missing, extra, duplicate, renamed, quoted, or crossed prelude export; wrong source qualified binding, prelude words, binding kind, or direct target; a catalogue binding identity with a missing or crossed origin | Each case returns `SourceMismatch`. Each verified prelude binding fact is consumed once and has the same direct target as its source qualified binding. |
+| Origins | Missing, extra, duplicate, or crossed `DefinitionIdentity`; wrong source-unit ID; non-full declaration range; wrong start or end | Each case returns `SourceMismatch`. Every fact has one exact complete-declaration `SourceOrigin` in the sole stored unit, and every verified origin is consumed once. |
+| Successful result | A core-verified snapshot whose source, catalogue, and origins agree | The result retains the supplied verified capability and all checked facts and origins in source order. It has no preparation, database, install, or type-use output. |
+| Authority boundary | A core-verified self-consistent non-golden snapshot, including changed logical path, whitespace, comment, content, declaration order, durable identities, or supported-family counts when source, catalogue, and origins agree; a compiler dependency review | The compiler checker proves source, catalogue, and origin agreement only. It accepts the self-consistent non-golden case, has no `orna-standard` dependency, does not recheck the accepted digest, and does not create installable state. |
+| Ordinary path compatibility | Protected application `std` owner, kernel contract, qualified export, and prelude export cases; syntax-error precedence; all established scalar spellings and rejected aliases | Ordinary checking preserves the exact `ORNA0303` diagnostics, spans, category order, scalar compatibility adapter, accepted aliases, and rejected aliases. The trusted checker never calls ordinary `check_parsed`. |
+
+The later `feat(std): orchestrate standard upgrades` proof, not this compiler
+checker matrix, proves wrapper-before-check production ordering. It calls
+`orna_standard::verify_standard_library_snapshot` before
+`check_standard_library_source`.
+
 Tests must prove:
 
 * the source-independent manifest contains the exact reserved IDs for
@@ -1007,14 +1153,14 @@ standard-orchestration rows remain within their two-file caps.
 | `feat(std): define the standard manifest` | `crates/orna-standard/Cargo.toml`, `crates/orna-standard/src/lib.rs`, `Cargo.lock` | The source-independent manifest exposes the exact reserved IDs, 13 primary names and contracts, and 30 direct binding facts: 13 qualified plus 17 prelude. It contains no source bytes, origins, hashes, standard digest, `StandardLibrarySnapshot`, or `VerifiedStandardLibrarySnapshot`. The crate manifest predeclares `orna-core`, `orna-syntax`, and `orna-compiler` so the later source and orchestration rows stay within their file caps; no database state changes. |
 | `feat(syntax): parse primitive value types` | `crates/orna-syntax/src/lib.rs`, `crates/orna-syntax/src/parser.rs`, `crates/orna-compiler/src/resolver.rs` | The parser losslessly accepts the privileged primitive and export forms. Before identity allocation, ordinary application checking enforces the complete protected-source table across existing and new declaration forms, including every primitive value declaration and type export, with the exact ordered `ORNA0303` diagnostic text and spans defined above. It cannot silently ignore one. No trusted standard-checking path exists yet. |
 | `feat(std): retain the standard source` | `stdlib/std/types.orna`, `crates/orna-standard/src/lib.rs` | The crate retains the exact 3273-byte source and its 45 complete-declaration origins. It parses directly with `orna_syntax`, checks every unquoted source fact against the manifest, and locks the literal framed content, bundle, revision, and standard digests. It exposes `retained_standard_library_snapshot` and `verify_standard_library_snapshot` with the stated `StandardLibraryError` contract. The verifier checks reserved catalogue identity, then accepted digest, then the core canonical verifier. Tests prove each error field, display text, source result, gate precedence, and rejection of a core-accepted self-consistent non-golden snapshot. |
-| `feat(compiler): check standard type source` | `crates/orna-compiler/src/resolver.rs`, `crates/orna-compiler/src/resolver/model.rs`, `crates/orna-compiler/src/lib.rs` | A dedicated trusted standard-checking path checks the retained standard source. Ordinary application checking retains the exact `ORNA0303` protection introduced with the syntax forms, and ordinary scalar resolution still uses its compatibility adapter. |
+| `feat(compiler): check standard type source` | `crates/orna-compiler/src/resolver.rs`, `crates/orna-compiler/src/resolver/model.rs`, `crates/orna-compiler/src/lib.rs` | A dedicated `check_standard_library_source(&VerifiedStandardLibrarySnapshot) -> Result<CheckedStandardLibrary, StandardLibraryCheckError>` path accepts only the core-verified carrier, has no `orna-standard` dependency, and checks the one stored retained unit, diagnostics, lossless declaration families, one-to-one catalogue facts, and exact origins in the stated order. It returns `verified_snapshot()` plus source-ordered checked schema, value-type, and binding fields with durable IDs from matched catalogue facts and exact origins. It never calls ordinary `check_parsed`, `prepare`, database, installation, type-use resolution, or `StandardScalar` conversion. Ordinary application checking retains the exact `ORNA0303` protection introduced with the syntax forms, and ordinary scalar resolution retains its compatibility adapter. |
 | `feat(compiler): resolve types through std` | `crates/orna-compiler/src/resolver.rs`, `crates/orna-compiler/src/resolver/model.rs` | Public and qualified scalar names resolve through an explicitly supplied verified standard snapshot to `TypeId`; compilation without that snapshot returns `StandardLibraryError::Unavailable`. No database can install the snapshot yet. |
 | `refactor(types): remove scalar naming authority` | `crates/orna-core/src/types.rs`, `crates/orna-compiler/src/resolver.rs` | Public `StandardScalar::from_source_spelling`, `canonical_name`, `type_id`, and `ScalarResolutionError` are removed. Diagnostics render names from verified catalogue definitions or retained source, while exact representation matching remains internal. |
 | `feat(compiler): reference standard function types` | `crates/orna-compiler/src/resolver.rs`, `crates/orna-compiler/src/resolver/model.rs`, `crates/orna-compiler/src/prepare.rs` | Standard types in signatures emit exact `ValueType`/`NamedType` evidence and affected functions receive semantic-hash v2 revisions. A checked compatibility projection is derived only after binding resolution. |
 | `feat(client): prepare catalogue Boolean constants` | `crates/orna-compiler/src/prepare.rs`, `crates/orna-compiler/src/resolver/model.rs` | Work ADR 0015 preparation uses the canonical Boolean identity and exact one-reference sequence; no evaluator or database consumer exists yet. |
 | `feat(client): evaluate catalogue Boolean constants` | `crates/orna-client/Cargo.toml`, `crates/orna-client/src/lib.rs`, `Cargo.lock` | The local evaluator verifies canonical hash version 1 or 2 as appropriate, requires the exact standard revision and one-reference sequence for version-2 CLIENT revisions, and retains the exact result and error contract. |
 | `feat(compiler): prepare standard revisions` | `crates/orna-compiler/src/prepare.rs`, `crates/orna-core/src/revision.rs` | A closed `StandardUpgrade` is produced with the companion source and v2 catalogue; no kernel consumer exists yet. |
-| `feat(std): orchestrate standard upgrades` | `crates/orna-standard/src/lib.rs`, `crates/orna-compiler/src/prepare.rs` | `prepare_standard_upgrade` rechecks exact active source and returns the complete closed upgrade; the crate has no database authority. |
+| `feat(std): orchestrate standard upgrades` | `crates/orna-standard/src/lib.rs`, `crates/orna-compiler/src/prepare.rs` | `prepare_standard_upgrade` first calls `verify_standard_library_snapshot`, then passes the accepted verified carrier to `check_standard_library_source`, rechecks exact active source, and returns the complete closed upgrade. Its proof owns that wrapper-before-check ordering. The crate has no database authority. |
 | `feat(postgres): store standard catalogue types` | `crates/orna-kernel-postgres/migrations/0007_catalogue_types.sql`, `crates/orna-kernel-postgres/src/bootstrap.rs` | Bare bootstrap installs only schema support and still recovers all v1 databases exactly. |
 | `feat(postgres): decode standard revisions` | `crates/orna-kernel-postgres/src/recovery.rs`, `crates/orna-kernel-postgres/src/recovery/functions.rs` | Recovery verifies complete raw v2 fixtures and still recovers v1 exactly, but no public production mutation can create v2 active state. |
 | `feat(storage): lower verified value contracts` | `crates/orna-core/src/physical.rs`, `crates/orna-kernel-postgres/src/physical.rs`, `crates/orna-kernel-postgres/src/physical/verify.rs` | Physical planning and verification start from a verified contract; generated SQL and existing physical identities remain exact. |
