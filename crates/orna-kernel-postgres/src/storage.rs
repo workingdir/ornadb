@@ -13,6 +13,10 @@ pub(crate) fn field_name(field_id: FieldId) -> String {
     format!("f_{}", field_id_hex(field_id))
 }
 
+pub(crate) fn unique_constraint_name(field_id: FieldId) -> String {
+    format!("uq_{}", field_id_hex(field_id))
+}
+
 pub(crate) fn type_id_hex(type_id: TypeId) -> String {
     raw_id_hex(type_id.to_bytes())
 }
@@ -29,7 +33,7 @@ fn raw_id_hex(bytes: [u8; 16]) -> String {
 mod tests {
     use orna_core::{FieldId, TypeId};
 
-    use super::{field_id_hex, field_name, relation_name, type_id_hex};
+    use super::{field_id_hex, field_name, relation_name, type_id_hex, unique_constraint_name};
 
     #[test]
     fn names_use_exact_lowercase_raw_identity_bytes() {
@@ -41,7 +45,12 @@ mod tests {
 
         assert_eq!(relation_name(type_id), "t_000102030405060708090a0b0c0d0e0f");
         assert_eq!(field_name(field_id), "f_abababababababababababababababab");
+        assert_eq!(
+            unique_constraint_name(field_id),
+            "uq_abababababababababababababababab"
+        );
         assert!(format!("ck_{}_object_id", type_id_hex(type_id)).len() < 63);
         assert!(format!("ck_{}_object_id", field_id_hex(field_id)).len() < 63);
+        assert!(unique_constraint_name(field_id).len() < 63);
     }
 }

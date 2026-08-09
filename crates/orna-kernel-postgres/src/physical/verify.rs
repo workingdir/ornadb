@@ -7,13 +7,13 @@ use orna_core::{
     catalogue::{CatalogueSnapshot, FieldDefinition, ObjectTypeDefinition, OnDeleteAction},
     types::{ResolvedType, StandardScalar},
 };
-use tokio_postgres::Transaction;
+use tokio_postgres::{Row, Transaction};
 
 use crate::{PostgresKernelError, decode::DurableRecord};
 
 use super::{
     DATA_SCHEMA, OBJECT_ID_COLUMN, establish_trusted_search_path, field_id_hex, field_name,
-    on_delete_sql, relation_name, scalar_storage_type, type_id_hex,
+    on_delete_sql, relation_name, scalar_storage_type, type_id_hex, unique_constraint_name,
 };
 
 const DATA_RELATION: &str = "_orna_data";
@@ -156,6 +156,14 @@ impl ExpectedTable {
                     &record,
                 )?;
             }
+            if field.unique() {
+                insert_expected_constraint(
+                    &mut constraints,
+                    unique_constraint_name(field.id()),
+                    ExpectedConstraint::unique(attribute),
+                    &field_record(object.id(), field.id()),
+                )?;
+            }
             columns.push(column);
         }
 
@@ -198,8 +206,8 @@ struct ExpectedColumn {
 impl ExpectedColumn {
     fn from_field(owner: TypeId, field: &FieldDefinition) -> Result<Self, PostgresKernelError> {
         let record = field_record(owner, field.id());
-        if field.unique() {
-            return Err(record.invariant("physical storage does not support unique fields"));
+        if field.unique() && !field.is_required_unique_reference() {
+            return Err(record.invariant("only NOT NULL REF fields can be UNIQUE"));
         }
         if field.default_expression().is_some() {
             return Err(record.invariant("physical storage does not support field defaults"));
@@ -305,6 +313,17 @@ impl ExpectedConstraint {
             foreign_key: None,
             delete_action: None,
             expression: Some(format!("(octet_length({column}) = 16)")),
+        }
+    }
+
+    fn unique(attribute: i16) -> Self {
+        Self {
+            kind: "u",
+            key: vec![attribute],
+            foreign_table: None,
+            foreign_key: None,
+            delete_action: None,
+            expression: None,
         }
     }
 
@@ -430,7 +449,7 @@ async fn verify_table(
 ) -> Result<(), PostgresKernelError> {
     verify_columns(transaction, table).await?;
     verify_constraints(transaction, table).await?;
-    verify_primary_index(transaction, table).await
+    verify_indexes(transaction, table).await
 }
 
 async fn verify_columns(
@@ -685,7 +704,7 @@ async fn verify_constraints(
 
     if !expected.is_empty() {
         return Err(relation_record(&table.name).invariant(
-            "relation is missing a required Orna-owned primary, check, or foreign key constraint",
+            "relation is missing a required Orna-owned primary, unique, check, or foreign key constraint",
         ));
     }
     if observed_not_null != required_not_null {
@@ -767,7 +786,7 @@ fn verify_named_constraint(
                 ));
             }
         }
-        "p" => {
+        "p" | "u" => {
             if !has_non_foreign_constraint_shape(
                 target_table,
                 target_namespace,
@@ -777,7 +796,9 @@ fn verify_named_constraint(
                 match_type,
                 expression,
             ) {
-                return Err(record.invariant("primary key must not contain foreign or check state"));
+                return Err(record.invariant(
+                    "primary and unique constraints must not contain foreign or check state",
+                ));
             }
         }
         _ => return Err(record.invariant("expected constraint kind must be supported")),
@@ -804,7 +825,7 @@ fn has_non_foreign_constraint_shape(
 }
 
 fn requires_no_inherit(kind: &str) -> bool {
-    matches!(kind, "p" | "f")
+    matches!(kind, "p" | "u" | "f")
 }
 
 fn delete_action_code(action: &str) -> Option<&'static str> {
@@ -817,7 +838,102 @@ fn delete_action_code(action: &str) -> Option<&'static str> {
     }
 }
 
-async fn verify_primary_index(
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ExpectedIndex {
+    key: Vec<i16>,
+    primary: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ObservedIndex {
+    valid: bool,
+    ready: bool,
+    unique: bool,
+    primary: bool,
+    immediate: bool,
+    exclusion: bool,
+    clustered: bool,
+    replica_identity: bool,
+    nulls_not_distinct: bool,
+    key_attributes: i16,
+    attributes: i16,
+    key: Vec<i16>,
+    no_predicate: bool,
+    no_expression: bool,
+}
+
+impl ObservedIndex {
+    fn from_row(row: &Row, record: &DurableRecord) -> Result<Self, PostgresKernelError> {
+        Ok(Self {
+            valid: record.column(row, "valid", "index valid flag must decode")?,
+            ready: record.column(row, "ready", "index ready flag must decode")?,
+            unique: record.column(row, "unique_index", "index unique flag must decode")?,
+            primary: record.column(row, "primary_index", "index primary flag must decode")?,
+            immediate: record.column(row, "immediate", "index immediate flag must decode")?,
+            exclusion: record.column(row, "exclusion", "index exclusion flag must decode")?,
+            clustered: record.column(row, "clustered", "index clustered flag must decode")?,
+            replica_identity: record.column(
+                row,
+                "replica_identity",
+                "index replica identity flag must decode",
+            )?,
+            nulls_not_distinct: record.column(
+                row,
+                "nulls_not_distinct",
+                "index null treatment flag must decode",
+            )?,
+            key_attributes: record.column(row, "key_attributes", "index key count must decode")?,
+            attributes: record.column(row, "attributes", "index attribute count must decode")?,
+            key: record.column(row, "indkey", "index key columns must decode")?,
+            no_predicate: record.column(row, "no_predicate", "index predicate flag must decode")?,
+            no_expression: record.column(
+                row,
+                "no_expression",
+                "index expression flag must decode",
+            )?,
+        })
+    }
+
+    fn has_expected_shape(&self, expected: &ExpectedIndex) -> bool {
+        self.valid
+            && self.ready
+            && self.unique
+            && self.primary == expected.primary
+            && self.immediate
+            && !self.exclusion
+            && !self.clustered
+            && !self.replica_identity
+            && !self.nulls_not_distinct
+            && self.key_attributes == 1
+            && self.attributes == 1
+            && self.key == expected.key
+            && self.no_predicate
+            && self.no_expression
+    }
+}
+
+fn expected_indexes(table: &ExpectedTable) -> BTreeMap<String, ExpectedIndex> {
+    table
+        .constraints
+        .iter()
+        .filter_map(|(name, constraint)| {
+            let primary = match constraint.kind {
+                "p" => true,
+                "u" => false,
+                _ => return None,
+            };
+            Some((
+                name.clone(),
+                ExpectedIndex {
+                    key: constraint.key.clone(),
+                    primary,
+                },
+            ))
+        })
+        .collect()
+}
+
+async fn verify_indexes(
     transaction: &Transaction<'_>,
     table: &ExpectedTable,
 ) -> Result<(), PostgresKernelError> {
@@ -844,62 +960,30 @@ async fn verify_primary_index(
              JOIN pg_catalog.pg_class AS index_class ON index_class.oid = index.indexrelid
              JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = class.relnamespace
              WHERE namespace.nspname = '_orna_data'
-               AND class.relname = $1",
+               AND class.relname = $1
+             ORDER BY index_class.relname",
             &[&table.name],
         )
         .await
         .map_err(PostgresKernelError::Database)?;
-    let record = relation_record(&table.name);
-    if rows.len() != 1 {
-        return Err(
-            record.invariant("each private relation must have exactly one primary key index")
-        );
+    let mut expected = expected_indexes(table);
+    for row in &rows {
+        let table_record = relation_record(&table.name);
+        let name: String = table_record.column(row, "name", "index name must decode")?;
+        let record = DurableRecord::new(DATA_RELATION, format!("{}.{}", table.name, name));
+        let Some(expected_index) = expected.remove(&name) else {
+            return Err(record.invariant("relation has an unexpected index"));
+        };
+        let observed = ObservedIndex::from_row(row, &record)?;
+        if !observed.has_expected_shape(&expected_index) {
+            return Err(record.invariant(
+                "index must have the exact one-column immediate private primary or unique shape",
+            ));
+        }
     }
-    let row = &rows[0];
-    let name: String = record.column(row, "name", "index name must decode")?;
-    let valid: bool = record.column(row, "valid", "index valid flag must decode")?;
-    let ready: bool = record.column(row, "ready", "index ready flag must decode")?;
-    let unique: bool = record.column(row, "unique_index", "index unique flag must decode")?;
-    let primary: bool = record.column(row, "primary_index", "index primary flag must decode")?;
-    let immediate: bool = record.column(row, "immediate", "index immediate flag must decode")?;
-    let exclusion: bool = record.column(row, "exclusion", "index exclusion flag must decode")?;
-    let clustered: bool = record.column(row, "clustered", "index clustered flag must decode")?;
-    let replica_identity: bool = record.column(
-        row,
-        "replica_identity",
-        "index replica identity flag must decode",
-    )?;
-    let nulls_not_distinct: bool = record.column(
-        row,
-        "nulls_not_distinct",
-        "index null treatment flag must decode",
-    )?;
-    let key_attributes: i16 =
-        record.column(row, "key_attributes", "index key count must decode")?;
-    let attributes: i16 = record.column(row, "attributes", "index attribute count must decode")?;
-    let key: Vec<i16> = record.column(row, "indkey", "index key columns must decode")?;
-    let no_predicate: bool =
-        record.column(row, "no_predicate", "index predicate flag must decode")?;
-    let no_expression: bool =
-        record.column(row, "no_expression", "index expression flag must decode")?;
-    if name != format!("pk_{}", &table.name[2..])
-        || !valid
-        || !ready
-        || !unique
-        || !primary
-        || !immediate
-        || exclusion
-        || clustered
-        || replica_identity
-        || nulls_not_distinct
-        || key_attributes != 1
-        || attributes != 1
-        || key != [1]
-        || !no_predicate
-        || !no_expression
-    {
-        return Err(record
-            .invariant("primary key index must be the exact one-column immediate private index"));
+    if !expected.is_empty() {
+        return Err(relation_record(&table.name)
+            .invariant("relation is missing a required private primary or unique index"));
     }
     Ok(())
 }
@@ -1245,14 +1329,17 @@ fn relation_record(name: &str) -> DurableRecord {
 mod tests {
     use orna_core::{
         FieldId, TypeId,
-        catalogue::{FieldDefinition, ObjectTypeDefinition, QualifiedSemanticName},
+        catalogue::{FieldDefinition, ObjectTypeDefinition, OnDeleteAction, QualifiedSemanticName},
         types::{ResolvedType, StandardScalar},
     };
 
     use super::{
-        ExpectedForeignKey, ExpectedTable, ReferenceTriggerLocation, classify_reference_trigger,
-        field_name, has_non_foreign_constraint_shape, relation_name, requires_no_inherit,
+        ExpectedConstraint, ExpectedForeignKey, ExpectedIndex, ExpectedTable, ObservedIndex,
+        ReferenceTriggerLocation, classify_reference_trigger, expected_indexes, field_name,
+        has_non_foreign_constraint_shape, relation_name, requires_no_inherit,
+        unique_constraint_name, verify_named_constraint,
     };
+    use crate::decode::DurableRecord;
 
     #[test]
     fn non_foreign_constraints_require_the_exact_pg18_blank_characters() {
@@ -1276,9 +1363,60 @@ mod tests {
     #[test]
     fn pg18_constraint_inheritance_flags_are_exact_per_constraint_kind() {
         assert!(requires_no_inherit("p"));
+        assert!(requires_no_inherit("u"));
         assert!(requires_no_inherit("f"));
         assert!(!requires_no_inherit("c"));
         assert!(!requires_no_inherit("n"));
+    }
+
+    #[test]
+    fn unique_constraint_requires_the_exact_pg18_shape() {
+        let record = DurableRecord::new("_orna_data", "unique constraint");
+        let expected = ExpectedConstraint::unique(2);
+        assert!(
+            verify_named_constraint(
+                &record,
+                "u",
+                Some(&[2]),
+                None,
+                None,
+                None,
+                " ",
+                " ",
+                " ",
+                true,
+                true,
+                false,
+                false,
+                false,
+                true,
+                None,
+                &expected,
+            )
+            .is_ok()
+        );
+        assert!(
+            verify_named_constraint(
+                &record,
+                "u",
+                Some(&[2]),
+                None,
+                None,
+                None,
+                " ",
+                " ",
+                " ",
+                true,
+                true,
+                false,
+                true,
+                false,
+                true,
+                None,
+                &expected,
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1339,6 +1477,16 @@ mod tests {
                     None,
                     None,
                 ),
+                FieldDefinition::new(
+                    FieldId::from_bytes([5; 16]),
+                    "unique_target",
+                    2,
+                    ResolvedType::reference(target),
+                    false,
+                    true,
+                    None,
+                    None,
+                ),
             ],
         );
 
@@ -1355,6 +1503,182 @@ mod tests {
                 .constraints
                 .contains_key(&format!("fk_{}", "04".repeat(16)))
         );
+        let unique_name = unique_constraint_name(FieldId::from_bytes([5; 16]));
+        let unique = expected
+            .constraints
+            .get(&unique_name)
+            .expect("required unique constraint");
+        assert_eq!(unique.kind, "u");
+        assert_eq!(unique.key, [4]);
+
+        let indexes = expected_indexes(&expected);
+        assert_eq!(indexes.len(), 2);
+        assert_eq!(
+            indexes.get(&format!("pk_{}", "02".repeat(16))),
+            Some(&ExpectedIndex {
+                key: vec![1],
+                primary: true,
+            })
+        );
+        assert_eq!(
+            indexes.get(&unique_name),
+            Some(&ExpectedIndex {
+                key: vec![4],
+                primary: false,
+            })
+        );
+    }
+
+    #[test]
+    fn expected_builder_accepts_only_required_unique_references() {
+        let owner = TypeId::from_bytes([0x20; 16]);
+        let target = TypeId::from_bytes([0x21; 16]);
+        let required_reference = unique_object(
+            owner,
+            ResolvedType::reference(target),
+            false,
+            FieldId::from_bytes([0x22; 16]),
+        );
+        assert!(ExpectedTable::from_object(&required_reference).is_ok());
+
+        let nullable_reference = unique_object(
+            owner,
+            ResolvedType::reference(target),
+            true,
+            FieldId::from_bytes([0x23; 16]),
+        );
+        assert!(ExpectedTable::from_object(&nullable_reference).is_err());
+
+        let set_null_reference = ObjectTypeDefinition::new(
+            owner,
+            name(&["test", "unique_owner"]),
+            vec![FieldDefinition::new(
+                FieldId::from_bytes([0x25; 16]),
+                "unique_field",
+                0,
+                ResolvedType::reference(target),
+                false,
+                true,
+                None,
+                Some(OnDeleteAction::SetNull),
+            )],
+        );
+        assert!(ExpectedTable::from_object(&set_null_reference).is_err());
+
+        let named = unique_object(
+            owner,
+            ResolvedType::Named(target),
+            false,
+            FieldId::from_bytes([0x24; 16]),
+        );
+        assert!(ExpectedTable::from_object(&named).is_err());
+
+        for (index, scalar) in StandardScalar::ALL.into_iter().enumerate() {
+            let field_byte = u8::try_from(index + 0x30).expect("closed scalar set fits byte");
+            let scalar = unique_object(
+                owner,
+                ResolvedType::scalar(scalar),
+                false,
+                FieldId::from_bytes([field_byte; 16]),
+            );
+            assert!(ExpectedTable::from_object(&scalar).is_err());
+        }
+    }
+
+    #[test]
+    fn index_shape_is_closed_to_exact_primary_and_unique_indexes() {
+        let unique = ExpectedIndex {
+            key: vec![2],
+            primary: false,
+        };
+        let exact = ObservedIndex {
+            valid: true,
+            ready: true,
+            unique: true,
+            primary: false,
+            immediate: true,
+            exclusion: false,
+            clustered: false,
+            replica_identity: false,
+            nulls_not_distinct: false,
+            key_attributes: 1,
+            attributes: 1,
+            key: vec![2],
+            no_predicate: true,
+            no_expression: true,
+        };
+        assert!(exact.has_expected_shape(&unique));
+        assert!(
+            ObservedIndex {
+                primary: true,
+                ..exact.clone()
+            }
+            .has_expected_shape(&ExpectedIndex {
+                key: vec![2],
+                primary: true,
+            })
+        );
+
+        for malformed in [
+            ObservedIndex {
+                valid: false,
+                ..exact.clone()
+            },
+            ObservedIndex {
+                ready: false,
+                ..exact.clone()
+            },
+            ObservedIndex {
+                unique: false,
+                ..exact.clone()
+            },
+            ObservedIndex {
+                primary: true,
+                ..exact.clone()
+            },
+            ObservedIndex {
+                immediate: false,
+                ..exact.clone()
+            },
+            ObservedIndex {
+                exclusion: true,
+                ..exact.clone()
+            },
+            ObservedIndex {
+                clustered: true,
+                ..exact.clone()
+            },
+            ObservedIndex {
+                replica_identity: true,
+                ..exact.clone()
+            },
+            ObservedIndex {
+                nulls_not_distinct: true,
+                ..exact.clone()
+            },
+            ObservedIndex {
+                key_attributes: 2,
+                ..exact.clone()
+            },
+            ObservedIndex {
+                attributes: 2,
+                ..exact.clone()
+            },
+            ObservedIndex {
+                key: vec![3],
+                ..exact.clone()
+            },
+            ObservedIndex {
+                no_predicate: false,
+                ..exact.clone()
+            },
+            ObservedIndex {
+                no_expression: false,
+                ..exact.clone()
+            },
+        ] {
+            assert!(!malformed.has_expected_shape(&unique));
+        }
     }
 
     #[test]
@@ -1396,6 +1720,28 @@ mod tests {
         );
 
         assert!(ExpectedTable::from_object(&object).is_err());
+    }
+
+    fn unique_object(
+        owner: TypeId,
+        resolved_type: ResolvedType,
+        nullable: bool,
+        field: FieldId,
+    ) -> ObjectTypeDefinition {
+        ObjectTypeDefinition::new(
+            owner,
+            name(&["test", "unique_owner"]),
+            vec![FieldDefinition::new(
+                field,
+                "unique_field",
+                0,
+                resolved_type,
+                nullable,
+                true,
+                None,
+                None,
+            )],
+        )
     }
 
     fn name(parts: &[&str]) -> QualifiedSemanticName {
