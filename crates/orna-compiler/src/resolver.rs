@@ -12,19 +12,22 @@ pub use identity::{
     ProvisionalParameterId, ProvisionalSchemaId, ProvisionalTypeId,
 };
 pub use model::{
-    CheckReport, CheckedBundle, CheckedDefault, CheckedDefinitionReference,
+    CheckReport, CheckedBundle, CheckedClientFunction, CheckedDefault, CheckedDefinitionReference,
     CheckedDefinitionReferenceTarget, CheckedField, CheckedObjectType, CheckedSchema,
     CheckedServerFunction, CheckedServerFunctionParameter, CheckedServerFunctionReturnColumn,
     ConstantValue, SemanticType,
 };
-pub(crate) use model::{CheckedFieldRename, CheckedServerFunctionBody, QueryCatalogue, QueryField};
+pub(crate) use model::{
+    CheckedClientFunctionBody, CheckedFieldRename, CheckedServerFunctionBody, QueryCatalogue,
+    QueryField,
+};
 
 use std::collections::{HashMap, HashSet};
 
 use orna_core::{
     ExpressionId,
     catalogue::{
-        CatalogueSnapshot, FunctionSecurity as CatalogueFunctionSecurity,
+        CatalogueSnapshot, FunctionDomain, FunctionSecurity as CatalogueFunctionSecurity,
         FunctionTransaction as CatalogueFunctionTransaction,
         FunctionVolatility as CatalogueFunctionVolatility, OnDeleteAction, QualifiedSemanticName,
     },
@@ -33,8 +36,8 @@ use orna_core::{
     types::StandardScalar,
 };
 use orna_syntax::{
-    FieldRenameDeclaration, FunctionReturnType, FunctionSecurity as SyntaxFunctionSecurity,
-    FunctionTransaction as SyntaxFunctionTransaction,
+    ClientFunctionDeclaration, FieldRenameDeclaration, FunctionReturnType,
+    FunctionSecurity as SyntaxFunctionSecurity, FunctionTransaction as SyntaxFunctionTransaction,
     FunctionVolatility as SyntaxFunctionVolatility, ObjectTypeDeclaration, OnDeletePolicy,
     QualifiedName, SelectQuantifier, ServerFunctionBody, ServerFunctionDeclaration, SourceSlice,
     SourceSpan, StandardLargeObjectKind, TypeSpecification,
@@ -88,6 +91,67 @@ struct ServerFunctionHeader<'a> {
     security: CatalogueFunctionSecurity,
     transaction: Option<CatalogueFunctionTransaction>,
     volatility: CatalogueFunctionVolatility,
+}
+
+/// Resolved metadata for a CLIENT function before closed-shape checking.
+#[derive(Clone, Copy)]
+struct ClientFunctionHeader<'a> {
+    declaration: &'a ClientFunctionDeclaration,
+    logical_path: &'a str,
+    id: CheckedFunctionId,
+}
+
+/// One resolved CLIENT function body and its closed semantic metadata.
+struct ResolvedClientFunctionInput<'a> {
+    id: CheckedFunctionId,
+    name: QualifiedSemanticName,
+    parameters: Vec<ResolvedServerFunctionParameter>,
+    return_type: SemanticType<CheckedTypeId>,
+    body: &'a orna_syntax::ClientFunctionBody,
+    location: SourceLocation,
+    declaration_span: SourceSpan,
+    logical_path: &'a str,
+}
+
+/// One function declaration in source order, independent of its execution domain.
+enum FunctionDeclarationRef<'a> {
+    Server {
+        declaration: &'a ServerFunctionDeclaration,
+        logical_path: &'a str,
+    },
+    Client {
+        declaration: &'a ClientFunctionDeclaration,
+        logical_path: &'a str,
+    },
+}
+
+impl FunctionDeclarationRef<'_> {
+    fn name(&self) -> QualifiedSemanticName {
+        match self {
+            Self::Server { declaration, .. } => semantic_name(&declaration.name),
+            Self::Client { declaration, .. } => semantic_name(&declaration.name),
+        }
+    }
+
+    fn domain(&self) -> FunctionDomain {
+        match self {
+            Self::Server { .. } => FunctionDomain::Server,
+            Self::Client { .. } => FunctionDomain::Client,
+        }
+    }
+
+    fn span(&self) -> &SourceSpan {
+        match self {
+            Self::Server { declaration, .. } => &declaration.name.span,
+            Self::Client { declaration, .. } => &declaration.name.span,
+        }
+    }
+
+    fn logical_path(&self) -> &str {
+        match self {
+            Self::Server { logical_path, .. } | Self::Client { logical_path, .. } => logical_path,
+        }
+    }
 }
 
 /// One resolved parameter accepted by this SERVER function slice.
@@ -343,14 +407,19 @@ fn check_parsed(parse_report: ParseReport, base: &CatalogueSnapshot) -> CheckRep
 
     let query_catalogue = checked_query_catalogue(&checked_types);
 
-    let function_headers = if diagnostics.is_empty() {
-        resolve_server_function_headers(
+    let function_ids = if diagnostics.is_empty() {
+        resolve_function_namespace(
             &parse_report,
             base,
             &known_schemas,
             &mut assignments,
             &mut diagnostics,
         )
+    } else {
+        HashMap::new()
+    };
+    let function_headers = if diagnostics.is_empty() {
+        resolve_server_function_headers(&parse_report, &function_ids)
     } else {
         Vec::new()
     };
@@ -370,6 +439,21 @@ fn check_parsed(parse_report: ParseReport, base: &CatalogueSnapshot) -> CheckRep
     } else {
         Vec::new()
     };
+    let client_headers = if diagnostics.is_empty() {
+        resolve_client_function_headers(&parse_report, &function_ids)
+    } else {
+        Vec::new()
+    };
+    let client_inputs = if diagnostics.is_empty() {
+        resolve_client_function_inputs(&client_headers, &mut diagnostics)
+    } else {
+        Vec::new()
+    };
+    let checked_client_functions = if diagnostics.is_empty() {
+        check_client_functions(&client_inputs, &mut diagnostics)
+    } else {
+        Vec::new()
+    };
 
     if !diagnostics.is_empty() {
         return failed(parse_report, diagnostics);
@@ -383,6 +467,7 @@ fn check_parsed(parse_report: ParseReport, base: &CatalogueSnapshot) -> CheckRep
             schemas: checked_schemas,
             object_types: checked_types,
             server_functions: checked_functions,
+            client_functions: checked_client_functions,
             field_renames: field_renames
                 .into_iter()
                 .map(|rename| CheckedFieldRename {
@@ -571,10 +656,7 @@ fn check_field_renames(
 
 fn resolve_server_function_headers<'a>(
     parse_report: &'a ParseReport,
-    base: &CatalogueSnapshot,
-    known_schemas: &HashSet<QualifiedSemanticName>,
-    assignments: &mut CheckAssignments,
-    diagnostics: &mut Vec<CompilerDiagnostic>,
+    function_ids: &HashMap<QualifiedSemanticName, CheckedFunctionId>,
 ) -> Vec<ServerFunctionHeader<'a>> {
     let mut headers = Vec::new();
     let mut declarations_by_name = HashSet::new();
@@ -583,51 +665,21 @@ fn resolve_server_function_headers<'a>(
         for declaration in unit.parsed().server_functions() {
             let name = semantic_name(&declaration.name);
             if !declarations_by_name.insert(name.clone()) {
-                diagnostics.push(diagnostic(
-                    DiagnosticCode::DuplicateDefinition,
-                    format!("duplicate server function definition {name}"),
-                    unit.logical_path(),
-                    &declaration.name.span,
-                ));
                 continue;
             }
-            let Some(namespace) = namespace_of(&name) else {
-                diagnostics.push(diagnostic(
-                    DiagnosticCode::UnknownQualifiedName,
-                    format!("server function {name} has no declared schema"),
-                    unit.logical_path(),
-                    &declaration.name.span,
-                ));
+
+            let Some(&id) = function_ids.get(&name) else {
                 continue;
             };
-            if !known_schemas.contains(&namespace) {
-                diagnostics.push(diagnostic(
-                    DiagnosticCode::UnknownQualifiedName,
-                    format!("unknown schema {namespace} for server function {name}"),
-                    unit.logical_path(),
-                    &declaration.name.span,
-                ));
-                continue;
-            }
 
             let security = map_function_security(declaration.security);
             let transaction = map_function_transaction(declaration.transaction);
             let volatility = map_function_volatility(declaration.volatility);
-            if transaction == Some(CatalogueFunctionTransaction::Manual) {
-                diagnostics.push(diagnostic(
-                    DiagnosticCode::DomainIncompatible,
-                    "SERVER functions do not yet support TRANSACTION MANUAL",
-                    unit.logical_path(),
-                    &declaration.span,
-                ));
-                continue;
-            }
 
             headers.push(ServerFunctionHeader {
                 declaration,
                 logical_path: unit.logical_path(),
-                id: assignments
-                    .function_id(base.function_by_name(&name).map(|function| function.id())),
+                id,
                 security,
                 transaction,
                 volatility,
@@ -636,6 +688,273 @@ fn resolve_server_function_headers<'a>(
     }
 
     headers
+}
+
+fn function_declarations_in_source_order<'a>(
+    parse_report: &'a ParseReport,
+) -> Vec<FunctionDeclarationRef<'a>> {
+    let mut declarations = Vec::new();
+    for unit in parse_report.units() {
+        let mut unit_declarations = Vec::with_capacity(
+            unit.parsed().server_functions().len() + unit.parsed().client_functions().len(),
+        );
+        unit_declarations.extend(unit.parsed().server_functions().iter().map(|declaration| {
+            FunctionDeclarationRef::Server {
+                declaration,
+                logical_path: unit.logical_path(),
+            }
+        }));
+        unit_declarations.extend(unit.parsed().client_functions().iter().map(|declaration| {
+            FunctionDeclarationRef::Client {
+                declaration,
+                logical_path: unit.logical_path(),
+            }
+        }));
+        unit_declarations.sort_by_key(|declaration| declaration.span().start);
+        declarations.extend(unit_declarations);
+    }
+    declarations
+}
+
+/// Resolves the shared function namespace before any function body checking.
+///
+/// This pass gives CLIENT and SERVER declarations one source-order identity
+/// stream. It also rejects a domain change for an active function before a
+/// later resolver stage can inspect its body.
+fn resolve_function_namespace(
+    parse_report: &ParseReport,
+    base: &CatalogueSnapshot,
+    known_schemas: &HashSet<QualifiedSemanticName>,
+    assignments: &mut CheckAssignments,
+    diagnostics: &mut Vec<CompilerDiagnostic>,
+) -> HashMap<QualifiedSemanticName, CheckedFunctionId> {
+    let mut function_ids = HashMap::new();
+    let mut declarations_by_name = HashMap::<QualifiedSemanticName, FunctionDomain>::new();
+
+    for declaration in function_declarations_in_source_order(parse_report) {
+        let name = declaration.name();
+        if let Some(previous_domain) = declarations_by_name.get(&name).copied() {
+            let message = match (previous_domain, declaration.domain()) {
+                (FunctionDomain::Server, FunctionDomain::Server) => {
+                    format!("duplicate server function definition {name}")
+                }
+                (FunctionDomain::Client, FunctionDomain::Client) => {
+                    format!("duplicate client function definition {name}")
+                }
+                _ => format!("duplicate function definition {name}"),
+            };
+            diagnostics.push(diagnostic(
+                DiagnosticCode::DuplicateDefinition,
+                message,
+                declaration.logical_path(),
+                declaration.span(),
+            ));
+            continue;
+        }
+        declarations_by_name.insert(name.clone(), declaration.domain());
+
+        let Some(namespace) = namespace_of(&name) else {
+            let kind = match declaration.domain() {
+                FunctionDomain::Server => "server",
+                FunctionDomain::Client => "client",
+            };
+            diagnostics.push(diagnostic(
+                DiagnosticCode::UnknownQualifiedName,
+                format!("{kind} function {name} has no declared schema"),
+                declaration.logical_path(),
+                declaration.span(),
+            ));
+            continue;
+        };
+        if !known_schemas.contains(&namespace) {
+            let kind = match declaration.domain() {
+                FunctionDomain::Server => "server",
+                FunctionDomain::Client => "client",
+            };
+            diagnostics.push(diagnostic(
+                DiagnosticCode::UnknownQualifiedName,
+                format!("unknown schema {namespace} for {kind} function {name}"),
+                declaration.logical_path(),
+                declaration.span(),
+            ));
+            continue;
+        }
+
+        let existing = base.function_by_name(&name);
+        if let Some(existing) = existing
+            && existing.domain() != declaration.domain()
+        {
+            let existing_domain = match existing.domain() {
+                FunctionDomain::Server => "SERVER",
+                FunctionDomain::Client => "CLIENT",
+            };
+            diagnostics.push(diagnostic(
+                DiagnosticCode::DomainIncompatible,
+                format!("this function is already declared as a {existing_domain} function"),
+                declaration.logical_path(),
+                declaration.span(),
+            ));
+            continue;
+        }
+
+        if let FunctionDeclarationRef::Server {
+            declaration: server,
+            logical_path,
+        } = &declaration
+            && map_function_transaction(server.transaction)
+                == Some(CatalogueFunctionTransaction::Manual)
+        {
+            diagnostics.push(diagnostic(
+                DiagnosticCode::DomainIncompatible,
+                "SERVER functions do not yet support TRANSACTION MANUAL",
+                logical_path,
+                &server.span,
+            ));
+            continue;
+        }
+
+        let id = assignments.function_id(existing.map(|function| function.id()));
+        function_ids.insert(name, id);
+    }
+
+    function_ids
+}
+
+fn resolve_client_function_headers<'a>(
+    parse_report: &'a ParseReport,
+    function_ids: &HashMap<QualifiedSemanticName, CheckedFunctionId>,
+) -> Vec<ClientFunctionHeader<'a>> {
+    let mut headers = Vec::new();
+    for unit in parse_report.units() {
+        for declaration in unit.parsed().client_functions() {
+            let name = semantic_name(&declaration.name);
+            if let Some(&id) = function_ids.get(&name) {
+                headers.push(ClientFunctionHeader {
+                    declaration,
+                    logical_path: unit.logical_path(),
+                    id,
+                });
+            }
+        }
+    }
+    headers
+}
+
+fn resolve_client_function_inputs<'a>(
+    headers: &[ClientFunctionHeader<'a>],
+    diagnostics: &mut Vec<CompilerDiagnostic>,
+) -> Vec<ResolvedClientFunctionInput<'a>> {
+    let mut inputs = Vec::with_capacity(headers.len());
+    for header in headers {
+        let declaration = header.declaration;
+        if !declaration.parameters.is_empty() {
+            diagnostics.push(diagnostic(
+                DiagnosticCode::DomainIncompatible,
+                "this CLIENT function cannot declare parameters yet",
+                header.logical_path,
+                &declaration.parameter_list_span,
+            ));
+        }
+
+        let return_type = match &declaration.return_type {
+            FunctionReturnType::Single(specification)
+                if is_closed_client_boolean_return(specification) =>
+            {
+                Some(SemanticType::scalar(StandardScalar::Boolean))
+            }
+            FunctionReturnType::Single(specification) => {
+                diagnostics.push(diagnostic(
+                    DiagnosticCode::TypeMismatch,
+                    "this CLIENT function must return BOOLEAN",
+                    header.logical_path,
+                    specification.span(),
+                ));
+                None
+            }
+            FunctionReturnType::Rows { span, .. } => {
+                diagnostics.push(diagnostic(
+                    DiagnosticCode::TypeMismatch,
+                    "this CLIENT function must return BOOLEAN",
+                    header.logical_path,
+                    span,
+                ));
+                None
+            }
+        };
+
+        if let Some(return_type) = return_type
+            && declaration.parameters.is_empty()
+        {
+            inputs.push(ResolvedClientFunctionInput {
+                id: header.id,
+                name: semantic_name(&declaration.name),
+                parameters: Vec::new(),
+                return_type,
+                body: &declaration.body,
+                location: location(header.logical_path, &declaration.span),
+                declaration_span: declaration.span.clone(),
+                logical_path: header.logical_path,
+            });
+        }
+    }
+    inputs
+}
+
+fn check_client_functions(
+    inputs: &[ResolvedClientFunctionInput<'_>],
+    diagnostics: &mut Vec<CompilerDiagnostic>,
+) -> Vec<CheckedClientFunction> {
+    inputs
+        .iter()
+        .filter_map(|input| {
+            let Some((value, body_source)) = input.body.as_boolean_literal() else {
+                diagnostics.push(diagnostic(
+                    DiagnosticCode::DomainIncompatible,
+                    "CLIENT function body is not supported",
+                    input.logical_path,
+                    &input.declaration_span,
+                ));
+                return None;
+            };
+            Some(CheckedClientFunction {
+                id: input.id,
+                name: input.name.clone(),
+                domain: FunctionDomain::Client,
+                parameters: input
+                    .parameters
+                    .iter()
+                    .map(|parameter| CheckedServerFunctionParameter {
+                        id: parameter.id,
+                        name: parameter.name.clone(),
+                        ordinal: parameter.ordinal,
+                        semantic_type: parameter.semantic_type,
+                        location: parameter.location.clone(),
+                    })
+                    .collect(),
+                return_type: input.return_type,
+                security: CatalogueFunctionSecurity::Invoker,
+                transaction: None,
+                volatility: CatalogueFunctionVolatility::Immutable,
+                location: input.location.clone(),
+                body: CheckedClientFunctionBody::BooleanLiteral {
+                    value,
+                    location: location(input.logical_path, &body_source.span),
+                },
+                references: Vec::new(),
+            })
+        })
+        .collect()
+}
+
+fn is_closed_client_boolean_return(specification: &TypeSpecification) -> bool {
+    let TypeSpecification::Named(name) = specification else {
+        return false;
+    };
+    if name.parts.len() != 1 || name.parts[0].text.starts_with('"') {
+        return false;
+    }
+    let spelling = &name.parts[0].text;
+    spelling.eq_ignore_ascii_case("BOOLEAN") || spelling.eq_ignore_ascii_case("BOOL")
 }
 
 fn resolve_server_function_inputs<'a>(
@@ -3697,7 +4016,38 @@ mod tests {
 
         let diagnostics = report.diagnostics();
         assert_eq!(diagnostics[0].code(), DiagnosticCode::DuplicateDefinition);
+        assert_eq!(
+            diagnostics[0].message(),
+            "duplicate server function definition people.find"
+        );
         assert_eq!(diagnostics.len(), 1);
+        assert_no_checked_bundle(&report);
+    }
+
+    #[test]
+    fn preserves_server_header_and_duplicate_diagnostic_order() {
+        let source = "CREATE SCHEMA people;\
+            CREATE SERVER FUNCTION people.find() RETURNS TEXT TRANSACTION MANUAL AS SELECT TRUE FROM people.person p;\
+            CREATE SERVER FUNCTION people.find() RETURNS TEXT AS SELECT FALSE FROM people.person p;";
+        let report = check(&bundle([("functions.orna", source)]), &empty_catalogue());
+
+        assert_eq!(report.diagnostics().len(), 2);
+        assert_eq!(
+            report.diagnostics()[0].message(),
+            "SERVER functions do not yet support TRANSACTION MANUAL"
+        );
+        assert_eq!(
+            report.diagnostics()[0].location().span().start(),
+            source.find("CREATE SERVER").unwrap()
+        );
+        assert_eq!(
+            report.diagnostics()[1].message(),
+            "duplicate server function definition people.find"
+        );
+        assert_eq!(
+            report.diagnostics()[1].location().span().start(),
+            source.rfind("people.find").unwrap()
+        );
         assert_no_checked_bundle(&report);
     }
 
@@ -5012,5 +5362,354 @@ mod tests {
         assert!(codes.contains(&DiagnosticCode::DuplicateDefinition));
         assert!(codes.contains(&DiagnosticCode::UnknownQualifiedName));
         assert_no_checked_bundle(&report);
+    }
+
+    #[test]
+    fn checks_client_boolean_constant_with_exact_model_and_literal_location() {
+        let source = "CREATE SCHEMA examples; CREATE CLIENT FUNCTION examples.enabled() RETURNS BOOL RETURN tRuE;";
+        let report = check(&bundle([("client.orna", source)]), &empty_catalogue());
+
+        assert!(report.diagnostics().is_empty());
+        let checked = report.checked_bundle().unwrap();
+        assert!(checked.server_functions().is_empty());
+        let function = &checked.client_functions()[0];
+        assert_eq!(function.name().to_string(), "examples.enabled");
+        assert_eq!(function.domain(), FunctionDomain::Client);
+        assert!(function.id().is_provisional());
+        assert!(function.parameters().is_empty());
+        assert_eq!(
+            function.return_type(),
+            SemanticType::scalar(StandardScalar::Boolean)
+        );
+        assert_eq!(function.security(), FunctionSecurity::Invoker);
+        assert_eq!(function.transaction(), None);
+        assert_eq!(function.volatility(), FunctionVolatility::Immutable);
+        assert!(function.references().is_empty());
+        assert_eq!(
+            function.location().span().start(),
+            source.find("CREATE CLIENT").unwrap()
+        );
+        assert_eq!(function.location().span().end(), source.len());
+        let literal_start = source.find("tRuE").unwrap();
+        let (value, literal_location) = function.boolean_body().unwrap();
+        assert!(value);
+        assert_eq!(literal_location.logical_path(), "client.orna");
+        assert_eq!(literal_location.span().start(), literal_start);
+        assert_eq!(literal_location.span().end(), literal_start + 4);
+    }
+
+    #[test]
+    fn checks_client_false_and_reuses_active_id_with_quoted_formatting() {
+        let changed_source = "CREATE SCHEMA examples;\nCREATE CLIENT FUNCTION \"examples\".\"enabled\"() RETURNS BOOL RETURN false;";
+        let existing_function = FunctionDefinition::new(
+            FunctionId::from_bytes([8; 16]),
+            QualifiedSemanticName::new(["examples", "enabled"]).unwrap(),
+            FunctionDomain::Client,
+            Vec::new(),
+            FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Boolean)),
+            FunctionRevisionId::from_bytes([9; 16]),
+            FunctionSecurity::Invoker,
+            None,
+            FunctionVolatility::Immutable,
+        );
+        let existing_report = check(
+            &bundle([("client.orna", changed_source)]),
+            &catalogue(
+                vec![schema(1, &["examples"])],
+                Vec::new(),
+                vec![existing_function],
+            ),
+        );
+        assert!(existing_report.diagnostics().is_empty());
+        let changed = &existing_report.checked_bundle().unwrap().client_functions()[0];
+        assert_eq!(
+            changed.id().existing(),
+            Some(FunctionId::from_bytes([8; 16]))
+        );
+        assert_eq!(changed.name().to_string(), "examples.enabled");
+        assert!(!changed.boolean_body().unwrap().0);
+    }
+
+    #[test]
+    fn rejects_client_shape_in_deterministic_order_and_whole_bundle() {
+        let source = "CREATE SCHEMA examples; CREATE CLIENT FUNCTION examples.bad(a TEXT) RETURNS TEXT RETURN TRUE; CREATE CLIENT FUNCTION examples.good() RETURNS BOOLEAN RETURN FALSE;";
+        let report = check(&bundle([("client.orna", source)]), &empty_catalogue());
+
+        assert_eq!(report.diagnostics().len(), 2);
+        assert_eq!(
+            report.diagnostics()[0].code(),
+            DiagnosticCode::DomainIncompatible
+        );
+        assert_eq!(
+            report.diagnostics()[0].message(),
+            "this CLIENT function cannot declare parameters yet"
+        );
+        assert_eq!(
+            report.diagnostics()[0].location().span().start(),
+            source.find("(a TEXT)").unwrap()
+        );
+        assert_eq!(
+            report.diagnostics()[0].location().span().end(),
+            source.find("(a TEXT)").unwrap() + "(a TEXT)".len()
+        );
+        assert_eq!(report.diagnostics()[1].code(), DiagnosticCode::TypeMismatch);
+        assert_eq!(
+            report.diagnostics()[1].message(),
+            "this CLIENT function must return BOOLEAN"
+        );
+        assert_eq!(
+            report.diagnostics()[1].location().span().start(),
+            source.find("RETURNS TEXT").unwrap() + "RETURNS ".len()
+        );
+        assert_eq!(
+            report.diagnostics()[1].location().span().end(),
+            source.find("RETURNS TEXT").unwrap() + "RETURNS TEXT".len()
+        );
+        assert_no_checked_bundle(&report);
+    }
+
+    #[test]
+    fn rejects_client_server_duplicates_and_active_domain_changes_at_name() {
+        let duplicate_source = "CREATE SCHEMA examples; CREATE TYPE examples.flag AS OBJECT (value BOOLEAN); CREATE SERVER FUNCTION examples.enabled() RETURNS ROWS (value BOOLEAN) AS SELECT f.value FROM examples.flag f; CREATE CLIENT FUNCTION examples.ENABLED() RETURNS BOOLEAN RETURN TRUE;";
+        let duplicate = check(
+            &bundle([("client.orna", duplicate_source)]),
+            &empty_catalogue(),
+        );
+        assert_eq!(duplicate.diagnostics().len(), 1);
+        assert_eq!(
+            duplicate.diagnostics()[0].code(),
+            DiagnosticCode::DuplicateDefinition
+        );
+        assert_eq!(
+            duplicate.diagnostics()[0].message(),
+            "duplicate function definition examples.enabled"
+        );
+        let duplicate_name = duplicate_source.rfind("examples.ENABLED").unwrap();
+        assert_eq!(
+            duplicate.diagnostics()[0].location().span().start(),
+            duplicate_name
+        );
+        assert_eq!(
+            duplicate.diagnostics()[0].location().span().end(),
+            duplicate_name + "examples.ENABLED".len()
+        );
+        assert_no_checked_bundle(&duplicate);
+
+        let reverse_source = "CREATE SCHEMA examples; CREATE CLIENT FUNCTION examples.enabled() RETURNS BOOLEAN RETURN TRUE; CREATE SERVER FUNCTION examples.ENABLED() RETURNS TEXT TRANSACTION MANUAL AS SELECT TRUE FROM examples.flag f;";
+        let reverse_duplicate = check(
+            &bundle([("client.orna", reverse_source)]),
+            &empty_catalogue(),
+        );
+        assert_eq!(reverse_duplicate.diagnostics().len(), 1);
+        assert_eq!(
+            reverse_duplicate.diagnostics()[0].code(),
+            DiagnosticCode::DuplicateDefinition
+        );
+        assert_eq!(
+            reverse_duplicate.diagnostics()[0].message(),
+            "duplicate function definition examples.enabled"
+        );
+        let reverse_name = reverse_source.rfind("examples.ENABLED").unwrap();
+        assert_eq!(
+            reverse_duplicate.diagnostics()[0].location().span().start(),
+            reverse_name
+        );
+        assert_eq!(
+            reverse_duplicate.diagnostics()[0].location().span().end(),
+            reverse_name + "examples.ENABLED".len()
+        );
+        assert_no_checked_bundle(&reverse_duplicate);
+
+        let base = catalogue(
+            vec![schema(1, &["examples"])],
+            Vec::new(),
+            vec![server_function(
+                8,
+                &["examples", "enabled"],
+                Vec::new(),
+                vec![rows_column(
+                    "value",
+                    0,
+                    ResolvedType::scalar(StandardScalar::Boolean),
+                )],
+                FunctionSecurity::Invoker,
+                None,
+                FunctionVolatility::Stable,
+            )],
+        );
+        let changed = "CREATE SCHEMA examples; CREATE CLIENT FUNCTION examples.enabled() RETURNS BOOLEAN RETURN TRUE;";
+        let report = check(&bundle([("client.orna", changed)]), &base);
+        assert_eq!(report.diagnostics().len(), 1);
+        assert_eq!(
+            report.diagnostics()[0].code(),
+            DiagnosticCode::DomainIncompatible
+        );
+        assert_eq!(
+            report.diagnostics()[0].message(),
+            "this function is already declared as a SERVER function"
+        );
+        assert_eq!(
+            report.diagnostics()[0].location().span().start(),
+            changed.find("examples.enabled").unwrap()
+        );
+        assert_eq!(
+            report.diagnostics()[0].location().span().end(),
+            changed.find("examples.enabled").unwrap() + "examples.enabled".len()
+        );
+        assert_no_checked_bundle(&report);
+    }
+
+    #[test]
+    fn assigns_function_ids_in_shared_source_order_across_domains() {
+        let source = "CREATE SCHEMA examples; CREATE TYPE examples.flag AS OBJECT (value BOOLEAN); CREATE CLIENT FUNCTION examples.enabled() RETURNS BOOLEAN RETURN TRUE; CREATE SERVER FUNCTION examples.read() RETURNS ROWS (value BOOLEAN) AS SELECT f.value FROM examples.flag f;";
+        let report = check(&bundle([("client.orna", source)]), &empty_catalogue());
+
+        assert!(report.diagnostics().is_empty());
+        let checked = report.checked_bundle().unwrap();
+        assert_eq!(
+            checked.client_functions()[0].id().to_string(),
+            "provisional:function:0"
+        );
+        assert_eq!(
+            checked.server_functions()[0].id().to_string(),
+            "provisional:function:1"
+        );
+    }
+
+    #[test]
+    fn rejects_client_duplicates_with_normalised_names() {
+        let source = "CREATE SCHEMA examples; CREATE CLIENT FUNCTION examples.enabled() RETURNS BOOLEAN RETURN TRUE; CREATE CLIENT FUNCTION examples.ENABLED(p_value TEXT) RETURNS TEXT RETURN FALSE;";
+        let report = check(&bundle([("client.orna", source)]), &empty_catalogue());
+
+        assert_eq!(report.diagnostics().len(), 1);
+        assert_eq!(
+            report.diagnostics()[0].code(),
+            DiagnosticCode::DuplicateDefinition
+        );
+        assert_eq!(
+            report.diagnostics()[0].message(),
+            "duplicate client function definition examples.enabled"
+        );
+        let duplicate_name = source.rfind("examples.ENABLED").unwrap();
+        assert_eq!(
+            report.diagnostics()[0].location().span().start(),
+            duplicate_name
+        );
+        assert_eq!(
+            report.diagnostics()[0].location().span().end(),
+            duplicate_name + "examples.ENABLED".len()
+        );
+        assert_no_checked_bundle(&report);
+    }
+
+    #[test]
+    fn rejects_active_client_to_server_domain_change_at_the_function_name() {
+        let base = catalogue(
+            vec![schema(1, &["examples"])],
+            Vec::new(),
+            vec![FunctionDefinition::new(
+                FunctionId::from_bytes([8; 16]),
+                QualifiedSemanticName::new(["examples", "enabled"]).unwrap(),
+                FunctionDomain::Client,
+                Vec::new(),
+                FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Boolean)),
+                FunctionRevisionId::from_bytes([9; 16]),
+                FunctionSecurity::Invoker,
+                None,
+                FunctionVolatility::Immutable,
+            )],
+        );
+        let source = "CREATE SCHEMA examples; CREATE TYPE examples.flag AS OBJECT (value BOOLEAN); CREATE SERVER FUNCTION examples.enabled() RETURNS ROWS (value BOOLEAN) AS SELECT f.value FROM examples.flag f;";
+        let report = check(&bundle([("client.orna", source)]), &base);
+
+        assert_eq!(report.diagnostics().len(), 1);
+        assert_eq!(
+            report.diagnostics()[0].code(),
+            DiagnosticCode::DomainIncompatible
+        );
+        assert_eq!(
+            report.diagnostics()[0].message(),
+            "this function is already declared as a CLIENT function"
+        );
+        assert_eq!(
+            report.diagnostics()[0].location().span().start(),
+            source.find("examples.enabled").unwrap()
+        );
+        assert_eq!(
+            report.diagnostics()[0].location().span().end(),
+            source.find("examples.enabled").unwrap() + "examples.enabled".len()
+        );
+        assert_no_checked_bundle(&report);
+    }
+
+    #[test]
+    fn reports_non_boolean_client_returns_at_the_written_return_shape() {
+        let source = "CREATE SCHEMA examples; CREATE CLIENT FUNCTION examples.ui() RETURNS UI RETURN TRUE; CREATE CLIENT FUNCTION examples.rows() RETURNS ROWS () RETURN FALSE;";
+        let report = check(&bundle([("client.orna", source)]), &empty_catalogue());
+
+        assert_eq!(report.diagnostics().len(), 2);
+        for diagnostic in report.diagnostics() {
+            assert_eq!(diagnostic.code(), DiagnosticCode::TypeMismatch);
+            assert_eq!(
+                diagnostic.message(),
+                "this CLIENT function must return BOOLEAN"
+            );
+        }
+        assert_eq!(
+            report.diagnostics()[0].location().span().start(),
+            source.find("UI").unwrap()
+        );
+        assert_eq!(
+            report.diagnostics()[0].location().span().end(),
+            source.find("UI").unwrap() + "UI".len()
+        );
+        assert_eq!(
+            report.diagnostics()[1].location().span().start(),
+            source.find("ROWS ()").unwrap()
+        );
+        assert_eq!(
+            report.diagnostics()[1].location().span().end(),
+            source.find("ROWS ()").unwrap() + "ROWS ()".len()
+        );
+        assert_no_checked_bundle(&report);
+    }
+
+    #[test]
+    fn client_boolean_return_spellings_are_closed_to_boolean_and_bool() {
+        let cases = [
+            (
+                "CREATE SCHEMA examples; CREATE CLIENT FUNCTION examples.value() RETURNS \"BOOLEAN\" RETURN TRUE;",
+                "\"BOOLEAN\"",
+            ),
+            (
+                "CREATE SCHEMA examples; CREATE CLIENT FUNCTION examples.value() RETURNS boolean_alias RETURN TRUE;",
+                "boolean_alias",
+            ),
+            (
+                "CREATE SCHEMA examples; CREATE CLIENT FUNCTION examples.value() RETURNS std.BOOLEAN RETURN TRUE;",
+                "std.BOOLEAN",
+            ),
+        ];
+        for (source, spelling) in cases {
+            let report = check(&bundle([("client.orna", source)]), &empty_catalogue());
+
+            assert_eq!(report.diagnostics().len(), 1, "spelling: {spelling}");
+            assert_eq!(report.diagnostics()[0].code(), DiagnosticCode::TypeMismatch);
+            assert_eq!(
+                report.diagnostics()[0].message(),
+                "this CLIENT function must return BOOLEAN"
+            );
+            let start = source.find(spelling).unwrap();
+            assert_eq!(
+                report.diagnostics()[0].location().logical_path(),
+                "client.orna"
+            );
+            assert_eq!(report.diagnostics()[0].location().span().start(), start);
+            assert_eq!(
+                report.diagnostics()[0].location().span().end(),
+                start + spelling.len()
+            );
+            assert_no_checked_bundle(&report);
+        }
     }
 }
