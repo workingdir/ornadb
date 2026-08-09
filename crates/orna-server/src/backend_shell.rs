@@ -37,20 +37,18 @@ impl std::error::Error for BackendShellError {}
 mod unix {
     use super::BackendShellError;
     use crate::{ServerHostConfig, ServerHostConfigError};
-    use nix::unistd::{AccessFlags, access};
+    use nix::unistd::{AccessFlags, access, execve};
     use std::{
         convert::Infallible,
         env,
-        ffi::{OsStr, OsString},
+        ffi::{CString, OsStr, OsString},
         fs,
         io::{self, IsTerminal},
         os::unix::{
             ffi::{OsStrExt, OsStringExt},
             fs::PermissionsExt,
-            process::CommandExt,
         },
         path::{Path, PathBuf},
-        process::{Command, Stdio},
     };
 
     const URL_ENV: &[u8] = b"ORNA_SERVER_POSTGRES_URL";
@@ -178,18 +176,35 @@ mod unix {
         (OsString::from_vec(name.to_vec()), OsString::from(value))
     }
 
-    fn exec(specification: CommandSpecification) -> Result<std::convert::Infallible, io::Error> {
-        let mut command = Command::new(&specification.executable);
-        command
-            .env_clear()
-            .envs(specification.environment)
-            .args(specification.arguments)
-            .stdin(Stdio::inherit())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit());
+    fn exec(specification: CommandSpecification) -> Result<Infallible, io::Error> {
+        let executable = c_string(specification.executable.as_os_str())?;
+        let arguments = std::iter::once(specification.executable.as_os_str())
+            .chain(specification.arguments.iter().map(OsString::as_os_str))
+            .map(c_string)
+            .collect::<Result<Vec<_>, _>>()?;
+        let environment = specification
+            .environment
+            .iter()
+            .map(|(name, value)| {
+                let mut entry = name.as_bytes().to_vec();
+                entry.push(b'=');
+                entry.extend_from_slice(value.as_bytes());
+                CString::new(entry).map_err(|_| invalid_process_input())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
 
-        let error = command.exec();
-        Err(error)
+        execve(&executable, &arguments, &environment).map_err(io::Error::from)
+    }
+
+    fn c_string(value: &OsStr) -> Result<CString, io::Error> {
+        CString::new(value.as_bytes()).map_err(|_| invalid_process_input())
+    }
+
+    fn invalid_process_input() -> io::Error {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "backend-shell process input contains a null byte",
+        )
     }
 
     #[cfg(test)]
