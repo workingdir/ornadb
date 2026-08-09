@@ -39,6 +39,13 @@ const EXECUTION_SOURCE: &str = r"CREATE SCHEMA exec;
     AS SELECT REF(selected), selected.value, selected.child.label,
       REF(selected) = selected.child
     FROM exec.node selected WHERE REF(selected) = p_node;
+    CREATE SERVER FUNCTION exec.unique_values()
+    RETURNS ROWS (active BOOL, value INT, amount BIGINT, blob BYTES, child REF exec.node)
+    SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE
+    AS SELECT DISTINCT n.active, n.value, n.amount, n.blob, n.child FROM exec.node n;
+    CREATE SERVER FUNCTION exec.all_values()
+    RETURNS ROWS (active BOOL, value INT, amount BIGINT, blob BYTES, child REF exec.node)
+    AS SELECT n.active, n.value, n.amount, n.blob, n.child FROM exec.node n;
 ";
 
 #[cfg(feature = "test-hooks")]
@@ -60,6 +67,13 @@ const EXECUTION_SOURCE_EDIT: &str = r"-- source-only active edit
     AS SELECT REF(selected), selected.value, selected.child.label,
       REF(selected) = selected.child
     FROM exec.node selected WHERE REF(selected) = p_node;
+    CREATE SERVER FUNCTION exec.unique_values()
+    RETURNS ROWS (active BOOL, value INT, amount BIGINT, blob BYTES, child REF exec.node)
+    SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE
+    AS SELECT DISTINCT n.active, n.value, n.amount, n.blob, n.child FROM exec.node n;
+    CREATE SERVER FUNCTION exec.all_values()
+    RETURNS ROWS (active BOOL, value INT, amount BIGINT, blob BYTES, child REF exec.node)
+    AS SELECT n.active, n.value, n.amount, n.blob, n.child FROM exec.node n;
 ";
 
 const MANY_SOURCE: &str = "CREATE SCHEMA many;\n\
@@ -69,6 +83,8 @@ const MANY_SOURCE: &str = "CREATE SCHEMA many;\n\
 
 #[cfg(feature = "test-hooks")]
 const WAIT: Duration = Duration::from_secs(5);
+#[cfg(feature = "test-hooks")]
+const ARGUMENT_REJECTION_WAIT: Duration = Duration::from_secs(2);
 const PAYLOAD_LIMIT: usize = 16 * 1024 * 1024;
 const VARIABLE_PAYLOAD_MAXIMUM: usize = 5_592_377;
 
@@ -109,7 +125,7 @@ async fn identity_selected_server_select_returns_exact_zero_or_one_rows() -> Tes
         let applied = kernel.apply(&candidate(EXECUTION_SOURCE, &active)?).await?;
         let fixture = Fixture::from_active(&applied)?;
         insert_execution_rows(&database, fixture).await?;
-        install_public_identity_selected_decoy(&database, fixture).await?;
+        install_public_execution_decoy(&database, fixture).await?;
 
         let selected = kernel
             .execute_server_select_with_arguments(
@@ -149,6 +165,186 @@ async fn identity_selected_server_select_returns_exact_zero_or_one_rows() -> Tes
         require_result_identity(&v1, applied.pair(), fixture.read, fixture.read_revision)?;
         require_exact_columns(&v1, fixture)?;
         require_exact_rows(&v1, fixture, 20)?;
+        require_no_session_leaks(&database).await
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn distinct_server_select_returns_unique_typed_rows_and_preserves_v1_v2() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = hostile_kernel(&database)?;
+        kernel.bootstrap().await?;
+        let active = kernel.recover().await?;
+        let applied = kernel.apply(&candidate(EXECUTION_SOURCE, &active)?).await?;
+        let fixture = Fixture::from_active(&applied)?;
+        insert_execution_rows(&database, fixture).await?;
+        insert_distinct_duplicate_rows(&database, fixture).await?;
+        install_public_execution_decoy(&database, fixture).await?;
+
+        let distinct = kernel.execute_server_select(fixture.unique_values).await?;
+        require_result_identity(
+            &distinct,
+            applied.pair(),
+            fixture.unique_values,
+            fixture.unique_values_revision,
+        )?;
+        require_distinct_columns(&distinct, fixture)?;
+        require_distinct_rows(&distinct, fixture, 20)?;
+
+        let preserving = kernel.execute_server_select(fixture.all_values).await?;
+        require_result_identity(
+            &preserving,
+            applied.pair(),
+            fixture.all_values,
+            fixture.all_values_revision,
+        )?;
+        require_distinct_columns(&preserving, fixture)?;
+        require_version_one_value_multiset(&preserving, fixture, 20)?;
+
+        let selected = kernel
+            .execute_server_select_with_arguments(
+                fixture.select_node,
+                &selector_argument(fixture, fixture.root)?,
+            )
+            .await?;
+        require_result_identity(
+            &selected,
+            applied.pair(),
+            fixture.select_node,
+            fixture.select_node_revision,
+        )?;
+        require_identity_selected_columns(&selected, fixture)?;
+        require_identity_selected_root_row(&selected, fixture, 20)?;
+        require_no_session_leaks(&database).await
+    })
+    .await
+}
+
+#[cfg(feature = "test-hooks")]
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn distinct_server_select_deduplicates_before_the_result_limit_and_rejects_arguments()
+-> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = hostile_kernel(&database)?;
+        kernel.bootstrap().await?;
+        let active = kernel.recover().await?;
+        let applied = kernel.apply(&candidate(EXECUTION_SOURCE, &active)?).await?;
+        let fixture = Fixture::from_active(&applied)?;
+        insert_execution_rows(&database, fixture).await?;
+        insert_distinct_limit_rows(&database, fixture).await?;
+        install_public_execution_decoy(&database, fixture).await?;
+
+        let distinct = kernel.execute_server_select(fixture.unique_values).await?;
+        require_result_identity(
+            &distinct,
+            applied.pair(),
+            fixture.unique_values,
+            fixture.unique_values_revision,
+        )?;
+        require_distinct_columns(&distinct, fixture)?;
+        require_distinct_limit_rows(&distinct, fixture, 20)?;
+
+        let before_rows = count_rows(&database, fixture.node).await?;
+        require(
+            before_rows > 10_000,
+            "SELECT DISTINCT limit fixture did not create more than 10,000 physical rows",
+        )?;
+        let argument = FunctionArgument::new(
+            ParameterId::from_bytes([0x71; 16]),
+            RuntimeValue::Boolean(true),
+        )?;
+        let reached = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let resume = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let executor = kernel.clone();
+        let execution_reached = reached.clone();
+        let execution_resume = resume.clone();
+        let mut execution = ExecutionTask::new(tokio::spawn(async move {
+            executor
+                .execute_server_select_with_arguments_and_test_barrier(
+                    fixture.unique_values,
+                    &[argument],
+                    execution_reached,
+                    execution_resume,
+                )
+                .await
+        }));
+        if tokio::time::timeout(WAIT, reached.wait()).await.is_err() {
+            execution.abort_and_wait().await;
+            return Err(failure(
+                "SELECT DISTINCT argument validation did not recover before the target lock",
+            ));
+        }
+        let holder = match lock_target_relation(&database, fixture.node).await {
+            Ok(holder) => holder,
+            Err(error) => {
+                execution.abort_and_wait().await;
+                return Err(error);
+            }
+        };
+        if tokio::time::timeout(ARGUMENT_REJECTION_WAIT, resume.wait())
+            .await
+            .is_err()
+        {
+            execution.abort_and_wait().await;
+            return match rollback_and_finish_session(
+                holder,
+                Err(failure(
+                    "SELECT DISTINCT argument validation did not resume under the target lock",
+                )),
+                "SELECT DISTINCT argument-lock holder",
+            )
+            .await
+            {
+                Ok(()) => Err(failure(
+                    "SELECT DISTINCT argument-lock cleanup lost its resume failure",
+                )),
+                Err(error) => Err(error),
+            };
+        }
+        let operation = match execution
+            .finish_with_timeout(
+                "SELECT DISTINCT argument validation",
+                ARGUMENT_REJECTION_WAIT,
+            )
+            .await
+        {
+            Ok(result) => {
+                expect_kernel_error(result, "SELECT DISTINCT accepted an unexpected argument")
+            }
+            Err(error) => Err(error),
+        };
+        let error =
+            rollback_and_finish_session(holder, operation, "SELECT DISTINCT argument-lock holder")
+                .await?;
+        require_select_argument_error(
+            &error,
+            applied.pair(),
+            fixture.unique_values,
+            fixture.unique_values_revision,
+            None,
+            "this function does not accept arguments",
+        )?;
+        require(
+            count_rows(&database, fixture.node).await? == before_rows,
+            "argument rejection changed SELECT DISTINCT physical rows",
+        )?;
+        require(
+            kernel.recover().await?.pair() == applied.pair(),
+            "argument rejection changed the SELECT DISTINCT active pair",
+        )?;
+
+        let unchanged = kernel.execute_server_select(fixture.unique_values).await?;
+        require_result_identity(
+            &unchanged,
+            applied.pair(),
+            fixture.unique_values,
+            fixture.unique_values_revision,
+        )?;
+        require_distinct_columns(&unchanged, fixture)?;
+        require_distinct_limit_rows(&unchanged, fixture, 20)?;
         require_no_session_leaks(&database).await
     })
     .await
@@ -570,6 +766,79 @@ async fn identity_selected_execution_pins_active_revision_and_data_snapshot() ->
 #[cfg(feature = "test-hooks")]
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
+async fn distinct_execution_pins_active_revision_and_data_snapshot() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = kernel(&database)?;
+        kernel.bootstrap().await?;
+        let empty = kernel.recover().await?;
+        let first = kernel.apply(&candidate(EXECUTION_SOURCE, &empty)?).await?;
+        let fixture = Fixture::from_active(&first)?;
+        insert_execution_rows(&database, fixture).await?;
+        let source_only_candidate = candidate(EXECUTION_SOURCE_EDIT, &first)?;
+
+        let reached = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let resume = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let executor = kernel.clone();
+        let execution_reached = reached.clone();
+        let execution_resume = resume.clone();
+        let execution = ExecutionTask::new(tokio::spawn(async move {
+            executor
+                .execute_server_select_with_test_barrier(
+                    fixture.unique_values,
+                    execution_reached,
+                    execution_resume,
+                )
+                .await
+        }));
+        let (running, second) = complete_pinned_execution(
+            execution,
+            reached,
+            resume,
+            "SELECT DISTINCT SERVER SELECT",
+            async {
+                update_root_value(&database, fixture, 21).await?;
+                kernel
+                    .apply(&source_only_candidate)
+                    .await
+                    .map_err(Into::into)
+            },
+        )
+        .await?;
+
+        require(
+            second.pair() != first.pair(),
+            "source-only apply did not advance the SELECT DISTINCT pair",
+        )?;
+        require(
+            current_revision(&second, fixture.unique_values)? == fixture.unique_values_revision,
+            "source-only apply did not reuse the immutable SELECT DISTINCT revision",
+        )?;
+        require_result_identity(
+            &running,
+            first.pair(),
+            fixture.unique_values,
+            fixture.unique_values_revision,
+        )?;
+        require_distinct_columns(&running, fixture)?;
+        require_distinct_rows(&running, fixture, 20)?;
+
+        let later = kernel.execute_server_select(fixture.unique_values).await?;
+        require_result_identity(
+            &later,
+            second.pair(),
+            fixture.unique_values,
+            fixture.unique_values_revision,
+        )?;
+        require_distinct_columns(&later, fixture)?;
+        require_distinct_rows(&later, fixture, 21)?;
+        require_no_session_leaks(&database).await
+    })
+    .await
+}
+
+#[cfg(feature = "test-hooks")]
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
 async fn identity_selected_post_commit_shutdown_is_contextual_and_read_only() -> TestResult<()> {
     with_test_database(|database| async move {
         let kernel = kernel(&database)?;
@@ -607,6 +876,56 @@ async fn identity_selected_post_commit_shutdown_is_contextual_and_read_only() ->
             kernel.recover().await?.pair() == applied.pair(),
             "post-commit select shutdown changed the active pair",
         )?;
+        require_no_session_leaks(&database).await
+    })
+    .await
+}
+
+#[cfg(feature = "test-hooks")]
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn distinct_post_commit_shutdown_is_contextual_and_read_only() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = kernel(&database)?;
+        kernel.bootstrap().await?;
+        let active = kernel.recover().await?;
+        let applied = kernel.apply(&candidate(EXECUTION_SOURCE, &active)?).await?;
+        let fixture = Fixture::from_active(&applied)?;
+        insert_execution_rows(&database, fixture).await?;
+        let before_rows = count_rows(&database, fixture.node).await?;
+
+        let error = expect_kernel_error(
+            kernel
+                .execute_server_select_with_forced_post_commit_driver_shutdown(
+                    fixture.unique_values,
+                )
+                .await,
+            "forced SELECT DISTINCT post-commit shutdown unexpectedly returned a result",
+        )?;
+        require_select_shutdown_error(
+            &error,
+            applied.pair(),
+            fixture.unique_values,
+            fixture.unique_values_revision,
+        )?;
+        require(
+            count_rows(&database, fixture.node).await? == before_rows,
+            "SELECT DISTINCT post-commit shutdown changed physical rows",
+        )?;
+        require(
+            kernel.recover().await?.pair() == applied.pair(),
+            "SELECT DISTINCT post-commit shutdown changed the active pair",
+        )?;
+
+        let unchanged = kernel.execute_server_select(fixture.unique_values).await?;
+        require_result_identity(
+            &unchanged,
+            applied.pair(),
+            fixture.unique_values,
+            fixture.unique_values_revision,
+        )?;
+        require_distinct_columns(&unchanged, fixture)?;
+        require_distinct_rows(&unchanged, fixture, 20)?;
         require_no_session_leaks(&database).await
     })
     .await
@@ -688,12 +1007,18 @@ struct Fixture {
     read: FunctionId,
     none: FunctionId,
     select_node: FunctionId,
+    unique_values: FunctionId,
+    all_values: FunctionId,
     read_revision: FunctionRevisionId,
     none_revision: FunctionRevisionId,
     select_node_revision: FunctionRevisionId,
+    unique_values_revision: FunctionRevisionId,
+    all_values_revision: FunctionRevisionId,
     select_node_parameter: ParameterId,
     root: ObjectId,
     other: ObjectId,
+    duplicate_null: ObjectId,
+    duplicate_reference: ObjectId,
 }
 
 impl Fixture {
@@ -727,6 +1052,18 @@ impl Fixture {
             .iter()
             .find(|function| name_is(function.name().parts(), &["exec", "select_node"]))
             .ok_or_else(|| failure("identity-selected function is absent"))?;
+        let unique_values = active
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|function| name_is(function.name().parts(), &["exec", "unique_values"]))
+            .ok_or_else(|| failure("SELECT DISTINCT function is absent"))?;
+        let all_values = active
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|function| name_is(function.name().parts(), &["exec", "all_values"]))
+            .ok_or_else(|| failure("version-1 value tracer function is absent"))?;
         let other_type = active
             .catalogue()
             .object_types()
@@ -751,12 +1088,18 @@ impl Fixture {
             read: read.id(),
             none: none.id(),
             select_node: select_node.id(),
+            unique_values: unique_values.id(),
+            all_values: all_values.id(),
             read_revision: read.current_revision(),
             none_revision: none.current_revision(),
             select_node_revision: select_node.current_revision(),
+            unique_values_revision: unique_values.current_revision(),
+            all_values_revision: all_values.current_revision(),
             select_node_parameter: selector.id(),
             root: ObjectId::from_bytes([1; 16]),
             other: ObjectId::from_bytes([2; 16]),
+            duplicate_null: ObjectId::from_bytes([3; 16]),
+            duplicate_reference: ObjectId::from_bytes([4; 16]),
         })
     }
 }
@@ -814,28 +1157,157 @@ async fn insert_execution_rows(database: &TestDatabase, fixture: Fixture) -> Tes
     finish_session(session, operation, "execution fixture insert").await
 }
 
-async fn install_public_identity_selected_decoy(
+async fn insert_distinct_duplicate_rows(
+    database: &TestDatabase,
+    fixture: Fixture,
+) -> TestResult<()> {
+    let statement = format!(
+        "INSERT INTO {} (_orna_object_id, {}, {}, {}, {}, {}, {}, {}) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        relation(fixture.node),
+        field(fixture.child),
+        field(fixture.active),
+        field(fixture.value),
+        field(fixture.amount),
+        field(fixture.score),
+        field(fixture.label),
+        field(fixture.blob),
+    );
+    let session = database.open().await?;
+    let operation: TestResult<()> = async {
+        session
+            .client()
+            .execute(
+                &statement,
+                &[
+                    &fixture.duplicate_null.to_bytes().to_vec(),
+                    &Option::<Vec<u8>>::None,
+                    &true,
+                    &10_i32,
+                    &100_i64,
+                    &1.5_f64,
+                    &"other duplicate",
+                    &vec![1_u8],
+                ],
+            )
+            .await?;
+        session
+            .client()
+            .execute(
+                &statement,
+                &[
+                    &fixture.duplicate_reference.to_bytes().to_vec(),
+                    &Some(fixture.other.to_bytes().to_vec()),
+                    &true,
+                    &20_i32,
+                    &200_i64,
+                    &2.5_f64,
+                    &"root duplicate",
+                    &vec![2_u8, 0],
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+    .await;
+    finish_session(
+        session,
+        operation,
+        "SELECT DISTINCT duplicate fixture insert",
+    )
+    .await
+}
+
+#[cfg(feature = "test-hooks")]
+async fn insert_distinct_limit_rows(database: &TestDatabase, fixture: Fixture) -> TestResult<()> {
+    let session = database.open().await?;
+    let operation: TestResult<()> = async {
+        session
+            .client()
+            .batch_execute(&format!(
+                "INSERT INTO {} (_orna_object_id, {}, {}, {}, {}, {}, {}, {}) \
+                 SELECT decode(lpad(to_hex(value + 1000), 32, '0'), 'hex'), NULL, FALSE, \
+                        30, 300, 3.0, 'limit duplicate', decode('03', 'hex') \
+                 FROM generate_series(1, 10001) AS value;",
+                relation(fixture.node),
+                field(fixture.child),
+                field(fixture.active),
+                field(fixture.value),
+                field(fixture.amount),
+                field(fixture.score),
+                field(fixture.label),
+                field(fixture.blob),
+            ))
+            .await?;
+        session
+            .client()
+            .execute(
+                &format!(
+                    "INSERT INTO {} (_orna_object_id, {}, {}, {}, {}, {}, {}, {}) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                    relation(fixture.node),
+                    field(fixture.child),
+                    field(fixture.active),
+                    field(fixture.value),
+                    field(fixture.amount),
+                    field(fixture.score),
+                    field(fixture.label),
+                    field(fixture.blob),
+                ),
+                &[
+                    &vec![0x70_u8; 16],
+                    &Some(fixture.other.to_bytes().to_vec()),
+                    &true,
+                    &40_i32,
+                    &400_i64,
+                    &4_f64,
+                    &"limit tail",
+                    &vec![4_u8],
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+    .await;
+    finish_session(
+        session,
+        operation,
+        "SELECT DISTINCT result-limit fixture insert",
+    )
+    .await
+}
+
+async fn install_public_execution_decoy(
     database: &TestDatabase,
     fixture: Fixture,
 ) -> TestResult<()> {
     let session = database.open().await?;
     let statement = format!(
         "CREATE TABLE public.t_{:032x} \
-         (_orna_object_id bytea, {} bytea, {} integer, {} text);",
+         (_orna_object_id bytea, {} bytea, {} boolean, {} integer, {} bigint, \
+          {} double precision, {} text, {} bytea);",
         u128::from_be_bytes(fixture.node.to_bytes()),
         field(fixture.child),
+        field(fixture.active),
         field(fixture.value),
+        field(fixture.amount),
+        field(fixture.score),
         field(fixture.label),
+        field(fixture.blob),
     );
     let operation: TestResult<()> = async {
         session.client().batch_execute(&statement).await?;
         let insert = format!(
-            "INSERT INTO public.t_{:032x} (_orna_object_id, {}, {}, {}) \
-             VALUES ($1, $2, $3, $4)",
+            "INSERT INTO public.t_{:032x} (_orna_object_id, {}, {}, {}, {}, {}, {}, {}) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
             u128::from_be_bytes(fixture.node.to_bytes()),
             field(fixture.child),
+            field(fixture.active),
             field(fixture.value),
+            field(fixture.amount),
+            field(fixture.score),
             field(fixture.label),
+            field(fixture.blob),
         );
         session
             .client()
@@ -844,8 +1316,12 @@ async fn install_public_identity_selected_decoy(
                 &[
                     &fixture.other.to_bytes().to_vec(),
                     &Option::<Vec<u8>>::None,
+                    &false,
                     &-999_i32,
+                    &-999_i64,
+                    &-999_f64,
                     &"hostile other",
+                    &vec![0_u8],
                 ],
             )
             .await?;
@@ -856,15 +1332,19 @@ async fn install_public_identity_selected_decoy(
                 &[
                     &fixture.root.to_bytes().to_vec(),
                     &Some(fixture.other.to_bytes().to_vec()),
+                    &false,
                     &-998_i32,
+                    &-998_i64,
+                    &-998_f64,
                     &"hostile root",
+                    &vec![0_u8],
                 ],
             )
             .await?;
         Ok(())
     }
     .await;
-    finish_session(session, operation, "public identity-selected decoy").await
+    finish_session(session, operation, "public execution decoy").await
 }
 
 #[cfg(feature = "test-hooks")]
@@ -1091,6 +1571,161 @@ fn require_exact_rows(
     Ok(())
 }
 
+fn require_distinct_columns(result: &ServerSelectResult, fixture: Fixture) -> TestResult<()> {
+    let expected = [
+        (
+            "active",
+            ResolvedType::scalar(StandardScalar::Boolean),
+            false,
+        ),
+        (
+            "value",
+            ResolvedType::scalar(StandardScalar::Integer),
+            false,
+        ),
+        (
+            "amount",
+            ResolvedType::scalar(StandardScalar::BigInt),
+            false,
+        ),
+        (
+            "blob",
+            ResolvedType::scalar(StandardScalar::BinaryLargeObject),
+            false,
+        ),
+        ("child", ResolvedType::reference(fixture.node), true),
+    ];
+    require(
+        result.rows().columns().len() == expected.len(),
+        "SELECT DISTINCT result column count differs from the declared five columns",
+    )?;
+    for (column, (name, resolved_type, nullable)) in result.rows().columns().iter().zip(expected) {
+        require(
+            column.name() == name,
+            format!("SELECT DISTINCT column name is not {name}"),
+        )?;
+        require(
+            column.resolved_type() == resolved_type,
+            format!("SELECT DISTINCT column {name} has the wrong resolved type"),
+        )?;
+        require(
+            column.nullable() == nullable,
+            format!("SELECT DISTINCT column {name} has the wrong nullability"),
+        )?;
+    }
+    Ok(())
+}
+
+fn require_distinct_rows(
+    result: &ServerSelectResult,
+    fixture: Fixture,
+    root_value: i32,
+) -> TestResult<()> {
+    require_unordered_rows(
+        result,
+        distinct_rows(fixture, root_value)?,
+        "SELECT DISTINCT base rows",
+    )
+}
+
+#[cfg(feature = "test-hooks")]
+fn require_distinct_limit_rows(
+    result: &ServerSelectResult,
+    fixture: Fixture,
+    root_value: i32,
+) -> TestResult<()> {
+    let mut expected = distinct_rows(fixture, root_value)?;
+    expected.extend([
+        vec![
+            RuntimeValue::Boolean(false),
+            RuntimeValue::Integer(30),
+            RuntimeValue::BigInt(300),
+            RuntimeValue::Bytes(vec![3]),
+            RuntimeValue::null(ResolvedType::reference(fixture.node))?,
+        ],
+        vec![
+            RuntimeValue::Boolean(true),
+            RuntimeValue::Integer(40),
+            RuntimeValue::BigInt(400),
+            RuntimeValue::Bytes(vec![4]),
+            RuntimeValue::Reference {
+                target: fixture.node,
+                object: fixture.other,
+            },
+        ],
+    ]);
+    require_unordered_rows(result, expected, "SELECT DISTINCT result-limit rows")
+}
+
+fn distinct_rows(fixture: Fixture, root_value: i32) -> TestResult<Vec<Vec<RuntimeValue>>> {
+    Ok(vec![
+        vec![
+            RuntimeValue::Boolean(true),
+            RuntimeValue::Integer(10),
+            RuntimeValue::BigInt(100),
+            RuntimeValue::Bytes(vec![1]),
+            RuntimeValue::null(ResolvedType::reference(fixture.node))?,
+        ],
+        vec![
+            RuntimeValue::Boolean(true),
+            RuntimeValue::Integer(root_value),
+            RuntimeValue::BigInt(200),
+            RuntimeValue::Bytes(vec![2, 0]),
+            RuntimeValue::Reference {
+                target: fixture.node,
+                object: fixture.other,
+            },
+        ],
+    ])
+}
+
+fn require_unordered_rows(
+    result: &ServerSelectResult,
+    expected: Vec<Vec<RuntimeValue>>,
+    name: &'static str,
+) -> TestResult<()> {
+    require(
+        result.rows().rows().len() == expected.len(),
+        format!("{name} returned the wrong row count"),
+    )?;
+    for expected_row in expected {
+        require(
+            result
+                .rows()
+                .rows()
+                .iter()
+                .any(|actual| actual.values() == expected_row),
+            format!("{name} is missing one exact typed row"),
+        )?;
+    }
+    Ok(())
+}
+
+fn require_version_one_value_multiset(
+    result: &ServerSelectResult,
+    fixture: Fixture,
+    root_value: i32,
+) -> TestResult<()> {
+    let expected = distinct_rows(fixture, root_value)?;
+    require(
+        result.rows().rows().len() == expected.len() * 2,
+        "version-1 value tracer did not return the four duplicate source values",
+    )?;
+    for expected_row in expected {
+        let count = result
+            .rows()
+            .rows()
+            .iter()
+            .filter(|actual| actual.values() == expected_row)
+            .count();
+        require(
+            count == 2,
+            "version-1 value tracer did not preserve one exact typed duplicate pair",
+        )?;
+    }
+    Ok(())
+}
+
 fn selector_argument(fixture: Fixture, object: ObjectId) -> TestResult<Vec<FunctionArgument>> {
     Ok(vec![FunctionArgument::new(
         fixture.select_node_parameter,
@@ -1255,6 +1890,31 @@ async fn install_hostile_octet_length_shadow(database: &TestDatabase) -> TestRes
     finish_session(session, operation, "hostile octet_length fixture").await
 }
 
+#[cfg(feature = "test-hooks")]
+async fn lock_target_relation(database: &TestDatabase, object: TypeId) -> TestResult<TestSession> {
+    let session = database.open().await?;
+    let operation: TestResult<()> = async {
+        session
+            .client()
+            .batch_execute(&format!(
+                "BEGIN; LOCK TABLE {} IN ACCESS EXCLUSIVE MODE",
+                relation(object),
+            ))
+            .await?;
+        Ok(())
+    }
+    .await;
+    match operation {
+        Ok(()) => Ok(session),
+        Err(error) => {
+            match rollback_and_finish_session(session, Err(error), "target relation lock").await {
+                Ok(()) => Err(failure("target relation lock failed without an error")),
+                Err(error) => Err(error),
+            }
+        }
+    }
+}
+
 async fn count_rows(database: &TestDatabase, object: TypeId) -> TestResult<i64> {
     let session = database.open().await?;
     let operation: TestResult<i64> = async {
@@ -1374,6 +2034,34 @@ async fn finish_session<T>(
 }
 
 #[cfg(feature = "test-hooks")]
+async fn rollback_and_finish_session<T>(
+    session: TestSession,
+    operation: TestResult<T>,
+    name: &str,
+) -> TestResult<T> {
+    let rollback = session.client().batch_execute("ROLLBACK").await;
+    let shutdown = session.shutdown().await;
+    match (operation, rollback, shutdown) {
+        (Ok(value), Ok(()), Ok(())) => Ok(value),
+        (Err(error), Ok(()), Ok(())) => Err(failure(format!("{name} failed: {error}"))),
+        (Ok(_), Err(error), Ok(())) => Err(failure(format!("{name} rollback failed: {error}"))),
+        (Ok(_), Ok(()), Err(error)) => Err(failure(format!("{name} shutdown failed: {error}"))),
+        (Err(operation), Err(rollback), Ok(())) => Err(failure(format!(
+            "{name} failed: {operation}; rollback failed: {rollback}"
+        ))),
+        (Err(operation), Ok(()), Err(shutdown)) => Err(failure(format!(
+            "{name} failed: {operation}; shutdown failed: {shutdown}"
+        ))),
+        (Ok(_), Err(rollback), Err(shutdown)) => Err(failure(format!(
+            "{name} rollback failed: {rollback}; shutdown failed: {shutdown}"
+        ))),
+        (Err(operation), Err(rollback), Err(shutdown)) => Err(failure(format!(
+            "{name} failed: {operation}; rollback failed: {rollback}; shutdown failed: {shutdown}"
+        ))),
+    }
+}
+
+#[cfg(feature = "test-hooks")]
 struct ExecutionTask {
     handle: Option<tokio::task::JoinHandle<Result<ServerSelectResult, PostgresKernelError>>>,
 }
@@ -1395,20 +2083,28 @@ impl ExecutionTask {
         }
     }
 
-    async fn finish(mut self, name: &str) -> TestResult<ServerSelectResult> {
+    async fn finish_with_timeout(
+        mut self,
+        name: &str,
+        wait: Duration,
+    ) -> TestResult<Result<ServerSelectResult, PostgresKernelError>> {
         let Some(mut handle) = self.handle.take() else {
             return Err(failure(format!("{name} task was already consumed")));
         };
-        match tokio::time::timeout(WAIT, &mut handle).await {
-            Ok(result) => result
-                .map_err(|error| failure(format!("{name} task failed: {error}")))?
-                .map_err(|error| failure(format!("{name} failed: {error}"))),
+        match tokio::time::timeout(wait, &mut handle).await {
+            Ok(result) => result.map_err(|error| failure(format!("{name} task failed: {error}"))),
             Err(_) => {
                 handle.abort();
                 let _ = handle.await;
                 Err(failure(format!("{name} exceeded the bounded wait")))
             }
         }
+    }
+
+    async fn finish(self, name: &str) -> TestResult<ServerSelectResult> {
+        self.finish_with_timeout(name, WAIT)
+            .await?
+            .map_err(|error| failure(format!("{name} failed: {error}")))
     }
 }
 
