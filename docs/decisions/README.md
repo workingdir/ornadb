@@ -36,3 +36,4 @@ source-of-truth or authority rules.
 * **work ADR 0014:** [Host-Only Backend Shell](0014-host-only-backend-shell.md)
 * **work ADR 0015:** [The First CLIENT Function Returns a Boolean Constant](0015-boolean-constant-client-functions.md)
 * **work ADR 0016:** [Standard Scalars Are Catalogue-Backed `std` Value Types](0016-catalogue-backed-standard-types.md)
+* **work ADR 0017:** [Orna Ships and Owns Its PostgreSQL Runtime](0017-bundled-postgresql-runtime.md)
