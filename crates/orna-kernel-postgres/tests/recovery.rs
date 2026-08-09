@@ -179,6 +179,12 @@ async fn recovers_complete_objects_fields_references_and_expression_origins() ->
         require(
             objects[0].fields()[12].id() == objects[1].fields()[0].id(),
             "duplicate field identities across owners did not remain owner-qualified",
+        )?;
+        require(
+            objects[0].fields()[12].is_required_unique_reference()
+                && objects[0].fields()[12].resolved_type()
+                    == ResolvedType::reference(objects[1].id()),
+            "object recovery changed the required unique reference shape or target",
         )
     })
     .await
@@ -913,6 +919,9 @@ async fn rejects_object_field_expression_and_origin_tampering() -> TestResult<()
 async fn rejects_exact_physical_catalogue_tampering() -> TestResult<()> {
     const TABLE: &str = "_orna_data.t_81818181818181818181818181818181";
     const TARGET: &str = "_orna_data.t_82828282828282828282828282828282";
+    const UNIQUE: &str = "uq_a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0";
+    const UNIQUE_FIELD: &str = "f_a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0";
+    const OTHER_REFERENCE: &str = "f_a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1";
     let statements = [
         format!("DROP TABLE {TABLE} CASCADE"),
         "CREATE TABLE _orna_data.extra_relation (value integer)".to_owned(),
@@ -935,6 +944,42 @@ async fn rejects_exact_physical_catalogue_tampering() -> TestResult<()> {
              FOREIGN KEY (f_a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0)
              REFERENCES {TARGET} (_orna_object_id) ON DELETE CASCADE"
         ),
+        format!("ALTER TABLE {TABLE} DROP CONSTRAINT {UNIQUE}"),
+        format!("ALTER TABLE {TABLE} RENAME CONSTRAINT {UNIQUE} TO wrong_unique_name"),
+        format!(
+            "ALTER TABLE {TABLE} DROP CONSTRAINT {UNIQUE};
+             ALTER TABLE {TABLE} ADD CONSTRAINT {UNIQUE} UNIQUE ({OTHER_REFERENCE})"
+        ),
+        format!(
+            "ALTER TABLE {TABLE} DROP CONSTRAINT {UNIQUE};
+             ALTER TABLE {TABLE} ADD CONSTRAINT {UNIQUE} UNIQUE ({UNIQUE_FIELD})
+             DEFERRABLE INITIALLY DEFERRED"
+        ),
+        format!(
+            "ALTER TABLE {TABLE} DROP CONSTRAINT {UNIQUE};
+             ALTER TABLE {TABLE} ADD CONSTRAINT {UNIQUE}
+             UNIQUE ({UNIQUE_FIELD}, {OTHER_REFERENCE})"
+        ),
+        format!(
+            "ALTER TABLE {TABLE} DROP CONSTRAINT {UNIQUE};
+             ALTER TABLE {TABLE} ADD CONSTRAINT {UNIQUE}
+             UNIQUE NULLS NOT DISTINCT ({UNIQUE_FIELD})"
+        ),
+        format!(
+            "ALTER TABLE {TABLE} DROP CONSTRAINT {UNIQUE};
+             ALTER TABLE {TABLE} ADD CONSTRAINT {UNIQUE}
+             UNIQUE ({UNIQUE_FIELD}) INCLUDE ({OTHER_REFERENCE})"
+        ),
+        format!(
+            "ALTER TABLE {TABLE} DROP CONSTRAINT {UNIQUE};
+             CREATE UNIQUE INDEX {UNIQUE} ON {TABLE} ({UNIQUE_FIELD})
+             WHERE {UNIQUE_FIELD} IS NOT NULL"
+        ),
+        format!(
+            "ALTER TABLE {TABLE} DROP CONSTRAINT {UNIQUE};
+             CREATE UNIQUE INDEX {UNIQUE} ON {TABLE} ((octet_length({UNIQUE_FIELD})))"
+        ),
+        format!("CREATE UNIQUE INDEX unexpected_unique_index ON {TABLE} ({UNIQUE_FIELD})"),
         format!("CREATE INDEX unexpected_index ON {TABLE} (f_91919191919191919191919191919191)"),
         format!("ALTER TABLE {TABLE} ENABLE ROW LEVEL SECURITY"),
         format!("GRANT MAINTAIN ON TABLE {TABLE} TO PUBLIC"),
@@ -2701,7 +2746,7 @@ async fn install_object_revision(
                 12 + u32::try_from(offset).expect("five references"),
                 ResolvedType::reference(target),
                 nullable,
-                false,
+                offset == 0,
                 None,
                 on_delete,
             ));
@@ -2973,8 +3018,11 @@ fn physical_catalogue_sql(objects: &[ObjectTypeDefinition]) -> String {
                 references.push(format!(
                     "ALTER TABLE _orna_data.{table} ADD CONSTRAINT fk_{field_hex} \
                      FOREIGN KEY ({column}) REFERENCES _orna_data.{target_table} \
-                     (_orna_object_id) ON DELETE {delete_action};"
+                    (_orna_object_id) ON DELETE {delete_action};"
                 ));
+            }
+            if field.unique() {
+                definitions.push(format!("CONSTRAINT uq_{field_hex} UNIQUE ({column})"));
             }
         }
         statements.push(format!(

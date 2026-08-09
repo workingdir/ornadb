@@ -14,6 +14,7 @@ use orna_core::{
         DefinitionReferenceTarget, DeployableRevision, FunctionRevisionRecord, SourceOrigin,
     },
     source::{SourceBundle, SourceUnit},
+    types::ResolvedType,
     value::RuntimeValue,
 };
 use orna_kernel_postgres::{PostgresKernel, PostgresKernelError};
@@ -49,6 +50,19 @@ const FIELD_RENAME_FINAL_SOURCE: &str = "CREATE SCHEMA people;\n\
     CREATE SERVER FUNCTION people.list_emails()\n\
     RETURNS ROWS (email TEXT)\n\
     AS SELECT p.primary_email FROM people.person p;\n";
+
+const UNIQUE_REFERENCE_ORIGINAL_SOURCE: &str = "CREATE SCHEMA assignments;\n\
+    CREATE TYPE assignments.person AS OBJECT ();\n\
+    CREATE TYPE assignments.assignment AS OBJECT (\n\
+        owner REF assignments.person NOT NULL UNIQUE\n\
+    );\n";
+
+const UNIQUE_REFERENCE_RENAMED_SOURCE: &str = "CREATE SCHEMA assignments;\n\
+    CREATE TYPE assignments.person AS OBJECT ();\n\
+    CREATE TYPE assignments.assignment AS OBJECT (\n\
+        assignee REF assignments.person NOT NULL UNIQUE\n\
+    );\n\
+    ALTER TYPE assignments.assignment RENAME FIELD owner TO assignee;\n";
 
 const MUTUAL_REFERENCE_SOURCE: &str = "CREATE SCHEMA graph;\n\
     CREATE TYPE graph.left AS OBJECT (right REF graph.right);\n\
@@ -275,6 +289,89 @@ async fn replay_safe_field_rename_preserves_live_storage_and_execution() -> Test
         require_recovered_snapshot(&replay_candidate, &replayed)?;
         require_recovered_snapshot(&replay_candidate, &final_recovered)?;
         require_rename_state(&database, &final_recovered, &proof).await
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn required_unique_reference_replay_and_rename_preserve_physical_identity() -> TestResult<()>
+{
+    with_test_database(|database| async move {
+        let initial_kernel = kernel(&database)?;
+        initial_kernel.bootstrap().await?;
+        let original_candidate = candidate(
+            UNIQUE_REFERENCE_ORIGINAL_SOURCE,
+            &initial_kernel.recover().await?,
+        )?;
+        let original = initial_kernel.apply(&original_candidate).await?;
+        require_recovered_snapshot(&original_candidate, &original)?;
+
+        let person = original
+            .catalogue()
+            .object_types()
+            .iter()
+            .find(|object| object.name().parts() == ["assignments", "person"])
+            .ok_or_else(|| failure("initial apply did not create assignments.person"))?;
+        let assignment = original
+            .catalogue()
+            .object_types()
+            .iter()
+            .find(|object| object.name().parts() == ["assignments", "assignment"])
+            .ok_or_else(|| failure("initial apply did not create assignments.assignment"))?;
+        let owner = assignment
+            .field_by_name("owner")
+            .ok_or_else(|| failure("initial apply did not create assignment.owner"))?;
+        require(
+            assignment.fields().len() == 1
+                && owner.is_required_unique_reference()
+                && owner.resolved_type() == ResolvedType::reference(person.id()),
+            "initial apply changed the required unique reference semantics",
+        )?;
+
+        let assignment_physical = physical_catalogue(&database, assignment.id()).await?;
+        let person_physical = physical_catalogue(&database, person.id()).await?;
+        let field_hex = format!("{:032x}", u128::from_be_bytes(owner.id().to_bytes()));
+        let unique_name = format!("uq_{field_hex}");
+        let foreign_key_name = format!("fk_{field_hex}");
+        require(
+            assignment_physical
+                .constraints
+                .iter()
+                .any(|(_, name, _)| name == &unique_name)
+                && assignment_physical
+                    .constraints
+                    .iter()
+                    .any(|(_, name, _)| name == &foreign_key_name)
+                && assignment_physical
+                    .indexes
+                    .iter()
+                    .any(|(_, name, _)| name == &unique_name),
+            "initial apply did not install the stable unique and foreign-key identities",
+        )?;
+        let proof = UniqueReferenceProof {
+            person: person.id(),
+            assignment: assignment.id(),
+            field: owner.id(),
+            person_physical,
+            assignment_physical,
+        };
+
+        let replay_kernel = kernel(&database)?;
+        let recovered = replay_kernel.recover().await?;
+        require_unique_reference_state(&database, &recovered, &proof, "owner").await?;
+        let replay_candidate = candidate(UNIQUE_REFERENCE_ORIGINAL_SOURCE, &recovered)?;
+        let replayed = replay_kernel.apply(&replay_candidate).await?;
+        require_recovered_snapshot(&replay_candidate, &replayed)?;
+        require_unique_reference_state(&database, &replayed, &proof, "owner").await?;
+
+        let rename_candidate = candidate(UNIQUE_REFERENCE_RENAMED_SOURCE, &replayed)?;
+        let renamed = replay_kernel.apply(&rename_candidate).await?;
+        require_recovered_snapshot(&rename_candidate, &renamed)?;
+        require_unique_reference_state(&database, &renamed, &proof, "assignee").await?;
+
+        let final_recovered = kernel(&database)?.recover().await?;
+        require_unique_reference_state(&database, &final_recovered, &proof, "assignee").await
     })
     .await
 }
@@ -1102,6 +1199,47 @@ struct RenameProof {
     immutable: ImmutableRevisionRows,
     physical: PhysicalCatalogue,
     stored_object: ObjectId,
+}
+
+struct UniqueReferenceProof {
+    person: TypeId,
+    assignment: TypeId,
+    field: FieldId,
+    person_physical: PhysicalCatalogue,
+    assignment_physical: PhysicalCatalogue,
+}
+
+async fn require_unique_reference_state(
+    database: &TestDatabase,
+    active: &ActiveDatabaseRevision,
+    proof: &UniqueReferenceProof,
+    field_name: &str,
+) -> TestResult<()> {
+    let person = active
+        .catalogue()
+        .object_type_by_id(proof.person)
+        .ok_or_else(|| failure("required unique reference recovery lost the person TypeId"))?;
+    let assignment = active
+        .catalogue()
+        .object_type_by_id(proof.assignment)
+        .ok_or_else(|| failure("required unique reference recovery lost the assignment TypeId"))?;
+    let reference = assignment
+        .field_by_id(proof.field)
+        .ok_or_else(|| failure("required unique reference recovery lost the FieldId"))?;
+    require(
+        person.name().parts() == ["assignments", "person"]
+            && assignment.name().parts() == ["assignments", "assignment"]
+            && assignment.fields().len() == 1
+            && reference.name() == field_name
+            && reference.is_required_unique_reference()
+            && reference.resolved_type() == ResolvedType::reference(proof.person),
+        "required unique reference recovery changed semantic identity or field properties",
+    )?;
+    require(
+        physical_catalogue(database, proof.person).await? == proof.person_physical
+            && physical_catalogue(database, proof.assignment).await? == proof.assignment_physical,
+        "required unique reference replay or rename changed physical identities",
+    )
 }
 
 async fn require_rename_state(
