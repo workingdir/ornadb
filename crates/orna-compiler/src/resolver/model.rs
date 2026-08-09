@@ -957,13 +957,6 @@ impl CheckedServerFunction {
     }
 
     /// Returns the checked DISTINCT query plan when the function has one.
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "the preparation stage consumes checked DISTINCT plans in the next slice"
-        )
-    )]
     pub(crate) fn distinct_query_plan(
         &self,
     ) -> Option<&DistinctQueryIr<CheckedTypeId, CheckedFieldId>> {
