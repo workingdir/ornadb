@@ -182,6 +182,13 @@ impl FieldDefinition {
         self.unique
     }
 
+    /// Reports whether this is the required typed-reference uniqueness shape.
+    pub const fn is_required_unique_reference(&self) -> bool {
+        self.unique
+            && !self.nullable
+            && matches!(self.resolved_type, ResolvedType::Reference { .. })
+    }
+
     /// Returns the identity of the resolved default expression, when present.
     pub const fn default_expression(&self) -> Option<ExpressionId> {
         self.default_expression
@@ -1292,6 +1299,43 @@ mod tests {
             ordinal,
             ResolvedType::scalar(StandardScalar::CharacterLargeObject),
         )
+    }
+
+    #[test]
+    fn required_unique_reference_shape_is_exact() {
+        let target = TypeId::from_bytes([99; 16]);
+        let definition = |resolved_type, nullable, unique| {
+            FieldDefinition::new(
+                FieldId::from_bytes([98; 16]),
+                "owner",
+                0,
+                resolved_type,
+                nullable,
+                unique,
+                None,
+                None,
+            )
+        };
+
+        assert!(
+            definition(ResolvedType::reference(target), false, true).is_required_unique_reference()
+        );
+        assert!(
+            !definition(ResolvedType::reference(target), true, true).is_required_unique_reference()
+        );
+        assert!(
+            !definition(ResolvedType::reference(target), false, false)
+                .is_required_unique_reference()
+        );
+        assert!(
+            !definition(ResolvedType::Named(target), false, true).is_required_unique_reference()
+        );
+        for scalar in StandardScalar::ALL {
+            assert!(
+                !definition(ResolvedType::scalar(scalar), false, true)
+                    .is_required_unique_reference()
+            );
+        }
     }
 
     fn function(
