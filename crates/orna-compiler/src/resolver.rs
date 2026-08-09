@@ -296,6 +296,19 @@ fn check_parsed(parse_report: ParseReport, base: &CatalogueSnapshot) -> CheckRep
                 _ => None,
             };
 
+            if field.unique
+                && semantic_type.is_some_and(|semantic_type| {
+                    !supports_required_unique_reference(semantic_type, field.nullable)
+                })
+            {
+                diagnostics.push(diagnostic(
+                    DiagnosticCode::TypeMismatch,
+                    REQUIRED_UNIQUE_REFERENCE_MESSAGE,
+                    header.logical_path,
+                    &field.span,
+                ));
+            }
+
             if let Some(semantic_type) = semantic_type {
                 checked_fields.push(CheckedField {
                     id,
@@ -1622,6 +1635,16 @@ fn resolve_type(
     }
 }
 
+pub(crate) fn supports_required_unique_reference(
+    semantic_type: SemanticType<CheckedTypeId>,
+    nullable: bool,
+) -> bool {
+    !nullable && matches!(semantic_type, SemanticType::Reference { .. })
+}
+
+pub(crate) const REQUIRED_UNIQUE_REFERENCE_MESSAGE: &str =
+    "UNIQUE is only available for REF fields that are NOT NULL";
+
 fn resolve_closed_scalar(name: &QualifiedName) -> Option<StandardScalar> {
     if name.parts.len() != 1 || name.parts[0].text.starts_with('"') {
         return None;
@@ -1746,7 +1769,8 @@ mod tests {
     use crate::relational::ExpressionKind;
 
     use super::{
-        CheckedDefinitionReferenceTarget, ConstantValue, DiagnosticCode, SemanticType, check,
+        CheckedDefinitionReferenceTarget, CheckedTypeId, ConstantValue, DiagnosticCode,
+        SemanticType, check,
     };
 
     fn empty_catalogue() -> CatalogueSnapshot {
@@ -1992,6 +2016,211 @@ mod tests {
             fields[5].semantic_type(),
             SemanticType::scalar(StandardScalar::BinaryLargeObject)
         );
+    }
+
+    #[test]
+    fn resolves_required_unique_references_with_forward_targets_and_replay_ids() {
+        let source = "CREATE SCHEMA tasks; CREATE SCHEMA people; \
+            CREATE TYPE tasks.assignment AS OBJECT (owner REF people.owner UNIQUE NOT NULL); \
+            CREATE TYPE people.owner AS OBJECT ();";
+
+        let report = check(&bundle([("unique.orna", source)]), &empty_catalogue());
+
+        assert!(report.diagnostics().is_empty());
+        let checked = report.checked_bundle().unwrap();
+        let assignment = &checked.object_types()[0];
+        let owner = &checked.object_types()[1];
+        let field = &assignment.fields()[0];
+        assert!(assignment.id().is_provisional());
+        assert!(field.id().is_provisional());
+        assert_eq!(field.semantic_type(), SemanticType::reference(owner.id()));
+        assert!(!field.nullable());
+        assert!(field.unique());
+
+        let owner_id = TypeId::from_bytes([3; 16]);
+        let assignment_id = TypeId::from_bytes([4; 16]);
+        let owner_field = FieldId::from_bytes([5; 16]);
+        let base = catalogue(
+            vec![schema(1, &["people"]), schema(2, &["tasks"])],
+            vec![
+                object_type(
+                    4,
+                    &["tasks", "assignment"],
+                    vec![FieldDefinition::new(
+                        owner_field,
+                        "owner",
+                        0,
+                        ResolvedType::reference(owner_id),
+                        false,
+                        true,
+                        None,
+                        None,
+                    )],
+                ),
+                object_type(3, &["people", "owner"], Vec::new()),
+            ],
+            Vec::new(),
+        );
+        let replay = check(&bundle([("unique.orna", source)]), &base);
+
+        assert!(replay.diagnostics().is_empty());
+        let assignment = &replay.checked_bundle().unwrap().object_types()[0];
+        let field = &assignment.fields()[0];
+        assert_eq!(assignment.id().existing(), Some(assignment_id));
+        assert_eq!(field.id().existing(), Some(owner_field));
+        assert_eq!(
+            field.semantic_type(),
+            SemanticType::reference(CheckedTypeId::Existing(owner_id))
+        );
+    }
+
+    #[test]
+    fn rejects_unique_fields_outside_the_required_reference_shape() {
+        for scalar in StandardScalar::ALL {
+            let source = format!(
+                "CREATE SCHEMA demo; CREATE TYPE demo.item AS OBJECT (value {} UNIQUE);",
+                scalar.canonical_name()
+            );
+            let bundle =
+                SourceBundle::new([SourceUnit::new("unique.orna", source.clone())]).unwrap();
+            let report = check(&bundle, &empty_catalogue());
+
+            assert_eq!(report.diagnostics().len(), 1, "{source}");
+            let diagnostic = &report.diagnostics()[0];
+            assert_eq!(diagnostic.code(), DiagnosticCode::TypeMismatch);
+            assert_eq!(
+                diagnostic.message(),
+                "UNIQUE is only available for REF fields that are NOT NULL"
+            );
+            assert_eq!(diagnostic.location().logical_path(), "unique.orna");
+            let start = source.find("value").unwrap();
+            assert_eq!(diagnostic.location().span().start(), start);
+            assert_eq!(
+                diagnostic.location().span().end(),
+                start + "value ".len() + scalar.canonical_name().len() + " UNIQUE".len()
+            );
+            assert_no_checked_bundle(&report);
+        }
+
+        let source = "CREATE SCHEMA people; CREATE SCHEMA tasks; \
+            CREATE TYPE tasks.assignment AS OBJECT (owner REF people.owner UNIQUE); \
+            CREATE TYPE people.owner AS OBJECT ();";
+        let report = check(&bundle([("unique.orna", source)]), &empty_catalogue());
+
+        assert_eq!(report.diagnostics().len(), 1);
+        let diagnostic = &report.diagnostics()[0];
+        assert_eq!(diagnostic.code(), DiagnosticCode::TypeMismatch);
+        assert_eq!(
+            diagnostic.message(),
+            "UNIQUE is only available for REF fields that are NOT NULL"
+        );
+        let start = source.find("owner REF").unwrap();
+        assert_eq!(diagnostic.location().span().start(), start);
+        assert_eq!(
+            diagnostic.location().span().end(),
+            start + "owner REF people.owner UNIQUE".len()
+        );
+        assert_no_checked_bundle(&report);
+    }
+
+    #[test]
+    fn unique_field_validation_preserves_existing_field_diagnostic_precedence() {
+        let source = "CREATE SCHEMA demo; CREATE TYPE demo.item AS OBJECT (\
+            repeated TEXT, repeated TEXT UNIQUE,\
+            missing REF demo.missing UNIQUE,\
+            scalar_target REF TEXT UNIQUE,\
+            deleted TEXT UNIQUE ON DELETE RESTRICT,\
+            defaulted INT UNIQUE DEFAULT TRUE\
+        );";
+        let report = check(&bundle([("unique.orna", source)]), &empty_catalogue());
+
+        let expected = [
+            (
+                DiagnosticCode::DuplicateDefinition,
+                "duplicate field definition repeated in demo.item",
+            ),
+            (
+                DiagnosticCode::UnknownQualifiedName,
+                "unknown object type demo.missing",
+            ),
+            (
+                DiagnosticCode::InvalidReferenceTarget,
+                "REF target text is a scalar type",
+            ),
+            (
+                DiagnosticCode::TypeMismatch,
+                "ON DELETE is only valid for REF fields",
+            ),
+            (
+                DiagnosticCode::TypeMismatch,
+                "UNIQUE is only available for REF fields that are NOT NULL",
+            ),
+            (
+                DiagnosticCode::TypeMismatch,
+                "default constant does not match the field type and nullability",
+            ),
+            (
+                DiagnosticCode::TypeMismatch,
+                "UNIQUE is only available for REF fields that are NOT NULL",
+            ),
+        ];
+        assert_eq!(report.diagnostics().len(), expected.len());
+        for (diagnostic, (code, message)) in report.diagnostics().iter().zip(expected) {
+            assert_eq!(diagnostic.code(), code);
+            assert_eq!(diagnostic.message(), message);
+        }
+        assert_no_checked_bundle(&report);
+    }
+
+    #[test]
+    fn required_unique_reference_preserves_set_null_diagnostic_precedence() {
+        let source = "CREATE SCHEMA people; CREATE SCHEMA tasks; \
+            CREATE TYPE tasks.assignment AS OBJECT (\
+                owner REF people.owner NOT NULL UNIQUE ON DELETE SET NULL\
+            ); \
+            CREATE TYPE people.owner AS OBJECT ();";
+        let report = check(&bundle([("unique.orna", source)]), &empty_catalogue());
+
+        assert_eq!(report.diagnostics().len(), 1);
+        let diagnostic = &report.diagnostics()[0];
+        assert_eq!(diagnostic.code(), DiagnosticCode::TypeMismatch);
+        assert_eq!(diagnostic.code().as_str(), "ORNA0201");
+        assert_eq!(
+            diagnostic.message(),
+            "ON DELETE SET NULL requires a nullable field"
+        );
+        assert_eq!(diagnostic.location().logical_path(), "unique.orna");
+        let start = source.find("owner REF").unwrap();
+        assert_eq!(diagnostic.location().span().start(), start);
+        assert_eq!(
+            diagnostic.location().span().end(),
+            start + "owner REF people.owner NOT NULL UNIQUE ON DELETE SET NULL".len()
+        );
+        assert_no_checked_bundle(&report);
+    }
+
+    #[test]
+    fn required_unique_reference_support_is_closed_to_non_null_references() {
+        let type_id = CheckedTypeId::Existing(TypeId::from_bytes([1; 16]));
+
+        assert!(super::supports_required_unique_reference(
+            SemanticType::reference(type_id),
+            false
+        ));
+        assert!(!super::supports_required_unique_reference(
+            SemanticType::reference(type_id),
+            true
+        ));
+        assert!(!super::supports_required_unique_reference(
+            SemanticType::Named(type_id),
+            false
+        ));
+        for scalar in StandardScalar::ALL {
+            assert!(!super::supports_required_unique_reference(
+                SemanticType::scalar(scalar),
+                false
+            ));
+        }
     }
 
     #[test]

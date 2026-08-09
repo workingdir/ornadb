@@ -1071,4 +1071,36 @@ impl CheckReport {
     pub fn checked_bundle(&self) -> Option<&CheckedBundle> {
         self.checked_bundle.as_ref()
     }
+
+    #[cfg(test)]
+    pub(crate) fn replace_checked_field_facts_for_test(
+        &mut self,
+        owner: CheckedTypeId,
+        field: CheckedFieldId,
+        semantic_type: SemanticType<CheckedTypeId>,
+        nullable: bool,
+        unique: bool,
+    ) -> bool {
+        let Some(checked) = self.checked_bundle.as_mut() else {
+            return false;
+        };
+        let Some(field) = checked
+            .object_types
+            .iter_mut()
+            .find(|object_type| object_type.id == owner)
+            .and_then(|object_type| {
+                object_type
+                    .fields
+                    .iter_mut()
+                    .find(|candidate| candidate.id == field)
+            })
+        else {
+            return false;
+        };
+
+        field.semantic_type = semantic_type;
+        field.nullable = nullable;
+        field.unique = unique;
+        true
+    }
 }
