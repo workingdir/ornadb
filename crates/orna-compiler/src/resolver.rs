@@ -1976,8 +1976,8 @@ mod tests {
                      count INT DEFAULT 7,\
                      note TEXT DEFAULT 'it''s fine',\
                      owner REF people.person ON DELETE SET NULL,\
-                     document CLOB,\
-                     payload BLOB\
+                     document TEXT,\
+                     payload BYTES\
                  );",
             )]),
             &empty_catalogue(),
@@ -2016,6 +2016,30 @@ mod tests {
             fields[5].semantic_type(),
             SemanticType::scalar(StandardScalar::BinaryLargeObject)
         );
+    }
+
+    #[test]
+    fn rejects_non_public_large_object_aliases_at_their_type_spans() {
+        for spelling in ["CLOB", "BLOB"] {
+            let source =
+                format!("CREATE SCHEMA demo; CREATE TYPE demo.item AS OBJECT (value {spelling});");
+            let source_bundle =
+                SourceBundle::new([SourceUnit::new("types.orna", source.as_str())]).unwrap();
+            let report = check(&source_bundle, &empty_catalogue());
+
+            assert_eq!(report.diagnostics().len(), 1, "{spelling}");
+            let diagnostic = &report.diagnostics()[0];
+            assert_eq!(diagnostic.code(), DiagnosticCode::UnknownQualifiedName);
+            assert_eq!(
+                diagnostic.message(),
+                format!("unknown type name {}", spelling.to_lowercase())
+            );
+            assert_eq!(diagnostic.location().logical_path(), "types.orna");
+            let start = source.find(spelling).expect("type spelling is present");
+            assert_eq!(diagnostic.location().span().start(), start);
+            assert_eq!(diagnostic.location().span().end(), start + spelling.len());
+            assert_no_checked_bundle(&report);
+        }
     }
 
     #[test]
