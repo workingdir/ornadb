@@ -7,7 +7,7 @@ use std::{
     ffi::{OsStr, OsString},
     fs::{self, File},
     io::{self, Read},
-    net::{TcpListener, TcpStream},
+    net::TcpListener,
     os::unix::{ffi::OsStringExt, fs::PermissionsExt, process::ExitStatusExt},
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Output, Stdio},
@@ -844,13 +844,11 @@ fn missing_empty_relative_and_unusable_paths_fail_without_platform_fallback() {
 
 #[test]
 fn unavailable_backend_is_left_to_psql_after_process_replacement() {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("reserve unused TCP port");
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind non-PostgreSQL endpoint");
     let address = listener.local_addr().expect("reserved TCP address");
-    drop(listener);
-    assert!(
-        TcpStream::connect_timeout(&address, Duration::from_millis(100)).is_err(),
-        "reserved TCP endpoint must be unavailable before launch"
-    );
+    listener
+        .set_nonblocking(true)
+        .expect("make non-PostgreSQL endpoint observable");
 
     let directory = TestDirectory::new("unavailable-backend").expect("temporary directory");
     let url = format!(
@@ -866,6 +864,12 @@ fn unavailable_backend_is_left_to_psql_after_process_replacement() {
     assert_eq!(
         read_nul_values(&suffixed_path(&record, ".args")).expect("arguments record"),
         vec![b"--no-psqlrc".to_vec()]
+    );
+    assert!(
+        listener
+            .accept()
+            .is_err_and(|error| error.kind() == io::ErrorKind::WouldBlock),
+        "Orna must not contact the configured endpoint before replacing itself"
     );
 }
 
