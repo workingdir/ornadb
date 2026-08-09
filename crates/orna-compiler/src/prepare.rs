@@ -55,7 +55,9 @@ use crate::{
 use crate::{
     mutation::{DeletePlanIr, MutationExpressionKind, MutationOperation, MutationPlanIr},
     relational::{supports_server_select_distinct, supports_server_select_equality},
-    resolver::CheckedFieldRename,
+    resolver::{
+        CheckedFieldRename, REQUIRED_UNIQUE_REFERENCE_MESSAGE, supports_required_unique_reference,
+    },
 };
 
 /// One encoded SERVER artifact with the language version that defines it.
@@ -1252,6 +1254,7 @@ fn preflight(
     for location in checked_locations(checked) {
         validate_location(location, &sources)?;
     }
+    validate_unique_fields(checked)?;
     validate_field_renames(checked, active)?;
     for function in checked.server_functions() {
         if u32::try_from(function.references().len()).is_err() {
@@ -1267,6 +1270,23 @@ fn preflight(
         {
             return Err(PrepareError::InvalidCheckedBundle {
                 reason: "checked function contains an unsupported definition reference kind",
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_unique_fields(checked: &CheckedBundle) -> Result<(), PrepareError> {
+    for field in checked
+        .object_types()
+        .iter()
+        .flat_map(|object_type| object_type.fields())
+    {
+        if field.unique()
+            && !supports_required_unique_reference(field.semantic_type(), field.nullable())
+        {
+            return Err(PrepareError::InvalidCheckedBundle {
+                reason: REQUIRED_UNIQUE_REFERENCE_MESSAGE,
             });
         }
     }
@@ -2424,6 +2444,12 @@ mod tests {
           TRANSACTION READ ONLY VOLATILITY STABLE\n\
           AS SELECT REF(t), t.title FROM tasks.task t\n\
           WHERE t.completed = FALSE ORDER BY t.title;\n";
+
+    const REQUIRED_UNIQUE_REFERENCE_SOURCE: &str = "CREATE SCHEMA relations;\n\
+        CREATE TYPE relations.assignment AS OBJECT (\n\
+            owner REF relations.owner NOT NULL UNIQUE\n\
+        );\n\
+        CREATE TYPE relations.owner AS OBJECT (name TEXT NOT NULL);\n";
 
     #[test]
     fn accepts_all_supported_definition_reference_kinds() {
@@ -5983,6 +6009,82 @@ mod tests {
             first.candidate().object_types()[0].id(),
             second.candidate().object_types()[0].id()
         );
+    }
+
+    #[test]
+    fn prepares_and_replays_required_unique_references_fail_closed() {
+        let empty = empty_active();
+        let report = checked_report(REQUIRED_UNIQUE_REFERENCE_SOURCE, empty.catalogue());
+        let checked = report.checked_bundle().unwrap();
+        let checked_assignment = checked
+            .object_types()
+            .iter()
+            .find(|object_type| object_type.name() == &semantic_name(&["relations", "assignment"]))
+            .unwrap();
+        let checked_field = &checked_assignment.fields()[0];
+        let checked_owner = checked
+            .object_types()
+            .iter()
+            .find(|object_type| object_type.name() == &semantic_name(&["relations", "owner"]))
+            .unwrap()
+            .id();
+
+        let prepared = prepare(&report, empty.pair(), &empty).unwrap();
+        let assignment = prepared
+            .candidate()
+            .object_type_by_name(&semantic_name(&["relations", "assignment"]))
+            .unwrap();
+        let owner = prepared
+            .candidate()
+            .object_type_by_name(&semantic_name(&["relations", "owner"]))
+            .unwrap();
+        let field = assignment.field_by_name("owner").unwrap();
+        assert!(field.unique());
+        assert!(!field.nullable());
+        assert_eq!(field.resolved_type(), ResolvedType::reference(owner.id()));
+
+        let field_id = field.id();
+        let assignment_id = assignment.id();
+        let owner_id = owner.id();
+        let active = activate(&prepared, Vec::new(), Vec::new());
+        let replay = prepare(
+            &checked_report(REQUIRED_UNIQUE_REFERENCE_SOURCE, active.catalogue()),
+            active.pair(),
+            &active,
+        )
+        .unwrap();
+        let replay_assignment = replay
+            .candidate()
+            .object_type_by_name(&semantic_name(&["relations", "assignment"]))
+            .unwrap();
+        let replay_owner = replay
+            .candidate()
+            .object_type_by_name(&semantic_name(&["relations", "owner"]))
+            .unwrap();
+        let replay_field = replay_assignment.field_by_name("owner").unwrap();
+        assert_eq!(replay_assignment.id(), assignment_id);
+        assert_eq!(replay_owner.id(), owner_id);
+        assert_eq!(replay_field.id(), field_id);
+        assert!(replay_field.unique());
+        assert_eq!(replay_field.resolved_type(), field.resolved_type());
+
+        for (semantic_type, nullable) in [
+            (SemanticType::scalar(StandardScalar::Boolean), false),
+            (SemanticType::reference(checked_owner), true),
+        ] {
+            let mut malformed = report.clone();
+            assert!(malformed.replace_checked_field_facts_for_test(
+                checked_assignment.id(),
+                checked_field.id(),
+                semantic_type,
+                nullable,
+                true,
+            ));
+            assert_preparation_reason(
+                prepare(&malformed, empty.pair(), &empty),
+                REQUIRED_UNIQUE_REFERENCE_MESSAGE,
+            );
+        }
     }
 
     #[test]
