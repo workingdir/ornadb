@@ -198,11 +198,16 @@ revision contains:
 * one canonical standard-library digest; and
 * the exact association between `orna.language/1` and `orna.std/1`.
 
-The bootstrap manifest is the smallest trusted input needed to compile the
-source that defines the primitive types. It contains only reserved identities,
-the expected primary names, the allow-listed versioned kernel contracts, and
-the expected source and semantic digests. It does not provide a second set of
-public type semantics.
+The initial bootstrap manifest is the smallest source-independent trusted
+input needed to compile the source that defines the primitive types. It
+contains the exact reserved IDs, 13 primary names, 13 allow-listed versioned
+kernel contracts, and 30 direct binding facts: 13 qualified `std.*` bindings
+plus 17 prelude bindings (`13 + 17 = 30`). It does not yet contain source
+bytes, source origins, hashes, a standard digest, or a
+`StandardLibrarySnapshot` or `VerifiedStandardLibrarySnapshot`. It stages
+identity and contract expectations without providing a second set of public
+type semantics or claiming that source-derived facts have already been
+verified.
 
 ### Canonical standard identities
 
@@ -212,6 +217,7 @@ bytes followed by the listed byte:
 | Identity class | Member | Final byte |
 | --- | --- | --- |
 | `StandardLibraryRevisionId` | `orna.std/1` | `01` |
+| `CatalogueRevisionId` | standard catalogue revision | `01` |
 | `SourceBundleId` | standard source bundle | `01` |
 | `SourceRevisionId` | standard source revision | `01` |
 | `SourceUnitId` | `std/types.orna` | `01` |
@@ -219,12 +225,37 @@ bytes followed by the listed byte:
 | `SchemaId` | `std.types` | `02` |
 
 The identity classes are distinct Rust and durable types, so equal byte arrays
-do not cross identity domains.
+do not cross identity domains. Reuse of the listed `01` bytes across different
+identity classes is intentional. Within one identity class, every reserved
+manifest member must remain unique. Manifest construction rejects any
+collision in the same identity class, including a derived `TypeBindingId`
+collision. Collision checks never compare identities from different classes.
+Installation and recovery compare application identities only with reserved
+manifest identities of the same class and reject equality. In particular,
+standard installation rejects an application catalogue whose
+`CatalogueRevisionId` equals the reserved standard catalogue identity before
+creating an upgrade. Recovery requires the stored standard catalogue to use
+the reserved identity and rejects an application collision in the same
+identity class or a crossed catalogue link instead of interpreting either
+record through the other role.
 
 The standard source revision has no parent. Its one source unit has ordinal
 `0`, logical path `std/types.orna`, and the exact embedded UTF-8 content. Its
 content, bundle, and revision hashes use the existing source hash contracts
 without a special standard-library branch.
+
+Retaining that source is the first stage that owns provenance and canonical
+verification. It derives exactly forty-five source origins: two schemas,
+thirteen value types, and thirty bindings (`2 + 13 + 30 = 45`). That stage
+locks exact source-unit, bundle, and source-revision hash goldens, retains one
+hard-coded accepted standard digest golden, and exposes
+`orna_standard::verify_standard_library_snapshot`. Before that wrapper runs,
+source parsing must already have matched every source-independent manifest
+fact. The wrapper checks the exact reserved `CatalogueRevisionId`, compares the
+retained standard digest with the hard-coded accepted golden, and only then
+calls `orna_core::canonical_hash::verify_standard_library_snapshot`. That
+ordering prevents a different but internally self-consistent standard snapshot
+from becoming authority.
 
 Each binding identity is derived rather than allocated. Compute SHA-256 over
 the domain bytes `ornadb.id/type-binding/v1\0`, then one binding-kind byte
@@ -258,6 +289,15 @@ The canonical standard digest is SHA-256 over this exact sequence:
    count, each encoded as its sixteen ID bytes, binding-kind byte, the same
    untagged name payload used for identity derivation, sixteen target `TypeId`
    bytes, and source origin.
+
+The reserved standard `CatalogueRevisionId` is deliberately excluded from
+standard digest version 1. It is a manifest identity, not another encoding of
+the standard contents. Standard assembly and recovery must compare it with the
+exact reserved manifest identity before digest verification begins. The later
+`orna_standard::verify_standard_library_snapshot` wrapper performs that
+identity check and the hard-coded accepted digest comparison before invoking
+the core canonical verifier, so a valid self-consistent digest cannot
+legitimise a renamed, crossed, or different non-golden standard snapshot.
 
 A qualified semantic name uses the existing canonical framing: big-endian
 `u32` part count followed by length-prefixed UTF-8 parts. A source origin is
@@ -631,18 +671,38 @@ together, or the previous version-1 active revision remains authoritative.
 
 Tests must prove:
 
-* the embedded `orna.std/1` source and manifest produce all thirteen exact
-  primary definitions with the existing reserved `TypeId` values;
-* every qualified and prelude binding resolves directly to the expected
+* the source-independent manifest contains the exact reserved IDs for
+  `orna.std/1`, the standard catalogue, the later source bundle, revision, and
+  unit, both schemas, all 13 types, and all 30 bindings; it also contains the
+  exact schema and type names, 13 contracts, and each binding kind, name,
+  derived ID, and direct target;
+* the source-independent manifest contains no source bytes, origins, hashes,
+  standard digest, `StandardLibrarySnapshot`, or
+  `VerifiedStandardLibrarySnapshot` capability and therefore cannot establish
+  standard authority by itself;
+* all 30 qualified and prelude bindings resolve directly to the expected
   identity, with no alias-created identity or runtime chain;
+* retained standard source parsing matches every source-independent manifest
+  fact before verification and produces exactly 45 origins: 2 schema, 13
+  value-type, and 30 binding origins;
+* the retained source unit, bundle, and source revision match their exact hash
+  goldens, and the retained standard digest equals the hard-coded accepted
+  golden;
+* `orna_standard::verify_standard_library_snapshot` checks the exact reserved
+  `CatalogueRevisionId` and hard-coded accepted digest before the core
+  canonical verifier, yields `VerifiedStandardLibrarySnapshot` for the
+  accepted snapshot, and rejects a different self-consistent non-golden
+  snapshot;
 * case-insensitive unquoted spellings resolve while quoted spellings remain
   exact;
 * object and value primary names and bindings share one collision-checked type
   namespace;
 * ordinary source cannot own `std`, declare a kernel contract, export a
   prelude name, or replace a reserved standard identity;
-* standard installation rejects a pre-existing application `std` owner or
-  reserved identity collision without changing the active pair;
+* standard installation rejects a pre-existing application `std` owner, a
+  reserved collision in the same identity class including the standard
+  `CatalogueRevisionId`, or a crossed catalogue role without changing the
+  active pair;
 * bootstrap and recovery reject every missing, duplicate, crossed, renamed,
   contract-mismatched, source-mismatched, or hash-mismatched standard fact;
 * compiler checking consults the standard catalogue bindings rather than a
@@ -672,7 +732,10 @@ an error exists.
 ## Initial implementation sequence
 
 The implementation uses these buildable commits. Each row names its complete
-file ownership and the compatibility state required after the commit.
+file ownership and the compatibility state required after the commit. No row
+owns more than three files. The initial `orna-standard` `Cargo.toml` may declare
+`orna-core`, `orna-syntax`, and `orna-compiler` so the later retained-source and
+standard-orchestration rows remain within their two-file caps.
 
 | Commit | Files | Required state after the commit |
 | --- | --- | --- |
@@ -680,9 +743,9 @@ file ownership and the compatibility state required after the commit.
 | `feat(core): model catalogue value types` | `crates/orna-core/src/catalogue/types.rs`, `crates/orna-core/src/catalogue.rs`, `crates/orna-core/src/lib.rs` | Definitions, bindings, IDs, direct lookup, and legacy object projections compile; existing constructors and hashes are unchanged. |
 | `refactor(postgres): fail closed on future definition evidence` | `crates/orna-kernel-postgres/src/apply.rs`, `crates/orna-kernel-postgres/tests/bootstrap.rs`, `crates/orna-kernel-postgres/tests/recovery.rs` | PostgreSQL production and test adapters explicitly reject unknown definition identities or reference targets; the currently exhaustive enums and all version-1 behaviour remain unchanged. |
 | `feat(core): version standard and catalogue hashes` | `crates/orna-core/src/canonical_hash.rs`, `crates/orna-core/src/revision.rs`, `crates/orna-core/src/lib.rs` | Definition identities and reference targets become non-exhaustive and gain the append-only value-type variants. The derived `StandardLibraryRevisionId`, exact version-1 preservation tests, and version-2 models and goldens compile, but no active caller emits version 2. |
-| `feat(std): define the standard manifest` | `crates/orna-standard/Cargo.toml`, `crates/orna-standard/src/lib.rs`, `Cargo.lock` | The exact IDs, contracts, names, bindings, and digest are available in memory; no database state changes. |
+| `feat(std): define the standard manifest` | `crates/orna-standard/Cargo.toml`, `crates/orna-standard/src/lib.rs`, `Cargo.lock` | The source-independent manifest exposes the exact reserved IDs, 13 primary names and contracts, and 30 direct binding facts: 13 qualified plus 17 prelude. It contains no source bytes, origins, hashes, standard digest, `StandardLibrarySnapshot`, or `VerifiedStandardLibrarySnapshot`. The crate manifest predeclares `orna-core`, `orna-syntax`, and `orna-compiler` so the later source and orchestration rows stay within their file caps; no database state changes. |
 | `feat(syntax): parse primitive value types` | `crates/orna-syntax/src/lib.rs`, `crates/orna-syntax/src/parser.rs` | Lossless privileged declarations parse and recover; existing application semantics still fail closed. |
-| `feat(std): retain the standard source` | `stdlib/std/types.orna`, `crates/orna-standard/src/lib.rs` | The manifest verifies the exact parsed source, spans, IDs, and digest in memory. |
+| `feat(std): retain the standard source` | `stdlib/std/types.orna`, `crates/orna-standard/src/lib.rs` | After parsed source matches every source-independent manifest fact, the crate retains the exact source, derives all 45 origins (`2` schemas + `13` types + `30` bindings), locks exact source-unit, bundle, and revision hash goldens plus the hard-coded accepted standard digest, and exposes `orna_standard::verify_standard_library_snapshot`, which checks the reserved catalogue identity and compares the retained digest with that hard-coded accepted golden before the core canonical verifier. |
 | `feat(compiler): check standard type source` | `crates/orna-compiler/src/resolver.rs`, `crates/orna-compiler/src/resolver/model.rs`, `crates/orna-compiler/src/lib.rs` | Trusted standard checking and exact application protection diagnostics work; ordinary scalar resolution still uses its compatibility adapter. |
 | `feat(compiler): resolve types through std` | `crates/orna-compiler/src/resolver.rs`, `crates/orna-compiler/src/resolver/model.rs` | Public and qualified scalar names resolve through an explicitly supplied verified standard snapshot to `TypeId`; compilation without that snapshot returns `StandardLibraryError::Unavailable`. No database can install the snapshot yet. |
 | `refactor(types): remove scalar naming authority` | `crates/orna-core/src/types.rs`, `crates/orna-compiler/src/resolver.rs` | Public `StandardScalar::from_source_spelling`, `canonical_name`, `type_id`, and `ScalarResolutionError` are removed. Diagnostics render names from verified catalogue definitions or retained source, while exact representation matching remains internal. |
@@ -696,7 +759,7 @@ file ownership and the compatibility state required after the commit.
 | `feat(storage): lower verified value contracts` | `crates/orna-core/src/physical.rs`, `crates/orna-kernel-postgres/src/physical.rs`, `crates/orna-kernel-postgres/src/physical/verify.rs` | Physical planning and verification start from a verified contract; generated SQL and existing physical identities remain exact. |
 | `feat(server): execute verified value contracts` | `crates/orna-kernel-postgres/src/server_runtime.rs`, `crates/orna-kernel-postgres/src/server_execution.rs`, `crates/orna-kernel-postgres/src/server_mutation_execution.rs` | Runtime adapters start from the same contract and preserve every existing plan byte, bind, result, and error. |
 | `feat(postgres): apply standard upgrades` | `crates/orna-kernel-postgres/src/apply.rs`, `crates/orna-kernel-postgres/src/lib.rs` | After compiler, recovery, storage, and execution consumers are ready, one explicit API verifies and atomically applies `StandardUpgrade`; normal apply rejects a bare database. |
-| `feat(server): open standard-backed databases` | `crates/orna-server/Cargo.toml`, `crates/orna-server/src/lib.rs` | The host opener composes bare bootstrap, exact standard preparation, atomic standard apply when required, and verified recovery. It does not return a normal application database handle until `orna.std/1` is active. |
+| `feat(server): open standard-backed databases` | `crates/orna-server/Cargo.toml`, `crates/orna-server/src/lib.rs`, `Cargo.lock` | The host opener composes bare bootstrap, exact standard preparation, atomic standard apply when required, and verified recovery. It does not return a normal application database handle until `orna.std/1` is active. |
 | `test(postgres): prove the standard lifecycle` | `crates/orna-kernel-postgres/tests/apply.rs`, `crates/orna-kernel-postgres/tests/recovery.rs`, `justfile` | Fresh install, v1 upgrade, replay, restart, tamper rejection, and exact physical storage pass on PostgreSQL 18. |
 | `test(postgres): preserve standard execution` | `crates/orna-kernel-postgres/tests/server_execution.rs`, `crates/orna-kernel-postgres/tests/server_mutation_execution.rs` | Existing SERVER and mutation behaviour is byte- and value-identical under the installed standard revision. |
 | `test(client): recover and evaluate standard Boolean constants` | `crates/orna-client/src/lib.rs`, `crates/orna-kernel-postgres/tests/recovery.rs` | Apply, source-only replay, semantic change, restart, tamper rejection, and local evaluation prove the exact CLIENT version-2 context and leave no PostgreSQL session open. |
