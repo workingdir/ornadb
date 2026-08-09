@@ -90,6 +90,34 @@ const MUTATION_SOURCE: &str = "CREATE SCHEMA tasks;\n\
     AS DELETE FROM tasks.owner AS deleted_owner\n\
     WHERE REF(deleted_owner) = p_owner RETURNING TRUE;\n";
 
+// This stays separate from `tasks.owner`: the main fixture deliberately uses
+// that type for a high-volume allocation regression and cannot make it unique.
+#[cfg(feature = "test-hooks")]
+const UNIQUE_REFERENCE_SOURCE: &str = "CREATE SCHEMA assignments;\n\
+    CREATE TYPE assignments.owner AS OBJECT (name TEXT NOT NULL);\n\
+    CREATE TYPE assignments.assignment AS OBJECT (\n\
+      owner REF assignments.owner NOT NULL UNIQUE, label TEXT NOT NULL\n\
+    );\n\
+    CREATE SERVER FUNCTION assignments.create_owner(p_name TEXT)\n\
+    RETURNS ROWS (created_owner REF assignments.owner)\n\
+    SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE\n\
+    AS INSERT INTO assignments.owner AS made_owner (name)\n\
+    VALUES (p_name) RETURNING REF(made_owner);\n\
+    CREATE SERVER FUNCTION assignments.create_assignment(\n\
+      p_owner REF assignments.owner, p_label TEXT\n\
+    ) RETURNS ROWS (created_assignment REF assignments.assignment)\n\
+    SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE\n\
+    AS INSERT INTO assignments.assignment AS made_assignment (owner, label)\n\
+    VALUES (p_owner, p_label) RETURNING REF(made_assignment);\n\
+    CREATE SERVER FUNCTION assignments.update_assignment(\n\
+      p_assignment REF assignments.assignment, p_owner REF assignments.owner, p_label TEXT\n\
+    ) RETURNS ROWS (updated_assignment REF assignments.assignment)\n\
+    SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE\n\
+    AS UPDATE assignments.assignment AS changed_assignment\n\
+    SET owner = p_owner, label = p_label\n\
+    WHERE REF(changed_assignment) = p_assignment\n\
+    RETURNING REF(changed_assignment);\n";
+
 #[cfg(feature = "test-hooks")]
 const MUTATION_SOURCE_EDIT: &str = "-- source-only edit\n\
     CREATE SCHEMA tasks;\n\
@@ -689,12 +717,14 @@ async fn row_and_deferred_trigger_failures_roll_back_with_not_committed_state() 
         let owner = insert_owner(&kernel, fixture, "owner").await?;
         let arguments = task_arguments(fixture, &ExactTask::new(owner.object()))?;
 
-        let after_error = execute_with_installed_trigger(
+        let after_error = execute_insert_with_installed_trigger(
             &database,
             &kernel,
-            fixture,
+            fixture.create_task,
+            fixture.task,
             &arguments,
             TriggerKind::AfterRow,
+            "triggered insert",
         )
         .await?;
         require_wrapped_database_failure(
@@ -709,12 +739,14 @@ async fn row_and_deferred_trigger_failures_roll_back_with_not_committed_state() 
             "AFTER INSERT failure left a task row",
         )?;
 
-        let deferred_error = execute_with_installed_trigger(
+        let deferred_error = execute_insert_with_installed_trigger(
             &database,
             &kernel,
-            fixture,
+            fixture.create_task,
+            fixture.task,
             &arguments,
             TriggerKind::DeferredConstraint,
+            "triggered insert",
         )
         .await?;
         require_commit_rejected(
@@ -770,7 +802,7 @@ async fn insert_pins_snapshot_while_source_only_apply_advances() -> TestResult<(
                 )
                 .await
         });
-        wait_for_barrier(&mut execution, reached, "snapshot insert").await?;
+        wait_for_barrier(&mut execution, reached, "snapshot insert", "recovery").await?;
 
         let advancement = kernel.apply(&source_only).await;
         resume.wait().await;
@@ -866,7 +898,7 @@ async fn delete_pins_snapshot_and_preserves_uncertain_and_committed_outcomes() -
                 )
                 .await
         });
-        wait_for_barrier(&mut execution, reached, "snapshot delete").await?;
+        wait_for_barrier(&mut execution, reached, "snapshot delete", "recovery").await?;
 
         let advancement = kernel.apply(&source_only).await;
         resume.wait().await;
@@ -1167,6 +1199,290 @@ async fn withheld_commit_confirmation_is_unknown_but_the_row_exists_once() -> Te
     .await
 }
 
+#[cfg(feature = "test-hooks")]
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn required_unique_reference_conflicts_are_typed_and_transactional() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = hostile_kernel(&database)?;
+        kernel.bootstrap().await?;
+        let empty = kernel.recover().await?;
+        let applied = kernel
+            .apply(&candidate(UNIQUE_REFERENCE_SOURCE, &empty)?)
+            .await?;
+        let fixture = UniqueReferenceFixture::from_active(&applied)?;
+        install_public_decoy(&database, fixture.assignment).await?;
+
+        let claimed_owner = insert_unique_owner(&kernel, fixture, "claimed").await?;
+        let other_owner = insert_unique_owner(&kernel, fixture, "other").await?;
+        let concurrent_owner = insert_unique_owner(&kernel, fixture, "concurrent").await?;
+        let claimed =
+            insert_assignment(&kernel, fixture, claimed_owner.object(), "claimed").await?;
+        require_unique_insert_result(
+            &claimed,
+            applied.pair(),
+            fixture,
+            fixture.create_assignment,
+            fixture.create_assignment_revision,
+            "created_assignment",
+        )?;
+
+        let duplicate_insert = match kernel
+            .execute_server_insert(
+                fixture.create_assignment,
+                &assignment_arguments(fixture, claimed_owner.object(), "duplicate")?,
+            )
+            .await
+        {
+            Ok(_) => {
+                return Err(failure(
+                    "a second required unique reference INSERT unexpectedly committed",
+                ));
+            }
+            Err(error) => error,
+        };
+        require_unique_insert_conflict(
+            &duplicate_insert,
+            applied.pair(),
+            fixture,
+            fixture.create_assignment,
+            fixture.create_assignment_revision,
+        )?;
+        require_assignment_row(
+            &database,
+            fixture,
+            claimed.object(),
+            claimed_owner.object(),
+            "claimed",
+        )
+        .await?;
+
+        let other = insert_assignment(&kernel, fixture, other_owner.object(), "other").await?;
+        require_unique_insert_result(
+            &other,
+            applied.pair(),
+            fixture,
+            fixture.create_assignment,
+            fixture.create_assignment_revision,
+            "created_assignment",
+        )?;
+        let duplicate_update = match kernel
+            .execute_server_update(
+                fixture.update_assignment,
+                &assignment_update_arguments(
+                    fixture,
+                    other.object(),
+                    claimed_owner.object(),
+                    "duplicate update",
+                )?,
+            )
+            .await
+        {
+            Ok(_) => {
+                return Err(failure(
+                    "an UPDATE assigning an already used reference unexpectedly committed",
+                ));
+            }
+            Err(error) => error,
+        };
+        require_unique_update_conflict(&duplicate_update, applied.pair(), fixture)?;
+        require_assignment_row(
+            &database,
+            fixture,
+            other.object(),
+            other_owner.object(),
+            "other",
+        )
+        .await?;
+
+        let self_update = kernel
+            .execute_server_update(
+                fixture.update_assignment,
+                &assignment_update_arguments(
+                    fixture,
+                    claimed.object(),
+                    claimed_owner.object(),
+                    "claimed again",
+                )?,
+            )
+            .await?;
+        require_unique_update_result(
+            &self_update,
+            applied.pair(),
+            fixture,
+            claimed.object(),
+            true,
+        )?;
+        require_assignment_row(
+            &database,
+            fixture,
+            claimed.object(),
+            claimed_owner.object(),
+            "claimed again",
+        )
+        .await?;
+
+        let unrelated = execute_insert_with_installed_trigger(
+            &database,
+            &kernel,
+            fixture.create_assignment,
+            fixture.assignment,
+            &assignment_arguments(fixture, concurrent_owner.object(), "unrelated")?,
+            TriggerKind::UnrelatedUniqueViolation,
+            "unrelated unique INSERT",
+        )
+        .await?;
+        require_unrelated_unique_insert_failure(
+            &unrelated,
+            applied.pair(),
+            fixture.create_assignment,
+            fixture.create_assignment_revision,
+        )?;
+        require(
+            count_rows(&database, fixture.assignment).await? == 2,
+            "the unrelated unique violation changed the persisted assignment set",
+        )?;
+
+        let first_reached = Arc::new(tokio::sync::Barrier::new(2));
+        let first_resume = Arc::new(tokio::sync::Barrier::new(2));
+        let second_reached = Arc::new(tokio::sync::Barrier::new(2));
+        let second_resume = Arc::new(tokio::sync::Barrier::new(2));
+        let first_kernel = kernel.clone();
+        let first_arguments = assignment_arguments(fixture, concurrent_owner.object(), "first")?;
+        let first_execution_reached = first_reached.clone();
+        let first_execution_resume = first_resume.clone();
+        let mut first = tokio::spawn(async move {
+            first_kernel
+                .execute_server_insert_with_test_barrier(
+                    fixture.create_assignment,
+                    &first_arguments,
+                    first_execution_reached,
+                    first_execution_resume,
+                )
+                .await
+        });
+        let second_kernel = kernel.clone();
+        let second_arguments = assignment_arguments(fixture, concurrent_owner.object(), "second")?;
+        let second_execution_reached = second_reached.clone();
+        let second_execution_resume = second_resume.clone();
+        let mut second = tokio::spawn(async move {
+            second_kernel
+                .execute_server_insert_with_test_barrier(
+                    fixture.create_assignment,
+                    &second_arguments,
+                    second_execution_reached,
+                    second_execution_resume,
+                )
+                .await
+        });
+        if let Err(error) =
+            wait_for_barrier(&mut first, first_reached, "first unique claim", "recovery").await
+        {
+            abort_and_wait(second).await;
+            return Err(error);
+        }
+        if let Err(error) = wait_for_barrier(
+            &mut second,
+            second_reached,
+            "second unique claim",
+            "recovery",
+        )
+        .await
+        {
+            abort_and_wait(first).await;
+            return Err(error);
+        }
+        let (first_release, second_release) = tokio::join!(
+            wait_for_barrier(&mut first, first_resume, "first unique claim", "resume"),
+            wait_for_barrier(&mut second, second_resume, "second unique claim", "resume",),
+        );
+        match (first_release, second_release) {
+            (Ok(()), Ok(())) => {}
+            (Err(first_error), Ok(())) => {
+                abort_and_wait(second).await;
+                return Err(first_error);
+            }
+            (Ok(()), Err(second_error)) => {
+                abort_and_wait(first).await;
+                return Err(second_error);
+            }
+            (Err(first_error), Err(second_error)) => {
+                return Err(failure(format!(
+                    "both unique claim releases failed: {first_error}; {second_error}"
+                )));
+            }
+        }
+        let (first_outcome, second_outcome) = tokio::join!(
+            wait_for_outcome(first, "first unique claim"),
+            wait_for_outcome(second, "second unique claim"),
+        );
+        let first_outcome = first_outcome?;
+        let second_outcome = second_outcome?;
+        let outcomes = [first_outcome, second_outcome];
+        let successes = outcomes.iter().filter(|outcome| outcome.is_ok()).count();
+        require(
+            successes == 1,
+            "concurrent claims did not yield exactly one success",
+        )?;
+        for error in outcomes.iter().filter_map(|outcome| outcome.as_ref().err()) {
+            require_unique_insert_conflict(
+                error,
+                applied.pair(),
+                fixture,
+                fixture.create_assignment,
+                fixture.create_assignment_revision,
+            )?;
+        }
+        let concurrent_label =
+            assignment_label_for_owner(&database, fixture, concurrent_owner.object()).await?;
+        require(
+            matches!(concurrent_label.as_str(), "first" | "second"),
+            "the concurrent winner stored an unexpected assignment value",
+        )?;
+        require_assignment_row(
+            &database,
+            fixture,
+            claimed.object(),
+            claimed_owner.object(),
+            "claimed again",
+        )
+        .await?;
+        require_assignment_row(
+            &database,
+            fixture,
+            other.object(),
+            other_owner.object(),
+            "other",
+        )
+        .await?;
+
+        require(
+            count_rows(&database, fixture.assignment).await? == 3,
+            "unique conflicts changed the persisted assignment set",
+        )?;
+        require(
+            count_public_decoy_rows(&database, fixture.assignment).await? == 0,
+            "hostile public search_path redirected a unique-reference mutation",
+        )?;
+        let recovered = kernel.recover().await?;
+        require(
+            recovered.pair() == applied.pair(),
+            "unique conflicts changed the active pair",
+        )?;
+        require(
+            function_revision(&recovered, fixture.create_assignment)?
+                == fixture.create_assignment_revision
+                && function_revision(&recovered, fixture.update_assignment)?
+                    == fixture.update_assignment_revision
+                && function_revision(&recovered, fixture.create_owner)?
+                    == fixture.create_owner_revision,
+            "unique conflicts changed immutable function revisions",
+        )?;
+        require_no_session_leaks(&database).await
+    })
+    .await
+}
+
 #[derive(Clone, Copy)]
 struct Fixture {
     owner: TypeId,
@@ -1334,6 +1650,84 @@ impl Fixture {
     }
 }
 
+#[cfg(feature = "test-hooks")]
+#[derive(Clone, Copy)]
+struct UniqueReferenceFixture {
+    owner: TypeId,
+    assignment: TypeId,
+    assignment_owner_field: FieldId,
+    assignment_label_field: FieldId,
+    create_owner: FunctionId,
+    create_owner_revision: FunctionRevisionId,
+    owner_name_parameter: ParameterId,
+    create_assignment: FunctionId,
+    create_assignment_revision: FunctionRevisionId,
+    create_assignment_owner_parameter: ParameterId,
+    create_assignment_label_parameter: ParameterId,
+    update_assignment: FunctionId,
+    update_assignment_revision: FunctionRevisionId,
+    update_assignment_selector_parameter: ParameterId,
+    update_assignment_owner_parameter: ParameterId,
+    update_assignment_label_parameter: ParameterId,
+}
+
+#[cfg(feature = "test-hooks")]
+impl UniqueReferenceFixture {
+    fn from_active(active: &ActiveDatabaseRevision) -> TestResult<Self> {
+        let object = |name| {
+            active
+                .catalogue()
+                .object_types()
+                .iter()
+                .find(|object| name_is(object.name().parts(), &["assignments", name]))
+                .ok_or_else(|| failure(format!("assignments.{name} type is absent")))
+        };
+        let function = |name| {
+            active
+                .catalogue()
+                .functions()
+                .iter()
+                .find(|function| name_is(function.name().parts(), &["assignments", name]))
+                .ok_or_else(|| failure(format!("assignments.{name} function is absent")))
+        };
+        let parameter = |function: &orna_core::catalogue::FunctionDefinition, name| {
+            function
+                .parameter_by_name(name)
+                .map(|parameter| parameter.id())
+                .ok_or_else(|| failure(format!("parameter {name} is absent")))
+        };
+        let owner = object("owner")?;
+        let assignment = object("assignment")?;
+        let create_owner = function("create_owner")?;
+        let create_assignment = function("create_assignment")?;
+        let update_assignment = function("update_assignment")?;
+        Ok(Self {
+            owner: owner.id(),
+            assignment: assignment.id(),
+            assignment_owner_field: assignment
+                .field_by_name("owner")
+                .map(|field| field.id())
+                .ok_or_else(|| failure("assignments.assignment.owner field is absent"))?,
+            assignment_label_field: assignment
+                .field_by_name("label")
+                .map(|field| field.id())
+                .ok_or_else(|| failure("assignments.assignment.label field is absent"))?,
+            create_owner: create_owner.id(),
+            create_owner_revision: create_owner.current_revision(),
+            owner_name_parameter: parameter(create_owner, "p_name")?,
+            create_assignment: create_assignment.id(),
+            create_assignment_revision: create_assignment.current_revision(),
+            create_assignment_owner_parameter: parameter(create_assignment, "p_owner")?,
+            create_assignment_label_parameter: parameter(create_assignment, "p_label")?,
+            update_assignment: update_assignment.id(),
+            update_assignment_revision: update_assignment.current_revision(),
+            update_assignment_selector_parameter: parameter(update_assignment, "p_assignment")?,
+            update_assignment_owner_parameter: parameter(update_assignment, "p_owner")?,
+            update_assignment_label_parameter: parameter(update_assignment, "p_label")?,
+        })
+    }
+}
+
 #[derive(Clone)]
 struct ExactTask {
     active: bool,
@@ -1407,6 +1801,88 @@ async fn insert_owner(
             )?],
         )
         .await?)
+}
+
+#[cfg(feature = "test-hooks")]
+async fn insert_unique_owner(
+    kernel: &PostgresKernel,
+    fixture: UniqueReferenceFixture,
+    name: &str,
+) -> TestResult<ServerInsertResult> {
+    Ok(kernel
+        .execute_server_insert(
+            fixture.create_owner,
+            &[FunctionArgument::new(
+                fixture.owner_name_parameter,
+                RuntimeValue::Text(name.to_owned()),
+            )?],
+        )
+        .await?)
+}
+
+#[cfg(feature = "test-hooks")]
+async fn insert_assignment(
+    kernel: &PostgresKernel,
+    fixture: UniqueReferenceFixture,
+    owner: ObjectId,
+    label: &str,
+) -> TestResult<ServerInsertResult> {
+    Ok(kernel
+        .execute_server_insert(
+            fixture.create_assignment,
+            &assignment_arguments(fixture, owner, label)?,
+        )
+        .await?)
+}
+
+#[cfg(feature = "test-hooks")]
+fn assignment_arguments(
+    fixture: UniqueReferenceFixture,
+    owner: ObjectId,
+    label: &str,
+) -> TestResult<Vec<FunctionArgument>> {
+    Ok(vec![
+        FunctionArgument::new(
+            fixture.create_assignment_label_parameter,
+            RuntimeValue::Text(label.to_owned()),
+        )?,
+        FunctionArgument::new(
+            fixture.create_assignment_owner_parameter,
+            RuntimeValue::Reference {
+                target: fixture.owner,
+                object: owner,
+            },
+        )?,
+    ])
+}
+
+#[cfg(feature = "test-hooks")]
+fn assignment_update_arguments(
+    fixture: UniqueReferenceFixture,
+    selector: ObjectId,
+    owner: ObjectId,
+    label: &str,
+) -> TestResult<Vec<FunctionArgument>> {
+    Ok(vec![
+        FunctionArgument::new(
+            fixture.update_assignment_label_parameter,
+            RuntimeValue::Text(label.to_owned()),
+        )?,
+        FunctionArgument::new(
+            fixture.update_assignment_selector_parameter,
+            RuntimeValue::Reference {
+                target: fixture.assignment,
+                object: selector,
+            },
+        )?,
+        FunctionArgument::new(
+            fixture.update_assignment_owner_parameter,
+            RuntimeValue::Reference {
+                target: fixture.owner,
+                object: owner,
+            },
+        )?,
+    ])
 }
 
 fn task_arguments(fixture: Fixture, task: &ExactTask) -> TestResult<Vec<FunctionArgument>> {
@@ -1625,6 +2101,286 @@ fn require_update_result(
     }
 }
 
+#[cfg(feature = "test-hooks")]
+fn require_unique_insert_result(
+    result: &ServerInsertResult,
+    pair: RevisionPair,
+    fixture: UniqueReferenceFixture,
+    function: FunctionId,
+    revision: FunctionRevisionId,
+    return_column: &str,
+) -> TestResult<()> {
+    require_context(result.context(), pair, function, revision)?;
+    require(
+        result.target() == fixture.assignment,
+        "unique INSERT target differs",
+    )?;
+    let [column] = result.rows().columns() else {
+        return Err(failure("unique INSERT result does not have one column"));
+    };
+    require(
+        column.name() == return_column
+            && column.resolved_type() == ResolvedType::reference(fixture.assignment)
+            && !column.nullable(),
+        "unique INSERT result column differs",
+    )?;
+    let [row] = result.rows().rows() else {
+        return Err(failure("unique INSERT result does not have one row"));
+    };
+    require(
+        row.values()
+            == [RuntimeValue::Reference {
+                target: fixture.assignment,
+                object: result.object(),
+            }],
+        "unique INSERT result row differs",
+    )
+}
+
+#[cfg(feature = "test-hooks")]
+fn require_unique_insert_conflict(
+    error: &PostgresKernelError,
+    pair: RevisionPair,
+    fixture: UniqueReferenceFixture,
+    function: FunctionId,
+    revision: FunctionRevisionId,
+) -> TestResult<()> {
+    let PostgresKernelError::ServerInsert(insert) = error else {
+        return Err(failure(
+            "unique INSERT conflict is not a SERVER INSERT error",
+        ));
+    };
+    require(
+        insert.commit_state() == ServerInsertCommitState::NotCommitted,
+        "unique INSERT conflict has the wrong commit state",
+    )?;
+    let ServerInsertError::NotCommitted { context, source } = insert else {
+        return Err(failure(
+            "unique INSERT conflict lacks pinned execution context",
+        ));
+    };
+    require_context(*context, pair, function, revision)?;
+    let unique @ ServerMutationError::UniqueReferenceConflict {
+        owner,
+        field: conflict_field,
+        referenced_type,
+        source: database_source,
+    } = source.as_ref()
+    else {
+        return Err(failure(
+            "unique INSERT was not classified as a typed reference conflict",
+        ));
+    };
+    require(
+        *owner == fixture.assignment,
+        "unique INSERT conflict owner differs",
+    )?;
+    require(
+        *conflict_field == fixture.assignment_owner_field,
+        "unique INSERT conflict field differs",
+    )?;
+    require(
+        *referenced_type == fixture.owner,
+        "unique INSERT conflict referenced type differs",
+    )?;
+    require(
+        database_source
+            .as_db_error()
+            .is_some_and(|database| database.code() == &SqlState::UNIQUE_VIOLATION),
+        "unique INSERT conflict lost SQLSTATE 23505",
+    )?;
+    require(
+        database_source
+            .as_db_error()
+            .and_then(|database| database.constraint())
+            == Some(unique_constraint_name(fixture.assignment_owner_field).as_str()),
+        "unique INSERT conflict constraint differs",
+    )?;
+    require(
+        unique.to_string() == "this reference is already used by another object",
+        "unique INSERT inner display differs",
+    )?;
+    require(
+        error.to_string()
+            == "row creation failed: the row was not added: this reference is already used by another object",
+        "unique INSERT outer display differs",
+    )?;
+    Ok(())
+}
+
+#[cfg(feature = "test-hooks")]
+fn require_unique_update_conflict(
+    error: &PostgresKernelError,
+    pair: RevisionPair,
+    fixture: UniqueReferenceFixture,
+) -> TestResult<()> {
+    let PostgresKernelError::ServerUpdate(update) = error else {
+        return Err(failure(
+            "unique UPDATE conflict is not a SERVER UPDATE error",
+        ));
+    };
+    require(
+        update.commit_state() == ServerUpdateCommitState::NotCommitted,
+        "unique UPDATE conflict has the wrong commit state",
+    )?;
+    let ServerUpdateError::NotCommitted { context, source } = update else {
+        return Err(failure(
+            "unique UPDATE conflict lacks pinned execution context",
+        ));
+    };
+    require_context(
+        *context,
+        pair,
+        fixture.update_assignment,
+        fixture.update_assignment_revision,
+    )?;
+    let unique @ ServerMutationError::UniqueReferenceConflict {
+        owner,
+        field: conflict_field,
+        referenced_type,
+        source: database_source,
+    } = source.as_ref()
+    else {
+        return Err(failure(
+            "unique UPDATE was not classified as a typed reference conflict",
+        ));
+    };
+    require(
+        *owner == fixture.assignment,
+        "unique UPDATE conflict owner differs",
+    )?;
+    require(
+        *conflict_field == fixture.assignment_owner_field,
+        "unique UPDATE conflict field differs",
+    )?;
+    require(
+        *referenced_type == fixture.owner,
+        "unique UPDATE conflict referenced type differs",
+    )?;
+    require(
+        database_source
+            .as_db_error()
+            .is_some_and(|database| database.code() == &SqlState::UNIQUE_VIOLATION),
+        "unique UPDATE conflict lost SQLSTATE 23505",
+    )?;
+    require(
+        database_source
+            .as_db_error()
+            .and_then(|database| database.constraint())
+            == Some(unique_constraint_name(fixture.assignment_owner_field).as_str()),
+        "unique UPDATE conflict constraint differs",
+    )?;
+    require(
+        unique.to_string() == "this reference is already used by another object",
+        "unique UPDATE inner display differs",
+    )?;
+    require(
+        error.to_string()
+            == "object update failed: the object was not updated: this reference is already used by another object",
+        "unique UPDATE outer display differs",
+    )?;
+    Ok(())
+}
+
+#[cfg(feature = "test-hooks")]
+fn require_unique_update_result(
+    result: &ServerUpdateResult,
+    pair: RevisionPair,
+    fixture: UniqueReferenceFixture,
+    selector: ObjectId,
+    matched: bool,
+) -> TestResult<()> {
+    require(result.context().pair() == pair, "self-update pair differs")?;
+    require(
+        result.context().function() == fixture.update_assignment,
+        "self-update function differs",
+    )?;
+    require(
+        result.context().function_revision() == fixture.update_assignment_revision,
+        "self-update function revision differs",
+    )?;
+    require(
+        result.target() == fixture.assignment,
+        "self-update target differs",
+    )?;
+    require(
+        result.selector() == selector,
+        "self-update selector differs",
+    )?;
+    require(
+        result.matched() == matched,
+        "self-update match state differs",
+    )?;
+    let [column] = result.rows().columns() else {
+        return Err(failure("self-update result does not have one column"));
+    };
+    require(
+        column.name() == "updated_assignment"
+            && column.resolved_type() == ResolvedType::reference(fixture.assignment)
+            && !column.nullable(),
+        "self-update result column differs",
+    )?;
+    let [row] = result.rows().rows() else {
+        return Err(failure("self-update result does not have one row"));
+    };
+    require(
+        row.values()
+            == [RuntimeValue::Reference {
+                target: fixture.assignment,
+                object: selector,
+            }],
+        "self-update result row differs",
+    )
+}
+
+#[cfg(feature = "test-hooks")]
+fn require_unrelated_unique_insert_failure(
+    error: &PostgresKernelError,
+    pair: RevisionPair,
+    function: FunctionId,
+    revision: FunctionRevisionId,
+) -> TestResult<()> {
+    let PostgresKernelError::ServerInsert(insert) = error else {
+        return Err(failure(
+            "unrelated unique violation is not a SERVER INSERT error",
+        ));
+    };
+    require(
+        insert.commit_state() == ServerInsertCommitState::NotCommitted,
+        "unrelated unique violation has the wrong commit state",
+    )?;
+    let ServerInsertError::NotCommitted { context, source } = insert else {
+        return Err(failure(
+            "unrelated unique violation lacks pinned execution context",
+        ));
+    };
+    require_context(*context, pair, function, revision)?;
+    let ServerMutationError::Database { source } = source.as_ref() else {
+        return Err(failure(
+            "unrelated SQLSTATE 23505 was incorrectly typed as a reference conflict",
+        ));
+    };
+    require(
+        source
+            .as_db_error()
+            .is_some_and(|database| database.code() == &SqlState::UNIQUE_VIOLATION),
+        "unrelated unique violation lost SQLSTATE 23505",
+    )?;
+    require(
+        source
+            .as_db_error()
+            .and_then(|database| database.constraint())
+            == Some("test_unrelated_unique"),
+        "unrelated unique violation constraint differs",
+    )?;
+    require(
+        error.to_string()
+            == "row creation failed: the row was not added: the database operation failed before the change was saved",
+        "unrelated unique violation lost its generic display",
+    )?;
+    Ok(())
+}
+
 fn require_delete_result(
     result: &ServerDeleteResult,
     pair: RevisionPair,
@@ -1762,6 +2518,70 @@ async fn require_task_row(
         "stored REF differs",
     )?;
     require(stored.note.is_none(), "omitted nullable field is not NULL")
+}
+
+#[cfg(feature = "test-hooks")]
+async fn require_assignment_row(
+    database: &TestDatabase,
+    fixture: UniqueReferenceFixture,
+    object: ObjectId,
+    owner: ObjectId,
+    label: &str,
+) -> TestResult<()> {
+    let session = database.open().await?;
+    let operation: TestResult<(Vec<u8>, Vec<u8>, String)> = async {
+        let row = session
+            .client()
+            .query_one(
+                &format!(
+                    "SELECT _orna_object_id, {}, {} FROM {} WHERE _orna_object_id = $1",
+                    field(fixture.assignment_owner_field),
+                    field(fixture.assignment_label_field),
+                    relation(fixture.assignment),
+                ),
+                &[&object.to_bytes().to_vec()],
+            )
+            .await?;
+        Ok((row.try_get(0)?, row.try_get(1)?, row.try_get(2)?))
+    }
+    .await;
+    let (stored_object, stored_owner, stored_label) =
+        finish_session(session, operation, "unique assignment row inspection").await?;
+    require(
+        stored_object == object.to_bytes(),
+        "unique assignment identity differs",
+    )?;
+    require(
+        stored_owner == owner.to_bytes(),
+        "unique assignment owner differs",
+    )?;
+    require(stored_label == label, "unique assignment label differs")
+}
+
+#[cfg(feature = "test-hooks")]
+async fn assignment_label_for_owner(
+    database: &TestDatabase,
+    fixture: UniqueReferenceFixture,
+    owner: ObjectId,
+) -> TestResult<String> {
+    let session = database.open().await?;
+    let operation: TestResult<String> = async {
+        Ok(session
+            .client()
+            .query_one(
+                &format!(
+                    "SELECT {} FROM {} WHERE {} = $1",
+                    field(fixture.assignment_label_field),
+                    relation(fixture.assignment),
+                    field(fixture.assignment_owner_field),
+                ),
+                &[&owner.to_bytes().to_vec()],
+            )
+            .await?
+            .try_get(0)?)
+    }
+    .await;
+    finish_session(session, operation, "concurrent assignment inspection").await
 }
 
 async fn install_public_decoy(database: &TestDatabase, target: TypeId) -> TestResult<()> {
@@ -2250,6 +3070,7 @@ enum TriggerKind {
     AfterRow,
     DeferredConstraint,
     DeferredDeleteConstraint,
+    UnrelatedUniqueViolation,
 }
 
 #[cfg(feature = "test-hooks")]
@@ -2292,12 +3113,14 @@ async fn execute_delete_with_installed_trigger(
 }
 
 #[cfg(feature = "test-hooks")]
-async fn execute_with_installed_trigger(
+async fn execute_insert_with_installed_trigger(
     database: &TestDatabase,
     kernel: &PostgresKernel,
-    fixture: Fixture,
+    function: FunctionId,
+    target: TypeId,
     arguments: &[FunctionArgument],
     kind: TriggerKind,
+    operation: &str,
 ) -> TestResult<PostgresKernelError> {
     let reached = Arc::new(tokio::sync::Barrier::new(2));
     let resume = Arc::new(tokio::sync::Barrier::new(2));
@@ -2308,7 +3131,7 @@ async fn execute_with_installed_trigger(
     let execution = tokio::spawn(async move {
         executor
             .execute_server_insert_with_test_barrier(
-                fixture.create_task,
+                function,
                 &owned_arguments,
                 execution_reached,
                 execution_resume,
@@ -2316,13 +3139,7 @@ async fn execute_with_installed_trigger(
             .await
     });
     finish_triggered_failure(
-        database,
-        fixture.task,
-        kind,
-        execution,
-        reached,
-        resume,
-        "triggered insert",
+        database, target, kind, execution, reached, resume, operation,
     )
     .await
 }
@@ -2337,12 +3154,20 @@ async fn finish_triggered_failure<T>(
     resume: Arc<tokio::sync::Barrier>,
     operation: &str,
 ) -> TestResult<PostgresKernelError> {
-    wait_for_barrier(&mut execution, reached, operation).await?;
+    wait_for_barrier(&mut execution, reached, operation, "recovery").await?;
     let install = install_failure_trigger(database, target, kind).await;
-    resume.wait().await;
     if let Err(error) = install {
         abort_and_wait(execution).await;
         return Err(error);
+    }
+    if let Err(resume_error) = wait_for_barrier(&mut execution, resume, operation, "resume").await {
+        let cleanup = remove_failure_trigger(database, target, kind).await;
+        return match cleanup {
+            Ok(()) => Err(resume_error),
+            Err(cleanup_error) => Err(failure(format!(
+                "{operation} did not resume: {resume_error}; trigger cleanup failed: {cleanup_error}"
+            ))),
+        };
     }
     let outcome = wait_for_failure(execution, operation).await;
     let cleanup = remove_failure_trigger(database, target, kind).await;
@@ -2361,18 +3186,26 @@ async fn install_failure_trigger(
     target: TypeId,
     kind: TriggerKind,
 ) -> TestResult<()> {
-    let (function_name, trigger_sql) = match kind {
+    let (function_name, trigger_sql, trigger_body) = match kind {
         TriggerKind::AfterRow => (
             "test_fail_after_insert",
             "CREATE TRIGGER test_fail_after_insert AFTER INSERT",
+            "RAISE EXCEPTION 'forced insert failure';",
         ),
         TriggerKind::DeferredConstraint => (
             "test_fail_deferred_insert",
             "CREATE CONSTRAINT TRIGGER test_fail_deferred_insert AFTER INSERT",
+            "RAISE EXCEPTION 'forced insert failure';",
         ),
         TriggerKind::DeferredDeleteConstraint => (
             "test_fail_deferred_delete",
             "CREATE CONSTRAINT TRIGGER test_fail_deferred_delete AFTER DELETE",
+            "RAISE EXCEPTION 'forced insert failure';",
+        ),
+        TriggerKind::UnrelatedUniqueViolation => (
+            "test_unrelated_unique",
+            "CREATE TRIGGER test_unrelated_unique BEFORE INSERT",
+            "RAISE EXCEPTION USING ERRCODE = 'unique_violation', CONSTRAINT = 'test_unrelated_unique';",
         ),
     };
     let deferred = match kind {
@@ -2380,6 +3213,7 @@ async fn install_failure_trigger(
         TriggerKind::DeferredConstraint | TriggerKind::DeferredDeleteConstraint => {
             " DEFERRABLE INITIALLY DEFERRED"
         }
+        TriggerKind::UnrelatedUniqueViolation => "",
     };
     let session = database.open().await?;
     let operation: TestResult<()> = async {
@@ -2387,7 +3221,7 @@ async fn install_failure_trigger(
             .client()
             .batch_execute(&format!(
                 "CREATE FUNCTION _orna_data.{function_name}() RETURNS trigger LANGUAGE plpgsql AS $$ \
-                 BEGIN RAISE EXCEPTION 'forced insert failure'; END; $$; \
+                 BEGIN {trigger_body} END; $$; \
                  {trigger_sql} ON {}{deferred} FOR EACH ROW \
                  EXECUTE FUNCTION _orna_data.{function_name}()",
                 relation(target),
@@ -2409,6 +3243,7 @@ async fn remove_failure_trigger(
         TriggerKind::AfterRow => "test_fail_after_insert",
         TriggerKind::DeferredConstraint => "test_fail_deferred_insert",
         TriggerKind::DeferredDeleteConstraint => "test_fail_deferred_delete",
+        TriggerKind::UnrelatedUniqueViolation => "test_unrelated_unique",
     };
     let session = database.open().await?;
     let operation: TestResult<()> = async {
@@ -2431,6 +3266,7 @@ async fn wait_for_barrier<T>(
     task: &mut tokio::task::JoinHandle<T>,
     barrier: Arc<tokio::sync::Barrier>,
     operation: &str,
+    phase: &str,
 ) -> TestResult<()> {
     if tokio::time::timeout(WAIT, barrier.wait()).await.is_ok() {
         Ok(())
@@ -2438,7 +3274,7 @@ async fn wait_for_barrier<T>(
         task.abort();
         let _ = task.await;
         Err(failure(format!(
-            "{operation} did not reach the post-recovery barrier"
+            "{operation} did not reach the {phase} barrier"
         )))
     }
 }
@@ -2471,6 +3307,20 @@ async fn wait_for_failure<T>(
                 Err(error) => Ok(error),
             }
         }
+        Err(_) => {
+            abort_and_wait(task).await;
+            Err(failure(format!("{operation} exceeded the bounded wait")))
+        }
+    }
+}
+
+#[cfg(feature = "test-hooks")]
+async fn wait_for_outcome<T>(
+    mut task: tokio::task::JoinHandle<Result<T, PostgresKernelError>>,
+    operation: &str,
+) -> TestResult<Result<T, PostgresKernelError>> {
+    match tokio::time::timeout(WAIT, &mut task).await {
+        Ok(result) => result.map_err(|error| failure(format!("{operation} task failed: {error}"))),
         Err(_) => {
             abort_and_wait(task).await;
             Err(failure(format!("{operation} exceeded the bounded wait")))
@@ -2735,6 +3585,11 @@ fn relation_component(type_id: TypeId) -> String {
 
 fn field(field_id: FieldId) -> String {
     format!("f_{:032x}", u128::from_be_bytes(field_id.to_bytes()))
+}
+
+#[cfg(feature = "test-hooks")]
+fn unique_constraint_name(field_id: FieldId) -> String {
+    format!("uq_{:032x}", u128::from_be_bytes(field_id.to_bytes()))
 }
 
 fn name_is(actual: &[String], expected: &[&str]) -> bool {
