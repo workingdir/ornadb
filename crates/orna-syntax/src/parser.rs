@@ -1614,11 +1614,31 @@ impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
                 ));
             }
             let predicate = self.parse_expression(true)?;
-            if !matches!(predicate, QueryExpression::Equality { .. }) {
-                return Err(self.implementation_gap(
-                    "WHERE predicates other than equality",
-                    "an equality predicate",
-                ));
+            match (&quantifier, &predicate) {
+                (_, QueryExpression::Equality { .. })
+                | (
+                    SelectQuantifier::All,
+                    QueryExpression::FieldPath { .. } | QueryExpression::BooleanLiteral { .. },
+                ) => {}
+                (
+                    SelectQuantifier::Distinct { .. },
+                    QueryExpression::FieldPath { .. } | QueryExpression::BooleanLiteral { .. },
+                ) => {
+                    return Err(QueryParseError {
+                        code: "ORNA0001",
+                        message: "SELECT DISTINCT WHERE must use an equality predicate".to_owned(),
+                        span: predicate.span().clone(),
+                    });
+                }
+                _ => {
+                    return Err(QueryParseError {
+                        code: "ORNA0001",
+                        message:
+                            "WHERE must use a BOOLEAN field, TRUE, FALSE, or an equality predicate"
+                                .to_owned(),
+                        span: predicate.span().clone(),
+                    });
+                }
             }
             Some(predicate)
         } else {
