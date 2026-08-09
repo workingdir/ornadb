@@ -33,3 +33,4 @@ source-of-truth or authority rules.
 * **work ADR 0011:** [Direct Boolean SERVER SELECT Predicates](0011-direct-boolean-server-select-predicates.md)
 * **work ADR 0012:** [Direct Boolean Predicates in SELECT DISTINCT](0012-direct-boolean-select-distinct-predicates.md)
 * **work ADR 0013:** [Required Unique Reference Fields](0013-required-unique-reference-fields.md)
+* **work ADR 0014:** [Host-Only Backend Shell](0014-host-only-backend-shell.md)
