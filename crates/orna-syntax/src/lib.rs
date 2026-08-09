@@ -1481,35 +1481,123 @@ mod tests {
     }
 
     #[test]
-    fn rejects_direct_predicates_under_distinct_at_the_complete_predicate_span_and_recovers() {
-        for predicate in ["t.completed", "TRUE", "FALSE"] {
-            let source = format!(
-                "CREATE SERVER FUNCTION tasks.bad() RETURNS ROWS (completed BOOL) AS SELECT DISTINCT t.completed FROM tasks.task t WHERE {predicate};\nCREATE SERVER FUNCTION tasks.good() RETURNS ROWS (completed BOOL) AS SELECT DISTINCT t.completed FROM tasks.task t WHERE t.completed = TRUE;"
-            );
-            let parsed = parse(&source);
+    fn retains_direct_boolean_where_predicates_under_distinct_losslessly() {
+        let source = "CREATE SERVER FUNCTION tasks.by_field() RETURNS ROWS (value INT) AS SELECT DISTINCT t.value FROM tasks.task t WHERE t.title;\n\
+            CREATE SERVER FUNCTION tasks.by_true() RETURNS ROWS (value INT) AS SELECT DISTINCT t.value FROM tasks.task t WHERE TRUE;\n\
+            CREATE SERVER FUNCTION tasks.by_false() RETURNS ROWS (value INT) AS SELECT DISTINCT t.value FROM tasks.task t WHERE fAlSe;";
+        let parsed = parse(source);
 
-            assert_eq!(parsed.syntax().text(), source, "predicate: {predicate}");
-            assert_eq!(parsed.diagnostics().len(), 1, "predicate: {predicate}");
-            let diagnostic = &parsed.diagnostics()[0];
-            assert_eq!(diagnostic.code, "ORNA0001", "predicate: {predicate}");
-            assert_eq!(
-                diagnostic.message, "SELECT DISTINCT WHERE must use an equality predicate",
-                "predicate: {predicate}",
-            );
-            let predicate_start = source
-                .find(&format!("WHERE {predicate}"))
-                .expect("predicate exists")
+        assert!(parsed.diagnostics().is_empty());
+        assert_eq!(parsed.syntax().text(), source);
+        assert_eq!(parsed.server_functions().len(), 3);
+
+        let field = parsed.server_functions()[0]
+            .body
+            .as_sql_query()
+            .expect("field predicate function must use a SELECT body");
+        let distinct_start = source.find("DISTINCT").expect("DISTINCT exists");
+        assert!(matches!(
+            &field.query.quantifier,
+            SelectQuantifier::Distinct { source: distinct }
+                if distinct.text == "DISTINCT"
+                    && distinct.span == SourceSpan {
+                        start: distinct_start,
+                        end: distinct_start + "DISTINCT".len(),
+                    }
+        ));
+        let field_start = source
+            .find("WHERE t.title")
+            .expect("field predicate exists")
+            + "WHERE ".len();
+        match field.query.predicate.as_ref() {
+            Some(QueryExpression::FieldPath {
+                root,
+                members,
+                span,
+            }) => {
+                assert_eq!(root.text, "t");
+                assert_eq!(members.len(), 1);
+                assert_eq!(members[0].text, "title");
+                assert_eq!(
+                    span,
+                    &SourceSpan {
+                        start: field_start,
+                        end: field_start + "t.title".len(),
+                    }
+                );
+                assert_eq!(&source[span.start..span.end], "t.title");
+            }
+            _ => panic!("WHERE t.title must remain a type-neutral field predicate"),
+        }
+
+        for (function, source_text, value) in [(1, "TRUE", true), (2, "fAlSe", false)] {
+            let query = parsed.server_functions()[function]
+                .body
+                .as_sql_query()
+                .expect("boolean predicate function must use a SELECT body");
+            assert!(matches!(
+                query.query.quantifier,
+                SelectQuantifier::Distinct { .. }
+            ));
+            let literal_start = source
+                .find(&format!("WHERE {source_text}"))
+                .expect("literal predicate exists")
                 + "WHERE ".len();
-            assert_eq!(
-                diagnostic.span,
-                SourceSpan {
-                    start: predicate_start,
-                    end: predicate_start + predicate.len(),
-                },
-                "predicate: {predicate}",
-            );
-            assert_eq!(parsed.server_functions().len(), 1, "predicate: {predicate}");
-            let query = parsed.server_functions()[0]
+            match query.query.predicate.as_ref() {
+                Some(QueryExpression::BooleanLiteral {
+                    value: actual_value,
+                    source: literal,
+                }) => {
+                    assert_eq!(*actual_value, value);
+                    assert_eq!(literal.text, source_text);
+                    assert_eq!(
+                        literal.span,
+                        SourceSpan {
+                            start: literal_start,
+                            end: literal_start + source_text.len(),
+                        }
+                    );
+                    assert_eq!(&source[literal.span.start..literal.span.end], source_text,);
+                }
+                _ => panic!("WHERE {source_text} must remain a Boolean predicate"),
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_direct_ref_where_predicates_under_distinct_and_recovers() {
+        let source = "CREATE SERVER FUNCTION tasks.bad() RETURNS ROWS (task REF tasks.task) AS SELECT DISTINCT REF(t) FROM tasks.task t WHERE REF(t);\n\
+            CREATE SERVER FUNCTION tasks.good_field() RETURNS ROWS (value INT) AS SELECT DISTINCT t.value FROM tasks.task t WHERE t.title;\n\
+            CREATE SERVER FUNCTION tasks.good_true() RETURNS ROWS (value INT) AS SELECT DISTINCT t.value FROM tasks.task t WHERE TRUE;\n\
+            CREATE SERVER FUNCTION tasks.good_false() RETURNS ROWS (value INT) AS SELECT DISTINCT t.value FROM tasks.task t WHERE FALSE;";
+        let parsed = parse(source);
+
+        assert_eq!(parsed.syntax().text(), source);
+        assert_eq!(parsed.diagnostics().len(), 1);
+        let diagnostic = &parsed.diagnostics()[0];
+        assert_eq!(diagnostic.code, "ORNA0001");
+        assert_eq!(
+            diagnostic.message,
+            "WHERE must use a BOOLEAN field, TRUE, FALSE, or an equality predicate",
+        );
+        let predicate_start =
+            source.find("WHERE REF(t)").expect("predicate REF exists") + "WHERE ".len();
+        assert_eq!(
+            diagnostic.span,
+            SourceSpan {
+                start: predicate_start,
+                end: predicate_start + "REF(t)".len(),
+            }
+        );
+        assert_eq!(parsed.server_functions().len(), 3);
+        for (function, name, expected) in [
+            (0, "good_field", "field"),
+            (1, "good_true", "true"),
+            (2, "good_false", "false"),
+        ] {
+            let declaration = &parsed.server_functions()[function];
+            assert_eq!(declaration.name.parts[1].text, name);
+            let query = declaration
                 .body
                 .as_sql_query()
                 .expect("recovered function must use a SELECT body");
@@ -1517,10 +1605,12 @@ mod tests {
                 query.query.quantifier,
                 SelectQuantifier::Distinct { .. }
             ));
-            assert!(matches!(
-                query.query.predicate,
-                Some(QueryExpression::Equality { .. })
-            ));
+            match (expected, query.query.predicate.as_ref()) {
+                ("field", Some(QueryExpression::FieldPath { .. }))
+                | ("true", Some(QueryExpression::BooleanLiteral { value: true, .. }))
+                | ("false", Some(QueryExpression::BooleanLiteral { value: false, .. })) => {}
+                _ => panic!("recovered {name} predicate has the wrong shape"),
+            }
         }
     }
 
