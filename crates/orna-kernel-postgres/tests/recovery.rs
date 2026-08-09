@@ -2345,10 +2345,7 @@ fn definition_owned_by_function(identity: DefinitionIdentity, function: Function
         DefinitionIdentity::Function(owner)
         | DefinitionIdentity::Parameter { owner, .. }
         | DefinitionIdentity::FunctionReturnColumn { owner, .. } => owner == function,
-        DefinitionIdentity::Schema(_)
-        | DefinitionIdentity::ObjectType(_)
-        | DefinitionIdentity::Field { .. }
-        | DefinitionIdentity::Expression(_) => false,
+        _ => false,
     }
 }
 
@@ -2597,7 +2594,12 @@ async fn insert_reference_record(
             None,
             Some(owner.to_bytes().to_vec()),
         ),
-        DefinitionReferenceTarget::Expression(id) => {
+        other => {
+            let DefinitionReferenceTarget::Expression(id) = other else {
+                return Err(failure(
+                    "recovery fixture cannot persist this definition reference target",
+                ));
+            };
             (id.to_bytes().to_vec(), "expression", None, None)
         }
     };
