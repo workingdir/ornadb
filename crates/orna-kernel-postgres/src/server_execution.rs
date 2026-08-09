@@ -7,8 +7,8 @@ use std::{collections::BTreeMap, error::Error, fmt};
 
 use futures_util::TryStreamExt;
 use orna_artifact::server_plan::{
-    self, Expression, ExpressionKind, FieldStep, IdentitySelectedServerPlan, ServerPlan,
-    SortDirection,
+    self, DistinctServerPlan, Expression, ExpressionKind, FieldStep, IdentitySelectedServerPlan,
+    Ordering, ServerPlan, SortDirection,
 };
 use orna_core::{
     FieldId, FunctionId, FunctionRevisionId, ObjectId, ParameterId, TypeId,
@@ -43,6 +43,7 @@ use crate::{
 const SERVER_PLAN_FORMAT: &str = server_plan::FORMAT_IDENTITY;
 const SERVER_PLAN_VERSION: u32 = server_plan::FORMAT_VERSION;
 const IDENTITY_SELECTED_SERVER_PLAN_VERSION: u32 = server_plan::IDENTITY_SELECTED_FORMAT_VERSION;
+const DISTINCT_SERVER_PLAN_VERSION: u32 = server_plan::DISTINCT_FORMAT_VERSION;
 const ROW_LIMIT: usize = 10_000;
 const CELL_LIMIT: usize = 1_000_000;
 const PAYLOAD_LIMIT: usize = 16 * 1024 * 1024;
@@ -52,6 +53,13 @@ const SQL_LIMIT: usize = 1024 * 1024;
 const TARGET_ENTRY_LIMIT: usize = 1_600;
 const VERSION_ONE_EQUALITY_RULE: &str = "version 1 SERVER SELECT equality supports only BOOLEAN, INTEGER, BIGINT, BYTES, and references";
 const PARAMETERISED_EQUALITY_RULE: &str = "parameterised SERVER SELECT equality supports only BOOLEAN, INTEGER, BIGINT, BYTES, and references";
+const DISTINCT_EQUALITY_RULE: &str =
+    "SELECT DISTINCT equality supports only BOOLEAN, INTEGER, BIGINT, BYTES, and references";
+const DISTINCT_PROJECTION_RULE: &str =
+    "projections support only BOOLEAN, INTEGER, BIGINT, BYTES, and REF values";
+const DISTINCT_REFERENCE_COUNT_RULE: &str = "its dependencies do not match its signature and query";
+const DISTINCT_REFERENCE_SEQUENCE_RULE: &str =
+    "its dependencies are not in the same order as its signature and query";
 
 #[cfg(feature = "test-hooks")]
 struct SelectTestBarrier {
@@ -195,6 +203,11 @@ pub enum ServerSelectError {
     PlanDecode(orna_artifact::server_plan::ServerPlanError),
     /// The plan does not agree with the recovered active catalogue.
     PlanInvariant { rule: &'static str },
+    /// A saved `SELECT DISTINCT` function is outside the accepted runtime form.
+    Distinct {
+        /// The exact human-facing rule that failed.
+        rule: &'static str,
+    },
     /// The ordered durable definition references do not prove this plan.
     ReferenceEvidence {
         function: FunctionId,
@@ -319,6 +332,12 @@ impl fmt::Display for ServerSelectError {
             Self::PlanInvariant { rule } => {
                 write!(formatter, "server plan invariant failed: {rule}")
             }
+            Self::Distinct { rule } => {
+                write!(
+                    formatter,
+                    "saved SELECT DISTINCT function cannot run: {rule}"
+                )
+            }
             Self::ReferenceEvidence { function, rule } => write!(
                 formatter,
                 "function {} has invalid definition-reference evidence: {rule}",
@@ -390,6 +409,7 @@ impl Error for ServerSelectError {
             | Self::CurrentRevision { .. }
             | Self::Artifact { .. }
             | Self::PlanInvariant { .. }
+            | Self::Distinct { .. }
             | Self::ReferenceEvidence { .. }
             | Self::Argument { .. }
             | Self::Cardinality { .. }
@@ -407,10 +427,11 @@ impl Error for ServerSelectError {
 impl PostgresKernel {
     /// Executes the active no-argument SERVER `ROWS` function identified by `function`.
     ///
-    /// This operation accepts a stable function identity only. It does not
-    /// resolve names, perform authentication or authorisation, accept an
-    /// invocation identity or arguments, or expose a protocol stream. It
-    /// reads only the active revision and returns a bounded collected result.
+    /// This operation accepts no-argument version 1 and version 3 `SELECT
+    /// DISTINCT` functions by stable function identity. It does not resolve
+    /// names, perform authentication or authorisation, accept an invocation
+    /// identity or arguments, or expose a protocol stream. It reads only the
+    /// active revision and returns a bounded collected result.
     pub async fn execute_server_select(
         &self,
         function: FunctionId,
@@ -421,11 +442,12 @@ impl PostgresKernel {
 
     /// Executes an active SERVER `ROWS` function with its exact typed arguments.
     ///
-    /// Version 1 functions accept no arguments. Version 2 functions accept
-    /// exactly one non-null `REF` argument, identified by the stable
-    /// [`ParameterId`] from the active function signature. This method does
-    /// not resolve semantic names, authenticate or authorise a caller, attach
-    /// an invocation identity, or retry a failed operation automatically.
+    /// Version 1 and version 3 `SELECT DISTINCT` functions accept no arguments.
+    /// Version 2 functions accept exactly one non-null `REF` argument,
+    /// identified by the stable [`ParameterId`] from the active function
+    /// signature. This method does not resolve semantic names, authenticate or
+    /// authorise a caller, attach an invocation identity, or retry a failed
+    /// operation automatically.
     pub async fn execute_server_select_with_arguments(
         &self,
         function: FunctionId,
@@ -629,21 +651,16 @@ async fn execute_active_transaction(
         artifact.version(),
         artifact.payload(),
     )?;
-    let (columns, lowered, identity_selected) = match &decoded {
+    let (columns, lowered, cardinality) = match &decoded {
         DecodedServerPlan::V1(plan) => {
             validate_function_signature(function)?;
-            if !arguments.is_empty() {
-                return Err(argument_error(
-                    None,
-                    "this function does not accept arguments",
-                ));
-            }
+            validate_no_arguments(arguments)?;
             validate_plan(active, function, plan)?;
             validate_reference_evidence(active, function, plan)?;
             let columns = result_columns_for_projections(function, &plan.projections)?;
             validate_target_entries(plan.projections.len(), &columns, plan.ordering.len())?;
             let lowered = lower_plan(active.catalogue(), plan, &columns)?;
-            (columns, lowered, false)
+            (columns, lowered, ResultCardinality::BoundedMany)
         }
         DecodedServerPlan::V2(plan) => {
             validate_identity_selected_function_signature(active.catalogue(), function)?;
@@ -658,7 +675,17 @@ async fn execute_active_transaction(
             let columns = result_columns_for_projections(function, plan.projections())?;
             validate_target_entries(plan.projections().len(), &columns, 0)?;
             let lowered = lower_identity_selected_plan(active.catalogue(), plan, &columns, object)?;
-            (columns, lowered, true)
+            (columns, lowered, ResultCardinality::AtMostOne)
+        }
+        DecodedServerPlan::V3(plan) => {
+            validate_distinct_function_signature(function)?;
+            validate_no_arguments(arguments)?;
+            validate_distinct_plan(active.catalogue(), function, plan)?;
+            validate_distinct_reference_evidence(active, function, plan)?;
+            let columns = result_columns_for_projections(function, plan.projections())?;
+            validate_target_entries(plan.projections().len(), &columns, 0)?;
+            let lowered = lower_distinct_plan(active.catalogue(), plan, &columns)?;
+            (columns, lowered, ResultCardinality::BoundedMany)
         }
     };
     let statement = transaction
@@ -673,7 +700,7 @@ async fn execute_active_transaction(
         &columns,
         &lowered.guards,
         lowered.variable_payload_limit,
-        identity_selected,
+        cardinality,
     )
     .await?;
     Ok(ServerSelectResult::new(
@@ -687,6 +714,7 @@ async fn execute_active_transaction(
 enum DecodedServerPlan {
     V1(ServerPlan),
     V2(IdentitySelectedServerPlan),
+    V3(DistinctServerPlan),
 }
 
 fn decode_plan(
@@ -710,10 +738,25 @@ fn decode_plan(
             .map(DecodedServerPlan::V2)
             .map_err(ServerSelectError::PlanDecode)
             .map_err(server_error),
+        DISTINCT_SERVER_PLAN_VERSION => DistinctServerPlan::decode(payload)
+            .map(DecodedServerPlan::V3)
+            .map_err(map_distinct_plan_decode_error),
         _ => Err(artifact_error(
             function,
-            "current SERVER artifact must use supported orna.server-plan version 1 or version 2",
+            "current SERVER artifact must use supported orna.server-plan version 1, version 2, or version 3",
         )),
+    }
+}
+
+fn map_distinct_plan_decode_error(error: server_plan::ServerPlanError) -> PostgresKernelError {
+    match error {
+        server_plan::ServerPlanError::UnsupportedDistinctProjectionType { .. } => {
+            distinct_error(DISTINCT_PROJECTION_RULE)
+        }
+        server_plan::ServerPlanError::DistinctOrderingNotAllowed { .. } => {
+            distinct_error("ORDER BY is not allowed")
+        }
+        error => server_error(ServerSelectError::PlanDecode(error)),
     }
 }
 
@@ -813,6 +856,47 @@ fn validate_identity_selected_function_signature(
     Ok(())
 }
 
+fn validate_distinct_function_signature(
+    function: &FunctionDefinition,
+) -> Result<(), PostgresKernelError> {
+    if function.domain() != FunctionDomain::Server {
+        return Err(server_error(ServerSelectError::FunctionDomain {
+            function: function.id(),
+        }));
+    }
+    if !function.parameters().is_empty() {
+        return Err(function_signature_error(
+            function.id(),
+            "SELECT DISTINCT SERVER functions must have zero parameters",
+        ));
+    }
+    if !matches!(function.return_type(), FunctionReturn::Rows(columns) if !columns.is_empty()) {
+        return Err(function_signature_error(
+            function.id(),
+            "SELECT DISTINCT SERVER functions must return nonempty ROWS",
+        ));
+    }
+    if function.security() != FunctionSecurity::Invoker {
+        return Err(function_signature_error(
+            function.id(),
+            "SELECT DISTINCT SERVER functions must use INVOKER security",
+        ));
+    }
+    if function.transaction() != Some(FunctionTransaction::ReadOnly) {
+        return Err(function_signature_error(
+            function.id(),
+            "SELECT DISTINCT SERVER functions must use READ ONLY transactions",
+        ));
+    }
+    if function.volatility() != FunctionVolatility::Stable {
+        return Err(function_signature_error(
+            function.id(),
+            "SELECT DISTINCT SERVER functions must use STABLE volatility",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_identity_selected_plan(
     catalogue: &orna_core::catalogue::CatalogueSnapshot,
     function: &FunctionDefinition,
@@ -868,12 +952,77 @@ fn validate_identity_selected_plan(
     Ok(())
 }
 
+fn validate_distinct_plan(
+    catalogue: &orna_core::catalogue::CatalogueSnapshot,
+    function: &FunctionDefinition,
+    plan: &DistinctServerPlan,
+) -> Result<(), PostgresKernelError> {
+    validate_execution_complexity_for_distinct(plan)?;
+    let scan = plan.scan();
+    if scan.input != 0 || catalogue.object_type_by_id(scan.object_type).is_none() {
+        return Err(plan_invariant(
+            "scan must use active input zero and an active object type",
+        ));
+    }
+    let FunctionReturn::Rows(return_columns) = function.return_type() else {
+        return Err(plan_invariant("function return shape must be ROWS"));
+    };
+    if plan.projections().len() != return_columns.len() {
+        return Err(plan_invariant(
+            "projection count must equal ROWS column count",
+        ));
+    }
+    for (projection, column) in plan.projections().iter().zip(return_columns) {
+        validate_expression_with_equality_rule(
+            catalogue,
+            scan.object_type,
+            projection,
+            DISTINCT_EQUALITY_RULE,
+        )?;
+        if projection.value_type.resolved_type != column.resolved_type() {
+            return Err(plan_invariant("projection type must equal its ROWS column"));
+        }
+        if !supports_distinct_projection_type(projection.value_type.resolved_type) {
+            return Err(distinct_error(DISTINCT_PROJECTION_RULE));
+        }
+        if !supports_result_type(projection.value_type.resolved_type) {
+            return Err(plan_invariant(
+                "projection type is outside the initial runtime result subset",
+            ));
+        }
+    }
+    if let Some(selection) = plan.selection() {
+        validate_expression_with_equality_rule(
+            catalogue,
+            scan.object_type,
+            selection,
+            DISTINCT_EQUALITY_RULE,
+        )?;
+        if selection.value_type.resolved_type != ResolvedType::scalar(StandardScalar::Boolean) {
+            return Err(plan_invariant("selection must have BOOLEAN type"));
+        }
+    }
+    Ok(())
+}
+
 fn validate_execution_complexity_for_projections(
     projections: &[Expression],
 ) -> Result<(), PostgresKernelError> {
+    validate_expression_complexity(projections.iter())
+}
+
+fn validate_execution_complexity_for_distinct(
+    plan: &DistinctServerPlan,
+) -> Result<(), PostgresKernelError> {
+    validate_expression_complexity(plan.projections().iter().chain(plan.selection()))
+}
+
+fn validate_expression_complexity<'a>(
+    expressions: impl Iterator<Item = &'a Expression>,
+) -> Result<(), PostgresKernelError> {
     let mut steps = 0usize;
     let mut binds = 0usize;
-    for expression in projections {
+    for expression in expressions {
         count_expression_complexity(expression, &mut steps, &mut binds)?;
     }
     if steps > FIELD_PATH_STEP_LIMIT {
@@ -947,6 +1096,17 @@ fn validate_identity_selected_arguments(
     }
 }
 
+fn validate_no_arguments(arguments: &[FunctionArgument]) -> Result<(), PostgresKernelError> {
+    if arguments.is_empty() {
+        Ok(())
+    } else {
+        Err(argument_error(
+            None,
+            "this function does not accept arguments",
+        ))
+    }
+}
+
 fn runtime_type_is_active(
     catalogue: &orna_core::catalogue::CatalogueSnapshot,
     resolved_type: ResolvedType,
@@ -965,6 +1125,10 @@ fn argument_error(parameter: Option<ParameterId>, rule: &'static str) -> Postgre
 
 fn artifact_error(function: FunctionId, rule: &'static str) -> PostgresKernelError {
     server_error(ServerSelectError::Artifact { function, rule })
+}
+
+fn distinct_error(rule: &'static str) -> PostgresKernelError {
+    server_error(ServerSelectError::Distinct { rule })
 }
 
 fn validate_plan(
@@ -1102,6 +1266,18 @@ fn supports_equality_type(resolved_type: ResolvedType) -> bool {
     )
 }
 
+fn supports_distinct_projection_type(resolved_type: ResolvedType) -> bool {
+    matches!(
+        resolved_type,
+        ResolvedType::Scalar(
+            StandardScalar::Boolean
+                | StandardScalar::Integer
+                | StandardScalar::BigInt
+                | StandardScalar::BinaryLargeObject
+        ) | ResolvedType::Reference { .. }
+    )
+}
+
 fn supports_result_type(resolved_type: ResolvedType) -> bool {
     matches!(
         resolved_type,
@@ -1117,30 +1293,12 @@ fn supports_result_type(resolved_type: ResolvedType) -> bool {
 }
 
 fn validate_execution_complexity(plan: &ServerPlan) -> Result<(), PostgresKernelError> {
-    let mut steps = 0usize;
-    let mut binds = 0usize;
-    for expression in &plan.projections {
-        count_expression_complexity(expression, &mut steps, &mut binds)?;
-    }
-    if let Some(selection) = &plan.selection {
-        count_expression_complexity(selection, &mut steps, &mut binds)?;
-    }
-    for ordering in &plan.ordering {
-        count_expression_complexity(&ordering.expression, &mut steps, &mut binds)?;
-    }
-    if steps > FIELD_PATH_STEP_LIMIT {
-        return Err(server_error(ServerSelectError::ComplexityLimit {
-            category: "field path steps",
-            maximum: FIELD_PATH_STEP_LIMIT,
-        }));
-    }
-    if binds > server_plan::MAX_EXPRESSION_NODES as usize {
-        return Err(server_error(ServerSelectError::ComplexityLimit {
-            category: "boolean binds",
-            maximum: server_plan::MAX_EXPRESSION_NODES as usize,
-        }));
-    }
-    Ok(())
+    validate_expression_complexity(
+        plan.projections
+            .iter()
+            .chain(plan.selection.iter())
+            .chain(plan.ordering.iter().map(|ordering| &ordering.expression)),
+    )
 }
 
 fn validate_target_entries(
@@ -1275,6 +1433,27 @@ fn validate_identity_selected_reference_evidence(
     )
 }
 
+fn validate_distinct_reference_evidence(
+    active: &ActiveDatabaseRevision,
+    function: &FunctionDefinition,
+    plan: &DistinctServerPlan,
+) -> Result<(), PostgresKernelError> {
+    let expected = expected_unordered_body_references(
+        plan.scan().object_type,
+        plan.projections(),
+        plan.selection(),
+    );
+    validate_function_reference_replay(active, function, &expected)
+        .map_err(distinct_reference_error)
+}
+
+fn distinct_reference_error(mismatch: ReferenceReplayMismatch) -> PostgresKernelError {
+    distinct_error(match mismatch {
+        ReferenceReplayMismatch::Count => DISTINCT_REFERENCE_COUNT_RULE,
+        ReferenceReplayMismatch::Sequence => DISTINCT_REFERENCE_SEQUENCE_RULE,
+    })
+}
+
 fn validate_body_reference_evidence(
     active: &ActiveDatabaseRevision,
     function: &FunctionDefinition,
@@ -1317,18 +1496,31 @@ fn expected_identity_selected_body_references(
 }
 
 fn expected_body_references(plan: &ServerPlan) -> Vec<ExpectedDefinitionReference> {
-    let mut expected = vec![ExpectedDefinitionReference::new(
-        DefinitionReferenceKind::QueryObject,
-        DefinitionReferenceTarget::ObjectType(plan.scan.object_type),
-    )];
-    for expression in &plan.projections {
-        add_expression_references(&mut expected, plan.scan.object_type, expression);
-    }
-    if let Some(selection) = &plan.selection {
-        add_expression_references(&mut expected, plan.scan.object_type, selection);
-    }
+    let mut expected = expected_unordered_body_references(
+        plan.scan.object_type,
+        &plan.projections,
+        plan.selection.as_ref(),
+    );
     for ordering in &plan.ordering {
         add_expression_references(&mut expected, plan.scan.object_type, &ordering.expression);
+    }
+    expected
+}
+
+fn expected_unordered_body_references(
+    scan: TypeId,
+    projections: &[Expression],
+    selection: Option<&Expression>,
+) -> Vec<ExpectedDefinitionReference> {
+    let mut expected = vec![ExpectedDefinitionReference::new(
+        DefinitionReferenceKind::QueryObject,
+        DefinitionReferenceTarget::ObjectType(scan),
+    )];
+    for expression in projections {
+        add_expression_references(&mut expected, scan, expression);
+    }
+    if let Some(selection) = selection {
+        add_expression_references(&mut expected, scan, selection);
     }
     expected
 }
@@ -1428,22 +1620,70 @@ struct PartialLoweredSelect<'a> {
     variable_payload_limit: usize,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DuplicatePolicy {
+    Preserve,
+    Distinct,
+}
+
+impl DuplicatePolicy {
+    const fn select_sql(self) -> &'static str {
+        match self {
+            Self::Preserve => "SELECT",
+            Self::Distinct => "SELECT DISTINCT",
+        }
+    }
+}
+
 fn lower_plan(
     catalogue: &orna_core::catalogue::CatalogueSnapshot,
     plan: &ServerPlan,
     columns: &[ResultColumn],
 ) -> Result<LoweredPlan, PostgresKernelError> {
-    let mut lowered =
-        lower_select_projections(catalogue, plan.scan.object_type, &plan.projections, columns)?;
-    let selection = plan
-        .selection
-        .as_ref()
+    lower_parameter_free_plan(
+        catalogue,
+        plan.scan.object_type,
+        &plan.projections,
+        plan.selection.as_ref(),
+        &plan.ordering,
+        DuplicatePolicy::Preserve,
+        columns,
+    )
+}
+
+fn lower_distinct_plan(
+    catalogue: &orna_core::catalogue::CatalogueSnapshot,
+    plan: &DistinctServerPlan,
+    columns: &[ResultColumn],
+) -> Result<LoweredPlan, PostgresKernelError> {
+    lower_parameter_free_plan(
+        catalogue,
+        plan.scan().object_type,
+        plan.projections(),
+        plan.selection(),
+        &[],
+        DuplicatePolicy::Distinct,
+        columns,
+    )
+}
+
+fn lower_parameter_free_plan(
+    catalogue: &orna_core::catalogue::CatalogueSnapshot,
+    scan: TypeId,
+    projections: &[Expression],
+    selection: Option<&Expression>,
+    ordering: &[Ordering],
+    duplicate_policy: DuplicatePolicy,
+    columns: &[ResultColumn],
+) -> Result<LoweredPlan, PostgresKernelError> {
+    let mut lowered = lower_select_projections(catalogue, scan, projections, columns)?;
+    let selection = selection
         .map(|expression| lowered.lowerer.expression(expression))
         .transpose()?;
-    let mut ordering = Vec::with_capacity(plan.ordering.len());
-    for item in &plan.ordering {
+    let mut lowered_ordering = Vec::with_capacity(ordering.len());
+    for item in ordering {
         let direction = ordering_sql(item.direction);
-        ordering.push(format!(
+        lowered_ordering.push(format!(
             "{} {direction}",
             lowered.lowerer.expression(&item.expression)?
         ));
@@ -1453,13 +1693,13 @@ fn lower_plan(
         suffix.push_str("\nWHERE ");
         suffix.push_str(&selection);
     }
-    if !ordering.is_empty() {
+    if !lowered_ordering.is_empty() {
         suffix.push_str("\nORDER BY ");
-        suffix.push_str(&ordering.join(", "));
+        suffix.push_str(&lowered_ordering.join(", "));
     }
-    let limit = effective_query_limit(plan.projections.len())?;
+    let limit = effective_query_limit(projections.len())?;
     suffix.push_str(&format!("\nLIMIT {limit}"));
-    finish_lowered_select(lowered, &suffix)
+    finish_lowered_select(lowered, duplicate_policy, &suffix)
 }
 
 fn lower_identity_selected_plan(
@@ -1477,7 +1717,7 @@ fn lower_identity_selected_plan(
         .push(SelectBindValue::Bytes(selector.to_bytes().to_vec()));
     let selector_placeholder = lowered.lowerer.binds.len();
     let suffix = format!("\nWHERE i0.{OBJECT_ID_COLUMN} = ${selector_placeholder}\nLIMIT 2");
-    finish_lowered_select(lowered, &suffix)
+    finish_lowered_select(lowered, DuplicatePolicy::Preserve, &suffix)
 }
 
 fn lower_select_projections<'a>(
@@ -1527,10 +1767,12 @@ fn lower_select_projections<'a>(
 
 fn finish_lowered_select(
     lowered: PartialLoweredSelect<'_>,
+    duplicate_policy: DuplicatePolicy,
     suffix: &str,
 ) -> Result<LoweredPlan, PostgresKernelError> {
     let mut sql = format!(
-        "SELECT {}\nFROM {}.{} AS i0",
+        "{} {}\nFROM {}.{} AS i0",
+        duplicate_policy.select_sql(),
         lowered.projections.join(", "),
         DATA_SCHEMA,
         relation_name(lowered.lowerer.scan),
@@ -1761,6 +2003,21 @@ fn expected_postgres_type(resolved_type: ResolvedType) -> Result<Type, PostgresK
     })
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ResultCardinality {
+    BoundedMany,
+    AtMostOne,
+}
+
+impl ResultCardinality {
+    fn validate(self, row_count: usize) -> Result<(), PostgresKernelError> {
+        match self {
+            Self::BoundedMany => Ok(()),
+            Self::AtMostOne => validate_identity_selected_cardinality(row_count),
+        }
+    }
+}
+
 async fn stream_rows(
     transaction: &Transaction<'_>,
     statement: &Statement,
@@ -1768,7 +2025,7 @@ async fn stream_rows(
     columns: &[ResultColumn],
     guards: &[VariableGuard],
     variable_payload_limit: usize,
-    identity_selected: bool,
+    cardinality: ResultCardinality,
 ) -> Result<ResultRows, PostgresKernelError> {
     let parameters = binds
         .iter()
@@ -1787,9 +2044,7 @@ async fn stream_rows(
         .await
         .map_err(PostgresKernelError::Database)?
     {
-        if identity_selected {
-            validate_identity_selected_cardinality(rows.len().saturating_add(1))?;
-        }
+        cardinality.validate(rows.len().saturating_add(1))?;
         if rows.len() == ROW_LIMIT {
             return Err(server_error(ServerSelectError::RowLimit {
                 maximum: ROW_LIMIT,
@@ -2171,8 +2426,16 @@ mod tests {
         assert_eq!(rule, expected);
     }
 
-    fn assert_argument_rule(
-        result: Result<ObjectId, PostgresKernelError>,
+    fn assert_distinct_rule<T>(result: Result<T, PostgresKernelError>, expected: &'static str) {
+        let Err(PostgresKernelError::ServerSelect(ServerSelectError::Distinct { rule })) = result
+        else {
+            panic!("expected a SELECT DISTINCT rejection");
+        };
+        assert_eq!(rule, expected);
+    }
+
+    fn assert_argument_rule<T>(
+        result: Result<T, PostgresKernelError>,
         parameter: Option<ParameterId>,
         expected: &'static str,
     ) {
@@ -2297,6 +2560,69 @@ mod tests {
     }
 
     #[test]
+    fn distinct_lowering_changes_only_the_select_policy_and_adds_no_bind() {
+        let (catalogue, source, _, _) = catalogue();
+        let projection = Expression {
+            kind: ExpressionKind::BooleanLiteral { value: true },
+            value_type: ValueType {
+                resolved_type: ResolvedType::scalar(StandardScalar::Boolean),
+                nullable: false,
+            },
+        };
+        let selection = Expression {
+            kind: ExpressionKind::BooleanLiteral { value: false },
+            value_type: ValueType {
+                resolved_type: ResolvedType::scalar(StandardScalar::Boolean),
+                nullable: false,
+            },
+        };
+        let plan = DistinctServerPlan::new(
+            Scan {
+                input: 0,
+                object_type: source,
+            },
+            [projection.clone()],
+            Some(selection.clone()),
+        )
+        .unwrap();
+        let version_one = ServerPlan {
+            scan: plan.scan(),
+            projections: vec![projection],
+            selection: Some(selection),
+            ordering: Vec::new(),
+        };
+        let columns = [ResultColumn::new(
+            "selected",
+            ResolvedType::scalar(StandardScalar::Boolean),
+            false,
+        )
+        .unwrap()];
+
+        let distinct = lower_distinct_plan(&catalogue, &plan, &columns).unwrap();
+        let preserving = lower_plan(&catalogue, &version_one, &columns).unwrap();
+        assert_eq!(
+            distinct.sql,
+            format!(
+                "SELECT DISTINCT $1 AS c0\nFROM {}.{} AS i0\nWHERE $2\nLIMIT 10001",
+                DATA_SCHEMA,
+                relation_name(source),
+            )
+        );
+        assert_eq!(
+            distinct.sql,
+            preserving.sql.replacen("SELECT ", "SELECT DISTINCT ", 1)
+        );
+        assert_eq!(
+            distinct.binds,
+            vec![
+                SelectBindValue::Boolean(true),
+                SelectBindValue::Boolean(false),
+            ]
+        );
+        assert_eq!(distinct.bind_types, vec![Type::BOOL, Type::BOOL]);
+    }
+
+    #[test]
     fn artifact_versions_decode_only_their_matching_plan_model() {
         let (_, source, _, _) = catalogue();
         let projection = Expression {
@@ -2322,11 +2648,22 @@ mod tests {
                 input: 0,
                 object_type: source,
             },
-            [projection],
+            [projection.clone()],
             IdentitySelector::new(
                 FunctionId::from_bytes([0x31; 16]),
                 ParameterId::from_bytes([0x33; 16]),
             ),
+        )
+        .unwrap()
+        .encode()
+        .unwrap();
+        let v3 = DistinctServerPlan::new(
+            Scan {
+                input: 0,
+                object_type: source,
+            },
+            [projection],
+            None,
         )
         .unwrap()
         .encode()
@@ -2350,6 +2687,15 @@ mod tests {
             decode_plan(
                 function,
                 SERVER_PLAN_FORMAT,
+                DISTINCT_SERVER_PLAN_VERSION,
+                &v3,
+            ),
+            Ok(DecodedServerPlan::V3(_))
+        ));
+        assert!(matches!(
+            decode_plan(
+                function,
+                SERVER_PLAN_FORMAT,
                 IDENTITY_SELECTED_SERVER_PLAN_VERSION,
                 &v1,
             ),
@@ -2368,6 +2714,53 @@ mod tests {
             ))
         ));
         assert!(matches!(
+            decode_plan(
+                function,
+                SERVER_PLAN_FORMAT,
+                DISTINCT_SERVER_PLAN_VERSION,
+                &v1,
+            ),
+            Err(PostgresKernelError::ServerSelect(
+                ServerSelectError::PlanDecode(server_plan::ServerPlanError::UnsupportedVersion(
+                    SERVER_PLAN_VERSION
+                ))
+            ))
+        ));
+        assert!(matches!(
+            decode_plan(
+                function,
+                SERVER_PLAN_FORMAT,
+                DISTINCT_SERVER_PLAN_VERSION,
+                &v2,
+            ),
+            Err(PostgresKernelError::ServerSelect(
+                ServerSelectError::PlanDecode(server_plan::ServerPlanError::UnsupportedVersion(
+                    IDENTITY_SELECTED_SERVER_PLAN_VERSION
+                ))
+            ))
+        ));
+        assert!(matches!(
+            decode_plan(function, SERVER_PLAN_FORMAT, SERVER_PLAN_VERSION, &v3),
+            Err(PostgresKernelError::ServerSelect(
+                ServerSelectError::PlanDecode(server_plan::ServerPlanError::UnsupportedVersion(
+                    DISTINCT_SERVER_PLAN_VERSION
+                ))
+            ))
+        ));
+        assert!(matches!(
+            decode_plan(
+                function,
+                SERVER_PLAN_FORMAT,
+                IDENTITY_SELECTED_SERVER_PLAN_VERSION,
+                &v3,
+            ),
+            Err(PostgresKernelError::ServerSelect(
+                ServerSelectError::PlanDecode(server_plan::ServerPlanError::UnsupportedVersion(
+                    DISTINCT_SERVER_PLAN_VERSION
+                ))
+            ))
+        ));
+        assert!(matches!(
             decode_plan(function, "unknown", SERVER_PLAN_VERSION, &v1),
             Err(PostgresKernelError::ServerSelect(ServerSelectError::Artifact {
                 function: actual,
@@ -2378,9 +2771,224 @@ mod tests {
             decode_plan(function, SERVER_PLAN_FORMAT, 99, &v1),
             Err(PostgresKernelError::ServerSelect(ServerSelectError::Artifact {
                 function: actual,
-                rule: "current SERVER artifact must use supported orna.server-plan version 1 or version 2",
+                rule: "current SERVER artifact must use supported orna.server-plan version 1, version 2, or version 3",
             })) if actual == function
         ));
+    }
+
+    #[test]
+    fn distinct_decode_maps_only_human_actionable_v3_failures() {
+        let (_, source, reference, value) = catalogue();
+        let target = TypeId::from_bytes([0x20; 16]);
+        let function = FunctionId::from_bytes([0x31; 16]);
+        let mut unsupported_projection = ServerPlan {
+            scan: Scan {
+                input: 0,
+                object_type: source,
+            },
+            projections: vec![nullable_text_path(source, reference, target, value)],
+            selection: None,
+            ordering: Vec::new(),
+        }
+        .encode()
+        .unwrap();
+        unsupported_projection[8..12].copy_from_slice(&DISTINCT_SERVER_PLAN_VERSION.to_be_bytes());
+        assert_distinct_rule(
+            decode_plan(
+                function,
+                SERVER_PLAN_FORMAT,
+                DISTINCT_SERVER_PLAN_VERSION,
+                &unsupported_projection,
+            ),
+            DISTINCT_PROJECTION_RULE,
+        );
+
+        let projection = Expression {
+            kind: ExpressionKind::BooleanLiteral { value: true },
+            value_type: ValueType {
+                resolved_type: ResolvedType::scalar(StandardScalar::Boolean),
+                nullable: false,
+            },
+        };
+        let mut ordering = ServerPlan {
+            scan: Scan {
+                input: 0,
+                object_type: source,
+            },
+            projections: vec![projection.clone()],
+            selection: None,
+            ordering: vec![Ordering {
+                expression: projection,
+                direction: SortDirection::Unspecified,
+                null_order: server_plan::NullOrder::Unspecified,
+            }],
+        }
+        .encode()
+        .unwrap();
+        ordering[8..12].copy_from_slice(&DISTINCT_SERVER_PLAN_VERSION.to_be_bytes());
+        assert_distinct_rule(
+            decode_plan(
+                function,
+                SERVER_PLAN_FORMAT,
+                DISTINCT_SERVER_PLAN_VERSION,
+                &ordering,
+            ),
+            "ORDER BY is not allowed",
+        );
+
+        assert!(matches!(
+            decode_plan(
+                function,
+                SERVER_PLAN_FORMAT,
+                DISTINCT_SERVER_PLAN_VERSION,
+                b"not a server plan",
+            ),
+            Err(PostgresKernelError::ServerSelect(
+                ServerSelectError::PlanDecode(server_plan::ServerPlanError::InvalidMagic)
+            ))
+        ));
+    }
+
+    #[test]
+    fn distinct_error_display_is_human_facing_without_changing_existing_copy() {
+        let function = FunctionId::from_bytes([0x31; 16]);
+        assert_eq!(
+            ServerSelectError::Distinct {
+                rule: DISTINCT_PROJECTION_RULE,
+            }
+            .to_string(),
+            "saved SELECT DISTINCT function cannot run: projections support only BOOLEAN, INTEGER, BIGINT, BYTES, and REF values"
+        );
+        assert_eq!(
+            ServerSelectError::PlanInvariant { rule: "test" }.to_string(),
+            "server plan invariant failed: test"
+        );
+        assert_eq!(
+            ServerSelectError::ReferenceEvidence {
+                function,
+                rule: "test",
+            }
+            .to_string(),
+            "function function:64rk2c9h64rk2c9h64rk2c9h64 has invalid definition-reference evidence: test"
+        );
+    }
+
+    #[test]
+    fn distinct_signature_rejects_each_unsupported_shape_exactly() {
+        let function_id = FunctionId::from_bytes([0x31; 16]);
+        let valid = function(
+            FunctionDomain::Server,
+            Vec::new(),
+            rows_return(),
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+        );
+        assert!(validate_distinct_function_signature(&valid).is_ok());
+
+        let wrong_domain = function(
+            FunctionDomain::Client,
+            Vec::new(),
+            rows_return(),
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+        );
+        assert!(matches!(
+            validate_distinct_function_signature(&wrong_domain),
+            Err(PostgresKernelError::ServerSelect(
+                ServerSelectError::FunctionDomain { function }
+            )) if function == function_id
+        ));
+
+        assert_signature_rule(
+            validate_distinct_function_signature(&function(
+                FunctionDomain::Server,
+                vec![ParameterDefinition::new(
+                    ParameterId::from_bytes([0x33; 16]),
+                    "value",
+                    0,
+                    ResolvedType::scalar(StandardScalar::Integer),
+                    None,
+                )],
+                rows_return(),
+                FunctionSecurity::Invoker,
+                Some(FunctionTransaction::ReadOnly),
+            )),
+            function_id,
+            "SELECT DISTINCT SERVER functions must have zero parameters",
+        );
+        for return_type in [
+            FunctionReturn::Rows(Vec::new()),
+            FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Integer)),
+        ] {
+            assert_signature_rule(
+                validate_distinct_function_signature(&function(
+                    FunctionDomain::Server,
+                    Vec::new(),
+                    return_type,
+                    FunctionSecurity::Invoker,
+                    Some(FunctionTransaction::ReadOnly),
+                )),
+                function_id,
+                "SELECT DISTINCT SERVER functions must return nonempty ROWS",
+            );
+        }
+        assert_signature_rule(
+            validate_distinct_function_signature(&function(
+                FunctionDomain::Server,
+                Vec::new(),
+                rows_return(),
+                FunctionSecurity::Definer,
+                Some(FunctionTransaction::ReadOnly),
+            )),
+            function_id,
+            "SELECT DISTINCT SERVER functions must use INVOKER security",
+        );
+        for transaction in [
+            None,
+            Some(FunctionTransaction::Atomic),
+            Some(FunctionTransaction::Manual),
+        ] {
+            assert_signature_rule(
+                validate_distinct_function_signature(&function(
+                    FunctionDomain::Server,
+                    Vec::new(),
+                    rows_return(),
+                    FunctionSecurity::Invoker,
+                    transaction,
+                )),
+                function_id,
+                "SELECT DISTINCT SERVER functions must use READ ONLY transactions",
+            );
+        }
+        for volatility in [FunctionVolatility::Immutable, FunctionVolatility::Volatile] {
+            assert_signature_rule(
+                validate_distinct_function_signature(&function_with_volatility(
+                    FunctionDomain::Server,
+                    Vec::new(),
+                    rows_return(),
+                    FunctionSecurity::Invoker,
+                    Some(FunctionTransaction::ReadOnly),
+                    volatility,
+                )),
+                function_id,
+                "SELECT DISTINCT SERVER functions must use STABLE volatility",
+            );
+        }
+    }
+
+    #[test]
+    fn parameter_free_versions_accept_only_an_empty_argument_slice() {
+        assert!(validate_no_arguments(&[]).is_ok());
+        let argument = FunctionArgument::new(
+            ParameterId::from_bytes([0x33; 16]),
+            RuntimeValue::Integer(7),
+        )
+        .unwrap();
+        assert_argument_rule(
+            validate_no_arguments(&[argument]),
+            None,
+            "this function does not accept arguments",
+        );
     }
 
     #[test]
@@ -2834,10 +3442,85 @@ mod tests {
     }
 
     #[test]
+    fn distinct_evidence_orders_source_projections_then_optional_selection() {
+        let (_, source, reference, _) = catalogue();
+        let target = TypeId::from_bytes([0x20; 16]);
+        let projection = Expression {
+            kind: ExpressionKind::FieldPath {
+                input: 0,
+                steps: vec![FieldStep {
+                    owner: source,
+                    field: reference,
+                }],
+            },
+            value_type: ValueType {
+                resolved_type: ResolvedType::reference(target),
+                nullable: true,
+            },
+        };
+        let object_reference = || Expression {
+            kind: ExpressionKind::ObjectReference { input: 0 },
+            value_type: ValueType {
+                resolved_type: ResolvedType::reference(source),
+                nullable: false,
+            },
+        };
+        let selection = Expression {
+            kind: ExpressionKind::Equality {
+                left: Box::new(object_reference()),
+                right: Box::new(object_reference()),
+            },
+            value_type: ValueType {
+                resolved_type: ResolvedType::scalar(StandardScalar::Boolean),
+                nullable: false,
+            },
+        };
+
+        assert_eq!(
+            expected_unordered_body_references(source, &[projection], Some(&selection)),
+            vec![
+                ExpectedDefinitionReference::new(
+                    DefinitionReferenceKind::QueryObject,
+                    DefinitionReferenceTarget::ObjectType(source),
+                ),
+                ExpectedDefinitionReference::new(
+                    DefinitionReferenceKind::QueryField,
+                    DefinitionReferenceTarget::Field {
+                        owner: source,
+                        field: reference,
+                    },
+                ),
+                ExpectedDefinitionReference::new(
+                    DefinitionReferenceKind::ObjectReference,
+                    DefinitionReferenceTarget::ObjectType(source),
+                ),
+                ExpectedDefinitionReference::new(
+                    DefinitionReferenceKind::ObjectReference,
+                    DefinitionReferenceTarget::ObjectType(source),
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn distinct_evidence_mismatches_use_the_exact_human_rules() {
+        assert_distinct_rule::<()>(
+            Err(distinct_reference_error(ReferenceReplayMismatch::Count)),
+            DISTINCT_REFERENCE_COUNT_RULE,
+        );
+        assert_distinct_rule::<()>(
+            Err(distinct_reference_error(ReferenceReplayMismatch::Sequence)),
+            DISTINCT_REFERENCE_SEQUENCE_RULE,
+        );
+    }
+
+    #[test]
     fn identity_selected_cardinality_accepts_zero_or_one_and_rejects_two() {
+        assert!(ResultCardinality::BoundedMany.validate(2).is_ok());
         assert!(validate_identity_selected_cardinality(0).is_ok());
         assert!(validate_identity_selected_cardinality(1).is_ok());
-        let error = validate_identity_selected_cardinality(2).unwrap_err();
+        assert!(ResultCardinality::AtMostOne.validate(1).is_ok());
+        let error = ResultCardinality::AtMostOne.validate(2).unwrap_err();
         assert_eq!(
             error.to_string(),
             "server SELECT failed: SERVER SELECT returned too many rows: more than one row was returned for the requested object"
@@ -2995,6 +3678,167 @@ mod tests {
         assert!(!supports_ordering_type(ResolvedType::reference(
             TypeId::from_bytes([0x57; 16])
         )));
+    }
+
+    #[test]
+    fn distinct_projection_domain_is_exhaustive_and_independent() {
+        let mut accepted_scalars = 0usize;
+        for scalar in StandardScalar::ALL {
+            let expected = matches!(
+                scalar,
+                StandardScalar::Boolean
+                    | StandardScalar::Integer
+                    | StandardScalar::BigInt
+                    | StandardScalar::BinaryLargeObject
+            );
+            assert_eq!(
+                supports_distinct_projection_type(ResolvedType::scalar(scalar)),
+                expected,
+                "unexpected SELECT DISTINCT support for {scalar:?}",
+            );
+            accepted_scalars += usize::from(expected);
+        }
+        assert_eq!(accepted_scalars, 4);
+        assert!(supports_distinct_projection_type(ResolvedType::reference(
+            TypeId::from_bytes([0x55; 16])
+        )));
+        assert!(!supports_distinct_projection_type(ResolvedType::named(
+            TypeId::from_bytes([0x56; 16])
+        )));
+    }
+
+    #[test]
+    fn distinct_plan_revalidates_catalogue_shape_and_uses_its_own_equality_copy() {
+        let (catalogue, source, reference, value) = catalogue();
+        let target = TypeId::from_bytes([0x20; 16]);
+        let reference_projection = |scan| Expression {
+            kind: ExpressionKind::ObjectReference { input: 0 },
+            value_type: ValueType {
+                resolved_type: ResolvedType::reference(scan),
+                nullable: false,
+            },
+        };
+        let plan = DistinctServerPlan::new(
+            Scan {
+                input: 0,
+                object_type: source,
+            },
+            [reference_projection(source)],
+            None,
+        )
+        .unwrap();
+        let reference_rows = FunctionReturn::Rows(vec![FunctionReturnColumnDefinition::new(
+            "value",
+            0,
+            ResolvedType::reference(source),
+        )]);
+        let reference_function = function(
+            FunctionDomain::Server,
+            Vec::new(),
+            reference_rows,
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+        );
+        assert!(validate_distinct_plan(&catalogue, &reference_function, &plan).is_ok());
+
+        let inactive = TypeId::from_bytes([0x99; 16]);
+        let inactive_plan = DistinctServerPlan::new(
+            Scan {
+                input: 0,
+                object_type: inactive,
+            },
+            [reference_projection(inactive)],
+            None,
+        )
+        .unwrap();
+        assert_plan_rule(
+            validate_distinct_plan(&catalogue, &reference_function, &inactive_plan),
+            "scan must use active input zero and an active object type",
+        );
+        assert_plan_rule(
+            validate_distinct_plan(
+                &catalogue,
+                &function(
+                    FunctionDomain::Server,
+                    Vec::new(),
+                    boolean_rows_return(),
+                    FunctionSecurity::Invoker,
+                    Some(FunctionTransaction::ReadOnly),
+                ),
+                &plan,
+            ),
+            "projection type must equal its ROWS column",
+        );
+
+        let unknown_field = DistinctServerPlan::new(
+            Scan {
+                input: 0,
+                object_type: source,
+            },
+            [Expression {
+                kind: ExpressionKind::FieldPath {
+                    input: 0,
+                    steps: vec![FieldStep {
+                        owner: source,
+                        field: FieldId::from_bytes([0x99; 16]),
+                    }],
+                },
+                value_type: ValueType {
+                    resolved_type: ResolvedType::scalar(StandardScalar::Boolean),
+                    nullable: false,
+                },
+            }],
+            None,
+        )
+        .unwrap();
+        assert_plan_rule(
+            validate_distinct_plan(
+                &catalogue,
+                &function(
+                    FunctionDomain::Server,
+                    Vec::new(),
+                    boolean_rows_return(),
+                    FunctionSecurity::Invoker,
+                    Some(FunctionTransaction::ReadOnly),
+                ),
+                &unknown_field,
+            ),
+            "field path field must exist on its active owner",
+        );
+
+        let text = nullable_text_path(source, reference, target, value);
+        let unsupported_equality = DistinctServerPlan::new(
+            Scan {
+                input: 0,
+                object_type: source,
+            },
+            [Expression {
+                kind: ExpressionKind::Equality {
+                    left: Box::new(text.clone()),
+                    right: Box::new(text),
+                },
+                value_type: ValueType {
+                    resolved_type: ResolvedType::scalar(StandardScalar::Boolean),
+                    nullable: true,
+                },
+            }],
+            None,
+        )
+        .unwrap();
+        assert_plan_rule(
+            validate_distinct_plan(
+                &catalogue,
+                &function(
+                    FunctionDomain::Server,
+                    Vec::new(),
+                    boolean_rows_return(),
+                    FunctionSecurity::Invoker,
+                    Some(FunctionTransaction::ReadOnly),
+                ),
+                &unsupported_equality,
+            ),
+            DISTINCT_EQUALITY_RULE,
+        );
     }
 
     #[test]
