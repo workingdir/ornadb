@@ -91,6 +91,7 @@ pub struct CreateField {
     field_id: FieldId,
     field_type: PhysicalFieldType,
     nullable: bool,
+    unique: bool,
 }
 
 impl CreateField {
@@ -107,6 +108,11 @@ impl CreateField {
     /// Reports whether the physical field can contain null.
     pub const fn nullable(&self) -> bool {
         self.nullable
+    }
+
+    /// Reports whether the physical field requires one-column uniqueness.
+    pub const fn unique(&self) -> bool {
+        self.unique
     }
 }
 
@@ -140,7 +146,7 @@ pub enum PhysicalPlanError {
     UnsupportedNamedFieldType { object_type: TypeId, field: FieldId },
     /// A new field uses the non-storable VOID scalar.
     UnsupportedVoidField { object_type: TypeId, field: FieldId },
-    /// Initial physical creation does not yet enforce field uniqueness.
+    /// The field requests uniqueness outside the required typed-reference shape.
     UnsupportedUniqueField { object_type: TypeId, field: FieldId },
     /// Initial physical creation does not yet install field defaults.
     UnsupportedFieldDefault { object_type: TypeId, field: FieldId },
@@ -173,7 +179,7 @@ impl fmt::Display for PhysicalPlanError {
                 formatter.write_str("VOID fields cannot be stored")
             }
             Self::UnsupportedUniqueField { .. } => {
-                formatter.write_str("physical UNIQUE fields are not supported")
+                formatter.write_str("UNIQUE is supported only for required REF fields")
             }
             Self::UnsupportedFieldDefault { .. } => {
                 formatter.write_str("physical field defaults are not supported")
@@ -231,7 +237,7 @@ fn plan_new_field(
     field: &FieldDefinition,
     candidate: &DeployableRevision,
 ) -> Result<CreateField, PhysicalPlanError> {
-    if field.unique() {
+    if field.unique() && !field.is_required_unique_reference() {
         return Err(PhysicalPlanError::UnsupportedUniqueField {
             object_type,
             field: field.id(),
@@ -291,6 +297,7 @@ fn plan_new_field(
         field_id: field.id(),
         field_type,
         nullable: field.nullable(),
+        unique: field.unique(),
     })
 }
 
@@ -388,6 +395,7 @@ mod tests {
                     on_delete: Some(OnDeleteAction::SetNull),
                 },
                 nullable: true,
+                unique: false,
             }]
         );
         assert_eq!(
@@ -397,6 +405,51 @@ mod tests {
                 on_delete: Some(OnDeleteAction::Restrict),
             }
         );
+    }
+
+    #[test]
+    fn plans_required_unique_references_against_the_complete_candidate() {
+        let owner = object(
+            FIRST_TYPE,
+            "owner",
+            vec![field_with_options(
+                FIRST_FIELD,
+                "target",
+                0,
+                ResolvedType::reference(SECOND_TYPE),
+                false,
+                true,
+                None,
+                Some(OnDeleteAction::Restrict),
+            )],
+        );
+        let target = object(
+            SECOND_TYPE,
+            "target",
+            vec![reference_field(
+                SECOND_FIELD,
+                "owner",
+                0,
+                FIRST_TYPE,
+                true,
+                None,
+            )],
+        );
+        let active = active(Vec::new(), 1);
+        let candidate = candidate(&active, vec![owner, target], 2);
+
+        let plan = plan_physical_changes(&active, &candidate).unwrap();
+        let unique = &plan.create_objects()[0].fields()[0];
+        assert_eq!(unique.field_id(), FIRST_FIELD);
+        assert_eq!(
+            unique.field_type(),
+            PhysicalFieldType::Reference {
+                target: SECOND_TYPE,
+                on_delete: Some(OnDeleteAction::Restrict),
+            }
+        );
+        assert!(!unique.nullable());
+        assert!(unique.unique());
     }
 
     #[test]
@@ -437,11 +490,13 @@ mod tests {
                     field_id: FIRST_FIELD,
                     field_type: PhysicalFieldType::Scalar(StandardScalar::Integer),
                     nullable: false,
+                    unique: false,
                 },
                 CreateField {
                     field_id: SECOND_FIELD,
                     field_type: PhysicalFieldType::Scalar(StandardScalar::CharacterLargeObject,),
                     nullable: true,
+                    unique: false,
                 },
             ]
         );
@@ -524,6 +579,87 @@ mod tests {
             plan_physical_changes(&active, &candidate),
             Ok(PhysicalPlan {
                 create_objects: Vec::new(),
+            })
+        );
+    }
+
+    #[test]
+    fn semantic_field_names_do_not_change_required_unique_reference_storage() {
+        let target = object(SECOND_TYPE, "target", Vec::new());
+        let baseline = object(
+            FIRST_TYPE,
+            "owner",
+            vec![field_with_options(
+                FIRST_FIELD,
+                "target",
+                0,
+                ResolvedType::reference(SECOND_TYPE),
+                false,
+                true,
+                None,
+                Some(OnDeleteAction::Cascade),
+            )],
+        );
+        let active = active(vec![baseline, target.clone()], 1);
+        let renamed = object(
+            FIRST_TYPE,
+            "owner",
+            vec![field_with_options(
+                FIRST_FIELD,
+                "renamed_target",
+                0,
+                ResolvedType::reference(SECOND_TYPE),
+                false,
+                true,
+                None,
+                Some(OnDeleteAction::Cascade),
+            )],
+        );
+        let candidate = candidate(&active, vec![renamed, target], 2);
+
+        assert_eq!(
+            plan_physical_changes(&active, &candidate),
+            Ok(PhysicalPlan {
+                create_objects: Vec::new(),
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_adding_or_removing_existing_reference_uniqueness() {
+        let target = object(SECOND_TYPE, "target", Vec::new());
+        let owner = |unique| {
+            object(
+                FIRST_TYPE,
+                "owner",
+                vec![field_with_options(
+                    FIRST_FIELD,
+                    "target",
+                    0,
+                    ResolvedType::reference(SECOND_TYPE),
+                    false,
+                    unique,
+                    None,
+                    Some(OnDeleteAction::Restrict),
+                )],
+            )
+        };
+
+        let unique_active = active(vec![owner(true), target.clone()], 1);
+        let remove_unique = candidate(&unique_active, vec![owner(false), target.clone()], 2);
+        assert_eq!(
+            plan_physical_changes(&unique_active, &remove_unique),
+            Err(PhysicalPlanError::UnsupportedExistingObjectChange {
+                object_type: FIRST_TYPE,
+            })
+        );
+
+        let plain_active = active(vec![owner(false), target.clone()], 3);
+        let add_unique = candidate(&plain_active, vec![owner(true), target], 4);
+        assert_eq!(
+            plan_physical_changes(&plain_active, &add_unique),
+            Err(PhysicalPlanError::UnsupportedExistingObjectChange {
+                object_type: FIRST_TYPE,
             })
         );
     }
@@ -788,6 +924,33 @@ mod tests {
             },
         );
 
+        let target = object(SECOND_TYPE, "second", Vec::new());
+        let nullable_unique_reference = field_with_options(
+            FIRST_FIELD,
+            "second",
+            0,
+            ResolvedType::reference(SECOND_TYPE),
+            true,
+            true,
+            None,
+            None,
+        );
+        let nullable_candidate = candidate(
+            &active,
+            vec![
+                object(FIRST_TYPE, "first", vec![nullable_unique_reference]),
+                target.clone(),
+            ],
+            29,
+        );
+        assert_eq!(
+            plan_physical_changes(&active, &nullable_candidate),
+            Err(PhysicalPlanError::UnsupportedUniqueField {
+                object_type: FIRST_TYPE,
+                field: FIRST_FIELD,
+            })
+        );
+
         assert_new_field_error(
             &active,
             field_with_options(
@@ -834,7 +997,6 @@ mod tests {
             },
         );
 
-        let target = object(SECOND_TYPE, "second", Vec::new());
         let invalid_set_null = reference_field(
             FIRST_FIELD,
             "second",
