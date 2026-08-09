@@ -81,6 +81,25 @@ const MANY_SOURCE: &str = "CREATE SCHEMA many;\n\
     CREATE SERVER FUNCTION many.all_rows() RETURNS ROWS (value INT)\n\
     AS SELECT r.value FROM many.row r ORDER BY r.value;\n";
 
+const DIRECT_BOOLEAN_PREDICATE_SOURCE: &str = r"CREATE SCHEMA predicate;
+    CREATE TYPE predicate.child AS OBJECT (active BOOL);
+    CREATE TYPE predicate.row AS OBJECT (
+      child REF predicate.child, active BOOL, value INT NOT NULL, label TEXT NOT NULL
+    );
+    CREATE SERVER FUNCTION predicate.active()
+    RETURNS ROWS (value INT, label TEXT)
+    AS SELECT r.value, r.label FROM predicate.row r WHERE r.active ORDER BY r.value;
+    CREATE SERVER FUNCTION predicate.child_active()
+    RETURNS ROWS (value INT, label TEXT)
+    AS SELECT r.value, r.label FROM predicate.row r WHERE r.child.active ORDER BY r.value;
+    CREATE SERVER FUNCTION predicate.always()
+    RETURNS ROWS (value INT, label TEXT)
+    AS SELECT r.value, r.label FROM predicate.row r WHERE TRUE ORDER BY r.value;
+    CREATE SERVER FUNCTION predicate.never()
+    RETURNS ROWS (value INT, label TEXT)
+    AS SELECT r.value, r.label FROM predicate.row r WHERE FALSE ORDER BY r.value;
+";
+
 #[cfg(feature = "test-hooks")]
 const WAIT: Duration = Duration::from_secs(5);
 #[cfg(feature = "test-hooks")]
@@ -109,6 +128,104 @@ async fn executes_the_active_server_select_subset_exactly() -> TestResult<()> {
         require(
             empty.rows().rows().is_empty(),
             "zero-match function returned a row",
+        )?;
+        require_no_session_leaks(&database).await
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn direct_boolean_predicates_preserve_v1_truth_null_order_and_duplicates() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = hostile_kernel(&database)?;
+        kernel.bootstrap().await?;
+        let active = kernel.recover().await?;
+        let applied = kernel
+            .apply(&candidate(DIRECT_BOOLEAN_PREDICATE_SOURCE, &active)?)
+            .await?;
+        let fixture = DirectBooleanPredicateFixture::from_active(&applied)?;
+        insert_direct_boolean_predicate_rows(&database, fixture).await?;
+        install_direct_boolean_predicate_decoy(&database, fixture).await?;
+
+        let root_active = kernel.execute_server_select(fixture.active).await?;
+        require_result_identity(
+            &root_active,
+            applied.pair(),
+            fixture.active,
+            fixture.active_revision,
+        )?;
+        require_direct_boolean_predicate_columns(&root_active)?;
+        require_direct_boolean_predicate_rows(
+            &root_active,
+            &[
+                (10, "duplicate"),
+                (10, "duplicate"),
+                (40, "missing child"),
+                (50, "child false"),
+                (60, "child null"),
+            ],
+            "direct root Boolean predicate",
+        )?;
+
+        let child_active = kernel
+            .execute_server_select(fixture.child_active_function)
+            .await?;
+        require_result_identity(
+            &child_active,
+            applied.pair(),
+            fixture.child_active_function,
+            fixture.child_active_revision,
+        )?;
+        require_direct_boolean_predicate_columns(&child_active)?;
+        require_direct_boolean_predicate_rows(
+            &child_active,
+            &[
+                (10, "duplicate"),
+                (10, "duplicate"),
+                (20, "root false"),
+                (30, "root null"),
+            ],
+            "nullable child Boolean predicate",
+        )?;
+
+        let always = kernel.execute_server_select(fixture.always).await?;
+        require_result_identity(
+            &always,
+            applied.pair(),
+            fixture.always,
+            fixture.always_revision,
+        )?;
+        require_direct_boolean_predicate_columns(&always)?;
+        require_direct_boolean_predicate_rows(
+            &always,
+            &[
+                (10, "duplicate"),
+                (10, "duplicate"),
+                (20, "root false"),
+                (30, "root null"),
+                (40, "missing child"),
+                (50, "child false"),
+                (60, "child null"),
+            ],
+            "TRUE Boolean predicate",
+        )?;
+
+        let never = kernel.execute_server_select(fixture.never).await?;
+        require_result_identity(
+            &never,
+            applied.pair(),
+            fixture.never,
+            fixture.never_revision,
+        )?;
+        require_direct_boolean_predicate_columns(&never)?;
+        require(
+            never.rows().rows().is_empty(),
+            "FALSE Boolean predicate returned a row",
+        )?;
+        require(
+            kernel.recover().await?.pair() == applied.pair(),
+            "direct Boolean predicate execution changed the active pair",
         )?;
         require_no_session_leaks(&database).await
     })
@@ -1021,6 +1138,88 @@ struct Fixture {
     duplicate_reference: ObjectId,
 }
 
+#[derive(Clone, Copy)]
+struct DirectBooleanPredicateFixture {
+    child: TypeId,
+    row: TypeId,
+    child_active: FieldId,
+    row_child: FieldId,
+    row_active: FieldId,
+    row_value: FieldId,
+    row_label: FieldId,
+    active: FunctionId,
+    child_active_function: FunctionId,
+    always: FunctionId,
+    never: FunctionId,
+    active_revision: FunctionRevisionId,
+    child_active_revision: FunctionRevisionId,
+    always_revision: FunctionRevisionId,
+    never_revision: FunctionRevisionId,
+    true_child: ObjectId,
+    false_child: ObjectId,
+    null_child: ObjectId,
+}
+
+impl DirectBooleanPredicateFixture {
+    fn from_active(active: &ActiveDatabaseRevision) -> TestResult<Self> {
+        let child = active
+            .catalogue()
+            .object_types()
+            .iter()
+            .find(|object| name_is(object.name().parts(), &["predicate", "child"]))
+            .ok_or_else(|| failure("direct Boolean child type is absent"))?;
+        let row = active
+            .catalogue()
+            .object_types()
+            .iter()
+            .find(|object| name_is(object.name().parts(), &["predicate", "row"]))
+            .ok_or_else(|| failure("direct Boolean row type is absent"))?;
+        let child_field = |name| {
+            child
+                .field_by_name(name)
+                .map(|field| field.id())
+                .ok_or_else(|| failure(format!("direct Boolean child field {name} is absent")))
+        };
+        let row_field = |name| {
+            row.field_by_name(name)
+                .map(|field| field.id())
+                .ok_or_else(|| failure(format!("direct Boolean row field {name} is absent")))
+        };
+        let function = |name| {
+            active
+                .catalogue()
+                .functions()
+                .iter()
+                .find(|function| name_is(function.name().parts(), &["predicate", name]))
+                .ok_or_else(|| failure(format!("direct Boolean function {name} is absent")))
+        };
+        let active_function = function("active")?;
+        let child_active_function = function("child_active")?;
+        let always = function("always")?;
+        let never = function("never")?;
+        Ok(Self {
+            child: child.id(),
+            row: row.id(),
+            child_active: child_field("active")?,
+            row_child: row_field("child")?,
+            row_active: row_field("active")?,
+            row_value: row_field("value")?,
+            row_label: row_field("label")?,
+            active: active_function.id(),
+            child_active_function: child_active_function.id(),
+            always: always.id(),
+            never: never.id(),
+            active_revision: active_function.current_revision(),
+            child_active_revision: child_active_function.current_revision(),
+            always_revision: always.current_revision(),
+            never_revision: never.current_revision(),
+            true_child: ObjectId::from_bytes([0x81; 16]),
+            false_child: ObjectId::from_bytes([0x82; 16]),
+            null_child: ObjectId::from_bytes([0x83; 16]),
+        })
+    }
+}
+
 impl Fixture {
     fn from_active(active: &ActiveDatabaseRevision) -> TestResult<Self> {
         let node = active
@@ -1155,6 +1354,111 @@ async fn insert_execution_rows(database: &TestDatabase, fixture: Fixture) -> Tes
     }
     .await;
     finish_session(session, operation, "execution fixture insert").await
+}
+
+async fn insert_direct_boolean_predicate_rows(
+    database: &TestDatabase,
+    fixture: DirectBooleanPredicateFixture,
+) -> TestResult<()> {
+    let child_statement = format!(
+        "INSERT INTO {} (_orna_object_id, {}) VALUES ($1, $2)",
+        relation(fixture.child),
+        field(fixture.child_active),
+    );
+    let row_statement = format!(
+        "INSERT INTO {} (_orna_object_id, {}, {}, {}, {}) VALUES ($1, $2, $3, $4, $5)",
+        relation(fixture.row),
+        field(fixture.row_child),
+        field(fixture.row_active),
+        field(fixture.row_value),
+        field(fixture.row_label),
+    );
+    let session = database.open().await?;
+    let operation: TestResult<()> = async {
+        for (object, active) in [
+            (fixture.true_child, Some(true)),
+            (fixture.false_child, Some(false)),
+            (fixture.null_child, None),
+        ] {
+            session
+                .client()
+                .execute(&child_statement, &[&object.to_bytes().to_vec(), &active])
+                .await?;
+        }
+        for (object, child, active, value, label) in [
+            (
+                ObjectId::from_bytes([0x91; 16]),
+                Some(fixture.true_child),
+                Some(true),
+                10,
+                "duplicate",
+            ),
+            (
+                ObjectId::from_bytes([0x92; 16]),
+                Some(fixture.true_child),
+                Some(true),
+                10,
+                "duplicate",
+            ),
+            (
+                ObjectId::from_bytes([0x93; 16]),
+                Some(fixture.true_child),
+                Some(false),
+                20,
+                "root false",
+            ),
+            (
+                ObjectId::from_bytes([0x94; 16]),
+                Some(fixture.true_child),
+                None,
+                30,
+                "root null",
+            ),
+            (
+                ObjectId::from_bytes([0x95; 16]),
+                None,
+                Some(true),
+                40,
+                "missing child",
+            ),
+            (
+                ObjectId::from_bytes([0x96; 16]),
+                Some(fixture.false_child),
+                Some(true),
+                50,
+                "child false",
+            ),
+            (
+                ObjectId::from_bytes([0x97; 16]),
+                Some(fixture.null_child),
+                Some(true),
+                60,
+                "child null",
+            ),
+        ] {
+            session
+                .client()
+                .execute(
+                    &row_statement,
+                    &[
+                        &object.to_bytes().to_vec(),
+                        &child.map(|object| object.to_bytes().to_vec()),
+                        &active,
+                        &value,
+                        &label,
+                    ],
+                )
+                .await?;
+        }
+        Ok(())
+    }
+    .await;
+    finish_session(
+        session,
+        operation,
+        "direct Boolean predicate fixture insert",
+    )
+    .await
 }
 
 async fn insert_distinct_duplicate_rows(
@@ -1345,6 +1649,51 @@ async fn install_public_execution_decoy(
     }
     .await;
     finish_session(session, operation, "public execution decoy").await
+}
+
+async fn install_direct_boolean_predicate_decoy(
+    database: &TestDatabase,
+    fixture: DirectBooleanPredicateFixture,
+) -> TestResult<()> {
+    let session = database.open().await?;
+    let operation: TestResult<()> = async {
+        session
+            .client()
+            .batch_execute(&format!(
+                "CREATE TABLE public.t_{:032x} \
+                 (_orna_object_id bytea, {} bytea, {} boolean, {} integer, {} text);",
+                u128::from_be_bytes(fixture.row.to_bytes()),
+                field(fixture.row_child),
+                field(fixture.row_active),
+                field(fixture.row_value),
+                field(fixture.row_label),
+            ))
+            .await?;
+        session
+            .client()
+            .execute(
+                &format!(
+                    "INSERT INTO public.t_{:032x} (_orna_object_id, {}, {}, {}, {}) \
+                     VALUES ($1, $2, $3, $4, $5)",
+                    u128::from_be_bytes(fixture.row.to_bytes()),
+                    field(fixture.row_child),
+                    field(fixture.row_active),
+                    field(fixture.row_value),
+                    field(fixture.row_label),
+                ),
+                &[
+                    &vec![0xa1_u8; 16],
+                    &Some(fixture.true_child.to_bytes().to_vec()),
+                    &true,
+                    &-1_i32,
+                    &"hostile public row",
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+    .await;
+    finish_session(session, operation, "direct Boolean public execution decoy").await
 }
 
 #[cfg(feature = "test-hooks")]
@@ -1566,6 +1915,62 @@ fn require_exact_rows(
         require(
             actual.values() == expected,
             format!("result row {index} values differ from the canonical fixture"),
+        )?;
+    }
+    Ok(())
+}
+
+fn require_direct_boolean_predicate_columns(result: &ServerSelectResult) -> TestResult<()> {
+    let expected = [
+        (
+            "value",
+            ResolvedType::scalar(StandardScalar::Integer),
+            false,
+        ),
+        (
+            "label",
+            ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+            false,
+        ),
+    ];
+    require(
+        result.rows().columns().len() == expected.len(),
+        "direct Boolean predicate result has the wrong column count",
+    )?;
+    for (column, (name, resolved_type, nullable)) in result.rows().columns().iter().zip(expected) {
+        require(
+            column.name() == name,
+            format!("direct Boolean predicate column name is not {name}"),
+        )?;
+        require(
+            column.resolved_type() == resolved_type,
+            format!("direct Boolean predicate column {name} has the wrong type"),
+        )?;
+        require(
+            column.nullable() == nullable,
+            format!("direct Boolean predicate column {name} has the wrong nullability"),
+        )?;
+    }
+    Ok(())
+}
+
+fn require_direct_boolean_predicate_rows(
+    result: &ServerSelectResult,
+    expected: &[(i32, &'static str)],
+    name: &'static str,
+) -> TestResult<()> {
+    require(
+        result.rows().rows().len() == expected.len(),
+        format!("{name} returned the wrong row count"),
+    )?;
+    for (index, (actual, (value, label))) in result.rows().rows().iter().zip(expected).enumerate() {
+        require(
+            actual.values()
+                == [
+                    RuntimeValue::Integer(*value),
+                    RuntimeValue::Text((*label).to_owned()),
+                ],
+            format!("{name} row {index} differs from the exact ordered typed row"),
         )?;
     }
     Ok(())
