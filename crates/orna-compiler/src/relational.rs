@@ -359,7 +359,6 @@ pub(crate) enum QueryReferenceTarget<T = TypeId, F = FieldId> {
     Field { owner: T, field: F },
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 impl<T, F> RelationalQueryIr<T, F> {
     pub(crate) fn scan(&self) -> &ScanIr<T> {
         &self.scan
@@ -395,13 +394,6 @@ impl<T, F> DistinctQueryIr<T, F> {
     }
 }
 
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "the preparation stage consumes checked identity mappings in the next slice"
-    )
-)]
 impl<T: Copy, F: Copy> RelationalQueryIr<T, F> {
     /// Rewrites every semantic identity while preserving the checked plan shape.
     ///
@@ -469,6 +461,85 @@ impl<T: Copy, F: Copy> DistinctQueryIr<T, F> {
                 .map(|expression| try_map_expression(expression, &mut map_type, &mut map_field))
                 .transpose()?,
         })
+    }
+}
+
+/// One closed malformed duplicate-preserving query shape used to test durable validation.
+#[cfg(test)]
+pub(crate) enum RelationalQueryTestMutation {
+    /// Changes the scan object identity.
+    InvalidScan,
+    /// Changes the input of the field-path projection.
+    InvalidProjectionFieldPathInput,
+    /// Changes the input of the object-reference projection.
+    InvalidObjectReferenceInput,
+    /// Changes the type facts of the Boolean literal in the equality selection.
+    InvalidBooleanLiteralType,
+    /// Changes the result type facts of the equality selection.
+    InvalidEqualityType,
+    /// Changes the input of the first ordering field path.
+    InvalidOrderingFieldPathInput,
+    /// Replaces the selection with the valid object-reference projection.
+    SelectionObjectReference,
+}
+
+#[cfg(test)]
+impl RelationalQueryIr<TypeId, FieldId> {
+    /// Returns one deliberately malformed duplicate-preserving query for preparation tests.
+    pub(crate) fn with_test_mutation(&self, mutation: RelationalQueryTestMutation) -> Self {
+        let mut query = self.clone();
+        match mutation {
+            RelationalQueryTestMutation::InvalidScan => {
+                query.scan.object_type = TypeId::new();
+            }
+            RelationalQueryTestMutation::InvalidProjectionFieldPathInput => {
+                let ExpressionKind::FieldPath { input, .. } = &mut query.projections[1].kind else {
+                    panic!("test fixture second projection must be a field path");
+                };
+                *input = InputSlot(1);
+            }
+            RelationalQueryTestMutation::InvalidObjectReferenceInput => {
+                let ExpressionKind::ObjectReference { input } = &mut query.projections[0].kind
+                else {
+                    panic!("test fixture first projection must be an object reference");
+                };
+                *input = InputSlot(1);
+            }
+            RelationalQueryTestMutation::InvalidBooleanLiteralType => {
+                let Some(ExpressionIr {
+                    kind: ExpressionKind::Equality { right, .. },
+                    ..
+                }) = query.selection.as_mut()
+                else {
+                    panic!("test fixture selection must be an equality");
+                };
+                right.value_type = ValueType {
+                    semantic_type: SemanticType::scalar(StandardScalar::Integer),
+                    nullable: false,
+                };
+            }
+            RelationalQueryTestMutation::InvalidEqualityType => {
+                let Some(selection) = query.selection.as_mut() else {
+                    panic!("test fixture must have a selection");
+                };
+                selection.value_type = ValueType {
+                    semantic_type: SemanticType::scalar(StandardScalar::Integer),
+                    nullable: false,
+                };
+            }
+            RelationalQueryTestMutation::InvalidOrderingFieldPathInput => {
+                let ExpressionKind::FieldPath { input, .. } =
+                    &mut query.ordering[0].expression.kind
+                else {
+                    panic!("test fixture first ordering must be a field path");
+                };
+                *input = InputSlot(1);
+            }
+            RelationalQueryTestMutation::SelectionObjectReference => {
+                query.selection = Some(query.projections[0].clone());
+            }
+        }
+        query
     }
 }
 
@@ -565,13 +636,6 @@ impl DistinctQueryIr<TypeId, FieldId> {
     }
 }
 
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "the preparation stage consumes checked identity mappings in the next slice"
-    )
-)]
 fn try_map_expression<T: Copy, F: Copy, T2, F2, E>(
     expression: &ExpressionIr<T, F>,
     map_type: &mut impl FnMut(T) -> Result<T2, E>,
@@ -611,13 +675,6 @@ fn try_map_expression<T: Copy, F: Copy, T2, F2, E>(
     })
 }
 
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "the preparation stage consumes checked identity mappings in the next slice"
-    )
-)]
 fn try_map_semantic_type<T: Copy, T2, E>(
     semantic_type: SemanticType<T>,
     map_type: &mut impl FnMut(T) -> Result<T2, E>,

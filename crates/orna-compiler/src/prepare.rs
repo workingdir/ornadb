@@ -380,6 +380,96 @@ fn identity_selected_query_plan(
         .map_err(PrepareError::from)
 }
 
+fn version_one_query_plan(
+    plan: &crate::relational::RelationalQueryIr<TypeId, FieldId>,
+    function: &FunctionDefinition,
+    object_types: &[ObjectTypeDefinition],
+    references: &[(DefinitionReferenceKind, DefinitionReferenceTarget)],
+) -> Result<Vec<u8>, PrepareError> {
+    let scan = object_types
+        .iter()
+        .find(|object_type| object_type.id() == plan.scan().object_type())
+        .ok_or(PrepareError::InvalidCheckedBundle {
+            reason: "SERVER SELECT query scan object is absent from the candidate catalogue",
+        })?;
+    if function.domain() != FunctionDomain::Server
+        || function.security() != FunctionSecurity::Invoker
+        || !matches!(
+            function.transaction(),
+            None | Some(FunctionTransaction::Atomic | FunctionTransaction::ReadOnly)
+        )
+    {
+        return Err(PrepareError::InvalidCheckedBundle {
+            reason: "SERVER SELECT query function has unsupported execution modes",
+        });
+    }
+    if !function.parameters().is_empty() {
+        return Err(PrepareError::InvalidCheckedBundle {
+            reason: "SERVER SELECT query function declares parameters",
+        });
+    }
+    let FunctionReturn::Rows(columns) = function.return_type() else {
+        return Err(PrepareError::InvalidCheckedBundle {
+            reason: "SERVER SELECT query function does not return ROWS",
+        });
+    };
+    if columns.is_empty() {
+        return Err(PrepareError::InvalidCheckedBundle {
+            reason: "SERVER SELECT query function returns empty ROWS",
+        });
+    }
+    if columns.len() != plan.projections().len() {
+        return Err(PrepareError::InvalidCheckedBundle {
+            reason: "SERVER SELECT query projection count differs from its function return",
+        });
+    }
+    for (projection, column) in plan.projections().iter().zip(columns) {
+        validate_query_expression_facts(
+            projection,
+            scan,
+            plan.scan().input(),
+            object_types,
+            VERSION_ONE_QUERY_FACTS,
+        )?;
+        if resolved_type_from_semantic(projection.value_type().semantic_type())
+            != column.resolved_type()
+        {
+            return Err(PrepareError::InvalidCheckedBundle {
+                reason: "SERVER SELECT query projection differs from its function return",
+            });
+        }
+    }
+    if let Some(selection) = plan.selection() {
+        validate_query_expression_facts(
+            selection,
+            scan,
+            plan.scan().input(),
+            object_types,
+            VERSION_ONE_QUERY_FACTS,
+        )?;
+        if selection.value_type().semantic_type() != SemanticType::Scalar(StandardScalar::Boolean) {
+            return Err(PrepareError::InvalidCheckedBundle {
+                reason: "SERVER SELECT query selection is not BOOLEAN",
+            });
+        }
+    }
+    for ordering in plan.ordering() {
+        validate_query_expression_facts(
+            ordering.expression(),
+            scan,
+            plan.scan().input(),
+            object_types,
+            VERSION_ONE_QUERY_FACTS,
+        )?;
+    }
+    validate_reference_sequence(
+        &version_one_query_reference_sequence(plan, function),
+        references,
+        "SERVER SELECT definition references differ from the checked function body",
+    )?;
+    plan.encode_server_plan().map_err(PrepareError::from)
+}
+
 fn distinct_query_plan(
     plan: &crate::relational::DistinctQueryIr<TypeId, FieldId>,
     function: &FunctionDefinition,
@@ -502,6 +592,19 @@ const DISTINCT_QUERY_FACTS: QueryExpressionFactAdapter = QueryExpressionFactAdap
     field_path_target: "SELECT DISTINCT query field path target is absent from the candidate catalogue",
     boolean: "SELECT DISTINCT query BOOLEAN expression has inconsistent type facts",
     equality: "SELECT DISTINCT query equality expression has inconsistent type facts",
+    require_final_reference_target: true,
+};
+
+const VERSION_ONE_QUERY_FACTS: QueryExpressionFactAdapter = QueryExpressionFactAdapter {
+    object_reference: "SERVER SELECT query object reference has inconsistent facts",
+    field_path_input: "SERVER SELECT query field path has an invalid input or is empty",
+    field_path_owner: "SERVER SELECT query field path owner differs from its source object",
+    field_path_field: "SERVER SELECT query field path field is absent from its source object",
+    field_path_type: "SERVER SELECT query field path type differs from its source field",
+    field_path_continuation: "SERVER SELECT query field path continues through a non-reference field",
+    field_path_target: "SERVER SELECT query field path target is absent from the candidate catalogue",
+    boolean: "SERVER SELECT query BOOLEAN expression has inconsistent type facts",
+    equality: "SERVER SELECT query equality expression has inconsistent type facts",
     require_final_reference_target: true,
 };
 
@@ -657,6 +760,31 @@ fn distinct_query_reference_sequence(
     }
     if let Some(selection) = plan.selection() {
         query_expression_references(selection, plan.scan().object_type(), &mut references);
+    }
+    references
+}
+
+fn version_one_query_reference_sequence(
+    plan: &crate::relational::RelationalQueryIr<TypeId, FieldId>,
+    function: &FunctionDefinition,
+) -> Vec<(DefinitionReferenceKind, DefinitionReferenceTarget)> {
+    let mut references = signature_reference_sequence(function);
+    references.push((
+        DefinitionReferenceKind::QueryObject,
+        DefinitionReferenceTarget::ObjectType(plan.scan().object_type()),
+    ));
+    for projection in plan.projections() {
+        query_expression_references(projection, plan.scan().object_type(), &mut references);
+    }
+    if let Some(selection) = plan.selection() {
+        query_expression_references(selection, plan.scan().object_type(), &mut references);
+    }
+    for ordering in plan.ordering() {
+        query_expression_references(
+            ordering.expression(),
+            plan.scan().object_type(),
+            &mut references,
+        );
     }
     references
 }
@@ -2040,16 +2168,7 @@ impl<'a> CandidateBuilder<'a> {
                 |id| self.identities.function(id),
                 |id| self.identities.parameter(id),
             )?;
-            let references = checked
-                .references()
-                .iter()
-                .map(|reference| {
-                    Ok((
-                        reference.kind(),
-                        self.identities.reference_target(reference.target())?,
-                    ))
-                })
-                .collect::<Result<Vec<_>, PrepareError>>()?;
+            let references = self.mapped_references(checked)?;
             let encoded = identity_selected_query_plan(&plan, function, object_types, &references)?;
             let payload = encoded.payload().to_vec();
             let hash = artifact_payload_digest(&payload)?;
@@ -2070,16 +2189,7 @@ impl<'a> CandidateBuilder<'a> {
                 |id| self.identities.type_id(id),
                 |id| self.identities.field(id),
             )?;
-            let references = checked
-                .references()
-                .iter()
-                .map(|reference| {
-                    Ok((
-                        reference.kind(),
-                        self.identities.reference_target(reference.target())?,
-                    ))
-                })
-                .collect::<Result<Vec<_>, PrepareError>>()?;
+            let references = self.mapped_references(checked)?;
             let encoded = distinct_query_plan(&plan, function, object_types, &references)?;
             let payload = encoded.payload().to_vec();
             let hash = artifact_payload_digest(&payload)?;
@@ -2100,7 +2210,8 @@ impl<'a> CandidateBuilder<'a> {
                 |id| self.identities.type_id(id),
                 |id| self.identities.field(id),
             )?;
-            let payload = plan.encode_server_plan()?;
+            let references = self.mapped_references(checked)?;
+            let payload = version_one_query_plan(&plan, function, object_types, &references)?;
             let hash = artifact_payload_digest(&payload)?;
             return Ok(PreparedServerArtifact {
                 artifact: ExecutableArtifact::new(
@@ -2114,16 +2225,7 @@ impl<'a> CandidateBuilder<'a> {
             });
         }
 
-        let references = checked
-            .references()
-            .iter()
-            .map(|reference| {
-                Ok((
-                    reference.kind(),
-                    self.identities.reference_target(reference.target())?,
-                ))
-            })
-            .collect::<Result<Vec<_>, PrepareError>>()?;
+        let references = self.mapped_references(checked)?;
 
         let (format_version, payload) = if let Some(checked_plan) = checked.mutation_plan() {
             let plan = checked_plan.try_map_identities(
@@ -2159,6 +2261,22 @@ impl<'a> CandidateBuilder<'a> {
             )?,
             language_version: SERVER_MUTATION_PLAN_LANGUAGE_VERSION,
         })
+    }
+
+    fn mapped_references(
+        &self,
+        checked: &crate::CheckedServerFunction,
+    ) -> Result<Vec<(DefinitionReferenceKind, DefinitionReferenceTarget)>, PrepareError> {
+        checked
+            .references()
+            .iter()
+            .map(|reference| {
+                Ok((
+                    reference.kind(),
+                    self.identities.reference_target(reference.target())?,
+                ))
+            })
+            .collect()
     }
 
     fn function_references(
@@ -2250,7 +2368,10 @@ mod tests {
             MutationExpressionKind as DurableMutationExpressionKind, ServerDeletePlan,
             ServerMutationOperation, ServerMutationPlan,
         },
-        server_plan::{DistinctServerPlan, ExpressionKind, IdentitySelectedServerPlan, ServerPlan},
+        server_plan::{
+            DistinctServerPlan, ExpressionKind, IdentitySelectedServerPlan, ServerPlan,
+            ServerPlanError,
+        },
     };
     use orna_core::{
         catalogue::{
@@ -2398,6 +2519,38 @@ mod tests {
         TRANSACTION READ ONLY VOLATILITY STABLE\n\
         AS SELECT REF(t), t.title FROM tasks.task t\n\
         WHERE t.completed = TRUE ORDER BY t.title;\n";
+
+    const DIRECT_BOOLEAN_SOURCE: &str = "CREATE SCHEMA tasks;\n\
+        CREATE TYPE tasks.person AS OBJECT (active BOOL NOT NULL);\n\
+        CREATE TYPE tasks.task AS OBJECT (owner REF tasks.person, completed BOOL NOT NULL);\n\
+        CREATE SERVER FUNCTION tasks.active_tasks()\n\
+        RETURNS ROWS (active BOOL, completed BOOL)\n\
+        AS SELECT t.owner.active, t.completed FROM tasks.task t\n\
+        WHERE t.owner.active ORDER BY t.completed DESC;\n";
+
+    const DIRECT_BOOLEAN_REFORMATTED_SOURCE: &str = "-- source-only direct-predicate edit\n\
+        CREATE SCHEMA tasks;\n\
+        CREATE TYPE tasks.person AS OBJECT ( active BOOL NOT NULL );\n\
+        CREATE TYPE tasks.task AS OBJECT ( owner REF tasks.person, completed BOOL NOT NULL );\n\
+        CREATE SERVER FUNCTION tasks.active_tasks()\n\
+        RETURNS ROWS ( active BOOL, completed BOOL )\n\
+        AS SELECT t.owner.active, t.completed\n\
+        FROM tasks.task t WHERE t.owner.active ORDER BY t.completed DESC;\n";
+
+    const DIRECT_BOOLEAN_CHANGED_PREDICATE_SOURCE: &str = "CREATE SCHEMA tasks;\n\
+        CREATE TYPE tasks.person AS OBJECT (active BOOL NOT NULL);\n\
+        CREATE TYPE tasks.task AS OBJECT (owner REF tasks.person, completed BOOL NOT NULL);\n\
+        CREATE SERVER FUNCTION tasks.active_tasks()\n\
+        RETURNS ROWS (active BOOL, completed BOOL)\n\
+        AS SELECT t.owner.active, t.completed FROM tasks.task t\n\
+        WHERE t.completed ORDER BY t.completed DESC;\n";
+
+    const VERSION_ONE_REFERENCE_SOURCE: &str = "CREATE SCHEMA tasks;\n\
+        CREATE TYPE tasks.person AS OBJECT (active BOOL NOT NULL);\n\
+        CREATE TYPE tasks.task AS OBJECT (owner REF tasks.person);\n\
+        CREATE SERVER FUNCTION tasks.owners()\n\
+        RETURNS ROWS (owner REF tasks.person)\n\
+        AS SELECT t.owner FROM tasks.task t;\n";
 
     const IDENTITY_SELECTED_SOURCE: &str = "CREATE SCHEMA tasks;\n\
         CREATE TYPE tasks.task AS OBJECT (title TEXT NOT NULL);\n\
@@ -2595,8 +2748,14 @@ mod tests {
         );
         let plan = ServerPlan::decode(revision.artifact().payload()).unwrap();
         assert_eq!(revision.artifact().version(), SERVER_PLAN_VERSION);
-        assert!(IdentitySelectedServerPlan::decode(revision.artifact().payload()).is_err());
-        assert!(DistinctServerPlan::decode(revision.artifact().payload()).is_err());
+        assert_eq!(
+            IdentitySelectedServerPlan::decode(revision.artifact().payload()),
+            Err(ServerPlanError::UnsupportedVersion(SERVER_PLAN_VERSION))
+        );
+        assert_eq!(
+            DistinctServerPlan::decode(revision.artifact().payload()),
+            Err(ServerPlanError::UnsupportedVersion(SERVER_PLAN_VERSION))
+        );
         assert_eq!(plan.scan.object_type, task.id());
         assert!(matches!(
             plan.projections[0].kind,
@@ -2674,6 +2833,144 @@ mod tests {
             )
             .unwrap(),
             prepared.catalogue_hash()
+        );
+    }
+
+    #[test]
+    fn prepares_direct_boolean_predicates_as_version_one_server_plans_and_replays_by_semantics() {
+        let empty = empty_active();
+        let initial = prepare(
+            &checked_report(DIRECT_BOOLEAN_SOURCE, empty.catalogue()),
+            empty.pair(),
+            &empty,
+        )
+        .unwrap();
+        let catalogue = initial.candidate();
+        let person = catalogue
+            .object_type_by_name(&semantic_name(&["tasks", "person"]))
+            .unwrap();
+        let task = catalogue
+            .object_type_by_name(&semantic_name(&["tasks", "task"]))
+            .unwrap();
+        let revision = &initial.new_function_revisions()[0];
+        assert_eq!(revision.artifact().version(), SERVER_PLAN_VERSION);
+        let plan = ServerPlan::decode(revision.artifact().payload()).unwrap();
+        assert_eq!(
+            IdentitySelectedServerPlan::decode(revision.artifact().payload()),
+            Err(ServerPlanError::UnsupportedVersion(SERVER_PLAN_VERSION))
+        );
+        assert_eq!(
+            DistinctServerPlan::decode(revision.artifact().payload()),
+            Err(ServerPlanError::UnsupportedVersion(SERVER_PLAN_VERSION))
+        );
+        let selection = plan
+            .selection
+            .as_ref()
+            .expect("fixture has a direct predicate");
+        let ExpressionKind::FieldPath { input, steps } = &selection.kind else {
+            panic!("direct predicate must encode as a field path");
+        };
+        assert_eq!(*input, 0);
+        assert_eq!(
+            steps
+                .iter()
+                .map(|step| (step.owner, step.field))
+                .collect::<Vec<_>>(),
+            vec![
+                (task.id(), task.field_by_name("owner").unwrap().id()),
+                (person.id(), person.field_by_name("active").unwrap().id()),
+            ]
+        );
+        assert_eq!(
+            selection.value_type.resolved_type,
+            ResolvedType::scalar(StandardScalar::Boolean)
+        );
+        assert!(selection.value_type.nullable);
+        assert_eq!(
+            initial
+                .references()
+                .iter()
+                .map(|reference| (reference.kind(), reference.target()))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    DefinitionReferenceKind::QueryObject,
+                    DefinitionReferenceTarget::ObjectType(task.id()),
+                ),
+                (
+                    DefinitionReferenceKind::QueryField,
+                    DefinitionReferenceTarget::Field {
+                        owner: task.id(),
+                        field: task.field_by_name("owner").unwrap().id(),
+                    },
+                ),
+                (
+                    DefinitionReferenceKind::QueryField,
+                    DefinitionReferenceTarget::Field {
+                        owner: person.id(),
+                        field: person.field_by_name("active").unwrap().id(),
+                    },
+                ),
+                (
+                    DefinitionReferenceKind::QueryField,
+                    DefinitionReferenceTarget::Field {
+                        owner: task.id(),
+                        field: task.field_by_name("completed").unwrap().id(),
+                    },
+                ),
+                (
+                    DefinitionReferenceKind::QueryField,
+                    DefinitionReferenceTarget::Field {
+                        owner: task.id(),
+                        field: task.field_by_name("owner").unwrap().id(),
+                    },
+                ),
+                (
+                    DefinitionReferenceKind::QueryField,
+                    DefinitionReferenceTarget::Field {
+                        owner: person.id(),
+                        field: person.field_by_name("active").unwrap().id(),
+                    },
+                ),
+                (
+                    DefinitionReferenceKind::QueryField,
+                    DefinitionReferenceTarget::Field {
+                        owner: task.id(),
+                        field: task.field_by_name("completed").unwrap().id(),
+                    },
+                ),
+            ]
+        );
+
+        let initial_revision = revision.clone();
+        let active = activate(&initial, vec![initial_revision.clone()], Vec::new());
+        let replay = prepare(
+            &checked_report(DIRECT_BOOLEAN_REFORMATTED_SOURCE, active.catalogue()),
+            active.pair(),
+            &active,
+        )
+        .unwrap();
+        assert!(replay.new_function_revisions().is_empty());
+        assert_eq!(
+            replay.candidate().functions()[0].current_revision(),
+            initial_revision.id()
+        );
+
+        let changed = prepare(
+            &checked_report(DIRECT_BOOLEAN_CHANGED_PREDICATE_SOURCE, active.catalogue()),
+            active.pair(),
+            &active,
+        )
+        .unwrap();
+        let changed_revision = &changed.new_function_revisions()[0];
+        assert_ne!(changed_revision.id(), initial_revision.id());
+        assert_ne!(
+            changed_revision.semantic_hash(),
+            initial_revision.semantic_hash()
+        );
+        assert_ne!(
+            changed_revision.artifact().content_hash(),
+            initial_revision.artifact().content_hash()
         );
     }
 
@@ -3093,6 +3390,421 @@ mod tests {
                 &distinct_query_reference_sequence(&plan, &wrong_count),
             ),
             "SELECT DISTINCT query projection count differs from its function return",
+        );
+    }
+
+    #[test]
+    fn version_one_preparation_revalidates_headers_facts_and_evidence_before_encoding() {
+        let (plan, function, object_types, references) = mapped_version_one_fixture();
+        assert!(version_one_query_plan(&plan, &function, &object_types, &references).is_ok());
+
+        let function_with = |domain, parameters, return_type, security, transaction, volatility| {
+            FunctionDefinition::new(
+                function.id(),
+                function.name().clone(),
+                domain,
+                parameters,
+                return_type,
+                function.current_revision(),
+                security,
+                transaction,
+                volatility,
+            )
+        };
+        for (transaction, volatility) in [
+            (None, FunctionVolatility::Immutable),
+            (
+                Some(FunctionTransaction::Atomic),
+                FunctionVolatility::Volatile,
+            ),
+            (
+                Some(FunctionTransaction::ReadOnly),
+                FunctionVolatility::Stable,
+            ),
+        ] {
+            let accepted = function_with(
+                FunctionDomain::Server,
+                Vec::new(),
+                function.return_type().clone(),
+                FunctionSecurity::Invoker,
+                transaction,
+                volatility,
+            );
+            assert!(
+                version_one_query_plan(
+                    &plan,
+                    &accepted,
+                    &object_types,
+                    &version_one_query_reference_sequence(&plan, &accepted),
+                )
+                .is_ok()
+            );
+        }
+
+        assert_preparation_reason(
+            version_one_query_plan(
+                &plan.with_test_mutation(
+                    crate::relational::RelationalQueryTestMutation::InvalidScan,
+                ),
+                &function,
+                &object_types,
+                &references,
+            ),
+            "SERVER SELECT query scan object is absent from the candidate catalogue",
+        );
+
+        let manual = function_with(
+            FunctionDomain::Server,
+            Vec::new(),
+            function.return_type().clone(),
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::Manual),
+            function.volatility(),
+        );
+        assert_preparation_reason(
+            version_one_query_plan(
+                &plan,
+                &manual,
+                &object_types,
+                &version_one_query_reference_sequence(&plan, &manual),
+            ),
+            "SERVER SELECT query function has unsupported execution modes",
+        );
+        for (domain, security) in [
+            (FunctionDomain::Client, FunctionSecurity::Invoker),
+            (FunctionDomain::Server, FunctionSecurity::Definer),
+        ] {
+            let unsupported = function_with(
+                domain,
+                Vec::new(),
+                function.return_type().clone(),
+                security,
+                function.transaction(),
+                function.volatility(),
+            );
+            assert_preparation_reason(
+                version_one_query_plan(
+                    &plan,
+                    &unsupported,
+                    &object_types,
+                    &version_one_query_reference_sequence(&plan, &unsupported),
+                ),
+                "SERVER SELECT query function has unsupported execution modes",
+            );
+        }
+
+        let parameterised = function_with(
+            FunctionDomain::Server,
+            vec![ParameterDefinition::new(
+                ParameterId::new(),
+                "unexpected",
+                0,
+                ResolvedType::scalar(StandardScalar::Boolean),
+                None,
+            )],
+            function.return_type().clone(),
+            FunctionSecurity::Invoker,
+            function.transaction(),
+            function.volatility(),
+        );
+        assert_preparation_reason(
+            version_one_query_plan(
+                &plan,
+                &parameterised,
+                &object_types,
+                &version_one_query_reference_sequence(&plan, &parameterised),
+            ),
+            "SERVER SELECT query function declares parameters",
+        );
+
+        let single = function_with(
+            FunctionDomain::Server,
+            Vec::new(),
+            FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Boolean)),
+            FunctionSecurity::Invoker,
+            function.transaction(),
+            function.volatility(),
+        );
+        assert_preparation_reason(
+            version_one_query_plan(
+                &plan,
+                &single,
+                &object_types,
+                &version_one_query_reference_sequence(&plan, &single),
+            ),
+            "SERVER SELECT query function does not return ROWS",
+        );
+
+        let empty_rows = function_with(
+            FunctionDomain::Server,
+            Vec::new(),
+            FunctionReturn::Rows(Vec::new()),
+            FunctionSecurity::Invoker,
+            function.transaction(),
+            function.volatility(),
+        );
+        assert_preparation_reason(
+            version_one_query_plan(
+                &plan,
+                &empty_rows,
+                &object_types,
+                &version_one_query_reference_sequence(&plan, &empty_rows),
+            ),
+            "SERVER SELECT query function returns empty ROWS",
+        );
+
+        let wrong_count = function_with(
+            FunctionDomain::Server,
+            Vec::new(),
+            FunctionReturn::Rows(vec![FunctionReturnColumnDefinition::new(
+                "only",
+                0,
+                ResolvedType::scalar(StandardScalar::Boolean),
+            )]),
+            FunctionSecurity::Invoker,
+            function.transaction(),
+            function.volatility(),
+        );
+        assert_preparation_reason(
+            version_one_query_plan(
+                &plan,
+                &wrong_count,
+                &object_types,
+                &version_one_query_reference_sequence(&plan, &wrong_count),
+            ),
+            "SERVER SELECT query projection count differs from its function return",
+        );
+
+        let FunctionReturn::Rows(columns) = function.return_type() else {
+            panic!("fixture must return rows");
+        };
+        let mut wrong_columns = columns.to_vec();
+        wrong_columns[1] = FunctionReturnColumnDefinition::new(
+            wrong_columns[1].name(),
+            wrong_columns[1].ordinal(),
+            ResolvedType::scalar(StandardScalar::Boolean),
+        );
+        let wrong_return = function_with(
+            FunctionDomain::Server,
+            Vec::new(),
+            FunctionReturn::Rows(wrong_columns),
+            FunctionSecurity::Invoker,
+            function.transaction(),
+            function.volatility(),
+        );
+        assert_preparation_reason(
+            version_one_query_plan(
+                &plan,
+                &wrong_return,
+                &object_types,
+                &version_one_query_reference_sequence(&plan, &wrong_return),
+            ),
+            "SERVER SELECT query projection differs from its function return",
+        );
+
+        for (mutation, reason) in [
+            (
+                crate::relational::RelationalQueryTestMutation::InvalidProjectionFieldPathInput,
+                "SERVER SELECT query field path has an invalid input or is empty",
+            ),
+            (
+                crate::relational::RelationalQueryTestMutation::InvalidObjectReferenceInput,
+                "SERVER SELECT query object reference has inconsistent facts",
+            ),
+            (
+                crate::relational::RelationalQueryTestMutation::InvalidBooleanLiteralType,
+                "SERVER SELECT query BOOLEAN expression has inconsistent type facts",
+            ),
+            (
+                crate::relational::RelationalQueryTestMutation::InvalidEqualityType,
+                "SERVER SELECT query equality expression has inconsistent type facts",
+            ),
+            (
+                crate::relational::RelationalQueryTestMutation::InvalidOrderingFieldPathInput,
+                "SERVER SELECT query field path has an invalid input or is empty",
+            ),
+            (
+                crate::relational::RelationalQueryTestMutation::SelectionObjectReference,
+                "SERVER SELECT query selection is not BOOLEAN",
+            ),
+        ] {
+            let malformed = plan.with_test_mutation(mutation);
+            assert_preparation_reason(
+                version_one_query_plan(
+                    &malformed,
+                    &function,
+                    &object_types,
+                    &version_one_query_reference_sequence(&malformed, &function),
+                ),
+                reason,
+            );
+        }
+
+        let unknown_field = plan
+            .try_map_identities(Ok::<_, PrepareError>, |_| {
+                Ok::<_, PrepareError>(FieldId::new())
+            })
+            .unwrap();
+        assert_preparation_reason(
+            version_one_query_plan(
+                &unknown_field,
+                &function,
+                &object_types,
+                &version_one_query_reference_sequence(&unknown_field, &function),
+            ),
+            "SERVER SELECT query field path field is absent from its source object",
+        );
+        let wrong_owner = plan
+            .try_map_identities(
+                {
+                    let mut calls = 0;
+                    move |type_id| {
+                        calls += 1;
+                        Ok::<_, PrepareError>(if calls == 3 { TypeId::new() } else { type_id })
+                    }
+                },
+                Ok::<_, PrepareError>,
+            )
+            .unwrap();
+        assert_preparation_reason(
+            version_one_query_plan(
+                &wrong_owner,
+                &function,
+                &object_types,
+                &version_one_query_reference_sequence(&wrong_owner, &function),
+            ),
+            "SERVER SELECT query field path owner differs from its source object",
+        );
+        assert_preparation_reason(
+            version_one_query_plan(
+                &plan,
+                &function,
+                &object_types_with_task_field(
+                    &object_types,
+                    "title",
+                    ResolvedType::scalar(StandardScalar::Boolean),
+                    true,
+                ),
+                &references,
+            ),
+            "SERVER SELECT query field path type differs from its source field",
+        );
+        assert_preparation_reason(
+            version_one_query_plan(
+                &plan,
+                &function,
+                &object_types_with_task_field(
+                    &object_types,
+                    "title",
+                    ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+                    false,
+                ),
+                &references,
+            ),
+            "SERVER SELECT query field path type differs from its source field",
+        );
+        assert_preparation_reason(
+            plan.try_map_identities(
+                |_| {
+                    Err::<TypeId, _>(PrepareError::InvalidCheckedBundle {
+                        reason: "type mapping failure",
+                    })
+                },
+                Ok,
+            ),
+            "type mapping failure",
+        );
+        assert_preparation_reason(
+            plan.try_map_identities(Ok::<_, PrepareError>, |_| {
+                Err::<FieldId, _>(PrepareError::InvalidCheckedBundle {
+                    reason: "field mapping failure",
+                })
+            }),
+            "field mapping failure",
+        );
+
+        let mut wrong_evidence = references.clone();
+        wrong_evidence.reverse();
+        assert_preparation_reason(
+            version_one_query_plan(&plan, &function, &object_types, &wrong_evidence),
+            "SERVER SELECT definition references differ from the checked function body",
+        );
+        assert_preparation_reason(
+            version_one_query_plan(
+                &plan,
+                &function,
+                &object_types,
+                &references[..references.len() - 1],
+            ),
+            "SERVER SELECT definition references differ from the checked function body",
+        );
+        let mut extra_evidence = references.clone();
+        extra_evidence.push(references[0]);
+        assert_preparation_reason(
+            version_one_query_plan(&plan, &function, &object_types, &extra_evidence),
+            "SERVER SELECT definition references differ from the checked function body",
+        );
+        let mut wrong_kind = references.clone();
+        wrong_kind[0].0 = DefinitionReferenceKind::QueryObject;
+        assert_preparation_reason(
+            version_one_query_plan(&plan, &function, &object_types, &wrong_kind),
+            "SERVER SELECT definition references differ from the checked function body",
+        );
+        let mut wrong_target = references.clone();
+        wrong_target[0].1 = DefinitionReferenceTarget::ObjectType(TypeId::new());
+        assert_preparation_reason(
+            version_one_query_plan(&plan, &function, &object_types, &wrong_target),
+            "SERVER SELECT definition references differ from the checked function body",
+        );
+
+        let (direct_plan, direct_function, direct_objects, _) =
+            mapped_version_one_fixture_for(DIRECT_BOOLEAN_SOURCE);
+        let direct_references =
+            version_one_query_reference_sequence(&direct_plan, &direct_function);
+        assert_preparation_reason(
+            version_one_query_plan(
+                &direct_plan,
+                &direct_function,
+                &object_types_with_task_field(
+                    &direct_objects,
+                    "owner",
+                    ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+                    true,
+                ),
+                &direct_references,
+            ),
+            "SERVER SELECT query field path continues through a non-reference field",
+        );
+        let direct_task = direct_objects
+            .iter()
+            .find(|object_type| object_type.name() == &semantic_name(&["tasks", "task"]))
+            .unwrap()
+            .clone();
+        assert_preparation_reason(
+            version_one_query_plan(
+                &direct_plan,
+                &direct_function,
+                std::slice::from_ref(&direct_task),
+                &direct_references,
+            ),
+            "SERVER SELECT query field path target is absent from the candidate catalogue",
+        );
+
+        let (reference_plan, reference_function, reference_objects, _) =
+            mapped_version_one_fixture_for(VERSION_ONE_REFERENCE_SOURCE);
+        let reference_task = reference_objects
+            .iter()
+            .find(|object_type| object_type.name() == &semantic_name(&["tasks", "task"]))
+            .unwrap()
+            .clone();
+        assert_preparation_reason(
+            version_one_query_plan(
+                &reference_plan,
+                &reference_function,
+                std::slice::from_ref(&reference_task),
+                &version_one_query_reference_sequence(&reference_plan, &reference_function),
+            ),
+            "SERVER SELECT query field path target is absent from the candidate catalogue",
         );
     }
 
@@ -5409,6 +6121,65 @@ mod tests {
         Vec<(DefinitionReferenceKind, DefinitionReferenceTarget)>,
     );
 
+    type VersionOneFixture = (
+        crate::relational::RelationalQueryIr<TypeId, FieldId>,
+        FunctionDefinition,
+        Vec<ObjectTypeDefinition>,
+        Vec<(DefinitionReferenceKind, DefinitionReferenceTarget)>,
+    );
+
+    fn mapped_version_one_fixture() -> VersionOneFixture {
+        mapped_version_one_fixture_for(SOURCE)
+    }
+
+    fn mapped_version_one_fixture_for(source: &str) -> VersionOneFixture {
+        let active = empty_active();
+        let report = checked_report(source, active.catalogue());
+        let prepared = prepare(&report, active.pair(), &active).unwrap();
+        let checked = report.checked_bundle().unwrap();
+        let mut type_ids = std::collections::HashMap::new();
+        let mut field_ids = std::collections::HashMap::new();
+        for checked_object in checked.object_types() {
+            let candidate = prepared
+                .candidate()
+                .object_type_by_name(checked_object.name())
+                .unwrap();
+            type_ids.insert(checked_object.id(), candidate.id());
+            for checked_field in checked_object.fields() {
+                field_ids.insert(
+                    checked_field.id(),
+                    candidate.field_by_name(checked_field.name()).unwrap().id(),
+                );
+            }
+        }
+        let plan = checked.server_functions()[0]
+            .query_plan()
+            .unwrap()
+            .try_map_identities(
+                |id| {
+                    type_ids
+                        .get(&id)
+                        .copied()
+                        .ok_or(PrepareError::InvalidCheckedBundle {
+                            reason: "type mapping is absent",
+                        })
+                },
+                |id| {
+                    field_ids
+                        .get(&id)
+                        .copied()
+                        .ok_or(PrepareError::InvalidCheckedBundle {
+                            reason: "field mapping is absent",
+                        })
+                },
+            )
+            .unwrap();
+        let function = prepared.candidate().functions()[0].clone();
+        let object_types = prepared.candidate().object_types().to_vec();
+        let references = version_one_query_reference_sequence(&plan, &function);
+        (plan, function, object_types, references)
+    }
+
     fn mapped_distinct_fixture() -> DistinctFixture {
         mapped_distinct_fixture_for(DISTINCT_SOURCE)
     }
@@ -5492,6 +6263,45 @@ mod tests {
                             } else {
                                 field.clone()
                             }
+                        })
+                        .collect(),
+                )
+            })
+            .collect()
+    }
+
+    fn object_types_with_task_field(
+        object_types: &[ObjectTypeDefinition],
+        field_name: &str,
+        resolved_type: ResolvedType,
+        nullable: bool,
+    ) -> Vec<ObjectTypeDefinition> {
+        object_types
+            .iter()
+            .map(|object_type| {
+                if object_type.name() != &semantic_name(&["tasks", "task"]) {
+                    return object_type.clone();
+                }
+                ObjectTypeDefinition::new(
+                    object_type.id(),
+                    object_type.name().clone(),
+                    object_type
+                        .fields()
+                        .iter()
+                        .map(|field| {
+                            if field.name() != field_name {
+                                return field.clone();
+                            }
+                            FieldDefinition::new(
+                                field.id(),
+                                field.name(),
+                                field.ordinal(),
+                                resolved_type,
+                                nullable,
+                                field.unique(),
+                                field.default_expression(),
+                                field.on_delete(),
+                            )
                         })
                         .collect(),
                 )
