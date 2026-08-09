@@ -208,6 +208,11 @@ fn check_parsed(parse_report: ParseReport, base: &CatalogueSnapshot) -> CheckRep
         return failed(parse_report, diagnostics);
     }
 
+    diagnostics.extend(check_protected_source(&parse_report));
+    if !diagnostics.is_empty() {
+        return failed(parse_report, diagnostics);
+    }
+
     let mut assignments = CheckAssignments::new();
     let mut checked_schemas = Vec::new();
     let mut known_schemas = HashSet::new();
@@ -479,6 +484,133 @@ fn check_parsed(parse_report: ParseReport, base: &CatalogueSnapshot) -> CheckRep
                 .collect(),
         }),
     }
+}
+
+fn check_protected_source(parse_report: &ParseReport) -> Vec<CompilerDiagnostic> {
+    let mut diagnostics = Vec::new();
+    let mut protected_declarations = HashSet::new();
+
+    for (unit_index, unit) in parse_report.units().iter().enumerate() {
+        let mut owners = Vec::new();
+        for declaration in unit.parsed().schemas() {
+            owners.push((&declaration.name, &declaration.name.span, &declaration.span));
+        }
+        for declaration in unit.parsed().object_types() {
+            owners.push((&declaration.name, &declaration.name.span, &declaration.span));
+        }
+        for declaration in unit.parsed().primitive_value_types() {
+            owners.push((&declaration.name, &declaration.name.span, &declaration.span));
+        }
+        for declaration in unit.parsed().field_renames() {
+            owners.push((
+                &declaration.type_name,
+                &declaration.type_name.span,
+                &declaration.span,
+            ));
+        }
+        for declaration in unit.parsed().server_functions() {
+            owners.push((&declaration.name, &declaration.name.span, &declaration.span));
+        }
+        for declaration in unit.parsed().client_functions() {
+            owners.push((&declaration.name, &declaration.name.span, &declaration.span));
+        }
+        for declaration in unit.parsed().type_exports() {
+            if let orna_syntax::TypeExportTarget::Qualified { name } = &declaration.target {
+                owners.push((name, &name.span, &declaration.span));
+            }
+        }
+        owners.sort_by_key(|(_, _, declaration_span)| declaration_span.start);
+        for (name, span, declaration_span) in owners {
+            if name
+                .parts
+                .first()
+                .is_some_and(|part| semantic_part(part) == "std")
+            {
+                diagnostics.push(diagnostic(
+                    DiagnosticCode::DomainIncompatible,
+                    "the std namespace is owned by the standard library",
+                    unit.logical_path(),
+                    span,
+                ));
+                protected_declarations.insert((
+                    unit_index,
+                    declaration_span.start,
+                    declaration_span.end,
+                ));
+            }
+        }
+    }
+
+    for (unit_index, unit) in parse_report.units().iter().enumerate() {
+        for declaration in unit.parsed().primitive_value_types() {
+            if !protected_declarations.contains(&(
+                unit_index,
+                declaration.span.start,
+                declaration.span.end,
+            )) {
+                diagnostics.push(diagnostic(
+                    DiagnosticCode::DomainIncompatible,
+                    "KERNEL CONTRACT is available only to the standard library",
+                    unit.logical_path(),
+                    &declaration.kernel_contract_modifier_span,
+                ));
+                protected_declarations.insert((
+                    unit_index,
+                    declaration.span.start,
+                    declaration.span.end,
+                ));
+            }
+        }
+    }
+
+    for (unit_index, unit) in parse_report.units().iter().enumerate() {
+        for declaration in unit.parsed().type_exports() {
+            if protected_declarations.contains(&(
+                unit_index,
+                declaration.span.start,
+                declaration.span.end,
+            )) {
+                continue;
+            }
+            if let orna_syntax::TypeExportTarget::Qualified { name } = &declaration.target {
+                diagnostics.push(diagnostic(
+                    DiagnosticCode::DomainIncompatible,
+                    "qualified type exports are available only to the standard library",
+                    unit.logical_path(),
+                    &name.span,
+                ));
+                protected_declarations.insert((
+                    unit_index,
+                    declaration.span.start,
+                    declaration.span.end,
+                ));
+            }
+        }
+    }
+
+    for (unit_index, unit) in parse_report.units().iter().enumerate() {
+        for declaration in unit.parsed().type_exports() {
+            if protected_declarations.contains(&(
+                unit_index,
+                declaration.span.start,
+                declaration.span.end,
+            )) {
+                continue;
+            }
+            if let orna_syntax::TypeExportTarget::Prelude { modifier_span, .. } =
+                &declaration.target
+            {
+                diagnostics.push(diagnostic(
+                    DiagnosticCode::DomainIncompatible,
+                    "only the standard library can export a type to the prelude",
+                    unit.logical_path(),
+                    modifier_span,
+                ));
+            }
+        }
+    }
+
+    diagnostics
 }
 
 #[derive(Clone)]
@@ -5711,5 +5843,181 @@ mod tests {
             );
             assert_no_checked_bundle(&report);
         }
+    }
+
+    #[test]
+    fn rejects_protected_type_source_in_global_category_order() {
+        let z_source = "EXPORT TYPE app.source TO PRELUDE AS SECOND;\n\
+            CREATE TYPE app.second AS VALUE PRIMITIVE KERNEL CONTRACT 'app.second@1' IMMUTABLE PERSISTABLE;\n\
+            EXPORT TYPE app.source AS app.second_binding;\n\
+            CREATE SCHEMA std;";
+        let a_source = "EXPORT TYPE app.source TO PRELUDE AS FIRST;\n\
+            CREATE TYPE app.first AS VALUE PRIMITIVE KERNEL CONTRACT 'app.first@1' IMMUTABLE TRANSIENT;\n\
+            EXPORT TYPE app.source AS app.first_binding;\n\
+            CREATE TYPE StD.first AS OBJECT ();";
+        let report = check(
+            &bundle([("z.orna", z_source), ("a.orna", a_source)]),
+            &empty_catalogue(),
+        );
+
+        assert_eq!(report.diagnostics().len(), 8);
+        let expected = [
+            (
+                "z.orna",
+                "the std namespace is owned by the standard library",
+                z_source.find("std").unwrap(),
+                "std".len(),
+            ),
+            (
+                "a.orna",
+                "the std namespace is owned by the standard library",
+                a_source.find("StD.first").unwrap(),
+                "StD.first".len(),
+            ),
+            (
+                "z.orna",
+                "KERNEL CONTRACT is available only to the standard library",
+                z_source.find("KERNEL CONTRACT").unwrap(),
+                "KERNEL CONTRACT".len(),
+            ),
+            (
+                "a.orna",
+                "KERNEL CONTRACT is available only to the standard library",
+                a_source.find("KERNEL CONTRACT").unwrap(),
+                "KERNEL CONTRACT".len(),
+            ),
+            (
+                "z.orna",
+                "qualified type exports are available only to the standard library",
+                z_source.find("app.second_binding").unwrap(),
+                "app.second_binding".len(),
+            ),
+            (
+                "a.orna",
+                "qualified type exports are available only to the standard library",
+                a_source.find("app.first_binding").unwrap(),
+                "app.first_binding".len(),
+            ),
+            (
+                "z.orna",
+                "only the standard library can export a type to the prelude",
+                z_source.find("TO PRELUDE").unwrap(),
+                "TO PRELUDE".len(),
+            ),
+            (
+                "a.orna",
+                "only the standard library can export a type to the prelude",
+                a_source.find("TO PRELUDE").unwrap(),
+                "TO PRELUDE".len(),
+            ),
+        ];
+        for (diagnostic, (path, message, start, length)) in
+            report.diagnostics().iter().zip(expected)
+        {
+            assert_eq!(diagnostic.code(), DiagnosticCode::DomainIncompatible);
+            assert_eq!(diagnostic.message(), message);
+            assert_eq!(diagnostic.location().logical_path(), path);
+            assert_eq!(diagnostic.location().span().start(), start);
+            assert_eq!(diagnostic.location().span().end(), start + length);
+        }
+        assert_no_checked_bundle(&report);
+    }
+
+    #[test]
+    fn syntax_errors_precede_protected_primitive_and_export_diagnostics() {
+        let source = "CREATE TYPE std.broken AS VALUE PRIMITIVE KERNEL CONTRACT 'std.broken@1' IMMUTABLE;\n\
+            CREATE TYPE app.value AS VALUE PRIMITIVE KERNEL CONTRACT 'app.value@1' IMMUTABLE PERSISTABLE;\n\
+            EXPORT TYPE app.value AS app.binding;\n\
+            EXPORT TYPE app.value TO PRELUDE AS VALUE;";
+        let report = check(&bundle([("precedence.orna", source)]), &empty_catalogue());
+
+        assert_eq!(report.diagnostics().len(), 1);
+        let diagnostic = &report.diagnostics()[0];
+        assert_eq!(diagnostic.code(), DiagnosticCode::UnexpectedToken);
+        assert_eq!(
+            diagnostic.message(),
+            "expected PERSISTABLE or TRANSIENT after IMMUTABLE"
+        );
+        assert_eq!(diagnostic.location().logical_path(), "precedence.orna");
+        assert_eq!(
+            diagnostic.location().span().start(),
+            source.find(";").unwrap()
+        );
+        assert_no_checked_bundle(&report);
+    }
+
+    #[test]
+    fn protects_quoted_std_but_not_uppercase_quoted_std() {
+        let source = "CREATE SCHEMA \"std\"; CREATE SCHEMA \"STD\";";
+        let report = check(&bundle([("quoted.orna", source)]), &empty_catalogue());
+
+        assert_eq!(report.diagnostics().len(), 1);
+        let diagnostic = &report.diagnostics()[0];
+        assert_eq!(diagnostic.code(), DiagnosticCode::DomainIncompatible);
+        assert_eq!(
+            diagnostic.message(),
+            "the std namespace is owned by the standard library"
+        );
+        assert_eq!(
+            diagnostic.location().span().start(),
+            source.find("\"std\"").unwrap()
+        );
+        assert_no_checked_bundle(&report);
+    }
+
+    #[test]
+    fn rejects_every_std_owner_form_at_its_complete_name() {
+        let source = "CREATE SCHEMA std;\n\
+            CREATE TYPE std.object AS OBJECT ();\n\
+            CREATE TYPE std.primitive AS VALUE PRIMITIVE KERNEL CONTRACT 'app.contract@1' IMMUTABLE PERSISTABLE;\n\
+            ALTER TYPE std.object RENAME FIELD old TO new;\n\
+            CREATE SERVER FUNCTION std.server() RETURNS ROWS (value BOOLEAN) AS SELECT o.value FROM std.object o;\n\
+            CREATE CLIENT FUNCTION std.client() RETURNS BOOLEAN RETURN TRUE;\n\
+            EXPORT TYPE app.value AS std.binding;";
+        let report = check(&bundle([("owners.orna", source)]), &empty_catalogue());
+
+        let expected = [
+            (
+                "std",
+                source.find("CREATE SCHEMA std").unwrap() + "CREATE SCHEMA ".len(),
+            ),
+            (
+                "std.object",
+                source.find("CREATE TYPE std.object").unwrap() + "CREATE TYPE ".len(),
+            ),
+            (
+                "std.primitive",
+                source.find("CREATE TYPE std.primitive").unwrap() + "CREATE TYPE ".len(),
+            ),
+            (
+                "std.object",
+                source.find("ALTER TYPE std.object").unwrap() + "ALTER TYPE ".len(),
+            ),
+            (
+                "std.server",
+                source.find("CREATE SERVER FUNCTION std.server").unwrap()
+                    + "CREATE SERVER FUNCTION ".len(),
+            ),
+            (
+                "std.client",
+                source.find("CREATE CLIENT FUNCTION std.client").unwrap()
+                    + "CREATE CLIENT FUNCTION ".len(),
+            ),
+            (
+                "std.binding",
+                source.find("AS std.binding").unwrap() + "AS ".len(),
+            ),
+        ];
+        assert_eq!(report.diagnostics().len(), expected.len());
+        for (diagnostic, (name, start)) in report.diagnostics().iter().zip(expected) {
+            assert_eq!(diagnostic.code(), DiagnosticCode::DomainIncompatible);
+            assert_eq!(
+                diagnostic.message(),
+                "the std namespace is owned by the standard library"
+            );
+            assert_eq!(diagnostic.location().span().start(), start);
+            assert_eq!(diagnostic.location().span().end(), start + name.len());
+        }
+        assert_no_checked_bundle(&report);
     }
 }

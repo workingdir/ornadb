@@ -632,6 +632,62 @@ pub struct ObjectTypeDeclaration {
     pub span: SourceSpan,
 }
 
+/// The persistence selected for a primitive value type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrimitiveValueTypePersistence {
+    /// `PERSISTABLE` was written.
+    Persistable,
+    /// `TRANSIENT` was written.
+    Transient,
+}
+
+/// A parsed privileged `CREATE TYPE ... AS VALUE PRIMITIVE` declaration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrimitiveValueTypeDeclaration {
+    /// The declared value type name.
+    pub name: QualifiedName,
+    /// The exact kernel contract string literal.
+    pub kernel_contract: SourceSlice,
+    /// The span of the `KERNEL CONTRACT` modifier.
+    pub kernel_contract_modifier_span: SourceSpan,
+    /// The selected persistence behaviour.
+    pub persistence: PrimitiveValueTypePersistence,
+    /// The span of the persistence keyword.
+    pub persistence_span: SourceSpan,
+    /// The declaration span, including its terminating semicolon.
+    pub span: SourceSpan,
+}
+
+/// The destination selected by a privileged type export.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TypeExportTarget {
+    /// A qualified type binding after `AS`.
+    Qualified {
+        /// The qualified target type name.
+        name: QualifiedName,
+    },
+    /// A prelude type binding after `TO PRELUDE AS`.
+    Prelude {
+        /// The unquoted words that form the prelude type name.
+        words: Vec<NamePart>,
+        /// The span from the first prelude word through the final word.
+        name_span: SourceSpan,
+        /// The span of the `TO PRELUDE` modifier.
+        modifier_span: SourceSpan,
+    },
+}
+
+/// A parsed privileged `EXPORT TYPE` declaration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeExportDeclaration {
+    /// The primary type that this declaration exports.
+    pub source_type: QualifiedName,
+    /// The target binding selected by the declaration.
+    pub target: TypeExportTarget,
+    /// The declaration span, including its terminating semicolon.
+    pub span: SourceSpan,
+}
+
 /// A parsed `ALTER TYPE ... RENAME FIELD ... TO ...` declaration.
 ///
 /// This declaration records source transition evidence. The compiler performs
@@ -677,6 +733,8 @@ pub struct Parse {
     diagnostics: Vec<Diagnostic>,
     schemas: Vec<SchemaDeclaration>,
     object_types: Vec<ObjectTypeDeclaration>,
+    primitive_value_types: Vec<PrimitiveValueTypeDeclaration>,
+    type_exports: Vec<TypeExportDeclaration>,
     field_renames: Vec<FieldRenameDeclaration>,
     server_functions: Vec<ServerFunctionDeclaration>,
     client_functions: Vec<ClientFunctionDeclaration>,
@@ -703,6 +761,16 @@ impl Parse {
         &self.object_types
     }
 
+    /// Return successfully parsed primitive value type declarations in source order.
+    pub fn primitive_value_types(&self) -> &[PrimitiveValueTypeDeclaration] {
+        &self.primitive_value_types
+    }
+
+    /// Return successfully parsed type export declarations in source order.
+    pub fn type_exports(&self) -> &[TypeExportDeclaration] {
+        &self.type_exports
+    }
+
     /// Return successfully parsed field rename declarations in source order.
     pub fn field_renames(&self) -> &[FieldRenameDeclaration] {
         &self.field_renames
@@ -721,20 +789,23 @@ impl Parse {
 
 /// Parse one Orna source unit.
 ///
-/// The parser recognises schema declarations, object type declarations, field
-/// rename declarations, and function declarations. It keeps all source
-/// bytes in its CST, including bytes in malformed statements.
+/// The parser recognises schema declarations, object type declarations,
+/// primitive value type declarations, type export declarations, field rename
+/// declarations, and function declarations. It keeps all source bytes in its
+/// CST, including bytes in malformed statements.
 pub fn parse(source: &str) -> Parse {
     parser::parse(source)
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::parser::SyntaxKind;
+
     use super::{
         FunctionReturnType, FunctionSecurity, FunctionTransaction, FunctionVolatility, InsertValue,
-        MutationValue, NullOrdering, OnDeletePolicy, OrderingDirection, QueryExpression,
-        SelectQuantifier, ServerFunctionBody, SourceSpan, StandardLargeObjectKind,
-        TypeSpecification, parse,
+        MutationValue, NullOrdering, OnDeletePolicy, OrderingDirection,
+        PrimitiveValueTypePersistence, QueryExpression, SelectQuantifier, ServerFunctionBody,
+        SourceSpan, StandardLargeObjectKind, TypeExportTarget, TypeSpecification, parse,
     };
 
     #[test]
@@ -746,6 +817,330 @@ mod tests {
         assert_eq!(parsed.syntax().text(), source);
         assert_eq!(parsed.schemas()[0].name.parts[0].text, "crm");
         assert_eq!(parsed.schemas()[0].name.parts[1].text, "sales");
+    }
+
+    #[test]
+    fn parses_persistable_primitive_value_type_losslessly() {
+        let source = "CREATE TYPE std.types.BOOLEAN AS VALUE PRIMITIVE KERNEL CONTRACT 'orna.kernel.value.boolean@1' IMMUTABLE PERSISTABLE;";
+        let parsed = parse(source);
+
+        assert!(parsed.diagnostics().is_empty());
+        assert_eq!(parsed.syntax().text(), source);
+        let declaration = &parsed.primitive_value_types()[0];
+        assert_eq!(declaration.name.parts[0].text, "std");
+        assert_eq!(
+            declaration.kernel_contract.text,
+            "'orna.kernel.value.boolean@1'"
+        );
+        assert_eq!(
+            declaration.persistence,
+            PrimitiveValueTypePersistence::Persistable
+        );
+        assert_eq!(
+            declaration.kernel_contract_modifier_span.start,
+            source.find("KERNEL").unwrap()
+        );
+        assert_eq!(
+            declaration.persistence_span.start,
+            source.find("PERSISTABLE").unwrap()
+        );
+        assert_eq!(declaration.span.end, source.len());
+    }
+
+    #[test]
+    fn parses_transient_primitive_and_type_exports_losslessly() {
+        let source = "CREATE TYPE std.types.VOID AS VALUE PRIMITIVE KERNEL CONTRACT 'orna.kernel.value.void@1' IMMUTABLE TRANSIENT;\n\
+            EXPORT TYPE std.types.VOID AS std.VOID;\n\
+            EXPORT TYPE std.VOID TO /* binding */ PRELUDE AS CHARACTER  LARGE\nOBJECT;";
+        let parsed = parse(source);
+
+        assert!(parsed.diagnostics().is_empty());
+        assert_eq!(parsed.syntax().text(), source);
+        assert_eq!(
+            parsed.primitive_value_types()[0].persistence,
+            PrimitiveValueTypePersistence::Transient
+        );
+        assert!(matches!(
+            parsed.type_exports()[0].target,
+            TypeExportTarget::Qualified { .. }
+        ));
+        if let TypeExportTarget::Qualified { name } = &parsed.type_exports()[0].target {
+            assert_eq!(name.parts[1].text, "VOID");
+        }
+        assert!(matches!(
+            parsed.type_exports()[1].target,
+            TypeExportTarget::Prelude { .. }
+        ));
+        if let TypeExportTarget::Prelude {
+            words,
+            name_span,
+            modifier_span,
+        } = &parsed.type_exports()[1].target
+        {
+            assert_eq!(
+                words
+                    .iter()
+                    .map(|word| word.text.as_str())
+                    .collect::<Vec<_>>(),
+                ["CHARACTER", "LARGE", "OBJECT"]
+            );
+            assert_eq!(name_span.start, source.rfind("CHARACTER").unwrap());
+            assert_eq!(
+                name_span.end,
+                source.rfind("OBJECT").unwrap() + "OBJECT".len()
+            );
+            assert_eq!(modifier_span.start, source.rfind("TO").unwrap());
+        }
+    }
+
+    #[test]
+    fn reports_closed_primitive_and_export_syntax_diagnostics() {
+        let cases = [
+            (
+                "CREATE TYPE app.value AS ;",
+                "expected OBJECT or VALUE after AS",
+            ),
+            (
+                "CREATE TYPE app.value AS VALUE ;",
+                "expected keyword PRIMITIVE",
+            ),
+            (
+                "CREATE TYPE app.value AS VALUE PRIMITIVE ;",
+                "expected keyword KERNEL",
+            ),
+            (
+                "CREATE TYPE app.value AS VALUE PRIMITIVE KERNEL ;",
+                "expected keyword CONTRACT",
+            ),
+            (
+                "CREATE TYPE app.value AS VALUE PRIMITIVE KERNEL CONTRACT ;",
+                "expected a string literal after KERNEL CONTRACT",
+            ),
+            (
+                "CREATE TYPE app.value AS VALUE PRIMITIVE KERNEL CONTRACT 'app.value@1' ;",
+                "expected keyword IMMUTABLE",
+            ),
+            (
+                "CREATE TYPE app.value AS VALUE PRIMITIVE KERNEL CONTRACT 'app.value@1' IMMUTABLE ;",
+                "expected PERSISTABLE or TRANSIENT after IMMUTABLE",
+            ),
+            (
+                "CREATE TYPE app.value AS VALUE PRIMITIVE KERNEL CONTRACT 'app.value@1' IMMUTABLE PERSISTABLE",
+                "expected ';' after primitive value type declaration",
+            ),
+            ("EXPORT ;", "expected keyword TYPE"),
+            ("EXPORT TYPE ;", "expected a type name after EXPORT TYPE"),
+            (
+                "EXPORT TYPE app.value ;",
+                "expected AS or TO after exported type name",
+            ),
+            ("EXPORT TYPE app.value TO ;", "expected keyword PRELUDE"),
+            ("EXPORT TYPE app.value TO PRELUDE ;", "expected keyword AS"),
+            (
+                "EXPORT TYPE app.value TO PRELUDE AS ;",
+                "expected an unquoted prelude type name after AS",
+            ),
+            (
+                "EXPORT TYPE app.value AS ;",
+                "expected a qualified type name after AS",
+            ),
+            (
+                "EXPORT TYPE app.value AS app.binding",
+                "expected ';' after type export declaration",
+            ),
+        ];
+
+        for (source, message) in cases {
+            let parsed = parse(source);
+            assert_eq!(parsed.diagnostics().len(), 1, "{source}");
+            assert_eq!(parsed.diagnostics()[0].message, message, "{source}");
+        }
+    }
+
+    #[test]
+    fn recovers_from_primitive_and_export_errors_to_later_exports() {
+        let source = "CREATE TYPE app.value AS VALUE PRIMITIVE KERNEL CONTRACT 'app.value@1' IMMUTABLE;\n\
+            EXPORT TYPE app.value AS app.binding;";
+        let parsed = parse(source);
+
+        assert_eq!(parsed.diagnostics().len(), 1);
+        assert_eq!(
+            parsed.diagnostics()[0].message,
+            "expected PERSISTABLE or TRANSIENT after IMMUTABLE"
+        );
+        assert_eq!(parsed.type_exports().len(), 1);
+    }
+
+    #[test]
+    fn recovers_from_malformed_qualified_and_prelude_exports() {
+        let qualified_source = "EXPORT TYPE app.value AS ; CREATE SCHEMA later;";
+        let qualified = parse(qualified_source);
+        assert_eq!(qualified.diagnostics().len(), 1);
+        assert_eq!(
+            qualified.diagnostics()[0].message,
+            "expected a qualified type name after AS"
+        );
+        assert_eq!(qualified.schemas().len(), 1);
+        assert_eq!(qualified.schemas()[0].name.parts[0].text, "later");
+
+        let prelude_source =
+            "EXPORT TYPE app.value TO PRELUDE AS ; EXPORT TYPE app.value AS app.binding;";
+        let prelude = parse(prelude_source);
+        assert_eq!(prelude.diagnostics().len(), 1);
+        assert_eq!(
+            prelude.diagnostics()[0].message,
+            "expected an unquoted prelude type name after AS"
+        );
+        assert_eq!(prelude.type_exports().len(), 1);
+        assert!(matches!(
+            prelude.type_exports()[0].target,
+            TypeExportTarget::Qualified { .. }
+        ));
+    }
+
+    #[test]
+    fn recovers_from_missing_object_fields_without_panicking() {
+        let source = "CREATE TYPE app.value AS OBJECT ; CREATE SCHEMA later;";
+        let parsed = parse(source);
+
+        assert_eq!(parsed.syntax().text(), source);
+        assert!(parsed.object_types().is_empty());
+        assert_eq!(parsed.diagnostics().len(), 1);
+        assert_eq!(
+            parsed.diagnostics()[0].message,
+            "expected '(' after AS OBJECT"
+        );
+        assert_eq!(
+            parsed.diagnostics()[0].span.start,
+            source.find(';').unwrap()
+        );
+        assert_eq!(parsed.schemas().len(), 1);
+        assert_eq!(parsed.schemas()[0].name.parts[0].text, "later");
+    }
+
+    #[test]
+    fn recovers_missing_server_parameters_at_root_level() {
+        let source = "CREATE SERVER FUNCTION app.f ; CREATE SCHEMA later;";
+        let parsed = parse(source);
+
+        assert_eq!(parsed.syntax().text(), source);
+        assert_eq!(parsed.diagnostics().len(), 1);
+        assert_eq!(
+            parsed.diagnostics()[0].message,
+            "expected '(' after server function name"
+        );
+        assert_eq!(
+            parsed.diagnostics()[0].span.start,
+            source.find(';').unwrap()
+        );
+        assert_eq!(parsed.schemas().len(), 1);
+        assert_eq!(parsed.schemas()[0].name.parts[0].text, "later");
+
+        let root = &parsed.syntax().root;
+        assert_eq!(root.kind(), SyntaxKind::Root);
+        assert_eq!(
+            root.children().map(|node| node.kind()).collect::<Vec<_>>(),
+            [
+                SyntaxKind::CreateServerFunctionStatement,
+                SyntaxKind::CreateSchemaStatement,
+            ]
+        );
+    }
+
+    #[test]
+    fn preserves_a_create_declaration_after_a_missing_prelude_export_semicolon() {
+        let source = "EXPORT TYPE std.X TO PRELUDE AS X CREATE SCHEMA later;";
+        let parsed = parse(source);
+
+        assert_eq!(parsed.syntax().text(), source);
+        assert!(parsed.type_exports().is_empty());
+        assert_eq!(parsed.diagnostics().len(), 1);
+        assert_eq!(
+            parsed.diagnostics()[0].message,
+            "expected ';' after type export declaration"
+        );
+        let boundary = source.find("CREATE").unwrap();
+        assert_eq!(parsed.diagnostics()[0].span.start, boundary);
+        assert_eq!(parsed.diagnostics()[0].span.end, boundary + "CREATE".len());
+        assert_eq!(parsed.schemas().len(), 1);
+        assert_eq!(parsed.schemas()[0].name.parts[0].text, "later");
+    }
+
+    #[test]
+    fn preserves_a_create_declaration_after_a_missing_prelude_alias() {
+        let source = "EXPORT TYPE std.X TO PRELUDE AS CREATE SCHEMA later;";
+        let parsed = parse(source);
+
+        assert_eq!(parsed.syntax().text(), source);
+        assert!(parsed.type_exports().is_empty());
+        assert_eq!(parsed.diagnostics().len(), 1);
+        assert_eq!(
+            parsed.diagnostics()[0].message,
+            "expected an unquoted prelude type name after AS"
+        );
+        let boundary = source.find("CREATE").unwrap();
+        assert_eq!(parsed.diagnostics()[0].span.start, boundary);
+        assert_eq!(parsed.diagnostics()[0].span.end, boundary + "CREATE".len());
+        assert_eq!(parsed.schemas().len(), 1);
+        assert_eq!(parsed.schemas()[0].name.parts[0].text, "later");
+    }
+
+    #[test]
+    fn preserves_an_export_declaration_after_a_missing_prelude_export_semicolon() {
+        let source = "EXPORT TYPE std.X TO PRELUDE AS X EXPORT TYPE std.X AS std.Y;";
+        let parsed = parse(source);
+
+        assert_eq!(parsed.syntax().text(), source);
+        assert_eq!(parsed.diagnostics().len(), 1);
+        assert_eq!(
+            parsed.diagnostics()[0].message,
+            "expected ';' after type export declaration"
+        );
+        let boundary = source.rfind("EXPORT").unwrap();
+        assert_eq!(parsed.diagnostics()[0].span.start, boundary);
+        assert_eq!(parsed.diagnostics()[0].span.end, boundary + "EXPORT".len());
+        assert_eq!(parsed.type_exports().len(), 1);
+        assert_eq!(parsed.type_exports()[0].source_type.parts[1].text, "X");
+        assert!(matches!(
+            parsed.type_exports()[0].target,
+            TypeExportTarget::Qualified { .. }
+        ));
+        if let TypeExportTarget::Qualified { name } = &parsed.type_exports()[0].target {
+            assert_eq!(name.parts[1].text, "Y");
+        }
+    }
+
+    #[test]
+    fn preserves_an_alter_declaration_after_a_missing_prelude_export_semicolon() {
+        let source =
+            "EXPORT TYPE std.X TO PRELUDE AS X ALTER TYPE later.item RENAME FIELD old TO new;";
+        let parsed = parse(source);
+
+        assert_eq!(parsed.diagnostics().len(), 1);
+        assert_eq!(
+            parsed.diagnostics()[0].message,
+            "expected ';' after type export declaration"
+        );
+        let boundary = source.find("ALTER").unwrap();
+        assert_eq!(parsed.diagnostics()[0].span.start, boundary);
+        assert_eq!(parsed.diagnostics()[0].span.end, boundary + "ALTER".len());
+        assert_eq!(parsed.field_renames().len(), 1);
+        assert_eq!(parsed.field_renames()[0].type_name.parts[0].text, "later");
+    }
+
+    #[test]
+    fn reports_the_missing_qualified_export_target_at_its_source_span() {
+        let source = "EXPORT TYPE app.value AS ;";
+        let parsed = parse(source);
+
+        assert_eq!(parsed.diagnostics().len(), 1);
+        assert_eq!(
+            parsed.diagnostics()[0].message,
+            "expected a qualified type name after AS"
+        );
+        let semicolon = source.find(';').unwrap();
+        assert_eq!(parsed.diagnostics()[0].span.start, semicolon);
+        assert_eq!(parsed.diagnostics()[0].span.end, semicolon + 1);
     }
 
     #[test]
@@ -2749,7 +3144,7 @@ mod tests {
         assert_eq!(parsed.diagnostics()[0].code, "ORNA0001");
         assert_eq!(
             parsed.diagnostics()[0].message,
-            "expected a CREATE or ALTER declaration"
+            "expected a CREATE, ALTER, or EXPORT declaration"
         );
         assert_eq!(
             parsed.diagnostics()[0].span,

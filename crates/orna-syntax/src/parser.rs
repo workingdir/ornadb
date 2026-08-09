@@ -5,10 +5,11 @@ use crate::{
     Diagnostic, FieldRenameDeclaration, FunctionReturnType, FunctionSecurity, FunctionTransaction,
     FunctionVolatility, InsertStatement, MutationValue, NamePart, NullOrdering,
     ObjectFieldDeclaration, ObjectSource, ObjectTypeDeclaration, OnDeletePolicy, OrderingDirection,
-    OrderingExpression, Parse, QualifiedName, QueryExpression, RowsColumnDeclaration,
-    SchemaDeclaration, SelectQuantifier, SelectQuery, ServerFunctionBody,
-    ServerFunctionDeclaration, ServerFunctionParameter, SourceSlice, SourceSpan, SqlDeleteBody,
-    SqlInsertBody, SqlQueryBody, SqlUpdateBody, StandardLargeObjectKind, SyntaxTree,
+    OrderingExpression, Parse, PrimitiveValueTypeDeclaration, PrimitiveValueTypePersistence,
+    QualifiedName, QueryExpression, RowsColumnDeclaration, SchemaDeclaration, SelectQuantifier,
+    SelectQuery, ServerFunctionBody, ServerFunctionDeclaration, ServerFunctionParameter,
+    SourceSlice, SourceSpan, SqlDeleteBody, SqlInsertBody, SqlQueryBody, SqlUpdateBody,
+    StandardLargeObjectKind, SyntaxTree, TypeExportDeclaration, TypeExportTarget,
     TypeSpecification, UpdateAssignment, UpdateStatement,
     lexer::{Token, TokenKind, lex},
 };
@@ -27,7 +28,7 @@ pub(crate) enum SyntaxKind {
     Dot,
     Semicolon,
     Other,
-    CreateObjectTypeStatement,
+    CreateTypeStatement,
     ObjectField,
     NamedTypeSpecification,
     ReferenceTypeSpecification,
@@ -52,6 +53,7 @@ pub(crate) enum SyntaxKind {
     ClientFunctionParameter,
     ClientFunctionReturnType,
     ClientBooleanReturnBody,
+    ExportTypeStatement,
 }
 
 impl From<SyntaxKind> for rowan::SyntaxKind {
@@ -79,7 +81,7 @@ impl Language for OrnaLanguage {
             8 => SyntaxKind::Dot,
             9 => SyntaxKind::Semicolon,
             10 => SyntaxKind::Other,
-            11 => SyntaxKind::CreateObjectTypeStatement,
+            11 => SyntaxKind::CreateTypeStatement,
             12 => SyntaxKind::ObjectField,
             13 => SyntaxKind::NamedTypeSpecification,
             14 => SyntaxKind::ReferenceTypeSpecification,
@@ -104,6 +106,7 @@ impl Language for OrnaLanguage {
             33 => SyntaxKind::ClientFunctionParameter,
             34 => SyntaxKind::ClientFunctionReturnType,
             35 => SyntaxKind::ClientBooleanReturnBody,
+            36 => SyntaxKind::ExportTypeStatement,
             _ => panic!("unknown Orna syntax kind"),
         }
     }
@@ -125,6 +128,8 @@ struct Parser<'source> {
     diagnostics: Vec<Diagnostic>,
     schemas: Vec<SchemaDeclaration>,
     object_types: Vec<ObjectTypeDeclaration>,
+    primitive_value_types: Vec<PrimitiveValueTypeDeclaration>,
+    type_exports: Vec<TypeExportDeclaration>,
     field_renames: Vec<FieldRenameDeclaration>,
     server_functions: Vec<ServerFunctionDeclaration>,
     client_functions: Vec<ClientFunctionDeclaration>,
@@ -141,6 +146,8 @@ impl<'source> Parser<'source> {
             diagnostics,
             schemas: Vec::new(),
             object_types: Vec::new(),
+            primitive_value_types: Vec::new(),
+            type_exports: Vec::new(),
             field_renames: Vec::new(),
             server_functions: Vec::new(),
             client_functions: Vec::new(),
@@ -156,8 +163,13 @@ impl<'source> Parser<'source> {
                 self.parse_create_statement();
             } else if self.current().is_some_and(|token| token.is_word("ALTER")) {
                 self.parse_alter_type_rename_field_statement();
+            } else if self.current().is_some_and(|token| token.is_word("EXPORT")) {
+                self.parse_export_type_statement();
             } else {
-                self.error_current("ORNA0001", "expected a CREATE or ALTER declaration");
+                self.error_current(
+                    "ORNA0001",
+                    "expected a CREATE, ALTER, or EXPORT declaration",
+                );
                 self.recover_statement();
             }
         }
@@ -171,6 +183,8 @@ impl<'source> Parser<'source> {
             diagnostics: self.diagnostics,
             schemas: self.schemas,
             object_types: self.object_types,
+            primitive_value_types: self.primitive_value_types,
+            type_exports: self.type_exports,
             field_renames: self.field_renames,
             server_functions: self.server_functions,
             client_functions: self.client_functions,
@@ -203,7 +217,7 @@ impl<'source> Parser<'source> {
             .peek_significant(1)
             .is_some_and(|token| token.is_word("TYPE"))
         {
-            self.parse_create_object_type_statement();
+            self.parse_create_type_statement();
         } else {
             self.parse_create_schema_statement();
         }
@@ -665,7 +679,7 @@ impl<'source> Parser<'source> {
     fn recover_client_body(&mut self, long_form: bool) {
         let mut saw_end = false;
         while let Some(token) = self.current().cloned() {
-            if token.is_word("CREATE") || token.is_word("ALTER") {
+            if token.is_word("CREATE") || token.is_word("ALTER") || token.is_word("EXPORT") {
                 break;
             }
             if token.is_word("END") {
@@ -1198,10 +1212,10 @@ impl<'source> Parser<'source> {
         result
     }
 
-    fn parse_create_object_type_statement(&mut self) {
+    fn parse_create_type_statement(&mut self) {
         let statement_start = self.current().expect("CREATE token exists").range.start;
         self.builder
-            .start_node(SyntaxKind::CreateObjectTypeStatement.into());
+            .start_node(SyntaxKind::CreateTypeStatement.into());
 
         self.expect_word("CREATE");
         self.skip_trivia();
@@ -1220,18 +1234,30 @@ impl<'source> Parser<'source> {
             return;
         }
         self.skip_trivia();
-        if !self.expect_word("OBJECT") {
+        if self.take_word("OBJECT").is_some() {
+            self.parse_create_object_type_body(statement_start, name);
+        } else if self.take_word("VALUE").is_some() {
+            self.parse_create_primitive_value_type_body(statement_start, name);
+        } else {
+            self.error_current("ORNA0001", "expected OBJECT or VALUE after AS");
             self.recover_statement();
             self.builder.finish_node();
             return;
         }
+        self.builder.finish_node();
+    }
+
+    fn parse_create_object_type_body(
+        &mut self,
+        statement_start: usize,
+        name: Option<QualifiedName>,
+    ) {
         self.skip_trivia();
         if self
             .expect_kind(TokenKind::LeftParenthesis, "expected '(' after AS OBJECT")
             .is_none()
         {
             self.recover_statement();
-            self.builder.finish_node();
             return;
         }
 
@@ -1256,7 +1282,193 @@ impl<'source> Parser<'source> {
             (_, _, None) => self.recover_statement(),
             _ => {}
         }
+    }
 
+    fn parse_create_primitive_value_type_body(
+        &mut self,
+        statement_start: usize,
+        name: Option<QualifiedName>,
+    ) {
+        self.skip_trivia();
+        if !self.expect_word("PRIMITIVE") {
+            self.recover_statement();
+            return;
+        }
+        self.skip_trivia();
+        let Some(kernel) = self.expect_word_token("KERNEL") else {
+            self.recover_statement();
+            return;
+        };
+        self.skip_trivia();
+        let Some(contract) = self.expect_word_token("CONTRACT") else {
+            self.recover_statement();
+            return;
+        };
+        let kernel_contract_modifier_span = SourceSpan {
+            start: kernel.range.start,
+            end: contract.range.end,
+        };
+        self.skip_trivia();
+        let Some(contract_literal) = self
+            .current()
+            .cloned()
+            .filter(|token| token.kind == TokenKind::StringLiteral)
+        else {
+            self.error_current(
+                "ORNA0001",
+                "expected a string literal after KERNEL CONTRACT",
+            );
+            self.recover_statement();
+            return;
+        };
+        self.bump();
+        let kernel_contract = SourceSlice {
+            text: contract_literal.text.to_owned(),
+            span: contract_literal.span(),
+        };
+        self.skip_trivia();
+        if !self.expect_word("IMMUTABLE") {
+            self.recover_statement();
+            return;
+        }
+        self.skip_trivia();
+        let (persistence, persistence_span) = if let Some(token) = self.take_word("PERSISTABLE") {
+            (PrimitiveValueTypePersistence::Persistable, token.span())
+        } else if let Some(token) = self.take_word("TRANSIENT") {
+            (PrimitiveValueTypePersistence::Transient, token.span())
+        } else {
+            self.error_current(
+                "ORNA0001",
+                "expected PERSISTABLE or TRANSIENT after IMMUTABLE",
+            );
+            self.recover_statement();
+            return;
+        };
+        self.skip_trivia();
+        let Some(semicolon) = self.expect_kind(
+            TokenKind::Semicolon,
+            "expected ';' after primitive value type declaration",
+        ) else {
+            self.recover_statement();
+            return;
+        };
+        if let Some(name) = name {
+            self.primitive_value_types
+                .push(PrimitiveValueTypeDeclaration {
+                    name,
+                    kernel_contract,
+                    kernel_contract_modifier_span,
+                    persistence,
+                    persistence_span,
+                    span: SourceSpan {
+                        start: statement_start,
+                        end: semicolon.end,
+                    },
+                });
+        }
+    }
+
+    fn parse_export_type_statement(&mut self) {
+        let statement_start = self.current().expect("EXPORT token exists").range.start;
+        self.builder
+            .start_node(SyntaxKind::ExportTypeStatement.into());
+
+        self.expect_word("EXPORT");
+        self.skip_trivia();
+        if !self.expect_word("TYPE") {
+            self.recover_statement();
+            self.builder.finish_node();
+            return;
+        }
+        self.skip_trivia();
+        let Some(source_type) = self.parse_qualified_name("expected a type name after EXPORT TYPE")
+        else {
+            self.recover_statement();
+            self.builder.finish_node();
+            return;
+        };
+        self.skip_trivia();
+        let target = if self.take_word("AS").is_some() {
+            self.skip_trivia();
+            self.parse_qualified_name("expected a qualified type name after AS")
+                .map(|name| TypeExportTarget::Qualified { name })
+        } else if let Some(to) = self.take_word("TO") {
+            self.skip_trivia();
+            let Some(prelude) = self.expect_word_token("PRELUDE") else {
+                self.recover_statement();
+                self.builder.finish_node();
+                return;
+            };
+            let modifier_span = SourceSpan {
+                start: to.range.start,
+                end: prelude.range.end,
+            };
+            self.skip_trivia();
+            if !self.expect_word("AS") {
+                self.recover_statement();
+                self.builder.finish_node();
+                return;
+            }
+            self.skip_trivia();
+            let mut words = Vec::new();
+            while self.current().is_some_and(|token| {
+                token.kind == TokenKind::Word
+                    && !(token.is_word("CREATE")
+                        || token.is_word("ALTER")
+                        || token.is_word("EXPORT"))
+            }) {
+                let token = self.current().expect("word token exists").clone();
+                self.bump();
+                words.push(NamePart {
+                    text: token.text.to_owned(),
+                    span: token.span(),
+                });
+                self.skip_trivia();
+            }
+            let Some(first) = words.first() else {
+                self.error_current(
+                    "ORNA0001",
+                    "expected an unquoted prelude type name after AS",
+                );
+                self.recover_statement();
+                self.builder.finish_node();
+                return;
+            };
+            let name_span = SourceSpan {
+                start: first.span.start,
+                end: words.last().expect("prelude word exists").span.end,
+            };
+            Some(TypeExportTarget::Prelude {
+                words,
+                name_span,
+                modifier_span,
+            })
+        } else {
+            self.error_current("ORNA0001", "expected AS or TO after exported type name");
+            None
+        };
+        let Some(target) = target else {
+            self.recover_statement();
+            self.builder.finish_node();
+            return;
+        };
+        self.skip_trivia();
+        let Some(semicolon) = self.expect_kind(
+            TokenKind::Semicolon,
+            "expected ';' after type export declaration",
+        ) else {
+            self.recover_statement();
+            self.builder.finish_node();
+            return;
+        };
+        self.type_exports.push(TypeExportDeclaration {
+            source_type,
+            target,
+            span: SourceSpan {
+                start: statement_start,
+                end: semicolon.end,
+            },
+        });
         self.builder.finish_node();
     }
 
@@ -1700,7 +1912,7 @@ impl<'source> Parser<'source> {
                 self.bump();
                 break;
             }
-            if token.is_word("CREATE") || token.is_word("ALTER") {
+            if token.is_word("CREATE") || token.is_word("ALTER") || token.is_word("EXPORT") {
                 break;
             }
             self.bump();
