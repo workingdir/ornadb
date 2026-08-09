@@ -11,7 +11,7 @@ use orna_artifact::server_mutation_plan::{
     ServerMutationPlan,
 };
 use orna_core::{
-    FunctionId, FunctionRevisionId, ObjectId, ParameterId, TypeId,
+    FieldId, FunctionId, FunctionRevisionId, ObjectId, ParameterId, TypeId,
     catalogue::{
         CatalogueSnapshot, FunctionDefinition, FunctionDomain, FunctionReturn, FunctionSecurity,
         FunctionTransaction, FunctionVolatility, ObjectTypeDefinition,
@@ -35,7 +35,7 @@ use crate::{
         ExpectedDefinitionReference, ReferenceReplayMismatch, configure_and_recover, postgres_type,
         validate_function_reference_replay,
     },
-    storage::{DATA_SCHEMA, OBJECT_ID_COLUMN, field_name, relation_name},
+    storage::{DATA_SCHEMA, OBJECT_ID_COLUMN, field_name, relation_name, unique_constraint_name},
 };
 
 const VARIABLE_ARGUMENT_PAYLOAD_LIMIT: usize = 16 * 1024 * 1024;
@@ -313,30 +313,55 @@ impl ServerDeleteResult {
 }
 
 enum ServerMutationResult {
-    Insert(ServerInsertResult),
-    Update(ServerUpdateResult),
+    Insert {
+        result: ServerInsertResult,
+        unique_references: UniqueReferenceConstraints,
+    },
+    Update {
+        result: ServerUpdateResult,
+        unique_references: UniqueReferenceConstraints,
+    },
     Delete(ServerDeleteResult),
 }
 
 impl ServerMutationResult {
     const fn context(&self) -> ServerMutationContext {
         match self {
-            Self::Insert(result) => result.context(),
-            Self::Update(result) => result.context(),
+            Self::Insert { result, .. } => result.context(),
+            Self::Update { result, .. } => result.context(),
             Self::Delete(result) => result.context(),
+        }
+    }
+
+    fn unique_reference_conflict(
+        &self,
+        source: &tokio_postgres::Error,
+    ) -> Option<UniqueReferenceConstraint> {
+        match self {
+            Self::Insert {
+                unique_references, ..
+            }
+            | Self::Update {
+                unique_references, ..
+            } => unique_references.conflict(source),
+            Self::Delete(_) => None,
         }
     }
 
     fn committed_shutdown_error(self, source: PostgresKernelError) -> PostgresKernelError {
         match self {
-            Self::Insert(result) => server_error(ServerMutationError::CommittedButShutdownFailed {
-                result: Box::new(result),
-                source: Box::new(source),
-            }),
-            Self::Update(result) => update_error(ServerUpdateError::CommittedButShutdownFailed {
-                result: Box::new(result),
-                source: Box::new(source),
-            }),
+            Self::Insert { result, .. } => {
+                server_error(ServerMutationError::CommittedButShutdownFailed {
+                    result: Box::new(result),
+                    source: Box::new(source),
+                })
+            }
+            Self::Update { result, .. } => {
+                update_error(ServerUpdateError::CommittedButShutdownFailed {
+                    result: Box::new(result),
+                    source: Box::new(source),
+                })
+            }
             Self::Delete(result) => delete_error(ServerDeleteError::CommittedButShutdownFailed {
                 result: Box::new(result),
                 source: Box::new(source),
@@ -346,8 +371,8 @@ impl ServerMutationResult {
 
     fn into_insert(self) -> Result<ServerInsertResult, PostgresKernelError> {
         match self {
-            Self::Insert(result) => Ok(result),
-            Self::Update(_) | Self::Delete(_) => {
+            Self::Insert { result, .. } => Ok(result),
+            Self::Update { .. } | Self::Delete(_) => {
                 Err(server_error(ServerMutationError::ValueInvariant {
                     rule: "INSERT execution produced a different mutation result",
                 }))
@@ -357,8 +382,8 @@ impl ServerMutationResult {
 
     fn into_update(self) -> Result<ServerUpdateResult, PostgresKernelError> {
         match self {
-            Self::Update(result) => Ok(result),
-            Self::Insert(_) | Self::Delete(_) => {
+            Self::Update { result, .. } => Ok(result),
+            Self::Insert { .. } | Self::Delete(_) => {
                 Err(update_unavailable(PostgresKernelError::CatalogueInvariant(
                     "UPDATE execution produced a different mutation result",
                 )))
@@ -369,7 +394,7 @@ impl ServerMutationResult {
     fn into_delete(self) -> Result<ServerDeleteResult, PostgresKernelError> {
         match self {
             Self::Delete(result) => Ok(result),
-            Self::Insert(_) | Self::Update(_) => {
+            Self::Insert { .. } | Self::Update { .. } => {
                 Err(delete_unavailable(PostgresKernelError::CatalogueInvariant(
                     "DELETE execution produced a different mutation result",
                 )))
@@ -493,6 +518,17 @@ pub enum ServerMutationError {
     },
     /// The declared typed result could not be built.
     ResultRows(ResultRowsError),
+    /// A required unique reference is already assigned to another object.
+    UniqueReferenceConflict {
+        /// The object type that owns the unique reference field.
+        owner: TypeId,
+        /// The exact unique reference field.
+        field: FieldId,
+        /// The object type accepted by the reference field.
+        referenced_type: TypeId,
+        /// The PostgreSQL integrity rejection retained as internal context.
+        source: tokio_postgres::Error,
+    },
     /// PostgreSQL rejected COMMIT and confirmed that the transaction did not commit.
     CommitRejected {
         /// The immutable active execution context.
@@ -546,6 +582,7 @@ impl ServerMutationError {
             | Self::RowDecode { .. }
             | Self::ValueInvariant { .. }
             | Self::ResultRows(_)
+            | Self::UniqueReferenceConflict { .. }
             | Self::CommitRejected { .. } => ServerInsertCommitState::NotCommitted,
         }
     }
@@ -600,6 +637,9 @@ impl fmt::Display for ServerMutationError {
                 "the database returned an unexpected object identity; contact the database administrator",
             ),
             Self::ResultRows(_) => formatter.write_str("the function result is invalid"),
+            Self::UniqueReferenceConflict { .. } => {
+                formatter.write_str("this reference is already used by another object")
+            }
             Self::CommitRejected { candidate, .. } => write!(
                 formatter,
                 "the database rejected the final save for object {}; no row was added",
@@ -626,6 +666,7 @@ impl Error for ServerMutationError {
             Self::Kernel { source } => Some(source),
             Self::Database { source }
             | Self::RowDecode { source }
+            | Self::UniqueReferenceConflict { source, .. }
             | Self::CommitRejected { source, .. }
             | Self::CommitOutcomeUnknown { source, .. } => Some(source),
             Self::PlanDecode(error) => Some(error),
@@ -1118,63 +1159,39 @@ async fn commit_mutation_candidate(
     let context = candidate.context();
     match transaction.commit().await {
         Ok(()) => Ok(candidate),
-        Err(source) => Err(match candidate {
-            ServerMutationResult::Insert(result) if source.as_db_error().is_some() => {
-                server_error(ServerMutationError::CommitRejected {
-                    context,
-                    target: result.target(),
-                    candidate: result.object(),
-                    source,
-                })
-            }
-            ServerMutationResult::Insert(result) => {
-                server_error(ServerMutationError::CommitOutcomeUnknown {
-                    context,
-                    target: result.target(),
-                    candidate: result.object(),
-                    source,
-                })
-            }
-            ServerMutationResult::Update(result) if source.as_db_error().is_some() => {
-                update_error(ServerUpdateError::CommitRejected {
-                    context,
-                    target: result.target(),
-                    selector: result.selector(),
-                    matched: result.matched(),
-                    source,
-                })
-            }
-            ServerMutationResult::Update(result) => {
-                update_error(ServerUpdateError::CommitOutcomeUnknown {
-                    context,
-                    target: result.target(),
-                    selector: result.selector(),
-                    matched: result.matched(),
-                    source,
-                })
-            }
-            ServerMutationResult::Delete(result) => match delete_commit_failure(
-                source
-                    .as_db_error()
-                    .map(tokio_postgres::error::DbError::code),
-            ) {
-                DeleteCommitFailure::Restricted => {
-                    delete_error(ServerDeleteError::DeleteRestricted {
+        Err(source) => {
+            let unique_reference = candidate.unique_reference_conflict(&source);
+            Err(match candidate {
+                ServerMutationResult::Insert { .. } if let Some(reference) = unique_reference => {
+                    server_error(ServerMutationError::NotCommitted {
+                        context,
+                        source: Box::new(reference.error(source)),
+                    })
+                }
+                ServerMutationResult::Insert { result, .. } if source.as_db_error().is_some() => {
+                    server_error(ServerMutationError::CommitRejected {
                         context,
                         target: result.target(),
-                        selector: result.selector(),
+                        candidate: result.object(),
                         source,
                     })
                 }
-                DeleteCommitFailure::Rejected => delete_error(ServerDeleteError::CommitRejected {
-                    context,
-                    target: result.target(),
-                    selector: result.selector(),
-                    matched: result.matched(),
-                    source,
-                }),
-                DeleteCommitFailure::Unknown => {
-                    delete_error(ServerDeleteError::CommitOutcomeUnknown {
+                ServerMutationResult::Insert { result, .. } => {
+                    server_error(ServerMutationError::CommitOutcomeUnknown {
+                        context,
+                        target: result.target(),
+                        candidate: result.object(),
+                        source,
+                    })
+                }
+                ServerMutationResult::Update { .. } if let Some(reference) = unique_reference => {
+                    update_error(ServerUpdateError::NotCommitted {
+                        context,
+                        source: Box::new(reference.error(source)),
+                    })
+                }
+                ServerMutationResult::Update { result, .. } if source.as_db_error().is_some() => {
+                    update_error(ServerUpdateError::CommitRejected {
                         context,
                         target: result.target(),
                         selector: result.selector(),
@@ -1182,8 +1199,49 @@ async fn commit_mutation_candidate(
                         source,
                     })
                 }
-            },
-        }),
+                ServerMutationResult::Update { result, .. } => {
+                    update_error(ServerUpdateError::CommitOutcomeUnknown {
+                        context,
+                        target: result.target(),
+                        selector: result.selector(),
+                        matched: result.matched(),
+                        source,
+                    })
+                }
+                ServerMutationResult::Delete(result) => match delete_commit_failure(
+                    source
+                        .as_db_error()
+                        .map(tokio_postgres::error::DbError::code),
+                ) {
+                    DeleteCommitFailure::Restricted => {
+                        delete_error(ServerDeleteError::DeleteRestricted {
+                            context,
+                            target: result.target(),
+                            selector: result.selector(),
+                            source,
+                        })
+                    }
+                    DeleteCommitFailure::Rejected => {
+                        delete_error(ServerDeleteError::CommitRejected {
+                            context,
+                            target: result.target(),
+                            selector: result.selector(),
+                            matched: result.matched(),
+                            source,
+                        })
+                    }
+                    DeleteCommitFailure::Unknown => {
+                        delete_error(ServerDeleteError::CommitOutcomeUnknown {
+                            context,
+                            target: result.target(),
+                            selector: result.selector(),
+                            matched: result.matched(),
+                            source,
+                        })
+                    }
+                },
+            })
+        }
     }
 }
 
@@ -1248,13 +1306,19 @@ async fn execute_mutation_transaction(
         MutationExecutionKind::Insert => {
             execute_active_insert(transaction, &active, function, context, arguments)
                 .await
-                .map(ServerMutationResult::Insert)
+                .map(|(result, unique_references)| ServerMutationResult::Insert {
+                    result,
+                    unique_references,
+                })
                 .map_err(|error| not_committed(context, error))
         }
         MutationExecutionKind::Update => {
             execute_active_update(transaction, &active, function, context, arguments)
                 .await
-                .map(ServerMutationResult::Update)
+                .map(|(result, unique_references)| ServerMutationResult::Update {
+                    result,
+                    unique_references,
+                })
                 .map_err(|error| update_not_committed(context, error))
         }
         MutationExecutionKind::Delete => {
@@ -1272,7 +1336,7 @@ async fn execute_active_update(
     function: &FunctionDefinition,
     context: ServerUpdateContext,
     arguments: &[FunctionArgument],
-) -> Result<ServerUpdateResult, PostgresKernelError> {
+) -> Result<(ServerUpdateResult, UniqueReferenceConstraints), PostgresKernelError> {
     let validated =
         validate_active_mutation(active, function, arguments, MutationExecutionKind::Update)?;
     let selector = selector_object(&validated.plan, arguments)?;
@@ -1282,8 +1346,15 @@ async fn execute_active_update(
         .await
         .map_err(|source| server_error(ServerMutationError::Database { source }))?;
     validate_prepared_result(&statement, "UPDATE")?;
-    let matched = execute_update(transaction, &statement, lowered.binds, selector).await?;
-    ServerUpdateResult::new(
+    let matched = execute_update(
+        transaction,
+        &statement,
+        lowered.binds,
+        selector,
+        &validated.unique_references,
+    )
+    .await?;
+    let result = ServerUpdateResult::new(
         context,
         validated.target.id(),
         selector,
@@ -1291,7 +1362,8 @@ async fn execute_active_update(
         validated.returned.column,
     )
     .map_err(ServerMutationError::ResultRows)
-    .map_err(server_error)
+    .map_err(server_error)?;
+    Ok((result, validated.unique_references))
 }
 
 async fn execute_active_delete(
@@ -1350,7 +1422,7 @@ async fn execute_active_insert(
     function: &FunctionDefinition,
     context: ServerInsertContext,
     arguments: &[FunctionArgument],
-) -> Result<ServerInsertResult, PostgresKernelError> {
+) -> Result<(ServerInsertResult, UniqueReferenceConstraints), PostgresKernelError> {
     let validated =
         validate_active_mutation(active, function, arguments, MutationExecutionKind::Insert)?;
     let lowered = lower_insert(&validated.plan, &validated.arguments)?;
@@ -1371,8 +1443,15 @@ async fn execute_active_insert(
     )
     .map_err(ServerInsertError::ResultRows)
     .map_err(server_error)?;
-    execute_insert(transaction, &statement, lowered.binds, object).await?;
-    Ok(result)
+    execute_insert(
+        transaction,
+        &statement,
+        lowered.binds,
+        object,
+        &validated.unique_references,
+    )
+    .await?;
+    Ok((result, validated.unique_references))
 }
 
 #[derive(Debug)]
@@ -1381,10 +1460,16 @@ struct ValidatedReturn {
     column: ResultColumn,
 }
 
+struct ValidatedMutationTarget<'a> {
+    target: &'a ObjectTypeDefinition,
+    unique_references: UniqueReferenceConstraints,
+}
+
 struct ValidatedActiveMutation<'a> {
     returned: ValidatedReturn,
     plan: ServerMutationPlan,
     target: &'a ObjectTypeDefinition,
+    unique_references: UniqueReferenceConstraints,
     arguments: BTreeMap<ParameterId, BindValue>,
 }
 
@@ -1393,6 +1478,91 @@ struct ValidatedActiveDelete<'a> {
     plan: ServerDeletePlan,
     target: &'a ObjectTypeDefinition,
     arguments: BTreeMap<ParameterId, BindValue>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct UniqueReferenceConstraint {
+    owner: TypeId,
+    field: FieldId,
+    referenced_type: TypeId,
+}
+
+impl UniqueReferenceConstraint {
+    fn error(self, source: tokio_postgres::Error) -> ServerMutationError {
+        ServerMutationError::UniqueReferenceConflict {
+            owner: self.owner,
+            field: self.field,
+            referenced_type: self.referenced_type,
+            source,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct UniqueReferenceConstraints {
+    fields: Vec<UniqueReferenceConstraint>,
+}
+
+impl UniqueReferenceConstraints {
+    fn from_target(target: &ObjectTypeDefinition) -> Result<Self, PostgresKernelError> {
+        let mut fields = Vec::new();
+        for field in target.fields() {
+            if !field.unique() {
+                continue;
+            }
+            if !field.is_required_unique_reference() {
+                return Err(plan_invariant(
+                    "UNIQUE target fields must be required typed references",
+                ));
+            }
+            let ResolvedType::Reference {
+                target: referenced_type,
+            } = field.resolved_type()
+            else {
+                return Err(plan_invariant(
+                    "UNIQUE target fields must be required typed references",
+                ));
+            };
+            fields.push(UniqueReferenceConstraint {
+                owner: target.id(),
+                field: field.id(),
+                referenced_type,
+            });
+        }
+        Ok(Self { fields })
+    }
+
+    fn conflict(&self, source: &tokio_postgres::Error) -> Option<UniqueReferenceConstraint> {
+        let error = source.as_db_error()?;
+        unique_reference_constraint(self, Some(error.code()), error.constraint())
+    }
+}
+
+fn unique_reference_constraint(
+    constraints: &UniqueReferenceConstraints,
+    code: Option<&SqlState>,
+    constraint: Option<&str>,
+) -> Option<UniqueReferenceConstraint> {
+    if code != Some(&SqlState::UNIQUE_VIOLATION) {
+        return None;
+    }
+    let constraint = constraint?;
+    constraints
+        .fields
+        .iter()
+        .copied()
+        .find(|expected| unique_constraint_name(expected.field) == constraint)
+}
+
+fn mutation_database_error(
+    source: tokio_postgres::Error,
+    constraints: &UniqueReferenceConstraints,
+) -> ServerMutationError {
+    if let Some(reference) = constraints.conflict(&source) {
+        reference.error(source)
+    } else {
+        ServerMutationError::Database { source }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1456,7 +1626,8 @@ fn validate_active_mutation<'a>(
     Ok(ValidatedActiveMutation {
         returned,
         plan,
-        target,
+        target: target.target,
+        unique_references: target.unique_references,
         arguments,
     })
 }
@@ -1758,13 +1929,14 @@ fn validate_plan<'a>(
     returned_target: TypeId,
     plan: &ServerMutationPlan,
 ) -> Result<&'a ObjectTypeDefinition, PostgresKernelError> {
-    validate_plan_for_operation(
+    Ok(validate_plan_for_operation(
         catalogue,
         function,
         returned_target,
         plan,
         MutationExecutionKind::Insert,
-    )
+    )?
+    .target)
 }
 
 fn validate_plan_for_operation<'a>(
@@ -1773,7 +1945,7 @@ fn validate_plan_for_operation<'a>(
     returned_target: TypeId,
     plan: &ServerMutationPlan,
     operation: MutationExecutionKind,
-) -> Result<&'a ObjectTypeDefinition, PostgresKernelError> {
+) -> Result<ValidatedMutationTarget<'a>, PostgresKernelError> {
     let operation_matches = matches!(
         (operation, plan.operation()),
         (
@@ -1797,12 +1969,8 @@ fn validate_plan_for_operation<'a>(
     let target = catalogue
         .object_type_by_id(plan.target())
         .ok_or_else(|| plan_invariant("mutation target must be an active object type"))?;
+    let unique_references = UniqueReferenceConstraints::from_target(target)?;
     for field in target.fields() {
-        if field.unique() {
-            return Err(plan_invariant(
-                "mutation targets cannot contain UNIQUE fields",
-            ));
-        }
         if field.default_expression().is_some() {
             return Err(plan_invariant(
                 "mutation targets cannot contain field default expressions",
@@ -1893,7 +2061,10 @@ fn validate_plan_for_operation<'a>(
             ));
         }
     }
-    Ok(target)
+    Ok(ValidatedMutationTarget {
+        target,
+        unique_references,
+    })
 }
 
 fn validate_delete_plan<'a>(
@@ -2394,6 +2565,7 @@ async fn execute_insert(
     statement: &Statement,
     binds: Vec<BindValue>,
     object: ObjectId,
+    unique_references: &UniqueReferenceConstraints,
 ) -> Result<(), PostgresKernelError> {
     let object_bytes = object.to_bytes().to_vec();
     let mut parameters = Vec::<&(dyn ToSql + Sync)>::with_capacity(binds.len() + 1);
@@ -2402,7 +2574,7 @@ async fn execute_insert(
     let rows = transaction
         .query(statement, &parameters)
         .await
-        .map_err(|source| server_error(ServerInsertError::Database { source }))?;
+        .map_err(|source| server_error(mutation_database_error(source, unique_references)))?;
     let [row] = rows.as_slice() else {
         return Err(server_error(ServerInsertError::ValueInvariant {
             rule: "INSERT must return exactly one row",
@@ -2429,12 +2601,13 @@ async fn execute_update(
     statement: &Statement,
     binds: Vec<BindValue>,
     selector: ObjectId,
+    unique_references: &UniqueReferenceConstraints,
 ) -> Result<bool, PostgresKernelError> {
     let parameters = binds.iter().map(BindValue::as_to_sql).collect::<Vec<_>>();
     let rows = transaction
         .query(statement, &parameters)
         .await
-        .map_err(|source| server_error(ServerInsertError::Database { source }))?;
+        .map_err(|source| server_error(mutation_database_error(source, unique_references)))?;
     decode_selected_result(&rows, selector, "UPDATE")
 }
 
@@ -3306,7 +3479,8 @@ mod tests {
             &plan,
             MutationExecutionKind::Update,
         )
-        .unwrap();
+        .unwrap()
+        .target;
 
         assert_eq!(target.id(), TARGET);
         assert_eq!(plan.format_version(), 2);
@@ -3694,10 +3868,35 @@ mod tests {
     }
 
     #[test]
-    fn plan_rejects_unique_defaults_inactive_references_and_result_mismatch() {
+    fn plan_accepts_only_required_unique_reference_target_fields() {
         let function = valid_function();
         let mut unique_fields = target_fields(OTHER);
-        unique_fields[0] = FieldDefinition::new(
+        unique_fields[3] = FieldDefinition::new(
+            FIELD_OWNER,
+            "semantic_owner",
+            3,
+            ResolvedType::reference(OTHER),
+            false,
+            true,
+            None,
+            None,
+        );
+        let unique_catalogue = catalogue(unique_fields, true, Vec::new());
+        let unique_target =
+            validate_plan(&unique_catalogue, &function, TARGET, &valid_plan()).unwrap();
+        assert_eq!(
+            UniqueReferenceConstraints::from_target(unique_target)
+                .unwrap()
+                .fields,
+            [UniqueReferenceConstraint {
+                owner: TARGET,
+                field: FIELD_OWNER,
+                referenced_type: OTHER,
+            }]
+        );
+
+        let mut invalid_unique_fields = target_fields(OTHER);
+        invalid_unique_fields[0] = FieldDefinition::new(
             FIELD_TITLE,
             "semantic_title",
             0,
@@ -3707,8 +3906,31 @@ mod tests {
             None,
             None,
         );
-        let unique_catalogue = catalogue(unique_fields, true, Vec::new());
-        assert!(validate_plan(&unique_catalogue, &function, TARGET, &valid_plan()).is_err());
+        let invalid_unique_catalogue = catalogue(invalid_unique_fields, true, Vec::new());
+        assert!(
+            validate_plan(&invalid_unique_catalogue, &function, TARGET, &valid_plan()).is_err()
+        );
+
+        let mut nullable_unique_fields = target_fields(OTHER);
+        nullable_unique_fields[3] = FieldDefinition::new(
+            FIELD_OWNER,
+            "semantic_owner",
+            3,
+            ResolvedType::reference(OTHER),
+            true,
+            true,
+            None,
+            None,
+        );
+        let nullable_unique_catalogue = catalogue(nullable_unique_fields, true, Vec::new());
+        assert!(
+            validate_plan(&nullable_unique_catalogue, &function, TARGET, &valid_plan()).is_err()
+        );
+    }
+
+    #[test]
+    fn plan_rejects_defaults_inactive_references_and_result_mismatch() {
+        let function = valid_function();
 
         let mut default_fields = target_fields(OTHER);
         default_fields[4] = FieldDefinition::new(
@@ -4265,6 +4487,138 @@ mod tests {
                 "object {} was added, but the database connection did not close cleanly",
                 OBJECT.canonical(),
             ),
+        );
+    }
+
+    #[test]
+    fn unique_reference_conflict_preserves_typed_context_and_not_committed_outcomes() {
+        let context = ServerInsertContext::new(
+            RevisionPair::new(
+                SourceRevisionId::from_bytes([0x76; 16]),
+                CatalogueRevisionId::from_bytes([0x77; 16]),
+            ),
+            FUNCTION,
+            REVISION,
+        );
+        let conflict = || ServerMutationError::UniqueReferenceConflict {
+            owner: TARGET,
+            field: FIELD_OWNER,
+            referenced_type: OTHER,
+            source: "port=invalid"
+                .parse::<tokio_postgres::Config>()
+                .unwrap_err(),
+        };
+
+        let error = conflict();
+        let ServerMutationError::UniqueReferenceConflict {
+            owner,
+            field,
+            referenced_type,
+            ..
+        } = &error
+        else {
+            unreachable!();
+        };
+        assert_eq!(
+            (*owner, *field, *referenced_type),
+            (TARGET, FIELD_OWNER, OTHER)
+        );
+        assert_eq!(
+            error.to_string(),
+            "this reference is already used by another object"
+        );
+        assert_eq!(
+            error.commit_state(),
+            ServerMutationCommitState::NotCommitted
+        );
+        assert!(error.source().is_some());
+
+        let insert = expect_insert_error(not_committed(context, server_error(conflict())));
+        let ServerMutationError::NotCommitted {
+            context: insert_context,
+            source: insert_source,
+        } = insert
+        else {
+            panic!("expected contextual INSERT conflict");
+        };
+        assert_eq!(insert_context, context);
+        assert!(matches!(
+            insert_source.as_ref(),
+            ServerMutationError::UniqueReferenceConflict {
+                owner: TARGET,
+                field: FIELD_OWNER,
+                referenced_type: OTHER,
+                ..
+            }
+        ));
+
+        let update = expect_update_error(update_not_committed(context, server_error(conflict())));
+        let ServerUpdateError::NotCommitted {
+            context: update_context,
+            source: update_source,
+        } = update
+        else {
+            panic!("expected contextual UPDATE conflict");
+        };
+        assert_eq!(update_context, context);
+        assert!(matches!(
+            update_source.as_ref(),
+            ServerMutationError::UniqueReferenceConflict {
+                owner: TARGET,
+                field: FIELD_OWNER,
+                referenced_type: OTHER,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn unique_reference_classifier_requires_exact_active_constraint_evidence() {
+        let expected = UniqueReferenceConstraint {
+            owner: TARGET,
+            field: FIELD_OWNER,
+            referenced_type: OTHER,
+        };
+        let constraints = UniqueReferenceConstraints {
+            fields: vec![expected],
+        };
+        let expected_name = unique_constraint_name(FIELD_OWNER);
+
+        assert_eq!(
+            unique_reference_constraint(
+                &constraints,
+                Some(&SqlState::UNIQUE_VIOLATION),
+                Some(&expected_name),
+            ),
+            Some(expected)
+        );
+        assert_eq!(
+            unique_reference_constraint(&constraints, Some(&SqlState::UNIQUE_VIOLATION), None),
+            None
+        );
+        assert_eq!(
+            unique_reference_constraint(
+                &constraints,
+                Some(&SqlState::UNIQUE_VIOLATION),
+                Some(&unique_constraint_name(FIELD_TITLE)),
+            ),
+            None
+        );
+        assert_eq!(
+            unique_reference_constraint(
+                &constraints,
+                Some(&SqlState::UNIQUE_VIOLATION),
+                Some("unrelated_unique_constraint"),
+            ),
+            None
+        );
+        assert_eq!(
+            unique_reference_constraint(
+                &constraints,
+                Some(&SqlState::FOREIGN_KEY_VIOLATION),
+                Some(&expected_name),
+            ),
+            None
         );
     }
 
