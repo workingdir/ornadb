@@ -780,7 +780,7 @@ async fn persist_revisions_and_references(
             .map_err(PostgresKernelError::Database)?;
     }
     for reference in candidate.references() {
-        let (target, kind, owner_type, owner_function) = reference_columns(reference);
+        let (target, kind, owner_type, owner_function) = reference_columns(reference)?;
         let reference_kind = reference_kind(reference.kind())?;
         let source = reference.source_origin();
         transaction
@@ -1124,8 +1124,10 @@ const POSTGRES_REFERENCE_KINDS: &[(DefinitionReferenceKind, &str)] = &[
 ];
 type ReferenceTargetColumns = (&'static str, Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>);
 
-fn reference_target(value: DefinitionReferenceTarget) -> ReferenceTargetColumns {
-    match value {
+fn reference_target(
+    value: DefinitionReferenceTarget,
+) -> Result<ReferenceTargetColumns, PostgresKernelError> {
+    Ok(match value {
         DefinitionReferenceTarget::ObjectType(id) => ("object_type", bytes(id), None, None),
         DefinitionReferenceTarget::Field { owner, field } => {
             ("field", bytes(field), Some(bytes(owner)), None)
@@ -1134,14 +1136,23 @@ fn reference_target(value: DefinitionReferenceTarget) -> ReferenceTargetColumns 
         DefinitionReferenceTarget::Parameter { owner, parameter } => {
             ("parameter", bytes(parameter), None, Some(bytes(owner)))
         }
-        DefinitionReferenceTarget::Expression(id) => ("expression", bytes(id), None, None),
-    }
+        other => {
+            let DefinitionReferenceTarget::Expression(id) = other else {
+                return Err(invariant(
+                    "definition reference target is not supported by PostgreSQL persistence",
+                ));
+            };
+            ("expression", bytes(id), None, None)
+        }
+    })
 }
 type ReferenceInsertColumns = (Vec<u8>, &'static str, Option<Vec<u8>>, Option<Vec<u8>>);
 
-fn reference_columns(reference: &DefinitionReference) -> ReferenceInsertColumns {
-    let (kind, target, owner_type, owner_function) = reference_target(reference.target());
-    (target, kind, owner_type, owner_function)
+fn reference_columns(
+    reference: &DefinitionReference,
+) -> Result<ReferenceInsertColumns, PostgresKernelError> {
+    let (kind, target, owner_type, owner_function) = reference_target(reference.target())?;
+    Ok((target, kind, owner_type, owner_function))
 }
 
 #[cfg(test)]
@@ -1232,27 +1243,35 @@ mod tests {
         let parameter = ParameterId::from_bytes([4; 16]);
         let expression = ExpressionId::from_bytes([5; 16]);
         assert_eq!(
-            reference_target(DefinitionReferenceTarget::ObjectType(object)).0,
+            reference_target(DefinitionReferenceTarget::ObjectType(object))
+                .unwrap()
+                .0,
             "object_type"
         );
         let field_target = reference_target(DefinitionReferenceTarget::Field {
             owner: object,
             field,
-        });
+        })
+        .unwrap();
         assert_eq!(field_target.0, "field");
         assert_eq!(field_target.2, Some(object.to_bytes().to_vec()));
         assert_eq!(
-            reference_target(DefinitionReferenceTarget::Function(function)).0,
+            reference_target(DefinitionReferenceTarget::Function(function))
+                .unwrap()
+                .0,
             "function"
         );
         let parameter_target = reference_target(DefinitionReferenceTarget::Parameter {
             owner: function,
             parameter,
-        });
+        })
+        .unwrap();
         assert_eq!(parameter_target.0, "parameter");
         assert_eq!(parameter_target.3, Some(function.to_bytes().to_vec()));
         assert_eq!(
-            reference_target(DefinitionReferenceTarget::Expression(expression)).0,
+            reference_target(DefinitionReferenceTarget::Expression(expression))
+                .unwrap()
+                .0,
             "expression"
         );
         let expected_kinds = [
