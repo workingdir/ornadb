@@ -16,8 +16,8 @@ const POSTGRES_URL_ENV: &str = "ORNA_SERVER_POSTGRES_URL";
 
 /// A parsed, immutable connection target for the private server host.
 ///
-/// The password is not included in the public representation. A future host
-/// shell module within this crate can use the private field directly.
+/// The password is not included in the public representation. The host-only
+/// shell uses the private field solely to build the replacement environment.
 #[derive(Clone, Eq, PartialEq)]
 pub struct ServerHostConfig {
     host: String,

@@ -64,7 +64,7 @@ struct PtyOutput {
     stderr: Vec<u8>,
 }
 
-fn run(arguments: impl IntoIterator<Item = OsString>) -> Output {
+fn run_without_terminal(arguments: impl IntoIterator<Item = OsString>) -> Output {
     Command::new(env!("CARGO_BIN_EXE_orna"))
         .args(arguments)
         .env_clear()
@@ -212,7 +212,7 @@ fn write_fake_psql_with_marker(
 ) -> io::Result<PathBuf> {
     fs::create_dir_all(directory)?;
     let executable = directory.join("psql");
-    let mut script = String::from("#!/bin/sh\nset -eu\n");
+    let mut script = String::from("#!/bin/bash\nset -euo pipefail\n");
     if let Some(marker_environment) = marker_environment {
         script.push_str(&format!(": > \"${{{marker_environment}}}\"\n"));
     }
@@ -314,13 +314,13 @@ fn command_shape_failures_have_exact_process_results() {
             OsString::from("select 1"),
         ],
     ] {
-        assert_usage(&run(arguments));
+        assert_usage(&run_without_terminal(arguments));
     }
 }
 
 #[test]
 fn non_unicode_command_tokens_are_usage_errors() {
-    assert_usage(&run([
+    assert_usage(&run_without_terminal([
         OsString::from("server"),
         OsString::from_vec(b"backend-shell\xff".to_vec()),
     ]));
