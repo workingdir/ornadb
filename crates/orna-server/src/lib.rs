@@ -4,6 +4,10 @@
 //! one environment variable and keeps the parsed value separate from its
 //! original text so later host operations do not need a second parser.
 
+mod backend_shell;
+
+pub use backend_shell::{BackendShellError, run_backend_shell};
+
 use std::{env, ffi::OsString, fmt, string::FromUtf8Error};
 
 use url::{Host, Url};
