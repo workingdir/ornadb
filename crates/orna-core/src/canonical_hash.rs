@@ -1,4 +1,4 @@
-//! Canonical version-1 hashes for durable OrnaDB revision data.
+//! Canonical versioned hashes for durable OrnaDB revision data.
 //!
 //! Each function in this module first writes one complete, domain-separated
 //! byte sequence and then calculates SHA-256 over that sequence. The encoding
@@ -15,17 +15,21 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     ExpressionId, FieldId, FunctionId, FunctionRevisionId, ParameterId, SchemaId, SourceBundleId,
-    SourceRevisionId, SourceUnitId, TypeId,
+    SourceRevisionId, SourceUnitId, StandardLibraryRevisionId, TypeBindingId, TypeId,
     catalogue::{
         CatalogueSnapshot, FunctionDefinition, FunctionDomain, FunctionReturn, FunctionSecurity,
         FunctionTransaction, FunctionVolatility, ObjectTypeDefinition, OnDeleteAction,
-        ParameterDefinition, QualifiedSemanticName, SchemaDefinition,
+        ParameterDefinition, PreludeTypeName, QualifiedSemanticName, SchemaDefinition, TypeBinding,
+        TypeBindingKind, TypeLookupName, ValueTypeDefinition, ValueTypeKind, ValueTypeMutability,
+        ValueTypePersistence,
     },
     revision::{
-        DefinitionIdentity, DefinitionOrigin, DefinitionReference, DefinitionReferenceKind,
-        DefinitionReferenceTarget, ExecutableArtifact, ExecutableArtifactKind, ExpressionArtifact,
-        FunctionRevisionRecord, Sha256Digest, SourceOrigin, StoredSourceRevision, StoredSourceUnit,
-        reference_kind_accepts_target,
+        CatalogueHashContext, CatalogueHashVersion, DefinitionIdentity, DefinitionOrigin,
+        DefinitionReference, DefinitionReferenceKind, DefinitionReferenceTarget,
+        ExecutableArtifact, ExecutableArtifactKind, ExpressionArtifact, FunctionRevisionRecord,
+        FunctionSemanticHashVersion, Sha256Digest, SourceOrigin, StandardLibraryDigestVersion,
+        StandardLibrarySnapshot, StoredSourceRevision, StoredSourceUnit,
+        VerifiedStandardLibrarySnapshot, reference_kind_accepts_target,
     },
     types::{ResolvedType, StandardScalar},
 };
@@ -34,11 +38,45 @@ const SOURCE_UNIT_CONTENT_DOMAIN: &[u8] = b"ornadb.hash/source-unit-content/v1\0
 const SOURCE_BUNDLE_DOMAIN: &[u8] = b"ornadb.hash/source-bundle/v1\0";
 const SOURCE_REVISION_DOMAIN: &[u8] = b"ornadb.hash/source-revision/v1\0";
 const CATALOGUE_DOMAIN: &[u8] = b"ornadb.hash/catalogue/v1\0";
+const CATALOGUE_V2_DOMAIN: &[u8] = b"ornadb.hash/catalogue/v2\0";
 const FUNCTION_DECLARATION_DOMAIN: &[u8] = b"ornadb.hash/function-declaration/v1\0";
 const FUNCTION_SEMANTIC_DOMAIN: &[u8] = b"ornadb.hash/function-semantic/v1\0";
+const FUNCTION_SEMANTIC_V2_DOMAIN: &[u8] = b"ornadb.hash/function-semantic/v2\0";
+const STANDARD_LIBRARY_DOMAIN: &[u8] = b"ornadb.hash/standard-library/v1\0";
 const ARTIFACT_PAYLOAD_DOMAIN: &[u8] = b"ornadb.hash/artifact-payload/v1\0";
 
-/// An error returned when input cannot form canonical version-1 hash bytes.
+/// One typed fact that cannot be represented by an older catalogue hash contract.
+#[non_exhaustive]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CatalogueHashFact {
+    /// One value-type definition.
+    ValueTypeDefinition(TypeId),
+    /// One direct type-name binding.
+    TypeBinding(TypeBindingId),
+    /// One definition source origin.
+    DefinitionOrigin(DefinitionIdentity),
+    /// One resolved reference target.
+    DefinitionReferenceTarget(DefinitionReferenceTarget),
+    /// One immutable function revision's semantic-hash contract.
+    FunctionSemanticHashVersion {
+        /// The function owning the immutable revision.
+        function: FunctionId,
+        /// The immutable function revision.
+        revision: FunctionRevisionId,
+        /// The incompatible semantic-hash contract.
+        version: FunctionSemanticHashVersion,
+    },
+}
+
+/// One typed function fact that cannot be represented by an older semantic hash.
+#[non_exhaustive]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FunctionSemanticHashFact {
+    /// One resolved value-type reference target.
+    ValueTypeReference(TypeId),
+}
+
+/// An error returned when input cannot form the selected canonical hash bytes.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CanonicalHashError {
     /// A text, blob, or sequence length cannot be represented by the codec.
@@ -76,6 +114,32 @@ pub enum CanonicalHashError {
     SourceBundleHashMismatch {
         /// The source bundle with an inconsistent aggregate hash.
         source_bundle: SourceBundleId,
+    },
+    /// A standard source revision's retained revision hash is inconsistent.
+    StandardSourceRevisionHashMismatch {
+        /// The inconsistent source revision.
+        source_revision: SourceRevisionId,
+    },
+    /// A retained standard-library digest differs from its canonical facts.
+    StandardLibraryDigestMismatch {
+        /// The inconsistent standard-library revision.
+        revision: StandardLibraryRevisionId,
+    },
+    /// A typed catalogue fact cannot be represented by the selected hash contract.
+    CatalogueFactUnsupportedByHashVersion {
+        /// The selected catalogue hash contract.
+        version: CatalogueHashVersion,
+        /// The incompatible catalogue fact.
+        fact: CatalogueHashFact,
+    },
+    /// A typed function fact cannot be represented by the selected semantic hash contract.
+    FunctionFactUnsupportedBySemanticHashVersion {
+        /// The selected function semantic hash contract.
+        version: FunctionSemanticHashVersion,
+        /// The affected function.
+        function: FunctionId,
+        /// The incompatible semantic fact.
+        fact: FunctionSemanticHashFact,
     },
     /// An artifact record's retained payload hash is inconsistent.
     ArtifactPayloadHashMismatch {
@@ -216,6 +280,49 @@ impl fmt::Display for CanonicalHashError {
             SourceBundleHashMismatch { .. } => {
                 formatter.write_str("stored source bundle hash differs from exact bundle")
             }
+            StandardSourceRevisionHashMismatch { .. } => formatter
+                .write_str("stored standard source revision hash differs from exact revision"),
+            StandardLibraryDigestMismatch { .. } => {
+                formatter.write_str("stored standard library digest differs from canonical facts")
+            }
+            CatalogueFactUnsupportedByHashVersion { version, fact } => match fact {
+                CatalogueHashFact::ValueTypeDefinition(_) => write!(
+                    formatter,
+                    "catalogue hash version {} cannot include value types; use catalogue hash version 2",
+                    version.to_u32()
+                ),
+                CatalogueHashFact::TypeBinding(_) => write!(
+                    formatter,
+                    "catalogue hash version {} cannot include type-name bindings; use catalogue hash version 2",
+                    version.to_u32()
+                ),
+                CatalogueHashFact::DefinitionOrigin(_) => write!(
+                    formatter,
+                    "catalogue hash version {} cannot include value-type or binding origins; use catalogue hash version 2",
+                    version.to_u32()
+                ),
+                CatalogueHashFact::DefinitionReferenceTarget(_) => write!(
+                    formatter,
+                    "catalogue hash version {} cannot include value-type references; use catalogue hash version 2",
+                    version.to_u32()
+                ),
+                CatalogueHashFact::FunctionSemanticHashVersion {
+                    version: semantic_version,
+                    ..
+                } => write!(
+                    formatter,
+                    "catalogue hash version {} cannot include function semantic hash version {}; use catalogue hash version 2",
+                    version.to_u32(),
+                    semantic_version.to_u32()
+                ),
+            },
+            FunctionFactUnsupportedBySemanticHashVersion { version, fact, .. } => match fact {
+                FunctionSemanticHashFact::ValueTypeReference(_) => write!(
+                    formatter,
+                    "function semantic hash version {} cannot include value-type references; use function semantic hash version 2",
+                    version.to_u32()
+                ),
+            },
             ArtifactPayloadHashMismatch { artifact } => {
                 write!(
                     formatter,
@@ -386,12 +493,96 @@ pub fn source_revision_record_digest(
     Ok(encoder.digest())
 }
 
+/// Verifies and returns the canonical digest of one standard-library snapshot.
+pub fn standard_library_digest(
+    standard: &StandardLibrarySnapshot,
+) -> Result<Sha256Digest, CanonicalHashError> {
+    let digest = calculate_standard_library_digest(standard)?;
+    if digest != standard.digest() {
+        return Err(CanonicalHashError::StandardLibraryDigestMismatch {
+            revision: standard.revision(),
+        });
+    }
+    Ok(digest)
+}
+
+/// Verifies a retained standard snapshot and returns its unforgeable trust capability.
+pub fn verify_standard_library_snapshot(
+    standard: StandardLibrarySnapshot,
+) -> Result<VerifiedStandardLibrarySnapshot, CanonicalHashError> {
+    standard_library_digest(&standard)?;
+    Ok(VerifiedStandardLibrarySnapshot::new(standard))
+}
+
+fn calculate_standard_library_digest(
+    standard: &StandardLibrarySnapshot,
+) -> Result<Sha256Digest, CanonicalHashError> {
+    match standard.digest_version() {
+        StandardLibraryDigestVersion::Version1 => {}
+    }
+
+    let source_hash = source_revision_digest(standard.source())?;
+    if source_hash != standard.source().revision_hash() {
+        return Err(CanonicalHashError::StandardSourceRevisionHashMismatch {
+            source_revision: standard.source().id(),
+        });
+    }
+
+    let expressions = HashMap::new();
+    let origins = complete_origins(standard.catalogue(), &expressions, standard.origins())?;
+    let mut encoder = Encoder::new(STANDARD_LIBRARY_DOMAIN);
+    encoder.u32(StandardLibraryDigestVersion::Version1.to_u32());
+    encoder.standard_library_revision_id(standard.revision());
+    encoder.source_revision_id(standard.source().id());
+    encoder.digest_value(standard.source().revision_hash());
+    encoder.text(standard.language_version(), "standard language version")?;
+    encode_standard_schemas(&mut encoder, standard.catalogue(), &origins)?;
+    encode_value_types(
+        &mut encoder,
+        standard.catalogue().value_types(),
+        Some(&origins),
+    )?;
+    encode_type_bindings(
+        &mut encoder,
+        standard.catalogue().type_bindings(),
+        Some(&origins),
+    )?;
+
+    Ok(encoder.digest())
+}
+
+#[cfg(test)]
+pub(crate) fn calculate_standard_library_digest_for_test(
+    standard: &StandardLibrarySnapshot,
+) -> Result<Sha256Digest, CanonicalHashError> {
+    calculate_standard_library_digest(standard)
+}
+
 /// Hashes the resolved semantics of one function revision.
 ///
 /// This intentionally excludes semantic names, source origins, and function
 /// revision identities. It includes resolved identities, execution properties,
 /// exact artifact descriptors, and resolved definition references.
 pub fn function_semantic_digest(
+    function: &FunctionDefinition,
+    language_version: &str,
+    artifact: &ExecutableArtifact,
+    expressions: &[ExpressionArtifact],
+    references: &[DefinitionReference],
+) -> Result<Sha256Digest, CanonicalHashError> {
+    function_semantic_digest_with_version(
+        FunctionSemanticHashVersion::Version1,
+        function,
+        language_version,
+        artifact,
+        expressions,
+        references,
+    )
+}
+
+/// Hashes one function under an explicit semantic-hash contract.
+pub fn function_semantic_digest_with_version(
+    version: FunctionSemanticHashVersion,
     function: &FunctionDefinition,
     language_version: &str,
     artifact: &ExecutableArtifact,
@@ -407,7 +598,34 @@ pub fn function_semantic_digest(
     }
 
     let references = semantic_references(function, references)?;
-    let mut encoder = Encoder::new(FUNCTION_SEMANTIC_DOMAIN);
+    match version {
+        FunctionSemanticHashVersion::Version1 => {
+            for reference in &references {
+                match reference.target() {
+                    DefinitionReferenceTarget::ValueType(target) => {
+                        return Err(
+                            CanonicalHashError::FunctionFactUnsupportedBySemanticHashVersion {
+                                version,
+                                function: function.id(),
+                                fact: FunctionSemanticHashFact::ValueTypeReference(target),
+                            },
+                        );
+                    }
+                    DefinitionReferenceTarget::ObjectType(_)
+                    | DefinitionReferenceTarget::Field { .. }
+                    | DefinitionReferenceTarget::Function(_)
+                    | DefinitionReferenceTarget::Parameter { .. }
+                    | DefinitionReferenceTarget::Expression(_) => {}
+                }
+            }
+        }
+        FunctionSemanticHashVersion::Version2 => {}
+    }
+    let domain = match version {
+        FunctionSemanticHashVersion::Version1 => FUNCTION_SEMANTIC_DOMAIN,
+        FunctionSemanticHashVersion::Version2 => FUNCTION_SEMANTIC_V2_DOMAIN,
+    };
+    let mut encoder = Encoder::new(domain);
     encoder.function_id(function.id());
     encoder.function_domain(function.domain());
 
@@ -452,11 +670,40 @@ pub fn catalogue_digest(
     origins: &[DefinitionOrigin],
     references: &[DefinitionReference],
 ) -> Result<Sha256Digest, CanonicalHashError> {
+    catalogue_digest_with_context(
+        &CatalogueHashContext::version_one(),
+        catalogue,
+        function_revisions,
+        expressions,
+        origins,
+        references,
+    )
+}
+
+/// Hashes one complete catalogue under its closed version and standard context.
+pub fn catalogue_digest_with_context(
+    context: &CatalogueHashContext,
+    catalogue: &CatalogueSnapshot,
+    function_revisions: &[FunctionRevisionRecord],
+    expressions: &[ExpressionArtifact],
+    origins: &[DefinitionOrigin],
+    references: &[DefinitionReference],
+) -> Result<Sha256Digest, CanonicalHashError> {
+    validate_catalogue_version_facts(
+        context.version(),
+        catalogue,
+        function_revisions,
+        origins,
+        references,
+    )?;
     let expressions_by_id = expression_artifacts_by_id(expressions)?;
     validate_default_expression_coverage(catalogue, &expressions_by_id)?;
     let revisions_by_function = current_function_revisions(catalogue, function_revisions)?;
     validate_catalogue_references(
         catalogue,
+        context
+            .standard()
+            .map(VerifiedStandardLibrarySnapshot::catalogue),
         &expressions_by_id,
         &revisions_by_function,
         references,
@@ -475,7 +722,8 @@ pub fn catalogue_digest(
             .filter(|reference| reference.source_function() == function.id())
             .cloned()
             .collect::<Vec<_>>();
-        let semantic_hash = function_semantic_digest(
+        let semantic_hash = function_semantic_digest_with_version(
+            revision.semantic_hash_version(),
             function,
             revision.language_version(),
             revision.artifact(),
@@ -490,15 +738,117 @@ pub fn catalogue_digest(
         }
     }
 
-    let mut encoder = Encoder::new(CATALOGUE_DOMAIN);
-    encode_catalogue_schemas(&mut encoder, catalogue.schemas())?;
-    encode_catalogue_object_types(&mut encoder, catalogue)?;
-    encode_catalogue_functions(&mut encoder, catalogue)?;
-    encode_expression_artifacts(&mut encoder, expressions)?;
-    encode_current_function_revisions(&mut encoder, function_revisions)?;
-    encode_definition_origins(&mut encoder, origins)?;
-    encode_definition_references(&mut encoder, references)?;
-    Ok(encoder.digest())
+    match context {
+        CatalogueHashContext::Version1 => {
+            let mut encoder = Encoder::new(CATALOGUE_DOMAIN);
+            encode_catalogue_schemas(&mut encoder, catalogue.schemas())?;
+            encode_catalogue_object_types(&mut encoder, catalogue)?;
+            encode_catalogue_functions(&mut encoder, catalogue)?;
+            encode_expression_artifacts(&mut encoder, expressions)?;
+            encode_current_function_revisions_with_contract(
+                &mut encoder,
+                function_revisions,
+                CurrentFunctionRevisionEncoding::Version1,
+            )?;
+            encode_definition_origins(&mut encoder, origins)?;
+            encode_definition_references(&mut encoder, references)?;
+            Ok(encoder.digest())
+        }
+        CatalogueHashContext::Version2 { standard } => {
+            let mut encoder = Encoder::new(CATALOGUE_V2_DOMAIN);
+            encoder.u32(CatalogueHashVersion::Version2.to_u32());
+            encoder.standard_library_revision_id(standard.revision());
+            encoder.digest_value(standard.digest());
+            encode_catalogue_schemas(&mut encoder, catalogue.schemas())?;
+            encode_catalogue_object_types(&mut encoder, catalogue)?;
+            encode_value_types(&mut encoder, catalogue.value_types(), None)?;
+            encode_type_bindings(&mut encoder, catalogue.type_bindings(), None)?;
+            encode_catalogue_functions(&mut encoder, catalogue)?;
+            encode_expression_artifacts(&mut encoder, expressions)?;
+            encode_current_function_revisions_with_contract(
+                &mut encoder,
+                function_revisions,
+                CurrentFunctionRevisionEncoding::Version2,
+            )?;
+            encode_definition_origins(&mut encoder, origins)?;
+            encode_definition_references(&mut encoder, references)?;
+            Ok(encoder.digest())
+        }
+    }
+}
+
+fn validate_catalogue_version_facts(
+    version: CatalogueHashVersion,
+    catalogue: &CatalogueSnapshot,
+    function_revisions: &[FunctionRevisionRecord],
+    origins: &[DefinitionOrigin],
+    references: &[DefinitionReference],
+) -> Result<(), CanonicalHashError> {
+    match version {
+        CatalogueHashVersion::Version1 => {
+            if let Some(value_type) = catalogue.value_types().first() {
+                return Err(CanonicalHashError::CatalogueFactUnsupportedByHashVersion {
+                    version,
+                    fact: CatalogueHashFact::ValueTypeDefinition(value_type.id()),
+                });
+            }
+            if let Some(binding) = catalogue.type_bindings().first() {
+                return Err(CanonicalHashError::CatalogueFactUnsupportedByHashVersion {
+                    version,
+                    fact: CatalogueHashFact::TypeBinding(binding.id()),
+                });
+            }
+            for origin in origins {
+                match origin.identity() {
+                    DefinitionIdentity::ValueType(_) | DefinitionIdentity::TypeBinding(_) => {
+                        return Err(CanonicalHashError::CatalogueFactUnsupportedByHashVersion {
+                            version,
+                            fact: CatalogueHashFact::DefinitionOrigin(origin.identity()),
+                        });
+                    }
+                    DefinitionIdentity::Schema(_)
+                    | DefinitionIdentity::ObjectType(_)
+                    | DefinitionIdentity::Field { .. }
+                    | DefinitionIdentity::Function(_)
+                    | DefinitionIdentity::Parameter { .. }
+                    | DefinitionIdentity::FunctionReturnColumn { .. }
+                    | DefinitionIdentity::Expression(_) => {}
+                }
+            }
+            for reference in references {
+                match reference.target() {
+                    DefinitionReferenceTarget::ValueType(_) => {
+                        return Err(CanonicalHashError::CatalogueFactUnsupportedByHashVersion {
+                            version,
+                            fact: CatalogueHashFact::DefinitionReferenceTarget(reference.target()),
+                        });
+                    }
+                    DefinitionReferenceTarget::ObjectType(_)
+                    | DefinitionReferenceTarget::Field { .. }
+                    | DefinitionReferenceTarget::Function(_)
+                    | DefinitionReferenceTarget::Parameter { .. }
+                    | DefinitionReferenceTarget::Expression(_) => {}
+                }
+            }
+            for revision in function_revisions {
+                match revision.semantic_hash_version() {
+                    FunctionSemanticHashVersion::Version1 => {}
+                    FunctionSemanticHashVersion::Version2 => {
+                        return Err(CanonicalHashError::CatalogueFactUnsupportedByHashVersion {
+                            version,
+                            fact: CatalogueHashFact::FunctionSemanticHashVersion {
+                                function: revision.function(),
+                                revision: revision.id(),
+                                version: revision.semantic_hash_version(),
+                            },
+                        });
+                    }
+                }
+            }
+        }
+        CatalogueHashVersion::Version2 => {}
+    }
+    Ok(())
 }
 
 fn encode_catalogue_schemas(
@@ -511,6 +861,97 @@ fn encode_catalogue_schemas(
         encoder.schema_id(schema.id());
         encoder.semantic_name(schema.name())?;
     }
+    Ok(())
+}
+
+fn encode_standard_schemas(
+    encoder: &mut Encoder,
+    catalogue: &CatalogueSnapshot,
+    origins: &HashMap<DefinitionIdentity, &DefinitionOrigin>,
+) -> Result<(), CanonicalHashError> {
+    let schemas = sorted_by_key(catalogue.schemas(), |schema| schema.id().to_bytes());
+    encoder.sequence_len(schemas.len(), "standard schemas")?;
+    for schema in schemas {
+        encoder.schema_id(schema.id());
+        encoder.semantic_name(schema.name())?;
+        encode_required_origin(encoder, origins, DefinitionIdentity::Schema(schema.id()))?;
+    }
+    Ok(())
+}
+
+fn encode_value_types(
+    encoder: &mut Encoder,
+    value_types: &[ValueTypeDefinition],
+    origins: Option<&HashMap<DefinitionIdentity, &DefinitionOrigin>>,
+) -> Result<(), CanonicalHashError> {
+    let value_types = sorted_by_key(value_types, |value_type| value_type.id().to_bytes());
+    encoder.sequence_len(value_types.len(), "catalogue value types")?;
+    for value_type in value_types {
+        encoder.type_id(value_type.id());
+        encoder.semantic_name(value_type.name())?;
+        encoder.u8(match value_type.kind() {
+            ValueTypeKind::Primitive => 1,
+        });
+        encoder.u8(match value_type.mutability() {
+            ValueTypeMutability::Immutable => 1,
+        });
+        encoder.u8(match value_type.persistence() {
+            ValueTypePersistence::Persistable => 1,
+            ValueTypePersistence::Transient => 2,
+        });
+        encoder.text(
+            value_type.representation_contract(),
+            "value type representation contract",
+        )?;
+        if let Some(origins) = origins {
+            encode_required_origin(
+                encoder,
+                origins,
+                DefinitionIdentity::ValueType(value_type.id()),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn encode_type_bindings(
+    encoder: &mut Encoder,
+    bindings: &[TypeBinding],
+    origins: Option<&HashMap<DefinitionIdentity, &DefinitionOrigin>>,
+) -> Result<(), CanonicalHashError> {
+    let bindings = sorted_by_key(bindings, |binding| binding.id().to_bytes());
+    encoder.sequence_len(bindings.len(), "catalogue type bindings")?;
+    for binding in bindings {
+        encoder.type_binding_id(binding.id());
+        encoder.u8(match binding.kind() {
+            TypeBindingKind::Qualified => 1,
+            TypeBindingKind::Prelude => 2,
+        });
+        match binding.name() {
+            TypeLookupName::Qualified(name) => encoder.semantic_name(name)?,
+            TypeLookupName::Prelude(name) => encoder.prelude_name(name)?,
+        }
+        encoder.type_id(binding.target());
+        if let Some(origins) = origins {
+            encode_required_origin(
+                encoder,
+                origins,
+                DefinitionIdentity::TypeBinding(binding.id()),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn encode_required_origin(
+    encoder: &mut Encoder,
+    origins: &HashMap<DefinitionIdentity, &DefinitionOrigin>,
+    identity: DefinitionIdentity,
+) -> Result<(), CanonicalHashError> {
+    let origin = origins
+        .get(&identity)
+        .ok_or(CanonicalHashError::MissingDefinitionOrigin { identity })?;
+    encoder.source_origin(origin.source());
     Ok(())
 }
 
@@ -581,9 +1022,16 @@ fn encode_function_return_catalogue(
     encode_function_return(encoder, function_return, ReturnColumnNames::Include)
 }
 
-fn encode_current_function_revisions(
+#[derive(Clone, Copy)]
+enum CurrentFunctionRevisionEncoding {
+    Version1,
+    Version2,
+}
+
+fn encode_current_function_revisions_with_contract(
     encoder: &mut Encoder,
     function_revisions: &[FunctionRevisionRecord],
+    encoding: CurrentFunctionRevisionEncoding,
 ) -> Result<(), CanonicalHashError> {
     let revisions = sorted_by_key(function_revisions, |revision| {
         revision.function().to_bytes()
@@ -596,6 +1044,12 @@ fn encode_current_function_revisions(
         encoder.source_origin(revision.declaration_origin());
         encoder.digest_value(revision.declaration_content_hash());
         encoder.digest_value(revision.semantic_hash());
+        match encoding {
+            CurrentFunctionRevisionEncoding::Version1 => {}
+            CurrentFunctionRevisionEncoding::Version2 => {
+                encoder.u32(revision.semantic_hash_version().to_u32());
+            }
+        }
         encoder.text(revision.language_version(), "function language version")?;
         encode_executable_artifact_descriptor(encoder, revision.artifact())?;
     }
@@ -855,6 +1309,7 @@ fn current_function_revisions<'a>(
 
 fn validate_catalogue_references(
     catalogue: &CatalogueSnapshot,
+    standard: Option<&CatalogueSnapshot>,
     expressions: &HashMap<ExpressionId, &ExpressionArtifact>,
     revisions: &HashMap<FunctionId, &FunctionRevisionRecord>,
     references: &[DefinitionReference],
@@ -882,7 +1337,7 @@ fn validate_catalogue_references(
                 ordinal: reference.ordinal(),
             });
         }
-        if !reference_target_exists(catalogue, expressions, reference.target()) {
+        if !reference_target_exists(catalogue, standard, expressions, reference.target()) {
             return Err(CanonicalHashError::ReferenceTargetNotFound {
                 target: reference.target(),
             });
@@ -951,10 +1406,14 @@ fn semantic_references<'a>(
 
 fn reference_target_exists(
     catalogue: &CatalogueSnapshot,
+    standard: Option<&CatalogueSnapshot>,
     expressions: &HashMap<ExpressionId, &ExpressionArtifact>,
     target: DefinitionReferenceTarget,
 ) -> bool {
-    definition_identity_exists(catalogue, expressions, target.into())
+    let identity = target.into();
+    definition_identity_exists(catalogue, expressions, identity)
+        || standard
+            .is_some_and(|standard| definition_identity_exists(standard, expressions, identity))
 }
 
 fn definition_identity_exists(
@@ -967,6 +1426,10 @@ fn definition_identity_exists(
         DefinitionIdentity::ObjectType(object_type) => {
             catalogue.object_type_by_id(object_type).is_some()
         }
+        DefinitionIdentity::ValueType(value_type) => {
+            catalogue.value_type_by_id(value_type).is_some()
+        }
+        DefinitionIdentity::TypeBinding(binding) => catalogue.type_binding_by_id(binding).is_some(),
         DefinitionIdentity::Field { owner, field } => catalogue
             .object_type_by_id(owner)
             .is_some_and(|object_type| object_type.field_by_id(field).is_some()),
@@ -1002,6 +1465,12 @@ fn catalogue_definition_identities(
                 field: field.id(),
             });
         }
+    }
+    for value_type in catalogue.value_types() {
+        identities.push(DefinitionIdentity::ValueType(value_type.id()));
+    }
+    for binding in catalogue.type_bindings() {
+        identities.push(DefinitionIdentity::TypeBinding(binding.id()));
     }
     for function in catalogue.functions() {
         identities.push(DefinitionIdentity::Function(function.id()));
@@ -1157,11 +1626,27 @@ impl Encoder {
         Ok(())
     }
 
+    fn prelude_name(&mut self, name: &PreludeTypeName) -> Result<(), CanonicalHashError> {
+        self.sequence_len(name.words().len(), "prelude type name words")?;
+        for word in name.words() {
+            self.text(word, "prelude type name word")?;
+        }
+        Ok(())
+    }
+
     fn id(&mut self, id: [u8; 16]) {
         self.bytes(&id);
     }
 
     fn type_id(&mut self, id: TypeId) {
+        self.id(id.to_bytes());
+    }
+
+    fn type_binding_id(&mut self, id: TypeBindingId) {
+        self.id(id.to_bytes());
+    }
+
+    fn standard_library_revision_id(&mut self, id: StandardLibraryRevisionId) {
         self.id(id.to_bytes());
     }
 
@@ -1318,6 +1803,14 @@ impl Encoder {
                 self.u8(2);
                 self.type_id(object_type);
             }
+            DefinitionIdentity::ValueType(value_type) => {
+                self.u8(8);
+                self.type_id(value_type);
+            }
+            DefinitionIdentity::TypeBinding(binding) => {
+                self.u8(9);
+                self.type_binding_id(binding);
+            }
             DefinitionIdentity::Field { owner, field } => {
                 self.u8(3);
                 self.type_id(owner);
@@ -1349,6 +1842,10 @@ impl Encoder {
             DefinitionReferenceTarget::ObjectType(object_type) => {
                 self.u8(1);
                 self.type_id(object_type);
+            }
+            DefinitionReferenceTarget::ValueType(value_type) => {
+                self.u8(6);
+                self.type_id(value_type);
             }
             DefinitionReferenceTarget::Field { owner, field } => {
                 self.u8(2);
@@ -1405,8 +1902,11 @@ mod tests {
     use super::*;
     use crate::{
         CatalogueRevisionId,
-        catalogue::{FieldDefinition, FunctionReturnColumnDefinition, SchemaDefinition},
-        revision::SourceOrigin,
+        catalogue::{
+            FieldDefinition, FunctionReturnColumnDefinition, PreludeTypeName, SchemaDefinition,
+            TypeBinding, ValueTypeDefinition, ValueTypeMutability, ValueTypePersistence,
+        },
+        revision::{CatalogueHashContext, SourceOrigin},
         types::{ResolvedType, StandardScalar},
     };
 
@@ -1451,6 +1951,132 @@ mod tests {
             artifact_payload_digest(&payload).unwrap(),
         )
         .unwrap()
+    }
+
+    fn standard_boolean_id() -> TypeId {
+        TypeId::from_bytes(id::<21>())
+    }
+
+    fn standard_snapshot(
+        reverse: bool,
+        retained_digest: Option<Sha256Digest>,
+    ) -> StandardLibrarySnapshot {
+        let unit = source_unit(
+            SourceUnitId::from_bytes(id::<22>()),
+            0,
+            "std/types.orna",
+            "CREATE SCHEMA std; CREATE SCHEMA std.types; CREATE TYPE boolean;",
+        );
+        let bundle_hash = source_bundle_digest(std::slice::from_ref(&unit)).unwrap();
+        let source = StoredSourceRevision::new(
+            SourceBundleId::from_bytes(id::<23>()),
+            SourceRevisionId::from_bytes(id::<24>()),
+            None,
+            vec![unit],
+            bundle_hash,
+            source_revision_record_digest(
+                SourceBundleId::from_bytes(id::<23>()),
+                None,
+                bundle_hash,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        let mut schemas = vec![
+            SchemaDefinition::new(
+                SchemaId::from_bytes(id::<25>()),
+                QualifiedSemanticName::new(["std"]).unwrap(),
+            ),
+            SchemaDefinition::new(
+                SchemaId::from_bytes(id::<26>()),
+                QualifiedSemanticName::new(["std", "types"]).unwrap(),
+            ),
+        ];
+        let boolean = ValueTypeDefinition::primitive(
+            standard_boolean_id(),
+            QualifiedSemanticName::new(["std", "types", "boolean"]).unwrap(),
+            ValueTypeMutability::Immutable,
+            ValueTypePersistence::Persistable,
+            "orna.kernel.value.boolean@1",
+        );
+        let mut bindings = vec![
+            TypeBinding::qualified(
+                QualifiedSemanticName::new(["std", "boolean"]).unwrap(),
+                standard_boolean_id(),
+            )
+            .unwrap(),
+            TypeBinding::prelude(
+                PreludeTypeName::new(["BOOLEAN"]).unwrap(),
+                standard_boolean_id(),
+            )
+            .unwrap(),
+        ];
+        let qualified_binding = bindings[0].id();
+        let prelude_binding = bindings[1].id();
+        if reverse {
+            schemas.reverse();
+            bindings.reverse();
+        }
+        let catalogue = CatalogueSnapshot::new_with_types(
+            CatalogueRevisionId::from_bytes(id::<27>()),
+            schemas,
+            vec![],
+            vec![boolean],
+            bindings.clone(),
+        )
+        .unwrap();
+        let source_unit = SourceUnitId::from_bytes(id::<22>());
+        let mut origins = vec![
+            DefinitionOrigin::new(
+                DefinitionIdentity::Schema(SchemaId::from_bytes(id::<25>())),
+                SourceOrigin::new(source_unit, 0, 1).unwrap(),
+            ),
+            DefinitionOrigin::new(
+                DefinitionIdentity::Schema(SchemaId::from_bytes(id::<26>())),
+                SourceOrigin::new(source_unit, 1, 2).unwrap(),
+            ),
+            DefinitionOrigin::new(
+                DefinitionIdentity::ValueType(standard_boolean_id()),
+                SourceOrigin::new(source_unit, 2, 3).unwrap(),
+            ),
+            DefinitionOrigin::new(
+                DefinitionIdentity::TypeBinding(qualified_binding),
+                SourceOrigin::new(source_unit, 3, 4).unwrap(),
+            ),
+            DefinitionOrigin::new(
+                DefinitionIdentity::TypeBinding(prelude_binding),
+                SourceOrigin::new(source_unit, 4, 5).unwrap(),
+            ),
+        ];
+        if reverse {
+            origins.reverse();
+        }
+        let provisional = StandardLibrarySnapshot::new(
+            StandardLibraryRevisionId::from_bytes(id::<28>()),
+            StandardLibraryDigestVersion::Version1,
+            source.clone(),
+            "orna.language/1",
+            catalogue.clone(),
+            origins.clone(),
+            digest_bytes(b"provisional"),
+        )
+        .unwrap();
+        let exact = calculate_standard_library_digest(&provisional).unwrap();
+        StandardLibrarySnapshot::new(
+            provisional.revision(),
+            provisional.digest_version(),
+            source,
+            provisional.language_version(),
+            catalogue,
+            origins,
+            retained_digest.unwrap_or(exact),
+        )
+        .unwrap()
+    }
+
+    fn verified_standard_snapshot(reverse: bool) -> VerifiedStandardLibrarySnapshot {
+        verify_standard_library_snapshot(standard_snapshot(reverse, None)).unwrap()
     }
 
     fn catalogue() -> CatalogueSnapshot {
@@ -1500,6 +2126,109 @@ mod tests {
             vec![function],
         )
         .unwrap()
+    }
+
+    fn catalogue_with_application_types(
+        reverse: bool,
+    ) -> (CatalogueSnapshot, Vec<DefinitionOrigin>) {
+        let base = catalogue();
+        let mut value_types = vec![
+            ValueTypeDefinition::primitive(
+                TypeId::from_bytes(id::<30>()),
+                QualifiedSemanticName::new(["crm", "flag"]).unwrap(),
+                ValueTypeMutability::Immutable,
+                ValueTypePersistence::Persistable,
+                "orna.kernel.value.flag@1",
+            ),
+            ValueTypeDefinition::primitive(
+                TypeId::from_bytes(id::<31>()),
+                QualifiedSemanticName::new(["crm", "token"]).unwrap(),
+                ValueTypeMutability::Immutable,
+                ValueTypePersistence::Transient,
+                "orna.kernel.value.token@1",
+            ),
+        ];
+        let mut bindings = vec![
+            TypeBinding::qualified(
+                QualifiedSemanticName::new(["crm", "flag_alias"]).unwrap(),
+                TypeId::from_bytes(id::<30>()),
+            )
+            .unwrap(),
+            TypeBinding::prelude(
+                PreludeTypeName::new(["APP", "TOKEN"]).unwrap(),
+                TypeId::from_bytes(id::<31>()),
+            )
+            .unwrap(),
+        ];
+        let binding_ids = [bindings[0].id(), bindings[1].id()];
+        if reverse {
+            value_types.reverse();
+            bindings.reverse();
+        }
+        let catalogue = CatalogueSnapshot::new_with_functions_and_types(
+            base.revision(),
+            base.schemas().to_vec(),
+            base.object_types().to_vec(),
+            value_types,
+            bindings,
+            base.functions().to_vec(),
+        )
+        .unwrap();
+        let source = SourceUnitId::from_bytes(id::<10>());
+        let mut origins = origins();
+        origins.extend([
+            DefinitionOrigin::new(
+                DefinitionIdentity::ValueType(TypeId::from_bytes(id::<30>())),
+                SourceOrigin::new(source, 37, 38).unwrap(),
+            ),
+            DefinitionOrigin::new(
+                DefinitionIdentity::ValueType(TypeId::from_bytes(id::<31>())),
+                SourceOrigin::new(source, 38, 39).unwrap(),
+            ),
+            DefinitionOrigin::new(
+                DefinitionIdentity::TypeBinding(binding_ids[0]),
+                SourceOrigin::new(source, 39, 40).unwrap(),
+            ),
+            DefinitionOrigin::new(
+                DefinitionIdentity::TypeBinding(binding_ids[1]),
+                SourceOrigin::new(source, 40, 41).unwrap(),
+            ),
+        ]);
+        if reverse {
+            origins.reverse();
+        }
+        (catalogue, origins)
+    }
+
+    fn catalogue_with_unaffected_function() -> (CatalogueSnapshot, Vec<DefinitionOrigin>) {
+        let (base, mut origins) = catalogue_with_application_types(false);
+        let unaffected = FunctionDefinition::new(
+            FunctionId::from_bytes(id::<40>()),
+            QualifiedSemanticName::new(["crm", "health"]).unwrap(),
+            FunctionDomain::Server,
+            vec![],
+            FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Boolean)),
+            FunctionRevisionId::from_bytes(id::<41>()),
+            FunctionSecurity::Invoker,
+            None,
+            FunctionVolatility::Stable,
+        );
+        let mut functions = base.functions().to_vec();
+        functions.push(unaffected);
+        let catalogue = CatalogueSnapshot::new_with_functions_and_types(
+            base.revision(),
+            base.schemas().to_vec(),
+            base.object_types().to_vec(),
+            base.value_types().to_vec(),
+            base.type_bindings().to_vec(),
+            functions,
+        )
+        .unwrap();
+        origins.push(DefinitionOrigin::new(
+            DefinitionIdentity::Function(FunctionId::from_bytes(id::<40>())),
+            SourceOrigin::new(SourceUnitId::from_bytes(id::<10>()), 41, 42).unwrap(),
+        ));
+        (catalogue, origins)
     }
 
     fn references() -> Vec<DefinitionReference> {
@@ -1574,6 +2303,64 @@ mod tests {
             function_declaration_digest(b"FUNCTION crm.lookup").unwrap(),
             function_semantic_digest(function, "orna-1", &artifact, &[expression()], references)
                 .unwrap(),
+            "orna-1",
+            artifact,
+        )
+        .unwrap()
+    }
+
+    fn value_type_references(target: TypeId) -> Vec<DefinitionReference> {
+        vec![reference(
+            0,
+            DefinitionReferenceTarget::ValueType(target),
+            DefinitionReferenceKind::NamedType,
+            10,
+            18,
+        )]
+    }
+
+    fn function_revision_v2(
+        catalogue: &CatalogueSnapshot,
+        references: &[DefinitionReference],
+    ) -> FunctionRevisionRecord {
+        let function = catalogue
+            .function_by_id(FunctionId::from_bytes(id::<4>()))
+            .unwrap();
+        let artifact = artifact();
+        FunctionRevisionRecord::new(
+            function.id(),
+            function.current_revision(),
+            1,
+            SourceOrigin::new(SourceUnitId::from_bytes(id::<10>()), 0, 24).unwrap(),
+            function_declaration_digest(b"FUNCTION crm.lookup").unwrap(),
+            function_semantic_digest_with_version(
+                FunctionSemanticHashVersion::Version2,
+                function,
+                "orna-1",
+                &artifact,
+                &[expression()],
+                references,
+            )
+            .unwrap(),
+            "orna-1",
+            artifact,
+        )
+        .unwrap()
+        .with_semantic_hash_version(FunctionSemanticHashVersion::Version2)
+    }
+
+    fn unaffected_function_revision(catalogue: &CatalogueSnapshot) -> FunctionRevisionRecord {
+        let function = catalogue
+            .function_by_id(FunctionId::from_bytes(id::<40>()))
+            .unwrap();
+        let artifact = artifact();
+        FunctionRevisionRecord::new(
+            function.id(),
+            function.current_revision(),
+            1,
+            SourceOrigin::new(SourceUnitId::from_bytes(id::<10>()), 41, 42).unwrap(),
+            function_declaration_digest(b"FUNCTION crm.health").unwrap(),
+            function_semantic_digest(function, "orna-1", &artifact, &[expression()], &[]).unwrap(),
             "orna-1",
             artifact,
         )
@@ -1669,6 +2456,310 @@ mod tests {
     }
 
     #[test]
+    fn standard_library_digest_has_a_stable_order_independent_version_one_golden() {
+        let standard = standard_snapshot(false, None);
+        let reversed = standard_snapshot(true, None);
+        let digest = standard_library_digest(&standard).unwrap();
+
+        assert_eq!(
+            hex(digest),
+            "2f5c79f487506075cf189852aa4197eb8aa7ed4470e391a6a8ca119175c02261"
+        );
+        assert_eq!(standard_library_digest(&reversed).unwrap(), digest);
+        let verified = verify_standard_library_snapshot(standard).unwrap();
+        assert_eq!(verified.digest(), digest);
+        assert_eq!(
+            verified.revision(),
+            StandardLibraryRevisionId::from_bytes(id::<28>())
+        );
+    }
+
+    #[test]
+    fn version_two_function_and_catalogue_hashes_have_stable_goldens() {
+        let (catalogue, application_origins) = catalogue_with_application_types(false);
+        let references = value_type_references(standard_boolean_id());
+        let revision = function_revision_v2(&catalogue, &references);
+        let function = catalogue.functions().first().unwrap();
+        let semantic = function_semantic_digest_with_version(
+            FunctionSemanticHashVersion::Version2,
+            function,
+            revision.language_version(),
+            revision.artifact(),
+            &[expression()],
+            &references,
+        )
+        .unwrap();
+        let context = CatalogueHashContext::version_two(verified_standard_snapshot(false));
+        let catalogue_hash = catalogue_digest_with_context(
+            &context,
+            &catalogue,
+            std::slice::from_ref(&revision),
+            &[expression()],
+            &application_origins,
+            &references,
+        )
+        .unwrap();
+
+        assert_eq!(
+            hex(semantic),
+            "2c7210cb14d9dd2524cdd2018f91f4a195c49f6f3970fcf60dac76e7920ea2f0"
+        );
+        assert_eq!(
+            hex(catalogue_hash),
+            "61a80508f05f75cdff8a5e5e625781f178c9a5f9642d8f27881a6fccc15fff36"
+        );
+
+        let reversed_context = CatalogueHashContext::version_two(verified_standard_snapshot(true));
+        let (reversed_catalogue, reversed_origins) = catalogue_with_application_types(true);
+        let reversed_revision = function_revision_v2(&reversed_catalogue, &references);
+        assert_eq!(
+            catalogue_digest_with_context(
+                &reversed_context,
+                &reversed_catalogue,
+                &[reversed_revision],
+                &[expression()],
+                &reversed_origins,
+                &references,
+            )
+            .unwrap(),
+            catalogue_hash
+        );
+    }
+
+    #[test]
+    fn version_two_catalogue_accepts_mixed_current_semantic_hash_versions() {
+        let (catalogue, origins) = catalogue_with_unaffected_function();
+        let references = value_type_references(standard_boolean_id());
+        let affected = function_revision_v2(&catalogue, &references);
+        let unaffected = unaffected_function_revision(&catalogue);
+
+        assert_eq!(
+            affected.semantic_hash_version(),
+            FunctionSemanticHashVersion::Version2
+        );
+        assert_eq!(
+            unaffected.semantic_hash_version(),
+            FunctionSemanticHashVersion::Version1
+        );
+        assert!(
+            catalogue_digest_with_context(
+                &CatalogueHashContext::version_two(verified_standard_snapshot(false)),
+                &catalogue,
+                &[unaffected, affected],
+                &[expression()],
+                &origins,
+                &references,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn versioned_hashes_reject_mismatches_and_version_two_only_facts_in_version_one() {
+        let valid_standard = standard_snapshot(false, None);
+        let mismatched_source = StoredSourceRevision::new(
+            valid_standard.source().bundle(),
+            valid_standard.source().id(),
+            None,
+            valid_standard.source().units().to_vec(),
+            valid_standard.source().bundle_hash(),
+            digest_bytes(b"incorrect standard source revision hash"),
+        )
+        .unwrap();
+        let mismatched_source_standard = StandardLibrarySnapshot::new(
+            valid_standard.revision(),
+            valid_standard.digest_version(),
+            mismatched_source,
+            valid_standard.language_version(),
+            valid_standard.catalogue().clone(),
+            valid_standard.origins().to_vec(),
+            valid_standard.digest(),
+        )
+        .unwrap();
+        assert!(matches!(
+            standard_library_digest(&mismatched_source_standard),
+            Err(CanonicalHashError::StandardSourceRevisionHashMismatch { .. })
+        ));
+        assert!(matches!(
+            verify_standard_library_snapshot(mismatched_source_standard),
+            Err(CanonicalHashError::StandardSourceRevisionHashMismatch { .. })
+        ));
+
+        let mismatched_standard =
+            standard_snapshot(false, Some(digest_bytes(b"incorrect standard digest")));
+        assert!(matches!(
+            standard_library_digest(&mismatched_standard),
+            Err(CanonicalHashError::StandardLibraryDigestMismatch { .. })
+        ));
+        assert!(matches!(
+            verify_standard_library_snapshot(mismatched_standard),
+            Err(CanonicalHashError::StandardLibraryDigestMismatch { .. })
+        ));
+
+        let catalogue = catalogue();
+        let references = value_type_references(standard_boolean_id());
+        let revision = function_revision_v2(&catalogue, &references);
+        let function = catalogue.functions().first().unwrap();
+        assert!(matches!(
+            function_semantic_digest(
+                function,
+                revision.language_version(),
+                revision.artifact(),
+                &[expression()],
+                &references,
+            ),
+            Err(CanonicalHashError::FunctionFactUnsupportedBySemanticHashVersion {
+                version: FunctionSemanticHashVersion::Version1,
+                function: rejected_function,
+                fact: FunctionSemanticHashFact::ValueTypeReference(target),
+            }) if rejected_function == function.id() && target == standard_boolean_id()
+        ));
+        let mismatched_revision = FunctionRevisionRecord::new(
+            revision.function(),
+            revision.id(),
+            revision.revision_number(),
+            revision.declaration_origin(),
+            revision.declaration_content_hash(),
+            digest_bytes(b"incorrect function semantic hash"),
+            revision.language_version(),
+            revision.artifact().clone(),
+        )
+        .unwrap()
+        .with_semantic_hash_version(revision.semantic_hash_version());
+        assert!(matches!(
+            catalogue_digest_with_context(
+                &CatalogueHashContext::version_two(verified_standard_snapshot(false)),
+                &catalogue,
+                &[mismatched_revision],
+                &[expression()],
+                &origins(),
+                &references,
+            ),
+            Err(CanonicalHashError::FunctionSemanticHashMismatch { .. })
+        ));
+        assert!(matches!(
+            catalogue_digest(
+                &catalogue,
+                &[revision],
+                &[expression()],
+                &origins(),
+                &references,
+            ),
+            Err(CanonicalHashError::CatalogueFactUnsupportedByHashVersion {
+                version: CatalogueHashVersion::Version1,
+                fact: CatalogueHashFact::DefinitionReferenceTarget(
+                    DefinitionReferenceTarget::ValueType(target),
+                ),
+            }) if target == standard_boolean_id()
+        ));
+    }
+
+    #[test]
+    fn unsupported_version_errors_name_the_fact_and_required_upgrade() {
+        let catalogue_cases = [
+            (
+                CatalogueHashFact::ValueTypeDefinition(TypeId::from_bytes(id::<30>())),
+                "catalogue hash version 1 cannot include value types; use catalogue hash version 2",
+            ),
+            (
+                CatalogueHashFact::TypeBinding(TypeBindingId::from_bytes(id::<31>())),
+                "catalogue hash version 1 cannot include type-name bindings; use catalogue hash version 2",
+            ),
+            (
+                CatalogueHashFact::DefinitionOrigin(DefinitionIdentity::ValueType(
+                    TypeId::from_bytes(id::<30>()),
+                )),
+                "catalogue hash version 1 cannot include value-type or binding origins; use catalogue hash version 2",
+            ),
+            (
+                CatalogueHashFact::DefinitionReferenceTarget(DefinitionReferenceTarget::ValueType(
+                    TypeId::from_bytes(id::<30>()),
+                )),
+                "catalogue hash version 1 cannot include value-type references; use catalogue hash version 2",
+            ),
+            (
+                CatalogueHashFact::FunctionSemanticHashVersion {
+                    function: FunctionId::from_bytes(id::<4>()),
+                    revision: FunctionRevisionId::from_bytes(id::<6>()),
+                    version: FunctionSemanticHashVersion::Version2,
+                },
+                "catalogue hash version 1 cannot include function semantic hash version 2; use catalogue hash version 2",
+            ),
+        ];
+        for (fact, message) in catalogue_cases {
+            assert_eq!(
+                CanonicalHashError::CatalogueFactUnsupportedByHashVersion {
+                    version: CatalogueHashVersion::Version1,
+                    fact,
+                }
+                .to_string(),
+                message
+            );
+        }
+
+        assert_eq!(
+            CanonicalHashError::FunctionFactUnsupportedBySemanticHashVersion {
+                version: FunctionSemanticHashVersion::Version1,
+                function: FunctionId::from_bytes(id::<4>()),
+                fact: FunctionSemanticHashFact::ValueTypeReference(TypeId::from_bytes(id::<30>())),
+            }
+            .to_string(),
+            "function semantic hash version 1 cannot include value-type references; use function semantic hash version 2"
+        );
+    }
+
+    #[test]
+    fn version_two_target_validation_uses_application_and_standard_catalogues() {
+        let catalogue = catalogue();
+        let context = CatalogueHashContext::version_two(verified_standard_snapshot(false));
+        let accepted = value_type_references(standard_boolean_id());
+        let accepted_revision = function_revision_v2(&catalogue, &accepted);
+        assert!(
+            catalogue_digest_with_context(
+                &context,
+                &catalogue,
+                &[accepted_revision],
+                &[expression()],
+                &origins(),
+                &accepted,
+            )
+            .is_ok()
+        );
+
+        let (application_catalogue, application_origins) = catalogue_with_application_types(false);
+        let accepted_application = value_type_references(TypeId::from_bytes(id::<30>()));
+        let accepted_application_revision =
+            function_revision_v2(&application_catalogue, &accepted_application);
+        assert!(
+            catalogue_digest_with_context(
+                &context,
+                &application_catalogue,
+                &[accepted_application_revision],
+                &[expression()],
+                &application_origins,
+                &accepted_application,
+            )
+            .is_ok()
+        );
+
+        let missing = value_type_references(TypeId::from_bytes(id::<99>()));
+        let missing_revision = function_revision_v2(&catalogue, &missing);
+        assert!(matches!(
+            catalogue_digest_with_context(
+                &context,
+                &catalogue,
+                &[missing_revision],
+                &[expression()],
+                &origins(),
+                &missing,
+            ),
+            Err(CanonicalHashError::ReferenceTargetNotFound {
+                target: DefinitionReferenceTarget::ValueType(_),
+            })
+        ));
+    }
+
+    #[test]
     fn reference_kind_tags_are_append_only() {
         assert_eq!(
             [
@@ -1685,6 +2776,30 @@ mod tests {
             .map(reference_kind_tag),
             [1, 2, 3, 4, 5, 6, 7, 8, 9]
         );
+    }
+
+    #[test]
+    fn version_two_identity_and_target_tags_are_append_only() {
+        let value_type = TypeId::from_bytes(id::<21>());
+        let binding = TypeBindingId::from_bytes(id::<22>());
+
+        let mut value_identity = Encoder::new(&[]);
+        value_identity.definition_identity(DefinitionIdentity::ValueType(value_type));
+        assert_eq!(
+            value_identity.bytes,
+            [vec![8], id::<21>().to_vec()].concat()
+        );
+
+        let mut binding_identity = Encoder::new(&[]);
+        binding_identity.definition_identity(DefinitionIdentity::TypeBinding(binding));
+        assert_eq!(
+            binding_identity.bytes,
+            [vec![9], id::<22>().to_vec()].concat()
+        );
+
+        let mut value_target = Encoder::new(&[]);
+        value_target.reference_target(DefinitionReferenceTarget::ValueType(value_type));
+        assert_eq!(value_target.bytes, [vec![6], id::<21>().to_vec()].concat());
     }
 
     #[test]
