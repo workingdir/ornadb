@@ -14,6 +14,7 @@ use crate::{
     PostgresKernelError,
     storage::{
         DATA_SCHEMA, OBJECT_ID_COLUMN, field_id_hex, field_name, relation_name, type_id_hex,
+        unique_constraint_name,
     },
 };
 
@@ -86,6 +87,13 @@ fn create_table_statement(object: &CreateObject) -> Result<String, PostgresKerne
             let field_hex = field_id_hex(field.field_id());
             definitions.push(format!(
                 "CONSTRAINT ck_{field_hex}_object_id CHECK (octet_length({column}) = 16)"
+            ));
+        }
+        if field.unique() {
+            let column = field_name(field.field_id());
+            definitions.push(format!(
+                "CONSTRAINT {} UNIQUE ({column})",
+                unique_constraint_name(field.field_id())
             ));
         }
     }
@@ -234,6 +242,7 @@ mod tests {
         let source = TypeId::from_bytes([0x22; 16]);
         let required_scalar = FieldId::from_bytes([0x23; 16]);
         let optional_reference = FieldId::from_bytes([0x24; 16]);
+        let required_unique_reference = FieldId::from_bytes([0x25; 16]);
         let candidate = candidate_with_objects(
             &active,
             vec![
@@ -266,6 +275,16 @@ mod tests {
                             None,
                             None,
                         ),
+                        FieldDefinition::new(
+                            required_unique_reference,
+                            "semantic_unique_reference",
+                            2,
+                            ResolvedType::reference(target),
+                            false,
+                            true,
+                            None,
+                            Some(OnDeleteAction::Restrict),
+                        ),
                     ],
                 ),
             ],
@@ -275,7 +294,7 @@ mod tests {
         let statements = lower_physical_plan(&plan).unwrap();
 
         assert_eq!(statements.creates.len(), 4);
-        assert_eq!(statements.references.len(), 1);
+        assert_eq!(statements.references.len(), 2);
         assert_eq!(
             statements.creates[2],
             concat!(
@@ -285,7 +304,10 @@ mod tests {
                 "    CONSTRAINT ck_22222222222222222222222222222222_object_id CHECK (octet_length(_orna_object_id) = 16),\n",
                 "    f_23232323232323232323232323232323 integer NOT NULL,\n",
                 "    f_24242424242424242424242424242424 bytea,\n",
-                "    CONSTRAINT ck_24242424242424242424242424242424_object_id CHECK (octet_length(f_24242424242424242424242424242424) = 16)\n",
+                "    CONSTRAINT ck_24242424242424242424242424242424_object_id CHECK (octet_length(f_24242424242424242424242424242424) = 16),\n",
+                "    f_25252525252525252525252525252525 bytea NOT NULL,\n",
+                "    CONSTRAINT ck_25252525252525252525252525252525_object_id CHECK (octet_length(f_25252525252525252525252525252525) = 16),\n",
+                "    CONSTRAINT uq_25252525252525252525252525252525 UNIQUE (f_25252525252525252525252525252525)\n",
                 ");"
             )
         );
@@ -303,6 +325,16 @@ mod tests {
                 "    ON DELETE NO ACTION;"
             )
         );
+        assert_eq!(
+            statements.references[1],
+            concat!(
+                "ALTER TABLE _orna_data.t_22222222222222222222222222222222\n",
+                "    ADD CONSTRAINT fk_25252525252525252525252525252525\n",
+                "    FOREIGN KEY (f_25252525252525252525252525252525)\n",
+                "    REFERENCES _orna_data.t_11111111111111111111111111111111 (_orna_object_id)\n",
+                "    ON DELETE RESTRICT;"
+            )
+        );
         let sql = statements
             .creates
             .iter()
@@ -313,6 +345,7 @@ mod tests {
         assert!(!sql.contains("private_words"));
         assert!(!sql.contains("semantic_scalar"));
         assert!(!sql.contains("semantic_reference"));
+        assert!(!sql.contains("semantic_unique_reference"));
     }
 
     #[test]
