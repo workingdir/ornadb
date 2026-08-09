@@ -3,9 +3,12 @@
 use std::{collections::HashMap, error::Error, fmt, hash::Hash};
 
 use orna_core::{
-    CatalogueRevisionId, FieldId, TypeId,
-    catalogue::{CatalogueSnapshot, FunctionDomain, OnDeleteAction, QualifiedSemanticName},
-    revision::DefinitionReferenceKind,
+    CatalogueRevisionId, FieldId, SchemaId, TypeBindingId, TypeId,
+    catalogue::{
+        CatalogueSnapshot, FunctionDomain, OnDeleteAction, QualifiedSemanticName, TypeBindingKind,
+        TypeLookupName, ValueTypeKind, ValueTypeMutability, ValueTypePersistence,
+    },
+    revision::{DefinitionReferenceKind, SourceOrigin, VerifiedStandardLibrarySnapshot},
     types::{ResolvedType, StandardScalar},
 };
 
@@ -1158,6 +1161,185 @@ impl CheckedSchema {
         &self.location
     }
 }
+
+/// One schema confirmed against a verified standard-library snapshot.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CheckedStandardSchema {
+    pub(super) id: SchemaId,
+    pub(super) name: QualifiedSemanticName,
+    pub(super) origin: SourceOrigin,
+}
+
+impl CheckedStandardSchema {
+    /// Returns the durable schema identity.
+    pub const fn id(&self) -> SchemaId {
+        self.id
+    }
+
+    /// Returns the resolved schema name.
+    pub fn name(&self) -> &QualifiedSemanticName {
+        &self.name
+    }
+
+    /// Returns the complete schema declaration origin.
+    pub const fn origin(&self) -> SourceOrigin {
+        self.origin
+    }
+}
+
+/// One primitive value type confirmed against a verified standard-library snapshot.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CheckedStandardValueType {
+    pub(super) id: TypeId,
+    pub(super) name: QualifiedSemanticName,
+    pub(super) kind: ValueTypeKind,
+    pub(super) mutability: ValueTypeMutability,
+    pub(super) persistence: ValueTypePersistence,
+    pub(super) representation_contract: String,
+    pub(super) origin: SourceOrigin,
+}
+
+impl CheckedStandardValueType {
+    /// Returns the durable value-type identity.
+    pub const fn id(&self) -> TypeId {
+        self.id
+    }
+
+    /// Returns the resolved primary type name.
+    pub fn name(&self) -> &QualifiedSemanticName {
+        &self.name
+    }
+
+    /// Returns the checked value-type category.
+    pub const fn kind(&self) -> ValueTypeKind {
+        self.kind
+    }
+
+    /// Returns the checked mutability contract.
+    pub const fn mutability(&self) -> ValueTypeMutability {
+        self.mutability
+    }
+
+    /// Returns the checked persistence contract.
+    pub const fn persistence(&self) -> ValueTypePersistence {
+        self.persistence
+    }
+
+    /// Returns the checked kernel representation contract.
+    pub fn representation_contract(&self) -> &str {
+        &self.representation_contract
+    }
+
+    /// Returns the complete value-type declaration origin.
+    pub const fn origin(&self) -> SourceOrigin {
+        self.origin
+    }
+}
+
+/// One direct type binding confirmed against a verified standard-library snapshot.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CheckedStandardTypeBinding {
+    pub(super) id: TypeBindingId,
+    pub(super) kind: TypeBindingKind,
+    pub(super) name: TypeLookupName,
+    pub(super) target: TypeId,
+    pub(super) origin: SourceOrigin,
+}
+
+impl CheckedStandardTypeBinding {
+    /// Returns the durable type-binding identity.
+    pub const fn id(&self) -> TypeBindingId {
+        self.id
+    }
+
+    /// Returns the binding namespace.
+    pub const fn kind(&self) -> TypeBindingKind {
+        self.kind
+    }
+
+    /// Returns the checked lookup name.
+    pub fn name(&self) -> &TypeLookupName {
+        &self.name
+    }
+
+    /// Returns the direct target type identity.
+    pub const fn target(&self) -> TypeId {
+        self.target
+    }
+
+    /// Returns the complete binding declaration origin.
+    pub const fn origin(&self) -> SourceOrigin {
+        self.origin
+    }
+}
+
+/// One standard-library source and catalogue agreement result.
+#[derive(Clone, Debug)]
+pub struct CheckedStandardLibrary {
+    pub(super) verified_snapshot: VerifiedStandardLibrarySnapshot,
+    pub(super) schemas: Vec<CheckedStandardSchema>,
+    pub(super) value_types: Vec<CheckedStandardValueType>,
+    pub(super) type_bindings: Vec<CheckedStandardTypeBinding>,
+}
+
+impl CheckedStandardLibrary {
+    /// Returns the verified snapshot that this result reconciles.
+    pub fn verified_snapshot(&self) -> &VerifiedStandardLibrarySnapshot {
+        &self.verified_snapshot
+    }
+
+    /// Returns checked schemas in source order.
+    pub fn schemas(&self) -> &[CheckedStandardSchema] {
+        &self.schemas
+    }
+
+    /// Returns checked primitive value types in source order.
+    pub fn value_types(&self) -> &[CheckedStandardValueType] {
+        &self.value_types
+    }
+
+    /// Returns checked direct type bindings in source order.
+    pub fn type_bindings(&self) -> &[CheckedStandardTypeBinding] {
+        &self.type_bindings
+    }
+}
+
+/// A failure while reconciling retained source with a verified standard library.
+#[non_exhaustive]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StandardLibraryCheckError {
+    /// The verified snapshot does not retain exactly one source unit.
+    SourceUnitCount {
+        /// The retained source-unit count.
+        actual: usize,
+    },
+    /// The retained source contains compiler diagnostics.
+    Diagnostics {
+        /// The exact retained compiler diagnostics.
+        diagnostics: Vec<CompilerDiagnostic>,
+    },
+    /// Source facts, catalogue facts, or origins do not agree.
+    SourceMismatch,
+}
+
+impl fmt::Display for StandardLibraryCheckError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SourceUnitCount { actual } => write!(
+                formatter,
+                "the verified standard library has {actual} source units, expected exactly one"
+            ),
+            Self::Diagnostics { .. } => {
+                formatter.write_str("the verified standard library source has compiler diagnostics")
+            }
+            Self::SourceMismatch => formatter.write_str(
+                "the verified standard library source does not match its catalogue and origins",
+            ),
+        }
+    }
+}
+
+impl Error for StandardLibraryCheckError {}
 
 /// The result of parsing and checking a source bundle.
 #[derive(Clone, Debug)]
