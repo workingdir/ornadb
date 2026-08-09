@@ -8,7 +8,7 @@ implemented, reviewed, committed, and pushed.
 
 - [ ] Produce the deterministic private PostgreSQL 18.4 runtime twice and
   prove identical payload and manifest bytes.
-- [ ] Accept the offline `orna source check <file.orna>` contract.
+- [x] Accept the offline `orna source check <file.orna>` contract.
 - [ ] Verify and accept the first signed private PostgreSQL runtime.
 - [ ] Add the Orna-owned instance model, cluster initialisation, private Unix
   socket authentication, and foreground PostgreSQL supervision.
