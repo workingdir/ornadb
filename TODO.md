@@ -15,7 +15,7 @@ implemented, reviewed, committed, and pushed.
 
 ## First usable Orna workflow
 
-- [ ] Retain and verify the exact `std` source needed by application checking.
+- [x] Retain and verify the exact `std` source needed by application checking.
 - [ ] Resolve application type names through the verified standard catalogue.
 - [ ] Implement `orna source check <file.orna>` without PostgreSQL, network
   access, configuration, or filesystem writes.
