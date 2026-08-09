@@ -1,6 +1,6 @@
 //! Lossless source parsing for the Orna language.
 //!
-//! This crate recognises supported declarations and SERVER function bodies.
+//! This crate recognises supported declarations and function bodies.
 //! All source bytes remain in the CST, including whitespace and comments.
 
 use std::{fmt, ops::Range};
@@ -259,6 +259,13 @@ pub struct ServerFunctionParameter {
     pub span: SourceSpan,
 }
 
+/// A parameter declared by a CLIENT function.
+///
+/// CLIENT parameters use the same lossless declaration shape as SERVER
+/// parameters. The compiler applies the closed CLIENT rule that rejects a
+/// non-empty list in this slice.
+pub type ClientFunctionParameter = ServerFunctionParameter;
+
 /// A named field returned by a `ROWS (...)` server function.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RowsColumnDeclaration {
@@ -272,7 +279,7 @@ pub struct RowsColumnDeclaration {
     pub span: SourceSpan,
 }
 
-/// The declared result shape of a server function.
+/// The declared result shape of a function.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FunctionReturnType {
     /// One scalar or reference value.
@@ -542,6 +549,46 @@ pub struct ServerFunctionDeclaration {
     pub span: SourceSpan,
 }
 
+/// The closed body of a CLIENT function.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClientFunctionBody {
+    /// A Boolean literal returned by the function.
+    BooleanLiteral {
+        /// The Boolean value selected by the source text.
+        value: bool,
+        /// The exact literal spelling and source span.
+        source: SourceSlice,
+    },
+}
+
+impl ClientFunctionBody {
+    /// Return the Boolean literal when this body contains one.
+    #[must_use]
+    pub fn as_boolean_literal(&self) -> Option<(bool, &SourceSlice)> {
+        match self {
+            Self::BooleanLiteral { value, source } => Some((*value, source)),
+        }
+    }
+}
+
+/// A parsed `CREATE CLIENT FUNCTION` declaration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientFunctionDeclaration {
+    /// The declared function name.
+    pub name: QualifiedName,
+    /// The function parameters in source order.
+    pub parameters: Vec<ClientFunctionParameter>,
+    /// The complete parenthesised parameter-list span.
+    pub parameter_list_span: SourceSpan,
+    /// The declared result shape retained for semantic checking.
+    pub return_type: FunctionReturnType,
+    /// The retained CLIENT function body.
+    pub body: ClientFunctionBody,
+    /// The declaration span, including its terminating semicolon.
+    pub span: SourceSpan,
+}
+
 /// The action for a reference when its target is deleted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OnDeletePolicy {
@@ -632,6 +679,7 @@ pub struct Parse {
     object_types: Vec<ObjectTypeDeclaration>,
     field_renames: Vec<FieldRenameDeclaration>,
     server_functions: Vec<ServerFunctionDeclaration>,
+    client_functions: Vec<ClientFunctionDeclaration>,
 }
 
 impl Parse {
@@ -664,12 +712,17 @@ impl Parse {
     pub fn server_functions(&self) -> &[ServerFunctionDeclaration] {
         &self.server_functions
     }
+
+    /// Return successfully parsed CLIENT function declarations in source order.
+    pub fn client_functions(&self) -> &[ClientFunctionDeclaration] {
+        &self.client_functions
+    }
 }
 
 /// Parse one Orna source unit.
 ///
 /// The parser recognises schema declarations, object type declarations, field
-/// rename declarations, and server function declarations. It keeps all source
+/// rename declarations, and function declarations. It keeps all source
 /// bytes in its CST, including bytes in malformed statements.
 pub fn parse(source: &str) -> Parse {
     parser::parse(source)
@@ -2794,6 +2847,268 @@ mod tests {
             marker,
             span_offset,
             span_length,
+        );
+    }
+
+    #[test]
+    fn parses_client_boolean_constants_losslessly_with_exact_spans() {
+        let source = "CREATE CLIENT FUNCTION examples.enabled()\n\
+            RETURNS BOOLEAN\n\
+            RETURN TRUE;\n\
+            CREATE cLiEnT fUnCtIoN \"Examples\".\"Disabled\"() RETURNS BOOL RETURN fAlSe;";
+        let parsed = parse(source);
+
+        assert!(parsed.diagnostics().is_empty());
+        assert_eq!(parsed.syntax().text(), source);
+        assert!(parsed.server_functions().is_empty());
+        assert_eq!(parsed.client_functions().len(), 2);
+
+        let enabled = &parsed.client_functions()[0];
+        assert_eq!(enabled.name.parts[0].text, "examples");
+        assert_eq!(enabled.parameters.len(), 0);
+        assert_eq!(enabled.span.start, 0);
+        assert_eq!(
+            enabled.span.end,
+            source.find(';').expect("first terminator") + 1
+        );
+        let enabled_literal = enabled.body.as_boolean_literal().expect("Boolean body");
+        assert!(enabled_literal.0);
+        assert_eq!(enabled_literal.1.text, "TRUE");
+        let enabled_start = source.find("TRUE").expect("TRUE literal");
+        assert_eq!(
+            enabled_literal.1.span,
+            SourceSpan {
+                start: enabled_start,
+                end: enabled_start + 4,
+            }
+        );
+
+        let disabled = &parsed.client_functions()[1];
+        assert_eq!(disabled.name.parts[0].text, "\"Examples\"");
+        assert_eq!(disabled.name.parts[1].text, "\"Disabled\"");
+        let disabled_literal = disabled.body.as_boolean_literal().expect("Boolean body");
+        assert!(!disabled_literal.0);
+        assert_eq!(disabled_literal.1.text, "fAlSe");
+        let disabled_start = source.find("fAlSe").expect("FALSE literal");
+        assert_eq!(
+            disabled_literal.1.span,
+            SourceSpan {
+                start: disabled_start,
+                end: disabled_start + 5,
+            }
+        );
+    }
+
+    #[test]
+    fn retains_client_parameters_and_non_boolean_return_types_for_semantic_checks() {
+        let source = "CREATE CLIENT FUNCTION examples.with_parameter(p_value TEXT) RETURNS BOOLEAN RETURN TRUE;\n\
+            CREATE CLIENT FUNCTION examples.ui() RETURNS UI RETURN FALSE;\n\
+            CREATE CLIENT FUNCTION examples.text() RETURNS TEXT RETURN TRUE;";
+        let parsed = parse(source);
+
+        assert!(parsed.diagnostics().is_empty());
+        assert_eq!(parsed.client_functions().len(), 3);
+        let with_parameter = &parsed.client_functions()[0];
+        assert_eq!(with_parameter.parameters.len(), 1);
+        assert_eq!(with_parameter.parameters[0].name.text, "p_value");
+        assert_eq!(with_parameter.parameters[0].order, 0);
+        assert_eq!(
+            with_parameter.parameters[0].span.start,
+            source.find("p_value").unwrap()
+        );
+        let parameter_list = "(p_value TEXT)";
+        let parameter_list_start = source.find(parameter_list).unwrap();
+        assert_eq!(
+            with_parameter.parameter_list_span,
+            SourceSpan {
+                start: parameter_list_start,
+                end: parameter_list_start + parameter_list.len(),
+            }
+        );
+        let empty_parameter_list_start =
+            source.find("examples.ui()").unwrap() + "examples.ui".len();
+        assert_eq!(
+            parsed.client_functions()[1].parameter_list_span,
+            SourceSpan {
+                start: empty_parameter_list_start,
+                end: empty_parameter_list_start + 2,
+            }
+        );
+        assert!(matches!(
+            &parsed.client_functions()[1].return_type,
+            FunctionReturnType::Single(TypeSpecification::Named(name))
+                if name.parts[0].text == "UI"
+        ));
+        assert!(matches!(
+            &parsed.client_functions()[2].return_type,
+            FunctionReturnType::Single(TypeSpecification::Named(name))
+                if name.parts[0].text == "TEXT"
+        ));
+    }
+
+    #[test]
+    fn reports_closed_client_body_diagnostics_with_exact_public_messages() {
+        let cases = [
+            (
+                "CREATE CLIENT FUNCTION examples.as_form() RETURNS BOOLEAN AS TRUE;",
+                "CLIENT functions use RETURN before their result value",
+                "AS",
+            ),
+            (
+                "CREATE CLIENT FUNCTION examples.is_form() RETURNS BOOLEAN IS BEGIN RETURN TRUE; END;",
+                "CLIENT functions use RETURN before their result value",
+                "IS",
+            ),
+            (
+                "CREATE CLIENT FUNCTION examples.expression() RETURNS BOOLEAN RETURN NULL;",
+                "CLIENT RETURN currently supports only TRUE or FALSE",
+                "NULL",
+            ),
+            (
+                "CREATE CLIENT FUNCTION examples.call() RETURNS BOOLEAN RETURN helper();",
+                "CLIENT RETURN currently supports only TRUE or FALSE",
+                "helper",
+            ),
+            (
+                "CREATE CLIENT FUNCTION examples.identifier() RETURNS BOOLEAN RETURN p_value;",
+                "CLIENT RETURN currently supports only TRUE or FALSE",
+                "p_value",
+            ),
+            (
+                "CREATE CLIENT FUNCTION examples.number() RETURNS BOOLEAN RETURN 1;",
+                "CLIENT RETURN currently supports only TRUE or FALSE",
+                "1",
+            ),
+            (
+                "CREATE CLIENT FUNCTION examples.text() RETURNS BOOLEAN RETURN 'yes';",
+                "CLIENT RETURN currently supports only TRUE or FALSE",
+                "'yes'",
+            ),
+            (
+                "CREATE CLIENT FUNCTION examples.security() RETURNS BOOLEAN SECURITY INVOKER RETURN TRUE;",
+                "CLIENT functions use RETURN before their result value",
+                "SECURITY",
+            ),
+            (
+                "CREATE CLIENT FUNCTION examples.transaction() RETURNS BOOLEAN TRANSACTION READ ONLY RETURN TRUE;",
+                "CLIENT functions use RETURN before their result value",
+                "TRANSACTION",
+            ),
+            (
+                "CREATE CLIENT FUNCTION examples.volatility() RETURNS BOOLEAN VOLATILITY IMMUTABLE RETURN TRUE;",
+                "CLIENT functions use RETURN before their result value",
+                "VOLATILITY",
+            ),
+            (
+                "CREATE CLIENT FUNCTION examples.capabilities() RETURNS BOOLEAN REQUIRES CAPABILITY files.read RETURN TRUE;",
+                "CLIENT functions use RETURN before their result value",
+                "REQUIRES",
+            ),
+            (
+                "CREATE CLIENT FUNCTION examples.table_result() RETURNS TABLE (value BOOLEAN) RETURN TRUE;",
+                "CLIENT functions must name one return type after RETURNS",
+                "TABLE",
+            ),
+            (
+                "CREATE CLIENT FUNCTION examples.set_result() RETURNS SET OF BOOLEAN RETURN TRUE;",
+                "CLIENT functions must name one return type after RETURNS",
+                "SET",
+            ),
+            (
+                "CREATE CLIENT FUNCTION examples.missing_type() RETURNS ;",
+                "CLIENT functions must name one return type after RETURNS",
+                ";",
+            ),
+            (
+                "CREATE CLIENT FUNCTION examples.extra() RETURNS BOOLEAN RETURN TRUE FALSE;",
+                "expected ';' after CLIENT function body",
+                "FALSE",
+            ),
+            (
+                "CREATE CLIENT FUNCTION examples.missing_semicolon() RETURNS BOOLEAN RETURN TRUE",
+                "expected ';' after CLIENT function body",
+                "",
+            ),
+        ];
+
+        for (source, message, marker) in cases {
+            let parsed = parse(source);
+            assert!(parsed.client_functions().is_empty(), "source: {source}");
+            assert_eq!(parsed.diagnostics().len(), 1, "source: {source}");
+            let diagnostic = &parsed.diagnostics()[0];
+            assert_eq!(diagnostic.code, "ORNA0001");
+            assert_eq!(diagnostic.message, message);
+            if marker.is_empty() {
+                assert_eq!(diagnostic.span.start, source.len());
+                assert_eq!(diagnostic.span.end, source.len());
+            } else {
+                let start = source.find(marker).expect("diagnostic marker");
+                assert_eq!(diagnostic.span.start, start);
+                assert_eq!(diagnostic.span.end, start + marker.len());
+            }
+        }
+    }
+
+    #[test]
+    fn recovers_after_client_function_errors_to_all_later_declarations() {
+        let source = "CREATE CLIENT FUNCTION examples.bad() RETURNS BOOLEAN IS BEGIN RETURN TRUE; END;\n\
+            CREATE SCHEMA later;\n\
+            CREATE TYPE later.item AS OBJECT (name TEXT);\n\
+            CREATE SERVER FUNCTION later.server() RETURNS ROWS (value BOOL) AS SELECT t.value FROM later.item t;\n\
+            CREATE CLIENT FUNCTION later.good() RETURNS BOOLEAN RETURN FALSE;";
+        let parsed = parse(source);
+
+        assert_eq!(parsed.diagnostics().len(), 1);
+        assert_eq!(
+            parsed.diagnostics()[0].message,
+            "CLIENT functions use RETURN before their result value"
+        );
+        let rejected_form = source.find("IS BEGIN").expect("rejected CLIENT body form");
+        assert_eq!(
+            parsed.diagnostics()[0].span,
+            SourceSpan {
+                start: rejected_form,
+                end: rejected_form + 2,
+            }
+        );
+        assert_eq!(parsed.schemas().len(), 1);
+        assert_eq!(parsed.object_types().len(), 1);
+        assert_eq!(parsed.server_functions().len(), 1);
+        assert_eq!(parsed.client_functions().len(), 1);
+        assert_eq!(parsed.client_functions()[0].name.parts[0].text, "later");
+        assert_eq!(parsed.client_functions()[0].name.parts[1].text, "good");
+    }
+
+    #[test]
+    fn keeps_server_and_client_function_reports_separate() {
+        let source = "CREATE SERVER FUNCTION examples.server() RETURNS ROWS (value BOOL) AS SELECT t.value FROM examples.item t;\n\
+            CREATE CLIENT FUNCTION examples.client() RETURNS BOOLEAN RETURN TRUE;";
+        let parsed = parse(source);
+
+        assert!(parsed.diagnostics().is_empty());
+        assert_eq!(parsed.server_functions().len(), 1);
+        assert_eq!(parsed.server_functions()[0].name.parts[1].text, "server");
+        assert_eq!(parsed.client_functions().len(), 1);
+        assert_eq!(parsed.client_functions()[0].name.parts[1].text, "client");
+    }
+
+    #[test]
+    fn client_return_type_diagnostics_do_not_change_server_parsing() {
+        let source = "CREATE SERVER FUNCTION tasks.bad() RETURNS RETURN TRUE;";
+        let parsed = parse(source);
+
+        assert!(parsed.server_functions().is_empty());
+        assert!(parsed.client_functions().is_empty());
+        assert_eq!(parsed.diagnostics().len(), 1);
+        assert_eq!(parsed.diagnostics()[0].code, "ORNA0001");
+        assert_eq!(parsed.diagnostics()[0].message, "expected keyword AS");
+        let start = source.find("TRUE").expect("offending SERVER body token");
+        assert_eq!(
+            parsed.diagnostics()[0].span,
+            SourceSpan {
+                start,
+                end: start + 4,
+            }
         );
     }
 

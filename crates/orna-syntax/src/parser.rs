@@ -1,14 +1,15 @@
 use rowan::{GreenNode, GreenNodeBuilder, Language};
 
 use crate::{
-    CapabilitySpecification, DeleteStatement, Diagnostic, FieldRenameDeclaration,
-    FunctionReturnType, FunctionSecurity, FunctionTransaction, FunctionVolatility, InsertStatement,
-    MutationValue, NamePart, NullOrdering, ObjectFieldDeclaration, ObjectSource,
-    ObjectTypeDeclaration, OnDeletePolicy, OrderingDirection, OrderingExpression, Parse,
-    QualifiedName, QueryExpression, RowsColumnDeclaration, SchemaDeclaration, SelectQuantifier,
-    SelectQuery, ServerFunctionBody, ServerFunctionDeclaration, ServerFunctionParameter,
-    SourceSlice, SourceSpan, SqlDeleteBody, SqlInsertBody, SqlQueryBody, SqlUpdateBody,
-    StandardLargeObjectKind, SyntaxTree, TypeSpecification, UpdateAssignment, UpdateStatement,
+    CapabilitySpecification, ClientFunctionBody, ClientFunctionDeclaration, DeleteStatement,
+    Diagnostic, FieldRenameDeclaration, FunctionReturnType, FunctionSecurity, FunctionTransaction,
+    FunctionVolatility, InsertStatement, MutationValue, NamePart, NullOrdering,
+    ObjectFieldDeclaration, ObjectSource, ObjectTypeDeclaration, OnDeletePolicy, OrderingDirection,
+    OrderingExpression, Parse, QualifiedName, QueryExpression, RowsColumnDeclaration,
+    SchemaDeclaration, SelectQuantifier, SelectQuery, ServerFunctionBody,
+    ServerFunctionDeclaration, ServerFunctionParameter, SourceSlice, SourceSpan, SqlDeleteBody,
+    SqlInsertBody, SqlQueryBody, SqlUpdateBody, StandardLargeObjectKind, SyntaxTree,
+    TypeSpecification, UpdateAssignment, UpdateStatement,
     lexer::{Token, TokenKind, lex},
 };
 
@@ -47,6 +48,10 @@ pub(crate) enum SyntaxKind {
     AlterTypeRenameFieldStatement,
     SqlUpdateBody,
     SqlDeleteBody,
+    CreateClientFunctionStatement,
+    ClientFunctionParameter,
+    ClientFunctionReturnType,
+    ClientBooleanReturnBody,
 }
 
 impl From<SyntaxKind> for rowan::SyntaxKind {
@@ -95,6 +100,10 @@ impl Language for OrnaLanguage {
             29 => SyntaxKind::AlterTypeRenameFieldStatement,
             30 => SyntaxKind::SqlUpdateBody,
             31 => SyntaxKind::SqlDeleteBody,
+            32 => SyntaxKind::CreateClientFunctionStatement,
+            33 => SyntaxKind::ClientFunctionParameter,
+            34 => SyntaxKind::ClientFunctionReturnType,
+            35 => SyntaxKind::ClientBooleanReturnBody,
             _ => panic!("unknown Orna syntax kind"),
         }
     }
@@ -118,6 +127,7 @@ struct Parser<'source> {
     object_types: Vec<ObjectTypeDeclaration>,
     field_renames: Vec<FieldRenameDeclaration>,
     server_functions: Vec<ServerFunctionDeclaration>,
+    client_functions: Vec<ClientFunctionDeclaration>,
 }
 
 impl<'source> Parser<'source> {
@@ -133,6 +143,7 @@ impl<'source> Parser<'source> {
             object_types: Vec::new(),
             field_renames: Vec::new(),
             server_functions: Vec::new(),
+            client_functions: Vec::new(),
         }
     }
 
@@ -162,6 +173,7 @@ impl<'source> Parser<'source> {
             object_types: self.object_types,
             field_renames: self.field_renames,
             server_functions: self.server_functions,
+            client_functions: self.client_functions,
         }
     }
 
@@ -179,6 +191,14 @@ impl<'source> Parser<'source> {
                 .is_some_and(|token| token.is_word("FUNCTION"))
         {
             self.parse_create_server_function_statement();
+        } else if self
+            .peek_significant(1)
+            .is_some_and(|token| token.is_word("CLIENT"))
+            && self
+                .peek_significant(2)
+                .is_some_and(|token| token.is_word("FUNCTION"))
+        {
+            self.parse_create_client_function_statement();
         } else if self
             .peek_significant(1)
             .is_some_and(|token| token.is_word("TYPE"))
@@ -481,6 +501,184 @@ impl<'source> Parser<'source> {
         self.builder.finish_node();
     }
 
+    fn parse_create_client_function_statement(&mut self) {
+        let statement_start = self.current().expect("CREATE token exists").range.start;
+        self.builder
+            .start_node(SyntaxKind::CreateClientFunctionStatement.into());
+
+        self.expect_word("CREATE");
+        self.skip_trivia();
+        if !self.expect_word("CLIENT") {
+            self.recover_statement();
+            self.builder.finish_node();
+            return;
+        }
+        self.skip_trivia();
+        if !self.expect_word("FUNCTION") {
+            self.recover_statement();
+            self.builder.finish_node();
+            return;
+        }
+        self.skip_trivia();
+        let Some(name) =
+            self.parse_qualified_name("expected a function name after CREATE CLIENT FUNCTION")
+        else {
+            self.recover_statement();
+            self.builder.finish_node();
+            return;
+        };
+        self.skip_trivia();
+        let Some(parameter_list_start) = self.expect_kind(
+            TokenKind::LeftParenthesis,
+            "expected '(' after client function name",
+        ) else {
+            self.recover_statement();
+            self.builder.finish_node();
+            return;
+        };
+        let Some((parameters, parameter_list_end)) = self.parse_client_function_parameters() else {
+            self.recover_statement();
+            self.builder.finish_node();
+            return;
+        };
+        self.skip_trivia();
+        if !self.expect_word("RETURNS") {
+            self.recover_statement();
+            self.builder.finish_node();
+            return;
+        }
+        self.skip_trivia();
+        self.builder
+            .start_node(SyntaxKind::ClientFunctionReturnType.into());
+        let return_type = self.parse_client_function_return_type();
+        self.builder.finish_node();
+        let Some(return_type) = return_type else {
+            self.recover_statement();
+            self.builder.finish_node();
+            return;
+        };
+
+        self.skip_trivia();
+        let Some(body) = self.parse_client_function_body() else {
+            self.recover_statement();
+            self.builder.finish_node();
+            return;
+        };
+        self.skip_trivia();
+        let Some(semicolon) = self.expect_kind(
+            TokenKind::Semicolon,
+            "expected ';' after CLIENT function body",
+        ) else {
+            self.recover_statement();
+            self.builder.finish_node();
+            return;
+        };
+
+        self.client_functions.push(ClientFunctionDeclaration {
+            name,
+            parameters,
+            parameter_list_span: SourceSpan {
+                start: parameter_list_start.start,
+                end: parameter_list_end,
+            },
+            return_type,
+            body,
+            span: SourceSpan {
+                start: statement_start,
+                end: semicolon.end,
+            },
+        });
+        self.builder.finish_node();
+    }
+
+    fn parse_client_function_parameters(
+        &mut self,
+    ) -> Option<(Vec<ServerFunctionParameter>, usize)> {
+        self.parse_parenthesized_comma_list(
+            "expected ')' to close CLIENT function parameters",
+            "expected ',' or ')' after CLIENT function parameter",
+            "trailing commas are not allowed in CLIENT function parameters",
+            Self::parse_client_function_parameter,
+        )
+    }
+
+    fn parse_client_function_parameter(&mut self, order: usize) -> Option<ServerFunctionParameter> {
+        self.builder
+            .start_node(SyntaxKind::ClientFunctionParameter.into());
+        let result = self.parse_function_parameter(order, "CLIENT function");
+        self.builder.finish_node();
+        result
+    }
+
+    fn parse_client_function_body(&mut self) -> Option<ClientFunctionBody> {
+        self.builder
+            .start_node(SyntaxKind::ClientBooleanReturnBody.into());
+        let result = (|| {
+            if !self.current().is_some_and(|token| token.is_word("RETURN")) {
+                let long_form = self.current().is_some_and(|token| token.is_word("IS"));
+                self.error_current(
+                    "ORNA0001",
+                    "CLIENT functions use RETURN before their result value",
+                );
+                if self
+                    .current()
+                    .is_some_and(|token| token.is_word("AS") || token.is_word("IS"))
+                {
+                    self.bump();
+                    self.recover_client_body(long_form);
+                }
+                return None;
+            }
+            self.bump();
+            self.skip_trivia();
+            let Some(token) = self.current().cloned() else {
+                self.error_current(
+                    "ORNA0001",
+                    "CLIENT RETURN currently supports only TRUE or FALSE",
+                );
+                return None;
+            };
+            let value = if token.is_word("TRUE") {
+                true
+            } else if token.is_word("FALSE") {
+                false
+            } else {
+                self.error_current(
+                    "ORNA0001",
+                    "CLIENT RETURN currently supports only TRUE or FALSE",
+                );
+                return None;
+            };
+            self.bump();
+            Some(ClientFunctionBody::BooleanLiteral {
+                value,
+                source: SourceSlice {
+                    text: token.text.to_owned(),
+                    span: token.span(),
+                },
+            })
+        })();
+        self.builder.finish_node();
+        result
+    }
+
+    fn recover_client_body(&mut self, long_form: bool) {
+        let mut saw_end = false;
+        while let Some(token) = self.current().cloned() {
+            if token.is_word("CREATE") || token.is_word("ALTER") {
+                break;
+            }
+            if token.is_word("END") {
+                saw_end = true;
+            }
+            let is_semicolon = token.kind == TokenKind::Semicolon;
+            self.bump();
+            if is_semicolon && (!long_form || saw_end) {
+                break;
+            }
+        }
+    }
+
     fn parse_server_function_parameters(&mut self) -> Option<Vec<ServerFunctionParameter>> {
         self.parse_parenthesized_comma_list(
             "expected ')' to close server function parameters",
@@ -494,8 +692,18 @@ impl<'source> Parser<'source> {
     fn parse_server_function_parameter(&mut self, order: usize) -> Option<ServerFunctionParameter> {
         self.builder
             .start_node(SyntaxKind::FunctionParameter.into());
-        let result = (|| {
-            let name = self.expect_identifier("expected a server function parameter name")?;
+        let result = self.parse_function_parameter(order, "server function");
+        self.builder.finish_node();
+        result
+    }
+
+    fn parse_function_parameter(
+        &mut self,
+        order: usize,
+        subject: &str,
+    ) -> Option<ServerFunctionParameter> {
+        (|| {
+            let name = self.expect_identifier(&format!("expected a {subject} parameter name"))?;
             let start = name.span.start;
             self.skip_trivia();
             let type_specification = self.parse_type_specification()?;
@@ -518,29 +726,53 @@ impl<'source> Parser<'source> {
                 default_expression,
                 span: SourceSpan { start, end },
             })
-        })();
-        self.builder.finish_node();
-        result
+        })()
     }
 
     fn parse_function_return_type(&mut self) -> Option<FunctionReturnType> {
-        if self.current().is_some_and(|token| token.is_word("TABLE")) {
+        self.parse_function_return_type_with_messages(
+            "RETURNS TABLE is not supported; use RETURNS ROWS (...) for query-producing functions",
+            "RETURNS SET OF is not supported; use RETURNS ROWS (...) for query-producing functions",
+            "expected a field type",
+        )
+    }
+
+    fn parse_client_function_return_type(&mut self) -> Option<FunctionReturnType> {
+        if self.current().is_some_and(|token| token.is_word("RETURN")) {
             self.error_current(
                 "ORNA0001",
-                "RETURNS TABLE is not supported; use RETURNS ROWS (...) for query-producing functions",
+                "CLIENT functions must name one return type after RETURNS",
             );
             return None;
         }
+        self.parse_function_return_type_with_messages(
+            "CLIENT functions must name one return type after RETURNS",
+            "CLIENT functions must name one return type after RETURNS",
+            "CLIENT functions must name one return type after RETURNS",
+        )
+    }
+
+    fn parse_function_return_type_with_messages(
+        &mut self,
+        table_message: &str,
+        set_message: &str,
+        type_message: &str,
+    ) -> Option<FunctionReturnType> {
+        if self.current().is_some_and(|token| token.is_word("TABLE")) {
+            self.error_current("ORNA0001", table_message);
+            return None;
+        }
         if self.current().is_some_and(|token| token.is_word("SET")) {
-            self.error_current(
-                "ORNA0001",
-                "RETURNS SET OF is not supported; use RETURNS ROWS (...) for query-producing functions",
-            );
+            self.error_current("ORNA0001", set_message);
+            return None;
+        }
+        if self.current().is_none() {
+            self.error_current("ORNA0001", type_message);
             return None;
         }
         if !self.current().is_some_and(|token| token.is_word("ROWS")) {
             return self
-                .parse_type_specification()
+                .parse_type_specification_with_message(type_message)
                 .map(FunctionReturnType::Single);
         }
 
@@ -1180,6 +1412,13 @@ impl<'source> Parser<'source> {
     }
 
     fn parse_type_specification(&mut self) -> Option<TypeSpecification> {
+        self.parse_type_specification_with_message("expected a field type")
+    }
+
+    fn parse_type_specification_with_message(
+        &mut self,
+        named_type_message: &str,
+    ) -> Option<TypeSpecification> {
         if self.current().is_some_and(|token| token.is_word("REF")) {
             self.builder
                 .start_node(SyntaxKind::ReferenceTypeSpecification.into());
@@ -1205,7 +1444,7 @@ impl<'source> Parser<'source> {
         self.builder
             .start_node(SyntaxKind::NamedTypeSpecification.into());
         let specification = self
-            .parse_qualified_name("expected a field type")
+            .parse_qualified_name(named_type_message)
             .map(TypeSpecification::Named);
         self.builder.finish_node();
         specification
