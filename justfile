@@ -45,7 +45,3 @@ kernel-test:
     trap cleanup EXIT
     docker compose up --detach --wait postgres
     ORNA_TEST_POSTGRES_ADMIN_URL='host=127.0.0.1 port=55432 user=ornadb_dev password=ornadb_dev_password' cargo test --package orna-kernel-postgres --features test-hooks --test bootstrap --test recovery --test apply --test server_execution --test server_mutation_execution -- --ignored --test-threads=1
-
-# Open an operator shell in the private PostgreSQL kernel.
-backend-shell:
-    docker compose exec postgres psql --username=ornadb_dev --dbname=ornadb_dev
