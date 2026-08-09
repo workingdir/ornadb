@@ -1702,16 +1702,25 @@ fn fixture_origin(
         .ok_or_else(|| failure(format!("registered v4 fixture omits origin {identity:?}")))
 }
 
-fn legacy_reference_target(target: DefinitionReferenceTarget) -> (Vec<u8>, &'static str) {
-    match target {
+fn legacy_reference_target(
+    target: DefinitionReferenceTarget,
+) -> TestResult<(Vec<u8>, &'static str)> {
+    Ok(match target {
         DefinitionReferenceTarget::ObjectType(id) => (id.to_bytes().to_vec(), "object_type"),
         DefinitionReferenceTarget::Field { field, .. } => (field.to_bytes().to_vec(), "field"),
         DefinitionReferenceTarget::Function(id) => (id.to_bytes().to_vec(), "function"),
         DefinitionReferenceTarget::Parameter { parameter, .. } => {
             (parameter.to_bytes().to_vec(), "parameter")
         }
-        DefinitionReferenceTarget::Expression(id) => (id.to_bytes().to_vec(), "expression"),
-    }
+        other => {
+            let DefinitionReferenceTarget::Expression(id) = other else {
+                return Err(failure(
+                    "registered v4 fixture cannot persist this definition reference target",
+                ));
+            };
+            (id.to_bytes().to_vec(), "expression")
+        }
+    })
 }
 
 const SUPPORTED_REFERENCE_KINDS: &[(DefinitionReferenceKind, &str)] = &[
@@ -2064,7 +2073,7 @@ async fn persist_registered_v4_references(
 ) -> TestResult<()> {
     let catalogue_revision_id = fixture.catalogue().revision().to_bytes().to_vec();
     for reference in fixture.references() {
-        let (target_definition_id, target_kind) = legacy_reference_target(reference.target());
+        let (target_definition_id, target_kind) = legacy_reference_target(reference.target())?;
         let reference_kind = supported_reference_kind_sql(reference.kind())?;
         let origin = reference.source_origin();
         client
