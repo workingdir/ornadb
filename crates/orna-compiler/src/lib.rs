@@ -17,7 +17,7 @@ mod resolver;
 pub use prepare::{PrepareError, prepare};
 
 pub use resolver::{
-    CheckReport, CheckedBundle, CheckedDefault, CheckedDefinitionReference,
+    CheckReport, CheckedBundle, CheckedClientFunction, CheckedDefault, CheckedDefinitionReference,
     CheckedDefinitionReferenceTarget, CheckedExpressionId, CheckedField, CheckedFieldId,
     CheckedFunctionId, CheckedObjectType, CheckedParameterId, CheckedSchema, CheckedSchemaId,
     CheckedServerFunction, CheckedServerFunctionParameter, CheckedServerFunctionReturnColumn,

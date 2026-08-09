@@ -4,7 +4,7 @@ use std::{collections::HashMap, error::Error, fmt, hash::Hash};
 
 use orna_core::{
     CatalogueRevisionId, FieldId, TypeId,
-    catalogue::{CatalogueSnapshot, OnDeleteAction, QualifiedSemanticName},
+    catalogue::{CatalogueSnapshot, FunctionDomain, OnDeleteAction, QualifiedSemanticName},
     revision::DefinitionReferenceKind,
     types::{ResolvedType, StandardScalar},
 };
@@ -708,6 +708,7 @@ pub struct CheckedBundle {
     pub(super) schemas: Vec<CheckedSchema>,
     pub(super) object_types: Vec<CheckedObjectType>,
     pub(super) server_functions: Vec<CheckedServerFunction>,
+    pub(super) client_functions: Vec<CheckedClientFunction>,
     pub(super) field_renames: Vec<CheckedFieldRename>,
 }
 
@@ -732,8 +733,116 @@ impl CheckedBundle {
         &self.server_functions
     }
 
+    /// Returns submitted checked CLIENT functions in source order.
+    pub fn client_functions(&self) -> &[CheckedClientFunction] {
+        &self.client_functions
+    }
+
     pub(crate) fn field_renames(&self) -> &[CheckedFieldRename] {
         &self.field_renames
+    }
+}
+
+/// A checked CLIENT function body.
+#[non_exhaustive]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum CheckedClientFunctionBody {
+    /// A Boolean literal returned by the function.
+    BooleanLiteral {
+        /// The resolved Boolean value.
+        value: bool,
+        /// The exact source location of the literal.
+        location: SourceLocation,
+    },
+}
+
+impl CheckedClientFunctionBody {
+    /// Returns the closed Boolean body data.
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "preparation reads the checked CLIENT body")
+    )]
+    pub(crate) fn as_boolean_literal(&self) -> Option<(bool, &SourceLocation)> {
+        match self {
+            Self::BooleanLiteral { value, location } => Some((*value, location)),
+        }
+    }
+}
+
+/// A checked CLIENT function with a closed Boolean constant body.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CheckedClientFunction {
+    pub(super) id: CheckedFunctionId,
+    pub(super) name: QualifiedSemanticName,
+    pub(super) domain: FunctionDomain,
+    pub(super) parameters: Vec<CheckedServerFunctionParameter>,
+    pub(super) return_type: SemanticType<CheckedTypeId>,
+    pub(super) security: orna_core::catalogue::FunctionSecurity,
+    pub(super) transaction: Option<orna_core::catalogue::FunctionTransaction>,
+    pub(super) volatility: orna_core::catalogue::FunctionVolatility,
+    pub(super) location: SourceLocation,
+    pub(super) body: CheckedClientFunctionBody,
+    pub(super) references: Vec<CheckedDefinitionReference>,
+}
+
+impl CheckedClientFunction {
+    /// Returns the checked function identity.
+    pub const fn id(&self) -> CheckedFunctionId {
+        self.id
+    }
+
+    /// Returns the resolved function name.
+    pub fn name(&self) -> &QualifiedSemanticName {
+        &self.name
+    }
+
+    /// Returns the runtime domain of the checked function.
+    pub const fn domain(&self) -> FunctionDomain {
+        self.domain
+    }
+
+    /// Returns checked parameters in declaration order.
+    pub fn parameters(&self) -> &[CheckedServerFunctionParameter] {
+        &self.parameters
+    }
+
+    /// Returns the checked scalar return type.
+    pub const fn return_type(&self) -> SemanticType<CheckedTypeId> {
+        self.return_type
+    }
+
+    /// Returns the function security context mode.
+    pub const fn security(&self) -> orna_core::catalogue::FunctionSecurity {
+        self.security
+    }
+
+    /// Returns the declared transaction mode.
+    pub const fn transaction(&self) -> Option<orna_core::catalogue::FunctionTransaction> {
+        self.transaction
+    }
+
+    /// Returns the declared volatility mode.
+    pub const fn volatility(&self) -> orna_core::catalogue::FunctionVolatility {
+        self.volatility
+    }
+
+    /// Returns the source location of the declaration.
+    pub fn location(&self) -> &SourceLocation {
+        &self.location
+    }
+
+    /// Returns the Boolean body value and its exact source location.
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "preparation reads the checked CLIENT body")
+    )]
+    pub(crate) fn boolean_body(&self) -> Option<(bool, &SourceLocation)> {
+        self.body.as_boolean_literal()
+    }
+
+    /// Returns checked definition references in source-resolution order.
+    pub fn references(&self) -> &[CheckedDefinitionReference] {
+        &self.references
     }
 }
 
