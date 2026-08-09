@@ -107,8 +107,14 @@ view.
 
 ## Standard-library source
 
-The standard definitions are implemented by real Orna standard-library
-source. The initial privileged declaration shape is:
+The standard definitions are implemented by these exact canonical retained
+standard-library source bytes. The retained bytes are not authority. Only a
+`VerifiedStandardLibrarySnapshot` grants standard-library authority. The source
+is UTF-8 with no BOM,
+contains ASCII bytes and LF line endings only, contains no CR byte, and has
+exactly one final LF byte. Its declarations are in the stated source order:
+two schemas, then the thirteen types in manifest and `TypeId` order, followed
+by each type's qualified export and its manifest-order prelude exports.
 
 ```sql
 CREATE SCHEMA std;
@@ -123,7 +129,177 @@ EXPORT TYPE std.types.BOOLEAN AS std.BOOLEAN;
 
 EXPORT TYPE std.BOOLEAN TO PRELUDE AS BOOLEAN;
 EXPORT TYPE std.BOOLEAN TO PRELUDE AS BOOL;
+
+CREATE TYPE std.types.INTEGER AS VALUE PRIMITIVE
+    KERNEL CONTRACT 'orna.kernel.value.integer@1'
+    IMMUTABLE
+    PERSISTABLE;
+
+EXPORT TYPE std.types.INTEGER AS std.INTEGER;
+
+EXPORT TYPE std.INTEGER TO PRELUDE AS INTEGER;
+EXPORT TYPE std.INTEGER TO PRELUDE AS INT;
+
+CREATE TYPE std.types.BIGINT AS VALUE PRIMITIVE
+    KERNEL CONTRACT 'orna.kernel.value.bigint@1'
+    IMMUTABLE
+    PERSISTABLE;
+
+EXPORT TYPE std.types.BIGINT AS std.BIGINT;
+
+EXPORT TYPE std.BIGINT TO PRELUDE AS BIGINT;
+
+CREATE TYPE std.types.FLOAT AS VALUE PRIMITIVE
+    KERNEL CONTRACT 'orna.kernel.value.float@1'
+    IMMUTABLE
+    PERSISTABLE;
+
+EXPORT TYPE std.types.FLOAT AS std.FLOAT;
+
+EXPORT TYPE std.FLOAT TO PRELUDE AS FLOAT;
+
+CREATE TYPE std.types.DECIMAL AS VALUE PRIMITIVE
+    KERNEL CONTRACT 'orna.kernel.value.decimal@1'
+    IMMUTABLE
+    PERSISTABLE;
+
+EXPORT TYPE std.types.DECIMAL AS std.DECIMAL;
+
+EXPORT TYPE std.DECIMAL TO PRELUDE AS DECIMAL;
+
+CREATE TYPE std.types.CHARACTER_LARGE_OBJECT AS VALUE PRIMITIVE
+    KERNEL CONTRACT 'orna.kernel.value.character-large-object@1'
+    IMMUTABLE
+    PERSISTABLE;
+
+EXPORT TYPE std.types.CHARACTER_LARGE_OBJECT AS std.CHARACTER_LARGE_OBJECT;
+
+EXPORT TYPE std.CHARACTER_LARGE_OBJECT TO PRELUDE AS CHARACTER LARGE OBJECT;
+EXPORT TYPE std.CHARACTER_LARGE_OBJECT TO PRELUDE AS TEXT;
+
+CREATE TYPE std.types.BINARY_LARGE_OBJECT AS VALUE PRIMITIVE
+    KERNEL CONTRACT 'orna.kernel.value.binary-large-object@1'
+    IMMUTABLE
+    PERSISTABLE;
+
+EXPORT TYPE std.types.BINARY_LARGE_OBJECT AS std.BINARY_LARGE_OBJECT;
+
+EXPORT TYPE std.BINARY_LARGE_OBJECT TO PRELUDE AS BINARY LARGE OBJECT;
+EXPORT TYPE std.BINARY_LARGE_OBJECT TO PRELUDE AS BYTES;
+
+CREATE TYPE std.types.UUID AS VALUE PRIMITIVE
+    KERNEL CONTRACT 'orna.kernel.value.uuid@1'
+    IMMUTABLE
+    PERSISTABLE;
+
+EXPORT TYPE std.types.UUID AS std.UUID;
+
+EXPORT TYPE std.UUID TO PRELUDE AS UUID;
+
+CREATE TYPE std.types.DATE AS VALUE PRIMITIVE
+    KERNEL CONTRACT 'orna.kernel.value.date@1'
+    IMMUTABLE
+    PERSISTABLE;
+
+EXPORT TYPE std.types.DATE AS std.DATE;
+
+EXPORT TYPE std.DATE TO PRELUDE AS DATE;
+
+CREATE TYPE std.types.TIME AS VALUE PRIMITIVE
+    KERNEL CONTRACT 'orna.kernel.value.time@1'
+    IMMUTABLE
+    PERSISTABLE;
+
+EXPORT TYPE std.types.TIME AS std.TIME;
+
+EXPORT TYPE std.TIME TO PRELUDE AS TIME;
+
+CREATE TYPE std.types.TIMESTAMP AS VALUE PRIMITIVE
+    KERNEL CONTRACT 'orna.kernel.value.timestamp@1'
+    IMMUTABLE
+    PERSISTABLE;
+
+EXPORT TYPE std.types.TIMESTAMP AS std.TIMESTAMP;
+
+EXPORT TYPE std.TIMESTAMP TO PRELUDE AS TIMESTAMP;
+
+CREATE TYPE std.types.DURATION AS VALUE PRIMITIVE
+    KERNEL CONTRACT 'orna.kernel.value.duration@1'
+    IMMUTABLE
+    PERSISTABLE;
+
+EXPORT TYPE std.types.DURATION AS std.DURATION;
+
+EXPORT TYPE std.DURATION TO PRELUDE AS DURATION;
+
+CREATE TYPE std.types.VOID AS VALUE PRIMITIVE
+    KERNEL CONTRACT 'orna.kernel.value.void@1'
+    IMMUTABLE
+    TRANSIENT;
+
+EXPORT TYPE std.types.VOID AS std.VOID;
+
+EXPORT TYPE std.VOID TO PRELUDE AS VOID;
 ```
+
+The fenced source is exactly 3273 bytes and contains exactly 45 semicolons.
+The accepted value
+`e844ebda2f3de385a9f7f193021bc1abbd4863d61fe6af7bef43ed4e60f92fea`
+is its canonical source-unit content digest, not a raw file SHA-256. Compute
+that digest with the existing `ornadb.hash/source-unit-content/v1\0` domain
+bytes, the big-endian `u32` byte length `3273`, and the exact source bytes.
+
+The 45 source origins cover the complete declarations, including each final
+semicolon, in this source order. The final LF at byte `3272` is outside every
+declaration origin.
+
+| Ordinal | Declaration | Span |
+| --- | --- | --- |
+| 0 | `CREATE SCHEMA std` | `0..18` |
+| 1 | `CREATE SCHEMA std.types` | `19..43` |
+| 2 | `CREATE TYPE std.types.BOOLEAN` | `45..174` |
+| 3 | `EXPORT TYPE std.types.BOOLEAN AS std.BOOLEAN` | `176..221` |
+| 4 | `EXPORT TYPE std.BOOLEAN TO PRELUDE AS BOOLEAN` | `223..269` |
+| 5 | `EXPORT TYPE std.BOOLEAN TO PRELUDE AS BOOL` | `270..313` |
+| 6 | `CREATE TYPE std.types.INTEGER` | `315..444` |
+| 7 | `EXPORT TYPE std.types.INTEGER AS std.INTEGER` | `446..491` |
+| 8 | `EXPORT TYPE std.INTEGER TO PRELUDE AS INTEGER` | `493..539` |
+| 9 | `EXPORT TYPE std.INTEGER TO PRELUDE AS INT` | `540..582` |
+| 10 | `CREATE TYPE std.types.BIGINT` | `584..711` |
+| 11 | `EXPORT TYPE std.types.BIGINT AS std.BIGINT` | `713..756` |
+| 12 | `EXPORT TYPE std.BIGINT TO PRELUDE AS BIGINT` | `758..802` |
+| 13 | `CREATE TYPE std.types.FLOAT` | `804..929` |
+| 14 | `EXPORT TYPE std.types.FLOAT AS std.FLOAT` | `931..972` |
+| 15 | `EXPORT TYPE std.FLOAT TO PRELUDE AS FLOAT` | `974..1016` |
+| 16 | `CREATE TYPE std.types.DECIMAL` | `1018..1147` |
+| 17 | `EXPORT TYPE std.types.DECIMAL AS std.DECIMAL` | `1149..1194` |
+| 18 | `EXPORT TYPE std.DECIMAL TO PRELUDE AS DECIMAL` | `1196..1242` |
+| 19 | `CREATE TYPE std.types.CHARACTER_LARGE_OBJECT` | `1244..1403` |
+| 20 | `EXPORT TYPE std.types.CHARACTER_LARGE_OBJECT AS std.CHARACTER_LARGE_OBJECT` | `1405..1480` |
+| 21 | `EXPORT TYPE std.CHARACTER_LARGE_OBJECT TO PRELUDE AS CHARACTER LARGE OBJECT` | `1482..1558` |
+| 22 | `EXPORT TYPE std.CHARACTER_LARGE_OBJECT TO PRELUDE AS TEXT` | `1559..1617` |
+| 23 | `CREATE TYPE std.types.BINARY_LARGE_OBJECT` | `1619..1772` |
+| 24 | `EXPORT TYPE std.types.BINARY_LARGE_OBJECT AS std.BINARY_LARGE_OBJECT` | `1774..1843` |
+| 25 | `EXPORT TYPE std.BINARY_LARGE_OBJECT TO PRELUDE AS BINARY LARGE OBJECT` | `1845..1915` |
+| 26 | `EXPORT TYPE std.BINARY_LARGE_OBJECT TO PRELUDE AS BYTES` | `1916..1972` |
+| 27 | `CREATE TYPE std.types.UUID` | `1974..2097` |
+| 28 | `EXPORT TYPE std.types.UUID AS std.UUID` | `2099..2138` |
+| 29 | `EXPORT TYPE std.UUID TO PRELUDE AS UUID` | `2140..2180` |
+| 30 | `CREATE TYPE std.types.DATE` | `2182..2305` |
+| 31 | `EXPORT TYPE std.types.DATE AS std.DATE` | `2307..2346` |
+| 32 | `EXPORT TYPE std.DATE TO PRELUDE AS DATE` | `2348..2388` |
+| 33 | `CREATE TYPE std.types.TIME` | `2390..2513` |
+| 34 | `EXPORT TYPE std.types.TIME AS std.TIME` | `2515..2554` |
+| 35 | `EXPORT TYPE std.TIME TO PRELUDE AS TIME` | `2556..2596` |
+| 36 | `CREATE TYPE std.types.TIMESTAMP` | `2598..2731` |
+| 37 | `EXPORT TYPE std.types.TIMESTAMP AS std.TIMESTAMP` | `2733..2782` |
+| 38 | `EXPORT TYPE std.TIMESTAMP TO PRELUDE AS TIMESTAMP` | `2784..2834` |
+| 39 | `CREATE TYPE std.types.DURATION` | `2836..2967` |
+| 40 | `EXPORT TYPE std.types.DURATION AS std.DURATION` | `2969..3016` |
+| 41 | `EXPORT TYPE std.DURATION TO PRELUDE AS DURATION` | `3018..3066` |
+| 42 | `CREATE TYPE std.types.VOID` | `3068..3189` |
+| 43 | `EXPORT TYPE std.types.VOID AS std.VOID` | `3191..3230` |
+| 44 | `EXPORT TYPE std.VOID TO PRELUDE AS VOID` | `3232..3272` |
 
 This decision accepts that closed declaration family for the standard
 library. `AS VALUE PRIMITIVE` creates a primitive value type. `KERNEL CONTRACT`
@@ -250,15 +426,92 @@ without a special standard-library branch.
 Retaining that source is the first stage that owns provenance and canonical
 verification. It derives exactly forty-five source origins: two schemas,
 thirteen value types, and thirty bindings (`2 + 13 + 30 = 45`). That stage
-locks exact source-unit, bundle, and source-revision hash goldens, retains one
-hard-coded accepted standard digest golden, and exposes
-`orna_standard::verify_standard_library_snapshot`. Before that wrapper runs,
-source parsing must already have matched every source-independent manifest
-fact. The wrapper checks the exact reserved `CatalogueRevisionId`, compares the
-retained standard digest with the hard-coded accepted golden, and only then
-calls `orna_core::canonical_hash::verify_standard_library_snapshot`. That
-ordering prevents a different but internally self-consistent standard snapshot
-from becoming authority.
+locks these exact accepted goldens:
+
+| Fact | Digest |
+| --- | --- |
+| source-unit content | `e844ebda2f3de385a9f7f193021bc1abbd4863d61fe6af7bef43ed4e60f92fea` |
+| source bundle | `f30293aa3c4068e2cb4e19b815ae5077338931562af0ee1cd444e9b0b4e08616` |
+| source revision | `0f64a10ec8e620c0bddf402cc1d25c16aa847c48fb6a0af7367f8e76b283f01c` |
+| standard library | `e53c41a35e1a092380188fd20d24b6322ae82c2d50dfb5dd053100b51c3b7e9c` |
+
+### Retained standard-source interface
+
+This stage adds these two public functions to `orna-standard`:
+
+```rust
+pub fn retained_standard_library_snapshot() -> Result<StandardLibrarySnapshot, StandardLibraryError>
+pub fn verify_standard_library_snapshot(
+    snapshot: StandardLibrarySnapshot,
+) -> Result<VerifiedStandardLibrarySnapshot, StandardLibraryError>
+```
+
+`StandardLibraryError` is `#[non_exhaustive]` and derives `Clone`, `Debug`,
+`Eq`, and `PartialEq`. It has exactly these variants and fields for this
+stage:
+
+```rust
+Manifest { source: StandardLibraryManifestError }
+RetainedSourceMismatch
+Revision { source: RevisionInvariantError }
+CanonicalHash { source: CanonicalHashError }
+CatalogueIdentityMismatch {
+    expected: CatalogueRevisionId,
+    actual: CatalogueRevisionId,
+}
+AcceptedDigestMismatch {
+    expected: Sha256Digest,
+    actual: Sha256Digest,
+}
+```
+
+Its public `Display` text is exact:
+
+| Variant | Display |
+| --- | --- |
+| `Manifest` | `the standard library manifest is invalid: {source}` |
+| `RetainedSourceMismatch` | `the retained standard library source does not match its manifest` |
+| `Revision` | `the retained standard library revision is invalid: {source}` |
+| `CanonicalHash` | `the standard library canonical hashes are invalid: {source}` |
+| `CatalogueIdentityMismatch` | `the standard library catalogue identity does not match the reserved identity` |
+| `AcceptedDigestMismatch` | `the standard library digest does not match the hard-coded accepted digest` |
+
+Its `Error::source` is `Some(source)` only for `Manifest`, `Revision`, and
+`CanonicalHash`. It is `None` for the other variants.
+
+`retained_standard_library_snapshot` constructs the source unit, bundle, and
+parentless source revision under the existing source hash contracts. It parses
+the retained bytes directly with `orna_syntax`. It does not call the compiler.
+It first maps manifest construction failure to `Manifest`. It maps a source
+parse diagnostic; a count other than exactly two schemas, thirteen primitive
+value types, thirteen qualified exports, or seventeen prelude exports; a quoted
+identifier, name, qualified target, or prelude word; or any source fact that
+does not match the manifest to `RetainedSourceMismatch`.
+
+The direct parse must produce exactly two schemas, thirteen primitive value
+types, thirteen qualified exports, and seventeen prelude exports. Each
+identifier, name, qualified target, and prelude word must be unquoted and match
+the source-independent manifest one-for-one. Each `kernel_contract` is an
+exact quoted `SourceSlice`; its SQL string-literal content is decoded and
+compared to the manifest contract text. Persistence is the parsed keyword enum.
+Declaration order is positional and must match the manifest one-for-one. It
+must then attach the 45 complete-declaration origins
+listed above, assemble the snapshot, and apply the four retained-source
+goldens. Source-revision invariant failure maps to `Revision`; canonical hash
+failure maps to `CanonicalHash`. The function returns an unverified
+`StandardLibrarySnapshot` only after all those checks succeed.
+
+`verify_standard_library_snapshot` applies checks in this exact order:
+
+1. compare the snapshot `CatalogueRevisionId` with the reserved manifest
+   identity and return `CatalogueIdentityMismatch` on a difference;
+2. compare the snapshot standard digest with the hard-coded accepted digest and
+   return `AcceptedDigestMismatch` on a difference; and
+3. call `orna_core::canonical_hash::verify_standard_library_snapshot`, mapping
+   failure to `CanonicalHash`.
+
+This ordering prevents a different but internally self-consistent standard
+snapshot from becoming authority.
 
 Each binding identity is derived rather than allocated. Compute SHA-256 over
 the domain bytes `ornadb.id/type-binding/v1\0`, then one binding-kind byte
@@ -685,17 +938,22 @@ Tests must prove:
   standard authority by itself;
 * all 30 qualified and prelude bindings resolve directly to the expected
   identity, with no alias-created identity or runtime chain;
-* retained standard source parsing matches every source-independent manifest
-  fact before verification and produces exactly 45 origins: 2 schema, 13
-  value-type, and 30 binding origins;
-* the retained source unit, bundle, and source revision match their exact hash
-  goldens, and the retained standard digest equals the hard-coded accepted
-  golden;
-* `orna_standard::verify_standard_library_snapshot` checks the exact reserved
-  `CatalogueRevisionId` and hard-coded accepted digest before the core
-  canonical verifier, yields `VerifiedStandardLibrarySnapshot` for the
-  accepted snapshot, and rejects a different self-consistent non-golden
-  snapshot;
+* the retained source has the literal 3273 UTF-8 ASCII/LF bytes stated above,
+  no BOM or CR, exactly one final LF, exactly 45 semicolons, and all 45 exact
+  complete-declaration origins including `0..18`, `19..43`, and `3232..3272`;
+* retained standard source parsing directly through `orna_syntax`, without the
+  compiler, matches every source-independent manifest fact one-for-one,
+  produces exactly 45 origins, and rejects a quoted or reordered fact;
+* the framed source-unit content digest, bundle digest, source-revision digest,
+  and standard-library digest equal the four literal accepted goldens, and the
+  content digest is not confused with a raw file SHA-256;
+* `StandardLibraryError` has the stated fields, exact `Display` text, and
+  `Error::source` result for every variant;
+* `verify_standard_library_snapshot` checks the exact reserved
+  `CatalogueRevisionId`, then the hard-coded accepted digest, then the core
+  canonical verifier; it yields `VerifiedStandardLibrarySnapshot` for the
+  accepted snapshot and rejects a core-accepted, self-consistent non-golden
+  snapshot at the accepted-digest gate;
 * case-insensitive unquoted spellings resolve while quoted spellings remain
   exact;
 * object and value primary names and bindings share one collision-checked type
@@ -748,7 +1006,7 @@ standard-orchestration rows remain within their two-file caps.
 | `feat(core): version standard and catalogue hashes` | `crates/orna-core/src/canonical_hash.rs`, `crates/orna-core/src/revision.rs`, `crates/orna-core/src/lib.rs` | Definition identities and reference targets become non-exhaustive and gain the append-only value-type variants. The derived `StandardLibraryRevisionId`, exact version-1 preservation tests, and version-2 models and goldens compile, but no active caller emits version 2. |
 | `feat(std): define the standard manifest` | `crates/orna-standard/Cargo.toml`, `crates/orna-standard/src/lib.rs`, `Cargo.lock` | The source-independent manifest exposes the exact reserved IDs, 13 primary names and contracts, and 30 direct binding facts: 13 qualified plus 17 prelude. It contains no source bytes, origins, hashes, standard digest, `StandardLibrarySnapshot`, or `VerifiedStandardLibrarySnapshot`. The crate manifest predeclares `orna-core`, `orna-syntax`, and `orna-compiler` so the later source and orchestration rows stay within their file caps; no database state changes. |
 | `feat(syntax): parse primitive value types` | `crates/orna-syntax/src/lib.rs`, `crates/orna-syntax/src/parser.rs`, `crates/orna-compiler/src/resolver.rs` | The parser losslessly accepts the privileged primitive and export forms. Before identity allocation, ordinary application checking enforces the complete protected-source table across existing and new declaration forms, including every primitive value declaration and type export, with the exact ordered `ORNA0303` diagnostic text and spans defined above. It cannot silently ignore one. No trusted standard-checking path exists yet. |
-| `feat(std): retain the standard source` | `stdlib/std/types.orna`, `crates/orna-standard/src/lib.rs` | After parsed source matches every source-independent manifest fact, the crate retains the exact source, derives all 45 origins (`2` schemas + `13` types + `30` bindings), locks exact source-unit, bundle, and revision hash goldens plus the hard-coded accepted standard digest, and exposes `orna_standard::verify_standard_library_snapshot`, which checks the reserved catalogue identity and compares the retained digest with that hard-coded accepted golden before the core canonical verifier. |
+| `feat(std): retain the standard source` | `stdlib/std/types.orna`, `crates/orna-standard/src/lib.rs` | The crate retains the exact 3273-byte source and its 45 complete-declaration origins. It parses directly with `orna_syntax`, checks every unquoted source fact against the manifest, and locks the literal framed content, bundle, revision, and standard digests. It exposes `retained_standard_library_snapshot` and `verify_standard_library_snapshot` with the stated `StandardLibraryError` contract. The verifier checks reserved catalogue identity, then accepted digest, then the core canonical verifier. Tests prove each error field, display text, source result, gate precedence, and rejection of a core-accepted self-consistent non-golden snapshot. |
 | `feat(compiler): check standard type source` | `crates/orna-compiler/src/resolver.rs`, `crates/orna-compiler/src/resolver/model.rs`, `crates/orna-compiler/src/lib.rs` | A dedicated trusted standard-checking path checks the retained standard source. Ordinary application checking retains the exact `ORNA0303` protection introduced with the syntax forms, and ordinary scalar resolution still uses its compatibility adapter. |
 | `feat(compiler): resolve types through std` | `crates/orna-compiler/src/resolver.rs`, `crates/orna-compiler/src/resolver/model.rs` | Public and qualified scalar names resolve through an explicitly supplied verified standard snapshot to `TypeId`; compilation without that snapshot returns `StandardLibraryError::Unavailable`. No database can install the snapshot yet. |
 | `refactor(types): remove scalar naming authority` | `crates/orna-core/src/types.rs`, `crates/orna-compiler/src/resolver.rs` | Public `StandardScalar::from_source_spelling`, `canonical_name`, `type_id`, and `ScalarResolutionError` are removed. Diagnostics render names from verified catalogue definitions or retained source, while exact representation matching remains internal. |
