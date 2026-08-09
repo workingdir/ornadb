@@ -1614,31 +1614,14 @@ impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
                 ));
             }
             let predicate = self.parse_expression(true)?;
-            match (&quantifier, &predicate) {
-                (_, QueryExpression::Equality { .. })
-                | (
-                    SelectQuantifier::All,
-                    QueryExpression::FieldPath { .. } | QueryExpression::BooleanLiteral { .. },
-                ) => {}
-                (
-                    SelectQuantifier::Distinct { .. },
-                    QueryExpression::FieldPath { .. } | QueryExpression::BooleanLiteral { .. },
-                ) => {
-                    return Err(QueryParseError {
-                        code: "ORNA0001",
-                        message: "SELECT DISTINCT WHERE must use an equality predicate".to_owned(),
-                        span: predicate.span().clone(),
-                    });
-                }
-                _ => {
-                    return Err(QueryParseError {
-                        code: "ORNA0001",
-                        message:
-                            "WHERE must use a BOOLEAN field, TRUE, FALSE, or an equality predicate"
-                                .to_owned(),
-                        span: predicate.span().clone(),
-                    });
-                }
+            if !supports_where_predicate(&quantifier, &predicate) {
+                return Err(QueryParseError {
+                    code: "ORNA0001",
+                    message:
+                        "WHERE must use a BOOLEAN field, TRUE, FALSE, or an equality predicate"
+                            .to_owned(),
+                    span: predicate.span().clone(),
+                });
             }
             Some(predicate)
         } else {
@@ -1953,6 +1936,17 @@ impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
 
 fn parse_select_query(tokens: &[Token<'_>]) -> Result<SelectQuery, QueryParseError> {
     SqlBodyParser::new(tokens, SqlBodySyntax::Select).parse_select()
+}
+
+fn supports_where_predicate(quantifier: &SelectQuantifier, predicate: &QueryExpression) -> bool {
+    matches!(predicate, QueryExpression::Equality { .. })
+        || matches!(
+            (quantifier, predicate),
+            (
+                SelectQuantifier::All | SelectQuantifier::Distinct { .. },
+                QueryExpression::FieldPath { .. } | QueryExpression::BooleanLiteral { .. },
+            )
+        )
 }
 
 impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
