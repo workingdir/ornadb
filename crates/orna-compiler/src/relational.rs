@@ -446,13 +446,6 @@ impl<T: Copy, F: Copy> RelationalQueryIr<T, F> {
     }
 }
 
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "the preparation stage consumes checked DISTINCT plans in the next slice"
-    )
-)]
 impl<T: Copy, F: Copy> DistinctQueryIr<T, F> {
     /// Rewrites every semantic identity while preserving the checked DISTINCT shape.
     pub(crate) fn try_map_identities<T2, F2, E>(
@@ -476,6 +469,99 @@ impl<T: Copy, F: Copy> DistinctQueryIr<T, F> {
                 .map(|expression| try_map_expression(expression, &mut map_type, &mut map_field))
                 .transpose()?,
         })
+    }
+}
+
+/// One closed malformed DISTINCT shape used to test durable validation.
+#[cfg(test)]
+pub(crate) enum DistinctQueryTestMutation {
+    /// Changes the input of the final field-path projection.
+    InvalidFieldPathInput,
+    /// Changes the input of the object-reference projection.
+    InvalidObjectReferenceInput,
+    /// Changes the type facts of the object-reference projection.
+    InvalidObjectReferenceType,
+    /// Changes the type facts of the Boolean literal in the selection.
+    InvalidBooleanLiteralType,
+    /// Changes the result type facts of the equality selection.
+    InvalidEqualityType,
+    /// Removes the optional selection.
+    ClearSelection,
+    /// Changes the final field-path projection type facts.
+    ProjectionType {
+        /// The replacement semantic type.
+        semantic_type: SemanticType<TypeId>,
+        /// The replacement nullability fact.
+        nullable: bool,
+    },
+    /// Replaces the selection with the valid object-reference projection.
+    SelectionObjectReference,
+}
+
+#[cfg(test)]
+impl DistinctQueryIr<TypeId, FieldId> {
+    /// Returns one deliberately malformed DISTINCT query for preparation tests.
+    pub(crate) fn with_test_mutation(&self, mutation: DistinctQueryTestMutation) -> Self {
+        let mut query = self.clone();
+        match mutation {
+            DistinctQueryTestMutation::InvalidFieldPathInput => {
+                let ExpressionKind::FieldPath { input, .. } = &mut query.projections[2].kind else {
+                    panic!("test fixture final projection must be a field path");
+                };
+                *input = InputSlot(1);
+            }
+            DistinctQueryTestMutation::InvalidObjectReferenceInput => {
+                let ExpressionKind::ObjectReference { input } = &mut query.projections[0].kind
+                else {
+                    panic!("test fixture first projection must be an object reference");
+                };
+                *input = InputSlot(1);
+            }
+            DistinctQueryTestMutation::InvalidObjectReferenceType => {
+                query.projections[0].value_type = ValueType {
+                    semantic_type: SemanticType::scalar(StandardScalar::Boolean),
+                    nullable: false,
+                };
+            }
+            DistinctQueryTestMutation::InvalidBooleanLiteralType => {
+                let Some(ExpressionIr {
+                    kind: ExpressionKind::Equality { right, .. },
+                    ..
+                }) = query.selection.as_mut()
+                else {
+                    panic!("test fixture selection must be an equality");
+                };
+                right.value_type = ValueType {
+                    semantic_type: SemanticType::scalar(StandardScalar::Integer),
+                    nullable: false,
+                };
+            }
+            DistinctQueryTestMutation::InvalidEqualityType => {
+                let Some(selection) = query.selection.as_mut() else {
+                    panic!("test fixture must have a selection");
+                };
+                selection.value_type = ValueType {
+                    semantic_type: SemanticType::scalar(StandardScalar::Integer),
+                    nullable: false,
+                };
+            }
+            DistinctQueryTestMutation::ClearSelection => {
+                query.selection = None;
+            }
+            DistinctQueryTestMutation::ProjectionType {
+                semantic_type,
+                nullable,
+            } => {
+                query.projections[2].value_type = ValueType {
+                    semantic_type,
+                    nullable,
+                };
+            }
+            DistinctQueryTestMutation::SelectionObjectReference => {
+                query.selection = Some(query.projections[0].clone());
+            }
+        }
+        query
     }
 }
 
@@ -719,13 +805,6 @@ impl IdentitySelectedQueryIr<TypeId, FieldId, FunctionId, ParameterId> {
 
 impl DistinctQueryIr<TypeId, FieldId> {
     /// Encodes this checked DISTINCT query as a version-3 server plan.
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "the preparation stage consumes encoded DISTINCT plans in the next slice"
-        )
-    )]
     pub(crate) fn encode_distinct_server_plan(
         &self,
     ) -> Result<EncodedServerPlan, orna_artifact::server_plan::ServerPlanError> {
