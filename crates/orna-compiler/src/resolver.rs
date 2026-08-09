@@ -15,7 +15,8 @@ pub use model::{
     CheckReport, CheckedBundle, CheckedClientFunction, CheckedDefault, CheckedDefinitionReference,
     CheckedDefinitionReferenceTarget, CheckedField, CheckedObjectType, CheckedSchema,
     CheckedServerFunction, CheckedServerFunctionParameter, CheckedServerFunctionReturnColumn,
-    ConstantValue, SemanticType,
+    CheckedStandardLibrary, CheckedStandardSchema, CheckedStandardTypeBinding,
+    CheckedStandardValueType, ConstantValue, SemanticType, StandardLibraryCheckError,
 };
 pub(crate) use model::{
     CheckedClientFunctionBody, CheckedFieldRename, CheckedServerFunctionBody, QueryCatalogue,
@@ -29,18 +30,24 @@ use orna_core::{
     catalogue::{
         CatalogueSnapshot, FunctionDomain, FunctionSecurity as CatalogueFunctionSecurity,
         FunctionTransaction as CatalogueFunctionTransaction,
-        FunctionVolatility as CatalogueFunctionVolatility, OnDeleteAction, QualifiedSemanticName,
+        FunctionVolatility as CatalogueFunctionVolatility, OnDeleteAction, PreludeTypeName,
+        QualifiedSemanticName, TypeBindingKind, TypeLookupName, ValueTypeKind, ValueTypeMutability,
+        ValueTypePersistence,
     },
-    revision::DefinitionReferenceKind,
-    source::SourceBundle,
+    revision::{
+        DefinitionIdentity, DefinitionOrigin, DefinitionReferenceKind, SourceOrigin,
+        StoredSourceUnit, VerifiedStandardLibrarySnapshot,
+    },
+    source::{SourceBundle, SourceUnit},
     types::StandardScalar,
 };
 use orna_syntax::{
     ClientFunctionDeclaration, FieldRenameDeclaration, FunctionReturnType,
     FunctionSecurity as SyntaxFunctionSecurity, FunctionTransaction as SyntaxFunctionTransaction,
     FunctionVolatility as SyntaxFunctionVolatility, ObjectTypeDeclaration, OnDeletePolicy,
-    QualifiedName, SelectQuantifier, ServerFunctionBody, ServerFunctionDeclaration, SourceSlice,
-    SourceSpan, StandardLargeObjectKind, TypeSpecification,
+    PrimitiveValueTypePersistence, QualifiedName, SelectQuantifier, ServerFunctionBody,
+    ServerFunctionDeclaration, SourceSlice, SourceSpan, StandardLargeObjectKind, TypeExportTarget,
+    TypeSpecification,
 };
 
 use crate::mutation::{
@@ -52,7 +59,7 @@ use crate::relational::{
     check_identity_selected_query_in, check_query_in,
 };
 use crate::{
-    CompilerDiagnostic, DiagnosticCode, ParseReport, SourceLocation,
+    CompilerDiagnostic, DiagnosticCode, ParseReport, ParsedSourceUnit, SourceLocation,
     normalise_name_part as semantic_part, normalise_qualified_name as semantic_name, parse_bundle,
 };
 
@@ -67,6 +74,456 @@ use self::{
 /// `Parse` values that [`parse_bundle`] retains in the resulting report.
 pub fn check(bundle: &SourceBundle, base: &CatalogueSnapshot) -> CheckReport {
     check_parsed(parse_bundle(bundle), base)
+}
+
+/// Checks retained standard source against its verified catalogue and origins.
+pub fn check_standard_library_source(
+    snapshot: &VerifiedStandardLibrarySnapshot,
+) -> Result<CheckedStandardLibrary, StandardLibraryCheckError> {
+    let source_units = snapshot.source().units();
+    let [stored_unit] = source_units else {
+        return Err(StandardLibraryCheckError::SourceUnitCount {
+            actual: source_units.len(),
+        });
+    };
+
+    let bundle = SourceBundle::new([SourceUnit::new(
+        stored_unit.logical_path(),
+        stored_unit.content(),
+    )])
+    .map_err(|_| StandardLibraryCheckError::SourceMismatch)?;
+    let report = parse_bundle(&bundle);
+    if !report.diagnostics().is_empty() {
+        return Err(StandardLibraryCheckError::Diagnostics {
+            diagnostics: report.diagnostics().to_vec(),
+        });
+    }
+    let parsed_unit = report
+        .units()
+        .first()
+        .ok_or(StandardLibraryCheckError::SourceMismatch)?;
+    let families = reconcile_standard_source(
+        stored_unit,
+        parsed_unit,
+        snapshot.catalogue(),
+        snapshot.origins(),
+    )?;
+
+    Ok(CheckedStandardLibrary {
+        verified_snapshot: snapshot.clone(),
+        schemas: families.schemas,
+        value_types: families.value_types,
+        type_bindings: families.type_bindings,
+    })
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct StandardSourceFamilies {
+    schemas: Vec<CheckedStandardSchema>,
+    value_types: Vec<CheckedStandardValueType>,
+    type_bindings: Vec<CheckedStandardTypeBinding>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct PendingStandardSourceFacts {
+    schemas: Vec<PendingStandardSchema>,
+    value_types: Vec<PendingStandardValueType>,
+    type_bindings: Vec<PendingStandardTypeBinding>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct PendingStandardSchema {
+    id: orna_core::SchemaId,
+    name: QualifiedSemanticName,
+    span: SourceSpan,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct PendingStandardValueType {
+    id: orna_core::TypeId,
+    name: QualifiedSemanticName,
+    kind: ValueTypeKind,
+    mutability: ValueTypeMutability,
+    persistence: ValueTypePersistence,
+    representation_contract: String,
+    span: SourceSpan,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct PendingStandardTypeBinding {
+    id: orna_core::TypeBindingId,
+    kind: TypeBindingKind,
+    name: TypeLookupName,
+    target: orna_core::TypeId,
+    span: SourceSpan,
+}
+
+fn reconcile_standard_source(
+    stored_unit: &StoredSourceUnit,
+    parsed_unit: &ParsedSourceUnit,
+    catalogue: &CatalogueSnapshot,
+    origins: &[DefinitionOrigin],
+) -> Result<StandardSourceFamilies, StandardLibraryCheckError> {
+    validate_standard_source_shape(stored_unit, parsed_unit, catalogue)?;
+    let pending = match_standard_source_facts(parsed_unit, catalogue)?;
+    validate_standard_source_origins(stored_unit, origins, pending)
+}
+
+fn validate_standard_source_shape(
+    stored_unit: &StoredSourceUnit,
+    parsed_unit: &ParsedSourceUnit,
+    catalogue: &CatalogueSnapshot,
+) -> Result<(), StandardLibraryCheckError> {
+    if parsed_unit.source_text() != stored_unit.content()
+        || parsed_unit.source_text() != parsed_unit.syntax_text()
+        || !catalogue.object_types().is_empty()
+        || !catalogue.functions().is_empty()
+        || !parsed_unit.parsed().object_types().is_empty()
+        || !parsed_unit.parsed().field_renames().is_empty()
+        || !parsed_unit.parsed().server_functions().is_empty()
+        || !parsed_unit.parsed().client_functions().is_empty()
+    {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+
+    let (qualified_binding_count, prelude_binding_count) =
+        catalogue_binding_category_counts(catalogue)?;
+    let (qualified_export_count, prelude_export_count) =
+        source_export_category_counts(parsed_unit)?;
+    if parsed_unit.parsed().schemas().len() != catalogue.schemas().len()
+        || parsed_unit.parsed().primitive_value_types().len() != catalogue.value_types().len()
+        || qualified_export_count != qualified_binding_count
+        || prelude_export_count != prelude_binding_count
+    {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+
+    Ok(())
+}
+
+fn match_standard_source_facts(
+    parsed_unit: &ParsedSourceUnit,
+    catalogue: &CatalogueSnapshot,
+) -> Result<PendingStandardSourceFacts, StandardLibraryCheckError> {
+    let mut consumed_schema_ids = HashSet::with_capacity(catalogue.schemas().len());
+    let mut consumed_type_ids = HashSet::with_capacity(catalogue.value_types().len());
+    let mut consumed_binding_ids = HashSet::with_capacity(catalogue.type_bindings().len());
+
+    let mut schemas = Vec::with_capacity(parsed_unit.parsed().schemas().len());
+    for declaration in parsed_unit.parsed().schemas() {
+        let name = unquoted_semantic_name(&declaration.name)?;
+        let definition = catalogue
+            .schema_by_name(&name)
+            .ok_or(StandardLibraryCheckError::SourceMismatch)?;
+        if !consumed_schema_ids.insert(definition.id()) {
+            return Err(StandardLibraryCheckError::SourceMismatch);
+        }
+        schemas.push(PendingStandardSchema {
+            id: definition.id(),
+            name,
+            span: declaration.span.clone(),
+        });
+    }
+
+    let mut primary_type_ids = HashMap::with_capacity(catalogue.value_types().len());
+    let mut value_types = Vec::with_capacity(parsed_unit.parsed().primitive_value_types().len());
+    for declaration in parsed_unit.parsed().primitive_value_types() {
+        let name = unquoted_semantic_name(&declaration.name)?;
+        let contract = decode_string_literal(&declaration.kernel_contract)
+            .ok_or(StandardLibraryCheckError::SourceMismatch)?;
+        let persistence = value_type_persistence(declaration.persistence);
+        let definition = catalogue
+            .value_type_by_name(&name)
+            .ok_or(StandardLibraryCheckError::SourceMismatch)?;
+        if !matches!(definition.kind(), ValueTypeKind::Primitive)
+            || !matches!(definition.mutability(), ValueTypeMutability::Immutable)
+            || definition.persistence() != persistence
+            || definition.representation_contract() != contract
+            || !consumed_type_ids.insert(definition.id())
+            || primary_type_ids
+                .insert(name.clone(), definition.id())
+                .is_some()
+        {
+            return Err(StandardLibraryCheckError::SourceMismatch);
+        }
+        value_types.push(PendingStandardValueType {
+            id: definition.id(),
+            name,
+            kind: definition.kind(),
+            mutability: definition.mutability(),
+            persistence: definition.persistence(),
+            representation_contract: definition.representation_contract().to_owned(),
+            span: declaration.span.clone(),
+        });
+    }
+
+    let type_exports = parsed_unit.parsed().type_exports();
+    let mut qualified_bindings = (0..type_exports.len()).map(|_| None).collect::<Vec<_>>();
+    let mut qualified_targets = HashMap::with_capacity(catalogue.type_bindings().len());
+    for (index, declaration) in type_exports.iter().enumerate() {
+        let TypeExportTarget::Qualified { name } = &declaration.target else {
+            continue;
+        };
+        let source_name = unquoted_semantic_name(&declaration.source_type)?;
+        let target_name = unquoted_semantic_name(name)?;
+        let target = primary_type_ids
+            .get(&source_name)
+            .copied()
+            .ok_or(StandardLibraryCheckError::SourceMismatch)?;
+        let lookup_name = TypeLookupName::qualified(target_name.clone());
+        let binding = catalogue
+            .type_binding_by_name(&lookup_name)
+            .ok_or(StandardLibraryCheckError::SourceMismatch)?;
+        if !matches!(binding.kind(), TypeBindingKind::Qualified)
+            || binding.target() != target
+            || !consumed_binding_ids.insert(binding.id())
+            || qualified_targets.insert(target_name, target).is_some()
+        {
+            return Err(StandardLibraryCheckError::SourceMismatch);
+        }
+        qualified_bindings[index] = Some(PendingStandardTypeBinding {
+            id: binding.id(),
+            kind: binding.kind(),
+            name: binding.name().clone(),
+            target: binding.target(),
+            span: declaration.span.clone(),
+        });
+    }
+
+    let mut type_bindings = Vec::with_capacity(type_exports.len());
+    for (index, declaration) in type_exports.iter().enumerate() {
+        match &declaration.target {
+            TypeExportTarget::Qualified { .. } => {
+                let binding = qualified_bindings[index]
+                    .take()
+                    .ok_or(StandardLibraryCheckError::SourceMismatch)?;
+                type_bindings.push(binding);
+            }
+            TypeExportTarget::Prelude { words, .. } => {
+                let source_name = unquoted_semantic_name(&declaration.source_type)?;
+                let target = qualified_targets
+                    .get(&source_name)
+                    .copied()
+                    .ok_or(StandardLibraryCheckError::SourceMismatch)?;
+                let prelude_name = unquoted_prelude_name(words)?;
+                let lookup_name = TypeLookupName::prelude(prelude_name);
+                let binding = catalogue
+                    .type_binding_by_name(&lookup_name)
+                    .ok_or(StandardLibraryCheckError::SourceMismatch)?;
+                if !matches!(binding.kind(), TypeBindingKind::Prelude)
+                    || binding.target() != target
+                    || !consumed_binding_ids.insert(binding.id())
+                {
+                    return Err(StandardLibraryCheckError::SourceMismatch);
+                }
+                type_bindings.push(PendingStandardTypeBinding {
+                    id: binding.id(),
+                    kind: binding.kind(),
+                    name: binding.name().clone(),
+                    target: binding.target(),
+                    span: declaration.span.clone(),
+                });
+            }
+        }
+    }
+
+    if consumed_schema_ids.len() != catalogue.schemas().len()
+        || consumed_type_ids.len() != catalogue.value_types().len()
+        || consumed_binding_ids.len() != catalogue.type_bindings().len()
+    {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+
+    Ok(PendingStandardSourceFacts {
+        schemas,
+        value_types,
+        type_bindings,
+    })
+}
+
+fn validate_standard_source_origins(
+    stored_unit: &StoredSourceUnit,
+    origins: &[DefinitionOrigin],
+    pending: PendingStandardSourceFacts,
+) -> Result<StandardSourceFamilies, StandardLibraryCheckError> {
+    let mut origins_by_identity = origin_map(origins)?;
+    let schemas = pending
+        .schemas
+        .into_iter()
+        .map(|fact| {
+            let origin = take_origin(
+                &mut origins_by_identity,
+                DefinitionIdentity::Schema(fact.id),
+                stored_unit.id(),
+                &fact.span,
+            )?;
+            Ok(CheckedStandardSchema {
+                id: fact.id,
+                name: fact.name,
+                origin,
+            })
+        })
+        .collect::<Result<Vec<_>, StandardLibraryCheckError>>()?;
+    let value_types = pending
+        .value_types
+        .into_iter()
+        .map(|fact| {
+            let origin = take_origin(
+                &mut origins_by_identity,
+                DefinitionIdentity::ValueType(fact.id),
+                stored_unit.id(),
+                &fact.span,
+            )?;
+            Ok(CheckedStandardValueType {
+                id: fact.id,
+                name: fact.name,
+                kind: fact.kind,
+                mutability: fact.mutability,
+                persistence: fact.persistence,
+                representation_contract: fact.representation_contract,
+                origin,
+            })
+        })
+        .collect::<Result<Vec<_>, StandardLibraryCheckError>>()?;
+    let type_bindings = pending
+        .type_bindings
+        .into_iter()
+        .map(|fact| {
+            let origin = take_origin(
+                &mut origins_by_identity,
+                DefinitionIdentity::TypeBinding(fact.id),
+                stored_unit.id(),
+                &fact.span,
+            )?;
+            Ok(CheckedStandardTypeBinding {
+                id: fact.id,
+                kind: fact.kind,
+                name: fact.name,
+                target: fact.target,
+                origin,
+            })
+        })
+        .collect::<Result<Vec<_>, StandardLibraryCheckError>>()?;
+    if !origins_by_identity.is_empty() {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+
+    Ok(StandardSourceFamilies {
+        schemas,
+        value_types,
+        type_bindings,
+    })
+}
+
+fn catalogue_binding_category_counts(
+    catalogue: &CatalogueSnapshot,
+) -> Result<(usize, usize), StandardLibraryCheckError> {
+    let mut qualified = 0;
+    let mut prelude = 0;
+    for binding in catalogue.type_bindings() {
+        match binding.kind() {
+            TypeBindingKind::Qualified => qualified += 1,
+            TypeBindingKind::Prelude => prelude += 1,
+            _ => return Err(StandardLibraryCheckError::SourceMismatch),
+        }
+    }
+    Ok((qualified, prelude))
+}
+
+fn source_export_category_counts(
+    parsed_unit: &ParsedSourceUnit,
+) -> Result<(usize, usize), StandardLibraryCheckError> {
+    let mut qualified = 0;
+    let mut prelude = 0;
+    for declaration in parsed_unit.parsed().type_exports() {
+        match &declaration.target {
+            TypeExportTarget::Qualified { .. } => qualified += 1,
+            TypeExportTarget::Prelude { .. } => prelude += 1,
+        }
+    }
+    Ok((qualified, prelude))
+}
+
+fn origin_map(
+    origins: &[DefinitionOrigin],
+) -> Result<HashMap<DefinitionIdentity, SourceOrigin>, StandardLibraryCheckError> {
+    let mut by_identity = HashMap::with_capacity(origins.len());
+    for origin in origins {
+        match origin.identity() {
+            DefinitionIdentity::Schema(_)
+            | DefinitionIdentity::ValueType(_)
+            | DefinitionIdentity::TypeBinding(_) => {}
+            _ => return Err(StandardLibraryCheckError::SourceMismatch),
+        }
+        if by_identity
+            .insert(origin.identity(), origin.source())
+            .is_some()
+        {
+            return Err(StandardLibraryCheckError::SourceMismatch);
+        }
+    }
+    Ok(by_identity)
+}
+
+fn take_origin(
+    origins: &mut HashMap<DefinitionIdentity, SourceOrigin>,
+    identity: DefinitionIdentity,
+    source_unit: orna_core::SourceUnitId,
+    span: &SourceSpan,
+) -> Result<SourceOrigin, StandardLibraryCheckError> {
+    let byte_start =
+        u32::try_from(span.start).map_err(|_| StandardLibraryCheckError::SourceMismatch)?;
+    let byte_end =
+        u32::try_from(span.end).map_err(|_| StandardLibraryCheckError::SourceMismatch)?;
+    let expected = SourceOrigin::new(source_unit, byte_start, byte_end)
+        .map_err(|_| StandardLibraryCheckError::SourceMismatch)?;
+    let actual = origins
+        .remove(&identity)
+        .ok_or(StandardLibraryCheckError::SourceMismatch)?;
+    if actual != expected {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+    Ok(actual)
+}
+
+fn unquoted_semantic_name(
+    name: &QualifiedName,
+) -> Result<QualifiedSemanticName, StandardLibraryCheckError> {
+    if name.parts.iter().any(|part| part.text.starts_with('"')) {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+    QualifiedSemanticName::new(name.parts.iter().map(semantic_part))
+        .map_err(|_| StandardLibraryCheckError::SourceMismatch)
+}
+
+fn unquoted_prelude_name(
+    words: &[orna_syntax::NamePart],
+) -> Result<PreludeTypeName, StandardLibraryCheckError> {
+    if words.iter().any(|word| word.text.starts_with('"')) {
+        return Err(StandardLibraryCheckError::SourceMismatch);
+    }
+    PreludeTypeName::new(words.iter().map(semantic_part))
+        .map_err(|_| StandardLibraryCheckError::SourceMismatch)
+}
+
+fn value_type_persistence(persistence: PrimitiveValueTypePersistence) -> ValueTypePersistence {
+    match persistence {
+        PrimitiveValueTypePersistence::Persistable => ValueTypePersistence::Persistable,
+        PrimitiveValueTypePersistence::Transient => ValueTypePersistence::Transient,
+    }
+}
+
+fn decode_string_literal(slice: &SourceSlice) -> Option<String> {
+    let text = slice.text.strip_prefix('\'')?.strip_suffix('\'')?;
+    let mut decoded = String::with_capacity(text.len());
+    let mut characters = text.chars();
+    while let Some(character) = characters.next() {
+        if character == '\'' && characters.next() != Some('\'') {
+            return None;
+        }
+        decoded.push(character);
+    }
+    Some(decoded)
 }
 
 #[derive(Clone, Copy)]
@@ -2205,24 +2662,34 @@ fn diagnostic(
 mod tests {
     use orna_core::{
         CatalogueRevisionId, ExpressionId, FieldId, FunctionId, FunctionRevisionId, ParameterId,
-        SchemaId, TypeId,
+        SchemaId, SourceUnitId, TypeId,
+        canonical_hash::source_unit_content_digest,
         catalogue::{
             CatalogueSnapshot, FieldDefinition, FunctionDefinition, FunctionDomain, FunctionReturn,
             FunctionReturnColumnDefinition, FunctionSecurity, FunctionTransaction,
             FunctionVolatility, ObjectTypeDefinition, OnDeleteAction, ParameterDefinition,
-            QualifiedSemanticName, SchemaDefinition,
+            PreludeTypeName, QualifiedSemanticName, SchemaDefinition, TypeBinding, TypeLookupName,
+            ValueTypeDefinition, ValueTypeMutability, ValueTypePersistence,
         },
-        revision::DefinitionReferenceKind,
+        revision::{
+            DefinitionIdentity, DefinitionOrigin, DefinitionReferenceKind, SourceOrigin,
+            StoredSourceUnit,
+        },
         source::{SourceBundle, SourceUnit},
         types::{ResolvedType, StandardScalar},
     };
 
     use crate::relational::ExpressionKind;
+    use orna_syntax::SourceSpan;
 
     use super::{
         CheckedDefinitionReferenceTarget, CheckedTypeId, ConstantValue, DiagnosticCode,
-        SemanticType, check,
+        SemanticType, check, reconcile_standard_source,
     };
+    use crate::{ParsedSourceUnit, parse_bundle};
+
+    const STANDARD_SOURCE: &str = "CREATE SCHEMA std;CREATE SCHEMA std.types;CREATE TYPE std.types.BOOLEAN AS VALUE PRIMITIVE KERNEL CONTRACT 'orna.kernel.value.boolean@1' IMMUTABLE PERSISTABLE;EXPORT TYPE std.types.BOOLEAN AS std.BOOLEAN;EXPORT TYPE std.BOOLEAN TO PRELUDE AS BOOLEAN;";
+    const TWO_TYPE_STANDARD_SOURCE: &str = "CREATE SCHEMA std.types;CREATE SCHEMA std;CREATE TYPE std.types.INTEGER AS VALUE PRIMITIVE KERNEL CONTRACT 'int@1' IMMUTABLE TRANSIENT;CREATE TYPE std.types.BOOLEAN AS VALUE PRIMITIVE KERNEL CONTRACT 'boolean@1' IMMUTABLE PERSISTABLE;EXPORT TYPE std.INTEGER TO PRELUDE AS INTEGER;EXPORT TYPE std.types.INTEGER AS std.INTEGER;EXPORT TYPE std.BOOLEAN TO PRELUDE AS BOOLEAN;EXPORT TYPE std.types.BOOLEAN AS std.BOOLEAN;";
 
     fn empty_catalogue() -> CatalogueSnapshot {
         catalogue(Vec::new(), Vec::new(), Vec::new())
@@ -2329,6 +2796,647 @@ mod tests {
                 .map(|(path, source)| SourceUnit::new(path, source)),
         )
         .unwrap()
+    }
+
+    fn standard_reconciliation_inputs(
+        source: &str,
+    ) -> (
+        StoredSourceUnit,
+        ParsedSourceUnit,
+        CatalogueSnapshot,
+        Vec<DefinitionOrigin>,
+    ) {
+        let stored_unit = StoredSourceUnit::new(
+            SourceUnitId::from_bytes([4; 16]),
+            0,
+            "std/types.orna",
+            source,
+            source_unit_content_digest(source).unwrap(),
+        )
+        .unwrap();
+        let report =
+            parse_bundle(&SourceBundle::new([SourceUnit::new("std/types.orna", source)]).unwrap());
+        assert!(report.diagnostics().is_empty());
+        let parsed_unit = report.units()[0].clone();
+
+        let boolean = ValueTypeDefinition::primitive(
+            TypeId::from_bytes([3; 16]),
+            QualifiedSemanticName::new(["std", "types", "boolean"]).unwrap(),
+            ValueTypeMutability::Immutable,
+            ValueTypePersistence::Persistable,
+            "orna.kernel.value.boolean@1",
+        );
+        let qualified = TypeBinding::qualified(
+            QualifiedSemanticName::new(["std", "boolean"]).unwrap(),
+            boolean.id(),
+        )
+        .unwrap();
+        let prelude =
+            TypeBinding::prelude(PreludeTypeName::new(["boolean"]).unwrap(), boolean.id()).unwrap();
+        let catalogue = CatalogueSnapshot::new_with_types(
+            CatalogueRevisionId::from_bytes([8; 16]),
+            vec![
+                SchemaDefinition::new(
+                    SchemaId::from_bytes([1; 16]),
+                    QualifiedSemanticName::new(["std"]).unwrap(),
+                ),
+                SchemaDefinition::new(
+                    SchemaId::from_bytes([2; 16]),
+                    QualifiedSemanticName::new(["std", "types"]).unwrap(),
+                ),
+            ],
+            vec![],
+            vec![boolean],
+            vec![qualified.clone(), prelude.clone()],
+        )
+        .unwrap();
+        let origins = vec![
+            standard_origin(
+                DefinitionIdentity::Schema(SchemaId::from_bytes([1; 16])),
+                0,
+                18,
+            ),
+            standard_origin(
+                DefinitionIdentity::Schema(SchemaId::from_bytes([2; 16])),
+                18,
+                42,
+            ),
+            standard_origin(
+                DefinitionIdentity::ValueType(TypeId::from_bytes([3; 16])),
+                42,
+                159,
+            ),
+            standard_origin(DefinitionIdentity::TypeBinding(qualified.id()), 159, 204),
+            standard_origin(DefinitionIdentity::TypeBinding(prelude.id()), 204, 250),
+        ];
+
+        (stored_unit, parsed_unit, catalogue, origins)
+    }
+
+    fn standard_origin(
+        identity: DefinitionIdentity,
+        byte_start: u32,
+        byte_end: u32,
+    ) -> DefinitionOrigin {
+        DefinitionOrigin::new(
+            identity,
+            SourceOrigin::new(SourceUnitId::from_bytes([4; 16]), byte_start, byte_end).unwrap(),
+        )
+    }
+
+    fn rebase_standard_origins_to_source(
+        origins: &mut [DefinitionOrigin],
+        parsed_unit: &ParsedSourceUnit,
+    ) {
+        assert_eq!(origins.len(), 5);
+        assert_eq!(parsed_unit.parsed().schemas().len(), 2);
+        assert_eq!(parsed_unit.parsed().primitive_value_types().len(), 1);
+        assert_eq!(parsed_unit.parsed().type_exports().len(), 2);
+        let identities = origins
+            .iter()
+            .map(DefinitionOrigin::identity)
+            .collect::<Vec<_>>();
+        origins[0] = parsed_origin(identities[0], &parsed_unit.parsed().schemas()[0].span);
+        origins[1] = parsed_origin(identities[1], &parsed_unit.parsed().schemas()[1].span);
+        origins[2] = parsed_origin(
+            identities[2],
+            &parsed_unit.parsed().primitive_value_types()[0].span,
+        );
+        origins[3] = parsed_origin(identities[3], &parsed_unit.parsed().type_exports()[0].span);
+        origins[4] = parsed_origin(identities[4], &parsed_unit.parsed().type_exports()[1].span);
+    }
+
+    fn assert_standard_source_mismatch(source: &str) {
+        let (stored_unit, parsed_unit, catalogue, origins) = standard_reconciliation_inputs(source);
+        assert_eq!(
+            reconcile_standard_source(&stored_unit, &parsed_unit, &catalogue, &origins),
+            Err(super::StandardLibraryCheckError::SourceMismatch)
+        );
+    }
+
+    fn two_type_reconciliation_inputs(
+        source: &str,
+    ) -> (
+        StoredSourceUnit,
+        ParsedSourceUnit,
+        CatalogueSnapshot,
+        Vec<DefinitionOrigin>,
+    ) {
+        let stored_unit = StoredSourceUnit::new(
+            SourceUnitId::from_bytes([4; 16]),
+            0,
+            "std/types.orna",
+            source,
+            source_unit_content_digest(source).unwrap(),
+        )
+        .unwrap();
+        let parsed_unit = parsed_standard_unit(source);
+        let boolean = ValueTypeDefinition::primitive(
+            TypeId::from_bytes([3; 16]),
+            QualifiedSemanticName::new(["std", "types", "boolean"]).unwrap(),
+            ValueTypeMutability::Immutable,
+            ValueTypePersistence::Persistable,
+            "boolean@1",
+        );
+        let integer = ValueTypeDefinition::primitive(
+            TypeId::from_bytes([4; 16]),
+            QualifiedSemanticName::new(["std", "types", "integer"]).unwrap(),
+            ValueTypeMutability::Immutable,
+            ValueTypePersistence::Transient,
+            "int@1",
+        );
+        let qualified_boolean = TypeBinding::qualified(
+            QualifiedSemanticName::new(["std", "boolean"]).unwrap(),
+            boolean.id(),
+        )
+        .unwrap();
+        let qualified_integer = TypeBinding::qualified(
+            QualifiedSemanticName::new(["std", "integer"]).unwrap(),
+            integer.id(),
+        )
+        .unwrap();
+        let prelude_boolean =
+            TypeBinding::prelude(PreludeTypeName::new(["boolean"]).unwrap(), boolean.id()).unwrap();
+        let prelude_integer =
+            TypeBinding::prelude(PreludeTypeName::new(["integer"]).unwrap(), integer.id()).unwrap();
+        let catalogue = CatalogueSnapshot::new_with_types(
+            CatalogueRevisionId::from_bytes([8; 16]),
+            vec![
+                SchemaDefinition::new(
+                    SchemaId::from_bytes([1; 16]),
+                    QualifiedSemanticName::new(["std"]).unwrap(),
+                ),
+                SchemaDefinition::new(
+                    SchemaId::from_bytes([2; 16]),
+                    QualifiedSemanticName::new(["std", "types"]).unwrap(),
+                ),
+            ],
+            vec![],
+            vec![boolean, integer],
+            vec![
+                prelude_boolean,
+                qualified_integer,
+                prelude_integer,
+                qualified_boolean,
+            ],
+        )
+        .unwrap();
+        let canonical_unit = parsed_standard_unit(TWO_TYPE_STANDARD_SOURCE);
+        let mut origins = Vec::new();
+        for declaration in canonical_unit.parsed().schemas() {
+            let name = QualifiedSemanticName::new(
+                declaration
+                    .name
+                    .parts
+                    .iter()
+                    .map(|part| part.text.to_ascii_lowercase()),
+            )
+            .unwrap();
+            let id = catalogue.schema_by_name(&name).unwrap().id();
+            origins.push(parsed_origin(
+                DefinitionIdentity::Schema(id),
+                &declaration.span,
+            ));
+        }
+        for declaration in canonical_unit.parsed().primitive_value_types() {
+            let name = QualifiedSemanticName::new(
+                declaration
+                    .name
+                    .parts
+                    .iter()
+                    .map(|part| part.text.to_ascii_lowercase()),
+            )
+            .unwrap();
+            let id = catalogue.value_type_by_name(&name).unwrap().id();
+            origins.push(parsed_origin(
+                DefinitionIdentity::ValueType(id),
+                &declaration.span,
+            ));
+        }
+        for declaration in canonical_unit.parsed().type_exports() {
+            let name = match &declaration.target {
+                orna_syntax::TypeExportTarget::Qualified { name } => TypeLookupName::qualified(
+                    QualifiedSemanticName::new(
+                        name.parts.iter().map(|part| part.text.to_ascii_lowercase()),
+                    )
+                    .unwrap(),
+                ),
+                orna_syntax::TypeExportTarget::Prelude { words, .. } => TypeLookupName::prelude(
+                    PreludeTypeName::new(words.iter().map(|word| word.text.as_str())).unwrap(),
+                ),
+            };
+            let id = catalogue.type_binding_by_name(&name).unwrap().id();
+            origins.push(parsed_origin(
+                DefinitionIdentity::TypeBinding(id),
+                &declaration.span,
+            ));
+        }
+        origins.reverse();
+
+        (stored_unit, parsed_unit, catalogue, origins)
+    }
+
+    fn parsed_standard_unit(source: &str) -> ParsedSourceUnit {
+        let report =
+            parse_bundle(&SourceBundle::new([SourceUnit::new("std/types.orna", source)]).unwrap());
+        assert!(report.diagnostics().is_empty());
+        report.units()[0].clone()
+    }
+
+    fn parsed_origin(identity: DefinitionIdentity, span: &SourceSpan) -> DefinitionOrigin {
+        DefinitionOrigin::new(
+            identity,
+            SourceOrigin::new(
+                SourceUnitId::from_bytes([4; 16]),
+                u32::try_from(span.start).unwrap(),
+                u32::try_from(span.end).unwrap(),
+            )
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn standard_reconciliation_accepts_reordered_declarations_and_catalogue_facts() {
+        let (stored_unit, parsed_unit, catalogue, origins) =
+            two_type_reconciliation_inputs(TWO_TYPE_STANDARD_SOURCE);
+
+        let families =
+            reconcile_standard_source(&stored_unit, &parsed_unit, &catalogue, &origins).unwrap();
+        let schemas = families.schemas;
+        let value_types = families.value_types;
+        let bindings = families.type_bindings;
+
+        assert_eq!(schemas[0].name().to_string(), "std.types");
+        assert_eq!(schemas[1].name().to_string(), "std");
+        assert_eq!(value_types[0].name().to_string(), "std.types.integer");
+        assert_eq!(value_types[1].name().to_string(), "std.types.boolean");
+        assert_eq!(bindings[0].name().to_string(), "integer");
+        assert_eq!(bindings[1].name().to_string(), "std.integer");
+        assert_eq!(bindings[2].name().to_string(), "boolean");
+        assert_eq!(bindings[3].name().to_string(), "std.boolean");
+    }
+
+    #[test]
+    fn standard_reconciliation_rejects_crossed_and_duplicate_type_and_binding_facts() {
+        let crossed_cases = [
+            TWO_TYPE_STANDARD_SOURCE.replacen(
+                "CREATE TYPE std.types.INTEGER AS VALUE PRIMITIVE KERNEL CONTRACT 'int@1' IMMUTABLE TRANSIENT;",
+                "CREATE TYPE std.types.BOOLEAN AS VALUE PRIMITIVE KERNEL CONTRACT 'boolean@1' IMMUTABLE PERSISTABLE;",
+                1,
+            ),
+            TWO_TYPE_STANDARD_SOURCE.replacen(
+                "EXPORT TYPE std.types.INTEGER AS std.INTEGER;",
+                "EXPORT TYPE std.types.BOOLEAN AS std.INTEGER;",
+                1,
+            ),
+            TWO_TYPE_STANDARD_SOURCE.replacen(
+                "EXPORT TYPE std.INTEGER TO PRELUDE AS INTEGER;",
+                "EXPORT TYPE std.BOOLEAN TO PRELUDE AS INTEGER;",
+                1,
+            ),
+        ];
+
+        for source in crossed_cases {
+            let (stored_unit, parsed_unit, catalogue, origins) =
+                two_type_reconciliation_inputs(&source);
+            assert_eq!(
+                reconcile_standard_source(&stored_unit, &parsed_unit, &catalogue, &origins),
+                Err(super::StandardLibraryCheckError::SourceMismatch)
+            );
+        }
+
+        let duplicate_primitive = TWO_TYPE_STANDARD_SOURCE.replacen(
+            "CREATE TYPE std.types.INTEGER AS VALUE PRIMITIVE KERNEL CONTRACT 'int@1' IMMUTABLE TRANSIENT;",
+            "CREATE TYPE std.types.BOOLEAN AS VALUE PRIMITIVE KERNEL CONTRACT 'boolean@1' IMMUTABLE PERSISTABLE;",
+            1,
+        );
+        let (stored_unit, parsed_unit, catalogue, mut origins) =
+            two_type_reconciliation_inputs(&duplicate_primitive);
+        replace_origin(
+            &mut origins,
+            DefinitionIdentity::ValueType(TypeId::from_bytes([3; 16])),
+            &parsed_unit.parsed().primitive_value_types()[0].span,
+        );
+        assert_eq!(
+            reconcile_standard_source(&stored_unit, &parsed_unit, &catalogue, &origins),
+            Err(super::StandardLibraryCheckError::SourceMismatch)
+        );
+
+        let duplicate_qualified = TWO_TYPE_STANDARD_SOURCE.replacen(
+            "EXPORT TYPE std.types.INTEGER AS std.INTEGER;",
+            "EXPORT TYPE std.types.BOOLEAN AS std.BOOLEAN;",
+            1,
+        );
+        let (stored_unit, parsed_unit, catalogue, mut origins) =
+            two_type_reconciliation_inputs(&duplicate_qualified);
+        let qualified_boolean = catalogue
+            .type_binding_by_name(&TypeLookupName::qualified(
+                QualifiedSemanticName::new(["std", "boolean"]).unwrap(),
+            ))
+            .unwrap()
+            .id();
+        let first_qualified = parsed_unit
+            .parsed()
+            .type_exports()
+            .iter()
+            .find(|declaration| {
+                matches!(
+                    &declaration.target,
+                    orna_syntax::TypeExportTarget::Qualified { .. }
+                )
+            })
+            .unwrap();
+        replace_origin(
+            &mut origins,
+            DefinitionIdentity::TypeBinding(qualified_boolean),
+            &first_qualified.span,
+        );
+        assert_eq!(
+            reconcile_standard_source(&stored_unit, &parsed_unit, &catalogue, &origins),
+            Err(super::StandardLibraryCheckError::SourceMismatch)
+        );
+
+        let duplicate_prelude = TWO_TYPE_STANDARD_SOURCE.replacen(
+            "EXPORT TYPE std.BOOLEAN TO PRELUDE AS BOOLEAN;",
+            "EXPORT TYPE std.INTEGER TO PRELUDE AS INTEGER;",
+            1,
+        );
+        let (stored_unit, parsed_unit, catalogue, mut origins) =
+            two_type_reconciliation_inputs(&duplicate_prelude);
+        let prelude_integer = catalogue
+            .type_binding_by_name(&TypeLookupName::prelude(
+                PreludeTypeName::new(["integer"]).unwrap(),
+            ))
+            .unwrap()
+            .id();
+        let first_prelude = parsed_unit
+            .parsed()
+            .type_exports()
+            .iter()
+            .find(|declaration| {
+                matches!(
+                    &declaration.target,
+                    orna_syntax::TypeExportTarget::Prelude { .. }
+                )
+            })
+            .unwrap();
+        replace_origin(
+            &mut origins,
+            DefinitionIdentity::TypeBinding(prelude_integer),
+            &first_prelude.span,
+        );
+        assert_eq!(
+            reconcile_standard_source(&stored_unit, &parsed_unit, &catalogue, &origins),
+            Err(super::StandardLibraryCheckError::SourceMismatch)
+        );
+    }
+
+    fn replace_origin(
+        origins: &mut [DefinitionOrigin],
+        identity: DefinitionIdentity,
+        span: &SourceSpan,
+    ) {
+        let origin = origins
+            .iter_mut()
+            .find(|origin| origin.identity() == identity)
+            .unwrap();
+        *origin = parsed_origin(identity, span);
+    }
+
+    #[test]
+    fn standard_reconciliation_rejects_missing_and_unsupported_declarations() {
+        assert_standard_source_mismatch(
+            "CREATE SCHEMA std;CREATE SCHEMA std.types;CREATE TYPE std.types.BOOLEAN AS VALUE PRIMITIVE KERNEL CONTRACT 'orna.kernel.value.boolean@1' IMMUTABLE PERSISTABLE;EXPORT TYPE std.types.BOOLEAN AS std.BOOLEAN;",
+        );
+        assert_standard_source_mismatch(
+            "CREATE SCHEMA std;CREATE SCHEMA std.types;CREATE TYPE std.types.BOOLEAN AS VALUE PRIMITIVE KERNEL CONTRACT 'orna.kernel.value.boolean@1' IMMUTABLE PERSISTABLE;EXPORT TYPE std.types.BOOLEAN AS std.BOOLEAN;EXPORT TYPE std.BOOLEAN TO PRELUDE AS BOOLEAN;CREATE TYPE std.extra AS OBJECT ();",
+        );
+    }
+
+    #[test]
+    fn standard_reconciliation_rejects_duplicate_and_crossed_source_facts() {
+        assert_standard_source_mismatch(
+            "CREATE SCHEMA std;CREATE SCHEMA std;CREATE TYPE std.types.BOOLEAN AS VALUE PRIMITIVE KERNEL CONTRACT 'orna.kernel.value.boolean@1' IMMUTABLE PERSISTABLE;EXPORT TYPE std.types.BOOLEAN AS std.BOOLEAN;EXPORT TYPE std.BOOLEAN TO PRELUDE AS BOOLEAN;",
+        );
+        assert_standard_source_mismatch(
+            "CREATE SCHEMA std;CREATE SCHEMA std.types;CREATE TYPE std.types.BOOLEAN AS VALUE PRIMITIVE KERNEL CONTRACT 'orna.kernel.value.boolean@1' IMMUTABLE PERSISTABLE;EXPORT TYPE std.types.BOOLEAN AS std.BOOLEAN;EXPORT TYPE std.types.BOOLEAN TO PRELUDE AS BOOLEAN;",
+        );
+    }
+
+    #[test]
+    fn standard_reconciliation_rejects_quoted_and_changed_primitive_facts() {
+        let cases = [
+            STANDARD_SOURCE.replacen("CREATE SCHEMA std;", "CREATE SCHEMA \"std\";", 1),
+            STANDARD_SOURCE.replacen(
+                "CREATE TYPE std.types.BOOLEAN",
+                "CREATE TYPE \"std\".types.BOOLEAN",
+                1,
+            ),
+            STANDARD_SOURCE.replacen("AS std.BOOLEAN", "AS \"std\".BOOLEAN", 1),
+            STANDARD_SOURCE.replacen(
+                "EXPORT TYPE std.types.BOOLEAN",
+                "EXPORT TYPE \"std\".types.BOOLEAN",
+                1,
+            ),
+            STANDARD_SOURCE.replacen(
+                "EXPORT TYPE std.BOOLEAN TO PRELUDE",
+                "EXPORT TYPE \"std\".BOOLEAN TO PRELUDE",
+                1,
+            ),
+            STANDARD_SOURCE.replacen("boolean@1", "boolean@2", 1),
+            STANDARD_SOURCE.replacen("PERSISTABLE", "TRANSIENT", 1),
+        ];
+
+        for source in cases {
+            let (stored_unit, parsed_unit, catalogue, mut origins) =
+                standard_reconciliation_inputs(&source);
+            rebase_standard_origins_to_source(&mut origins, &parsed_unit);
+            assert_eq!(
+                reconcile_standard_source(&stored_unit, &parsed_unit, &catalogue, &origins),
+                Err(super::StandardLibraryCheckError::SourceMismatch)
+            );
+        }
+    }
+
+    #[test]
+    fn quoted_prelude_words_are_rejected_by_the_parse_gate() {
+        let report = parse_bundle(
+            &SourceBundle::new([SourceUnit::new(
+                "std/types.orna",
+                "EXPORT TYPE std.BOOLEAN TO PRELUDE AS \"BOOLEAN\";",
+            )])
+            .unwrap(),
+        );
+
+        assert_eq!(report.diagnostics().len(), 1);
+        assert_eq!(
+            report.diagnostics()[0].code(),
+            DiagnosticCode::UnexpectedToken
+        );
+        assert_eq!(
+            report.diagnostics()[0].message(),
+            "expected an unquoted prelude type name after AS"
+        );
+    }
+
+    #[test]
+    fn standard_reconciliation_rejects_every_missing_or_extra_supported_family() {
+        let cases = [
+            "CREATE SCHEMA std.types;CREATE TYPE std.types.BOOLEAN AS VALUE PRIMITIVE KERNEL CONTRACT 'orna.kernel.value.boolean@1' IMMUTABLE PERSISTABLE;EXPORT TYPE std.types.BOOLEAN AS std.BOOLEAN;EXPORT TYPE std.BOOLEAN TO PRELUDE AS BOOLEAN;".to_owned(),
+            format!("CREATE SCHEMA std.extra;{STANDARD_SOURCE}"),
+            "CREATE SCHEMA std;CREATE SCHEMA std.types;EXPORT TYPE std.types.BOOLEAN AS std.BOOLEAN;EXPORT TYPE std.BOOLEAN TO PRELUDE AS BOOLEAN;".to_owned(),
+            format!("{STANDARD_SOURCE}CREATE TYPE std.types.EXTRA AS VALUE PRIMITIVE KERNEL CONTRACT 'extra@1' IMMUTABLE PERSISTABLE;"),
+            "CREATE SCHEMA std;CREATE SCHEMA std.types;CREATE TYPE std.types.BOOLEAN AS VALUE PRIMITIVE KERNEL CONTRACT 'orna.kernel.value.boolean@1' IMMUTABLE PERSISTABLE;EXPORT TYPE std.BOOLEAN TO PRELUDE AS BOOLEAN;".to_owned(),
+            format!("{STANDARD_SOURCE}EXPORT TYPE std.types.BOOLEAN AS std.BOOL;"),
+            "CREATE SCHEMA std;CREATE SCHEMA std.types;CREATE TYPE std.types.BOOLEAN AS VALUE PRIMITIVE KERNEL CONTRACT 'orna.kernel.value.boolean@1' IMMUTABLE PERSISTABLE;EXPORT TYPE std.types.BOOLEAN AS std.BOOLEAN;".to_owned(),
+            format!("{STANDARD_SOURCE}EXPORT TYPE std.BOOLEAN TO PRELUDE AS BOOL;"),
+        ];
+
+        for source in cases {
+            assert_standard_source_mismatch(&source);
+        }
+    }
+
+    #[test]
+    fn standard_reconciliation_rejects_every_unsupported_source_category() {
+        let cases = [
+            format!("{STANDARD_SOURCE}CREATE TYPE std.extra AS OBJECT ();"),
+            format!("{STANDARD_SOURCE}ALTER TYPE std.extra RENAME FIELD old TO new;"),
+            format!(
+                "{STANDARD_SOURCE}CREATE SERVER FUNCTION std.extra() RETURNS ROWS (value BOOLEAN) AS SELECT o.value FROM std.object o;"
+            ),
+            format!(
+                "{STANDARD_SOURCE}CREATE CLIENT FUNCTION std.extra() RETURNS BOOLEAN RETURN TRUE;"
+            ),
+        ];
+
+        for source in cases {
+            assert_standard_source_mismatch(&source);
+        }
+    }
+
+    #[test]
+    fn standard_reconciliation_requires_exact_stored_bytes_and_origins() {
+        let (stored_unit, mut parsed_unit, catalogue, origins) =
+            standard_reconciliation_inputs(STANDARD_SOURCE);
+        assert_eq!(parsed_unit.parsed().schemas().len(), 2);
+        assert_eq!(parsed_unit.parsed().primitive_value_types().len(), 1);
+        assert_eq!(parsed_unit.parsed().type_exports().len(), 2);
+        parsed_unit.replace_source_text_for_test(format!("{STANDARD_SOURCE} "));
+        assert_eq!(
+            reconcile_standard_source(&stored_unit, &parsed_unit, &catalogue, &origins),
+            Err(super::StandardLibraryCheckError::SourceMismatch)
+        );
+
+        let (stored_unit, parsed_unit, catalogue, mut origins) =
+            standard_reconciliation_inputs(STANDARD_SOURCE);
+        origins.remove(0);
+        assert_eq!(
+            reconcile_standard_source(&stored_unit, &parsed_unit, &catalogue, &origins),
+            Err(super::StandardLibraryCheckError::SourceMismatch)
+        );
+
+        let (stored_unit, parsed_unit, catalogue, mut origins) =
+            standard_reconciliation_inputs(STANDARD_SOURCE);
+        origins[2] = standard_origin(
+            DefinitionIdentity::ValueType(TypeId::from_bytes([3; 16])),
+            43,
+            159,
+        );
+        assert_eq!(
+            reconcile_standard_source(&stored_unit, &parsed_unit, &catalogue, &origins),
+            Err(super::StandardLibraryCheckError::SourceMismatch)
+        );
+
+        let (stored_unit, parsed_unit, catalogue, mut origins) =
+            standard_reconciliation_inputs(STANDARD_SOURCE);
+        origins.push(origins[0].clone());
+        assert_eq!(
+            reconcile_standard_source(&stored_unit, &parsed_unit, &catalogue, &origins),
+            Err(super::StandardLibraryCheckError::SourceMismatch)
+        );
+
+        let (stored_unit, parsed_unit, catalogue, mut origins) =
+            standard_reconciliation_inputs(STANDARD_SOURCE);
+        origins.push(standard_origin(
+            DefinitionIdentity::Expression(ExpressionId::from_bytes([9; 16])),
+            0,
+            0,
+        ));
+        assert_eq!(
+            reconcile_standard_source(&stored_unit, &parsed_unit, &catalogue, &origins),
+            Err(super::StandardLibraryCheckError::SourceMismatch)
+        );
+
+        let (stored_unit, parsed_unit, catalogue, mut origins) =
+            standard_reconciliation_inputs(STANDARD_SOURCE);
+        origins[2] = standard_origin(
+            DefinitionIdentity::ValueType(TypeId::from_bytes([3; 16])),
+            42,
+            158,
+        );
+        assert_eq!(
+            reconcile_standard_source(&stored_unit, &parsed_unit, &catalogue, &origins),
+            Err(super::StandardLibraryCheckError::SourceMismatch)
+        );
+
+        let (stored_unit, parsed_unit, catalogue, mut origins) =
+            standard_reconciliation_inputs(STANDARD_SOURCE);
+        let first_source = origins[0].source();
+        let second_source = origins[1].source();
+        origins[0] = DefinitionOrigin::new(
+            DefinitionIdentity::Schema(SchemaId::from_bytes([1; 16])),
+            second_source,
+        );
+        origins[1] = DefinitionOrigin::new(
+            DefinitionIdentity::Schema(SchemaId::from_bytes([2; 16])),
+            first_source,
+        );
+        assert_eq!(
+            reconcile_standard_source(&stored_unit, &parsed_unit, &catalogue, &origins),
+            Err(super::StandardLibraryCheckError::SourceMismatch)
+        );
+
+        let (stored_unit, parsed_unit, catalogue, mut origins) =
+            standard_reconciliation_inputs(STANDARD_SOURCE);
+        origins[0] = DefinitionOrigin::new(
+            DefinitionIdentity::Schema(SchemaId::from_bytes([1; 16])),
+            SourceOrigin::new(SourceUnitId::from_bytes([9; 16]), 0, 18).unwrap(),
+        );
+        assert_eq!(
+            reconcile_standard_source(&stored_unit, &parsed_unit, &catalogue, &origins),
+            Err(super::StandardLibraryCheckError::SourceMismatch)
+        );
+    }
+
+    #[test]
+    fn catalogue_reconciliation_precedes_hostile_origin_validation() {
+        let source = STANDARD_SOURCE.replace("boolean@1", "integer@1");
+        let (stored_unit, parsed_unit, catalogue, mut origins) =
+            standard_reconciliation_inputs(&source);
+        origins.push(origins[0].clone());
+
+        assert_eq!(
+            super::match_standard_source_facts(&parsed_unit, &catalogue),
+            Err(super::StandardLibraryCheckError::SourceMismatch)
+        );
+        assert_eq!(
+            reconcile_standard_source(&stored_unit, &parsed_unit, &catalogue, &origins),
+            Err(super::StandardLibraryCheckError::SourceMismatch)
+        );
+
+        let (stored_unit, parsed_unit, catalogue, mut origins) =
+            standard_reconciliation_inputs(STANDARD_SOURCE);
+        origins.push(origins[0].clone());
+        let pending = super::match_standard_source_facts(&parsed_unit, &catalogue);
+        assert!(pending.is_ok());
+        let Ok(pending) = pending else {
+            return;
+        };
+        assert_eq!(
+            super::validate_standard_source_origins(&stored_unit, &origins, pending),
+            Err(super::StandardLibraryCheckError::SourceMismatch)
+        );
     }
 
     fn assert_no_checked_bundle(report: &super::CheckReport) {
