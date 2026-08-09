@@ -2610,6 +2610,32 @@ mod tests {
         SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n\
         AS SELECT DISTINCT t.owner FROM tasks.task t;\n";
 
+    const DIRECT_BOOLEAN_DISTINCT_SOURCE: &str = "CREATE SCHEMA tasks;\n\
+        CREATE TYPE tasks.person AS OBJECT (active BOOL NOT NULL);\n\
+        CREATE TYPE tasks.task AS OBJECT (owner REF tasks.person, completed BOOL NOT NULL);\n\
+        CREATE SERVER FUNCTION tasks.visible_values()\n\
+        RETURNS ROWS (completed BOOL)\n\
+        SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n\
+        AS SELECT DISTINCT t.completed FROM tasks.task t WHERE t.owner.active;\n";
+
+    const DIRECT_BOOLEAN_DISTINCT_REFORMATTED_SOURCE: &str = "-- source-only direct DISTINCT edit\n\
+        CREATE SCHEMA tasks;\n\
+        CREATE TYPE tasks.person AS OBJECT ( active BOOL NOT NULL );\n\
+        CREATE TYPE tasks.task AS OBJECT ( owner REF tasks.person, completed BOOL NOT NULL );\n\
+        CREATE SERVER FUNCTION tasks.visible_values()\n\
+        RETURNS ROWS ( completed BOOL )\n\
+        SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n\
+        AS SELECT DISTINCT t.completed\n\
+        FROM tasks.task AS t WHERE t.owner.active;\n";
+
+    const DIRECT_BOOLEAN_DISTINCT_CHANGED_PREDICATE_SOURCE: &str = "CREATE SCHEMA tasks;\n\
+        CREATE TYPE tasks.person AS OBJECT (active BOOL NOT NULL);\n\
+        CREATE TYPE tasks.task AS OBJECT (owner REF tasks.person, completed BOOL NOT NULL);\n\
+        CREATE SERVER FUNCTION tasks.visible_values()\n\
+        RETURNS ROWS (completed BOOL)\n\
+        SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n\
+        AS SELECT DISTINCT t.completed FROM tasks.task t WHERE t.completed;\n";
+
     const MUTATION_SOURCE: &str = "CREATE SCHEMA tasks;\n\
         CREATE TYPE tasks.person AS OBJECT (name TEXT NOT NULL);\n\
         CREATE TYPE tasks.task AS OBJECT (title TEXT NOT NULL, done BOOL NOT NULL, note TEXT, owner REF tasks.person);\n\
@@ -3213,6 +3239,235 @@ mod tests {
                 .map(|reference| reference.ordinal())
                 .collect::<Vec<_>>(),
             (0..7).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn prepares_direct_boolean_distinct_predicates_as_v3_and_replays_by_semantics() {
+        let empty = empty_active();
+        let initial = prepare(
+            &checked_report(DIRECT_BOOLEAN_DISTINCT_SOURCE, empty.catalogue()),
+            empty.pair(),
+            &empty,
+        )
+        .unwrap();
+        let catalogue = initial.candidate();
+        let person = catalogue
+            .object_type_by_name(&semantic_name(&["tasks", "person"]))
+            .unwrap();
+        let task = catalogue
+            .object_type_by_name(&semantic_name(&["tasks", "task"]))
+            .unwrap();
+        let function = &catalogue.functions()[0];
+        let revision = &initial.new_function_revisions()[0];
+
+        assert_eq!(revision.revision_number(), 1);
+        assert_eq!(revision.artifact().kind(), ExecutableArtifactKind::Server);
+        assert_eq!(revision.artifact().format(), SERVER_PLAN_FORMAT);
+        assert_eq!(revision.language_version(), SERVER_PLAN_LANGUAGE_VERSION);
+        assert_eq!(
+            artifact_payload_digest(revision.artifact().payload()).unwrap(),
+            revision.artifact().content_hash()
+        );
+        assert_eq!(
+            function_semantic_digest(
+                function,
+                revision.language_version(),
+                revision.artifact(),
+                initial.expressions(),
+                initial.references(),
+            )
+            .unwrap(),
+            revision.semantic_hash()
+        );
+
+        let plan = DistinctServerPlan::decode(revision.artifact().payload()).unwrap();
+        let format_version = plan.format_version();
+        assert_eq!(revision.artifact().version(), format_version);
+        assert_eq!(plan.encode().unwrap(), revision.artifact().payload());
+        assert_eq!(
+            ServerPlan::decode(revision.artifact().payload()),
+            Err(ServerPlanError::UnsupportedVersion(format_version))
+        );
+        assert_eq!(
+            IdentitySelectedServerPlan::decode(revision.artifact().payload()),
+            Err(ServerPlanError::UnsupportedVersion(format_version))
+        );
+        assert_eq!(plan.scan().input, 0);
+        assert_eq!(plan.scan().object_type, task.id());
+        assert_eq!(plan.projections().len(), 1);
+        let ExpressionKind::FieldPath { input, steps } = &plan.projections()[0].kind else {
+            panic!("direct DISTINCT projection must encode as a field path");
+        };
+        assert_eq!(*input, 0);
+        assert_eq!(
+            steps
+                .iter()
+                .map(|step| (step.owner, step.field))
+                .collect::<Vec<_>>(),
+            vec![(task.id(), task.field_by_name("completed").unwrap().id())]
+        );
+        assert_eq!(
+            plan.projections()[0].value_type.resolved_type,
+            ResolvedType::scalar(StandardScalar::Boolean)
+        );
+        assert!(!plan.projections()[0].value_type.nullable);
+
+        let selection = plan.selection().expect("fixture has a direct predicate");
+        let ExpressionKind::FieldPath { input, steps } = &selection.kind else {
+            panic!("direct DISTINCT predicate must encode as a field path");
+        };
+        assert_eq!(*input, 0);
+        assert_eq!(
+            steps
+                .iter()
+                .map(|step| (step.owner, step.field))
+                .collect::<Vec<_>>(),
+            vec![
+                (task.id(), task.field_by_name("owner").unwrap().id()),
+                (person.id(), person.field_by_name("active").unwrap().id()),
+            ]
+        );
+        assert_eq!(
+            selection.value_type.resolved_type,
+            ResolvedType::scalar(StandardScalar::Boolean)
+        );
+        assert!(selection.value_type.nullable);
+
+        assert_eq!(
+            initial
+                .references()
+                .iter()
+                .map(|reference| (reference.kind(), reference.target()))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    DefinitionReferenceKind::QueryObject,
+                    DefinitionReferenceTarget::ObjectType(task.id()),
+                ),
+                (
+                    DefinitionReferenceKind::QueryField,
+                    DefinitionReferenceTarget::Field {
+                        owner: task.id(),
+                        field: task.field_by_name("completed").unwrap().id(),
+                    },
+                ),
+                (
+                    DefinitionReferenceKind::QueryField,
+                    DefinitionReferenceTarget::Field {
+                        owner: task.id(),
+                        field: task.field_by_name("owner").unwrap().id(),
+                    },
+                ),
+                (
+                    DefinitionReferenceKind::QueryField,
+                    DefinitionReferenceTarget::Field {
+                        owner: person.id(),
+                        field: person.field_by_name("active").unwrap().id(),
+                    },
+                ),
+            ]
+        );
+        assert_eq!(
+            initial
+                .references()
+                .iter()
+                .map(|reference| reference.ordinal())
+                .collect::<Vec<_>>(),
+            (0..4).collect::<Vec<_>>()
+        );
+        assert!(initial.references().iter().all(|reference| {
+            reference.source_function() == function.id()
+                && reference.source_revision() == revision.id()
+        }));
+
+        let initial_revision = revision.clone();
+        let active = activate(&initial, vec![initial_revision.clone()], Vec::new());
+        let replay = prepare(
+            &checked_report(
+                DIRECT_BOOLEAN_DISTINCT_REFORMATTED_SOURCE,
+                active.catalogue(),
+            ),
+            active.pair(),
+            &active,
+        )
+        .unwrap();
+        assert!(replay.new_function_revisions().is_empty());
+        assert_eq!(
+            replay.candidate().functions()[0].current_revision(),
+            initial_revision.id()
+        );
+        assert_ne!(replay.source().id(), active.source().id());
+        assert_eq!(
+            active.function_revisions(),
+            std::slice::from_ref(&initial_revision)
+        );
+        assert_eq!(
+            active.function_revisions()[0].artifact(),
+            revision.artifact()
+        );
+
+        let changed = prepare(
+            &checked_report(
+                DIRECT_BOOLEAN_DISTINCT_CHANGED_PREDICATE_SOURCE,
+                active.catalogue(),
+            ),
+            active.pair(),
+            &active,
+        )
+        .unwrap();
+        let changed_function = &changed.candidate().functions()[0];
+        let changed_revision = &changed.new_function_revisions()[0];
+        assert_eq!(changed_function.id(), function.id());
+        assert_eq!(changed_revision.revision_number(), 2);
+        assert_ne!(changed_revision.id(), initial_revision.id());
+        assert_ne!(
+            changed_revision.semantic_hash(),
+            initial_revision.semantic_hash()
+        );
+        assert_ne!(
+            changed_revision.artifact().content_hash(),
+            initial_revision.artifact().content_hash()
+        );
+        assert_eq!(changed_revision.artifact().version(), format_version);
+        let changed_plan =
+            DistinctServerPlan::decode(changed_revision.artifact().payload()).unwrap();
+        let changed_selection = changed_plan
+            .selection()
+            .expect("changed fixture has a direct predicate");
+        let ExpressionKind::FieldPath { input, steps } = &changed_selection.kind else {
+            panic!("changed direct DISTINCT predicate must encode as a field path");
+        };
+        assert_eq!(*input, 0);
+        assert_eq!(
+            steps
+                .iter()
+                .map(|step| (step.owner, step.field))
+                .collect::<Vec<_>>(),
+            vec![(task.id(), task.field_by_name("completed").unwrap().id())]
+        );
+        assert!(!changed_selection.value_type.nullable);
+
+        let (mapped_plan, mapped_function, object_types, references) =
+            mapped_distinct_fixture_for(DIRECT_BOOLEAN_DISTINCT_SOURCE);
+        let mapped_person = object_types
+            .iter()
+            .find(|object_type| object_type.name() == &semantic_name(&["tasks", "person"]))
+            .unwrap();
+        let non_nullable_owner = object_types_with_task_field(
+            &object_types,
+            "owner",
+            ResolvedType::reference(mapped_person.id()),
+            false,
+        );
+        assert_preparation_reason(
+            distinct_query_plan(
+                &mapped_plan,
+                &mapped_function,
+                &non_nullable_owner,
+                &references,
+            ),
+            "SELECT DISTINCT query field path type differs from its source field",
         );
     }
 

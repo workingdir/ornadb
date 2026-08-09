@@ -1623,6 +1623,7 @@ mod tests {
     const TITLE_FIELD: FieldId = FieldId::from_bytes([13; 16]);
     const SCORE_FIELD: FieldId = FieldId::from_bytes([14; 16]);
     const PERSON_NAME_FIELD: FieldId = FieldId::from_bytes([21; 16]);
+    const PERSON_ACTIVE_FIELD: FieldId = FieldId::from_bytes([22; 16]);
     const SELECTOR_OWNER: FunctionId = FunctionId::from_bytes([31; 16]);
     const SELECTOR_PARAMETER: ParameterId = ParameterId::from_bytes([32; 16]);
 
@@ -1668,13 +1669,22 @@ mod tests {
                 ObjectTypeDefinition::new(
                     PERSON_TYPE,
                     name(&["people", "person"]),
-                    vec![field(
-                        PERSON_NAME_FIELD,
-                        "name",
-                        0,
-                        ResolvedType::scalar(StandardScalar::CharacterLargeObject),
-                        false,
-                    )],
+                    vec![
+                        field(
+                            PERSON_NAME_FIELD,
+                            "name",
+                            0,
+                            ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+                            false,
+                        ),
+                        field(
+                            PERSON_ACTIVE_FIELD,
+                            "active",
+                            1,
+                            ResolvedType::scalar(StandardScalar::Boolean),
+                            false,
+                        ),
+                    ],
                 ),
             ],
         )
@@ -1958,6 +1968,91 @@ mod tests {
             Some(ExpressionKind::Equality { .. })
         ));
         assert!(!plan.selection().unwrap().value_type().nullable());
+    }
+
+    #[test]
+    fn checks_direct_boolean_distinct_predicates_with_exact_types() {
+        let root = query("SELECT DISTINCT t.completed FROM tasks.task t WHERE t.completed");
+        let root = check_distinct_query_in(&root, &catalogue(), "tasks.orna").unwrap();
+        let root_selection = root.plan().selection().expect("fixture has a selection");
+        let ExpressionKind::FieldPath { steps, .. } = root_selection.kind() else {
+            panic!("root predicate must be a field path");
+        };
+        assert_eq!(
+            steps
+                .iter()
+                .map(|step| (step.owner(), step.field()))
+                .collect::<Vec<_>>(),
+            vec![(TASK_TYPE, COMPLETED_FIELD)]
+        );
+        assert_eq!(
+            root_selection.value_type().semantic_type(),
+            SemanticType::scalar(StandardScalar::Boolean)
+        );
+        assert!(!root_selection.value_type().nullable());
+
+        let nullable =
+            query("SELECT DISTINCT t.completed FROM tasks.task t WHERE t.assignee.active");
+        let nullable = check_distinct_query_in(&nullable, &catalogue(), "tasks.orna").unwrap();
+        let nullable_selection = nullable
+            .plan()
+            .selection()
+            .expect("fixture has a selection");
+        let ExpressionKind::FieldPath { steps, .. } = nullable_selection.kind() else {
+            panic!("nullable predicate must be a field path");
+        };
+        assert_eq!(
+            steps
+                .iter()
+                .map(|step| (step.owner(), step.field()))
+                .collect::<Vec<_>>(),
+            vec![
+                (TASK_TYPE, ASSIGNEE_FIELD),
+                (PERSON_TYPE, PERSON_ACTIVE_FIELD),
+            ]
+        );
+        assert_eq!(
+            nullable_selection.value_type().semantic_type(),
+            SemanticType::scalar(StandardScalar::Boolean)
+        );
+        assert!(nullable_selection.value_type().nullable());
+
+        for (source, expected) in [("TRUE", true), ("FALSE", false)] {
+            let literal = query(&format!(
+                "SELECT DISTINCT t.completed FROM tasks.task t WHERE {source}"
+            ));
+            let literal = check_distinct_query_in(&literal, &catalogue(), "tasks.orna").unwrap();
+            let selection = literal.plan().selection().expect("fixture has a selection");
+            assert!(matches!(
+                selection.kind(),
+                ExpressionKind::BooleanLiteral { value } if *value == expected
+            ));
+            assert_eq!(
+                selection.value_type().semantic_type(),
+                SemanticType::scalar(StandardScalar::Boolean)
+            );
+            assert!(!selection.value_type().nullable());
+            assert_eq!(literal.references().len(), 2);
+            assert_eq!(
+                literal.references()[0].kind(),
+                QueryReferenceKind::QueryObject
+            );
+            assert_eq!(
+                literal.references()[0].target(),
+                &QueryReferenceTarget::Object(TASK_TYPE)
+            );
+            assert_eq!(
+                literal.references()[1].kind(),
+                QueryReferenceKind::QueryField
+            );
+            assert_eq!(
+                literal.references()[1].target(),
+                &QueryReferenceTarget::Field {
+                    owner: TASK_TYPE,
+                    field: COMPLETED_FIELD,
+                }
+            );
+        }
     }
 
     #[test]
@@ -2251,10 +2346,12 @@ mod tests {
 
     #[test]
     fn rejects_a_non_boolean_where_expression() {
-        let mut query = query("SELECT t.title FROM tasks.task t WHERE t.completed = FALSE");
-        query.predicate = Some(query.projections[0].clone());
+        let mut duplicate_preserving =
+            query("SELECT t.title FROM tasks.task t WHERE t.completed = FALSE");
+        duplicate_preserving.predicate = Some(duplicate_preserving.projections[0].clone());
 
-        let diagnostics = check_query(&query, &catalogue(), "tasks.orna").unwrap_err();
+        let diagnostics =
+            check_query(&duplicate_preserving, &catalogue(), "tasks.orna").unwrap_err();
 
         assert_eq!(diagnostics[0].code(), DiagnosticCode::TypeMismatch);
         assert_eq!(
@@ -2263,7 +2360,17 @@ mod tests {
         );
         assert_eq!(
             diagnostics[0].location().span().start(),
-            query.projections[0].span().start
+            duplicate_preserving.projections[0].span().start
+        );
+
+        let distinct = query("SELECT DISTINCT t.completed FROM tasks.task t WHERE t.title");
+        let diagnostics =
+            check_distinct_query_in(&distinct, &catalogue(), "tasks.orna").unwrap_err();
+        assert_one_diagnostic(
+            &diagnostics,
+            DiagnosticCode::TypeMismatch,
+            "WHERE requires a BOOLEAN expression",
+            distinct.predicate.as_ref().unwrap().span(),
         );
     }
 
