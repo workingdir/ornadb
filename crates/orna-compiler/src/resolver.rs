@@ -3130,7 +3130,7 @@ mod tests {
             RETURNS ROWS (task REF tasks.task, active BOOL, completed BOOL) \
             SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE \
             AS SELECT DISTINCT REF(t), t.assignee.active, t.completed FROM tasks.task t \
-            WHERE t.completed = t.completed;";
+            WHERE t.assignee.active;";
         let report = check(
             &bundle([("distinct_references.orna", source)]),
             &empty_catalogue(),
@@ -3154,7 +3154,6 @@ mod tests {
         assert!(!plan.projections()[0].value_type().nullable());
         assert!(plan.projections()[1].value_type().nullable());
         assert!(!plan.projections()[2].value_type().nullable());
-        assert!(plan.selection().is_some());
         let ExpressionKind::FieldPath { steps, .. } = plan.projections()[1].kind() else {
             panic!("second DISTINCT projection must be a field path");
         };
@@ -3163,16 +3162,31 @@ mod tests {
         assert_eq!(steps[0].field(), assignee.id());
         assert_eq!(steps[1].owner(), person.id());
         assert_eq!(steps[1].field(), active.id());
+        let selection = plan.selection().expect("fixture has a direct predicate");
+        let ExpressionKind::FieldPath { steps, .. } = selection.kind() else {
+            panic!("direct DISTINCT predicate must be a field path");
+        };
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0].owner(), task.id());
+        assert_eq!(steps[0].field(), assignee.id());
+        assert_eq!(steps[1].owner(), person.id());
+        assert_eq!(steps[1].field(), active.id());
+        assert_eq!(
+            selection.value_type().semantic_type(),
+            SemanticType::scalar(StandardScalar::Boolean)
+        );
+        assert!(selection.value_type().nullable());
 
         let query_start = source.find("SELECT DISTINCT").unwrap();
         let query_object_start = query_start + source[query_start..].find("tasks.task").unwrap();
         let projection_reference_start =
             query_start + source[query_start..].find("REF(t)").unwrap() + "REF(".len();
-        let assignee_start = source.find("t.assignee.active").unwrap();
-        let completed_starts = source
-            .match_indices("t.completed")
+        let assignee_starts = source
+            .match_indices("t.assignee.active")
             .map(|(start, _)| start)
             .collect::<Vec<_>>();
+        assert_eq!(assignee_starts.len(), 2);
+        let completed_start = source.find("t.completed").unwrap();
         let return_target_start = source.find("task REF tasks.task").unwrap() + "task REF ".len();
         let expected = [
             (
@@ -3199,7 +3213,7 @@ mod tests {
                     owner: task.id(),
                     field: assignee.id(),
                 },
-                assignee_start + "t.".len(),
+                assignee_starts[0] + "t.".len(),
                 "assignee".len(),
             ),
             (
@@ -3208,7 +3222,7 @@ mod tests {
                     owner: person.id(),
                     field: active.id(),
                 },
-                assignee_start + "t.assignee.".len(),
+                assignee_starts[0] + "t.assignee.".len(),
                 "active".len(),
             ),
             (
@@ -3217,26 +3231,26 @@ mod tests {
                     owner: task.id(),
                     field: completed.id(),
                 },
-                completed_starts[0] + "t.".len(),
+                completed_start + "t.".len(),
                 "completed".len(),
             ),
             (
                 DefinitionReferenceKind::QueryField,
                 CheckedDefinitionReferenceTarget::Field {
                     owner: task.id(),
-                    field: completed.id(),
+                    field: assignee.id(),
                 },
-                completed_starts[1] + "t.".len(),
-                "completed".len(),
+                assignee_starts[1] + "t.".len(),
+                "assignee".len(),
             ),
             (
                 DefinitionReferenceKind::QueryField,
                 CheckedDefinitionReferenceTarget::Field {
-                    owner: task.id(),
-                    field: completed.id(),
+                    owner: person.id(),
+                    field: active.id(),
                 },
-                completed_starts[2] + "t.".len(),
-                "completed".len(),
+                assignee_starts[1] + "t.assignee.".len(),
+                "active".len(),
             ),
         ];
 
@@ -4164,10 +4178,10 @@ mod tests {
     #[test]
     fn distinct_semantic_and_return_errors_precede_function_shape_diagnostics() {
         let semantic_source = "CREATE SCHEMA tasks; \
-            CREATE TYPE tasks.task AS OBJECT (completed BOOL NOT NULL); \
+            CREATE TYPE tasks.task AS OBJECT (completed BOOL NOT NULL, title TEXT); \
             CREATE SERVER FUNCTION tasks.values(p_flag BOOL) RETURNS ROWS (completed BOOL) \
             SECURITY DEFINER TRANSACTION ATOMIC VOLATILITY IMMUTABLE \
-            AS SELECT DISTINCT t.unknown FROM tasks.task t;";
+            AS SELECT DISTINCT t.completed FROM tasks.task t WHERE t.title;";
         let report = check(
             &bundle([("distinct_semantic.orna", semantic_source)]),
             &empty_catalogue(),
@@ -4175,17 +4189,17 @@ mod tests {
         assert_no_checked_bundle(&report);
         assert_eq!(report.diagnostics().len(), 1);
         let diagnostic = &report.diagnostics()[0];
-        assert_eq!(diagnostic.code(), DiagnosticCode::UnknownQualifiedName);
-        assert_eq!(diagnostic.message(), "unknown field unknown on tasks.task");
+        assert_eq!(diagnostic.code(), DiagnosticCode::TypeMismatch);
+        assert_eq!(diagnostic.message(), "WHERE requires a BOOLEAN expression");
         assert_eq!(
             diagnostic.location().logical_path(),
             "distinct_semantic.orna"
         );
-        let unknown_start = semantic_source.rfind("unknown").unwrap();
-        assert_eq!(diagnostic.location().span().start(), unknown_start);
+        let predicate_start = semantic_source.rfind("t.title").unwrap();
+        assert_eq!(diagnostic.location().span().start(), predicate_start);
         assert_eq!(
             diagnostic.location().span().end(),
-            unknown_start + "unknown".len()
+            predicate_start + "t.title".len()
         );
 
         let return_source = "CREATE SCHEMA tasks; \
