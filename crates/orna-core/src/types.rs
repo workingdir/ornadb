@@ -102,11 +102,9 @@ impl StandardScalar {
             Self::Float => matches_one_of(source, &["FLOAT"]),
             Self::Decimal => matches_one_of(source, &["DECIMAL"]),
             Self::CharacterLargeObject => {
-                matches_one_of(source, &["CHARACTER LARGE OBJECT", "CLOB", "TEXT"])
+                matches_one_of(source, &["CHARACTER LARGE OBJECT", "TEXT"])
             }
-            Self::BinaryLargeObject => {
-                matches_one_of(source, &["BINARY LARGE OBJECT", "BLOB", "BYTES"])
-            }
+            Self::BinaryLargeObject => matches_one_of(source, &["BINARY LARGE OBJECT", "BYTES"]),
             Self::Uuid => matches_one_of(source, &["UUID"]),
             Self::Date => matches_one_of(source, &["DATE"]),
             Self::Time => matches_one_of(source, &["TIME"]),
@@ -180,13 +178,11 @@ mod tests {
             ("INT", StandardScalar::Integer),
             ("INTEGER", StandardScalar::Integer),
             ("TEXT", StandardScalar::CharacterLargeObject),
-            ("CLOB", StandardScalar::CharacterLargeObject),
             (
                 "CHARACTER LARGE OBJECT",
                 StandardScalar::CharacterLargeObject,
             ),
             ("BYTES", StandardScalar::BinaryLargeObject),
-            ("BLOB", StandardScalar::BinaryLargeObject),
             ("BINARY LARGE OBJECT", StandardScalar::BinaryLargeObject),
         ] {
             assert_eq!(StandardScalar::from_source_spelling(source), Ok(canonical));
@@ -236,8 +232,8 @@ mod tests {
     }
 
     #[test]
-    fn postgresql_only_spellings_do_not_resolve() {
-        for spelling in ["BYTEA", "SERIAL", "JSONB", "TIMESTAMPTZ"] {
+    fn unsupported_source_spellings_do_not_resolve() {
+        for spelling in ["BYTEA", "BLOB", "CLOB", "SERIAL", "JSONB", "TIMESTAMPTZ"] {
             assert!(StandardScalar::from_source_spelling(spelling).is_err());
         }
     }
