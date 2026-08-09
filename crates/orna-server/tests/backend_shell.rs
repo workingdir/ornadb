@@ -62,7 +62,6 @@ struct PtyOutput {
     status: ExitStatus,
     stdout: Vec<u8>,
     stderr: Vec<u8>,
-    terminal: Vec<u8>,
 }
 
 fn run(arguments: impl IntoIterator<Item = OsString>) -> Output {
@@ -84,9 +83,15 @@ fn run_in_pty(
     current_directory: &Path,
     non_terminal: Option<NonTerminalStream>,
 ) -> io::Result<PtyOutput> {
-    let pty = openpty(None, None).map_err(io::Error::other)?;
-    let mut master = File::from(pty.master);
-    let slave = File::from(pty.slave);
+    let stdin_pty = openpty(None, None).map_err(io::Error::other)?;
+    let stdout_pty = openpty(None, None).map_err(io::Error::other)?;
+    let stderr_pty = openpty(None, None).map_err(io::Error::other)?;
+    let stdin_master = File::from(stdin_pty.master);
+    let mut stdout_master = File::from(stdout_pty.master);
+    let mut stderr_master = File::from(stderr_pty.master);
+    let stdin_slave = File::from(stdin_pty.slave);
+    let stdout_slave = File::from(stdout_pty.slave);
+    let stderr_slave = File::from(stderr_pty.slave);
 
     let mut command = Command::new(env!("CARGO_BIN_EXE_orna"));
     command
@@ -97,33 +102,40 @@ fn run_in_pty(
 
     command.stdin(match non_terminal {
         Some(NonTerminalStream::Stdin) => Stdio::null(),
-        _ => Stdio::from(slave.try_clone()?),
+        _ => Stdio::from(stdin_slave.try_clone()?),
     });
     command.stdout(match non_terminal {
         Some(NonTerminalStream::Stdout) => Stdio::piped(),
-        _ => Stdio::from(slave.try_clone()?),
+        _ => Stdio::from(stdout_slave.try_clone()?),
     });
     command.stderr(match non_terminal {
         Some(NonTerminalStream::Stderr) => Stdio::piped(),
-        _ => Stdio::from(slave.try_clone()?),
+        _ => Stdio::from(stderr_slave.try_clone()?),
     });
 
     let mut child = command.spawn()?;
     drop(command);
-    drop(slave);
+    drop(stdin_slave);
+    drop(stdout_slave);
+    drop(stderr_slave);
 
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let status = wait_bounded(&mut child)?;
-    let stdout = read_pipe(stdout)?;
-    let stderr = read_pipe(stderr)?;
-    let terminal = read_pty(&mut master)?;
+    let stdout = match stdout {
+        Some(stdout) => read_pipe(stdout)?,
+        None => normalise_terminal_output(read_pty(&mut stdout_master)?),
+    };
+    let stderr = match stderr {
+        Some(stderr) => read_pipe(stderr)?,
+        None => normalise_terminal_output(read_pty(&mut stderr_master)?),
+    };
+    drop(stdin_master);
 
     Ok(PtyOutput {
         status,
         stdout,
         stderr,
-        terminal: normalise_terminal_output(terminal),
     })
 }
 
@@ -145,10 +157,7 @@ fn wait_bounded(child: &mut Child) -> io::Result<ExitStatus> {
     }
 }
 
-fn read_pipe(pipe: Option<impl Read>) -> io::Result<Vec<u8>> {
-    let Some(mut pipe) = pipe else {
-        return Ok(Vec::new());
-    };
+fn read_pipe(mut pipe: impl Read) -> io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
     pipe.read_to_end(&mut bytes)?;
     Ok(bytes)
@@ -168,10 +177,18 @@ fn read_pty(master: &mut File) -> io::Result<Vec<u8>> {
 }
 
 fn normalise_terminal_output(bytes: Vec<u8>) -> Vec<u8> {
-    bytes
-        .split(|byte| *byte == b'\r')
-        .flat_map(|part| part.iter().copied())
-        .collect()
+    let mut normalised = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index..].starts_with(b"\r\n") {
+            normalised.push(b'\n');
+            index += 2;
+        } else {
+            normalised.push(bytes[index]);
+            index += 1;
+        }
+    }
+    normalised
 }
 
 fn base_environment(path: &OsStr, url: Option<&str>) -> Vec<(OsString, OsString)> {
@@ -336,13 +353,9 @@ fn each_standard_stream_must_be_a_terminal_before_configuration_or_launch() {
 
         assert_eq!(output.status.code(), Some(1));
         assert!(output.stdout.is_empty());
-        let diagnostic = if matches!(stream, NonTerminalStream::Stderr) {
-            &output.stderr
-        } else {
-            &output.terminal
-        };
-        assert_eq!(diagnostic, TERMINAL_REQUIRED);
-        assert!(!record.exists());
+        assert_eq!(output.stderr, TERMINAL_REQUIRED);
+        assert!(!suffixed_path(&record, ".args").exists());
+        assert!(!suffixed_path(&record, ".env").exists());
     }
 }
 
@@ -367,11 +380,10 @@ fn configuration_failures_are_exact_and_redacted_in_a_terminal() {
 
         assert_eq!(output.status.code(), Some(1));
         assert!(output.stdout.is_empty());
-        assert!(output.stderr.is_empty());
-        assert_eq!(output.terminal, expected);
+        assert_eq!(output.stderr, expected);
         assert!(
             !output
-                .terminal
+                .stderr
                 .windows(12)
                 .any(|part| part == b"super-secret")
         );
@@ -427,7 +439,6 @@ fn child_receives_only_the_selected_connection_inputs_and_exact_argument() {
     assert_eq!(output.status.code(), Some(0));
     assert!(output.stdout.is_empty());
     assert!(output.stderr.is_empty());
-    assert!(output.terminal.is_empty());
     assert!(!directory.path().join("PWNED").exists());
 
     let arguments = read_nul_values(&suffixed_path(&record, ".args")).expect("arguments record");
@@ -543,7 +554,8 @@ fn path_search_is_absolute_ordered_and_never_falls_back_after_exec_failure() {
     ]);
     let output = run_in_pty(environment, directory.path(), None).expect("orna run");
     assert_eq!(output.status.code(), Some(1));
-    assert_eq!(output.terminal, PSQL_UNAVAILABLE);
+    assert!(output.stdout.is_empty());
+    assert_eq!(output.stderr, PSQL_UNAVAILABLE);
     assert!(!suffixed_path(&fallback_record, ".args").exists());
     assert!(!later_record.exists());
 }
@@ -567,7 +579,8 @@ fn missing_empty_relative_and_unusable_paths_fail_without_platform_fallback() {
         };
         let output = run_in_pty(environment, directory.path(), None).expect("orna run");
         assert_eq!(output.status.code(), Some(1));
-        assert_eq!(output.terminal, PSQL_UNAVAILABLE);
+        assert!(output.stdout.is_empty());
+        assert_eq!(output.stderr, PSQL_UNAVAILABLE);
     }
 }
 
@@ -579,7 +592,6 @@ fn replacement_preserves_exit_codes_and_terminating_signals() {
         assert_eq!(output.status.code(), Some(expected));
         assert!(output.stdout.is_empty());
         assert!(output.stderr.is_empty());
-        assert!(output.terminal.is_empty());
     }
 
     for (name, signal) in [("HUP", 1), ("INT", 2), ("QUIT", 3), ("TERM", 15)] {
@@ -590,6 +602,5 @@ fn replacement_preserves_exit_codes_and_terminating_signals() {
         assert_eq!(output.status.signal(), Some(signal));
         assert!(output.stdout.is_empty());
         assert!(output.stderr.is_empty());
-        assert!(output.terminal.is_empty());
     }
 }
