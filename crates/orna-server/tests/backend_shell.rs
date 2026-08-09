@@ -1,18 +1,28 @@
 #![cfg(unix)]
 
 use nix::pty::openpty;
+use orna_kernel_postgres::PostgresKernel;
 use std::{
     collections::BTreeMap,
     ffi::{OsStr, OsString},
     fs::{self, File},
     io::{self, Read},
+    net::{TcpListener, TcpStream},
     os::unix::{ffi::OsStringExt, fs::PermissionsExt, process::ExitStatusExt},
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Output, Stdio},
+    str,
     sync::atomic::{AtomicU64, Ordering},
     thread,
     time::{Duration, Instant},
 };
+use tokio_postgres::{Client, config::Host};
+use url::Url;
+
+#[path = "../../orna-kernel-postgres/tests/support/mod.rs"]
+mod postgres_test_support;
+
+use postgres_test_support::{TestDatabase, TestResult, failure, with_test_database};
 
 const USAGE: &[u8] = b"Usage: orna server backend-shell\n";
 const TERMINAL_REQUIRED: &[u8] = b"orna: backend-shell must be run in an interactive terminal\n";
@@ -49,6 +59,15 @@ impl Drop for TestDirectory {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.path);
     }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct DurableSnapshot {
+    relations: Vec<String>,
+    columns: Vec<String>,
+    indexes: Vec<String>,
+    constraints: Vec<String>,
+    rows: Vec<(String, Vec<String>)>,
 }
 
 #[derive(Clone, Copy)]
@@ -276,6 +295,135 @@ fn require_absent(environment: &BTreeMap<Vec<u8>, Vec<u8>>, name: &[u8]) {
     );
 }
 
+async fn durable_snapshot(database: &TestDatabase) -> TestResult<DurableSnapshot> {
+    let session = database.open().await?;
+    let operation = async {
+        let relations = query_strings(
+            session.client(),
+            "SELECT format('%s.%s:%s', n.nspname, c.relname, c.relkind::text)
+             FROM pg_catalog.pg_class AS c
+             JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+             WHERE n.nspname IN ('_orna_kernel', '_orna_data')
+             ORDER BY n.nspname, c.relname, c.relkind",
+        )
+        .await?;
+        let columns = query_strings(
+            session.client(),
+            "SELECT format('%s.%s:%s:%s:%s:%s', n.nspname, c.relname, a.attnum,
+                           a.attname, pg_catalog.format_type(a.atttypid, a.atttypmod),
+                           a.attnotnull)
+             FROM pg_catalog.pg_attribute AS a
+             JOIN pg_catalog.pg_class AS c ON c.oid = a.attrelid
+             JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+             WHERE n.nspname IN ('_orna_kernel', '_orna_data')
+               AND a.attnum > 0 AND NOT a.attisdropped
+             ORDER BY n.nspname, c.relname, a.attnum",
+        )
+        .await?;
+        let indexes = query_strings(
+            session.client(),
+            "SELECT format('%s.%s:%s', schemaname, indexname, indexdef)
+             FROM pg_catalog.pg_indexes
+             WHERE schemaname IN ('_orna_kernel', '_orna_data')
+             ORDER BY schemaname, indexname",
+        )
+        .await?;
+        let constraints = query_strings(
+            session.client(),
+            "SELECT format('%s.%s:%s:%s', n.nspname, c.relname, constraint_row.conname,
+                           pg_catalog.pg_get_constraintdef(constraint_row.oid))
+             FROM pg_catalog.pg_constraint AS constraint_row
+             JOIN pg_catalog.pg_class AS c ON c.oid = constraint_row.conrelid
+             JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+             WHERE n.nspname IN ('_orna_kernel', '_orna_data')
+             ORDER BY n.nspname, c.relname, constraint_row.conname",
+        )
+        .await?;
+        let table_rows = session
+            .client()
+            .query(
+                "SELECT schemaname, tablename
+                 FROM pg_catalog.pg_tables
+                 WHERE schemaname IN ('_orna_kernel', '_orna_data')
+                 ORDER BY schemaname, tablename",
+                &[],
+            )
+            .await?;
+        let mut rows = Vec::with_capacity(table_rows.len());
+        for table in table_rows {
+            let schema = table.get::<_, String>(0);
+            let table = table.get::<_, String>(1);
+            if !safe_identifier(&schema) || !safe_identifier(&table) {
+                return Err(failure(
+                    "durable PostgreSQL relation has an unsafe test identifier",
+                ));
+            }
+            let values = query_strings(
+                session.client(),
+                &format!(
+                    "SELECT to_jsonb(snapshot_row)::text
+                     FROM \"{schema}\".\"{table}\" AS snapshot_row
+                     ORDER BY to_jsonb(snapshot_row)::text"
+                ),
+            )
+            .await?;
+            rows.push((format!("{schema}.{table}"), values));
+        }
+
+        Ok(DurableSnapshot {
+            relations,
+            columns,
+            indexes,
+            constraints,
+            rows,
+        })
+    }
+    .await;
+    let shutdown = session.shutdown().await;
+    finish_live_operation("durable snapshot", operation, shutdown)
+}
+
+async fn query_strings(client: &Client, statement: &str) -> TestResult<Vec<String>> {
+    Ok(client
+        .query(statement, &[])
+        .await?
+        .into_iter()
+        .map(|row| row.get(0))
+        .collect())
+}
+
+fn safe_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte == b'_' || byte.is_ascii_lowercase() || byte.is_ascii_digit())
+}
+
+fn finish_live_operation<T>(
+    operation_name: &str,
+    operation: TestResult<T>,
+    shutdown: TestResult<()>,
+) -> TestResult<T> {
+    match (operation, shutdown) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), Ok(())) => Err(failure(format!("{operation_name} failed: {error}"))),
+        (Ok(_), Err(error)) => Err(failure(format!(
+            "{operation_name} connection shutdown failed: {error}"
+        ))),
+        (Err(operation), Err(shutdown)) => Err(failure(format!(
+            "{operation_name} failed: {operation}; connection shutdown failed: {shutdown}"
+        ))),
+    }
+}
+
+fn require_live(condition: bool, message: &'static str) -> TestResult<()> {
+    if condition {
+        Ok(())
+    } else {
+        Err(failure(message))
+    }
+}
+
 fn record_environment(
     directory: &TestDirectory,
     label: &str,
@@ -295,6 +443,116 @@ fn record_environment(
     ]);
     let output = run_in_pty(environment, directory.path(), None)?;
     Ok((output, record))
+}
+
+fn server_url(database: &TestDatabase) -> TestResult<String> {
+    let config = database.config()?;
+    let [Host::Tcp(host)] = config.get_hosts() else {
+        return Err(failure(
+            "live backend-shell test requires one TCP PostgreSQL host",
+        ));
+    };
+    let [port] = config.get_ports() else {
+        return Err(failure(
+            "live backend-shell test requires one explicit PostgreSQL port",
+        ));
+    };
+    let user = config
+        .get_user()
+        .ok_or_else(|| failure("live backend-shell test requires an explicit PostgreSQL user"))?;
+    let password = config.get_password().map(str::from_utf8).transpose()?;
+
+    let mut url = Url::parse("postgresql://placeholder@localhost:1/database")?;
+    url.set_host(Some(host))
+        .map_err(|_| failure("live PostgreSQL host cannot be represented as a URL"))?;
+    url.set_port(Some(*port))
+        .map_err(|_| failure("live PostgreSQL port cannot be represented as a URL"))?;
+    url.set_username(user)
+        .map_err(|_| failure("live PostgreSQL user cannot be represented as a URL"))?;
+    url.set_password(password)
+        .map_err(|_| failure("live PostgreSQL password cannot be represented as a URL"))?;
+    let database_name = config
+        .get_dbname()
+        .ok_or_else(|| failure("live backend-shell test requires an explicit database"))?;
+    url.set_path(&format!("/{database_name}"));
+    Ok(url.into())
+}
+
+async fn prove_attach_only_launch(database: &TestDatabase) -> TestResult<()> {
+    let directory = TestDirectory::new("live-storage")?;
+    let server_url = server_url(database)?;
+
+    let fresh_before = durable_snapshot(database).await?;
+    let (fresh_launch, fresh_record) =
+        record_environment(&directory, "fresh", &server_url, "exit:0")?;
+    require_live(
+        fresh_launch.status.code() == Some(0)
+            && fresh_launch.stdout.is_empty()
+            && fresh_launch.stderr.is_empty(),
+        "backend-shell did not replace itself cleanly against fresh storage",
+    )?;
+    require_live(
+        read_nul_values(&suffixed_path(&fresh_record, ".args"))? == vec![b"--no-psqlrc".to_vec()],
+        "fresh-storage fake psql received unexpected arguments",
+    )?;
+    require_live(
+        durable_snapshot(database).await? == fresh_before,
+        "backend-shell launch changed fresh PostgreSQL storage",
+    )?;
+
+    database
+        .connection_string()
+        .parse::<PostgresKernel>()?
+        .bootstrap()
+        .await?;
+    let existing_before = durable_snapshot(database).await?;
+    let serving_session = database.open().await?;
+    let operation = async {
+        let (successful_launch, successful_record) =
+            record_environment(&directory, "existing", &server_url, "exit:0")?;
+        require_live(
+            successful_launch.status.code() == Some(0)
+                && successful_launch.stdout.is_empty()
+                && successful_launch.stderr.is_empty(),
+            "backend-shell did not replace itself cleanly against existing storage",
+        )?;
+        require_live(
+            read_nul_values(&suffixed_path(&successful_record, ".args"))?
+                == vec![b"--no-psqlrc".to_vec()],
+            "existing-storage fake psql received unexpected arguments",
+        )?;
+        require_live(
+            durable_snapshot(database).await? == existing_before,
+            "successful backend-shell launch changed durable Orna storage",
+        )?;
+
+        let missing_path = directory.path().join("missing-psql");
+        fs::create_dir(&missing_path)?;
+        let failed_launch = run_in_pty(
+            base_environment(missing_path.as_os_str(), Some(&server_url)),
+            directory.path(),
+            None,
+        )?;
+        require_live(
+            failed_launch.status.code() == Some(1)
+                && failed_launch.stdout.is_empty()
+                && failed_launch.stderr == PSQL_UNAVAILABLE,
+            "missing psql did not return the exact pre-launch failure",
+        )?;
+        require_live(
+            durable_snapshot(database).await? == existing_before,
+            "failed backend-shell launch changed durable Orna storage",
+        )
+    }
+    .await;
+    let shutdown = serving_session.shutdown().await;
+    finish_live_operation("attach-only launch proof", operation, shutdown)
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn launch_does_not_change_fresh_or_existing_durable_storage() -> TestResult<()> {
+    with_test_database(|database| async move { prove_attach_only_launch(&database).await }).await
 }
 
 #[test]
@@ -582,6 +840,33 @@ fn missing_empty_relative_and_unusable_paths_fail_without_platform_fallback() {
         assert!(output.stdout.is_empty());
         assert_eq!(output.stderr, PSQL_UNAVAILABLE);
     }
+}
+
+#[test]
+fn unavailable_backend_is_left_to_psql_after_process_replacement() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("reserve unused TCP port");
+    let address = listener.local_addr().expect("reserved TCP address");
+    drop(listener);
+    assert!(
+        TcpStream::connect_timeout(&address, Duration::from_millis(100)).is_err(),
+        "reserved TCP endpoint must be unavailable before launch"
+    );
+
+    let directory = TestDirectory::new("unavailable-backend").expect("temporary directory");
+    let url = format!(
+        "postgresql://operator@127.0.0.1:{}/catalogue",
+        address.port()
+    );
+    let (output, record) =
+        record_environment(&directory, "unavailable", &url, "exit:37").expect("orna run");
+
+    assert_eq!(output.status.code(), Some(37));
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        read_nul_values(&suffixed_path(&record, ".args")).expect("arguments record"),
+        vec![b"--no-psqlrc".to_vec()]
+    );
 }
 
 #[test]
