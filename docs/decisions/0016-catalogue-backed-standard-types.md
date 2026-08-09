@@ -132,12 +132,12 @@ creates a qualified binding. `EXPORT TYPE ... TO PRELUDE` creates an
 unqualified public binding. Preparation flattens both export forms to the
 primary definition's `TypeId`.
 
-`KERNEL CONTRACT`, mutation of `std`, and prelude exports are privileged
+`KERNEL CONTRACT`, mutation of `std`, and both export forms are privileged
 standard-library operations. Ordinary application source cannot declare a
-kernel contract, create or replace a definition in `std`, export a prelude
-name, or change a reserved standard `TypeId`. The compiler reports a
-human-readable `ORNA0303` diagnostic at the reserved declaration or modifier
-before preparation or storage changes.
+kernel contract, create or replace a definition in `std`, export a qualified
+or prelude binding, or change a reserved standard `TypeId`. The compiler
+reports a human-readable `ORNA0303` diagnostic at the reserved declaration or
+modifier before preparation or storage changes.
 
 The standard source uses no PostgreSQL type name. A contract identifier is an
 Orna kernel ABI name, not a backend name or a dynamically loaded host symbol.
@@ -158,11 +158,14 @@ exact public text:
 | Declare or replace any name whose first semantic part is `std` | `the std namespace is owned by the standard library` |
 | Use `KERNEL CONTRACT` outside verified standard source | `KERNEL CONTRACT is available only to the standard library` |
 | Export a type to the prelude outside verified standard source | `only the standard library can export a type to the prelude` |
+| Export a type as a qualified binding outside verified standard source | `qualified type exports are available only to the standard library` |
 
 Normal syntax errors still take precedence over these semantic diagnostics.
 After syntax succeeds, the compiler reports a reserved `std` owner first, a
-kernel contract second, and a prelude export third. It does not emit later
-protection diagnostics for the same declaration after the first one.
+kernel contract second, a qualified type export third, and a prelude export
+fourth. The qualified-export diagnostic covers the complete qualified target
+name after `AS`. The compiler does not emit later protection diagnostics for
+the same declaration after the first one.
 Any diagnostic rejects the complete candidate and no standard or application
 catalogue state changes.
 
@@ -698,7 +701,7 @@ Tests must prove:
 * object and value primary names and bindings share one collision-checked type
   namespace;
 * ordinary source cannot own `std`, declare a kernel contract, export a
-  prelude name, or replace a reserved standard identity;
+  qualified or prelude binding, or replace a reserved standard identity;
 * standard installation rejects a pre-existing application `std` owner, a
   reserved collision in the same identity class including the standard
   `CatalogueRevisionId`, or a crossed catalogue role without changing the
@@ -744,9 +747,9 @@ standard-orchestration rows remain within their two-file caps.
 | `refactor(postgres): fail closed on future definition evidence` | `crates/orna-kernel-postgres/src/apply.rs`, `crates/orna-kernel-postgres/tests/bootstrap.rs`, `crates/orna-kernel-postgres/tests/recovery.rs` | PostgreSQL production and test adapters explicitly reject unknown definition identities or reference targets; the currently exhaustive enums and all version-1 behaviour remain unchanged. |
 | `feat(core): version standard and catalogue hashes` | `crates/orna-core/src/canonical_hash.rs`, `crates/orna-core/src/revision.rs`, `crates/orna-core/src/lib.rs` | Definition identities and reference targets become non-exhaustive and gain the append-only value-type variants. The derived `StandardLibraryRevisionId`, exact version-1 preservation tests, and version-2 models and goldens compile, but no active caller emits version 2. |
 | `feat(std): define the standard manifest` | `crates/orna-standard/Cargo.toml`, `crates/orna-standard/src/lib.rs`, `Cargo.lock` | The source-independent manifest exposes the exact reserved IDs, 13 primary names and contracts, and 30 direct binding facts: 13 qualified plus 17 prelude. It contains no source bytes, origins, hashes, standard digest, `StandardLibrarySnapshot`, or `VerifiedStandardLibrarySnapshot`. The crate manifest predeclares `orna-core`, `orna-syntax`, and `orna-compiler` so the later source and orchestration rows stay within their file caps; no database state changes. |
-| `feat(syntax): parse primitive value types` | `crates/orna-syntax/src/lib.rs`, `crates/orna-syntax/src/parser.rs` | Lossless privileged declarations parse and recover; existing application semantics still fail closed. |
+| `feat(syntax): parse primitive value types` | `crates/orna-syntax/src/lib.rs`, `crates/orna-syntax/src/parser.rs`, `crates/orna-compiler/src/resolver.rs` | The parser losslessly accepts the privileged primitive and export forms. Before identity allocation, ordinary application checking enforces the complete protected-source table across existing and new declaration forms, including every primitive value declaration and type export, with the exact ordered `ORNA0303` diagnostic text and spans defined above. It cannot silently ignore one. No trusted standard-checking path exists yet. |
 | `feat(std): retain the standard source` | `stdlib/std/types.orna`, `crates/orna-standard/src/lib.rs` | After parsed source matches every source-independent manifest fact, the crate retains the exact source, derives all 45 origins (`2` schemas + `13` types + `30` bindings), locks exact source-unit, bundle, and revision hash goldens plus the hard-coded accepted standard digest, and exposes `orna_standard::verify_standard_library_snapshot`, which checks the reserved catalogue identity and compares the retained digest with that hard-coded accepted golden before the core canonical verifier. |
-| `feat(compiler): check standard type source` | `crates/orna-compiler/src/resolver.rs`, `crates/orna-compiler/src/resolver/model.rs`, `crates/orna-compiler/src/lib.rs` | Trusted standard checking and exact application protection diagnostics work; ordinary scalar resolution still uses its compatibility adapter. |
+| `feat(compiler): check standard type source` | `crates/orna-compiler/src/resolver.rs`, `crates/orna-compiler/src/resolver/model.rs`, `crates/orna-compiler/src/lib.rs` | A dedicated trusted standard-checking path checks the retained standard source. Ordinary application checking retains the exact `ORNA0303` protection introduced with the syntax forms, and ordinary scalar resolution still uses its compatibility adapter. |
 | `feat(compiler): resolve types through std` | `crates/orna-compiler/src/resolver.rs`, `crates/orna-compiler/src/resolver/model.rs` | Public and qualified scalar names resolve through an explicitly supplied verified standard snapshot to `TypeId`; compilation without that snapshot returns `StandardLibraryError::Unavailable`. No database can install the snapshot yet. |
 | `refactor(types): remove scalar naming authority` | `crates/orna-core/src/types.rs`, `crates/orna-compiler/src/resolver.rs` | Public `StandardScalar::from_source_spelling`, `canonical_name`, `type_id`, and `ScalarResolutionError` are removed. Diagnostics render names from verified catalogue definitions or retained source, while exact representation matching remains internal. |
 | `feat(compiler): reference standard function types` | `crates/orna-compiler/src/resolver.rs`, `crates/orna-compiler/src/resolver/model.rs`, `crates/orna-compiler/src/prepare.rs` | Standard types in signatures emit exact `ValueType`/`NamedType` evidence and affected functions receive semantic-hash v2 revisions. A checked compatibility projection is derived only after binding resolution. |
