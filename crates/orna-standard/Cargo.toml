@@ -1,0 +1,11 @@
+[package]
+name = "orna-standard"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+orna-compiler = { path = "../orna-compiler" }
+orna-core = { path = "../orna-core" }
+orna-syntax = { path = "../orna-syntax" }
