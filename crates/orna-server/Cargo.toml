@@ -5,6 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[[bin]]
+name = "orna"
+path = "src/main.rs"
+
 [dependencies]
 nix = { version = "0.31.3", features = ["fs"] }
 url = "2.5.8"
