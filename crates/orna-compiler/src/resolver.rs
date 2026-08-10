@@ -27,7 +27,7 @@ pub use model::{
 };
 pub(crate) use model::{
     CheckedClientFunctionBody, CheckedFieldRename, CheckedServerFunctionBody, QueryCatalogue,
-    QueryField,
+    QueryField, QueryObjectType, ResolutionCatalogue,
 };
 
 use std::collections::{HashMap, HashSet};
@@ -61,19 +61,17 @@ use crate::mutation::{
     MutationParameter, MutationReference, check_delete_in, check_insert_in, check_update_in,
 };
 use crate::relational::{
-    ExpressionIr, IdentitySelectedQueryReference, QueryParameter, QueryReference,
-    QueryReferenceKind, QueryReferenceTarget, check_distinct_query_in,
-    check_identity_selected_query_in, check_query_in,
+    ExpressionIr, ExpressionKind, IdentitySelectedQueryReference, IntrinsicBooleanType, OrderingIr,
+    QueryParameter, QueryReference, QueryReferenceKind, QueryReferenceTarget,
+    check_distinct_query_with_intrinsic_boolean_in,
+    check_identity_selected_query_with_intrinsic_boolean_in, check_query_with_intrinsic_boolean_in,
 };
 use crate::{
     CompilerDiagnostic, DiagnosticCode, ParseReport, ParsedSourceUnit, SourceLocation,
     normalise_name_part as semantic_part, normalise_qualified_name as semantic_name, parse_bundle,
 };
 
-use self::{
-    identity::{CheckAssignments, IdentityAssignments},
-    model::{QueryObjectType, ResolutionCatalogue},
-};
+use self::identity::{CheckAssignments, IdentityAssignments};
 
 /// Checks one source bundle against an immutable catalogue snapshot.
 ///
@@ -702,6 +700,7 @@ struct ResolvedClientFunctionInput<'a> {
     name: QualifiedSemanticName,
     parameters: Vec<ResolvedServerFunctionParameter>,
     return_type: SemanticType<CheckedTypeId>,
+    standard_value_type: Option<orna_core::TypeId>,
     body: &'a orna_syntax::ClientFunctionBody,
     location: SourceLocation,
     declaration_span: SourceSpan,
@@ -1040,7 +1039,7 @@ fn check_application_parsed(
         return application_failed(parse_report, diagnostics);
     }
 
-    let query_catalogue = checked_query_catalogue(&checked_types);
+    let query_catalogue = checked_query_catalogue(&checked_types, &uses);
 
     let function_ids = if diagnostics.is_empty() {
         resolve_function_namespace(
@@ -1072,7 +1071,13 @@ fn check_application_parsed(
         Vec::new()
     };
     let checked_functions = if diagnostics.is_empty() {
-        check_server_functions(&function_inputs, &query_catalogue, &mut diagnostics)
+        check_server_functions(
+            &function_inputs,
+            &query_catalogue,
+            &mut diagnostics,
+            standard,
+            &mut uses,
+        )
     } else {
         Vec::new()
     };
@@ -1093,7 +1098,7 @@ fn check_application_parsed(
         Vec::new()
     };
     let checked_client_functions = if diagnostics.is_empty() {
-        check_client_functions(&client_inputs, &mut diagnostics)
+        check_client_functions(&client_inputs, &mut diagnostics, standard, &mut uses)
     } else {
         Vec::new()
     };
@@ -1630,6 +1635,25 @@ fn resolve_client_function_inputs<'a>(
             ));
         }
 
+        if let (Some(standard), FunctionReturnType::Single(specification), Some((_, body_source))) = (
+            standard,
+            &declaration.return_type,
+            declaration.body.as_boolean_literal(),
+        ) && is_standard_client_boolean_return(specification)
+            && matches!(
+                intrinsic_boolean_type(Some(standard)),
+                IntrinsicBooleanType::Missing
+            )
+        {
+            diagnostics.push(diagnostic(
+                DiagnosticCode::DomainIncompatible,
+                "the checked standard library does not provide a Boolean value type",
+                header.logical_path,
+                &body_source.span,
+            ));
+            continue;
+        }
+
         let return_type = match (&declaration.return_type, standard) {
             (FunctionReturnType::Single(specification), Some(standard)) => {
                 let diagnostics_before = diagnostics.len();
@@ -1688,6 +1712,7 @@ fn resolve_client_function_inputs<'a>(
             && declaration.parameters.is_empty()
         {
             let semantic_type = return_type.semantic_type;
+            let standard_value_type = return_type.standard_value_type;
             if let FunctionReturnType::Single(specification) = &declaration.return_type {
                 record_standard_type_use(
                     uses,
@@ -1705,6 +1730,7 @@ fn resolve_client_function_inputs<'a>(
                 name: semantic_name(&declaration.name),
                 parameters: Vec::new(),
                 return_type: semantic_type,
+                standard_value_type,
                 body: &declaration.body,
                 location: location(header.logical_path, &declaration.span),
                 declaration_span: declaration.span.clone(),
@@ -1718,6 +1744,8 @@ fn resolve_client_function_inputs<'a>(
 fn check_client_functions(
     inputs: &[ResolvedClientFunctionInput<'_>],
     diagnostics: &mut Vec<CompilerDiagnostic>,
+    standard: Option<&CheckedStandardLibrary>,
+    uses: &mut Vec<CheckedApplicationTypeUse>,
 ) -> Vec<CheckedClientFunction> {
     inputs
         .iter()
@@ -1731,6 +1759,26 @@ fn check_client_functions(
                 ));
                 return None;
             };
+            record_standard_value_type_use(
+                uses,
+                standard,
+                CheckedTypeUseKind::Expression {
+                    owner: input.id,
+                    ordinal: 0,
+                },
+                input.standard_value_type,
+                location(input.logical_path, &body_source.span),
+            );
+            record_standard_value_type_use(
+                uses,
+                standard,
+                CheckedTypeUseKind::Result {
+                    owner: input.id,
+                    ordinal: 0,
+                },
+                input.standard_value_type,
+                location(input.logical_path, &body_source.span),
+            );
             Some(CheckedClientFunction {
                 id: input.id,
                 name: input.name.clone(),
@@ -1770,6 +1818,22 @@ fn is_closed_client_boolean_return(specification: &TypeSpecification) -> bool {
     }
     let spelling = &name.parts[0].text;
     spelling.eq_ignore_ascii_case("BOOLEAN") || spelling.eq_ignore_ascii_case("BOOL")
+}
+
+fn is_standard_client_boolean_return(specification: &TypeSpecification) -> bool {
+    if is_closed_client_boolean_return(specification) {
+        return true;
+    }
+    let TypeSpecification::Named(name) = specification else {
+        return false;
+    };
+    match semantic_name(name).parts() {
+        [schema, value_type] => schema == "std" && value_type == "boolean",
+        [schema, types, value_type] => {
+            schema == "std" && types == "types" && value_type == "boolean"
+        }
+        _ => false,
+    }
 }
 
 fn resolve_server_function_inputs<'a>(
@@ -1999,9 +2063,12 @@ fn check_server_functions(
     inputs: &[ResolvedServerFunctionInput<'_>],
     catalogue: &ResolutionCatalogue<CheckedTypeId, CheckedFieldId>,
     diagnostics: &mut Vec<CompilerDiagnostic>,
+    standard: Option<&CheckedStandardLibrary>,
+    uses: &mut Vec<CheckedApplicationTypeUse>,
 ) -> Vec<CheckedServerFunction> {
     let diagnostics_before = diagnostics.len();
     let mut functions = Vec::with_capacity(inputs.len());
+    let intrinsic_boolean = intrinsic_boolean_type(standard);
 
     for input in inputs {
         let body_name = if input.body.as_sql_query().is_some() {
@@ -2035,10 +2102,11 @@ fn check_server_functions(
         let (body, body_references) = if let Some(query_body) = input.body.as_sql_query() {
             match &query_body.query.quantifier {
                 SelectQuantifier::Distinct { .. } => {
-                    let query_check = match check_distinct_query_in(
+                    let query_check = match check_distinct_query_with_intrinsic_boolean_in(
                         &query_body.query,
                         catalogue,
                         input.location.logical_path(),
+                        intrinsic_boolean,
                     ) {
                         Ok(query_check) => query_check,
                         Err(query_diagnostics) => {
@@ -2057,6 +2125,19 @@ fn check_server_functions(
                     if !distinct_query_execution_shape_is_valid(input, diagnostics) {
                         continue;
                     }
+                    let _ = StandardTypeUseRecorder {
+                        uses,
+                        standard,
+                        owner: input.id,
+                        logical_path: input.location.logical_path(),
+                    }
+                    .record_query_body(
+                        &query_body.query,
+                        query_check.plan().projections(),
+                        query_check.plan().selection(),
+                        &[],
+                        &[],
+                    );
                     (
                         CheckedServerFunctionBody::DistinctQuery(query_check.plan().clone()),
                         query_check
@@ -2073,10 +2154,11 @@ fn check_server_functions(
                             if matches!(right.as_ref(), orna_syntax::QueryExpression::ParameterRead { .. })
                     );
                     if input.parameters.is_empty() && !has_selector {
-                        let query_check = match check_query_in(
+                        let query_check = match check_query_with_intrinsic_boolean_in(
                             &query_body.query,
                             catalogue,
                             input.location.logical_path(),
+                            intrinsic_boolean,
                         ) {
                             Ok(query_check) => query_check,
                             Err(query_diagnostics) => {
@@ -2092,6 +2174,19 @@ fn check_server_functions(
                         ) {
                             continue;
                         }
+                        let _ = StandardTypeUseRecorder {
+                            uses,
+                            standard,
+                            owner: input.id,
+                            logical_path: input.location.logical_path(),
+                        }
+                        .record_query_body(
+                            &query_body.query,
+                            query_check.plan().projections(),
+                            query_check.plan().selection(),
+                            &query_body.query.ordering,
+                            query_check.plan().ordering(),
+                        );
                         (
                             CheckedServerFunctionBody::Query(query_check.plan().clone()),
                             query_check
@@ -2105,19 +2200,21 @@ fn check_server_functions(
                             continue;
                         }
                         let parameters = identity_selected_query_parameters(input);
-                        let query_check = match check_identity_selected_query_in(
-                            &query_body.query,
-                            catalogue,
-                            input.id,
-                            &parameters,
-                            input.location.logical_path(),
-                        ) {
-                            Ok(query_check) => query_check,
-                            Err(query_diagnostics) => {
-                                diagnostics.extend(query_diagnostics);
-                                continue;
-                            }
-                        };
+                        let query_check =
+                            match check_identity_selected_query_with_intrinsic_boolean_in(
+                                &query_body.query,
+                                catalogue,
+                                input.id,
+                                &parameters,
+                                input.location.logical_path(),
+                                intrinsic_boolean,
+                            ) {
+                                Ok(query_check) => query_check,
+                                Err(query_diagnostics) => {
+                                    diagnostics.extend(query_diagnostics);
+                                    continue;
+                                }
+                            };
                         if !query_return_matches(
                             query_check.plan().projections(),
                             columns,
@@ -2126,6 +2223,25 @@ fn check_server_functions(
                         ) {
                             continue;
                         }
+                        let mut recorder = StandardTypeUseRecorder {
+                            uses,
+                            standard,
+                            owner: input.id,
+                            logical_path: input.location.logical_path(),
+                        };
+                        let expression_ordinal = recorder.record_query_body(
+                            &query_body.query,
+                            query_check.plan().projections(),
+                            None,
+                            &[],
+                            &[],
+                        );
+                        recorder.record_identity_selector(
+                            &query_body.query,
+                            query_check.plan().scan().object_type(),
+                            intrinsic_boolean_id(intrinsic_boolean),
+                            expression_ordinal,
+                        );
                         (
                             CheckedServerFunctionBody::IdentitySelectedQuery(
                                 query_check.plan().clone(),
@@ -2525,7 +2641,19 @@ fn checked_server_function(
 
 fn checked_query_catalogue(
     object_types: &[CheckedObjectType],
+    uses: &[CheckedApplicationTypeUse],
 ) -> ResolutionCatalogue<CheckedTypeId, CheckedFieldId> {
+    let standard_field_types = uses
+        .iter()
+        .filter_map(|type_use| {
+            let CheckedTypeUseKind::Field { owner, field } = type_use.kind() else {
+                return None;
+            };
+            type_use
+                .value()
+                .map(|value| ((owner, field), value.type_id()))
+        })
+        .collect::<HashMap<_, _>>();
     ResolutionCatalogue::new(
         object_types
             .iter()
@@ -2537,10 +2665,15 @@ fn checked_query_catalogue(
                         .fields
                         .iter()
                         .map(|field| {
-                            (
-                                field.name.clone(),
-                                QueryField::new(field.id, field.semantic_type, field.nullable),
-                            )
+                            let query_field =
+                                QueryField::new(field.id, field.semantic_type, field.nullable);
+                            let query_field = standard_field_types
+                                .get(&(object_type.id, field.id))
+                                .copied()
+                                .map_or(query_field, |type_id| {
+                                    query_field.with_standard_value_type(type_id)
+                                });
+                            (field.name.clone(), query_field)
                         })
                         .collect(),
                 )
@@ -2967,6 +3100,28 @@ fn standard_value_by_lookup(
     compatibility_scalar(value_type.representation_contract()).map(|scalar| (direct, scalar))
 }
 
+fn intrinsic_boolean_type(standard: Option<&CheckedStandardLibrary>) -> IntrinsicBooleanType {
+    let Some(standard) = standard else {
+        return IntrinsicBooleanType::Legacy;
+    };
+    standard
+        .value_types()
+        .iter()
+        .find(|value_type| value_type.representation_contract() == "orna.kernel.value.boolean@1")
+        .map_or(IntrinsicBooleanType::Missing, |value_type| {
+            IntrinsicBooleanType::Standard(value_type.id())
+        })
+}
+
+const fn intrinsic_boolean_id(
+    intrinsic_boolean: IntrinsicBooleanType,
+) -> Option<orna_core::TypeId> {
+    match intrinsic_boolean {
+        IntrinsicBooleanType::Standard(type_id) => Some(type_id),
+        IntrinsicBooleanType::Legacy | IntrinsicBooleanType::Missing => None,
+    }
+}
+
 fn record_standard_type_use(
     uses: &mut Vec<CheckedApplicationTypeUse>,
     standard: Option<&CheckedStandardLibrary>,
@@ -2991,6 +3146,188 @@ fn record_standard_type_use(
                 location,
             },
         ));
+    }
+}
+
+fn record_standard_value_type_use(
+    uses: &mut Vec<CheckedApplicationTypeUse>,
+    standard: Option<&CheckedStandardLibrary>,
+    kind: CheckedTypeUseKind,
+    type_id: Option<orna_core::TypeId>,
+    location: SourceLocation,
+) {
+    if standard.is_some()
+        && let Some(type_id) = type_id
+    {
+        uses.push(CheckedApplicationTypeUse::Value(CheckedValueTypeUse {
+            type_id,
+            kind,
+            location,
+        }));
+    }
+}
+
+fn record_standard_object_reference_use(
+    uses: &mut Vec<CheckedApplicationTypeUse>,
+    standard: Option<&CheckedStandardLibrary>,
+    kind: CheckedTypeUseKind,
+    target: CheckedTypeId,
+    location: SourceLocation,
+) {
+    if standard.is_some() {
+        uses.push(CheckedApplicationTypeUse::ObjectReference(
+            CheckedObjectReferenceUse {
+                target,
+                kind,
+                location,
+            },
+        ));
+    }
+}
+
+fn record_standard_expression_use(
+    uses: &mut Vec<CheckedApplicationTypeUse>,
+    standard: Option<&CheckedStandardLibrary>,
+    kind: CheckedTypeUseKind,
+    expression: &ExpressionIr<CheckedTypeId, CheckedFieldId>,
+    location: SourceLocation,
+) {
+    if let Some(type_id) = expression.value_type().standard_value_type() {
+        record_standard_value_type_use(uses, standard, kind, Some(type_id), location);
+    } else if let SemanticType::Reference { target } = expression.value_type().semantic_type() {
+        record_standard_object_reference_use(uses, standard, kind, target, location);
+    }
+}
+
+struct StandardTypeUseRecorder<'a, 'b> {
+    uses: &'a mut Vec<CheckedApplicationTypeUse>,
+    standard: Option<&'b CheckedStandardLibrary>,
+    owner: CheckedFunctionId,
+    logical_path: &'b str,
+}
+
+impl StandardTypeUseRecorder<'_, '_> {
+    fn record_query_expression(
+        &mut self,
+        source: &orna_syntax::QueryExpression,
+        expression: &ExpressionIr<CheckedTypeId, CheckedFieldId>,
+        ordinal: &mut u32,
+    ) {
+        let kind = CheckedTypeUseKind::Expression {
+            owner: self.owner,
+            ordinal: *ordinal,
+        };
+        *ordinal += 1;
+        record_standard_expression_use(
+            self.uses,
+            self.standard,
+            kind,
+            expression,
+            location(self.logical_path, source.span()),
+        );
+
+        if let (
+            orna_syntax::QueryExpression::Equality {
+                left: source_left,
+                right: source_right,
+                ..
+            },
+            ExpressionKind::Equality {
+                left: checked_left,
+                right: checked_right,
+            },
+        ) = (source, expression.kind())
+        {
+            self.record_query_expression(source_left, checked_left, ordinal);
+            self.record_query_expression(source_right, checked_right, ordinal);
+        }
+    }
+
+    fn record_query_body(
+        &mut self,
+        query: &orna_syntax::SelectQuery,
+        projections: &[ExpressionIr<CheckedTypeId, CheckedFieldId>],
+        selection: Option<&ExpressionIr<CheckedTypeId, CheckedFieldId>>,
+        ordering: &[orna_syntax::OrderingExpression],
+        checked_ordering: &[OrderingIr<CheckedTypeId, CheckedFieldId>],
+    ) -> u32 {
+        let mut expression_ordinal = 0;
+        for (result_ordinal, (source, expression)) in
+            query.projections.iter().zip(projections).enumerate()
+        {
+            self.record_query_expression(source, expression, &mut expression_ordinal);
+            record_standard_expression_use(
+                self.uses,
+                self.standard,
+                CheckedTypeUseKind::Result {
+                    owner: self.owner,
+                    ordinal: result_ordinal as u32,
+                },
+                expression,
+                location(self.logical_path, source.span()),
+            );
+        }
+        if let (Some(source), Some(expression)) = (query.predicate.as_ref(), selection) {
+            self.record_query_expression(source, expression, &mut expression_ordinal);
+        }
+        for (source, ordering) in ordering.iter().zip(checked_ordering) {
+            self.record_query_expression(
+                &source.expression,
+                ordering.expression(),
+                &mut expression_ordinal,
+            );
+        }
+        expression_ordinal
+    }
+
+    fn record_identity_selector(
+        &mut self,
+        query: &orna_syntax::SelectQuery,
+        target: CheckedTypeId,
+        boolean_type: Option<orna_core::TypeId>,
+        expression_ordinal: u32,
+    ) {
+        let Some(orna_syntax::QueryExpression::Equality { left, right, .. }) =
+            query.predicate.as_ref()
+        else {
+            return;
+        };
+        record_standard_value_type_use(
+            self.uses,
+            self.standard,
+            CheckedTypeUseKind::Expression {
+                owner: self.owner,
+                ordinal: expression_ordinal,
+            },
+            boolean_type,
+            location(
+                self.logical_path,
+                query
+                    .predicate
+                    .as_ref()
+                    .map_or(&query.span, |predicate| predicate.span()),
+            ),
+        );
+        record_standard_object_reference_use(
+            self.uses,
+            self.standard,
+            CheckedTypeUseKind::Expression {
+                owner: self.owner,
+                ordinal: expression_ordinal + 1,
+            },
+            target,
+            location(self.logical_path, left.span()),
+        );
+        record_standard_object_reference_use(
+            self.uses,
+            self.standard,
+            CheckedTypeUseKind::Expression {
+                owner: self.owner,
+                ordinal: expression_ordinal + 2,
+            },
+            target,
+            location(self.logical_path, right.span()),
+        );
     }
 }
 
@@ -3132,8 +3469,12 @@ fn diagnostic(
 mod tests {
     use orna_core::{
         CatalogueRevisionId, ExpressionId, FieldId, FunctionId, FunctionRevisionId, ParameterId,
-        SchemaId, SourceUnitId, TypeId,
-        canonical_hash::source_unit_content_digest,
+        SchemaId, SourceBundleId, SourceRevisionId, SourceUnitId, StandardLibraryRevisionId,
+        TypeId,
+        canonical_hash::{
+            source_bundle_digest, source_revision_record_digest, source_unit_content_digest,
+            verify_standard_library_snapshot,
+        },
         catalogue::{
             CatalogueSnapshot, FieldDefinition, FunctionDefinition, FunctionDomain, FunctionReturn,
             FunctionReturnColumnDefinition, FunctionSecurity, FunctionTransaction,
@@ -3142,8 +3483,9 @@ mod tests {
             ValueTypeDefinition, ValueTypeMutability, ValueTypePersistence,
         },
         revision::{
-            DefinitionIdentity, DefinitionOrigin, DefinitionReferenceKind, SourceOrigin,
-            StoredSourceUnit,
+            DefinitionIdentity, DefinitionOrigin, DefinitionReferenceKind, Sha256Digest,
+            SourceOrigin, StandardLibraryDigestVersion, StandardLibrarySnapshot,
+            StoredSourceRevision, StoredSourceUnit,
         },
         source::{SourceBundle, SourceUnit},
         types::{ResolvedType, StandardScalar},
@@ -3155,8 +3497,10 @@ mod tests {
     use super::{
         CheckAssignments, CheckedApplicationTypeUse, CheckedDefinitionReferenceTarget,
         CheckedTypeId, CheckedTypeUseKind, CheckedValueTypeUse, ConstantValue, DiagnosticCode,
-        IdentityAssignments, SemanticType, check, location, reconcile_standard_source,
-        sort_standard_type_uses,
+        IdentityAssignments, SemanticType, StandardApplicationCheckContext, check,
+        check_standard_application, check_standard_library_source,
+        checked_standard_library_with_contract_overrides_for_test, location,
+        reconcile_standard_source, sort_standard_type_uses,
     };
     use crate::{ParsedSourceUnit, parse_bundle};
 
@@ -3219,6 +3563,38 @@ mod tests {
                 },
                 location: location("application.orna", &span),
             }),
+            CheckedApplicationTypeUse::Value(CheckedValueTypeUse {
+                type_id,
+                kind: CheckedTypeUseKind::Result {
+                    owner: second_return_owner,
+                    ordinal: 1,
+                },
+                location: location("application.orna", &span),
+            }),
+            CheckedApplicationTypeUse::Value(CheckedValueTypeUse {
+                type_id,
+                kind: CheckedTypeUseKind::Expression {
+                    owner: second_return_owner,
+                    ordinal: 1,
+                },
+                location: location("application.orna", &span),
+            }),
+            CheckedApplicationTypeUse::Value(CheckedValueTypeUse {
+                type_id,
+                kind: CheckedTypeUseKind::Result {
+                    owner: first_return_owner,
+                    ordinal: 1,
+                },
+                location: location("application.orna", &span),
+            }),
+            CheckedApplicationTypeUse::Value(CheckedValueTypeUse {
+                type_id,
+                kind: CheckedTypeUseKind::Expression {
+                    owner: first_return_owner,
+                    ordinal: 1,
+                },
+                location: location("application.orna", &span),
+            }),
         ];
         let report = parse_bundle(&bundle([("application.orna", "")]));
 
@@ -3246,6 +3622,22 @@ mod tests {
                     ordinal: 1,
                 },
                 CheckedTypeUseKind::Return {
+                    owner: second_return_owner,
+                    ordinal: 1,
+                },
+                CheckedTypeUseKind::Expression {
+                    owner: first_return_owner,
+                    ordinal: 1,
+                },
+                CheckedTypeUseKind::Expression {
+                    owner: second_return_owner,
+                    ordinal: 1,
+                },
+                CheckedTypeUseKind::Result {
+                    owner: first_return_owner,
+                    ordinal: 1,
+                },
+                CheckedTypeUseKind::Result {
                     owner: second_return_owner,
                     ordinal: 1,
                 },
@@ -3440,6 +3832,733 @@ mod tests {
             identity,
             SourceOrigin::new(SourceUnitId::from_bytes([4; 16]), byte_start, byte_end).unwrap(),
         )
+    }
+
+    fn verified_standard_library_for_relational_test()
+    -> orna_core::revision::VerifiedStandardLibrarySnapshot {
+        const DIGEST: [u8; 32] = [
+            0x72, 0x4b, 0x41, 0xcf, 0x68, 0x5c, 0x93, 0xa8, 0xc9, 0x8d, 0xf9, 0x3d, 0x96, 0x77,
+            0x98, 0x98, 0x12, 0x34, 0xc0, 0x98, 0xf6, 0xc1, 0x00, 0xfa, 0x57, 0xe9, 0xac, 0x00,
+            0xdd, 0x03, 0xfb, 0x6d,
+        ];
+        verified_standard_library_for_relational_test_with_boolean_id(
+            TypeId::from_bytes([3; 16]),
+            DIGEST,
+        )
+    }
+
+    fn verified_standard_library_for_relational_test_with_boolean_id(
+        boolean_id: TypeId,
+        digest: [u8; 32],
+    ) -> orna_core::revision::VerifiedStandardLibrarySnapshot {
+        let source_unit = StoredSourceUnit::new(
+            SourceUnitId::from_bytes([4; 16]),
+            0,
+            "std/types.orna",
+            STANDARD_SOURCE,
+            source_unit_content_digest(STANDARD_SOURCE).unwrap(),
+        )
+        .unwrap();
+        let bundle_hash = source_bundle_digest(std::slice::from_ref(&source_unit)).unwrap();
+        let source = StoredSourceRevision::new(
+            SourceBundleId::from_bytes([5; 16]),
+            SourceRevisionId::from_bytes([6; 16]),
+            None,
+            vec![source_unit],
+            bundle_hash,
+            source_revision_record_digest(SourceBundleId::from_bytes([5; 16]), None, bundle_hash)
+                .unwrap(),
+        )
+        .unwrap();
+        let boolean = ValueTypeDefinition::primitive(
+            boolean_id,
+            QualifiedSemanticName::new(["std", "types", "boolean"]).unwrap(),
+            ValueTypeMutability::Immutable,
+            ValueTypePersistence::Persistable,
+            "orna.kernel.value.boolean@1",
+        );
+        let qualified = TypeBinding::qualified(
+            QualifiedSemanticName::new(["std", "boolean"]).unwrap(),
+            boolean.id(),
+        )
+        .unwrap();
+        let prelude =
+            TypeBinding::prelude(PreludeTypeName::new(["boolean"]).unwrap(), boolean.id()).unwrap();
+        let catalogue = CatalogueSnapshot::new_with_types(
+            CatalogueRevisionId::from_bytes([8; 16]),
+            vec![
+                SchemaDefinition::new(
+                    SchemaId::from_bytes([1; 16]),
+                    QualifiedSemanticName::new(["std"]).unwrap(),
+                ),
+                SchemaDefinition::new(
+                    SchemaId::from_bytes([2; 16]),
+                    QualifiedSemanticName::new(["std", "types"]).unwrap(),
+                ),
+            ],
+            vec![],
+            vec![boolean],
+            vec![qualified.clone(), prelude.clone()],
+        )
+        .unwrap();
+        let snapshot = StandardLibrarySnapshot::new(
+            StandardLibraryRevisionId::from_bytes([7; 16]),
+            StandardLibraryDigestVersion::Version1,
+            source,
+            "orna.language/1",
+            catalogue,
+            vec![
+                standard_origin(
+                    DefinitionIdentity::Schema(SchemaId::from_bytes([1; 16])),
+                    0,
+                    18,
+                ),
+                standard_origin(
+                    DefinitionIdentity::Schema(SchemaId::from_bytes([2; 16])),
+                    18,
+                    42,
+                ),
+                standard_origin(DefinitionIdentity::ValueType(boolean_id), 42, 159),
+                standard_origin(DefinitionIdentity::TypeBinding(qualified.id()), 159, 204),
+                standard_origin(DefinitionIdentity::TypeBinding(prelude.id()), 204, 250),
+            ],
+            Sha256Digest::from_bytes(digest),
+        )
+        .unwrap();
+
+        verify_standard_library_snapshot(snapshot).unwrap()
+    }
+
+    fn expression_use<'a>(
+        uses: &[&'a CheckedApplicationTypeUse],
+        ordinal: u32,
+    ) -> &'a CheckedApplicationTypeUse {
+        let matches = uses
+            .iter()
+            .copied()
+            .filter(|type_use| {
+                matches!(
+                    type_use.kind(),
+                    CheckedTypeUseKind::Expression {
+                        ordinal: candidate,
+                        ..
+                    } if candidate == ordinal
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(matches.len(), 1, "expected expression ordinal {ordinal}");
+        matches[0]
+    }
+
+    fn result_use<'a>(
+        uses: &[&'a CheckedApplicationTypeUse],
+        ordinal: u32,
+    ) -> &'a CheckedApplicationTypeUse {
+        let matches = uses
+            .iter()
+            .copied()
+            .filter(|type_use| {
+                matches!(
+                    type_use.kind(),
+                    CheckedTypeUseKind::Result {
+                        ordinal: candidate,
+                        ..
+                    } if candidate == ordinal
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(matches.len(), 1, "expected result ordinal {ordinal}");
+        matches[0]
+    }
+
+    fn assert_type_use_span(type_use: &CheckedApplicationTypeUse, start: usize, text: &str) {
+        assert_eq!(type_use.location().span().start(), start);
+        assert_eq!(type_use.location().span().end(), start + text.len());
+    }
+
+    fn checked_use_index(
+        uses: &[CheckedApplicationTypeUse],
+        kind: CheckedTypeUseKind,
+        start: usize,
+        end: usize,
+    ) -> usize {
+        let matches = uses
+            .iter()
+            .enumerate()
+            .filter(|(_, type_use)| {
+                type_use.kind() == kind
+                    && type_use.location().span().start() == start
+                    && type_use.location().span().end() == end
+            })
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        assert_eq!(matches.len(), 1, "expected one exact arena use");
+        matches[0]
+    }
+
+    #[test]
+    fn records_standard_client_boolean_body_uses_with_the_resolved_type_id() {
+        let standard =
+            check_standard_library_source(&verified_standard_library_for_relational_test())
+                .unwrap();
+        let application = empty_catalogue();
+        let context = StandardApplicationCheckContext::try_new(&application, &standard).unwrap();
+        let source =
+            "CREATE SCHEMA app; CREATE CLIENT FUNCTION app.enabled() RETURNS BOOLEAN RETURN TRUE;";
+        let report = check_standard_application(&bundle([("application.orna", source)]), &context);
+
+        assert_eq!(report.diagnostics(), &[]);
+        let checked = report.checked_bundle().unwrap();
+        let clients = checked.client_functions().collect::<Vec<_>>();
+        assert_eq!(clients.len(), 1);
+        assert_eq!(checked.uses().len(), 3);
+
+        let boolean = TypeId::from_bytes([3; 16]);
+        let expected_kinds = [
+            CheckedTypeUseKind::Return {
+                owner: clients[0].id(),
+                ordinal: 0,
+            },
+            CheckedTypeUseKind::Expression {
+                owner: clients[0].id(),
+                ordinal: 0,
+            },
+            CheckedTypeUseKind::Result {
+                owner: clients[0].id(),
+                ordinal: 0,
+            },
+        ];
+        assert_eq!(
+            checked
+                .uses()
+                .iter()
+                .map(CheckedApplicationTypeUse::kind)
+                .collect::<Vec<_>>(),
+            expected_kinds
+        );
+        let literal_start = source.find("TRUE").unwrap();
+        for type_use in &checked.uses()[1..] {
+            assert_eq!(
+                type_use.value().map(CheckedValueTypeUse::type_id),
+                Some(boolean)
+            );
+            assert_eq!(type_use.location().span().start(), literal_start);
+            assert_eq!(
+                type_use.location().span().end(),
+                literal_start + "TRUE".len()
+            );
+        }
+        assert!(
+            checked_use_index(
+                checked.uses(),
+                expected_kinds[1],
+                literal_start,
+                literal_start + "TRUE".len(),
+            ) < checked_use_index(
+                checked.uses(),
+                expected_kinds[2],
+                literal_start,
+                literal_start + "TRUE".len(),
+            )
+        );
+    }
+
+    #[test]
+    fn rejects_a_client_boolean_literal_when_the_checked_standard_lacks_boolean() {
+        let snapshot = verified_standard_library_for_relational_test();
+        let standard = checked_standard_library_with_contract_overrides_for_test(
+            &snapshot,
+            &[(0, "orna.kernel.value.integer@1")],
+        )
+        .unwrap();
+        let application = empty_catalogue();
+        let context = StandardApplicationCheckContext::try_new(&application, &standard).unwrap();
+        let source =
+            "CREATE SCHEMA app; CREATE CLIENT FUNCTION app.enabled() RETURNS BOOLEAN RETURN TRUE;";
+        let report = check_standard_application(&bundle([("application.orna", source)]), &context);
+
+        assert!(report.checked_bundle().is_none());
+        assert_eq!(report.diagnostics().len(), 1);
+        let [diagnostic] = report.diagnostics() else {
+            return;
+        };
+        assert_eq!(diagnostic.code(), DiagnosticCode::DomainIncompatible);
+        assert_eq!(
+            diagnostic.message(),
+            "the checked standard library does not provide a Boolean value type"
+        );
+        let literal_start = source.find("TRUE").unwrap();
+        assert_eq!(diagnostic.location().span().start(), literal_start);
+        assert_eq!(
+            diagnostic.location().span().end(),
+            literal_start + "TRUE".len()
+        );
+    }
+
+    #[test]
+    fn rejects_qualified_client_boolean_literals_when_the_checked_standard_lacks_boolean() {
+        let snapshot = verified_standard_library_for_relational_test();
+        let standard = checked_standard_library_with_contract_overrides_for_test(
+            &snapshot,
+            &[(0, "orna.kernel.value.integer@1")],
+        )
+        .unwrap();
+        let application = empty_catalogue();
+        let context = StandardApplicationCheckContext::try_new(&application, &standard).unwrap();
+        let cases = [
+            (
+                "std.BOOLEAN",
+                "CREATE SCHEMA app; CREATE CLIENT FUNCTION app.enabled() RETURNS std.BOOLEAN RETURN TRUE;",
+            ),
+            (
+                "std.types.BOOLEAN",
+                "CREATE SCHEMA app; CREATE CLIENT FUNCTION app.enabled() RETURNS std.types.BOOLEAN RETURN TRUE;",
+            ),
+            (
+                "\"std\".\"boolean\"",
+                "CREATE SCHEMA app; CREATE CLIENT FUNCTION app.enabled() RETURNS \"std\".\"boolean\" RETURN TRUE;",
+            ),
+            (
+                "\"std\".\"types\".\"boolean\"",
+                "CREATE SCHEMA app; CREATE CLIENT FUNCTION app.enabled() RETURNS \"std\".\"types\".\"boolean\" RETURN TRUE;",
+            ),
+        ];
+
+        for (spelling, source) in cases {
+            let report =
+                check_standard_application(&bundle([("application.orna", source)]), &context);
+
+            assert!(report.checked_bundle().is_none(), "spelling: {spelling}");
+            assert_eq!(report.diagnostics().len(), 1, "spelling: {spelling}");
+            let [diagnostic] = report.diagnostics() else {
+                return;
+            };
+            assert_eq!(
+                diagnostic.code(),
+                DiagnosticCode::DomainIncompatible,
+                "spelling: {spelling}"
+            );
+            assert_eq!(
+                diagnostic.message(),
+                "the checked standard library does not provide a Boolean value type",
+                "spelling: {spelling}"
+            );
+            let literal_start = source.find("TRUE").unwrap();
+            assert_eq!(
+                diagnostic.location().span().start(),
+                literal_start,
+                "spelling: {spelling}"
+            );
+            assert_eq!(
+                diagnostic.location().span().end(),
+                literal_start + "TRUE".len(),
+                "spelling: {spelling}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_a_standard_query_equality_before_both_boolean_literals_when_boolean_is_missing() {
+        let snapshot = verified_standard_library_for_relational_test();
+        let standard = checked_standard_library_with_contract_overrides_for_test(
+            &snapshot,
+            &[(0, "orna.kernel.value.integer@1")],
+        )
+        .unwrap();
+        let application = empty_catalogue();
+        let context = StandardApplicationCheckContext::try_new(&application, &standard).unwrap();
+        let source = "CREATE SCHEMA app;\
+            CREATE TYPE app.task AS OBJECT ();\
+            CREATE SERVER FUNCTION app.matches() RETURNS ROWS (matches BOOLEAN) \
+            AS SELECT TRUE = FALSE FROM app.task t;";
+        let report = check_standard_application(&bundle([("application.orna", source)]), &context);
+
+        assert!(report.checked_bundle().is_none());
+        assert_eq!(report.diagnostics().len(), 3);
+        let [parent, left, right] = report.diagnostics() else {
+            return;
+        };
+        let expected = [
+            ("TRUE = FALSE", source.find("TRUE = FALSE").unwrap()),
+            ("TRUE", source.find("TRUE").unwrap()),
+            ("FALSE", source.find("FALSE").unwrap()),
+        ];
+        for (diagnostic, (text, start)) in [parent, left, right].into_iter().zip(expected) {
+            assert_eq!(diagnostic.code(), DiagnosticCode::DomainIncompatible);
+            assert_eq!(
+                diagnostic.message(),
+                "the checked standard library does not provide a Boolean value type"
+            );
+            assert_eq!(diagnostic.location().span().start(), start);
+            assert_eq!(diagnostic.location().span().end(), start + text.len());
+        }
+    }
+
+    #[test]
+    fn rejects_an_identity_selected_query_before_its_missing_boolean_selector_result() {
+        let snapshot = verified_standard_library_for_relational_test();
+        let standard = checked_standard_library_with_contract_overrides_for_test(
+            &snapshot,
+            &[(0, "orna.kernel.value.integer@1")],
+        )
+        .unwrap();
+        let application = empty_catalogue();
+        let context = StandardApplicationCheckContext::try_new(&application, &standard).unwrap();
+        let source = "CREATE SCHEMA app;\
+            CREATE TYPE app.task AS OBJECT ();\
+            CREATE SERVER FUNCTION app.matches(p_task REF app.task) RETURNS ROWS (matches BOOLEAN) \
+            TRANSACTION READ ONLY VOLATILITY STABLE \
+            AS SELECT TRUE FROM app.task t WHERE REF(t) = p_task;";
+        let report = check_standard_application(&bundle([("application.orna", source)]), &context);
+
+        assert!(report.checked_bundle().is_none());
+        assert_eq!(report.diagnostics().len(), 2);
+        let [projection, selector] = report.diagnostics() else {
+            return;
+        };
+        let expected = [
+            ("TRUE", source.find("TRUE").unwrap()),
+            ("REF(t) = p_task", source.find("REF(t) = p_task").unwrap()),
+        ];
+        for (diagnostic, (text, start)) in [projection, selector].into_iter().zip(expected) {
+            assert_eq!(diagnostic.code(), DiagnosticCode::DomainIncompatible);
+            assert_eq!(
+                diagnostic.message(),
+                "the checked standard library does not provide a Boolean value type"
+            );
+            assert_eq!(diagnostic.location().span().start(), start);
+            assert_eq!(diagnostic.location().span().end(), start + text.len());
+        }
+    }
+
+    #[test]
+    fn records_standard_relational_body_uses_in_all_three_query_families() {
+        let standard =
+            check_standard_library_source(&verified_standard_library_for_relational_test())
+                .unwrap();
+        let application = empty_catalogue();
+        let context = StandardApplicationCheckContext::try_new(&application, &standard).unwrap();
+        let source = "CREATE SCHEMA app;\
+            CREATE TYPE app.task AS OBJECT (done BOOLEAN NOT NULL);\
+            CREATE SERVER FUNCTION app.ordinary() RETURNS ROWS (done BOOLEAN, task REF app.task) \
+            AS SELECT t.done, REF(t) FROM app.task t WHERE t.done = TRUE ORDER BY t.done;\
+            CREATE SERVER FUNCTION app.distinct() RETURNS ROWS (done BOOLEAN) \
+            TRANSACTION READ ONLY VOLATILITY STABLE \
+            AS SELECT DISTINCT t.done FROM app.task t WHERE t.done;\
+            CREATE SERVER FUNCTION app.by_ref(p_task REF app.task) RETURNS ROWS (done BOOLEAN) \
+            TRANSACTION READ ONLY VOLATILITY STABLE \
+            AS SELECT t.done FROM app.task t WHERE REF(t) = p_task;";
+        let report = check_standard_application(&bundle([("application.orna", source)]), &context);
+
+        assert_eq!(report.diagnostics(), &[]);
+        let checked = report.checked_bundle().unwrap();
+        assert!(checked.uses().windows(2).all(|pair| {
+            let first = pair[0].location().span();
+            let second = pair[1].location().span();
+            (first.start(), first.end()) <= (second.start(), second.end())
+        }));
+        let functions = checked.server_functions().collect::<Vec<_>>();
+        let [ordinary, distinct, by_ref] = functions.as_slice() else {
+            assert_eq!(checked.server_functions().count(), 3);
+            return;
+        };
+        let object = checked.object_types().next().unwrap();
+
+        let body_uses = |owner| {
+            checked
+                .uses()
+                .iter()
+                .filter(|type_use| {
+                    matches!(
+                        type_use.kind(),
+                        CheckedTypeUseKind::Expression { owner: candidate, .. }
+                            | CheckedTypeUseKind::Result { owner: candidate, .. }
+                            if candidate == owner
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let boolean = TypeId::from_bytes([3; 16]);
+
+        let ordinary_uses = body_uses(ordinary.id());
+        assert_eq!(ordinary_uses.len(), 8);
+        let ordinary_projection = expression_use(&ordinary_uses, 0);
+        let ordinary_result = result_use(&ordinary_uses, 0);
+        let ordinary_reference = expression_use(&ordinary_uses, 1);
+        let ordinary_reference_result = result_use(&ordinary_uses, 1);
+        let ordinary_equality = expression_use(&ordinary_uses, 2);
+        let ordinary_left = expression_use(&ordinary_uses, 3);
+        let ordinary_literal = expression_use(&ordinary_uses, 4);
+        let ordinary_ordering = expression_use(&ordinary_uses, 5);
+        let distinct_start = source.find("CREATE SERVER FUNCTION app.distinct").unwrap();
+        let ordinary_done = source
+            .match_indices("t.done")
+            .filter(|(start, _)| *start < distinct_start)
+            .collect::<Vec<_>>();
+        assert_eq!(ordinary_done.len(), 3);
+        assert_type_use_span(ordinary_projection, ordinary_done[0].0, "t.done");
+        assert_type_use_span(ordinary_result, ordinary_done[0].0, "t.done");
+        assert_type_use_span(ordinary_equality, ordinary_done[1].0, "t.done = TRUE");
+        assert_type_use_span(ordinary_left, ordinary_done[1].0, "t.done");
+        assert_type_use_span(ordinary_literal, source.find("TRUE").unwrap(), "TRUE");
+        assert_type_use_span(ordinary_ordering, ordinary_done[2].0, "t.done");
+        let ordinary_reference_start = source
+            .match_indices("REF(t)")
+            .find(|(start, _)| *start < distinct_start)
+            .map(|(start, _)| start);
+        assert!(ordinary_reference_start.is_some());
+        let Some(ordinary_reference_start) = ordinary_reference_start else {
+            return;
+        };
+        assert_type_use_span(ordinary_reference, ordinary_reference_start, "REF(t)");
+        assert_type_use_span(
+            ordinary_reference_result,
+            ordinary_reference_start,
+            "REF(t)",
+        );
+        for type_use in [
+            ordinary_projection,
+            ordinary_result,
+            ordinary_equality,
+            ordinary_left,
+            ordinary_literal,
+            ordinary_ordering,
+        ] {
+            assert_eq!(
+                type_use.value().map(CheckedValueTypeUse::type_id),
+                Some(boolean)
+            );
+        }
+        for type_use in [ordinary_reference, ordinary_reference_result] {
+            assert_eq!(
+                type_use
+                    .object_reference()
+                    .map(|reference| reference.target()),
+                Some(object.id())
+            );
+        }
+        assert!(
+            checked_use_index(
+                checked.uses(),
+                ordinary_projection.kind(),
+                ordinary_done[0].0,
+                ordinary_done[0].0 + "t.done".len(),
+            ) < checked_use_index(
+                checked.uses(),
+                ordinary_result.kind(),
+                ordinary_done[0].0,
+                ordinary_done[0].0 + "t.done".len(),
+            )
+        );
+        assert!(
+            checked_use_index(
+                checked.uses(),
+                ordinary_reference.kind(),
+                ordinary_reference_start,
+                ordinary_reference_start + "REF(t)".len(),
+            ) < checked_use_index(
+                checked.uses(),
+                ordinary_reference_result.kind(),
+                ordinary_reference_start,
+                ordinary_reference_start + "REF(t)".len(),
+            )
+        );
+
+        let distinct_uses = body_uses(distinct.id());
+        assert_eq!(distinct_uses.len(), 3);
+        let distinct_projection = expression_use(&distinct_uses, 0);
+        let distinct_result = result_use(&distinct_uses, 0);
+        let distinct_predicate = expression_use(&distinct_uses, 1);
+        for type_use in [distinct_projection, distinct_result, distinct_predicate] {
+            assert_eq!(
+                type_use.value().map(CheckedValueTypeUse::type_id),
+                Some(boolean)
+            );
+        }
+        let identity_start = source.find("CREATE SERVER FUNCTION app.by_ref").unwrap();
+        let distinct_done = source
+            .match_indices("t.done")
+            .filter(|(start, _)| {
+                *start > distinct.location().span().start() && *start < identity_start
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(distinct_done.len(), 2);
+        assert_type_use_span(distinct_projection, distinct_done[0].0, "t.done");
+        assert_type_use_span(distinct_result, distinct_done[0].0, "t.done");
+        assert_type_use_span(distinct_predicate, distinct_done[1].0, "t.done");
+        assert!(
+            checked_use_index(
+                checked.uses(),
+                distinct_projection.kind(),
+                distinct_done[0].0,
+                distinct_done[0].0 + "t.done".len(),
+            ) < checked_use_index(
+                checked.uses(),
+                distinct_result.kind(),
+                distinct_done[0].0,
+                distinct_done[0].0 + "t.done".len(),
+            )
+        );
+
+        let selector_uses = body_uses(by_ref.id());
+        assert_eq!(selector_uses.len(), 5);
+        let selector_projection = expression_use(&selector_uses, 0);
+        let selector_result = result_use(&selector_uses, 0);
+        let selector_equality = expression_use(&selector_uses, 1);
+        let selector_left = expression_use(&selector_uses, 2);
+        let selector_right = expression_use(&selector_uses, 3);
+        for type_use in [selector_projection, selector_result, selector_equality] {
+            assert_eq!(
+                type_use.value().map(CheckedValueTypeUse::type_id),
+                Some(boolean)
+            );
+        }
+        assert_eq!(
+            selector_left
+                .object_reference()
+                .map(|reference| reference.target()),
+            Some(object.id())
+        );
+        assert_eq!(
+            selector_right
+                .object_reference()
+                .map(|reference| reference.target()),
+            Some(object.id())
+        );
+        let selector_done = source
+            .match_indices("t.done")
+            .find(|(start, _)| *start > identity_start)
+            .map(|(start, _)| start);
+        assert!(selector_done.is_some());
+        let Some(selector_done) = selector_done else {
+            return;
+        };
+        let selector_equality_start = source.find("REF(t) = p_task").unwrap();
+        let selector_left_start = source
+            .match_indices("REF(t)")
+            .find(|(start, _)| *start > identity_start)
+            .map(|(start, _)| start);
+        assert!(selector_left_start.is_some());
+        let Some(selector_left_start) = selector_left_start else {
+            return;
+        };
+        let selector_right_start = source.rfind("p_task").unwrap();
+        assert_type_use_span(selector_projection, selector_done, "t.done");
+        assert_type_use_span(selector_result, selector_done, "t.done");
+        assert_type_use_span(
+            selector_equality,
+            selector_equality_start,
+            "REF(t) = p_task",
+        );
+        assert_type_use_span(selector_left, selector_left_start, "REF(t)");
+        assert_type_use_span(selector_right, selector_right_start, "p_task");
+        assert!(
+            checked_use_index(
+                checked.uses(),
+                selector_projection.kind(),
+                selector_done,
+                selector_done + "t.done".len(),
+            ) < checked_use_index(
+                checked.uses(),
+                selector_result.kind(),
+                selector_done,
+                selector_done + "t.done".len(),
+            )
+        );
+        assert!(selector_uses.iter().all(|type_use| {
+            !matches!(
+                type_use.kind(),
+                CheckedTypeUseKind::Result { ordinal: 1, .. }
+            )
+        }));
+    }
+
+    #[test]
+    fn retains_a_non_golden_checked_boolean_id_through_relational_and_client_bodies() {
+        let changed_boolean = TypeId::from_bytes([0x53; 16]);
+        let snapshot = verified_standard_library_for_relational_test_with_boolean_id(
+            changed_boolean,
+            [
+                0xa2, 0x5b, 0xcf, 0x20, 0x76, 0x46, 0x26, 0xdf, 0xe3, 0x77, 0x67, 0xca, 0x79, 0xc9,
+                0x3e, 0x5f, 0xdc, 0x53, 0x8c, 0xc0, 0x7b, 0x74, 0xce, 0xac, 0x54, 0x2d, 0xb9, 0x31,
+                0x3c, 0x56, 0xe1, 0x82,
+            ],
+        );
+        let standard = check_standard_library_source(&snapshot).unwrap();
+        let application = empty_catalogue();
+        let context = StandardApplicationCheckContext::try_new(&application, &standard).unwrap();
+        let source = "CREATE SCHEMA app;\
+            CREATE TYPE app.task AS OBJECT (done BOOLEAN NOT NULL);\
+            CREATE SERVER FUNCTION app.matches() RETURNS ROWS (matches BOOLEAN) \
+            AS SELECT t.done = TRUE FROM app.task t;\
+            CREATE CLIENT FUNCTION app.enabled() RETURNS BOOLEAN RETURN TRUE;";
+        let report = check_standard_application(&bundle([("application.orna", source)]), &context);
+
+        assert_eq!(report.diagnostics(), &[]);
+        let checked = report.checked_bundle().unwrap();
+        let servers = checked.server_functions().collect::<Vec<_>>();
+        let clients = checked.client_functions().collect::<Vec<_>>();
+        let [server] = servers.as_slice() else {
+            assert_eq!(servers.len(), 1);
+            return;
+        };
+        let [client] = clients.as_slice() else {
+            assert_eq!(clients.len(), 1);
+            return;
+        };
+        let server_body = checked
+            .uses()
+            .iter()
+            .filter(|type_use| {
+                matches!(
+                    type_use.kind(),
+                    CheckedTypeUseKind::Expression { owner, .. }
+                        | CheckedTypeUseKind::Result { owner, .. }
+                        if owner == server.id()
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(server_body.len(), 4);
+        for type_use in [
+            expression_use(&server_body, 0),
+            expression_use(&server_body, 1),
+            expression_use(&server_body, 2),
+            result_use(&server_body, 0),
+        ] {
+            assert_eq!(
+                type_use.value().map(CheckedValueTypeUse::type_id),
+                Some(changed_boolean)
+            );
+        }
+        let equality_start = source.find("t.done = TRUE").unwrap();
+        assert_eq!(
+            expression_use(&server_body, 0).location().span().start(),
+            equality_start
+        );
+        assert_eq!(
+            expression_use(&server_body, 0).location().span().end(),
+            equality_start + "t.done = TRUE".len()
+        );
+
+        let client_body = checked
+            .uses()
+            .iter()
+            .filter(|type_use| {
+                matches!(
+                    type_use.kind(),
+                    CheckedTypeUseKind::Expression { owner, .. }
+                        | CheckedTypeUseKind::Result { owner, .. }
+                        if owner == client.id()
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(client_body.len(), 2);
+        for type_use in [expression_use(&client_body, 0), result_use(&client_body, 0)] {
+            assert_eq!(
+                type_use.value().map(CheckedValueTypeUse::type_id),
+                Some(changed_boolean)
+            );
+        }
     }
 
     fn rebase_standard_origins_to_source(

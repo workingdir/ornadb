@@ -28,6 +28,17 @@ impl InputSlot {
     const PRIMARY: Self = Self(0);
 }
 
+/// Availability of the intrinsic Boolean type while relational source is checked.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum IntrinsicBooleanType {
+    /// Legacy checking retains scalar-only compatibility facts.
+    Legacy,
+    /// Standard-backed checking supplies the durable Boolean identity.
+    Standard(TypeId),
+    /// Standard-backed checking has no Boolean compatibility contract.
+    Missing,
+}
+
 /// A checked one-source relational query.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RelationalQueryIr<T = TypeId, F = FieldId> {
@@ -515,6 +526,7 @@ impl RelationalQueryIr<TypeId, FieldId> {
                 };
                 right.value_type = ValueType {
                     semantic_type: SemanticType::scalar(StandardScalar::Integer),
+                    standard_value_type: None,
                     nullable: false,
                 };
             }
@@ -524,6 +536,7 @@ impl RelationalQueryIr<TypeId, FieldId> {
                 };
                 selection.value_type = ValueType {
                     semantic_type: SemanticType::scalar(StandardScalar::Integer),
+                    standard_value_type: None,
                     nullable: false,
                 };
             }
@@ -591,6 +604,7 @@ impl DistinctQueryIr<TypeId, FieldId> {
             DistinctQueryTestMutation::InvalidObjectReferenceType => {
                 query.projections[0].value_type = ValueType {
                     semantic_type: SemanticType::scalar(StandardScalar::Boolean),
+                    standard_value_type: None,
                     nullable: false,
                 };
             }
@@ -604,6 +618,7 @@ impl DistinctQueryIr<TypeId, FieldId> {
                 };
                 right.value_type = ValueType {
                     semantic_type: SemanticType::scalar(StandardScalar::Integer),
+                    standard_value_type: None,
                     nullable: false,
                 };
             }
@@ -613,6 +628,7 @@ impl DistinctQueryIr<TypeId, FieldId> {
                 };
                 selection.value_type = ValueType {
                     semantic_type: SemanticType::scalar(StandardScalar::Integer),
+                    standard_value_type: None,
                     nullable: false,
                 };
             }
@@ -625,6 +641,7 @@ impl DistinctQueryIr<TypeId, FieldId> {
             } => {
                 query.projections[2].value_type = ValueType {
                     semantic_type,
+                    standard_value_type: None,
                     nullable,
                 };
             }
@@ -670,6 +687,7 @@ fn try_map_expression<T: Copy, F: Copy, T2, F2, E>(
         kind,
         value_type: ValueType {
             semantic_type: try_map_semantic_type(expression.value_type.semantic_type, map_type)?,
+            standard_value_type: expression.value_type.standard_value_type,
             nullable: expression.value_type.nullable,
         },
     })
@@ -814,6 +832,7 @@ impl<T, F> ResolvedFieldStep<T, F> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ValueType<T = TypeId> {
     semantic_type: SemanticType<T>,
+    standard_value_type: Option<TypeId>,
     nullable: bool,
 }
 
@@ -829,6 +848,11 @@ impl<T> ValueType<T> {
 
     pub(crate) const fn nullable(&self) -> bool {
         self.nullable
+    }
+
+    /// Returns the supplied standard value-type identity when one exists.
+    pub(crate) const fn standard_value_type(&self) -> Option<TypeId> {
+        self.standard_value_type
     }
 }
 
@@ -886,10 +910,30 @@ pub(crate) fn check_query(
 ///
 /// The result keeps the identities supplied by the catalogue. This permits
 /// resolver-local checked identities without creating durable core identities.
+#[cfg(test)]
 pub(crate) fn check_query_in<T, F>(
     query: &SelectQuery,
     catalogue: &impl QueryCatalogue<T, F>,
     logical_path: &str,
+) -> Result<QueryCheck<T, F>, Vec<CompilerDiagnostic>>
+where
+    T: Copy + Eq + fmt::Display,
+    F: Copy,
+{
+    check_query_with_intrinsic_boolean_in(
+        query,
+        catalogue,
+        logical_path,
+        IntrinsicBooleanType::Legacy,
+    )
+}
+
+/// Checks one source query with explicit intrinsic Boolean provenance.
+pub(crate) fn check_query_with_intrinsic_boolean_in<T, F>(
+    query: &SelectQuery,
+    catalogue: &impl QueryCatalogue<T, F>,
+    logical_path: &str,
+    intrinsic_boolean: IntrinsicBooleanType,
 ) -> Result<QueryCheck<T, F>, Vec<CompilerDiagnostic>>
 where
     T: Copy + Eq + fmt::Display,
@@ -902,13 +946,14 @@ where
         projections,
         mut references,
         mut diagnostics,
-    } = check_source_and_projections(query, catalogue, logical_path)?;
+    } = check_source_and_projections(query, catalogue, logical_path, intrinsic_boolean)?;
 
     let selection = check_selection(
         query.predicate.as_ref(),
         &context,
         catalogue,
         logical_path,
+        intrinsic_boolean,
         &mut diagnostics,
         &mut references,
     );
@@ -922,6 +967,7 @@ where
                 &context,
                 catalogue,
                 logical_path,
+                intrinsic_boolean,
                 &mut diagnostics,
                 &mut references,
             )
@@ -958,10 +1004,30 @@ where
 }
 
 /// Checks the closed parameter-free `SELECT DISTINCT` form from ADR 0010.
+#[cfg(test)]
 pub(crate) fn check_distinct_query_in<T, F>(
     query: &SelectQuery,
     catalogue: &impl QueryCatalogue<T, F>,
     logical_path: &str,
+) -> Result<DistinctQueryCheck<T, F>, Vec<CompilerDiagnostic>>
+where
+    T: Copy + Eq + fmt::Display,
+    F: Copy,
+{
+    check_distinct_query_with_intrinsic_boolean_in(
+        query,
+        catalogue,
+        logical_path,
+        IntrinsicBooleanType::Legacy,
+    )
+}
+
+/// Checks one `SELECT DISTINCT` query with explicit intrinsic Boolean provenance.
+pub(crate) fn check_distinct_query_with_intrinsic_boolean_in<T, F>(
+    query: &SelectQuery,
+    catalogue: &impl QueryCatalogue<T, F>,
+    logical_path: &str,
+    intrinsic_boolean: IntrinsicBooleanType,
 ) -> Result<DistinctQueryCheck<T, F>, Vec<CompilerDiagnostic>>
 where
     T: Copy + Eq + fmt::Display,
@@ -997,13 +1063,14 @@ where
         projections,
         mut references,
         mut diagnostics,
-    } = check_source_and_projections(query, catalogue, logical_path)?;
+    } = check_source_and_projections(query, catalogue, logical_path, intrinsic_boolean)?;
 
     let selection = check_selection(
         query.predicate.as_ref(),
         &context,
         catalogue,
         logical_path,
+        intrinsic_boolean,
         &mut diagnostics,
         &mut references,
     );
@@ -1045,6 +1112,7 @@ fn check_selection<T, F>(
     context: &InputContext<T>,
     catalogue: &impl QueryCatalogue<T, F>,
     logical_path: &str,
+    intrinsic_boolean: IntrinsicBooleanType,
     diagnostics: &mut Vec<CompilerDiagnostic>,
     references: &mut Vec<QueryReference<T, F>>,
 ) -> Option<ExpressionIr<T, F>>
@@ -1059,6 +1127,7 @@ where
             context,
             catalogue,
             logical_path,
+            intrinsic_boolean,
             diagnostics,
             references,
         )?;
@@ -1109,6 +1178,7 @@ fn check_source_and_projections<T, F>(
     query: &SelectQuery,
     catalogue: &impl QueryCatalogue<T, F>,
     logical_path: &str,
+    intrinsic_boolean: IntrinsicBooleanType,
 ) -> Result<CheckedQuerySource<T, F>, Vec<CompilerDiagnostic>>
 where
     T: Copy + Eq + fmt::Display,
@@ -1146,6 +1216,7 @@ where
                 &context,
                 catalogue,
                 logical_path,
+                intrinsic_boolean,
                 &mut diagnostics,
                 &mut references,
             )
@@ -1169,6 +1240,31 @@ pub(crate) fn check_identity_selected_query_in<T, F, G, P>(
     function: G,
     parameters: &[QueryParameter<T, P>],
     logical_path: &str,
+) -> Result<IdentitySelectedQueryCheck<T, F, G, P>, Vec<CompilerDiagnostic>>
+where
+    T: Copy + Eq + fmt::Display,
+    F: Copy,
+    G: Copy,
+    P: Copy,
+{
+    check_identity_selected_query_with_intrinsic_boolean_in(
+        query,
+        catalogue,
+        function,
+        parameters,
+        logical_path,
+        IntrinsicBooleanType::Legacy,
+    )
+}
+
+/// Checks one identity-selected query with explicit intrinsic Boolean provenance.
+pub(crate) fn check_identity_selected_query_with_intrinsic_boolean_in<T, F, G, P>(
+    query: &SelectQuery,
+    catalogue: &impl QueryCatalogue<T, F>,
+    function: G,
+    parameters: &[QueryParameter<T, P>],
+    logical_path: &str,
+    intrinsic_boolean: IntrinsicBooleanType,
 ) -> Result<IdentitySelectedQueryCheck<T, F, G, P>, Vec<CompilerDiagnostic>>
 where
     T: Copy + Eq + fmt::Display,
@@ -1244,7 +1340,17 @@ where
         projections,
         references,
         diagnostics,
-    } = check_source_and_projections(query, catalogue, logical_path)?;
+    } = check_source_and_projections(query, catalogue, logical_path, intrinsic_boolean)?;
+    let mut diagnostics = diagnostics;
+    let _ = intrinsic_boolean_value_type::<T>(
+        intrinsic_boolean,
+        logical_path,
+        query
+            .predicate
+            .as_ref()
+            .map_or(&query.span, |predicate| predicate.span()),
+        &mut diagnostics,
+    );
     if !diagnostics.is_empty() {
         return Err(diagnostics);
     }
@@ -1356,6 +1462,7 @@ fn check_expression<T, F>(
     context: &InputContext<T>,
     catalogue: &impl QueryCatalogue<T, F>,
     logical_path: &str,
+    intrinsic_boolean: IntrinsicBooleanType,
     diagnostics: &mut Vec<CompilerDiagnostic>,
     references: &mut Vec<QueryReference<T, F>>,
 ) -> Option<ExpressionIr<T, F>>
@@ -1377,6 +1484,7 @@ where
                 },
                 value_type: ValueType {
                     semantic_type: SemanticType::reference(context.object_type),
+                    standard_value_type: None,
                     nullable: false,
                 },
             })
@@ -1392,13 +1500,18 @@ where
                 references,
             )
         }
-        QueryExpression::BooleanLiteral { value, .. } => Some(ExpressionIr {
-            kind: ExpressionKind::BooleanLiteral { value: *value },
-            value_type: ValueType {
-                semantic_type: SemanticType::scalar(StandardScalar::Boolean),
-                nullable: false,
-            },
-        }),
+        QueryExpression::BooleanLiteral { value, source } => {
+            let value_type = intrinsic_boolean_value_type(
+                intrinsic_boolean,
+                logical_path,
+                &source.span,
+                diagnostics,
+            )?;
+            Some(ExpressionIr {
+                kind: ExpressionKind::BooleanLiteral { value: *value },
+                value_type,
+            })
+        }
         QueryExpression::ParameterRead { parameter } => {
             diagnostics.push(diagnostic(
                 DiagnosticCode::DomainIncompatible,
@@ -1409,11 +1522,14 @@ where
             None
         }
         QueryExpression::Equality { left, right, span } => {
+            let value_type =
+                intrinsic_boolean_value_type(intrinsic_boolean, logical_path, span, diagnostics);
             let left = check_expression(
                 left,
                 context,
                 catalogue,
                 logical_path,
+                intrinsic_boolean,
                 diagnostics,
                 references,
             );
@@ -1422,14 +1538,17 @@ where
                 context,
                 catalogue,
                 logical_path,
+                intrinsic_boolean,
                 diagnostics,
                 references,
             );
-            let (Some(left), Some(right)) = (left, right) else {
+            let (Some(mut value_type), Some(left), Some(right)) = (value_type, left, right) else {
                 return None;
             };
 
-            if left.value_type.semantic_type != right.value_type.semantic_type {
+            if left.value_type.semantic_type != right.value_type.semantic_type
+                || left.value_type.standard_value_type != right.value_type.standard_value_type
+            {
                 diagnostics.push(diagnostic(
                     DiagnosticCode::TypeMismatch,
                     "equality requires expressions with compatible types",
@@ -1447,12 +1566,9 @@ where
                 ));
                 return None;
             }
-
+            value_type.nullable = left.value_type.nullable || right.value_type.nullable;
             Some(ExpressionIr {
-                value_type: ValueType {
-                    semantic_type: SemanticType::scalar(StandardScalar::Boolean),
-                    nullable: left.value_type.nullable || right.value_type.nullable,
-                },
+                value_type,
                 kind: ExpressionKind::Equality {
                     left: Box::new(left),
                     right: Box::new(right),
@@ -1460,6 +1576,32 @@ where
             })
         }
     }
+}
+
+fn intrinsic_boolean_value_type<T>(
+    intrinsic_boolean: IntrinsicBooleanType,
+    logical_path: &str,
+    span: &SourceSpan,
+    diagnostics: &mut Vec<CompilerDiagnostic>,
+) -> Option<ValueType<T>> {
+    let standard_value_type = match intrinsic_boolean {
+        IntrinsicBooleanType::Legacy => None,
+        IntrinsicBooleanType::Standard(type_id) => Some(type_id),
+        IntrinsicBooleanType::Missing => {
+            diagnostics.push(diagnostic(
+                DiagnosticCode::DomainIncompatible,
+                "the checked standard library does not provide a Boolean value type",
+                logical_path,
+                span,
+            ));
+            return None;
+        }
+    };
+    Some(ValueType {
+        semantic_type: SemanticType::scalar(StandardScalar::Boolean),
+        standard_value_type,
+        nullable: false,
+    })
 }
 
 pub(crate) fn supports_server_select_equality<T>(semantic_type: SemanticType<T>) -> bool {
@@ -1546,6 +1688,7 @@ where
                 },
                 value_type: ValueType {
                     semantic_type: field.semantic_type(),
+                    standard_value_type: field.standard_value_type(),
                     nullable,
                 },
             });
@@ -1608,13 +1751,17 @@ mod tests {
     use orna_syntax::{QueryExpression, SelectQuantifier, SourceSpan, parse};
 
     use super::{
-        ExpressionKind, IdentitySelectedQueryReference, NullOrder, QueryParameter,
-        QueryReferenceKind, QueryReferenceTarget, SortDirection, check_distinct_query_in,
-        check_identity_selected_query_in, check_query, check_query_in,
-        supports_server_select_distinct, supports_server_select_equality,
+        ExpressionKind, IdentitySelectedQueryReference, IntrinsicBooleanType, NullOrder,
+        QueryParameter, QueryReferenceKind, QueryReferenceTarget, SortDirection,
+        check_distinct_query_in, check_identity_selected_query_in,
+        check_identity_selected_query_with_intrinsic_boolean_in, check_query, check_query_in,
+        check_query_with_intrinsic_boolean_in, supports_server_select_distinct,
+        supports_server_select_equality,
     };
     use crate::DiagnosticCode;
-    use crate::resolver::{QueryCatalogue, QueryField, SemanticType};
+    use crate::resolver::{
+        QueryCatalogue, QueryField, QueryObjectType, ResolutionCatalogue, SemanticType,
+    };
 
     const TASK_TYPE: TypeId = TypeId::from_bytes([1; 16]);
     const PERSON_TYPE: TypeId = TypeId::from_bytes([2; 16]);
@@ -1736,6 +1883,73 @@ mod tests {
 
     fn selector_parameter(name: &str, semantic_type: SemanticType<TypeId>) -> QueryParameter {
         QueryParameter::new(name, SELECTOR_PARAMETER, semantic_type)
+    }
+
+    fn provenance_catalogue(
+        left: Option<TypeId>,
+        right: Option<TypeId>,
+    ) -> ResolutionCatalogue<TypeId, FieldId> {
+        let left = left.map_or_else(
+            || {
+                QueryField::new(
+                    COMPLETED_FIELD,
+                    SemanticType::scalar(StandardScalar::Boolean),
+                    false,
+                )
+            },
+            |type_id| {
+                QueryField::new(
+                    COMPLETED_FIELD,
+                    SemanticType::scalar(StandardScalar::Boolean),
+                    false,
+                )
+                .with_standard_value_type(type_id)
+            },
+        );
+        let right = right.map_or_else(
+            || {
+                QueryField::new(
+                    SCORE_FIELD,
+                    SemanticType::scalar(StandardScalar::Boolean),
+                    false,
+                )
+            },
+            |type_id| {
+                QueryField::new(
+                    SCORE_FIELD,
+                    SemanticType::scalar(StandardScalar::Boolean),
+                    false,
+                )
+                .with_standard_value_type(type_id)
+            },
+        );
+        ResolutionCatalogue::new(vec![QueryObjectType::new(
+            TASK_TYPE,
+            name(&["tasks", "task"]),
+            vec![("left".to_owned(), left), ("right".to_owned(), right)],
+        )])
+        .unwrap()
+    }
+
+    fn reference_provenance_catalogue(
+        reference_target: TypeId,
+    ) -> ResolutionCatalogue<TypeId, FieldId> {
+        ResolutionCatalogue::new(vec![
+            QueryObjectType::new(
+                TASK_TYPE,
+                name(&["tasks", "task"]),
+                vec![(
+                    "other".to_owned(),
+                    QueryField::new(
+                        ASSIGNEE_FIELD,
+                        SemanticType::reference(reference_target),
+                        false,
+                    ),
+                )],
+            ),
+            QueryObjectType::new(PERSON_TYPE, name(&["people", "person"]), Vec::new()),
+        ])
+        .unwrap()
     }
 
     fn assert_one_diagnostic(
@@ -1861,6 +2075,213 @@ mod tests {
         assert_eq!(
             diagnostics[0].location().span().start(),
             query.span.start + query_source.find("t.completed = t.title").unwrap()
+        );
+    }
+
+    #[test]
+    fn standard_value_equality_requires_matching_supplied_type_ids() {
+        let query_source = "SELECT t.left = t.right FROM tasks.task t";
+        let query = query(query_source);
+        let boolean = TypeId::from_bytes([0x41; 16]);
+        let other_boolean = TypeId::from_bytes([0x42; 16]);
+
+        let diagnostics = check_query_with_intrinsic_boolean_in(
+            &query,
+            &provenance_catalogue(Some(boolean), Some(other_boolean)),
+            "tasks.orna",
+            IntrinsicBooleanType::Standard(boolean),
+        )
+        .unwrap_err();
+        assert_one_diagnostic(
+            &diagnostics,
+            DiagnosticCode::TypeMismatch,
+            "equality requires expressions with compatible types",
+            query.projections[0].span(),
+        );
+
+        let checked = check_query_with_intrinsic_boolean_in(
+            &query,
+            &provenance_catalogue(Some(boolean), Some(boolean)),
+            "tasks.orna",
+            IntrinsicBooleanType::Standard(boolean),
+        )
+        .unwrap();
+        assert_eq!(
+            checked.plan().projections()[0]
+                .value_type()
+                .standard_value_type(),
+            Some(boolean)
+        );
+
+        let mixed_diagnostics = check_query_with_intrinsic_boolean_in(
+            &query,
+            &provenance_catalogue(Some(boolean), None),
+            "tasks.orna",
+            IntrinsicBooleanType::Standard(boolean),
+        )
+        .unwrap_err();
+        assert_one_diagnostic(
+            &mixed_diagnostics,
+            DiagnosticCode::TypeMismatch,
+            "equality requires expressions with compatible types",
+            query.projections[0].span(),
+        );
+    }
+
+    #[test]
+    fn standard_ref_equality_remains_keyed_by_the_checked_object_target() {
+        let query = query("SELECT REF(t) = t.other FROM tasks.task t");
+        let boolean = TypeId::from_bytes([0x43; 16]);
+
+        let checked = check_query_with_intrinsic_boolean_in(
+            &query,
+            &reference_provenance_catalogue(TASK_TYPE),
+            "tasks.orna",
+            IntrinsicBooleanType::Standard(boolean),
+        )
+        .unwrap();
+
+        assert_eq!(
+            checked.plan().projections()[0]
+                .value_type()
+                .standard_value_type(),
+            Some(boolean)
+        );
+        assert!(matches!(
+            checked.plan().projections()[0].kind(),
+            ExpressionKind::Equality { left, right }
+                if left.value_type().semantic_type() == SemanticType::reference(TASK_TYPE)
+                    && right.value_type().semantic_type() == SemanticType::reference(TASK_TYPE)
+        ));
+
+        let diagnostics = check_query_with_intrinsic_boolean_in(
+            &query,
+            &reference_provenance_catalogue(PERSON_TYPE),
+            "tasks.orna",
+            IntrinsicBooleanType::Standard(boolean),
+        )
+        .unwrap_err();
+        assert_one_diagnostic(
+            &diagnostics,
+            DiagnosticCode::TypeMismatch,
+            "equality requires expressions with compatible types",
+            query.projections[0].span(),
+        );
+    }
+
+    #[test]
+    fn standard_boolean_expressions_fail_closed_when_the_contract_is_missing() {
+        let query = query("SELECT TRUE FROM tasks.task t");
+
+        let diagnostics = check_query_with_intrinsic_boolean_in(
+            &query,
+            &provenance_catalogue(None, None),
+            "tasks.orna",
+            IntrinsicBooleanType::Missing,
+        )
+        .unwrap_err();
+
+        assert_one_diagnostic(
+            &diagnostics,
+            DiagnosticCode::DomainIncompatible,
+            "the checked standard library does not provide a Boolean value type",
+            query.projections[0].span(),
+        );
+    }
+
+    #[test]
+    fn missing_standard_boolean_reports_an_equality_before_both_literals() {
+        let query = query("SELECT TRUE = FALSE FROM tasks.task t");
+
+        let diagnostics = check_query_with_intrinsic_boolean_in(
+            &query,
+            &provenance_catalogue(None, None),
+            "tasks.orna",
+            IntrinsicBooleanType::Missing,
+        )
+        .unwrap_err();
+
+        assert_eq!(diagnostics.len(), 3);
+        let [parent, left, right] = diagnostics.as_slice() else {
+            return;
+        };
+        for diagnostic in [parent, left, right] {
+            assert_eq!(diagnostic.code(), DiagnosticCode::DomainIncompatible);
+            assert_eq!(
+                diagnostic.message(),
+                "the checked standard library does not provide a Boolean value type"
+            );
+        }
+        assert_one_diagnostic(
+            std::slice::from_ref(parent),
+            DiagnosticCode::DomainIncompatible,
+            "the checked standard library does not provide a Boolean value type",
+            query.projections[0].span(),
+        );
+        let QueryExpression::Equality {
+            left: source_left,
+            right: source_right,
+            ..
+        } = &query.projections[0]
+        else {
+            return;
+        };
+        assert_one_diagnostic(
+            std::slice::from_ref(left),
+            DiagnosticCode::DomainIncompatible,
+            "the checked standard library does not provide a Boolean value type",
+            source_left.span(),
+        );
+        assert_one_diagnostic(
+            std::slice::from_ref(right),
+            DiagnosticCode::DomainIncompatible,
+            "the checked standard library does not provide a Boolean value type",
+            source_right.span(),
+        );
+    }
+
+    #[test]
+    fn missing_standard_boolean_reports_identity_projection_before_selector_equality() {
+        let query = query("SELECT TRUE FROM tasks.task t WHERE REF(t) = p_task");
+
+        let diagnostics = check_identity_selected_query_with_intrinsic_boolean_in(
+            &query,
+            &provenance_catalogue(None, None),
+            SELECTOR_OWNER,
+            &[selector_parameter(
+                "p_task",
+                SemanticType::reference(TASK_TYPE),
+            )],
+            "tasks.orna",
+            IntrinsicBooleanType::Missing,
+        )
+        .unwrap_err();
+
+        assert_eq!(diagnostics.len(), 2);
+        let [projection, selector] = diagnostics.as_slice() else {
+            return;
+        };
+        for diagnostic in [projection, selector] {
+            assert_eq!(diagnostic.code(), DiagnosticCode::DomainIncompatible);
+            assert_eq!(
+                diagnostic.message(),
+                "the checked standard library does not provide a Boolean value type"
+            );
+        }
+        assert_one_diagnostic(
+            std::slice::from_ref(projection),
+            DiagnosticCode::DomainIncompatible,
+            "the checked standard library does not provide a Boolean value type",
+            query.projections[0].span(),
+        );
+        let Some(selector_expression) = query.predicate.as_ref() else {
+            return;
+        };
+        assert_one_diagnostic(
+            std::slice::from_ref(selector),
+            DiagnosticCode::DomainIncompatible,
+            "the checked standard library does not provide a Boolean value type",
+            selector_expression.span(),
         );
     }
 
