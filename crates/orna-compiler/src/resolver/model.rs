@@ -1665,6 +1665,238 @@ impl StandardApplicationCheckReport {
     pub fn checked_bundle(&self) -> Option<&CheckedStandardApplicationBundle> {
         self.checked_bundle.as_ref()
     }
+
+    /// Returns the crate-private data required for durable standard preparation.
+    ///
+    /// This deliberately exposes neither a legacy report nor a checked bundle
+    /// outside the compiler crate.
+    pub(crate) fn preparation_view(&self) -> Option<StandardApplicationPreparationView<'_>> {
+        self.checked_bundle
+            .as_ref()
+            .map(StandardApplicationPreparationView::new)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn replace_type_uses_for_test(
+        &mut self,
+        uses: Vec<CheckedApplicationTypeUse>,
+    ) -> bool {
+        let Some(bundle) = self.checked_bundle.as_mut() else {
+            return false;
+        };
+        bundle.use_indices = uses
+            .iter()
+            .enumerate()
+            .map(|(index, type_use)| (type_use.kind(), index))
+            .collect();
+        bundle.uses = uses;
+        true
+    }
+
+    #[cfg(test)]
+    pub(crate) fn replace_standard_type_references_for_test(
+        &mut self,
+        references: Vec<CheckedStandardTypeReference>,
+    ) -> bool {
+        let Some(bundle) = self.checked_bundle.as_mut() else {
+            return false;
+        };
+        bundle.standard_type_references = references;
+        true
+    }
+
+    #[cfg(test)]
+    pub(crate) fn replace_base_catalogue_revision_for_test(
+        &mut self,
+        revision: CatalogueRevisionId,
+    ) -> bool {
+        let Some(bundle) = self.checked_bundle.as_mut() else {
+            return false;
+        };
+        bundle.inner.base_catalogue_revision = revision;
+        true
+    }
+
+    #[cfg(test)]
+    pub(crate) fn replace_standard_context_for_test(
+        &mut self,
+        catalogue_revision: CatalogueRevisionId,
+        library_revision: StandardLibraryRevisionId,
+        digest: Sha256Digest,
+    ) -> bool {
+        let Some(bundle) = self.checked_bundle.as_mut() else {
+            return false;
+        };
+        bundle.standard_catalogue_revision = catalogue_revision;
+        bundle.standard_library_revision = library_revision;
+        bundle.standard_library_digest = digest;
+        true
+    }
+
+    #[cfg(test)]
+    pub(crate) fn replace_value_type_id_for_test(&mut self, index: usize, type_id: TypeId) -> bool {
+        let Some(bundle) = self.checked_bundle.as_mut() else {
+            return false;
+        };
+        let Some(CheckedApplicationTypeUse::Value(value)) = bundle.uses.get_mut(index) else {
+            return false;
+        };
+        value.type_id = type_id;
+        true
+    }
+
+    #[cfg(test)]
+    pub(crate) fn replace_object_reference_target_for_test(
+        &mut self,
+        index: usize,
+        target: CheckedTypeId,
+    ) -> bool {
+        let Some(bundle) = self.checked_bundle.as_mut() else {
+            return false;
+        };
+        let Some(CheckedApplicationTypeUse::ObjectReference(reference)) =
+            bundle.uses.get_mut(index)
+        else {
+            return false;
+        };
+        reference.target = target;
+        true
+    }
+
+    #[cfg(test)]
+    pub(crate) fn replace_type_use_location_for_test(
+        &mut self,
+        index: usize,
+        location: SourceLocation,
+    ) -> bool {
+        let Some(bundle) = self.checked_bundle.as_mut() else {
+            return false;
+        };
+        let Some(type_use) = bundle.uses.get_mut(index) else {
+            return false;
+        };
+        match type_use {
+            CheckedApplicationTypeUse::Value(value) => value.location = location,
+            CheckedApplicationTypeUse::ObjectReference(reference) => reference.location = location,
+        }
+        true
+    }
+
+    #[cfg(test)]
+    pub(crate) fn replace_type_use_kind_for_test(
+        &mut self,
+        index: usize,
+        kind: CheckedTypeUseKind,
+    ) -> bool {
+        let Some(bundle) = self.checked_bundle.as_mut() else {
+            return false;
+        };
+        let Some(type_use) = bundle.uses.get_mut(index) else {
+            return false;
+        };
+        match type_use {
+            CheckedApplicationTypeUse::Value(value) => value.kind = kind,
+            CheckedApplicationTypeUse::ObjectReference(reference) => reference.kind = kind,
+        }
+        true
+    }
+
+    #[cfg(test)]
+    pub(crate) fn replace_value_with_object_reference_for_test(
+        &mut self,
+        index: usize,
+        target: CheckedTypeId,
+    ) -> bool {
+        let Some(bundle) = self.checked_bundle.as_mut() else {
+            return false;
+        };
+        let Some(type_use) = bundle.uses.get_mut(index) else {
+            return false;
+        };
+        let kind = type_use.kind();
+        let location = type_use.location().clone();
+        *type_use = CheckedApplicationTypeUse::ObjectReference(CheckedObjectReferenceUse {
+            target,
+            kind,
+            location,
+        });
+        true
+    }
+
+    #[cfg(test)]
+    pub(crate) fn replace_standard_type_reference_for_test(
+        &mut self,
+        index: usize,
+        owner: CheckedFunctionId,
+        ordinal: u32,
+        target: TypeId,
+        location: SourceLocation,
+    ) -> bool {
+        let Some(bundle) = self.checked_bundle.as_mut() else {
+            return false;
+        };
+        let Some(reference) = bundle.standard_type_references.get_mut(index) else {
+            return false;
+        };
+        reference.owner = owner;
+        reference.ordinal = ordinal;
+        reference.target = target;
+        reference.location = location;
+        true
+    }
+}
+
+/// Crate-private standard preparation input with no legacy-report escape.
+pub(crate) struct StandardApplicationPreparationView<'a> {
+    checked: &'a CheckedBundle,
+    standard_catalogue_revision: CatalogueRevisionId,
+    standard_library_revision: StandardLibraryRevisionId,
+    standard_library_digest: Sha256Digest,
+    uses: &'a [CheckedApplicationTypeUse],
+    standard_type_references: &'a [CheckedStandardTypeReference],
+    evidence: &'a StandardApplicationPreparationEvidence,
+}
+
+impl<'a> StandardApplicationPreparationView<'a> {
+    fn new(bundle: &'a CheckedStandardApplicationBundle) -> Self {
+        Self {
+            checked: &bundle.inner,
+            standard_catalogue_revision: bundle.standard_catalogue_revision,
+            standard_library_revision: bundle.standard_library_revision,
+            standard_library_digest: bundle.standard_library_digest,
+            uses: &bundle.uses,
+            standard_type_references: &bundle.standard_type_references,
+            evidence: &bundle.preparation_evidence,
+        }
+    }
+
+    pub(crate) const fn checked(&self) -> &'a CheckedBundle {
+        self.checked
+    }
+
+    pub(crate) const fn standard_catalogue_revision(&self) -> CatalogueRevisionId {
+        self.standard_catalogue_revision
+    }
+
+    pub(crate) const fn standard_library_revision(&self) -> StandardLibraryRevisionId {
+        self.standard_library_revision
+    }
+
+    pub(crate) const fn standard_library_digest(&self) -> Sha256Digest {
+        self.standard_library_digest
+    }
+
+    pub(crate) const fn uses(&self) -> &'a [CheckedApplicationTypeUse] {
+        self.uses
+    }
+
+    pub(crate) const fn standard_type_references(&self) -> &'a [CheckedStandardTypeReference] {
+        self.standard_type_references
+    }
+
+    pub(crate) const fn evidence(&self) -> &'a StandardApplicationPreparationEvidence {
+        self.evidence
+    }
 }
 
 /// Sealed canonical resolver evidence retained for standard preparation.
@@ -1703,26 +1935,14 @@ impl StandardApplicationPreparationEvidence {
         }
     }
 
-    #[allow(
-        dead_code,
-        reason = "the following standard preparation row consumes this sealed resolver projection"
-    )]
     pub(crate) fn declaration_uses(&self) -> &[CheckedApplicationTypeUse] {
         &self.declaration_uses
     }
 
-    #[allow(
-        dead_code,
-        reason = "the following standard preparation row consumes this sealed resolver projection"
-    )]
     pub(crate) fn type_uses(&self) -> &[CheckedApplicationTypeUse] {
         &self.type_uses
     }
 
-    #[allow(
-        dead_code,
-        reason = "the following standard preparation row consumes this sealed resolver projection"
-    )]
     pub(crate) fn standard_type_references(&self) -> &[CheckedStandardTypeReference] {
         &self.standard_type_references
     }
@@ -1738,10 +1958,6 @@ pub struct CheckedStandardApplicationBundle {
     pub(super) uses: Vec<CheckedApplicationTypeUse>,
     pub(super) standard_type_references: Vec<CheckedStandardTypeReference>,
     pub(super) use_indices: HashMap<CheckedTypeUseKind, usize>,
-    #[allow(
-        dead_code,
-        reason = "the following standard preparation row consumes this sealed resolver projection"
-    )]
     pub(super) preparation_evidence: StandardApplicationPreparationEvidence,
 }
 
