@@ -12,11 +12,18 @@ pub use identity::{
     ProvisionalParameterId, ProvisionalSchemaId, ProvisionalTypeId,
 };
 pub use model::{
-    CheckReport, CheckedBundle, CheckedClientFunction, CheckedDefault, CheckedDefinitionReference,
-    CheckedDefinitionReferenceTarget, CheckedField, CheckedObjectType, CheckedSchema,
-    CheckedServerFunction, CheckedServerFunctionParameter, CheckedServerFunctionReturnColumn,
-    CheckedStandardLibrary, CheckedStandardSchema, CheckedStandardTypeBinding,
-    CheckedStandardValueType, ConstantValue, SemanticType, StandardLibraryCheckError,
+    CheckReport, CheckedApplicationTypeUse, CheckedBundle, CheckedClientFunction, CheckedDefault,
+    CheckedDefinitionReference, CheckedDefinitionReferenceTarget, CheckedField,
+    CheckedObjectReferenceUse, CheckedObjectType, CheckedSchema, CheckedServerFunction,
+    CheckedServerFunctionParameter, CheckedServerFunctionReturnColumn,
+    CheckedStandardApplicationBundle, CheckedStandardApplicationClientFunction,
+    CheckedStandardApplicationField, CheckedStandardApplicationObjectType,
+    CheckedStandardApplicationParameter, CheckedStandardApplicationReturnColumn,
+    CheckedStandardApplicationServerFunction, CheckedStandardLibrary, CheckedStandardSchema,
+    CheckedStandardTypeBinding, CheckedStandardTypeReference, CheckedStandardValueType,
+    CheckedTypeUseKind, CheckedValueTypeUse, ConstantValue, SemanticType,
+    StandardApplicationCheckContext, StandardApplicationCheckReport,
+    StandardApplicationContextError, StandardLibraryCheckError,
 };
 pub(crate) use model::{
     CheckedClientFunctionBody, CheckedFieldRename, CheckedServerFunctionBody, QueryCatalogue,
@@ -76,6 +83,122 @@ pub fn check(bundle: &SourceBundle, base: &CatalogueSnapshot) -> CheckReport {
     check_parsed(parse_bundle(bundle), base)
 }
 
+impl<'a> StandardApplicationCheckContext<'a> {
+    /// Establishes authority for standard-backed application checking.
+    ///
+    /// The checked standard-library capability is already reconciled with its
+    /// verified snapshot. This constructor checks only that the application
+    /// catalogue cannot collide with that authority and that the compiler can
+    /// derive one private compatibility scalar for every standard value type.
+    pub fn try_new(
+        application: &'a CatalogueSnapshot,
+        standard: &'a CheckedStandardLibrary,
+    ) -> Result<Self, StandardApplicationContextError> {
+        for schema in standard.schemas() {
+            if application.schema_by_id(schema.id()).is_some() {
+                return Err(StandardApplicationContextError::SchemaIdentityConflict {
+                    id: schema.id(),
+                });
+            }
+        }
+
+        for schema in standard.schemas() {
+            if application.schema_by_name(schema.name()).is_some() {
+                return Err(StandardApplicationContextError::SchemaNameConflict {
+                    name: schema.name().clone(),
+                });
+            }
+        }
+
+        for value_type in standard.value_types() {
+            if application.type_definition_by_id(value_type.id()).is_some() {
+                return Err(StandardApplicationContextError::TypeIdentityConflict {
+                    id: value_type.id(),
+                });
+            }
+        }
+
+        for binding in standard.type_bindings() {
+            if application.type_binding_by_id(binding.id()).is_some() {
+                return Err(
+                    StandardApplicationContextError::TypeBindingIdentityConflict {
+                        id: binding.id(),
+                    },
+                );
+            }
+        }
+
+        for value_type in standard.value_types() {
+            if compatibility_scalar(value_type.representation_contract()).is_none() {
+                return Err(
+                    StandardApplicationContextError::UnsupportedCompatibilityContract {
+                        type_id: value_type.id(),
+                        contract: value_type.representation_contract().to_owned(),
+                    },
+                );
+            }
+        }
+
+        let mut contracts = HashSet::with_capacity(standard.value_types().len());
+        for value_type in standard.value_types() {
+            let contract = value_type.representation_contract();
+            if !contracts.insert(contract) {
+                return Err(
+                    StandardApplicationContextError::CompatibilityContractConflict {
+                        contract: contract.to_owned(),
+                    },
+                );
+            }
+        }
+
+        Ok(Self {
+            application,
+            standard,
+        })
+    }
+}
+
+/// Checks one application source bundle against checked standard-library authority.
+///
+/// This is intentionally distinct from [`check`]: it resolves standard values
+/// through durable type identities and returns no legacy checked-bundle escape.
+pub fn check_standard_application(
+    bundle: &SourceBundle,
+    context: &StandardApplicationCheckContext<'_>,
+) -> StandardApplicationCheckReport {
+    let mut result = check_application_parsed(
+        parse_bundle(bundle),
+        context.application,
+        Some(context.standard),
+    );
+    sort_standard_type_uses(&mut result.uses, &result.parse_report);
+    let use_indices = result
+        .uses
+        .iter()
+        .enumerate()
+        .map(|(index, type_use)| (type_use.kind(), index))
+        .collect();
+    let snapshot = context.standard.verified_snapshot();
+    let checked_bundle = result
+        .checked_bundle
+        .map(|inner| CheckedStandardApplicationBundle {
+            inner,
+            standard_catalogue_revision: snapshot.catalogue().revision(),
+            standard_library_revision: snapshot.revision(),
+            standard_library_digest: snapshot.digest(),
+            uses: result.uses,
+            standard_type_references: Vec::new(),
+            use_indices,
+        });
+
+    StandardApplicationCheckReport {
+        standard_library: context.standard.clone(),
+        parse_report: result.parse_report,
+        diagnostics: result.diagnostics,
+        checked_bundle,
+    }
+}
+
 /// Checks retained standard source against its verified catalogue and origins.
 pub fn check_standard_library_source(
     snapshot: &VerifiedStandardLibrarySnapshot,
@@ -115,6 +238,21 @@ pub fn check_standard_library_source(
         value_types: families.value_types,
         type_bindings: families.type_bindings,
     })
+}
+
+#[cfg(test)]
+pub(crate) fn checked_standard_library_with_contract_overrides_for_test(
+    snapshot: &VerifiedStandardLibrarySnapshot,
+    overrides: &[(usize, &str)],
+) -> Result<CheckedStandardLibrary, StandardLibraryCheckError> {
+    let mut checked = check_standard_library_source(snapshot)?;
+    for (index, contract) in overrides {
+        let Some(value_type) = checked.value_types.get_mut(*index) else {
+            return Err(StandardLibraryCheckError::SourceMismatch);
+        };
+        value_type.representation_contract = (*contract).to_owned();
+    }
+    Ok(checked)
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -660,17 +798,38 @@ struct ResolvedServerFunctionInput<'a> {
 }
 
 fn check_parsed(parse_report: ParseReport, base: &CatalogueSnapshot) -> CheckReport {
+    let result = check_application_parsed(parse_report, base, None);
+    CheckReport {
+        parse_report: result.parse_report,
+        diagnostics: result.diagnostics,
+        checked_bundle: result.checked_bundle,
+    }
+}
+
+struct ApplicationCheckResult {
+    parse_report: ParseReport,
+    diagnostics: Vec<CompilerDiagnostic>,
+    checked_bundle: Option<CheckedBundle>,
+    uses: Vec<CheckedApplicationTypeUse>,
+}
+
+fn check_application_parsed(
+    parse_report: ParseReport,
+    base: &CatalogueSnapshot,
+    standard: Option<&CheckedStandardLibrary>,
+) -> ApplicationCheckResult {
     let mut diagnostics = parse_report.diagnostics().to_vec();
     if !diagnostics.is_empty() {
-        return failed(parse_report, diagnostics);
+        return application_failed(parse_report, diagnostics);
     }
 
     diagnostics.extend(check_protected_source(&parse_report));
     if !diagnostics.is_empty() {
-        return failed(parse_report, diagnostics);
+        return application_failed(parse_report, diagnostics);
     }
 
     let mut assignments = CheckAssignments::new();
+    let mut uses = Vec::new();
     let mut checked_schemas = Vec::new();
     let mut known_schemas = HashSet::new();
     let mut submitted_schemas = HashSet::new();
@@ -773,12 +932,14 @@ fn check_parsed(parse_report: ParseReport, base: &CatalogueSnapshot) -> CheckRep
                 continue;
             }
 
-            let semantic_type = resolve_type(
+            let resolved_type = resolve_application_type(
                 &field.type_specification,
                 &submitted_ids,
                 header.logical_path,
                 &mut diagnostics,
+                standard,
             );
+            let semantic_type = resolved_type.map(|resolved| resolved.semantic_type);
             let on_delete = map_on_delete(field.on_delete);
             if on_delete.is_some()
                 && !matches!(
@@ -847,6 +1008,18 @@ fn check_parsed(parse_report: ParseReport, base: &CatalogueSnapshot) -> CheckRep
                     on_delete,
                     location: location(header.logical_path, &field.span),
                 });
+                if let Some(resolved_type) = resolved_type {
+                    record_standard_type_use(
+                        &mut uses,
+                        standard,
+                        CheckedTypeUseKind::Field {
+                            owner: header.id,
+                            field: id,
+                        },
+                        resolved_type,
+                        type_use_location(&field.type_specification, header.logical_path),
+                    );
+                }
             }
         }
 
@@ -859,12 +1032,12 @@ fn check_parsed(parse_report: ParseReport, base: &CatalogueSnapshot) -> CheckRep
     }
 
     if !diagnostics.is_empty() {
-        return failed(parse_report, diagnostics);
+        return application_failed(parse_report, diagnostics);
     }
 
     reject_unplanned_server_function_features(&parse_report, &mut diagnostics);
     if !diagnostics.is_empty() {
-        return failed(parse_report, diagnostics);
+        return application_failed(parse_report, diagnostics);
     }
 
     let query_catalogue = checked_query_catalogue(&checked_types);
@@ -892,6 +1065,8 @@ fn check_parsed(parse_report: ParseReport, base: &CatalogueSnapshot) -> CheckRep
             base,
             &mut assignments,
             &mut diagnostics,
+            standard,
+            &mut uses,
         )
     } else {
         Vec::new()
@@ -907,7 +1082,13 @@ fn check_parsed(parse_report: ParseReport, base: &CatalogueSnapshot) -> CheckRep
         Vec::new()
     };
     let client_inputs = if diagnostics.is_empty() {
-        resolve_client_function_inputs(&client_headers, &mut diagnostics)
+        resolve_client_function_inputs(
+            &client_headers,
+            &submitted_ids,
+            &mut diagnostics,
+            standard,
+            &mut uses,
+        )
     } else {
         Vec::new()
     };
@@ -918,10 +1099,10 @@ fn check_parsed(parse_report: ParseReport, base: &CatalogueSnapshot) -> CheckRep
     };
 
     if !diagnostics.is_empty() {
-        return failed(parse_report, diagnostics);
+        return application_failed(parse_report, diagnostics);
     }
 
-    CheckReport {
+    ApplicationCheckResult {
         parse_report,
         diagnostics,
         checked_bundle: Some(CheckedBundle {
@@ -940,6 +1121,7 @@ fn check_parsed(parse_report: ParseReport, base: &CatalogueSnapshot) -> CheckRep
                 })
                 .collect(),
         }),
+        uses,
     }
 }
 
@@ -1431,7 +1613,10 @@ fn resolve_client_function_headers<'a>(
 
 fn resolve_client_function_inputs<'a>(
     headers: &[ClientFunctionHeader<'a>],
+    submitted_ids: &HashMap<QualifiedSemanticName, CheckedTypeId>,
     diagnostics: &mut Vec<CompilerDiagnostic>,
+    standard: Option<&CheckedStandardLibrary>,
+    uses: &mut Vec<CheckedApplicationTypeUse>,
 ) -> Vec<ResolvedClientFunctionInput<'a>> {
     let mut inputs = Vec::with_capacity(headers.len());
     for header in headers {
@@ -1445,13 +1630,41 @@ fn resolve_client_function_inputs<'a>(
             ));
         }
 
-        let return_type = match &declaration.return_type {
-            FunctionReturnType::Single(specification)
+        let return_type = match (&declaration.return_type, standard) {
+            (FunctionReturnType::Single(specification), Some(standard)) => {
+                let diagnostics_before = diagnostics.len();
+                let resolved = resolve_application_type(
+                    specification,
+                    submitted_ids,
+                    header.logical_path,
+                    diagnostics,
+                    Some(standard),
+                );
+                if diagnostics.len() != diagnostics_before {
+                    None
+                } else if resolved.is_some_and(|resolved| {
+                    resolved.semantic_type == SemanticType::scalar(StandardScalar::Boolean)
+                }) {
+                    resolved
+                } else {
+                    diagnostics.push(diagnostic(
+                        DiagnosticCode::TypeMismatch,
+                        "this CLIENT function must return BOOLEAN",
+                        header.logical_path,
+                        specification.span(),
+                    ));
+                    None
+                }
+            }
+            (FunctionReturnType::Single(specification), None)
                 if is_closed_client_boolean_return(specification) =>
             {
-                Some(SemanticType::scalar(StandardScalar::Boolean))
+                Some(ResolvedApplicationType {
+                    semantic_type: SemanticType::scalar(StandardScalar::Boolean),
+                    standard_value_type: None,
+                })
             }
-            FunctionReturnType::Single(specification) => {
+            (FunctionReturnType::Single(specification), None) => {
                 diagnostics.push(diagnostic(
                     DiagnosticCode::TypeMismatch,
                     "this CLIENT function must return BOOLEAN",
@@ -1460,7 +1673,7 @@ fn resolve_client_function_inputs<'a>(
                 ));
                 None
             }
-            FunctionReturnType::Rows { span, .. } => {
+            (FunctionReturnType::Rows { span, .. }, _) => {
                 diagnostics.push(diagnostic(
                     DiagnosticCode::TypeMismatch,
                     "this CLIENT function must return BOOLEAN",
@@ -1474,11 +1687,24 @@ fn resolve_client_function_inputs<'a>(
         if let Some(return_type) = return_type
             && declaration.parameters.is_empty()
         {
+            let semantic_type = return_type.semantic_type;
+            if let FunctionReturnType::Single(specification) = &declaration.return_type {
+                record_standard_type_use(
+                    uses,
+                    standard,
+                    CheckedTypeUseKind::Return {
+                        owner: header.id,
+                        ordinal: 0,
+                    },
+                    return_type,
+                    type_use_location(specification, header.logical_path),
+                );
+            }
             inputs.push(ResolvedClientFunctionInput {
                 id: header.id,
                 name: semantic_name(&declaration.name),
                 parameters: Vec::new(),
-                return_type,
+                return_type: semantic_type,
                 body: &declaration.body,
                 location: location(header.logical_path, &declaration.span),
                 declaration_span: declaration.span.clone(),
@@ -1552,6 +1778,8 @@ fn resolve_server_function_inputs<'a>(
     base: &CatalogueSnapshot,
     assignments: &mut CheckAssignments,
     diagnostics: &mut Vec<CompilerDiagnostic>,
+    standard: Option<&CheckedStandardLibrary>,
+    uses: &mut Vec<CheckedApplicationTypeUse>,
 ) -> Vec<ResolvedServerFunctionInput<'a>> {
     let mut inputs = Vec::with_capacity(headers.len());
 
@@ -1574,11 +1802,12 @@ fn resolve_server_function_inputs<'a>(
                 continue;
             }
 
-            let Some(semantic_type) = resolve_type(
+            let Some(resolved_type) = resolve_application_type(
                 &parameter.type_specification,
                 submitted_ids,
                 header.logical_path,
                 diagnostics,
+                standard,
             ) else {
                 continue;
             };
@@ -1587,11 +1816,21 @@ fn resolve_server_function_inputs<'a>(
                     .and_then(|function| function.parameter_by_name(&parameter_name))
                     .map(|parameter| parameter.id()),
             );
+            record_standard_type_use(
+                uses,
+                standard,
+                CheckedTypeUseKind::Parameter {
+                    owner: header.id,
+                    parameter: id,
+                },
+                resolved_type,
+                type_use_location(&parameter.type_specification, header.logical_path),
+            );
             parameters.push(ResolvedServerFunctionParameter {
                 id,
                 name: parameter_name,
                 ordinal: parameter.order as u32,
-                semantic_type,
+                semantic_type: resolved_type.semantic_type,
                 name_span: parameter.name.span.clone(),
                 location: location(header.logical_path, &parameter.span),
                 reference_location: reference_location(
@@ -1606,6 +1845,9 @@ fn resolve_server_function_inputs<'a>(
             submitted_ids,
             header.logical_path,
             diagnostics,
+            standard,
+            header.id,
+            uses,
         );
         if diagnostics.len() != diagnostics_before {
             continue;
@@ -1663,15 +1905,30 @@ fn resolve_server_function_return(
     submitted_ids: &HashMap<QualifiedSemanticName, CheckedTypeId>,
     logical_path: &str,
     diagnostics: &mut Vec<CompilerDiagnostic>,
+    standard: Option<&CheckedStandardLibrary>,
+    owner: CheckedFunctionId,
+    uses: &mut Vec<CheckedApplicationTypeUse>,
 ) -> Option<ResolvedServerFunctionReturn> {
     match return_type {
-        FunctionReturnType::Single(specification) => {
-            resolve_type(specification, submitted_ids, logical_path, diagnostics).map(|_| {
-                ResolvedServerFunctionReturn::Single {
-                    location: location(logical_path, specification.span()),
-                }
-            })
-        }
+        FunctionReturnType::Single(specification) => resolve_application_type(
+            specification,
+            submitted_ids,
+            logical_path,
+            diagnostics,
+            standard,
+        )
+        .map(|resolved| {
+            record_standard_type_use(
+                uses,
+                standard,
+                CheckedTypeUseKind::Return { owner, ordinal: 0 },
+                resolved,
+                type_use_location(specification, logical_path),
+            );
+            ResolvedServerFunctionReturn::Single {
+                location: location(logical_path, specification.span()),
+            }
+        }),
         FunctionReturnType::Rows { columns, span } => {
             if columns.is_empty() {
                 diagnostics.push(diagnostic(
@@ -1697,18 +1954,29 @@ fn resolve_server_function_return(
                     ));
                     continue;
                 }
-                let Some(semantic_type) = resolve_type(
+                let Some(resolved_type) = resolve_application_type(
                     &column.type_specification,
                     submitted_ids,
                     logical_path,
                     diagnostics,
+                    standard,
                 ) else {
                     continue;
                 };
+                record_standard_type_use(
+                    uses,
+                    standard,
+                    CheckedTypeUseKind::Return {
+                        owner,
+                        ordinal: column.order as u32,
+                    },
+                    resolved_type,
+                    type_use_location(&column.type_specification, logical_path),
+                );
                 resolved_columns.push(ResolvedServerFunctionReturnColumn {
                     name,
                     ordinal: column.order as u32,
-                    semantic_type,
+                    semantic_type: resolved_type.semantic_type,
                     location: location(logical_path, &column.span),
                     reference_location: reference_location(
                         &column.type_specification,
@@ -2447,6 +2715,15 @@ fn reference_location(
     Some(location(logical_path, &target.span))
 }
 
+fn type_use_location(specification: &TypeSpecification, logical_path: &str) -> SourceLocation {
+    match specification {
+        TypeSpecification::Reference { target, .. } => location(logical_path, &target.span),
+        TypeSpecification::Named(_) | TypeSpecification::StandardLargeObject { .. } => {
+            location(logical_path, specification.span())
+        }
+    }
+}
+
 fn map_function_security(mode: Option<SyntaxFunctionSecurity>) -> CatalogueFunctionSecurity {
     match mode {
         Some(SyntaxFunctionSecurity::Definer) => CatalogueFunctionSecurity::Definer,
@@ -2473,24 +2750,100 @@ fn map_function_volatility(mode: Option<SyntaxFunctionVolatility>) -> CatalogueF
     }
 }
 
-fn failed(parse_report: ParseReport, diagnostics: Vec<CompilerDiagnostic>) -> CheckReport {
-    CheckReport {
+fn application_failed(
+    parse_report: ParseReport,
+    diagnostics: Vec<CompilerDiagnostic>,
+) -> ApplicationCheckResult {
+    ApplicationCheckResult {
         parse_report,
         diagnostics,
         checked_bundle: None,
+        uses: Vec::new(),
     }
 }
 
-fn resolve_type(
+fn sort_standard_type_uses(uses: &mut [CheckedApplicationTypeUse], parse_report: &ParseReport) {
+    let unit_indices = parse_report
+        .units()
+        .iter()
+        .enumerate()
+        .map(|(index, unit)| (unit.logical_path(), index))
+        .collect::<HashMap<_, _>>();
+    uses.sort_by_key(|type_use| {
+        let location = type_use.location();
+        (
+            unit_indices
+                .get(location.logical_path())
+                .copied()
+                .unwrap_or(usize::MAX),
+            location.span().start(),
+            location.span().end(),
+            type_use_kind_tag(type_use.kind()),
+            type_use_tie_break(type_use.kind()),
+        )
+    });
+}
+
+const fn type_use_kind_tag(kind: CheckedTypeUseKind) -> u8 {
+    match kind {
+        CheckedTypeUseKind::Field { .. } => 0,
+        CheckedTypeUseKind::Parameter { .. } => 1,
+        CheckedTypeUseKind::Return { .. } => 2,
+        CheckedTypeUseKind::Expression { .. } => 3,
+        CheckedTypeUseKind::Result { .. } => 4,
+    }
+}
+
+#[derive(Eq, Ord, PartialEq, PartialOrd)]
+enum TypeUseTieBreak {
+    Field(CheckedTypeId, CheckedFieldId),
+    Parameter(CheckedFunctionId, CheckedParameterId),
+    Return(u32, CheckedFunctionId),
+    Expression(u32, CheckedFunctionId),
+    Result(u32, CheckedFunctionId),
+}
+
+const fn type_use_tie_break(kind: CheckedTypeUseKind) -> TypeUseTieBreak {
+    match kind {
+        CheckedTypeUseKind::Field { owner, field } => TypeUseTieBreak::Field(owner, field),
+        CheckedTypeUseKind::Parameter { owner, parameter } => {
+            TypeUseTieBreak::Parameter(owner, parameter)
+        }
+        CheckedTypeUseKind::Return { owner, ordinal } => TypeUseTieBreak::Return(ordinal, owner),
+        CheckedTypeUseKind::Expression { owner, ordinal } => {
+            TypeUseTieBreak::Expression(ordinal, owner)
+        }
+        CheckedTypeUseKind::Result { owner, ordinal } => TypeUseTieBreak::Result(ordinal, owner),
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ResolvedApplicationType {
+    semantic_type: SemanticType<CheckedTypeId>,
+    standard_value_type: Option<orna_core::TypeId>,
+}
+
+fn resolve_application_type(
     specification: &TypeSpecification,
     submitted_ids: &HashMap<QualifiedSemanticName, CheckedTypeId>,
     logical_path: &str,
     diagnostics: &mut Vec<CompilerDiagnostic>,
-) -> Option<SemanticType<CheckedTypeId>> {
+    standard: Option<&CheckedStandardLibrary>,
+) -> Option<ResolvedApplicationType> {
     match specification {
         TypeSpecification::Named(name) => {
-            if let Some(scalar) = resolve_closed_scalar(name) {
-                return Some(SemanticType::scalar(scalar));
+            let value_type = standard.map_or_else(
+                || resolve_closed_scalar(name).map(|scalar| (None, scalar)),
+                |standard| {
+                    standard_value_by_name(name, standard)
+                        .map(|(type_id, scalar)| (Some(type_id), scalar))
+                },
+            );
+            if let Some((standard_value_type, scalar)) = value_type {
+                return Some(ResolvedApplicationType {
+                    semantic_type: SemanticType::scalar(scalar),
+                    standard_value_type,
+                });
             }
             let semantic_name = semantic_name(name);
             if submitted_ids.contains_key(&semantic_name) {
@@ -2510,15 +2863,40 @@ fn resolve_type(
             }
             None
         }
-        TypeSpecification::StandardLargeObject { kind, .. } => {
-            let scalar = match kind {
-                StandardLargeObjectKind::Character => StandardScalar::CharacterLargeObject,
-                StandardLargeObjectKind::Binary => StandardScalar::BinaryLargeObject,
+        TypeSpecification::StandardLargeObject { kind, source } => {
+            let value_type = standard.map_or_else(
+                || {
+                    let scalar = match kind {
+                        StandardLargeObjectKind::Character => StandardScalar::CharacterLargeObject,
+                        StandardLargeObjectKind::Binary => StandardScalar::BinaryLargeObject,
+                    };
+                    Some((None, scalar))
+                },
+                |standard| {
+                    standard_large_object_value(*kind, standard)
+                        .map(|(type_id, scalar)| (Some(type_id), scalar))
+                },
+            );
+            let Some((standard_value_type, scalar)) = value_type else {
+                diagnostics.push(diagnostic(
+                    DiagnosticCode::UnknownQualifiedName,
+                    format!("unknown type name {}", source.text),
+                    logical_path,
+                    &source.span,
+                ));
+                return None;
             };
-            Some(SemanticType::scalar(scalar))
+            Some(ResolvedApplicationType {
+                semantic_type: SemanticType::scalar(scalar),
+                standard_value_type,
+            })
         }
         TypeSpecification::Reference { target, .. } => {
-            if resolve_closed_scalar(target).is_some() {
+            let scalar_target = standard.map_or_else(
+                || resolve_closed_scalar(target).is_some(),
+                |standard| standard_value_by_name(target, standard).is_some(),
+            );
+            if scalar_target {
                 diagnostics.push(diagnostic(
                     DiagnosticCode::InvalidReferenceTarget,
                     format!("REF target {} is a scalar type", semantic_name(target)),
@@ -2529,7 +2907,10 @@ fn resolve_type(
             }
             let name = semantic_name(target);
             if let Some(id) = submitted_ids.get(&name).copied() {
-                Some(SemanticType::reference(id))
+                Some(ResolvedApplicationType {
+                    semantic_type: SemanticType::reference(id),
+                    standard_value_type: None,
+                })
             } else {
                 diagnostics.push(diagnostic(
                     DiagnosticCode::UnknownQualifiedName,
@@ -2540,6 +2921,76 @@ fn resolve_type(
                 None
             }
         }
+    }
+}
+
+fn standard_value_by_name(
+    name: &QualifiedName,
+    standard: &CheckedStandardLibrary,
+) -> Option<(orna_core::TypeId, StandardScalar)> {
+    let lookup = if name.parts.len() == 1 && !name.parts[0].text.starts_with('"') {
+        PreludeTypeName::new([semantic_part(&name.parts[0])])
+            .ok()
+            .map(TypeLookupName::prelude)?
+    } else {
+        TypeLookupName::qualified(semantic_name(name))
+    };
+    standard_value_by_lookup(&lookup, standard)
+}
+
+fn standard_large_object_value(
+    kind: StandardLargeObjectKind,
+    standard: &CheckedStandardLibrary,
+) -> Option<(orna_core::TypeId, StandardScalar)> {
+    let words = match kind {
+        StandardLargeObjectKind::Character => ["character", "large", "object"],
+        StandardLargeObjectKind::Binary => ["binary", "large", "object"],
+    };
+    let lookup = PreludeTypeName::new(words)
+        .ok()
+        .map(TypeLookupName::prelude)?;
+    standard_value_by_lookup(&lookup, standard)
+}
+
+fn standard_value_by_lookup(
+    lookup: &TypeLookupName,
+    standard: &CheckedStandardLibrary,
+) -> Option<(orna_core::TypeId, StandardScalar)> {
+    let direct = standard
+        .verified_snapshot()
+        .catalogue()
+        .type_id_by_name(lookup)?;
+    let value_type = standard
+        .value_types()
+        .iter()
+        .find(|value_type| value_type.id() == direct)?;
+    compatibility_scalar(value_type.representation_contract()).map(|scalar| (direct, scalar))
+}
+
+fn record_standard_type_use(
+    uses: &mut Vec<CheckedApplicationTypeUse>,
+    standard: Option<&CheckedStandardLibrary>,
+    kind: CheckedTypeUseKind,
+    resolved: ResolvedApplicationType,
+    location: SourceLocation,
+) {
+    if standard.is_none() {
+        return;
+    }
+    if let Some(type_id) = resolved.standard_value_type {
+        uses.push(CheckedApplicationTypeUse::Value(CheckedValueTypeUse {
+            type_id,
+            kind,
+            location,
+        }));
+    } else if let SemanticType::Reference { target } = resolved.semantic_type {
+        uses.push(CheckedApplicationTypeUse::ObjectReference(
+            CheckedObjectReferenceUse {
+                target,
+                kind,
+                location,
+            },
+        ));
     }
 }
 
@@ -2558,6 +3009,25 @@ fn resolve_closed_scalar(name: &QualifiedName) -> Option<StandardScalar> {
         return None;
     }
     StandardScalar::from_source_spelling(&name.parts[0].text).ok()
+}
+
+fn compatibility_scalar(contract: &str) -> Option<StandardScalar> {
+    match contract {
+        "orna.kernel.value.boolean@1" => Some(StandardScalar::Boolean),
+        "orna.kernel.value.integer@1" => Some(StandardScalar::Integer),
+        "orna.kernel.value.bigint@1" => Some(StandardScalar::BigInt),
+        "orna.kernel.value.float@1" => Some(StandardScalar::Float),
+        "orna.kernel.value.decimal@1" => Some(StandardScalar::Decimal),
+        "orna.kernel.value.character-large-object@1" => Some(StandardScalar::CharacterLargeObject),
+        "orna.kernel.value.binary-large-object@1" => Some(StandardScalar::BinaryLargeObject),
+        "orna.kernel.value.uuid@1" => Some(StandardScalar::Uuid),
+        "orna.kernel.value.date@1" => Some(StandardScalar::Date),
+        "orna.kernel.value.time@1" => Some(StandardScalar::Time),
+        "orna.kernel.value.timestamp@1" => Some(StandardScalar::Timestamp),
+        "orna.kernel.value.duration@1" => Some(StandardScalar::Duration),
+        "orna.kernel.value.void@1" => Some(StandardScalar::Void),
+        _ => None,
+    }
 }
 
 fn checked_default(
@@ -2683,8 +3153,10 @@ mod tests {
     use orna_syntax::SourceSpan;
 
     use super::{
-        CheckedDefinitionReferenceTarget, CheckedTypeId, ConstantValue, DiagnosticCode,
-        SemanticType, check, reconcile_standard_source,
+        CheckAssignments, CheckedApplicationTypeUse, CheckedDefinitionReferenceTarget,
+        CheckedTypeId, CheckedTypeUseKind, CheckedValueTypeUse, ConstantValue, DiagnosticCode,
+        IdentityAssignments, SemanticType, check, location, reconcile_standard_source,
+        sort_standard_type_uses,
     };
     use crate::{ParsedSourceUnit, parse_bundle};
 
@@ -2693,6 +3165,92 @@ mod tests {
 
     fn empty_catalogue() -> CatalogueSnapshot {
         catalogue(Vec::new(), Vec::new(), Vec::new())
+    }
+
+    #[test]
+    fn canonical_type_use_order_breaks_coincident_same_kind_ties() {
+        let mut assignments = CheckAssignments::new();
+        let first_field_owner = assignments.type_id(Some(TypeId::from_bytes([0x10; 16])));
+        let second_field_owner = assignments.type_id(Some(TypeId::from_bytes([0x20; 16])));
+        let first_field = assignments.field_id(Some(FieldId::from_bytes([0x10; 16])));
+        let second_field = assignments.field_id(Some(FieldId::from_bytes([0x20; 16])));
+        let first_return_owner = assignments.function_id(Some(FunctionId::from_bytes([0x10; 16])));
+        let second_return_owner = assignments.function_id(Some(FunctionId::from_bytes([0x20; 16])));
+        let span = SourceSpan { start: 0, end: 0 };
+        let type_id = TypeId::from_bytes([0x55; 16]);
+        let mut uses = vec![
+            CheckedApplicationTypeUse::Value(CheckedValueTypeUse {
+                type_id,
+                kind: CheckedTypeUseKind::Return {
+                    owner: second_return_owner,
+                    ordinal: 1,
+                },
+                location: location("application.orna", &span),
+            }),
+            CheckedApplicationTypeUse::Value(CheckedValueTypeUse {
+                type_id,
+                kind: CheckedTypeUseKind::Field {
+                    owner: second_field_owner,
+                    field: second_field,
+                },
+                location: location("application.orna", &span),
+            }),
+            CheckedApplicationTypeUse::Value(CheckedValueTypeUse {
+                type_id,
+                kind: CheckedTypeUseKind::Return {
+                    owner: second_return_owner,
+                    ordinal: 0,
+                },
+                location: location("application.orna", &span),
+            }),
+            CheckedApplicationTypeUse::Value(CheckedValueTypeUse {
+                type_id,
+                kind: CheckedTypeUseKind::Field {
+                    owner: first_field_owner,
+                    field: first_field,
+                },
+                location: location("application.orna", &span),
+            }),
+            CheckedApplicationTypeUse::Value(CheckedValueTypeUse {
+                type_id,
+                kind: CheckedTypeUseKind::Return {
+                    owner: first_return_owner,
+                    ordinal: 1,
+                },
+                location: location("application.orna", &span),
+            }),
+        ];
+        let report = parse_bundle(&bundle([("application.orna", "")]));
+
+        sort_standard_type_uses(&mut uses, &report);
+
+        assert_eq!(
+            uses.iter()
+                .map(CheckedApplicationTypeUse::kind)
+                .collect::<Vec<_>>(),
+            vec![
+                CheckedTypeUseKind::Field {
+                    owner: first_field_owner,
+                    field: first_field,
+                },
+                CheckedTypeUseKind::Field {
+                    owner: second_field_owner,
+                    field: second_field,
+                },
+                CheckedTypeUseKind::Return {
+                    owner: second_return_owner,
+                    ordinal: 0,
+                },
+                CheckedTypeUseKind::Return {
+                    owner: first_return_owner,
+                    ordinal: 1,
+                },
+                CheckedTypeUseKind::Return {
+                    owner: second_return_owner,
+                    ordinal: 1,
+                },
+            ]
+        );
     }
 
     fn catalogue(

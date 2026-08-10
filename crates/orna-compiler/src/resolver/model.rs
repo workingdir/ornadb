@@ -3,12 +3,15 @@
 use std::{collections::HashMap, error::Error, fmt, hash::Hash};
 
 use orna_core::{
-    CatalogueRevisionId, FieldId, SchemaId, TypeBindingId, TypeId,
+    CatalogueRevisionId, FieldId, SchemaId, StandardLibraryRevisionId, TypeBindingId, TypeId,
     catalogue::{
-        CatalogueSnapshot, FunctionDomain, OnDeleteAction, QualifiedSemanticName, TypeBindingKind,
-        TypeLookupName, ValueTypeKind, ValueTypeMutability, ValueTypePersistence,
+        CatalogueSnapshot, FunctionDomain, FunctionSecurity, FunctionTransaction,
+        FunctionVolatility, OnDeleteAction, QualifiedSemanticName, TypeBindingKind, TypeLookupName,
+        ValueTypeKind, ValueTypeMutability, ValueTypePersistence,
     },
-    revision::{DefinitionReferenceKind, SourceOrigin, VerifiedStandardLibrarySnapshot},
+    revision::{
+        DefinitionReferenceKind, Sha256Digest, SourceOrigin, VerifiedStandardLibrarySnapshot,
+    },
     types::{ResolvedType, StandardScalar},
 };
 
@@ -1340,6 +1343,817 @@ impl fmt::Display for StandardLibraryCheckError {
 }
 
 impl Error for StandardLibraryCheckError {}
+
+/// Authority required to check application source against a checked standard library.
+#[derive(Clone, Copy, Debug)]
+pub struct StandardApplicationCheckContext<'a> {
+    pub(super) application: &'a CatalogueSnapshot,
+    pub(super) standard: &'a CheckedStandardLibrary,
+}
+
+impl<'a> StandardApplicationCheckContext<'a> {
+    /// Returns the application catalogue used for identity continuity.
+    pub fn application_catalogue(&self) -> &'a CatalogueSnapshot {
+        self.application
+    }
+
+    /// Returns the checked standard library used for type resolution.
+    pub fn standard_library(&self) -> &'a CheckedStandardLibrary {
+        self.standard
+    }
+}
+
+/// A failure while establishing standard-backed application checking authority.
+#[non_exhaustive]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StandardApplicationContextError {
+    /// An application schema has the same durable identity as a standard schema.
+    SchemaIdentityConflict {
+        /// The conflicting durable schema identity.
+        id: SchemaId,
+    },
+    /// An application schema has the same semantic name as a standard schema.
+    SchemaNameConflict {
+        /// The conflicting semantic schema name.
+        name: QualifiedSemanticName,
+    },
+    /// An application type has the same durable identity as a standard value type.
+    TypeIdentityConflict {
+        /// The conflicting durable type identity.
+        id: TypeId,
+    },
+    /// An application binding has the same durable identity as a standard binding.
+    TypeBindingIdentityConflict {
+        /// The conflicting durable binding identity.
+        id: TypeBindingId,
+    },
+    /// A standard value type uses a contract without compiler compatibility support.
+    UnsupportedCompatibilityContract {
+        /// The standard value type with the unsupported contract.
+        type_id: TypeId,
+        /// The unsupported representation contract.
+        contract: String,
+    },
+    /// More than one standard type uses one supported compatibility contract.
+    CompatibilityContractConflict {
+        /// The duplicated representation contract.
+        contract: String,
+    },
+}
+
+impl fmt::Display for StandardApplicationContextError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SchemaIdentityConflict { id } => write!(
+                formatter,
+                "the application catalogue conflicts with standard schema identity {id}"
+            ),
+            Self::SchemaNameConflict { name } => write!(
+                formatter,
+                "the application catalogue conflicts with standard schema name {name}"
+            ),
+            Self::TypeIdentityConflict { id } => write!(
+                formatter,
+                "the application catalogue conflicts with standard type identity {id}"
+            ),
+            Self::TypeBindingIdentityConflict { id } => write!(
+                formatter,
+                "the application catalogue conflicts with standard type binding identity {id}"
+            ),
+            Self::UnsupportedCompatibilityContract { type_id, contract } => write!(
+                formatter,
+                "the standard value type {type_id} uses unsupported compatibility contract {contract}"
+            ),
+            Self::CompatibilityContractConflict { contract } => write!(
+                formatter,
+                "the standard library uses compatibility contract {contract} for more than one type"
+            ),
+        }
+    }
+}
+
+impl Error for StandardApplicationContextError {}
+
+/// The kind and owner of one direct standard-backed application type use.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum CheckedTypeUseKind {
+    /// A direct type written on one object field.
+    Field {
+        /// The checked object type that owns the field.
+        owner: CheckedTypeId,
+        /// The checked field identity.
+        field: CheckedFieldId,
+    },
+    /// A direct type written on one function parameter.
+    Parameter {
+        /// The checked function that owns the parameter.
+        owner: CheckedFunctionId,
+        /// The checked parameter identity.
+        parameter: CheckedParameterId,
+    },
+    /// A direct type written on a function return or `ROWS` column.
+    Return {
+        /// The checked function that declares the return.
+        owner: CheckedFunctionId,
+        /// The zero-based scalar-return or `ROWS`-column ordinal.
+        ordinal: u32,
+    },
+    /// A future value-producing function-body expression use.
+    Expression {
+        /// The checked function that owns the expression.
+        owner: CheckedFunctionId,
+        /// The deterministic body-expression ordinal.
+        ordinal: u32,
+    },
+    /// A future function-body result use.
+    Result {
+        /// The checked function that owns the result.
+        owner: CheckedFunctionId,
+        /// The zero-based declared result ordinal.
+        ordinal: u32,
+    },
+}
+
+/// One direct value-type use resolved through the checked standard library.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CheckedValueTypeUse {
+    pub(super) type_id: TypeId,
+    pub(super) kind: CheckedTypeUseKind,
+    pub(super) location: SourceLocation,
+}
+
+impl CheckedValueTypeUse {
+    /// Returns the durable standard value-type identity.
+    pub const fn type_id(&self) -> TypeId {
+        self.type_id
+    }
+
+    /// Returns the direct declaration use kind.
+    pub const fn kind(&self) -> CheckedTypeUseKind {
+        self.kind
+    }
+
+    /// Returns the exact written type location.
+    pub fn location(&self) -> &SourceLocation {
+        &self.location
+    }
+}
+
+/// One direct object-reference type use in a standard-backed application.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CheckedObjectReferenceUse {
+    pub(super) target: CheckedTypeId,
+    pub(super) kind: CheckedTypeUseKind,
+    pub(super) location: SourceLocation,
+}
+
+impl CheckedObjectReferenceUse {
+    /// Returns the checked application object-type target.
+    pub const fn target(&self) -> CheckedTypeId {
+        self.target
+    }
+
+    /// Returns the direct declaration use kind.
+    pub const fn kind(&self) -> CheckedTypeUseKind {
+        self.kind
+    }
+
+    /// Returns the exact written reference-target location.
+    pub fn location(&self) -> &SourceLocation {
+        &self.location
+    }
+}
+
+/// One direct declared or future body type use in a standard-backed application.
+#[non_exhaustive]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CheckedApplicationTypeUse {
+    /// A resolved standard value-type use.
+    Value(CheckedValueTypeUse),
+    /// A resolved application object-reference use.
+    ObjectReference(CheckedObjectReferenceUse),
+}
+
+impl CheckedApplicationTypeUse {
+    /// Returns the value-type use when this use names a standard value type.
+    pub fn value(&self) -> Option<&CheckedValueTypeUse> {
+        match self {
+            Self::Value(value) => Some(value),
+            Self::ObjectReference(_) => None,
+        }
+    }
+
+    /// Returns the object-reference use when this use is a `REF` target.
+    pub fn object_reference(&self) -> Option<&CheckedObjectReferenceUse> {
+        match self {
+            Self::Value(_) => None,
+            Self::ObjectReference(reference) => Some(reference),
+        }
+    }
+
+    /// Returns the direct declaration use kind.
+    pub const fn kind(&self) -> CheckedTypeUseKind {
+        match self {
+            Self::Value(value) => value.kind,
+            Self::ObjectReference(reference) => reference.kind,
+        }
+    }
+
+    /// Returns the exact written type location.
+    pub fn location(&self) -> &SourceLocation {
+        match self {
+            Self::Value(value) => &value.location,
+            Self::ObjectReference(reference) => &reference.location,
+        }
+    }
+}
+
+/// One standard value-type signature reference reserved for a later evidence row.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CheckedStandardTypeReference {
+    pub(super) owner: CheckedFunctionId,
+    pub(super) ordinal: u32,
+    pub(super) target: TypeId,
+    pub(super) location: SourceLocation,
+}
+
+impl CheckedStandardTypeReference {
+    /// Returns the checked function that declares the type use.
+    pub const fn owner(&self) -> CheckedFunctionId {
+        self.owner
+    }
+
+    /// Returns the flattened zero-based function-signature ordinal.
+    pub const fn ordinal(&self) -> u32 {
+        self.ordinal
+    }
+
+    /// Returns the durable standard value-type identity.
+    pub const fn target(&self) -> TypeId {
+        self.target
+    }
+
+    /// Returns the exact written type location.
+    pub fn location(&self) -> &SourceLocation {
+        &self.location
+    }
+}
+
+/// A standard-backed checking result that cannot convert to a legacy report.
+#[derive(Clone)]
+pub struct StandardApplicationCheckReport {
+    pub(super) standard_library: CheckedStandardLibrary,
+    pub(super) parse_report: ParseReport,
+    pub(super) diagnostics: Vec<CompilerDiagnostic>,
+    pub(super) checked_bundle: Option<CheckedStandardApplicationBundle>,
+}
+
+impl fmt::Debug for StandardApplicationCheckReport {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("StandardApplicationCheckReport")
+            .field("standard_library", &self.standard_library)
+            .field("parse_report", &self.parse_report)
+            .field("diagnostics", &self.diagnostics)
+            .field("checked_bundle", &self.checked_bundle)
+            .finish()
+    }
+}
+
+impl StandardApplicationCheckReport {
+    /// Returns the checked standard library that authorised this result.
+    pub fn standard_library(&self) -> &CheckedStandardLibrary {
+        &self.standard_library
+    }
+
+    /// Returns the retained parse report on success and failure.
+    pub fn parse_report(&self) -> &ParseReport {
+        &self.parse_report
+    }
+
+    /// Returns syntax and semantic diagnostics in source order.
+    pub fn diagnostics(&self) -> &[CompilerDiagnostic] {
+        &self.diagnostics
+    }
+
+    /// Returns the distinct checked standard-application bundle on success.
+    pub fn checked_bundle(&self) -> Option<&CheckedStandardApplicationBundle> {
+        self.checked_bundle.as_ref()
+    }
+}
+
+/// A checked standard-backed application bundle with one canonical type-use arena.
+#[derive(Clone, Eq, PartialEq)]
+pub struct CheckedStandardApplicationBundle {
+    pub(super) inner: CheckedBundle,
+    pub(super) standard_catalogue_revision: CatalogueRevisionId,
+    pub(super) standard_library_revision: StandardLibraryRevisionId,
+    pub(super) standard_library_digest: Sha256Digest,
+    pub(super) uses: Vec<CheckedApplicationTypeUse>,
+    pub(super) standard_type_references: Vec<CheckedStandardTypeReference>,
+    pub(super) use_indices: HashMap<CheckedTypeUseKind, usize>,
+}
+
+impl fmt::Debug for CheckedStandardApplicationBundle {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let object_types = self.object_types().collect::<Vec<_>>();
+        let server_functions = self.server_functions().collect::<Vec<_>>();
+        let client_functions = self.client_functions().collect::<Vec<_>>();
+
+        formatter
+            .debug_struct("CheckedStandardApplicationBundle")
+            .field(
+                "base_catalogue_revision",
+                &self.inner.base_catalogue_revision,
+            )
+            .field(
+                "standard_catalogue_revision",
+                &self.standard_catalogue_revision,
+            )
+            .field("standard_library_revision", &self.standard_library_revision)
+            .field("standard_library_digest", &self.standard_library_digest)
+            .field("schemas", &self.inner.schemas)
+            .field("object_types", &object_types)
+            .field("server_functions", &server_functions)
+            .field("client_functions", &client_functions)
+            .field("uses", &self.uses)
+            .field("standard_type_references", &self.standard_type_references)
+            .finish()
+    }
+}
+
+impl CheckedStandardApplicationBundle {
+    /// Returns the application catalogue revision used for identity continuity.
+    pub const fn base_catalogue_revision(&self) -> CatalogueRevisionId {
+        self.inner.base_catalogue_revision
+    }
+
+    /// Returns the checked standard catalogue revision.
+    pub const fn standard_catalogue_revision(&self) -> CatalogueRevisionId {
+        self.standard_catalogue_revision
+    }
+
+    /// Returns the checked standard-library revision.
+    pub const fn standard_library_revision(&self) -> StandardLibraryRevisionId {
+        self.standard_library_revision
+    }
+
+    /// Returns the checked standard-library digest.
+    pub const fn standard_library_digest(&self) -> Sha256Digest {
+        self.standard_library_digest
+    }
+
+    /// Returns every direct declared or future body type use in canonical order.
+    pub fn uses(&self) -> &[CheckedApplicationTypeUse] {
+        &self.uses
+    }
+
+    /// Returns standard value-type uses without exposing the compatibility scalar.
+    pub fn value_type_uses(&self) -> impl Iterator<Item = &CheckedValueTypeUse> + '_ {
+        self.uses
+            .iter()
+            .filter_map(CheckedApplicationTypeUse::value)
+    }
+
+    /// Returns the initially empty standard type-reference arena.
+    pub fn standard_type_references(&self) -> &[CheckedStandardTypeReference] {
+        &self.standard_type_references
+    }
+
+    /// Returns submitted application schemas in source order.
+    pub fn schemas(&self) -> &[CheckedSchema] {
+        &self.inner.schemas
+    }
+
+    /// Returns scalar-free borrowed object views in source order.
+    pub fn object_types(
+        &self,
+    ) -> impl std::iter::ExactSizeIterator<Item = CheckedStandardApplicationObjectType<'_>> + '_
+    {
+        self.inner
+            .object_types
+            .iter()
+            .map(move |object| CheckedStandardApplicationObjectType {
+                bundle: self,
+                object,
+            })
+    }
+
+    /// Returns scalar-free borrowed SERVER function views in source order.
+    pub fn server_functions(
+        &self,
+    ) -> impl std::iter::ExactSizeIterator<Item = CheckedStandardApplicationServerFunction<'_>> + '_
+    {
+        self.inner.server_functions.iter().map(move |function| {
+            CheckedStandardApplicationServerFunction {
+                bundle: self,
+                function,
+            }
+        })
+    }
+
+    /// Returns scalar-free borrowed CLIENT function views in source order.
+    pub fn client_functions(
+        &self,
+    ) -> impl std::iter::ExactSizeIterator<Item = CheckedStandardApplicationClientFunction<'_>> + '_
+    {
+        self.inner.client_functions.iter().map(move |function| {
+            CheckedStandardApplicationClientFunction {
+                bundle: self,
+                function,
+            }
+        })
+    }
+
+    fn type_use(&self, kind: CheckedTypeUseKind) -> &CheckedApplicationTypeUse {
+        let index = self.use_indices[&kind];
+        &self.uses[index]
+    }
+}
+
+/// A scalar-free borrowed object-type view.
+#[derive(Clone, Copy)]
+pub struct CheckedStandardApplicationObjectType<'a> {
+    bundle: &'a CheckedStandardApplicationBundle,
+    object: &'a CheckedObjectType,
+}
+
+impl fmt::Debug for CheckedStandardApplicationObjectType<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CheckedStandardApplicationObjectType")
+            .field("id", &self.object.id)
+            .field("name", &self.object.name)
+            .field("location", &self.object.location)
+            .finish()
+    }
+}
+
+impl<'a> CheckedStandardApplicationObjectType<'a> {
+    /// Returns the checked object identity.
+    pub const fn id(&self) -> CheckedTypeId {
+        self.object.id
+    }
+
+    /// Returns the object semantic name.
+    pub fn name(&self) -> &QualifiedSemanticName {
+        &self.object.name
+    }
+
+    /// Returns scalar-free field views in declaration order.
+    pub fn fields(
+        &self,
+    ) -> impl std::iter::ExactSizeIterator<Item = CheckedStandardApplicationField<'_>> + '_ {
+        self.object
+            .fields
+            .iter()
+            .map(move |field| CheckedStandardApplicationField {
+                bundle: self.bundle,
+                owner: self.object.id,
+                field,
+            })
+    }
+
+    /// Returns the complete object declaration location.
+    pub fn location(&self) -> &SourceLocation {
+        &self.object.location
+    }
+}
+
+/// A scalar-free borrowed field view.
+#[derive(Clone, Copy)]
+pub struct CheckedStandardApplicationField<'a> {
+    bundle: &'a CheckedStandardApplicationBundle,
+    owner: CheckedTypeId,
+    field: &'a CheckedField,
+}
+
+impl fmt::Debug for CheckedStandardApplicationField<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CheckedStandardApplicationField")
+            .field("id", &self.field.id)
+            .field("name", &self.field.name)
+            .field("ordinal", &self.field.ordinal)
+            .field("location", &self.field.location)
+            .finish()
+    }
+}
+
+impl CheckedStandardApplicationField<'_> {
+    /// Returns the checked field identity.
+    pub const fn id(&self) -> CheckedFieldId {
+        self.field.id
+    }
+
+    /// Returns the field name.
+    pub fn name(&self) -> &str {
+        &self.field.name
+    }
+
+    /// Returns the declaration ordinal.
+    pub const fn ordinal(&self) -> u32 {
+        self.field.ordinal
+    }
+
+    /// Returns the direct resolved type use.
+    pub fn resolved_type(&self) -> &CheckedApplicationTypeUse {
+        self.bundle.type_use(CheckedTypeUseKind::Field {
+            owner: self.owner,
+            field: self.field.id,
+        })
+    }
+
+    /// Reports whether the field accepts null values.
+    pub const fn nullable(&self) -> bool {
+        self.field.nullable
+    }
+
+    /// Reports whether the field is unique.
+    pub const fn unique(&self) -> bool {
+        self.field.unique
+    }
+
+    /// Returns the default value and location when present.
+    pub fn default(&self) -> Option<(&ConstantValue, &SourceLocation)> {
+        self.field
+            .default
+            .as_ref()
+            .map(|default| (&default.value, &default.location))
+    }
+
+    /// Returns the declared delete action when present.
+    pub const fn on_delete(&self) -> Option<OnDeleteAction> {
+        self.field.on_delete
+    }
+
+    /// Returns the complete field declaration location.
+    pub fn location(&self) -> &SourceLocation {
+        &self.field.location
+    }
+}
+
+/// A scalar-free borrowed SERVER function view.
+#[derive(Clone, Copy)]
+pub struct CheckedStandardApplicationServerFunction<'a> {
+    bundle: &'a CheckedStandardApplicationBundle,
+    function: &'a CheckedServerFunction,
+}
+
+impl fmt::Debug for CheckedStandardApplicationServerFunction<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CheckedStandardApplicationServerFunction")
+            .field("id", &self.function.id)
+            .field("name", &self.function.name)
+            .field("location", &self.function.location)
+            .finish()
+    }
+}
+
+impl<'a> CheckedStandardApplicationServerFunction<'a> {
+    /// Returns the checked function identity.
+    pub const fn id(&self) -> CheckedFunctionId {
+        self.function.id
+    }
+
+    /// Returns the function semantic name.
+    pub fn name(&self) -> &QualifiedSemanticName {
+        &self.function.name
+    }
+
+    /// Returns scalar-free parameter views in declaration order.
+    pub fn parameters(
+        &self,
+    ) -> impl std::iter::ExactSizeIterator<Item = CheckedStandardApplicationParameter<'_>> + '_
+    {
+        self.function
+            .parameters
+            .iter()
+            .map(move |parameter| CheckedStandardApplicationParameter {
+                bundle: self.bundle,
+                owner: self.function.id,
+                parameter,
+            })
+    }
+
+    /// Returns scalar-free return-column views in declaration order.
+    pub fn return_columns(
+        &self,
+    ) -> impl std::iter::ExactSizeIterator<Item = CheckedStandardApplicationReturnColumn<'_>> + '_
+    {
+        self.function.return_columns.iter().map(move |column| {
+            CheckedStandardApplicationReturnColumn {
+                bundle: self.bundle,
+                owner: self.function.id,
+                column,
+            }
+        })
+    }
+
+    /// Returns the function security mode.
+    pub const fn security(&self) -> FunctionSecurity {
+        self.function.security
+    }
+
+    /// Returns the declared transaction mode.
+    pub const fn transaction(&self) -> Option<FunctionTransaction> {
+        self.function.transaction
+    }
+
+    /// Returns the declared volatility mode.
+    pub const fn volatility(&self) -> FunctionVolatility {
+        self.function.volatility
+    }
+
+    /// Returns the complete function declaration location.
+    pub fn location(&self) -> &SourceLocation {
+        &self.function.location
+    }
+
+    /// Returns application and object reference evidence in source order.
+    pub fn references(&self) -> &[CheckedDefinitionReference] {
+        &self.function.references
+    }
+}
+
+/// A scalar-free borrowed CLIENT function view.
+#[derive(Clone, Copy)]
+pub struct CheckedStandardApplicationClientFunction<'a> {
+    bundle: &'a CheckedStandardApplicationBundle,
+    function: &'a CheckedClientFunction,
+}
+
+impl fmt::Debug for CheckedStandardApplicationClientFunction<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CheckedStandardApplicationClientFunction")
+            .field("id", &self.function.id)
+            .field("name", &self.function.name)
+            .field("location", &self.function.location)
+            .finish()
+    }
+}
+
+impl<'a> CheckedStandardApplicationClientFunction<'a> {
+    /// Returns the checked function identity.
+    pub const fn id(&self) -> CheckedFunctionId {
+        self.function.id
+    }
+
+    /// Returns the function semantic name.
+    pub fn name(&self) -> &QualifiedSemanticName {
+        &self.function.name
+    }
+
+    /// Returns the function domain.
+    pub const fn domain(&self) -> FunctionDomain {
+        self.function.domain
+    }
+
+    /// Returns an empty scalar-free parameter iterator for the current CLIENT subset.
+    pub fn parameters(
+        &self,
+    ) -> impl std::iter::ExactSizeIterator<Item = CheckedStandardApplicationParameter<'_>> + '_
+    {
+        self.function
+            .parameters
+            .iter()
+            .map(move |parameter| CheckedStandardApplicationParameter {
+                bundle: self.bundle,
+                owner: self.function.id,
+                parameter,
+            })
+    }
+
+    /// Returns the direct declared return-type use.
+    pub fn return_type(&self) -> &CheckedApplicationTypeUse {
+        self.bundle.type_use(CheckedTypeUseKind::Return {
+            owner: self.function.id,
+            ordinal: 0,
+        })
+    }
+
+    /// Returns the function security mode.
+    pub const fn security(&self) -> FunctionSecurity {
+        self.function.security
+    }
+
+    /// Returns the declared transaction mode.
+    pub const fn transaction(&self) -> Option<FunctionTransaction> {
+        self.function.transaction
+    }
+
+    /// Returns the declared volatility mode.
+    pub const fn volatility(&self) -> FunctionVolatility {
+        self.function.volatility
+    }
+
+    /// Returns the complete function declaration location.
+    pub fn location(&self) -> &SourceLocation {
+        &self.function.location
+    }
+
+    /// Returns application and object reference evidence in source order.
+    pub fn references(&self) -> &[CheckedDefinitionReference] {
+        &self.function.references
+    }
+}
+
+/// A scalar-free borrowed function-parameter view.
+#[derive(Clone, Copy)]
+pub struct CheckedStandardApplicationParameter<'a> {
+    bundle: &'a CheckedStandardApplicationBundle,
+    owner: CheckedFunctionId,
+    parameter: &'a CheckedServerFunctionParameter,
+}
+
+impl fmt::Debug for CheckedStandardApplicationParameter<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CheckedStandardApplicationParameter")
+            .field("id", &self.parameter.id)
+            .field("name", &self.parameter.name)
+            .field("ordinal", &self.parameter.ordinal)
+            .field("location", &self.parameter.location)
+            .finish()
+    }
+}
+
+impl CheckedStandardApplicationParameter<'_> {
+    /// Returns the checked parameter identity.
+    pub const fn id(&self) -> CheckedParameterId {
+        self.parameter.id
+    }
+
+    /// Returns the parameter name.
+    pub fn name(&self) -> &str {
+        &self.parameter.name
+    }
+
+    /// Returns the declaration ordinal.
+    pub const fn ordinal(&self) -> u32 {
+        self.parameter.ordinal
+    }
+
+    /// Returns the direct resolved type use.
+    pub fn resolved_type(&self) -> &CheckedApplicationTypeUse {
+        self.bundle.type_use(CheckedTypeUseKind::Parameter {
+            owner: self.owner,
+            parameter: self.parameter.id,
+        })
+    }
+
+    /// Returns the complete parameter declaration location.
+    pub fn location(&self) -> &SourceLocation {
+        &self.parameter.location
+    }
+}
+
+/// A scalar-free borrowed SERVER return-column view.
+#[derive(Clone, Copy)]
+pub struct CheckedStandardApplicationReturnColumn<'a> {
+    bundle: &'a CheckedStandardApplicationBundle,
+    owner: CheckedFunctionId,
+    column: &'a CheckedServerFunctionReturnColumn,
+}
+
+impl fmt::Debug for CheckedStandardApplicationReturnColumn<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CheckedStandardApplicationReturnColumn")
+            .field("name", &self.column.name)
+            .field("ordinal", &self.column.ordinal)
+            .field("location", &self.column.location)
+            .finish()
+    }
+}
+
+impl CheckedStandardApplicationReturnColumn<'_> {
+    /// Returns the return-column name.
+    pub fn name(&self) -> &str {
+        &self.column.name
+    }
+
+    /// Returns the declaration ordinal.
+    pub const fn ordinal(&self) -> u32 {
+        self.column.ordinal
+    }
+
+    /// Returns the direct resolved type use.
+    pub fn resolved_type(&self) -> &CheckedApplicationTypeUse {
+        self.bundle.type_use(CheckedTypeUseKind::Return {
+            owner: self.owner,
+            ordinal: self.column.ordinal,
+        })
+    }
+
+    /// Returns the complete return-column declaration location.
+    pub fn location(&self) -> &SourceLocation {
+        &self.column.location
+    }
+}
 
 /// The result of parsing and checking a source bundle.
 #[derive(Clone, Debug)]
