@@ -1726,6 +1726,88 @@ A successful CLIENT Boolean literal body produces
 `Expression { ordinal: 0 }` and `Result { ordinal: 0 }`, both with the complete
 literal span and the intrinsically resolved Boolean `TypeId`.
 
+### Mutation value provenance
+
+Before mutation evidence is added, syntax retains these complete expression
+spans without changing its closed mutation grammar:
+
+* `InsertStatement::returning_ref_span: SourceSpan`,
+* `UpdateStatement::selector_equality_span: SourceSpan`,
+* `UpdateStatement::selector_ref_span: SourceSpan`,
+* `UpdateStatement::returning_ref_span: SourceSpan`,
+* `DeleteStatement::selector_equality_span: SourceSpan`, and
+* `DeleteStatement::selector_ref_span: SourceSpan`.
+
+`returning_ref_span` starts at `REF` and ends after its closing parenthesis.
+`selector_equality_span` starts at selector `REF` and ends after the selector
+parameter. `selector_ref_span` starts at the selector `REF` token and ends
+after its closing parenthesis. Each includes intervening trivia, including a
+comment before the closing parenthesis. Existing `MutationValue::span()`
+continues to identify the complete right-hand-side parameter, Boolean literal,
+or `NULL` literal. `DeleteStatement::returning_true` continues to identify the
+complete returned `TRUE` literal. Parser tests use mixed-case keywords and
+intervening trivia, retain lossless text, and compare every retained span to
+the exact source substring.
+
+The mutation checker carries a supplied standard value `TypeId` beside its
+private compatibility scalar. It obtains the intrinsic Boolean `TypeId` only
+from the checked `orna.kernel.value.boolean@1` value-type fact. It never
+reverse-maps a `StandardScalar` to a `TypeId`. Mutation assignment
+compatibility compares supplied `TypeId` values, not compatibility scalars.
+Selector `REF` validation continues to compare the checked object
+`CheckedTypeId` target.
+
+A missing checked Boolean fact leaves the six context gates unchanged. Every
+Boolean-producing mutation expression, including a Boolean right-hand side, a
+selector equality, and `DELETE ... RETURNING TRUE`, reports
+`DiagnosticCode::DomainIncompatible` (`ORNA0303`) with the exact existing
+message `the checked standard library does not provide a Boolean value type`
+at its complete expression span. The diagnostic returns no checked standard
+application bundle and no type use. Missing-Boolean tests require exact ordered
+diagnostic vectors. An `INSERT` with a Boolean literal right-hand side reports
+one exact `ORNA0303` at the complete literal span. An `UPDATE` with Boolean
+right-hand-side values and a selector equality reports those right-hand sides
+in source order, then the complete selector-equality span. A `DELETE` with a
+selector equality and `RETURNING TRUE` reports the complete selector-equality
+span, then the complete returned-`TRUE` span. Each vector contains only the
+stated exact `ORNA0303` diagnostics and returns no bundle or uses.
+
+Mutation traversal allocates zero-based `Expression` ordinals in this exact
+order, and visits each parent before its children:
+
+* `INSERT` visits right-hand-side values in source order, then its
+  `RETURNING REF(...)` expression.
+* `UPDATE` visits right-hand-side values in source order, then selector
+  equality, its `REF(...)` child, its parameter child, and its
+  `RETURNING REF(...)` expression.
+* `DELETE` visits selector equality, its `REF(...)` child, its parameter child,
+  then its returned `TRUE` expression.
+
+Assignments and selectors produce no `Result`. An `INSERT` or `UPDATE`
+`RETURNING REF(...)` produces an `ObjectReference` `Expression` and an
+`ObjectReference` `Result { ordinal: 0 }`. It is not a `Value` result. A
+`DELETE ... RETURNING TRUE` produces a `Value` `Expression` and a `Value`
+`Result { ordinal: 0 }`. Every mutation arena use keeps its complete expression
+span. If `Expression` and `Result` share the same span, canonical sorting puts
+`Expression` before `Result`.
+
+The mutation row owns private assignment-compatibility seam tests because the
+public context rejects equal supported contracts on different value `TypeId`
+values. They prove that an equal compatibility scalar with a different supplied
+`TypeId` cannot be assigned, equal supplied IDs can be assigned, and mixed
+present and absent provenance fails compatibility. INSERT reports at the
+parameter span `parameter {name} cannot be inserted into field {field} because
+their types do not match`. UPDATE reports at the parameter span
+`parameter {name} cannot be assigned to field {field} because their types do
+not match`. Selector `REF` validation retains its exact parameter-span
+diagnostic `selector parameter {name} must use REF {target}`. Missing Boolean
+tests cover every stated Boolean-producing mutation expression. A
+self-consistent core-verified non-golden standard with a changed Boolean
+`TypeId` proves that every distinct mutation Boolean path retains that supplied
+ID: INSERT and UPDATE Boolean right-hand sides, UPDATE and DELETE selector
+equalities, and DELETE returned `TRUE`. Legacy mutation assignment
+compatibility, diagnostics, and artefact bytes remain exact.
+
 ### Standard type-reference arena
 
 The active `feat(compiler): resolve types through std` row defines this
@@ -1919,6 +2001,7 @@ together, or the previous version-1 active revision remains authoritative.
 | Standard application bundle and views | Exact base and standard revision/digest accessors; schemas; all six borrowed view derives, accessors, source order, and manual `Debug`; the initially empty standard type-reference arena and accessor; attempted existing object/function family, `SemanticType`, or parallel-copy exposure | `CheckedStandardApplicationBundle` owns its resolver-visible `pub(super) inner: CheckedBundle`, standard revision data, one canonical type-use arena, an initially empty `CheckedStandardTypeReference` arena, and its private type-use lookup. Schemas safely remain a slice. Object, field, SERVER, CLIENT, parameter, and return-column views borrow that one state and return a borrowed `CheckedApplicationTypeUse` for every resolved direct type. Successful current CLIENT views have an empty parameter iterator. |
 | Canonical type-use arena | Field, SERVER parameter, CLIENT parameter rejection, scalar return, each `ROWS` column, direct `REF`, repeated written type, expression, result, coincident expression/result spans, and all ordering ties; each `CheckedTypeUseKind`, `CheckedValueTypeUse`, `CheckedObjectReferenceUse`, and `CheckedApplicationTypeUse` derive and accessor | One arena owns every accepted use exactly once. The active row emits only `Field`, SERVER `Parameter`, and `Return`; both checking paths retain the exact accepted CLIENT-parameter diagnostic, and direct `REF` target spans retain `ObjectReference` uses in the same arena. Later body rows emit `Expression` and `Result` with the stated deterministic ordinals and kind ordering, never `CheckedExpressionId`. Family views borrow the exact arena item. |
 | Relational value provenance | Intrinsic Boolean lookup from the exact Boolean contract; a checked standard library without that type; ordinary SERVER traversal with projections, predicate, nested children, and `ORDER BY`; `REF` and standard-value projection roots; identity-selected projections and selector; CLIENT Boolean literal; owned private relational-seam equality fixtures with equal compatibility scalars and different or equal supplied `TypeId` values, mixed present and absent provenance, and `REF` targets; a self-consistent core-verified non-golden checked standard library with a changed Boolean `TypeId`; public type-use model rustdoc | Boolean provenance comes from the checked `orna.kernel.value.boolean@1` fact's `TypeId`, never from a `StandardScalar` reverse lookup. A missing Boolean fact returns `ORNA0303` with `the checked standard library does not provide a Boolean value type` at each complete Boolean-producing expression span, with no checked bundle or use. SERVER traversal is projection order, predicate, then ordering, with parent-before-children `Expression` uses and one indexed `Result` for every projection root, including `REF`. Identity-selected traversal adds only equality, left `REF`, and right parameter selector expressions after projections, with no selector result; the `REF` and parameter read are `ObjectReference` uses. CLIENT literal evidence is `Expression 0` then `Result 0`. Private relational-seam tests prove equal compatibility scalars with different supplied IDs mismatch, equal supplied IDs match, mixed provenance returns exact `DiagnosticCode::TypeMismatch` (`ORNA0201`) `equality requires expressions with compatible types`, and `REF` equality compares its `CheckedTypeId` target. The public context cannot construct the different-ID duplicate-contract fixture, so that test is private and owned by the relational row. Legacy scalar equality, diagnostics, and artefact bytes remain exact. The non-golden fixture proves relational literal, equality, and CLIENT `Expression`/`Result` uses retain its changed Boolean ID. Public rustdoc states that `Expression` and `Result` are body-capable kinds with complete expression locations. |
+| Mutation expression spans and value provenance | Exact `returning_ref_span`, `selector_equality_span`, and `selector_ref_span` syntax fields; mixed-case and trivia lossless parser cases, including a comment before selector `REF` closing parenthesis; INSERT, UPDATE, and DELETE traversal; right-hand-side values; selector equality, `REF`, and parameter children; `RETURNING REF` and `RETURNING TRUE`; complete spans; coincident `Expression`/`Result` order; private assignment-compatibility seam; ordered multi-Boolean missing diagnostics; changed Boolean `TypeId`; legacy artefacts | The syntax row retains `InsertStatement::returning_ref_span`, `UpdateStatement::selector_equality_span`, `UpdateStatement::selector_ref_span`, `UpdateStatement::returning_ref_span`, `DeleteStatement::selector_equality_span`, and `DeleteStatement::selector_ref_span` as exact complete expression spans. The mutation row carries supplied value `TypeId` provenance beside its private scalar compatibility value. It traverses INSERT right-hand sides then returned `REF`; UPDATE right-hand sides, selector equality, `REF`, parameter, then returned `REF`; and DELETE selector equality, `REF`, parameter, then returned `TRUE`, with zero-based parent-before-children `Expression` ordinals. Assignments and selectors have no `Result`. Returned `REF` is `ObjectReference` `Expression` plus `Result 0`; returned `TRUE` is `Value` `Expression` plus `Result 0`; every body location is complete and an equal-span `Expression` precedes its `Result`. Private seams prove parameter-to-field supplied-`TypeId` compatibility and mixed provenance. At the parameter span, INSERT reports `parameter {name} cannot be inserted into field {field} because their types do not match` and UPDATE reports `parameter {name} cannot be assigned to field {field} because their types do not match`. Selector `CheckedTypeId` validation reports `selector parameter {name} must use REF {target}` at its parameter span. Missing-Boolean tests assert exact `ORNA0303` diagnostics, messages, and spans: one INSERT Boolean-literal right-hand side; UPDATE Boolean right-hand sides in source order then selector equality; and DELETE selector equality then returned `TRUE`, with no bundle or uses. A changed non-golden Boolean `TypeId` appears in every distinct mutation Boolean path. Legacy mutation diagnostics and artefact bytes remain exact. |
 | Standard resolution and compatibility | Every accepted thirteen qualified primary, thirteen qualified binding, and seventeen prelude type spelling; the two schema facts; quoted counterparts; unknown aliases; non-golden supported catalogue facts; each supported, unsupported, and duplicate representation contract | Accepted unquoted type spellings resolve to the checked `TypeId` with lossless source retained; schemas are not type spellings. Quoted input follows exact catalogue lookup. Compatibility is derived privately only from a resolved checked definition and its exact unique supported contract; unsupported-contract checking completes before duplicate-contract checking, and there is no `StandardScalar` to `TypeId` reverse lookup. |
 | Function type-reference evidence | The active row's empty arena and public model; SERVER parameters, SERVER and CLIENT declared returns, and `ROWS` columns with repeated declaration uses; flattened per-function ordinal; source/function reference order; existing application/object reference separation | The function-evidence row populates the existing `CheckedStandardTypeReference` arena. It emits repeated `NamedType` and `ValueType` evidence in the one flattened parameter-then-return signature ordinal, preserves the current CLIENT-parameter rejection, leaves existing application/object references separate, and performs no preparation. |
 | Standard application preparation | Every `PrepareStandardApplicationError` derive, typed fields, exact display, and source; incomplete report; base, standard-presence, catalogue, revision, digest, declaration-arena, body-arena, and reference-arena mismatches; private deterministic allocation retry for every new application catalogue, source, schema, and type ID | `prepare_standard_application` accepts only the distinct report and validates in the stated complete order before shared semantic preflight or allocation. Its private deterministic allocator yields the relevant reserved ID then a non-reserved ID for every new application `CatalogueRevisionId`, `SourceBundleId`, `SourceRevisionId`, copied `SourceUnitId`, `SchemaId`, and `TypeId`, proving retry before candidate catalogue, hash, and revision construction with no candidate collision. It creates no `TypeBindingId`; a later binding row rejects a same-class reserved collision after derivation. It never re-resolves source spelling. Only `Prepare { source }` exposes an error source. |
@@ -2027,6 +2110,42 @@ Tests must prove:
   Boolean `TypeId` proves relational literal and equality evidence and CLIENT
   `Expression 0`/`Result 0` uses retain that supplied ID, with no canonical
   Boolean ID hard-code;
+* mutation syntax retains exact `InsertStatement::returning_ref_span`,
+  `UpdateStatement::selector_equality_span`,
+  `UpdateStatement::selector_ref_span`,
+  `UpdateStatement::returning_ref_span`,
+  `DeleteStatement::selector_equality_span`, and
+  `DeleteStatement::selector_ref_span`; mixed-case mutation keywords and
+  trivia, including a comment before selector `REF` closing parenthesis, prove
+  lossless source and exact complete source substrings for every new span,
+  while existing right-hand-side and returned-`TRUE` spans remain exact;
+* standard mutation traversal records INSERT right-hand sides then returned
+  `REF`; UPDATE right-hand sides, selector equality, selector `REF`, selector
+  parameter, then returned `REF`; and DELETE selector equality, selector
+  `REF`, selector parameter, then returned `TRUE`. It proves zero-based
+  parent-before-children `Expression` ordinals, complete spans,
+  `Expression`-before-`Result` equal-span order, no assignment or selector
+  result, an `ObjectReference` returned-`REF` `Expression` and `Result 0`, and
+  a `Value` returned-`TRUE` `Expression` and `Result 0`;
+* owned private mutation assignment-compatibility seams prove equal
+  compatibility scalars with different supplied `TypeId` values cannot be
+  assigned, equal IDs can be assigned, and mixed present and absent provenance
+  fails compatibility. INSERT retains `parameter {name} cannot be inserted
+  into field {field} because their types do not match` and UPDATE retains
+  `parameter {name} cannot be assigned to field {field} because their types do
+  not match`, both at the parameter span. Selector `REF` retains its exact
+  `selector parameter {name} must use REF {target}` parameter-span diagnostic.
+  Missing Boolean proof asserts one INSERT Boolean-literal right-hand-side
+  `ORNA0303` with the exact message and complete literal span, no bundle, and
+  no use. It also asserts exact ordered `ORNA0303` vectors: UPDATE Boolean
+  right-hand sides in source order followed by selector equality, and DELETE
+  selector equality followed by `RETURNING TRUE`. Every diagnostic has its
+  complete expression span, and each vector returns no bundle or use. A
+  self-consistent core-verified non-golden checked standard with a changed
+  Boolean `TypeId` retains that ID for every distinct mutation Boolean path:
+  INSERT and UPDATE Boolean right-hand sides, UPDATE and DELETE selector
+  equalities, and DELETE returned `TRUE`. Legacy mutation assignment
+  compatibility, diagnostics, and artefact bytes remain exact;
 * the exact private thirteen-contract compatibility table maps only after
   `TypeId` and checked-definition lookup; unsupported contracts complete before
   duplicate contracts; and no `StandardScalar` to `TypeId` reverse lookup
@@ -2096,7 +2215,8 @@ standard-orchestration rows remain within their two-file caps.
 | `feat(compiler): resolve types through std` | `crates/orna-compiler/src/resolver.rs`, `crates/orna-compiler/src/resolver/model.rs`, `crates/orna-compiler/src/lib.rs` | Add `StandardApplicationCheckContext`, `StandardApplicationContextError`, `check_standard_application`, and the distinct standard application report and bundle. The path requires `CheckedStandardLibrary`, separately checks two standard schema facts, preserves all thirteen qualified primaries, thirteen qualified bindings, and seventeen prelude type spellings, derives private compatibility only after checked `TypeId` and contract lookup, records declaration field, SERVER parameter, declared return, and direct `REF` uses, preserves the exact CLIENT-parameter rejection, and defines the empty `CheckedStandardTypeReference` arena. It does not call legacy `check` or `prepare`, accept raw verified authority, emit compiler `Unavailable`, or prepare a report. |
 | `test(compiler): scope declaration type-use assertions` | `crates/orna-compiler/src/lib.rs` | Make the two existing body-bearing, declaration-focused standard-application tests select only `Field`, `Parameter`, and `Return` entries from the canonical `uses()` arena before asserting exact declaration counts, kinds, source order, locations, borrowed views, scalar-free `Debug` output, and the empty successful CLIENT parameter view. The assertions pass unchanged before and after body evidence is added and make no assertion about `Expression` or `Result`. The relational row owns exact body-arena proof in `resolver.rs` and private equality and legacy-artefact proof in `relational.rs`. No production behaviour or public API changes. |
 | `feat(compiler): preserve relational value provenance` | `crates/orna-compiler/src/resolver.rs`, `crates/orna-compiler/src/relational.rs`, `crates/orna-compiler/src/resolver/model.rs` | Carry supplied `TypeId` provenance beside the private scalar compatibility value. Resolve intrinsic Boolean only from the checked `orna.kernel.value.boolean@1` contract fact, never from a scalar reverse map. A missing Boolean fact reports the stated `ORNA0303` at the complete Boolean-producing expression and returns no checked bundle or use; the six context gates remain unchanged. For SERVER queries, traverse projections in declared order, then predicate, then `ORDER BY`, with parent-before-children `Expression` uses and one indexed `Result` for every projection root, including `REF`. For identity-selected queries, after projections record equality, left `REF`, and right parameter as three selector expressions without a selector result. A CLIENT Boolean literal records `Expression 0` then `Result 0`. Value expressions use `Value`. Every object-reference-valued expression, including `REF` and the identity-selector parameter read, uses `ObjectReference`. All body locations are complete expression spans. Equality is by supplied `TypeId`, while `REF` equality is by `CheckedTypeId` target; there is no `CheckedExpressionId` use. Update public model rustdoc so declaration uses identify written target locations and body-capable `Expression`/`Result` kinds identify complete expression locations. This row owns private relational-seam tests because the public context rejects equal-contract, different-ID facts: equal compatibility scalar plus different supplied IDs mismatches, equal IDs match, mixed present and absent provenance returns exact `DiagnosticCode::TypeMismatch` (`ORNA0201`) `equality requires expressions with compatible types`, and legacy scalar equality, diagnostics, and artefact bytes remain exact. A self-consistent core-verified non-golden checked standard with a changed Boolean `TypeId` proves relational literal/equality and CLIENT `Expression`/`Result` uses retain that supplied ID. Standard application preparation remains unavailable. |
-| `feat(compiler): preserve mutation value provenance` | `crates/orna-compiler/src/resolver.rs`, `crates/orna-compiler/src/mutation.rs`, `crates/orna-compiler/src/resolver/model.rs` | Carry supplied `TypeId` provenance beside the private scalar compatibility value for mutation fields, parameters, literals, nulls, assignments, and DELETE Boolean results. Emit the exact `Expression` and `Result` uses and spans; INSERT and UPDATE object results are not value results. The temporary prior relational-only evidence cannot prepare a standard application. |
+| `feat(syntax): retain mutation expression spans` | `crates/orna-syntax/src/lib.rs`, `crates/orna-syntax/src/parser.rs` | Add `InsertStatement::returning_ref_span`, `UpdateStatement::selector_equality_span`, `UpdateStatement::selector_ref_span`, `UpdateStatement::returning_ref_span`, `DeleteStatement::selector_equality_span`, and `DeleteStatement::selector_ref_span`, each a `SourceSpan`. Returned-`REF` and selector-`REF` spans start at `REF` and end after `)`. Selector-equality spans start at `REF` and end after the selector parameter. They retain every intervening trivia byte, including a comment before selector `REF` closing parenthesis. Existing `MutationValue::span()` and `DeleteStatement::returning_true` retain right-hand-side and returned-`TRUE` spans. Mixed-case and trivia parser tests prove exact lossless text and each literal source range. |
+| `feat(compiler): preserve mutation value provenance` | `crates/orna-compiler/src/resolver.rs`, `crates/orna-compiler/src/mutation.rs`, `crates/orna-compiler/src/resolver/model.rs` | Carry supplied standard `TypeId` provenance beside the private scalar compatibility value for mutation fields, parameters, literals, nulls, assignments, selectors, and results. Resolve intrinsic Boolean only from the checked `orna.kernel.value.boolean@1` contract fact. Never reverse-map a scalar to `TypeId`. A missing Boolean reports the stated `ORNA0303` at every complete Boolean-producing mutation expression and returns no checked bundle or use. Tests require one INSERT Boolean-literal right-hand-side diagnostic with the exact message and complete literal span, no bundle, and no use; exact ordered multi-Boolean vectors then require UPDATE Boolean right-hand sides in source order, then selector equality, and DELETE selector equality, then returned `TRUE`. Traverse INSERT right-hand-side values then `RETURNING REF`; UPDATE right-hand-side values, selector equality, selector `REF`, selector parameter, then `RETURNING REF`; and DELETE selector equality, selector `REF`, selector parameter, then `RETURNING TRUE`. Allocate zero-based parent-before-children `Expression` ordinals. Assignments and selectors have no `Result`. INSERT and UPDATE returned `REF` are `ObjectReference` `Expression` plus `Result { ordinal: 0 }`, not value results. DELETE returned `TRUE` is `Value` `Expression` plus `Result { ordinal: 0 }`. All locations use exact complete spans and equal-span `Expression` precedes `Result`. Assignment compatibility is by supplied `TypeId`; selector `REF` validation is by `CheckedTypeId` target. Private mutation seams prove compatible and incompatible supplied IDs and mixed provenance. At the parameter span, INSERT reports `parameter {name} cannot be inserted into field {field} because their types do not match`, UPDATE reports `parameter {name} cannot be assigned to field {field} because their types do not match`, and selector validation reports `selector parameter {name} must use REF {target}`. A self-consistent core-verified non-golden checked standard with a changed Boolean `TypeId` retains that ID in every distinct mutation Boolean path: INSERT and UPDATE Boolean right-hand sides, UPDATE and DELETE selector equalities, and DELETE returned `TRUE`; legacy mutation assignment compatibility, diagnostics, and artefact bytes remain exact. The temporary prior relational-only evidence cannot prepare a standard application. |
 | `feat(compiler): reference standard function types` | `crates/orna-compiler/src/resolver.rs`, `crates/orna-compiler/src/resolver/model.rs` | Populate the existing compiler-owned source/function-order `CheckedStandardTypeReference` arena with repeated `ValueType`/`NamedType` signature evidence for every SERVER parameter, every SERVER and CLIENT declared return, and every `ROWS` column, using the one flattened zero-based signature ordinal. Preserve the exact CLIENT-parameter rejection. Existing application/object references remain separate. This unconditional row is evidence-only and performs no preparation. |
 | `fix(postgres): guard standard context transitions` | `crates/orna-kernel-postgres/src/apply.rs`, `crates/orna-kernel-postgres/src/lib.rs`, `crates/orna-kernel-postgres/tests/apply.rs` | Define `StandardContextIdentity` and exact source-free `PostgresKernelError` transition and mismatch variants. After expected-base recovery, normal apply rejects every version-1/version-2 transition and requires equal version-2 contexts before materialisation, planning, or writes. The guard rejects a borrowed version-2 candidate from version 1 and context-locks it in version 2. |
 | `feat(compiler): prepare standard applications` | `crates/orna-compiler/src/prepare.rs`, `crates/orna-compiler/src/resolver/model.rs`, `crates/orna-compiler/src/lib.rs` | Add `prepare_standard_application(&StandardApplicationCheckReport, RevisionPair, &ActiveDatabaseRevision) -> Result<DeployableRevision, PrepareStandardApplicationError>` with the exact report-completeness, base, active-standard, arena-evidence, semantic-preflight, then allocation order. Its private retry allocator excludes same-class reserved IDs for every new application catalogue, source, schema, and type ID before candidate construction, with deterministic reserved-then-non-reserved proof and no public retry error. It creates no `TypeBindingId`; a later binding row rejects a post-derivation reserved collision. It accepts no legacy `CheckReport`, preserves report separation, and owns all standard-application preparation rejection and durable evidence proof. |
