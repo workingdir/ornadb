@@ -298,6 +298,10 @@ pub fn check_standard_application(
     let checked_bundle = checked_bundle.map(|inner| {
         let standard_type_references =
             collect_standard_type_references(&uses, &inner, &parse_report);
+        let preparation_evidence = model::StandardApplicationPreparationEvidence::from_canonical(
+            &uses,
+            &standard_type_references,
+        );
         CheckedStandardApplicationBundle {
             inner,
             standard_catalogue_revision: snapshot.catalogue().revision(),
@@ -306,6 +310,7 @@ pub fn check_standard_application(
             uses,
             standard_type_references,
             use_indices,
+            preparation_evidence,
         }
     });
 
@@ -4586,7 +4591,7 @@ mod tests {
     }
 
     #[test]
-    fn derives_standard_function_references_from_canonical_declaration_uses() {
+    fn retains_standard_preparation_evidence_from_canonical_uses_and_references() {
         let changed_boolean = TypeId::from_bytes([0x53; 16]);
         let snapshot = verified_standard_library_for_relational_test_with_boolean_id(
             changed_boolean,
@@ -4684,6 +4689,184 @@ mod tests {
                     second_boolean + "std.BOOLEAN".len(),
                 ),
             ]
+        );
+        assert_eq!(
+            checked.preparation_evidence.type_uses,
+            checked.uses(),
+            "preparation evidence must retain the canonical type-use arena after sorting"
+        );
+        let evidence_paths = checked.preparation_evidence.type_uses.iter().fold(
+            Vec::new(),
+            |mut paths, type_use| {
+                let path = type_use.location().logical_path();
+                if paths.last().is_none_or(|previous| *previous != path) {
+                    paths.push(path);
+                }
+                paths
+            },
+        );
+        assert_eq!(
+            evidence_paths,
+            vec![
+                "z-first-server.orna",
+                "a-client.orna",
+                "y-second-server.orna",
+                "m-declarations.orna",
+            ],
+            "canonical source-unit order is insertion order, not logical-path order"
+        );
+        assert_eq!(
+            checked.preparation_evidence.standard_type_references, checked.standard_type_references,
+            "preparation evidence must retain the canonical flattened signature references"
+        );
+
+        let object_types = checked.object_types().collect::<Vec<_>>();
+        let [item] = object_types.as_slice() else {
+            assert_eq!(object_types.len(), 1);
+            return;
+        };
+        let fields = item.fields().collect::<Vec<_>>();
+        let [done] = fields.as_slice() else {
+            assert_eq!(fields.len(), 1);
+            return;
+        };
+        let first_ref = first_server.find("p_ref REF app.item").unwrap() + "p_ref REF ".len();
+        let created_ref = first_server.find("created REF app.item").unwrap() + "created REF ".len();
+        let second_ref = second_server.find("p_ref REF app.item").unwrap() + "p_ref REF ".len();
+        let field_boolean = declarations.find("done BOOLEAN").unwrap() + "done ".len();
+        assert_eq!(
+            checked
+                .preparation_evidence
+                .declaration_uses
+                .iter()
+                .map(|type_use| {
+                    (
+                        type_use.kind(),
+                        type_use.value().map(CheckedValueTypeUse::type_id),
+                        type_use
+                            .object_reference()
+                            .map(|reference| reference.target()),
+                        type_use.location().logical_path().to_owned(),
+                        type_use.location().span().start(),
+                        type_use.location().span().end(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    CheckedTypeUseKind::Parameter {
+                        owner: create.id(),
+                        parameter: create.parameters().next().unwrap().id(),
+                    },
+                    None,
+                    Some(item.id()),
+                    "z-first-server.orna".to_owned(),
+                    first_ref,
+                    first_ref + "app.item".len(),
+                ),
+                (
+                    CheckedTypeUseKind::Parameter {
+                        owner: create.id(),
+                        parameter: create.parameters().nth(1).unwrap().id(),
+                    },
+                    Some(changed_boolean),
+                    None,
+                    "z-first-server.orna".to_owned(),
+                    first_boolean,
+                    first_boolean + "BOOLEAN".len(),
+                ),
+                (
+                    CheckedTypeUseKind::Parameter {
+                        owner: create.id(),
+                        parameter: create.parameters().nth(2).unwrap().id(),
+                    },
+                    Some(changed_boolean),
+                    None,
+                    "z-first-server.orna".to_owned(),
+                    first_alias,
+                    first_alias + "std.BOOLEAN".len(),
+                ),
+                (
+                    CheckedTypeUseKind::Return {
+                        owner: create.id(),
+                        ordinal: 0,
+                    },
+                    None,
+                    Some(item.id()),
+                    "z-first-server.orna".to_owned(),
+                    created_ref,
+                    created_ref + "app.item".len(),
+                ),
+                (
+                    CheckedTypeUseKind::Return {
+                        owner: enabled.id(),
+                        ordinal: 0,
+                    },
+                    Some(changed_boolean),
+                    None,
+                    "a-client.orna".to_owned(),
+                    client_boolean,
+                    client_boolean + "std.BOOLEAN".len(),
+                ),
+                (
+                    CheckedTypeUseKind::Parameter {
+                        owner: list.id(),
+                        parameter: list.parameters().next().unwrap().id(),
+                    },
+                    None,
+                    Some(item.id()),
+                    "y-second-server.orna".to_owned(),
+                    second_ref,
+                    second_ref + "app.item".len(),
+                ),
+                (
+                    CheckedTypeUseKind::Return {
+                        owner: list.id(),
+                        ordinal: 0,
+                    },
+                    Some(changed_boolean),
+                    None,
+                    "y-second-server.orna".to_owned(),
+                    second_boolean,
+                    second_boolean + "std.BOOLEAN".len(),
+                ),
+                (
+                    CheckedTypeUseKind::Field {
+                        owner: item.id(),
+                        field: done.id(),
+                    },
+                    Some(changed_boolean),
+                    None,
+                    "m-declarations.orna".to_owned(),
+                    field_boolean,
+                    field_boolean + "BOOLEAN".len(),
+                ),
+            ]
+        );
+        let made_ref = first_server.find("REF(made)").unwrap();
+        assert_eq!(
+            checked
+                .preparation_evidence
+                .type_uses
+                .iter()
+                .filter(|type_use| {
+                    type_use.location().logical_path() == "z-first-server.orna"
+                        && type_use.location().span().start() == made_ref
+                        && type_use.location().span().end() == made_ref + "REF(made)".len()
+                })
+                .map(CheckedApplicationTypeUse::kind)
+                .collect::<Vec<_>>(),
+            vec![
+                CheckedTypeUseKind::Expression {
+                    owner: create.id(),
+                    ordinal: 1,
+                },
+                CheckedTypeUseKind::Result {
+                    owner: create.id(),
+                    ordinal: 0,
+                },
+            ],
+            "the sealed full arena must retain Expression-before-Result at a coincident span"
         );
 
         let create_declaration_uses = checked

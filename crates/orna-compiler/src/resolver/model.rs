@@ -1667,6 +1667,67 @@ impl StandardApplicationCheckReport {
     }
 }
 
+/// Sealed canonical resolver evidence retained for standard preparation.
+///
+/// This is crate-private. It copies the canonical use and reference sequences
+/// after resolver ordering. It does not provide lookup or resolution logic.
+#[derive(Clone, Eq, PartialEq)]
+pub(crate) struct StandardApplicationPreparationEvidence {
+    pub(super) declaration_uses: Vec<CheckedApplicationTypeUse>,
+    pub(super) type_uses: Vec<CheckedApplicationTypeUse>,
+    pub(super) standard_type_references: Vec<CheckedStandardTypeReference>,
+}
+
+impl StandardApplicationPreparationEvidence {
+    pub(super) fn from_canonical(
+        type_uses: &[CheckedApplicationTypeUse],
+        standard_type_references: &[CheckedStandardTypeReference],
+    ) -> Self {
+        Self {
+            declaration_uses: type_uses
+                .iter()
+                .filter(|type_use| Self::is_declaration_use(type_use.kind()))
+                .cloned()
+                .collect(),
+            type_uses: type_uses.to_vec(),
+            standard_type_references: standard_type_references.to_vec(),
+        }
+    }
+
+    fn is_declaration_use(kind: CheckedTypeUseKind) -> bool {
+        match kind {
+            CheckedTypeUseKind::Field { .. }
+            | CheckedTypeUseKind::Parameter { .. }
+            | CheckedTypeUseKind::Return { .. } => true,
+            CheckedTypeUseKind::Expression { .. } | CheckedTypeUseKind::Result { .. } => false,
+        }
+    }
+
+    #[allow(
+        dead_code,
+        reason = "the following standard preparation row consumes this sealed resolver projection"
+    )]
+    pub(crate) fn declaration_uses(&self) -> &[CheckedApplicationTypeUse] {
+        &self.declaration_uses
+    }
+
+    #[allow(
+        dead_code,
+        reason = "the following standard preparation row consumes this sealed resolver projection"
+    )]
+    pub(crate) fn type_uses(&self) -> &[CheckedApplicationTypeUse] {
+        &self.type_uses
+    }
+
+    #[allow(
+        dead_code,
+        reason = "the following standard preparation row consumes this sealed resolver projection"
+    )]
+    pub(crate) fn standard_type_references(&self) -> &[CheckedStandardTypeReference] {
+        &self.standard_type_references
+    }
+}
+
 /// A checked standard-backed application bundle with one canonical type-use arena.
 #[derive(Clone, Eq, PartialEq)]
 pub struct CheckedStandardApplicationBundle {
@@ -1677,6 +1738,11 @@ pub struct CheckedStandardApplicationBundle {
     pub(super) uses: Vec<CheckedApplicationTypeUse>,
     pub(super) standard_type_references: Vec<CheckedStandardTypeReference>,
     pub(super) use_indices: HashMap<CheckedTypeUseKind, usize>,
+    #[allow(
+        dead_code,
+        reason = "the following standard preparation row consumes this sealed resolver projection"
+    )]
+    pub(super) preparation_evidence: StandardApplicationPreparationEvidence,
 }
 
 impl fmt::Debug for CheckedStandardApplicationBundle {
