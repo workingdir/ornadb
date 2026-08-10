@@ -1,0 +1,14 @@
+[package]
+name = "orna-client"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+orna-artifact = { path = "../orna-artifact" }
+orna-core = { path = "../orna-core" }
+
+[dev-dependencies]
+orna-compiler = { path = "../orna-compiler" }
+orna-standard = { path = "../orna-standard" }
