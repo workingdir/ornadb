@@ -1313,7 +1313,6 @@ mod tests {
 
         assert_eq!(report.diagnostics(), &[]);
         let checked = report.checked_bundle().unwrap();
-        assert_eq!(checked.uses().len(), 4);
 
         let objects = checked.object_types().collect::<Vec<_>>();
         let servers = checked.server_functions().collect::<Vec<_>>();
@@ -1329,6 +1328,44 @@ mod tests {
         assert_eq!(parameters.len(), 1);
         assert_eq!(columns.len(), 1);
         assert_eq!(clients[0].parameters().count(), 0);
+
+        let declaration_uses = checked
+            .uses()
+            .iter()
+            .filter(|type_use| {
+                matches!(
+                    type_use.kind(),
+                    CheckedTypeUseKind::Field { .. }
+                        | CheckedTypeUseKind::Parameter { .. }
+                        | CheckedTypeUseKind::Return { .. }
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(declaration_uses.len(), 4);
+        assert_eq!(
+            declaration_uses
+                .iter()
+                .map(|type_use| type_use.kind())
+                .collect::<Vec<_>>(),
+            [
+                CheckedTypeUseKind::Field {
+                    owner: objects[0].id(),
+                    field: fields[0].id(),
+                },
+                CheckedTypeUseKind::Parameter {
+                    owner: servers[0].id(),
+                    parameter: parameters[0].id(),
+                },
+                CheckedTypeUseKind::Return {
+                    owner: servers[0].id(),
+                    ordinal: 0,
+                },
+                CheckedTypeUseKind::Return {
+                    owner: clients[0].id(),
+                    ordinal: 0,
+                },
+            ]
+        );
 
         assert_eq!(
             fields[0]
@@ -1353,7 +1390,10 @@ mod tests {
             Some(TypeId::from_bytes([3; 16]))
         );
         let reference_start = source.find("app.flag) RETURNS").unwrap();
-        assert_eq!(checked.uses()[1].location().span().start(), reference_start);
+        assert_eq!(
+            declaration_uses[1].location().span().start(),
+            reference_start
+        );
         assert!(checked.standard_type_references().is_empty());
 
         let debug_values = [
@@ -1731,7 +1771,7 @@ mod tests {
     }
 
     #[test]
-    fn standard_type_use_arena_is_ordered_by_written_source_not_declaration_family() {
+    fn standard_declaration_type_uses_are_ordered_by_written_source_not_declaration_family() {
         let standard = check_standard_library_source(&verified_standard_source_fixture()).unwrap();
         let application = CatalogueSnapshot::new(
             CatalogueRevisionId::from_bytes([0x3a; 16]),
@@ -1750,18 +1790,30 @@ mod tests {
 
         assert_eq!(report.diagnostics(), &[]);
         let checked = report.checked_bundle().unwrap();
-        assert_eq!(checked.uses().len(), 2);
+        let declaration_uses = checked
+            .uses()
+            .iter()
+            .filter(|type_use| {
+                matches!(
+                    type_use.kind(),
+                    CheckedTypeUseKind::Field { .. }
+                        | CheckedTypeUseKind::Parameter { .. }
+                        | CheckedTypeUseKind::Return { .. }
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(declaration_uses.len(), 2);
         assert!(matches!(
-            checked.uses()[0].kind(),
+            declaration_uses[0].kind(),
             CheckedTypeUseKind::Return { .. }
         ));
         assert!(matches!(
-            checked.uses()[1].kind(),
+            declaration_uses[1].kind(),
             CheckedTypeUseKind::Field { .. }
         ));
         assert!(
-            checked.uses()[0].location().span().start()
-                < checked.uses()[1].location().span().start()
+            declaration_uses[0].location().span().start()
+                < declaration_uses[1].location().span().start()
         );
     }
 
