@@ -1321,7 +1321,6 @@ pub enum StandardApplicationContextError {
     SchemaNameConflict { name: QualifiedSemanticName },
     TypeIdentityConflict { id: TypeId },
     TypeBindingIdentityConflict { id: TypeBindingId },
-    TypeNameConflict { name: TypeLookupName },
     UnsupportedCompatibilityContract { type_id: TypeId, contract: String },
     CompatibilityContractConflict { contract: String },
 }
@@ -1335,7 +1334,6 @@ Its exact actionable `Display` text is:
 | `SchemaNameConflict` | `the application catalogue conflicts with standard schema name {name}` |
 | `TypeIdentityConflict` | `the application catalogue conflicts with standard type identity {id}` |
 | `TypeBindingIdentityConflict` | `the application catalogue conflicts with standard type binding identity {id}` |
-| `TypeNameConflict` | `the application catalogue conflicts with standard type name {name}` |
 | `UnsupportedCompatibilityContract` | `the standard value type {type_id} uses unsupported compatibility contract {contract}` |
 | `CompatibilityContractConflict` | `the standard library uses compatibility contract {contract} for more than one type` |
 
@@ -1347,17 +1345,18 @@ gates over every checked fact before it starts the next gate:
 2. schema names;
 3. type identities;
 4. type-binding identities;
-5. primary type names;
-6. qualified binding names;
-7. prelude binding names;
-8. complete unsupported-contract mapping; and
-9. complete duplicate-contract detection.
+5. complete unsupported-contract mapping; and
+6. complete duplicate-contract detection.
 
-The first seven gates compare the appropriate checked standard facts with the
+The first four gates compare the appropriate checked standard facts with the
 application catalogue. The final two gates derive private compatibility from
-the checked value-type facts. A context cannot substitute a raw verified
-snapshot, manifest, standard digest, or trust flag for
-`CheckedStandardLibrary`.
+the checked value-type facts. A valid application primary or qualified
+`std.*` name collision requires the standard parent schema, so
+`SchemaNameConflict` rejects it at gate 2. Every qualified or prelude
+binding-name collision has the same core-derived `TypeBindingId`, so
+`TypeBindingIdentityConflict` rejects it at gate 4. No later type-name winner
+or error exists. A context cannot substitute a raw verified snapshot, manifest,
+standard digest, or trust flag for `CheckedStandardLibrary`.
 
 `StandardApplicationCheckReport` is a distinct public result. It derives
 `Clone` and implements `Debug` manually. It owns a clone of the exact
@@ -1838,7 +1837,7 @@ together, or the previous version-1 active revision remains authoritative.
 | Authority boundary | A core-verified self-consistent non-golden snapshot, including changed logical path, whitespace, comment, content, declaration order, durable identities, or supported-family counts when source, catalogue, and origins agree; a compiler dependency review | The compiler checker proves source, catalogue, and origin agreement only. It accepts the self-consistent non-golden case, has no `orna-standard` dependency, does not recheck the accepted digest, and does not create installable state. |
 | Ordinary path compatibility | Protected application `std` owner, kernel contract, qualified export, and prelude export cases; syntax-error precedence; all established scalar spellings and rejected aliases | Ordinary checking preserves the exact `ORNA0303` diagnostics, spans, category order, scalar compatibility adapter, accepted aliases, and rejected aliases. The trusted checker never calls ordinary `check_parsed`. |
 | Standard application capability | Exact `StandardApplicationCheckContext<'a>` derive, private fields, constructor, accessors, and accepted `CheckedStandardLibrary` capability; raw verified snapshot, manifest, digest, trust flag, and absent checked standard capability | Only the unforgeable, already reconciled `CheckedStandardLibrary` enters `try_new`. The context trusts its checked source-ordered facts and uses its owned snapshot catalogue for lookup without rerunning retained-source reconciliation. It neither accepts nor returns an unavailable-standard-library error, and it does not enforce the accepted `orna.std/1` golden. |
-| Context gate order and errors | Schema-ID, schema-name, type-ID, binding-ID, primary-name, qualified-binding-name, prelude-binding-name, unsupported-contract, and duplicate-contract conflicts; simultaneous conflicts in every adjacent pair; each `StandardApplicationContextError` derive, exact display, and absent error source | Each complete source-ordered fact class finishes before the next begins: schema IDs, schema names, type IDs, binding IDs, primary names, qualified binding names, prelude binding names, unsupported contracts, then duplicate contracts. No map or lookup insertion selects a winner. Each public non-exhaustive context error has the exact typed field, `Display`, and `Error::source() == None`. |
+| Context gate order and errors | Schema-ID, schema-name, type-ID, binding-ID, unsupported-contract, and duplicate-contract conflicts; simultaneous conflicts in every adjacent pair; a valid primary or qualified `std.*` collision with its standard parent schema; qualified and prelude binding-name collisions with their same core-derived `TypeBindingId`; each `StandardApplicationContextError` derive, exact display, and absent error source | Each complete source-ordered fact class finishes before the next begins: schema IDs, schema names, type IDs, type-binding IDs, unsupported contracts, then duplicate contracts. No map or lookup insertion selects a winner. `SchemaNameConflict` at gate 2 structurally subsumes primary and qualified `std.*` name collisions. `TypeBindingIdentityConflict` at gate 4 structurally subsumes qualified and prelude binding-name collisions. No later type-name winner or error exists. Each public non-exhaustive context error has the exact typed field, `Display`, and `Error::source() == None`. |
 | Standard application report separation | Success, diagnostics, and clone/debug cases; attempted `CheckReport` or `CheckedBundle` conversion, dereference, borrow, inner access, extraction, and legacy preparation | `StandardApplicationCheckReport` owns the exact checked standard-library clone, parse report, diagnostics, and optional distinct standard application bundle. Its four accessors are exact. It has no legacy report or bundle escape hatch and cannot enter legacy preparation. |
 | Standard application bundle and views | Exact base and standard revision/digest accessors; schemas; all six borrowed view derives, accessors, source order, and manual `Debug`; the initially empty standard type-reference arena and accessor; attempted existing object/function family, `SemanticType`, or parallel-copy exposure | `CheckedStandardApplicationBundle` owns its resolver-visible `pub(super) inner: CheckedBundle`, standard revision data, one canonical type-use arena, an initially empty `CheckedStandardTypeReference` arena, and its private type-use lookup. Schemas safely remain a slice. Object, field, SERVER, CLIENT, parameter, and return-column views borrow that one state and return a borrowed `CheckedApplicationTypeUse` for every resolved direct type. |
 | Canonical type-use arena | Field, SERVER and CLIENT parameter, scalar return, each `ROWS` column, direct `REF`, repeated written type, expression, result, coincident expression/result spans, and all ordering ties; each `CheckedTypeUseKind`, `CheckedValueTypeUse`, `CheckedObjectReferenceUse`, and `CheckedApplicationTypeUse` derive and accessor | One arena owns every use exactly once. The active row emits only `Field`, `Parameter`, and `Return`; direct `REF` target spans retain `ObjectReference` uses in the same arena. Later body rows emit `Expression` and `Result` with the stated deterministic ordinals and kind ordering, never `CheckedExpressionId`. Family views borrow the exact arena item. |
@@ -1926,9 +1925,10 @@ Tests must prove:
   duplicate contracts; and no `StandardScalar` to `TypeId` reverse lookup
   exists;
 * standard application contexts trust the unforgeable checked standard
-  capability, complete every schema/type/binding name and identity gate in the
-  specified source-order sequence, and expose each typed conflict with exact
-  display and no error source;
+  capability, complete schema identity, schema name, type identity,
+  type-binding identity, unsupported-contract, then duplicate-contract gates
+  in the specified source-order sequence, and expose each typed conflict with
+  exact display and no error source;
 * all six borrowed standard application views have their exact derives,
   accessors, manual debug contract, and single-arena behaviour; and
 * function type-reference and standard-application preparation evidence have
