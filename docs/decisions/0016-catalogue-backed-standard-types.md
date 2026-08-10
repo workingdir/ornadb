@@ -1992,6 +1992,159 @@ be prepared`, and `Error::source()` returns the stated `PrepareError`. The
 later `feat(client): prepare catalogue Boolean constants` row owns CLIENT
 preparation acceptance.
 
+#### Later CLIENT preparation extension
+
+The later `feat(client): prepare catalogue Boolean constants` row replaces only
+the staged CLIENT rejection. Gates 1 through 10 remain in their stated order.
+At gate 10, after the exact retained standard-reference comparison, each
+checked CLIENT function must have exactly one retained reference slot for its
+written return type. The slot has the same owner, ordinal `0`, resolved
+`TypeId`, and location. Gate 11 consumes that validated slot. It does not
+derive a CLIENT signature slot again.
+
+Before CLIENT semantic checks, gate 11 completes this common preflight in exact
+order:
+
+1. source-unit count first, then each retained-order source unit's duplicate
+   logical path before that unit's content size;
+2. checked schemas in retained order; object types in retained order, each
+   object declaration then fields in retained order with a field then its
+   optional default; SERVER functions in checked source order, each declaration,
+   parameters in declaration order, return columns in declaration order, then
+   definition references in retained order; then CLIENT functions in checked
+   source order, each declaration, parameters in declaration order, return
+   slot, Boolean body literal, then application-definition references in
+   retained order;
+3. unique fields;
+4. field renames; and
+5. for each SERVER function in checked source order, reference count first,
+   then that function's reference kinds in retained order, then existing active
+   continuity.
+
+The second item validates each listed location. A location failure
+returns:
+
+```rust
+PrepareStandardApplicationError::Prepare {
+    source: PrepareError::InvalidSourceLocation {
+        logical_path,
+        byte_start,
+        byte_end,
+    },
+}
+```
+
+It does not return `InvalidCheckedBundle` for a location failure. At the end
+of each SERVER function's step-5 reference checks, an existing
+`CheckedFunctionId` must resolve in the active catalogue to the same
+`FunctionId`, exact semantic name, and `FunctionDomain::Server`. Otherwise
+preparation returns:
+
+```rust
+PrepareStandardApplicationError::Prepare {
+    source: PrepareError::ExistingDefinitionMismatch {
+        definition: DefinitionIdentity::Function(id),
+    },
+}
+```
+
+Its exact outer display is `the standard application could not be prepared:
+existing checked definition differs from active catalogue`, and
+`Error::source()` returns that `PrepareError`. SERVER continuity completes
+before any CLIENT semantic check. After all five common-preflight steps
+complete, gate 11 validates CLIENT functions in checked source order with these
+semantic checks in this exact order. Each semantic failure returns
+`PrepareStandardApplicationError::Prepare { source:
+PrepareError::InvalidCheckedBundle { reason } }` with the listed exact reason:
+
+1. the function domain is CLIENT, otherwise
+   `checked CLIENT function has an unsupported domain`;
+2. the function has no parameters, otherwise
+   `checked CLIENT function declares parameters`;
+3. the return use is `Value`, its compatibility projection is
+   `SemanticType::Scalar(StandardScalar::Boolean)`, its `TypeId` resolves to
+   an exact checked standard value-type definition, and that definition's
+   representation contract is exactly `orna.kernel.value.boolean@1`, otherwise
+   `checked CLIENT function does not return BOOLEAN from the checked standard library`;
+4. the security mode is `Invoker`, otherwise
+   `checked CLIENT function has an unsupported security mode`;
+5. the transaction mode is `None`, otherwise
+   `checked CLIENT function has an unsupported transaction mode`;
+6. the volatility mode is `Immutable`, otherwise
+   `checked CLIENT function has an unsupported volatility mode`;
+7. the checked body is a Boolean literal, otherwise
+   `checked CLIENT function has an unsupported body`; and
+8. the existing application definition-reference sequence is empty, otherwise
+   `checked CLIENT function contains unsupported application definition references`.
+
+The return check starts with the resolved `TypeId`, finds the checked standard
+value-type definition by that ID, and compares its exact contract. It also
+requires the stated Boolean compatibility projection. It does not select a
+Boolean by source spelling or reverse-map a compatibility scalar. Gate 11
+completes the common preflight and every CLIENT validation in the bundle before
+gate 12 allocation. It does not silently omit a checked CLIENT function.
+
+Immediately after the eight semantic checks succeed for one CLIENT function,
+before gate 11 advances to the next CLIENT function and before gate 12,
+existing identity continuity is exact. An existing `CheckedFunctionId` must
+resolve in the active catalogue to the same `FunctionId`, exact semantic name,
+and `FunctionDomain::Client`. Otherwise preparation returns:
+
+```rust
+PrepareStandardApplicationError::Prepare {
+    source: PrepareError::ExistingDefinitionMismatch {
+        definition: DefinitionIdentity::Function(id),
+    },
+}
+```
+
+Its exact outer display is `the standard application could not be prepared:
+existing checked definition differs from active catalogue`, and
+`Error::source()` returns that `PrepareError`. A provisional CLIENT function
+gets a new `FunctionId` only at gate 12.
+
+The shared `IdentityMap::functions` map contains both SERVER and CLIENT checked
+function IDs. Its existing duplicate insertion rule therefore rejects a
+duplicate checked ID across domains. The sole candidate-function ordering
+authority is the already gate-8-validated canonical declaration-evidence
+sequence. It scans that sequence once and retains the first occurrence of each
+function owner. It does not merge parse order, location order, or SERVER and
+CLIENT family iteration. Before candidate collection, every checked SERVER and
+CLIENT owner must appear exactly once in this derived unique-owner vector.
+Otherwise preparation returns the existing wrapped
+`PrepareError::InvalidCheckedBundle { reason: "checked standard function owners do not match declaration evidence" }`.
+Function definitions, `DefinitionOrigin::Function` values, current function
+revisions, and final function-reference groups follow this vector order.
+
+After gate 11 succeeds, a small dedicated CLIENT encoder lowers each accepted
+CLIENT function with `ClientPlan::return_boolean`. Its executable artefact has
+kind `Client`, format `orna.client-plan`, format version `1`, language
+`orna.language/1`, and the exact 14-byte version-1 Boolean payload. Its durable
+definition-reference sequence has exactly one item: ordinal `0`, kind
+`NamedType`, target `ValueType` with the validated Boolean `TypeId`, and the
+source origin at the complete written return type. The Boolean literal adds no
+definition reference.
+
+The CLIENT encoder shares only durable revision finalisation, semantic-version
+and hash selection, current and historical revision reuse, and final-reference
+rebinding with SERVER lowering. It does not share or duplicate SERVER plan
+encoding. A CLIENT function with its `ValueType` reference uses semantic hash
+version 2. A SERVER function remains at version 1 unless it has a `ValueType`
+reference. Formatting changes and equivalent accepted return spellings that
+resolve to the same Boolean `TypeId` reuse an equal immutable revision.
+Changing `TRUE` to `FALSE`, or the reverse, creates a new immutable revision.
+Returning to an equal earlier Boolean body reuses the matching historical
+revision. A self-consistent non-golden Boolean `TypeId` remains in the durable
+reference and participates in version-2 hash and reuse decisions. CLIENT
+support introduces no new allocator. Only gate 12's existing allocator runs
+after the complete bundle passes gate 11.
+
+Each accepted CLIENT function becomes a `FunctionDefinition` with domain
+`Client` and its stable or reused `FunctionId`. It participates in current and
+historical immutable revision reuse. The candidate contains exactly one
+`DefinitionOrigin::Function` at its complete declaration location and no
+parameter, return, or body origin for that CLIENT function.
+
 Before it constructs the candidate catalogue, canonical hashes, or revision,
 `prepare_standard_application` privately retries every random new application
 `CatalogueRevisionId`, `SourceBundleId`, `SourceRevisionId`, copied
@@ -2092,6 +2245,7 @@ together, or the previous version-1 active revision remains authoritative.
 | Function type-reference evidence | The initial empty arena and public model; a multi-unit source with interleaved CLIENT and SERVER functions whose insertion order differs from logical-path lexical order; SERVER parameters and `ROWS` columns, CLIENT scalar returns, and rejected SERVER scalar `Single` returns; mixed value and `REF` signature slots; repeated aliases resolving to one `TypeId` at distinct locations; a non-golden supplied `TypeId`; exact owners, ordinals, targets, locations, and accessor; unchanged `CheckedServerFunction::references()` and object references; empty application; CLIENT-parameter rejection; attempted deduplication, re-resolution, kind field, or preparation | The function-evidence row derives each `CheckedStandardTypeReference` from canonical declaration uses and retained source-order metadata without type re-resolution. It emits one entry for each accepted value declaration use, including repeated aliases with the same `TypeId`, and no entry for `REF` or rejected SERVER scalar `Single` returns. The flattened ordinal counts every accepted signature slot, so `REF` leaves valid gaps. A source-order seam orders entries by source-unit insertion ordinal, function declaration start, then ordinal rather than logical-path sort or SERVER/CLIENT resolver-family pass. The arena is separate from `CheckedServerFunction::references()`, `CheckedDefinitionReference`, and `ObjectReference`, has no kind field, preserves exact existing application and object references, and performs no preparation. |
 | Standard preparation evidence | The sealed crate-private projection after canonical resolver construction; declaration subsequence, full type-use sequence, and standard function-reference sequence; attempted public API, `Debug`, lookup, copied traversal, or compatibility mapping | The precursor stores exact resolver-produced preparation facts without a public API, `Debug` exposure, lookup, second traversal, or scalar map. It retains source order and exact targets and locations for preparation only. Construction proof compares the projection with the canonical public arenas after a successful resolver check, including declaration, relational, mutation, CLIENT, and function-reference evidence. |
 | Standard application preparation | Every `PrepareStandardApplicationError` derive, typed fields, exact display, and source; incomplete report; base, standard-presence, catalogue, revision, digest, retained declaration-subsequence, retained complete type-use, and retained function-reference mismatches; successful SERVER-only preparation; a checked CLIENT function; private deterministic allocation retry for every new application catalogue, source, schema, and type ID | `prepare_standard_application` accepts only the distinct report and validates in the stated complete order. Gate 8 compares the retained declaration subsequence one-to-one before gate 9 compares the retained full canonical type-use sequence, then gate 10 compares retained standard function references. Hostile fixtures mutate only the canonical public arenas, not a second traversal or independently constructed evidence, and prove missing, extra, duplicate, crossed, wrong class, target, location, ordinal, and order failures with adjacent-gate precedence. Candidate lowering consumes only the retained validated declaration targets. Gate 11 shared semantic preflight rejects every checked CLIENT function as `Prepare { source: PrepareError::InvalidCheckedBundle { reason: "checked CLIENT function cannot yet be prepared" } }` after the three evidence gates and before gate 12 allocation. Its exact display is `the standard application could not be prepared: checked CLIENT function cannot yet be prepared`; its only error source is that `PrepareError`; it allocates nothing. A successful SERVER-only report reaches allocation. The later `feat(client): prepare catalogue Boolean constants` row owns CLIENT acceptance. Its private deterministic allocator yields the relevant reserved ID then a non-reserved ID for every new application `CatalogueRevisionId`, `SourceBundleId`, `SourceRevisionId`, copied `SourceUnitId`, `SchemaId`, and `TypeId`, proving retry before candidate catalogue, hash, and revision construction with no candidate collision. It creates no `TypeBindingId`; a later binding row rejects a same-class reserved collision after derivation. It consumes the sealed projection and performs no source traversal or compatibility mapping. Only `Prepare { source }` exposes an error source. |
+| Catalogue Boolean CLIENT preparation | Gate-10 exact CLIENT return-slot precondition; exact five-step Gate-11 location and SERVER traversal with adjacent precedence; both SERVER and CLIENT existing-identity directions; cross-domain duplicate checked ID; derived candidate owner order; interleaved multi-unit functions; exact client plan, artefact, durable reference, semantic-version, reuse, and historical-reuse cases; stable `FunctionId`; exact CLIENT origins; self-consistent non-golden Boolean `TypeId`; code review and similarity review | The later CLIENT row replaces only the staged rejection. Gate 11 first counts source units, then checks each retained-order duplicate path before content size. It validates schema, object, SERVER, then CLIENT locations in the stated nested orders. It checks unique fields and renames. For each SERVER in checked source order, it checks reference count, reference kinds in retained order, then existing active identity as exact ID, name, and `FunctionDomain::Server`. That continuity completes before CLIENT semantics. After all five steps, it validates CLIENT semantics then existing identity as exact ID, name, and `FunctionDomain::Client` before the next CLIENT or gate 12. Both domain crossings and name mismatches return exact wrapped `ExistingDefinitionMismatch { definition: DefinitionIdentity::Function(id) }`; cross-domain duplicate IDs return the existing `InvalidCheckedBundle { reason: "duplicate checked function" }`. The sole function-order authority deduplicates first owner occurrences in gate-8-validated declaration evidence. Every checked owner appears exactly once, or preparation returns `InvalidCheckedBundle { reason: "checked standard function owners do not match declaration evidence" }`. Function definitions, origins, current revisions, and reference groups follow that exact vector order. Each CLIENT has stable or reused identity, one declaration `DefinitionOrigin::Function`, and no parameter, return, or body origin. The Boolean check requires `Value`, `SemanticType::Scalar(StandardScalar::Boolean)`, the supplied `TypeId`, and its checked Boolean contract. The dedicated CLIENT encoder emits the exact version-1 14-byte plan, client artefact, and one `NamedType`/`ValueType` return reference with its complete origin and no literal reference. It shares only durable revision finalisation, semantic-version and hash selection, reuse, and final-reference rebinding with SERVER lowering. Tests prove equal pipeline outcomes, the non-golden Boolean ID in the durable reference and version-2 hash/reuse, and no new allocator. Code review and similarity review prove that the encoder does not copy the shared pipeline. |
 | Prepared standard-upgrade capability | `PreparedStandardUpgrade` private fields, derives, exact accessors, and absent owned extraction, conversion, dereference, and inner interfaces; every compiler-owned `StandardUpgradeIdentity` payload; exact compiler signature, error, display, source, and gate precedence; installed-standard, namespace, every compiler-visible identity class and ordering position, diagnostics, source mismatch, companion source-ID retry, catalogue, canonical hash, and revision failures | `prepare_checked_standard_upgrade` accepts only `CheckedStandardLibrary` and returns only `PreparedStandardUpgrade` or `PrepareStandardUpgradeError`. It has no installable capability, but `application_revision()` intentionally borrows normal kernel input. The permanent normal-apply guard rejects that borrowed version-2 candidate from version 1 and context-locks it in version 2. The compiler rejects an installed standard, then active namespace and visible identity conflicts from `CatalogueRevision` through `TypeBinding`, then diagnostics and source mismatch. It privately retries only its new companion application `CatalogueRevisionId`, `SourceBundleId`, `SourceRevisionId`, and copied `SourceUnitId` before candidate construction. It reuses version-1 application `SchemaId` and `TypeId` values already covered by active gate 3, and creates no `TypeBindingId`. Each earlier gate wins against hostile data for every later gate. `ReservedIdentity` retains the exact conflicting durable identity; `StandardLibraryRevision` is kernel-only. |
 | Opaque standard-upgrade capability | `StandardUpgrade` private field, derives, exact accessors, and absent owned conversion, dereference, and inner interfaces; exact wrapper signature, transparent error, and retain, verify, check, prepare order | Only `prepare_standard_upgrade` constructs the opaque `StandardUpgrade`. It owns a `PreparedStandardUpgrade`, exposes its checked standard library, verified snapshot, and borrowed application revision, and returns retained, checked-source, and compiler-preparation failures through transparent `StandardUpgradeError` variants. It adds only `StandardLibraryError::Unavailable`; no raw or unnamed compiler route exists. |
 | Normal-apply and atomic standard guards | Every `StandardContextIdentity` field, accessor, derive, and error field; both boxed mismatch identity payloads and their exact retained values; version-1/version-2 transitions; matching and mismatching version-2 contexts; `ReservedStandardIdentity` field, display, and source; exact trusted-path, transaction, recovery, expected-base, identity-gate, materialisation, physical-plan, and write ordering; replay and repeat-preparation precedence; active and inactive-record ordering | Normal apply performs the permanent standard-context guard after expected-base recovery and before materialisation, planning, or writes. It rejects every version transition and requires exact version-2 context equality. A mismatch owns the complete active and candidate identities in symmetric boxes and allocates them only on the error path. Atomic special apply accepts only `&orna_standard::StandardUpgrade`, then follows the stated exact order. A replay returns `ExpectedBaseMismatch` before collision scanning or writes. It completes the typed `ReservedStandardIdentity` gate before materialisation and physical planning, with `StandardLibraryRevision` first and every active-visible record in explicit family order before inactive records by durable ID bytes. Compiler construction already proves deployable core invariants, so special apply has no opaque-association or invariant gate. A repeated prepare against active version 2 returns `StandardLibraryAlreadyInstalled`. |
@@ -2177,6 +2331,57 @@ Tests must prove:
   `PrepareError` source, no allocation, and no CLIENT artefact or reference
   preparation. The later `feat(client): prepare catalogue Boolean constants`
   row owns CLIENT preparation acceptance;
+* the later CLIENT preparation row proves Gate 10's exact single return slot.
+  Gate 11 proves source-unit count first, then duplicate logical path before
+  content size for each retained-order unit. It proves locations for retained
+  schemas; retained object declarations, fields, and optional defaults; SERVER
+  declarations, parameters, return columns, and references in their stated
+  nested orders; then CLIENT declaration, parameters, return slot, Boolean
+  literal, and application references in their stated nested orders. It then
+  proves unique fields and field renames. For each SERVER in checked source
+  order, it proves reference count, retained-order reference kinds, then active
+  `FunctionId`, name, and `FunctionDomain::Server` continuity. Only after these
+  five steps does it check CLIENT semantics. Adjacent hostile cases prove the
+  preceding common-preflight failure wins. It returns each invalid location as
+  exact wrapped
+  `PrepareError::InvalidSourceLocation` values;
+* after the common preflight, the later CLIENT row proves all eight ordered
+  semantic reasons. Its Boolean case requires `Value`,
+  `SemanticType::Scalar(StandardScalar::Boolean)`, the supplied `TypeId`, and
+  the matching checked Boolean contract. A mixed successful bundle proves
+  every CLIENT function passes before the shared allocator runs. A failing
+  CLIENT case proves zero allocator calls;
+* every existing SERVER and CLIENT `CheckedFunctionId` proves active-catalogue
+  continuity with the same `FunctionId`, semantic name, and its exact domain.
+  Checked SERVER to active CLIENT and checked CLIENT to active SERVER crossings,
+  plus name mismatch, return exact wrapped `ExistingDefinitionMismatch {
+  definition: DefinitionIdentity::Function(id) }`, including the exact outer
+  display and `PrepareError` source. SERVER continuity wins before any CLIENT
+  semantic check. CLIENT continuity wins after that CLIENT's semantics and
+  before the next CLIENT or allocation. A cross-domain duplicate checked ID
+  fails as the existing `InvalidCheckedBundle { reason: "duplicate checked function" }`
+  through the shared functions map before candidate collection. The sole
+  candidate-order test uses an interleaved multi-unit source. It derives the
+  unique owner vector from first occurrences in gate-8-validated declaration
+  evidence, proves every SERVER and CLIENT owner appears once, and returns
+  `InvalidCheckedBundle { reason: "checked standard function owners do not match declaration evidence" }`
+  for a mismatch. Function definitions, origins, current revisions, and
+  reference groups follow that exact vector order. A successful existing CLIENT
+  keeps its `FunctionId`; a provisional CLIENT receives one only at gate 12.
+  Each CLIENT has one complete-declaration `DefinitionOrigin::Function` and no
+  parameter, return, or body origin;
+* later CLIENT preparation produces the exact 14-byte version-1 `ClientPlan`,
+  client artefact kind, format, version, language, one ordinal-0 `NamedType`
+  to `ValueType` return reference with the complete written-return origin, and
+  no literal reference. It uses semantic version 2 while unaffected SERVER
+  functions remain at version 1. Formatting and equivalent accepted spellings
+  reuse an equal revision, `TRUE` and `FALSE` create distinct revisions, and a
+  matching historical Boolean revision is reused. A self-consistent
+  non-golden Boolean `TypeId` appears in the durable reference and version-2
+  hash and participates in reuse. Tests prove equivalent shared-pipeline
+  outcomes. Code review and similarity review prove the CLIENT encoder does
+  not copy the shared durable revision pipeline; CLIENT support adds no
+  allocator;
 * atomic standard apply separately rejects database-wide collisions after all
   active-visible records and before inactive records in the stated ordering;
 * bootstrap and recovery reject every missing, duplicate, crossed, renamed,
@@ -2358,7 +2563,7 @@ standard-orchestration rows remain within their two-file caps.
 | `refactor(compiler): retain standard preparation evidence` | `crates/orna-compiler/src/resolver.rs`, `crates/orna-compiler/src/resolver/model.rs` | After canonical resolver construction, retain one sealed crate-private exact preparation projection over the declaration-use subsequence, full canonical type-use arena, and standard function-reference arena. It is the only preparation-evidence authority: it has no public API, `Debug` exposure, lookup, scalar compatibility map, source re-resolution, or second relational, mutation, or CLIENT traversal. Construction tests compare exact kind, class, `TypeId` or `CheckedTypeId` target, location, ordinal, and canonical source order with the public arenas across declaration, relational, mutation, CLIENT, `REF`, and signature-reference cases. |
 | `feat(compiler): prepare standard applications` | `crates/orna-compiler/src/prepare.rs`, `crates/orna-compiler/src/resolver/model.rs`, `crates/orna-compiler/src/lib.rs` | Add `prepare_standard_application(&StandardApplicationCheckReport, RevisionPair, &ActiveDatabaseRevision) -> Result<DeployableRevision, PrepareStandardApplicationError>` with the exact report-completeness, base, active-standard, retained-evidence, gate-11 semantic-preflight, then gate-12 allocation order. It receives the sealed preparation projection only through the crate-private preparation view. Gate 8 compares its declaration-use subsequence exactly; gate 9 then compares its complete canonical type-use sequence exactly; gate 10 then compares its standard function-reference sequence exactly. It does not traverse relational, mutation, or CLIENT bodies, re-resolve source, or map contracts to compatibility scalars. Hostile tests mutate only canonical arena data and drive the production gates, including every exact target, class, location, ordinal, order, missing, extra, duplicate, and crossed failure with adjacent-gate precedence. Candidate lowering consumes only retained validated declaration targets. Gate 11 accepts successful SERVER-only preparation but rejects every checked CLIENT function as `Prepare { source: PrepareError::InvalidCheckedBundle { reason: "checked CLIENT function cannot yet be prepared" } }`, with its exact wrapped display and source, before allocation or CLIENT artefact/reference preparation. The later `feat(client): prepare catalogue Boolean constants` row owns CLIENT acceptance. Its private retry allocator excludes same-class reserved IDs for every new application catalogue, source, schema, and type ID before candidate construction, with deterministic reserved-then-non-reserved proof and no public retry error. It creates no `TypeBindingId`; a later binding row rejects a post-derivation reserved collision. It accepts no legacy `CheckReport`, preserves report separation, and owns all standard-application preparation rejection and durable evidence proof. |
 | `refactor(types): remove scalar naming authority` | `crates/orna-core/src/types.rs`, `crates/orna-compiler/src/resolver.rs` | Only after callers migrate to the distinct standard application path, remove public `StandardScalar::from_source_spelling`, `canonical_name`, `type_id`, and `ScalarResolutionError`. Diagnostics render names from checked catalogue definitions or retained source, while exact representation matching remains internal. |
-| `feat(client): prepare catalogue Boolean constants` | `crates/orna-compiler/src/prepare.rs`, `crates/orna-compiler/src/resolver/model.rs` | Work ADR 0015 preparation uses the canonical Boolean identity and exact one-reference sequence; no evaluator or database consumer exists yet. |
+| `feat(client): prepare catalogue Boolean constants` | `crates/orna-compiler/src/prepare.rs`, `crates/orna-compiler/src/resolver/model.rs`, `crates/orna-compiler/src/lib.rs` | Replace only the staged CLIENT rejection. Gate 10 requires the exact retained CLIENT return slot. Gate 11 first counts source units. For every retained-order unit, it checks duplicate logical path before content size. It then checks locations in the exact schema, object, SERVER, then CLIENT nested orders. It checks unique fields and field renames. For every SERVER in checked source order, it checks reference count, retained-order reference kinds, then existing active `FunctionId`, name, and `FunctionDomain::Server` continuity before any CLIENT semantic check. Only after all five common-preflight steps does it validate CLIENT functions in checked source order: domain CLIENT, no parameters, `Value` with `SemanticType::Scalar(StandardScalar::Boolean)`, supplied `TypeId` to checked definition to exact Boolean contract, security `Invoker`, transaction `None`, volatility `Immutable`, Boolean-literal body, and no application definition references. Immediately after each CLIENT passes these checks, an existing ID must match the active `FunctionId`, exact semantic name, and `FunctionDomain::Client`; mismatch returns exact wrapped `ExistingDefinitionMismatch { definition: DefinitionIdentity::Function(id) }` before the next CLIENT or gate 12. A provisional CLIENT gets a new `FunctionId` only at gate 12. The shared `IdentityMap::functions` map includes both families, so cross-domain duplicate checked IDs fail as the existing `InvalidCheckedBundle { reason: "duplicate checked function" }`. Candidate order comes only from deduplicated first function-owner occurrences in gate-8-validated canonical declaration evidence, never parse, location, or family merge. Every checked SERVER and CLIENT owner appears exactly once in this derived vector or preparation returns `InvalidCheckedBundle { reason: "checked standard function owners do not match declaration evidence" }`. Function definitions, origins, current revisions, and reference groups follow this vector order. Each CLIENT has a stable or reused ID, a `FunctionDefinition` with domain `Client`, current and historical immutable revision reuse, exactly one declaration `DefinitionOrigin::Function`, and no parameter, return, or body origins. A small dedicated CLIENT encoder emits the existing 14-byte version-1 `ClientPlan`, client artefact facts, one ordinal-0 `NamedType`/`ValueType` reference at the return origin, and no literal reference. It shares only durable revision finalisation, semantic-version/hash selection, reuse, and final-reference rebinding with SERVER lowering. It preserves semantic version 2 for CLIENT and selective version 1 for unaffected SERVER functions, equivalent-spelling and formatting reuse, Boolean payload revision changes, and historical reuse. The non-golden Boolean `TypeId` remains in the durable reference and version-2 hash. Tests prove all gate and adjacent precedence, exact plans and references, both-domain identity continuity and exact wrapped failures, interleaved multi-unit owner order, equivalent pipeline outcomes, and no allocation after failure. Code review and similarity review prove no copied shared pipeline. It adds no public API, evaluator, database path, allocator, or public error. |
 | `feat(client): evaluate catalogue Boolean constants` | `crates/orna-client/Cargo.toml`, `crates/orna-client/src/lib.rs`, `Cargo.lock` | The local evaluator verifies canonical hash version 1 or 2 as appropriate, requires the exact standard revision and one-reference sequence for version-2 CLIENT revisions, and retains the exact result and error contract. |
 | `feat(compiler): prepare checked standard upgrades` | `crates/orna-compiler/src/prepare.rs`, `crates/orna-compiler/src/lib.rs` | Define and re-export private-field `PreparedStandardUpgrade` and compiler-owned payload-bearing `StandardUpgradeIdentity`, then implement `prepare_checked_standard_upgrade(&CheckedStandardLibrary, &ActiveDatabaseRevision) -> Result<PreparedStandardUpgrade, PrepareStandardUpgradeError>`. It has the exact installed-standard, active-source, reserved-identity, and nested catalogue, canonical, and revision error contract. After the active source gates and before candidate construction, its private retry allocator excludes reserved same-class IDs only for new companion application catalogue and source IDs. It reuses version-1 application schema and type identities already covered by active gate 3, and creates no `TypeBindingId`. It produces no opaque installable capability; its application revision is a normal-input borrow guarded by the permanent PostgreSQL transition rule. |
 | `feat(std): orchestrate standard upgrades` | `crates/orna-standard/src/lib.rs` | Define opaque private-field `StandardUpgrade`, re-export `StandardUpgradeIdentity`, and expose `prepare_standard_upgrade(&ActiveDatabaseRevision) -> Result<StandardUpgrade, StandardUpgradeError>`. It calls retained snapshot construction, accepted verification, standard-source checking, and the public `orna_compiler::prepare_checked_standard_upgrade` seam in that exact order. It adds only boundary-owned `StandardLibraryError::Unavailable` and maps retained, checked-source, and compiler-preparation failures through transparent `StandardUpgradeError` variants. Its proof owns wrapper-before-check ordering. The crate has no database authority. |
