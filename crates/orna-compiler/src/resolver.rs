@@ -173,29 +173,36 @@ pub fn check_standard_application(
         Some(context.standard),
     );
     sort_standard_type_uses(&mut result.uses, &result.parse_report);
-    let use_indices = result
-        .uses
+    let ApplicationCheckResult {
+        parse_report,
+        diagnostics,
+        checked_bundle,
+        uses,
+    } = result;
+    let use_indices = uses
         .iter()
         .enumerate()
         .map(|(index, type_use)| (type_use.kind(), index))
         .collect();
     let snapshot = context.standard.verified_snapshot();
-    let checked_bundle = result
-        .checked_bundle
-        .map(|inner| CheckedStandardApplicationBundle {
+    let checked_bundle = checked_bundle.map(|inner| {
+        let standard_type_references =
+            collect_standard_type_references(&uses, &inner, &parse_report);
+        CheckedStandardApplicationBundle {
             inner,
             standard_catalogue_revision: snapshot.catalogue().revision(),
             standard_library_revision: snapshot.revision(),
             standard_library_digest: snapshot.digest(),
-            uses: result.uses,
-            standard_type_references: Vec::new(),
+            uses,
+            standard_type_references,
             use_indices,
-        });
+        }
+    });
 
     StandardApplicationCheckReport {
         standard_library: context.standard.clone(),
-        parse_report: result.parse_report,
-        diagnostics: result.diagnostics,
+        parse_report,
+        diagnostics,
         checked_bundle,
     }
 }
@@ -3027,12 +3034,7 @@ fn application_failed(
 }
 
 fn sort_standard_type_uses(uses: &mut [CheckedApplicationTypeUse], parse_report: &ParseReport) {
-    let unit_indices = parse_report
-        .units()
-        .iter()
-        .enumerate()
-        .map(|(index, unit)| (unit.logical_path(), index))
-        .collect::<HashMap<_, _>>();
+    let unit_indices = source_unit_indices(parse_report);
     uses.sort_by_key(|type_use| {
         let location = type_use.location();
         (
@@ -3046,6 +3048,103 @@ fn sort_standard_type_uses(uses: &mut [CheckedApplicationTypeUse], parse_report:
             type_use_tie_break(type_use.kind()),
         )
     });
+}
+
+fn source_unit_indices(parse_report: &ParseReport) -> HashMap<&str, usize> {
+    parse_report
+        .units()
+        .iter()
+        .enumerate()
+        .map(|(index, unit)| (unit.logical_path(), index))
+        .collect()
+}
+
+struct StandardFunctionReferenceMetadata {
+    source_unit_index: usize,
+    declaration_start: usize,
+    parameter_ordinals: HashMap<CheckedParameterId, u32>,
+    return_offset: u32,
+}
+
+fn collect_standard_type_references(
+    uses: &[CheckedApplicationTypeUse],
+    checked_bundle: &CheckedBundle,
+    parse_report: &ParseReport,
+) -> Vec<CheckedStandardTypeReference> {
+    let source_unit_indices = source_unit_indices(parse_report);
+    let mut functions = HashMap::new();
+
+    for function in &checked_bundle.server_functions {
+        functions.insert(
+            function.id,
+            StandardFunctionReferenceMetadata {
+                source_unit_index: source_unit_indices
+                    .get(function.location.logical_path())
+                    .copied()
+                    .unwrap_or(usize::MAX),
+                declaration_start: function.location.span().start(),
+                parameter_ordinals: function
+                    .parameters
+                    .iter()
+                    .map(|parameter| (parameter.id, parameter.ordinal))
+                    .collect(),
+                return_offset: function.parameters.len() as u32,
+            },
+        );
+    }
+    for function in &checked_bundle.client_functions {
+        functions.insert(
+            function.id,
+            StandardFunctionReferenceMetadata {
+                source_unit_index: source_unit_indices
+                    .get(function.location.logical_path())
+                    .copied()
+                    .unwrap_or(usize::MAX),
+                declaration_start: function.location.span().start(),
+                parameter_ordinals: HashMap::new(),
+                return_offset: 0,
+            },
+        );
+    }
+
+    let mut references = uses
+        .iter()
+        .filter_map(|type_use| {
+            let value = type_use.value()?;
+            let (owner, ordinal) = match value.kind() {
+                CheckedTypeUseKind::Parameter { owner, parameter } => {
+                    let function = functions.get(&owner)?;
+                    (owner, *function.parameter_ordinals.get(&parameter)?)
+                }
+                CheckedTypeUseKind::Return { owner, ordinal } => {
+                    let function = functions.get(&owner)?;
+                    (owner, function.return_offset.checked_add(ordinal)?)
+                }
+                CheckedTypeUseKind::Field { .. }
+                | CheckedTypeUseKind::Expression { .. }
+                | CheckedTypeUseKind::Result { .. } => return None,
+            };
+            let function = functions.get(&owner)?;
+            Some((
+                function.source_unit_index,
+                function.declaration_start,
+                ordinal,
+                CheckedStandardTypeReference {
+                    owner,
+                    ordinal,
+                    target: value.type_id(),
+                    location: value.location().clone(),
+                },
+            ))
+        })
+        .collect::<Vec<_>>();
+    references.sort_by_key(|(source_unit_index, declaration_start, ordinal, _)| {
+        (*source_unit_index, *declaration_start, *ordinal)
+    });
+    references
+        .into_iter()
+        .map(|(_, _, _, reference)| reference)
+        .collect()
 }
 
 const fn type_use_kind_tag(kind: CheckedTypeUseKind) -> u8 {
@@ -4287,6 +4386,175 @@ mod tests {
                 literal_start,
                 literal_start + "TRUE".len(),
             )
+        );
+    }
+
+    #[test]
+    fn derives_standard_function_references_from_canonical_declaration_uses() {
+        let changed_boolean = TypeId::from_bytes([0x53; 16]);
+        let snapshot = verified_standard_library_for_relational_test_with_boolean_id(
+            changed_boolean,
+            [
+                0xa2, 0x5b, 0xcf, 0x20, 0x76, 0x46, 0x26, 0xdf, 0xe3, 0x77, 0x67, 0xca, 0x79, 0xc9,
+                0x3e, 0x5f, 0xdc, 0x53, 0x8c, 0xc0, 0x7b, 0x74, 0xce, 0xac, 0x54, 0x2d, 0xb9, 0x31,
+                0x3c, 0x56, 0xe1, 0x82,
+            ],
+        );
+        let standard = check_standard_library_source(&snapshot).unwrap();
+        let application = empty_catalogue();
+        let context = StandardApplicationCheckContext::try_new(&application, &standard).unwrap();
+        let first_server = "CREATE SERVER FUNCTION app.create(p_ref REF app.item, p_boolean BOOLEAN, p_alias std.BOOLEAN) \
+            RETURNS ROWS (created REF app.item) TRANSACTION ATOMIC \
+            AS INSERT INTO app.item AS made (done) VALUES (p_boolean) RETURNING REF(made);";
+        let client = "CREATE CLIENT FUNCTION app.enabled() RETURNS std.BOOLEAN RETURN TRUE;";
+        let second_server = "CREATE SERVER FUNCTION app.by_ref(p_ref REF app.item) \
+            RETURNS ROWS (value std.BOOLEAN) TRANSACTION READ ONLY VOLATILITY STABLE \
+            AS SELECT TRUE FROM app.item item WHERE REF(item) = p_ref;";
+        let declarations = "CREATE SCHEMA app; \
+            CREATE TYPE app.item AS OBJECT (done BOOLEAN NOT NULL);";
+        let report = check_standard_application(
+            &bundle([
+                ("z-first-server.orna", first_server),
+                ("a-client.orna", client),
+                ("y-second-server.orna", second_server),
+                ("m-declarations.orna", declarations),
+            ]),
+            &context,
+        );
+
+        assert_eq!(report.diagnostics(), &[]);
+        let checked = report.checked_bundle().unwrap();
+        let server_functions = checked.server_functions().collect::<Vec<_>>();
+        let client_functions = checked.client_functions().collect::<Vec<_>>();
+        let [create, list] = server_functions.as_slice() else {
+            assert_eq!(server_functions.len(), 2);
+            return;
+        };
+        let [enabled] = client_functions.as_slice() else {
+            assert_eq!(client_functions.len(), 1);
+            return;
+        };
+
+        let first_boolean = first_server.find("p_boolean BOOLEAN").unwrap() + "p_boolean ".len();
+        let first_alias = first_server.find("p_alias std.BOOLEAN").unwrap() + "p_alias ".len();
+        let client_boolean = client.find("std.BOOLEAN").unwrap();
+        let second_boolean = second_server.find("value std.BOOLEAN").unwrap() + "value ".len();
+        assert_eq!(
+            checked
+                .standard_type_references()
+                .iter()
+                .map(|reference| {
+                    (
+                        reference.owner(),
+                        reference.ordinal(),
+                        reference.target(),
+                        reference.location().logical_path(),
+                        reference.location().span().start(),
+                        reference.location().span().end(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    create.id(),
+                    1,
+                    changed_boolean,
+                    "z-first-server.orna",
+                    first_boolean,
+                    first_boolean + "BOOLEAN".len(),
+                ),
+                (
+                    create.id(),
+                    2,
+                    changed_boolean,
+                    "z-first-server.orna",
+                    first_alias,
+                    first_alias + "std.BOOLEAN".len(),
+                ),
+                (
+                    enabled.id(),
+                    0,
+                    changed_boolean,
+                    "a-client.orna",
+                    client_boolean,
+                    client_boolean + "std.BOOLEAN".len(),
+                ),
+                (
+                    list.id(),
+                    1,
+                    changed_boolean,
+                    "y-second-server.orna",
+                    second_boolean,
+                    second_boolean + "std.BOOLEAN".len(),
+                ),
+            ]
+        );
+
+        let create_declaration_uses = checked
+            .uses()
+            .iter()
+            .filter(|type_use| {
+                matches!(
+                    type_use.kind(),
+                    CheckedTypeUseKind::Parameter { owner, .. }
+                        | CheckedTypeUseKind::Return { owner, .. }
+                        if owner == create.id()
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(create_declaration_uses.len(), 4);
+        assert!(create_declaration_uses[0].object_reference().is_some());
+        assert!(create_declaration_uses[1].value().is_some());
+        assert!(create_declaration_uses[2].value().is_some());
+        assert!(create_declaration_uses[3].object_reference().is_some());
+        assert_eq!(
+            create
+                .references()
+                .iter()
+                .map(|reference| reference.kind())
+                .collect::<Vec<_>>(),
+            vec![
+                DefinitionReferenceKind::ObjectReference,
+                DefinitionReferenceKind::ObjectReference,
+                DefinitionReferenceKind::WriteObject,
+                DefinitionReferenceKind::WriteField,
+                DefinitionReferenceKind::ParameterRead,
+                DefinitionReferenceKind::ObjectReference,
+            ]
+        );
+    }
+
+    #[test]
+    fn standard_function_references_preserve_server_single_return_rejection() {
+        let standard =
+            check_standard_library_source(&verified_standard_library_for_relational_test())
+                .unwrap();
+        let application = empty_catalogue();
+        let context = StandardApplicationCheckContext::try_new(&application, &standard).unwrap();
+        let source = "CREATE SCHEMA app; \
+            CREATE TYPE app.item AS OBJECT (); \
+            CREATE SERVER FUNCTION app.find() RETURNS BOOLEAN \
+            AS SELECT TRUE FROM app.item item;";
+        let report = check_standard_application(&bundle([("application.orna", source)]), &context);
+
+        assert!(report.checked_bundle().is_none());
+        assert_eq!(
+            report
+                .diagnostics()
+                .iter()
+                .map(|diagnostic| (
+                    diagnostic.code(),
+                    diagnostic.message(),
+                    diagnostic.location().span().start(),
+                    diagnostic.location().span().end(),
+                ))
+                .collect::<Vec<_>>(),
+            vec![(
+                DiagnosticCode::TypeMismatch,
+                "SELECT SERVER functions require RETURNS ROWS (...)",
+                source.find("BOOLEAN AS").unwrap(),
+                source.find("BOOLEAN AS").unwrap() + "BOOLEAN".len(),
+            ),]
         );
     }
 
