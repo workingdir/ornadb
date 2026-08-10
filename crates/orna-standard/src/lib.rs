@@ -2,6 +2,10 @@
 
 use std::{error::Error, fmt};
 
+use orna_compiler::{
+    CheckedStandardLibrary, PrepareStandardUpgradeError, PreparedStandardUpgrade,
+    StandardLibraryCheckError, check_standard_library_source, prepare_checked_standard_upgrade,
+};
 use orna_core::{
     CatalogueRevisionId, SchemaId, SourceBundleId, SourceRevisionId, SourceUnitId,
     StandardLibraryRevisionId, TypeBindingId, TypeId,
@@ -16,12 +20,15 @@ use orna_core::{
         TypeLookupName, ValueTypeDefinition, ValueTypeMutability, ValueTypePersistence,
     },
     revision::{
-        DefinitionIdentity, DefinitionOrigin, RevisionInvariantError, Sha256Digest, SourceOrigin,
-        StandardLibraryDigestVersion, StandardLibrarySnapshot, StoredSourceRevision,
-        StoredSourceUnit, VerifiedStandardLibrarySnapshot,
+        ActiveDatabaseRevision, DefinitionIdentity, DefinitionOrigin, DeployableRevision,
+        RevisionInvariantError, Sha256Digest, SourceOrigin, StandardLibraryDigestVersion,
+        StandardLibrarySnapshot, StoredSourceRevision, StoredSourceUnit,
+        VerifiedStandardLibrarySnapshot,
     },
 };
 use orna_syntax::{NamePart, PrimitiveValueTypePersistence, QualifiedName, TypeExportTarget};
+
+pub use orna_compiler::StandardUpgradeIdentity;
 
 /// The standard-library version represented by this manifest.
 pub const STANDARD_LIBRARY_VERSION_IDENTITY: &str = "orna.std/1";
@@ -681,6 +688,8 @@ pub enum StandardLibraryError {
         /// The digest retained by the snapshot.
         actual: Sha256Digest,
     },
+    /// The standard library is not installed at the service boundary.
+    Unavailable,
 }
 
 impl fmt::Display for StandardLibraryError {
@@ -712,6 +721,7 @@ impl fmt::Display for StandardLibraryError {
             Self::AcceptedDigestMismatch { .. } => formatter.write_str(
                 "the standard library digest does not match the hard-coded accepted digest",
             ),
+            Self::Unavailable => formatter.write_str("the standard library is not installed"),
         }
     }
 }
@@ -724,9 +734,118 @@ impl Error for StandardLibraryError {
             Self::CanonicalHash { source } => Some(source),
             Self::RetainedSourceMismatch
             | Self::CatalogueIdentityMismatch { .. }
-            | Self::AcceptedDigestMismatch { .. } => None,
+            | Self::AcceptedDigestMismatch { .. }
+            | Self::Unavailable => None,
         }
     }
+}
+
+/// A standard-library upgrade prepared for atomic kernel application.
+#[derive(Clone, Debug)]
+pub struct StandardUpgrade {
+    prepared: PreparedStandardUpgrade,
+}
+
+impl StandardUpgrade {
+    /// Returns the checked standard library retained by this upgrade.
+    pub fn checked_standard_library(&self) -> &CheckedStandardLibrary {
+        self.prepared.standard_library()
+    }
+
+    /// Returns the verified standard snapshot retained by this upgrade.
+    pub fn verified_standard_snapshot(&self) -> &VerifiedStandardLibrarySnapshot {
+        self.checked_standard_library().verified_snapshot()
+    }
+
+    /// Returns the prepared application revision for normal kernel input.
+    pub fn application_revision(&self) -> &DeployableRevision {
+        self.prepared.application_revision()
+    }
+}
+
+/// An error returned while preparing a standard-library upgrade.
+#[non_exhaustive]
+#[derive(Debug)]
+pub enum StandardUpgradeError {
+    /// Retained standard-library construction or verification failed.
+    StandardLibrary {
+        /// The standard-library error.
+        source: StandardLibraryError,
+    },
+    /// Compiler standard-source verification failed.
+    StandardSource {
+        /// The compiler checker error.
+        source: StandardLibraryCheckError,
+    },
+    /// Compiler preparation of the standard upgrade failed.
+    Prepare {
+        /// The compiler preparation error.
+        source: PrepareStandardUpgradeError,
+    },
+}
+
+impl fmt::Display for StandardUpgradeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::StandardLibrary { source } => source.fmt(formatter),
+            Self::StandardSource { source } => source.fmt(formatter),
+            Self::Prepare { source } => source.fmt(formatter),
+        }
+    }
+}
+
+impl Error for StandardUpgradeError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::StandardLibrary { source } => Some(source),
+            Self::StandardSource { source } => Some(source),
+            Self::Prepare { source } => Some(source),
+        }
+    }
+}
+
+/// Prepares the accepted standard library for a later atomic kernel upgrade.
+pub fn prepare_standard_upgrade(
+    active: &ActiveDatabaseRevision,
+) -> Result<StandardUpgrade, StandardUpgradeError> {
+    prepare_standard_upgrade_with(
+        active,
+        retained_standard_library_snapshot,
+        verify_standard_library_snapshot,
+        check_standard_library_source,
+        prepare_checked_standard_upgrade,
+    )
+}
+
+fn prepare_standard_upgrade_with<Retain, Verify, Check, Prepare>(
+    active: &ActiveDatabaseRevision,
+    retain: Retain,
+    verify: Verify,
+    check: Check,
+    prepare: Prepare,
+) -> Result<StandardUpgrade, StandardUpgradeError>
+where
+    Retain: FnOnce() -> Result<StandardLibrarySnapshot, StandardLibraryError>,
+    Verify: FnOnce(
+        StandardLibrarySnapshot,
+    ) -> Result<VerifiedStandardLibrarySnapshot, StandardLibraryError>,
+    Check: FnOnce(
+        &VerifiedStandardLibrarySnapshot,
+    ) -> Result<CheckedStandardLibrary, StandardLibraryCheckError>,
+    Prepare: FnOnce(
+        &CheckedStandardLibrary,
+        &ActiveDatabaseRevision,
+    ) -> Result<PreparedStandardUpgrade, PrepareStandardUpgradeError>,
+{
+    let snapshot = retain().map_err(|source| StandardUpgradeError::StandardLibrary { source })?;
+    let verified =
+        verify(snapshot).map_err(|source| StandardUpgradeError::StandardLibrary { source })?;
+    let checked =
+        check(&verified).map_err(|source| StandardUpgradeError::StandardSource { source })?;
+    let prepared =
+        prepare(&checked, active).map_err(|source| StandardUpgradeError::Prepare { source })?;
+
+    Ok(StandardUpgrade { prepared })
 }
 
 /// Retains the canonical standard source as an unverified snapshot.
@@ -1030,7 +1149,7 @@ fn source_persistence(persistence: PrimitiveValueTypePersistence) -> ValueTypePe
 
 #[cfg(test)]
 mod tests {
-    use std::error::Error as _;
+    use std::{cell::Cell, error::Error as _};
 
     use orna_core::catalogue::{
         CatalogueSnapshotError, PreludeTypeName, PreludeTypeNameError, QualifiedSemanticName,
@@ -1038,6 +1157,18 @@ mod tests {
         ValueTypeMutability, ValueTypePersistence,
     };
     use orna_core::revision::DefinitionIdentity;
+    use orna_core::{
+        CatalogueRevisionId, SourceBundleId, SourceRevisionId, SourceUnitId,
+        canonical_hash::{
+            catalogue_digest, catalogue_digest_with_context, source_bundle_digest,
+            source_revision_record_digest, source_unit_content_digest,
+        },
+        catalogue::CatalogueSnapshot,
+        revision::{
+            ActiveDatabaseRevision, ActiveDatabaseRevisionInput, ActiveRevisionContent,
+            CatalogueHashContext, RevisionPair, StoredSourceRevision, StoredSourceUnit,
+        },
+    };
 
     use super::{
         BIGINT_TYPE_ID, BINARY_LARGE_OBJECT_TYPE_ID, BOOLEAN_TYPE_ID,
@@ -1046,10 +1177,11 @@ mod tests {
         SOURCE_LOGICAL_PATH, STANDARD_CATALOGUE_REVISION_ID, STANDARD_LIBRARY_REVISION_ID,
         STANDARD_LIBRARY_VERSION_IDENTITY, STANDARD_SOURCE_BUNDLE_ID, STANDARD_SOURCE_REVISION_ID,
         STANDARD_SOURCE_UNIT_ID, STANDARD_TYPE_IDS, STD_SCHEMA_ID, STD_TYPES_SCHEMA_ID,
-        StandardLibraryManifestError, TIME_TYPE_ID, TIMESTAMP_TYPE_ID, UUID_TYPE_ID, VOID_TYPE_ID,
-        build_type_bindings, retained_standard_library_snapshot,
-        retained_standard_library_snapshot_from_source, standard_library_manifest,
-        verify_standard_library_snapshot,
+        StandardLibraryError, StandardLibraryManifestError, StandardUpgradeError, TIME_TYPE_ID,
+        TIMESTAMP_TYPE_ID, UUID_TYPE_ID, VOID_TYPE_ID, build_type_bindings,
+        prepare_standard_upgrade, prepare_standard_upgrade_with,
+        retained_standard_library_snapshot, retained_standard_library_snapshot_from_source,
+        standard_library_manifest, verify_standard_library_snapshot,
     };
 
     const EXPECTED_RETAINED_STANDARD_SOURCE: &str = r#"CREATE SCHEMA std;
@@ -1176,6 +1308,252 @@ EXPORT TYPE std.types.VOID AS std.VOID;
 
 EXPORT TYPE std.VOID TO PRELUDE AS VOID;
 "#;
+
+    fn empty_active_revision() -> ActiveDatabaseRevision {
+        let source_bundle = SourceBundleId::from_bytes([0x81; 16]);
+        let source_revision = SourceRevisionId::from_bytes([0x82; 16]);
+        let bundle_hash = source_bundle_digest(&[]).expect("the empty source bundle is valid");
+        let source = StoredSourceRevision::new(
+            source_bundle,
+            source_revision,
+            None,
+            Vec::new(),
+            bundle_hash,
+            source_revision_record_digest(source_bundle, None, bundle_hash)
+                .expect("the empty source revision is valid"),
+        )
+        .expect("the empty stored source revision is valid");
+        let catalogue = CatalogueSnapshot::new(
+            CatalogueRevisionId::from_bytes([0x83; 16]),
+            Vec::new(),
+            Vec::new(),
+        )
+        .expect("the empty catalogue is valid");
+        let pair = RevisionPair::new(source.id(), catalogue.revision());
+
+        ActiveDatabaseRevision::new(
+            pair,
+            source,
+            catalogue.clone(),
+            catalogue_digest(&catalogue, &[], &[], &[], &[])
+                .expect("the empty catalogue digest is valid"),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .expect("the empty active revision is valid")
+    }
+
+    fn empty_version_two_active_revision(
+        standard: &orna_core::revision::VerifiedStandardLibrarySnapshot,
+    ) -> ActiveDatabaseRevision {
+        let source_unit = StoredSourceUnit::new(
+            SourceUnitId::from_bytes([0x84; 16]),
+            0,
+            "active.orna",
+            "",
+            source_unit_content_digest("").expect("the empty source-unit digest is valid"),
+        )
+        .expect("the empty source unit is valid");
+        let source_bundle = SourceBundleId::from_bytes([0x85; 16]);
+        let bundle_hash = source_bundle_digest(std::slice::from_ref(&source_unit))
+            .expect("the active source bundle is valid");
+        let source = StoredSourceRevision::new(
+            source_bundle,
+            SourceRevisionId::from_bytes([0x86; 16]),
+            None,
+            vec![source_unit],
+            bundle_hash,
+            source_revision_record_digest(source_bundle, None, bundle_hash)
+                .expect("the active source revision is valid"),
+        )
+        .expect("the active stored source revision is valid");
+        let catalogue = CatalogueSnapshot::new_with_types(
+            CatalogueRevisionId::from_bytes([0x87; 16]),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .expect("the active catalogue is valid");
+        let context = CatalogueHashContext::version_two(standard.clone());
+        let catalogue_hash =
+            catalogue_digest_with_context(&context, &catalogue, &[], &[], &[], &[])
+                .expect("the active catalogue digest is valid");
+
+        ActiveDatabaseRevision::new_with_catalogue_hash_context(
+            ActiveDatabaseRevisionInput::new(
+                RevisionPair::new(source.id(), catalogue.revision()),
+                source,
+                catalogue,
+                catalogue_hash,
+                ActiveRevisionContent::new(Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+            ),
+            context,
+        )
+        .expect("the version-two active revision is valid")
+    }
+
+    #[test]
+    fn prepares_the_accepted_standard_upgrade_from_an_empty_active_revision() {
+        let active = empty_active_revision();
+
+        let upgrade = prepare_standard_upgrade(&active).expect("the standard upgrade prepares");
+
+        assert_eq!(
+            upgrade
+                .checked_standard_library()
+                .verified_snapshot()
+                .revision(),
+            STANDARD_LIBRARY_REVISION_ID
+        );
+        assert_eq!(
+            upgrade.verified_standard_snapshot().revision(),
+            STANDARD_LIBRARY_REVISION_ID
+        );
+        assert_eq!(
+            upgrade.application_revision().expected_base(),
+            active.pair()
+        );
+        assert_eq!(
+            upgrade
+                .application_revision()
+                .catalogue_hash_context()
+                .standard()
+                .map(|snapshot| snapshot.revision()),
+            Some(STANDARD_LIBRARY_REVISION_ID)
+        );
+    }
+
+    #[test]
+    fn standard_upgrade_stops_before_compiler_callbacks_when_accepted_verification_fails() {
+        let accepted =
+            retained_standard_library_snapshot().expect("the retained standard source is valid");
+        let wrong_digest = orna_core::revision::StandardLibrarySnapshot::new(
+            accepted.revision(),
+            accepted.digest_version(),
+            accepted.source().clone(),
+            accepted.language_version(),
+            accepted.catalogue().clone(),
+            accepted.origins().to_vec(),
+            orna_core::revision::Sha256Digest::from_bytes([0; 32]),
+        )
+        .expect("a different standard digest remains structurally valid");
+        let active = empty_active_revision();
+        let checker_calls = Cell::new(0);
+        let preparation_calls = Cell::new(0);
+
+        let error = prepare_standard_upgrade_with(
+            &active,
+            || Ok(wrong_digest),
+            verify_standard_library_snapshot,
+            |snapshot| {
+                checker_calls.set(checker_calls.get() + 1);
+                orna_compiler::check_standard_library_source(snapshot)
+            },
+            |standard, active| {
+                preparation_calls.set(preparation_calls.get() + 1);
+                orna_compiler::prepare_checked_standard_upgrade(standard, active)
+            },
+        )
+        .expect_err("the accepted verifier rejects the different digest");
+
+        assert!(matches!(
+            error,
+            StandardUpgradeError::StandardLibrary {
+                source: StandardLibraryError::AcceptedDigestMismatch { expected, actual }
+            } if expected == super::ACCEPTED_STANDARD_LIBRARY_DIGEST
+                && actual == orna_core::revision::Sha256Digest::from_bytes([0; 32])
+        ));
+        assert_eq!(checker_calls.get(), 0);
+        assert_eq!(preparation_calls.get(), 0);
+    }
+
+    #[test]
+    fn standard_upgrade_maps_the_compiler_installed_gate_after_standard_acceptance() {
+        let snapshot =
+            retained_standard_library_snapshot().expect("the retained standard source is valid");
+        let verified = verify_standard_library_snapshot(snapshot)
+            .expect("the accepted standard source verifies");
+        let active = empty_version_two_active_revision(&verified);
+
+        let error =
+            prepare_standard_upgrade(&active).expect_err("the standard is already installed");
+
+        assert!(matches!(
+            &error,
+            StandardUpgradeError::Prepare {
+                source: orna_compiler::PrepareStandardUpgradeError::StandardLibraryAlreadyInstalled {
+                    revision
+                }
+            } if *revision == STANDARD_LIBRARY_REVISION_ID
+        ));
+        assert_eq!(
+            error.to_string(),
+            format!("standard library {STANDARD_LIBRARY_REVISION_ID} is already installed")
+        );
+        assert_eq!(
+            error.source().map(ToString::to_string),
+            Some(format!(
+                "standard library {STANDARD_LIBRARY_REVISION_ID} is already installed"
+            ))
+        );
+    }
+
+    #[test]
+    fn standard_upgrade_errors_are_transparent_and_preserve_their_fields() {
+        let standard_library = StandardUpgradeError::StandardLibrary {
+            source: StandardLibraryError::Unavailable,
+        };
+        let standard_source = StandardUpgradeError::StandardSource {
+            source: orna_compiler::StandardLibraryCheckError::SourceUnitCount { actual: 9 },
+        };
+        let preparation = StandardUpgradeError::Prepare {
+            source: orna_compiler::PrepareStandardUpgradeError::StandardLibraryAlreadyInstalled {
+                revision: STANDARD_LIBRARY_REVISION_ID,
+            },
+        };
+
+        assert!(matches!(
+            standard_library,
+            StandardUpgradeError::StandardLibrary {
+                source: StandardLibraryError::Unavailable
+            }
+        ));
+        assert!(matches!(
+            standard_source,
+            StandardUpgradeError::StandardSource {
+                source: orna_compiler::StandardLibraryCheckError::SourceUnitCount { actual: 9 }
+            }
+        ));
+        assert!(matches!(
+            preparation,
+            StandardUpgradeError::Prepare {
+                source: orna_compiler::PrepareStandardUpgradeError::StandardLibraryAlreadyInstalled {
+                    revision
+                }
+            } if revision == STANDARD_LIBRARY_REVISION_ID
+        ));
+
+        for (error, expected) in [
+            (
+                &standard_library,
+                "the standard library is not installed".to_owned(),
+            ),
+            (
+                &standard_source,
+                "the verified standard library has 9 source units, expected exactly one".to_owned(),
+            ),
+            (
+                &preparation,
+                format!("standard library {STANDARD_LIBRARY_REVISION_ID} is already installed"),
+            ),
+        ] {
+            assert_eq!(error.to_string(), expected);
+            assert_eq!(error.source().map(ToString::to_string), Some(expected));
+        }
+    }
 
     #[test]
     fn manifest_exposes_the_reserved_staging_identities() {
@@ -1698,6 +2076,7 @@ EXPORT TYPE std.VOID TO PRELUDE AS VOID;
 
     #[test]
     fn standard_library_error_preserves_its_exact_public_contract() {
+        let unavailable = StandardLibraryError::Unavailable;
         let manifest = super::StandardLibraryError::Manifest {
             source: StandardLibraryManifestError::TypeBindingCountMismatch {
                 expected: 30,
@@ -1729,6 +2108,10 @@ EXPORT TYPE std.VOID TO PRELUDE AS VOID;
             "the standard library manifest is invalid: the standard library manifest has 29 type bindings, expected 30"
         );
         assert_eq!(
+            unavailable.to_string(),
+            "the standard library is not installed"
+        );
+        assert_eq!(
             retained.to_string(),
             "the retained standard library source does not match its manifest"
         );
@@ -1752,6 +2135,7 @@ EXPORT TYPE std.VOID TO PRELUDE AS VOID;
             manifest.source().map(ToString::to_string),
             Some("the standard library manifest has 29 type bindings, expected 30".to_owned())
         );
+        assert!(unavailable.source().is_none());
         assert!(retained.source().is_none());
         assert_eq!(
             revision.source().map(ToString::to_string),
