@@ -468,6 +468,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "orna-client"
+version = "0.1.0"
+dependencies = [
+ "orna-artifact",
+ "orna-compiler",
+ "orna-core",
+ "orna-standard",
+]
+
+[[package]]
 name = "orna-compiler"
 version = "0.1.0"
 dependencies = [
