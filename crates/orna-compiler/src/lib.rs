@@ -302,27 +302,30 @@ mod tests {
             verify_standard_library_snapshot,
         },
         catalogue::{
-            CatalogueSnapshot, PreludeTypeName, QualifiedSemanticName, SchemaDefinition,
-            TypeBinding, ValueTypeDefinition, ValueTypeMutability, ValueTypePersistence,
+            CatalogueSnapshot, FunctionDomain, FunctionReturn, FunctionSecurity,
+            FunctionTransaction, FunctionVolatility, PreludeTypeName, QualifiedSemanticName,
+            SchemaDefinition, TypeBinding, ValueTypeDefinition, ValueTypeMutability,
+            ValueTypePersistence,
         },
         revision::{
             ActiveDatabaseRevision, ActiveDatabaseRevisionInput, ActiveRevisionContent,
             CatalogueHashContext, CatalogueHashVersion, DefinitionIdentity, DefinitionOrigin,
-            DeployableRevision, RevisionPair, Sha256Digest, SourceOrigin,
-            StandardLibraryDigestVersion, StandardLibrarySnapshot, StoredSourceRevision,
-            StoredSourceUnit,
+            DefinitionReferenceKind, DefinitionReferenceTarget, DeployableRevision,
+            ExecutableArtifactKind, FunctionSemanticHashVersion, RevisionPair, Sha256Digest,
+            SourceOrigin, StandardLibraryDigestVersion, StandardLibrarySnapshot,
+            StoredSourceRevision, StoredSourceUnit,
         },
         source::{SourceBundle, SourceUnit},
         types::ResolvedType,
     };
 
     use super::{
-        CheckedFunctionId, CheckedTypeId, CheckedTypeUseKind, CheckedValueTypeUse, DiagnosticCode,
-        EMPTY_APPLICATION_CATALOGUE_REVISION_ID, PrepareError, PrepareStandardApplicationError,
-        StandardApplicationCheckContext, StandardApplicationCheckReport,
-        StandardApplicationContextError, StandardLibraryCheckError, check, check_new_application,
-        check_standard_application, check_standard_library_source, parse_bundle,
-        prepare_standard_application,
+        CheckedFunctionId, CheckedParameterId, CheckedTypeId, CheckedTypeUseKind,
+        CheckedValueTypeUse, DiagnosticCode, EMPTY_APPLICATION_CATALOGUE_REVISION_ID, PrepareError,
+        PrepareStandardApplicationError, StandardApplicationCheckContext,
+        StandardApplicationCheckReport, StandardApplicationContextError, StandardLibraryCheckError,
+        check, check_new_application, check_standard_application, check_standard_library_source,
+        parse_bundle, prepare_standard_application,
     };
     use crate::prepare::{
         CandidateAllocator, CandidateIdSource, ReservedStandardIds,
@@ -648,7 +651,354 @@ mod tests {
     }
 
     #[test]
-    fn standard_preparation_rejects_a_checked_client_before_allocation() {
+    fn prepares_a_checked_client_boolean_constant() {
+        let _allocation_lock = PREPARE_ALLOCATION_LOCK.lock().unwrap();
+        let verified = verified_standard_source_fixture();
+        let standard = check_standard_library_source(&verified).unwrap();
+        assert_eq!(standard.value_types().len(), 1);
+        assert_ne!(
+            standard.value_types()[0].id(),
+            TypeId::from_bytes(CANONICAL_TYPE_IDS[0]),
+            "the fixture must retain a self-consistent non-golden Boolean identity"
+        );
+        let active = empty_version_two_active(&verified);
+        let context =
+            StandardApplicationCheckContext::try_new(active.catalogue(), &standard).unwrap();
+        let source =
+            "CREATE SCHEMA app; CREATE CLIENT FUNCTION app.enabled() RETURNS BOOLEAN RETURN TRUE;";
+        let bundle = SourceBundle::new([SourceUnit::new("application.orna", source)]).unwrap();
+        let report = check_standard_application(&bundle, &context);
+
+        assert!(report.diagnostics().is_empty());
+        assert!(report.checked_bundle().is_some());
+        let prepared = prepare_standard_application_with_allocator(
+            &report,
+            active.pair(),
+            &active,
+            retrying_standard_allocator(&verified),
+        )
+        .unwrap();
+        assert_eq!(prepared.candidate().functions().len(), 1);
+        let function = &prepared.candidate().functions()[0];
+        assert_eq!(function.name().to_string(), "app.enabled");
+        assert_eq!(function.domain(), FunctionDomain::Client);
+        assert_eq!(function.parameters(), []);
+        assert_eq!(
+            function.return_type(),
+            &FunctionReturn::Single(ResolvedType::Scalar(
+                orna_core::types::StandardScalar::Boolean
+            ))
+        );
+        assert_eq!(prepared.new_function_revisions().len(), 1);
+        let revision = &prepared.new_function_revisions()[0];
+        assert_eq!(revision.function(), function.id());
+        assert_eq!(function.current_revision(), revision.id());
+        assert_eq!(
+            revision.semantic_hash_version(),
+            FunctionSemanticHashVersion::Version2
+        );
+        assert_eq!(revision.language_version(), "orna.language/1");
+        assert_eq!(revision.artifact().kind(), ExecutableArtifactKind::Client);
+        assert_eq!(revision.artifact().format(), "orna.client-plan");
+        assert_eq!(revision.artifact().version(), 1);
+        assert_eq!(
+            revision.artifact().payload(),
+            b"ORNACP\0\0\0\0\0\x01\x01\x01"
+        );
+        assert_eq!(prepared.references().len(), 1);
+        let reference = &prepared.references()[0];
+        assert_eq!(reference.source_function(), function.id());
+        assert_eq!(reference.source_revision(), revision.id());
+        assert_eq!(reference.ordinal(), 0);
+        assert_eq!(reference.kind(), DefinitionReferenceKind::NamedType);
+        assert_eq!(
+            reference.target(),
+            DefinitionReferenceTarget::ValueType(TypeId::from_bytes([3; 16]))
+        );
+        let return_start = source.find("BOOLEAN");
+        assert!(return_start.is_some());
+        let return_start = return_start.unwrap_or_default();
+        assert_eq!(
+            reference.source_origin().byte_start(),
+            u32::try_from(return_start).unwrap_or_default()
+        );
+        assert_eq!(
+            reference.source_origin().byte_end(),
+            u32::try_from(return_start + "BOOLEAN".len()).unwrap_or_default()
+        );
+        assert_eq!(
+            reference.source_origin().source_unit(),
+            prepared.source().units()[0].id()
+        );
+
+        let declaration_start = source.find("CREATE CLIENT FUNCTION").unwrap_or_default();
+        let client_origins = prepared
+            .origins()
+            .iter()
+            .filter(|origin| origin.identity() == DefinitionIdentity::Function(function.id()))
+            .collect::<Vec<_>>();
+        assert_eq!(client_origins.len(), 1);
+        assert_eq!(
+            client_origins[0].source(),
+            SourceOrigin::new(
+                prepared.source().units()[0].id(),
+                u32::try_from(declaration_start).unwrap_or_default(),
+                u32::try_from(source.len()).unwrap_or_default(),
+            )
+            .unwrap(),
+        );
+        assert!(prepared.origins().iter().all(|origin| {
+            !matches!(
+                origin.identity(),
+                DefinitionIdentity::Parameter { owner, .. }
+                    | DefinitionIdentity::FunctionReturnColumn { owner, .. }
+                    if owner == function.id()
+            )
+        }));
+    }
+
+    #[test]
+    fn standard_preparation_reuses_the_lowest_historical_client_true_revision() {
+        let verified = verified_standard_source_fixture();
+        let standard = check_standard_library_source(&verified).unwrap();
+        let true_source =
+            "CREATE SCHEMA app; CREATE CLIENT FUNCTION app.enabled() RETURNS BOOLEAN RETURN TRUE;";
+        let false_source =
+            "CREATE SCHEMA app; CREATE CLIENT FUNCTION app.enabled() RETURNS BOOLEAN RETURN FALSE;";
+        let true_bundle =
+            SourceBundle::new([SourceUnit::new("application.orna", true_source)]).unwrap();
+        let false_bundle =
+            SourceBundle::new([SourceUnit::new("application.orna", false_source)]).unwrap();
+
+        let initial = empty_version_two_active(&verified);
+        let initial_context =
+            StandardApplicationCheckContext::try_new(initial.catalogue(), &standard).unwrap();
+        let first_true_report = check_standard_application(&true_bundle, &initial_context);
+        assert_eq!(first_true_report.diagnostics(), &[]);
+        let first_true =
+            prepare_standard_application(&first_true_report, initial.pair(), &initial).unwrap();
+        assert_eq!(first_true.new_function_revisions().len(), 1);
+        let true_revision = first_true.new_function_revisions()[0].clone();
+        assert_eq!(
+            true_revision.semantic_hash_version(),
+            FunctionSemanticHashVersion::Version2
+        );
+        assert_eq!(
+            first_true.references()[0].target(),
+            DefinitionReferenceTarget::ValueType(TypeId::from_bytes([3; 16]))
+        );
+        assert_eq!(
+            true_revision.artifact().payload(),
+            b"ORNACP\0\0\0\0\0\x01\x01\x01"
+        );
+
+        let true_active = active_from_prepared_standard_candidate(&first_true, Vec::new());
+        let true_context =
+            StandardApplicationCheckContext::try_new(true_active.catalogue(), &standard).unwrap();
+        let false_report = check_standard_application(&false_bundle, &true_context);
+        assert_eq!(false_report.diagnostics(), &[]);
+        let false_prepared =
+            prepare_standard_application(&false_report, true_active.pair(), &true_active).unwrap();
+        assert_eq!(false_prepared.new_function_revisions().len(), 1);
+        assert_ne!(
+            false_prepared.new_function_revisions()[0].id(),
+            true_revision.id()
+        );
+        assert_eq!(
+            false_prepared.references()[0].target(),
+            DefinitionReferenceTarget::ValueType(TypeId::from_bytes([3; 16]))
+        );
+        assert_ne!(
+            false_prepared.new_function_revisions()[0].semantic_hash(),
+            true_revision.semantic_hash()
+        );
+
+        let false_active =
+            active_from_prepared_standard_candidate(&false_prepared, vec![true_revision.clone()]);
+        let false_context =
+            StandardApplicationCheckContext::try_new(false_active.catalogue(), &standard).unwrap();
+        let reused_true_report = check_standard_application(&true_bundle, &false_context);
+        assert_eq!(reused_true_report.diagnostics(), &[]);
+        let reused_true =
+            prepare_standard_application(&reused_true_report, false_active.pair(), &false_active)
+                .unwrap();
+
+        assert_eq!(reused_true.new_function_revisions(), &[]);
+        let current_revisions = reused_true.current_function_revisions();
+        assert!(current_revisions.is_some());
+        let current_revisions = current_revisions.unwrap_or_default();
+        assert_eq!(current_revisions.len(), 1);
+        assert_eq!(current_revisions[0].id(), true_revision.id());
+        assert_eq!(current_revisions[0].revision_number(), 1);
+        assert_eq!(
+            current_revisions[0].artifact().payload(),
+            b"ORNACP\0\0\0\0\0\x01\x01\x01"
+        );
+        assert_eq!(
+            current_revisions[0].semantic_hash(),
+            true_revision.semantic_hash()
+        );
+        let function = &reused_true.candidate().functions()[0];
+        assert_eq!(function.id(), true_revision.function());
+        assert_eq!(function.current_revision(), true_revision.id());
+        assert_eq!(reused_true.references().len(), 1);
+        assert_eq!(reused_true.references()[0].source_function(), function.id());
+        assert_eq!(
+            reused_true.references()[0].source_revision(),
+            true_revision.id()
+        );
+    }
+
+    #[test]
+    fn standard_preparation_reuses_client_boolean_across_formatting_and_spelling() {
+        let verified = verified_standard_source_fixture();
+        let standard = check_standard_library_source(&verified).unwrap();
+        let initial = empty_version_two_active(&verified);
+        let initial_context =
+            StandardApplicationCheckContext::try_new(initial.catalogue(), &standard).unwrap();
+        let canonical = SourceBundle::new([SourceUnit::new(
+            "canonical.orna",
+            "CREATE SCHEMA app; CREATE CLIENT FUNCTION app.enabled() RETURNS BOOLEAN RETURN TRUE;",
+        )])
+        .unwrap();
+        let canonical_report = check_standard_application(&canonical, &initial_context);
+        assert_eq!(canonical_report.diagnostics(), &[]);
+        let initial_prepared =
+            prepare_standard_application(&canonical_report, initial.pair(), &initial).unwrap();
+        let initial_revision = initial_prepared.new_function_revisions()[0].clone();
+        let active = active_from_prepared_standard_candidate(&initial_prepared, Vec::new());
+        let context =
+            StandardApplicationCheckContext::try_new(active.catalogue(), &standard).unwrap();
+        let equivalent = SourceBundle::new([SourceUnit::new(
+            "formatted.orna",
+            "CREATE SCHEMA app;\n\nCREATE CLIENT FUNCTION app.enabled() RETURNS std.BOOLEAN RETURN TRUE;",
+        )])
+        .unwrap();
+        let report = check_standard_application(&equivalent, &context);
+        assert_eq!(report.diagnostics(), &[]);
+        let prepared = prepare_standard_application(&report, active.pair(), &active).unwrap();
+
+        assert_eq!(prepared.new_function_revisions(), &[]);
+        let current = prepared.current_function_revisions().unwrap_or_default();
+        assert_eq!(current, [initial_revision]);
+        assert_eq!(prepared.references().len(), 1);
+        assert_eq!(
+            prepared.references()[0].target(),
+            DefinitionReferenceTarget::ValueType(TypeId::from_bytes([3; 16]))
+        );
+    }
+
+    fn assert_no_standard_preparation_allocations() {
+        for counter in [
+            &PREPARE_CATALOGUE_ALLOCATIONS,
+            &PREPARE_BUNDLE_ALLOCATIONS,
+            &PREPARE_REVISION_ALLOCATIONS,
+            &PREPARE_UNIT_ALLOCATIONS,
+            &PREPARE_SCHEMA_ALLOCATIONS,
+            &PREPARE_TYPE_ALLOCATIONS,
+        ] {
+            assert_eq!(
+                counter.load(Ordering::SeqCst),
+                0,
+                "CLIENT Gate 11 must reject before allocating a candidate identity"
+            );
+        }
+    }
+
+    fn assert_client_gate_eleven_failure(
+        error: PrepareStandardApplicationError,
+        reason: &'static str,
+    ) {
+        assert!(matches!(
+            &error,
+            PrepareStandardApplicationError::Prepare {
+                source: PrepareError::InvalidCheckedBundle { .. }
+            }
+        ));
+        if let PrepareStandardApplicationError::Prepare { source } = &error {
+            assert!(matches!(
+                source,
+                PrepareError::InvalidCheckedBundle { reason: actual } if *actual == reason
+            ));
+            assert_eq!(source.to_string(), reason);
+        }
+        assert_eq!(
+            error.to_string(),
+            format!("the standard application could not be prepared: {reason}")
+        );
+        assert!(std::error::Error::source(&error).is_some());
+    }
+
+    fn assert_existing_function_mismatch(
+        error: PrepareStandardApplicationError,
+        expected: FunctionId,
+    ) {
+        assert!(matches!(
+            &error,
+            PrepareStandardApplicationError::Prepare {
+                source: PrepareError::ExistingDefinitionMismatch {
+                    definition: DefinitionIdentity::Function(id),
+                }
+            } if *id == expected
+        ));
+        assert_eq!(
+            error.to_string(),
+            "the standard application could not be prepared: existing checked definition differs from active catalogue"
+        );
+        assert!(std::error::Error::source(&error).is_some());
+    }
+
+    #[derive(Clone, Copy)]
+    enum HostileClientFact {
+        Domain,
+        Parameter,
+        Return,
+        Security,
+        Transaction,
+        Volatility,
+        Body,
+        Reference,
+    }
+
+    impl HostileClientFact {
+        const fn reason(self) -> &'static str {
+            match self {
+                Self::Domain => "checked CLIENT function has an unsupported domain",
+                Self::Parameter => "checked CLIENT function declares parameters",
+                Self::Return => {
+                    "checked CLIENT function does not return BOOLEAN from the checked standard library"
+                }
+                Self::Security => "checked CLIENT function has an unsupported security mode",
+                Self::Transaction => "checked CLIENT function has an unsupported transaction mode",
+                Self::Volatility => "checked CLIENT function has an unsupported volatility mode",
+                Self::Body => "checked CLIENT function has an unsupported body",
+                Self::Reference => {
+                    "checked CLIENT function contains unsupported application definition references"
+                }
+            }
+        }
+
+        fn apply(self, report: &mut StandardApplicationCheckReport) -> bool {
+            match self {
+                Self::Domain => report.replace_first_client_domain_for_test(FunctionDomain::Server),
+                Self::Parameter => report.append_first_client_parameter_for_test(),
+                Self::Return => report.replace_first_client_return_with_integer_for_test(),
+                Self::Security => {
+                    report.replace_first_client_security_for_test(FunctionSecurity::Definer)
+                }
+                Self::Transaction => report
+                    .replace_first_client_transaction_for_test(Some(FunctionTransaction::Atomic)),
+                Self::Volatility => {
+                    report.replace_first_client_volatility_for_test(FunctionVolatility::Stable)
+                }
+                Self::Body => report.replace_first_client_body_with_unsupported_for_test(),
+                Self::Reference => report.append_first_client_reference_for_test(),
+            }
+        }
+    }
+
+    #[test]
+    fn standard_preparation_rejects_every_client_gate_eleven_fact_before_allocation() {
         let _allocation_lock = PREPARE_ALLOCATION_LOCK.lock().unwrap();
         let verified = verified_standard_source_fixture();
         let standard = check_standard_library_source(&verified).unwrap();
@@ -661,39 +1011,774 @@ mod tests {
         )])
         .unwrap();
         let report = check_standard_application(&bundle, &context);
+        assert_eq!(report.diagnostics(), &[]);
 
-        assert!(report.diagnostics().is_empty());
-        assert!(report.checked_bundle().is_some());
+        for fact in [
+            HostileClientFact::Domain,
+            HostileClientFact::Parameter,
+            HostileClientFact::Return,
+            HostileClientFact::Security,
+            HostileClientFact::Transaction,
+            HostileClientFact::Volatility,
+            HostileClientFact::Body,
+            HostileClientFact::Reference,
+        ] {
+            let mut hostile = report.clone();
+            let changed = fact.apply(&mut hostile);
+            assert!(changed);
+
+            let error = prepare_standard_application_with_allocator(
+                &hostile,
+                active.pair(),
+                &active,
+                retrying_standard_allocator(&verified),
+            )
+            .unwrap_err();
+            assert_client_gate_eleven_failure(error, fact.reason());
+            assert_no_standard_preparation_allocations();
+        }
+    }
+
+    #[test]
+    fn standard_preparation_orders_every_adjacent_client_gate_eleven_pair_before_allocation() {
+        let _allocation_lock = PREPARE_ALLOCATION_LOCK.lock().unwrap();
+        let verified = verified_standard_source_fixture();
+        let standard = check_standard_library_source(&verified).unwrap();
+        let active = empty_version_two_active(&verified);
+        let context =
+            StandardApplicationCheckContext::try_new(active.catalogue(), &standard).unwrap();
+        let bundle = SourceBundle::new([SourceUnit::new(
+            "application.orna",
+            "CREATE SCHEMA app; CREATE CLIENT FUNCTION app.enabled() RETURNS BOOLEAN RETURN TRUE;",
+        )])
+        .unwrap();
+        let report = check_standard_application(&bundle, &context);
+        assert_eq!(report.diagnostics(), &[]);
+        let facts = [
+            HostileClientFact::Domain,
+            HostileClientFact::Parameter,
+            HostileClientFact::Return,
+            HostileClientFact::Security,
+            HostileClientFact::Transaction,
+            HostileClientFact::Volatility,
+            HostileClientFact::Body,
+            HostileClientFact::Reference,
+        ];
+
+        for pair in facts.windows(2) {
+            let mut hostile = report.clone();
+            assert!(pair[0].apply(&mut hostile));
+            assert!(pair[1].apply(&mut hostile));
+            let error = prepare_standard_application_with_allocator(
+                &hostile,
+                active.pair(),
+                &active,
+                retrying_standard_allocator(&verified),
+            )
+            .unwrap_err();
+            assert_client_gate_eleven_failure(error, pair[0].reason());
+            assert_no_standard_preparation_allocations();
+        }
+    }
+
+    #[test]
+    fn standard_preparation_orders_gate_ten_and_common_preflight_before_client_semantics() {
+        let _allocation_lock = PREPARE_ALLOCATION_LOCK.lock().unwrap();
+        let verified = verified_standard_source_fixture();
+        let standard = check_standard_library_source(&verified).unwrap();
+        let active = empty_version_two_active(&verified);
+        let context =
+            StandardApplicationCheckContext::try_new(active.catalogue(), &standard).unwrap();
+        let bundle = SourceBundle::new([SourceUnit::new(
+            "application.orna",
+            "CREATE SCHEMA app; CREATE CLIENT FUNCTION app.enabled() RETURNS BOOLEAN RETURN TRUE;",
+        )])
+        .unwrap();
+        let report = check_standard_application(&bundle, &context);
+        assert_eq!(report.diagnostics(), &[]);
+
+        let mut gate_ten = report.clone();
+        assert!(
+            gate_ten.replace_standard_type_reference_for_test(
+                0,
+                CheckedFunctionId::Existing(FunctionId::from_bytes([0xc1; 16])),
+                0,
+                TypeId::from_bytes([3; 16]),
+                report.checked_bundle().unwrap().standard_type_references()[0]
+                    .location()
+                    .clone(),
+            )
+        );
+        assert!(gate_ten.replace_first_client_body_with_unsupported_for_test());
         let error = prepare_standard_application_with_allocator(
-            &report,
+            &gate_ten,
             active.pair(),
             &active,
             retrying_standard_allocator(&verified),
         )
         .unwrap_err();
+        assert_function_reference_evidence_mismatch(
+            error,
+            report.checked_bundle().unwrap().standard_type_references()[0].owner(),
+        );
+        assert_no_standard_preparation_allocations();
+
+        let retained_owner = CheckedFunctionId::Existing(FunctionId::from_bytes([0xc2; 16]));
+        let mut retained_client_return = report.clone();
+        assert!(retained_client_return.replace_first_client_id_for_test(retained_owner));
+        assert!(retained_client_return.replace_first_client_body_with_unsupported_for_test());
+        let error = prepare_standard_application_with_allocator(
+            &retained_client_return,
+            active.pair(),
+            &active,
+            retrying_standard_allocator(&verified),
+        )
+        .unwrap_err();
+        assert_function_reference_evidence_mismatch(error, retained_owner);
+        assert_no_standard_preparation_allocations();
+
+        let mut common_preflight = report.clone();
+        assert!(common_preflight.replace_first_client_location_for_test(
+            super::SourceLocation::from_syntax(
+                "missing.orna",
+                &orna_syntax::SourceSpan { start: 0, end: 1 },
+            ),
+        ));
+        assert!(common_preflight.replace_first_client_body_with_unsupported_for_test());
+        let error = prepare_standard_application_with_allocator(
+            &common_preflight,
+            active.pair(),
+            &active,
+            retrying_standard_allocator(&verified),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            &error,
+            PrepareStandardApplicationError::Prepare {
+                source: PrepareError::InvalidSourceLocation {
+                    logical_path,
+                    byte_start: 0,
+                    byte_end: 1,
+                }
+            } if logical_path == "missing.orna"
+        ));
         assert_eq!(
             error.to_string(),
-            "the standard application could not be prepared: checked CLIENT function cannot yet be prepared"
+            "the standard application could not be prepared: checked source location is invalid"
         );
-        assert!(matches!(
-            error,
-            PrepareStandardApplicationError::Prepare {
-                source: PrepareError::InvalidCheckedBundle {
-                    reason: "checked CLIENT function cannot yet be prepared"
-                }
-            }
-        ));
         assert!(std::error::Error::source(&error).is_some());
-        for counter in [
-            &PREPARE_CATALOGUE_ALLOCATIONS,
-            &PREPARE_BUNDLE_ALLOCATIONS,
-            &PREPARE_REVISION_ALLOCATIONS,
-            &PREPARE_UNIT_ALLOCATIONS,
-            &PREPARE_SCHEMA_ALLOCATIONS,
-            &PREPARE_TYPE_ALLOCATIONS,
-        ] {
-            assert_eq!(counter.load(Ordering::SeqCst), 0);
+        assert_no_standard_preparation_allocations();
+    }
+
+    #[test]
+    fn standard_preparation_materialises_exact_client_return_evidence_at_gate_ten() {
+        let _allocation_lock = PREPARE_ALLOCATION_LOCK.lock().unwrap();
+        let verified = verified_standard_source_fixture();
+        let standard = check_standard_library_source(&verified).unwrap();
+        let active = empty_version_two_active(&verified);
+        let context =
+            StandardApplicationCheckContext::try_new(active.catalogue(), &standard).unwrap();
+        let bundle = SourceBundle::new([SourceUnit::new(
+            "application.orna",
+            "CREATE SCHEMA app; CREATE CLIENT FUNCTION app.enabled() RETURNS BOOLEAN RETURN TRUE;",
+        )])
+        .unwrap();
+        let report = check_standard_application(&bundle, &context);
+        assert_eq!(report.diagnostics(), &[]);
+        let checked = report.checked_bundle().unwrap();
+        let client = checked.client_functions().next().unwrap();
+        let owner = client.id();
+        let reference = checked.standard_type_references()[0].clone();
+        let return_location = reference.location().clone();
+
+        let mut hostile_cases = Vec::new();
+        let mut missing = report.clone();
+        assert!(missing.replace_standard_type_references_for_test(Vec::new()));
+        hostile_cases.push((missing, owner));
+
+        let mut extra = report.clone();
+        assert!(
+            extra.replace_standard_type_references_for_test(vec![
+                reference.clone(),
+                reference.clone(),
+            ])
+        );
+        hostile_cases.push((extra, owner));
+
+        let mut wrong_owner = report.clone();
+        assert!(wrong_owner.replace_standard_type_reference_for_test(
+            0,
+            CheckedFunctionId::Existing(FunctionId::from_bytes([0xc3; 16])),
+            0,
+            reference.target(),
+            return_location.clone(),
+        ));
+        hostile_cases.push((wrong_owner, owner));
+
+        let mut wrong_ordinal = report.clone();
+        assert!(wrong_ordinal.replace_standard_type_reference_for_test(
+            0,
+            owner,
+            1,
+            reference.target(),
+            return_location.clone(),
+        ));
+        hostile_cases.push((wrong_ordinal, owner));
+
+        let mut wrong_target = report.clone();
+        assert!(wrong_target.replace_standard_type_reference_for_test(
+            0,
+            owner,
+            0,
+            TypeId::from_bytes([0xc4; 16]),
+            return_location.clone(),
+        ));
+        hostile_cases.push((wrong_target, owner));
+
+        let mut wrong_reference_location = report.clone();
+        assert!(
+            wrong_reference_location.replace_standard_type_reference_for_test(
+                0,
+                owner,
+                0,
+                reference.target(),
+                super::SourceLocation::from_syntax(
+                    "other.orna",
+                    &orna_syntax::SourceSpan { start: 0, end: 1 },
+                ),
+            )
+        );
+        hostile_cases.push((wrong_reference_location, owner));
+
+        let mut wrong_class = report.clone();
+        assert!(wrong_class.replace_first_client_return_kind_for_test(
+            CheckedTypeUseKind::Parameter {
+                owner,
+                parameter: CheckedParameterId::Existing(orna_core::ParameterId::from_bytes(
+                    [0xc5; 16]
+                )),
+            },
+        ));
+        hostile_cases.push((wrong_class, owner));
+
+        let mut wrong_kind_ordinal = report.clone();
+        assert!(
+            wrong_kind_ordinal.replace_first_client_return_kind_for_test(
+                CheckedTypeUseKind::Return { owner, ordinal: 1 },
+            )
+        );
+        hostile_cases.push((wrong_kind_ordinal, owner));
+
+        let mut wrong_retained_target = report.clone();
+        assert!(
+            wrong_retained_target
+                .replace_first_client_return_type_id_for_test(TypeId::from_bytes([0xc6; 16]))
+        );
+        hostile_cases.push((wrong_retained_target, owner));
+
+        let mut wrong_retained_location = report.clone();
+        assert!(
+            wrong_retained_location.replace_first_client_return_use_location_for_test(
+                super::SourceLocation::from_syntax(
+                    "other.orna",
+                    &orna_syntax::SourceSpan { start: 0, end: 1 },
+                ),
+            )
+        );
+        hostile_cases.push((wrong_retained_location, owner));
+
+        for (hostile, expected_owner) in hostile_cases {
+            let error = prepare_standard_application_with_allocator(
+                &hostile,
+                active.pair(),
+                &active,
+                retrying_standard_allocator(&verified),
+            )
+            .unwrap_err();
+            assert_function_reference_evidence_mismatch(error, expected_owner);
+            assert_no_standard_preparation_allocations();
         }
+
+        let two_clients = SourceBundle::new([SourceUnit::new(
+            "two-clients.orna",
+            "CREATE SCHEMA app; \
+             CREATE CLIENT FUNCTION app.first() RETURNS BOOLEAN RETURN TRUE; \
+             CREATE CLIENT FUNCTION app.second() RETURNS BOOLEAN RETURN FALSE;",
+        )])
+        .unwrap();
+        let ordered_report = check_standard_application(&two_clients, &context);
+        assert_eq!(ordered_report.diagnostics(), &[]);
+        let ordered = ordered_report.checked_bundle().unwrap();
+        let expected_owner = ordered.standard_type_references()[0].owner();
+        let mut reordered = ordered_report.clone();
+        let mut references = ordered.standard_type_references().to_vec();
+        references.swap(0, 1);
+        assert!(reordered.replace_standard_type_references_for_test(references));
+        let error = prepare_standard_application_with_allocator(
+            &reordered,
+            active.pair(),
+            &active,
+            retrying_standard_allocator(&verified),
+        )
+        .unwrap_err();
+        assert_function_reference_evidence_mismatch(error, expected_owner);
+        assert_no_standard_preparation_allocations();
+    }
+
+    #[test]
+    fn standard_preparation_validates_every_gate_eleven_location_in_nested_order() {
+        let _allocation_lock = PREPARE_ALLOCATION_LOCK.lock().unwrap();
+        let verified = verified_standard_source_fixture();
+        let standard = check_standard_library_source(&verified).unwrap();
+        let active = empty_version_two_active(&verified);
+        let context =
+            StandardApplicationCheckContext::try_new(active.catalogue(), &standard).unwrap();
+        let source = "CREATE SCHEMA app; \
+            CREATE TYPE app.item AS OBJECT (flag BOOLEAN NOT NULL DEFAULT TRUE); \
+            CREATE SERVER FUNCTION app.read(p_ref REF app.item) RETURNS ROWS (item REF app.item) \
+            TRANSACTION READ ONLY VOLATILITY STABLE AS SELECT REF(i) FROM app.item i WHERE REF(i) = p_ref; \
+            CREATE CLIENT FUNCTION app.enabled() RETURNS BOOLEAN RETURN TRUE;";
+        let bundle = SourceBundle::new([SourceUnit::new("application.orna", source)]).unwrap();
+        let report = check_standard_application(&bundle, &context);
+        assert_eq!(report.diagnostics(), &[]);
+        let invalid_location = super::SourceLocation::from_syntax(
+            "missing.orna",
+            &orna_syntax::SourceSpan { start: 0, end: 1 },
+        );
+
+        for selector in [
+            "schema",
+            "object",
+            "field",
+            "default",
+            "server",
+            "server parameter",
+            "server return",
+            "server reference",
+            "client",
+            "client parameter",
+            "client return",
+            "client body",
+            "client reference",
+        ] {
+            let mut hostile = report.clone();
+            if selector == "client parameter" {
+                assert!(hostile.append_first_client_parameter_for_test());
+            }
+            if selector == "client reference" {
+                assert!(hostile.append_first_client_reference_for_test());
+            }
+            assert!(hostile.replace_standard_preparation_location_for_test(
+                selector,
+                invalid_location.clone(),
+            ));
+            let error = prepare_standard_application_with_allocator(
+                &hostile,
+                active.pair(),
+                &active,
+                retrying_standard_allocator(&verified),
+            )
+            .unwrap_err();
+            assert!(matches!(
+                &error,
+                PrepareStandardApplicationError::Prepare {
+                    source: PrepareError::InvalidSourceLocation {
+                        logical_path,
+                        byte_start: 0,
+                        byte_end: 1,
+                    }
+                } if logical_path == "missing.orna"
+            ));
+            assert_eq!(
+                error.to_string(),
+                "the standard application could not be prepared: checked source location is invalid"
+            );
+            assert!(std::error::Error::source(&error).is_some());
+            assert_no_standard_preparation_allocations();
+        }
+
+        let selectors = [
+            "schema",
+            "object",
+            "field",
+            "default",
+            "server",
+            "server parameter",
+            "server return",
+            "server reference",
+            "client",
+            "client parameter",
+            "client return",
+            "client body",
+            "client reference",
+        ];
+        for (index, pair) in selectors.windows(2).enumerate() {
+            let mut hostile = report.clone();
+            if pair.contains(&"client parameter") {
+                assert!(hostile.append_first_client_parameter_for_test());
+            }
+            if pair.contains(&"client reference") {
+                assert!(hostile.append_first_client_reference_for_test());
+            }
+            let first_location = super::SourceLocation::from_syntax(
+                "first-missing.orna",
+                &orna_syntax::SourceSpan {
+                    start: index,
+                    end: index + 1,
+                },
+            );
+            let second_location = super::SourceLocation::from_syntax(
+                "second-missing.orna",
+                &orna_syntax::SourceSpan {
+                    start: index + 20,
+                    end: index + 21,
+                },
+            );
+            assert!(
+                hostile.replace_standard_preparation_location_for_test(pair[0], first_location,)
+            );
+            assert!(
+                hostile.replace_standard_preparation_location_for_test(pair[1], second_location,)
+            );
+            let error = prepare_standard_application_with_allocator(
+                &hostile,
+                active.pair(),
+                &active,
+                retrying_standard_allocator(&verified),
+            )
+            .unwrap_err();
+            assert!(matches!(
+                &error,
+                PrepareStandardApplicationError::Prepare {
+                    source: PrepareError::InvalidSourceLocation {
+                        logical_path,
+                        byte_start,
+                        byte_end,
+                    }
+                } if logical_path == "first-missing.orna"
+                    && *byte_start == index
+                    && *byte_end == index + 1
+            ));
+            assert_eq!(
+                error.to_string(),
+                "the standard application could not be prepared: checked source location is invalid"
+            );
+            assert!(std::error::Error::source(&error).is_some());
+            assert_no_standard_preparation_allocations();
+        }
+
+        let mut nested_precedence = report;
+        assert!(
+            nested_precedence.replace_standard_preparation_location_for_test(
+                "schema",
+                invalid_location.clone(),
+            )
+        );
+        assert!(nested_precedence.replace_first_client_body_with_unsupported_for_test());
+        let error = prepare_standard_application_with_allocator(
+            &nested_precedence,
+            active.pair(),
+            &active,
+            retrying_standard_allocator(&verified),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            &error,
+            PrepareStandardApplicationError::Prepare {
+                source: PrepareError::InvalidSourceLocation { logical_path, .. }
+            } if logical_path == "missing.orna"
+        ));
+        assert_no_standard_preparation_allocations();
+    }
+
+    #[test]
+    fn standard_preparation_orders_server_continuity_client_order_and_owner_completeness() {
+        let _allocation_lock = PREPARE_ALLOCATION_LOCK.lock().unwrap();
+        let verified = verified_standard_source_fixture();
+        let standard = check_standard_library_source(&verified).unwrap();
+        let active = empty_version_two_active(&verified);
+        let context =
+            StandardApplicationCheckContext::try_new(active.catalogue(), &standard).unwrap();
+        let source = "CREATE SCHEMA app; \
+            CREATE TYPE app.item AS OBJECT (done BOOLEAN NOT NULL); \
+            CREATE SERVER FUNCTION app.by_ref(p_ref REF app.item) RETURNS ROWS (item REF app.item) \
+            TRANSACTION READ ONLY VOLATILITY STABLE \
+            AS SELECT REF(item) FROM app.item item WHERE REF(item) = p_ref; \
+            CREATE CLIENT FUNCTION app.enabled() RETURNS BOOLEAN RETURN TRUE;";
+        let bundle = SourceBundle::new([SourceUnit::new("application.orna", source)]).unwrap();
+        let report = check_standard_application(&bundle, &context);
+        assert_eq!(report.diagnostics(), &[]);
+        let server_id = FunctionId::from_bytes([0xc2; 16]);
+
+        let mut server_before_client = report.clone();
+        assert!(
+            server_before_client
+                .replace_first_server_id_for_test(CheckedFunctionId::Existing(server_id))
+        );
+        assert!(server_before_client.replace_first_client_body_with_unsupported_for_test());
+        let error = prepare_standard_application_with_allocator(
+            &server_before_client,
+            active.pair(),
+            &active,
+            retrying_standard_allocator(&verified),
+        )
+        .unwrap_err();
+        assert_existing_function_mismatch(error, server_id);
+        assert_no_standard_preparation_allocations();
+
+        let checked = report.checked_bundle().unwrap();
+        let client_id = checked.client_functions().next().unwrap().id();
+        let mut client_semantics_before_duplicate = report.clone();
+        assert!(client_semantics_before_duplicate.replace_first_server_id_for_test(client_id));
+        assert!(
+            client_semantics_before_duplicate.replace_first_client_body_with_unsupported_for_test()
+        );
+        let error = prepare_standard_application_with_allocator(
+            &client_semantics_before_duplicate,
+            active.pair(),
+            &active,
+            retrying_standard_allocator(&verified),
+        )
+        .unwrap_err();
+        assert_client_gate_eleven_failure(error, "checked CLIENT function has an unsupported body");
+        assert_no_standard_preparation_allocations();
+
+        let client_source = "CREATE SCHEMA app; \
+            CREATE CLIENT FUNCTION app.first() RETURNS BOOLEAN RETURN TRUE; \
+            CREATE CLIENT FUNCTION app.second() RETURNS BOOLEAN RETURN FALSE;";
+        let client_bundle =
+            SourceBundle::new([SourceUnit::new("clients.orna", client_source)]).unwrap();
+        let client_report = check_standard_application(&client_bundle, &context);
+        assert_eq!(client_report.diagnostics(), &[]);
+        let mut first_before_second = client_report.clone();
+        assert!(first_before_second.replace_first_client_body_with_unsupported_for_test());
+        assert!(first_before_second.replace_client_domain_for_test(1, FunctionDomain::Server));
+        let error = prepare_standard_application_with_allocator(
+            &first_before_second,
+            active.pair(),
+            &active,
+            retrying_standard_allocator(&verified),
+        )
+        .unwrap_err();
+        assert_client_gate_eleven_failure(error, "checked CLIENT function has an unsupported body");
+        assert_no_standard_preparation_allocations();
+
+        let mut duplicate_domain = report.clone();
+        assert!(duplicate_domain.replace_first_server_id_for_test(client_id));
+        let error = prepare_standard_application_with_allocator(
+            &duplicate_domain,
+            active.pair(),
+            &active,
+            retrying_standard_allocator(&verified),
+        )
+        .unwrap_err();
+        assert_client_gate_eleven_failure(error, "duplicate checked function");
+        assert_no_standard_preparation_allocations();
+
+        let server_only_source = "CREATE SCHEMA app; \
+            CREATE TYPE app.item AS OBJECT (done BOOLEAN NOT NULL); \
+            CREATE SERVER FUNCTION app.by_ref(p_ref REF app.item) RETURNS ROWS (item REF app.item) \
+            TRANSACTION READ ONLY VOLATILITY STABLE \
+            AS SELECT REF(item) FROM app.item item WHERE REF(item) = p_ref;";
+        let server_only_bundle =
+            SourceBundle::new([SourceUnit::new("server.orna", server_only_source)]).unwrap();
+        let server_only = check_standard_application(&server_only_bundle, &context);
+        assert_eq!(server_only.diagnostics(), &[]);
+        let mut owner_mismatch = server_only.clone();
+        assert!(owner_mismatch.remove_first_server_declaration_evidence_for_test());
+        let error = prepare_standard_application_with_allocator(
+            &owner_mismatch,
+            active.pair(),
+            &active,
+            retrying_standard_allocator(&verified),
+        )
+        .unwrap_err();
+        assert_client_gate_eleven_failure(
+            error,
+            "checked standard function owners do not match declaration evidence",
+        );
+        assert_no_standard_preparation_allocations();
+    }
+
+    #[test]
+    fn standard_preparation_validates_existing_server_parameters_before_client_semantics() {
+        let _allocation_lock = PREPARE_ALLOCATION_LOCK.lock().unwrap();
+        let verified = verified_standard_source_fixture();
+        let standard = check_standard_library_source(&verified).unwrap();
+        let initial = empty_version_two_active(&verified);
+        let initial_context =
+            StandardApplicationCheckContext::try_new(initial.catalogue(), &standard).unwrap();
+        let server_source = "CREATE SCHEMA app; \
+            CREATE TYPE app.item AS OBJECT (done BOOLEAN NOT NULL); \
+            CREATE SERVER FUNCTION app.create(p_ref REF app.item, p_boolean BOOLEAN) \
+            RETURNS ROWS (created REF app.item) TRANSACTION ATOMIC \
+            AS INSERT INTO app.item AS made (done) VALUES (p_boolean) RETURNING REF(made);";
+        let server_bundle =
+            SourceBundle::new([SourceUnit::new("server.orna", server_source)]).unwrap();
+        let initial_report = check_standard_application(&server_bundle, &initial_context);
+        assert_eq!(initial_report.diagnostics(), &[]);
+        let prepared =
+            prepare_standard_application(&initial_report, initial.pair(), &initial).unwrap();
+        let active = active_from_prepared_standard_candidate(&prepared, Vec::new());
+        let context =
+            StandardApplicationCheckContext::try_new(active.catalogue(), &standard).unwrap();
+        let mixed_source = "CREATE SCHEMA app; \
+            CREATE TYPE app.item AS OBJECT (done BOOLEAN NOT NULL); \
+            CREATE SERVER FUNCTION app.create(p_ref REF app.item, p_boolean BOOLEAN) \
+            RETURNS ROWS (created REF app.item) TRANSACTION ATOMIC \
+            AS INSERT INTO app.item AS made (done) VALUES (p_boolean) RETURNING REF(made); \
+            CREATE CLIENT FUNCTION app.enabled() RETURNS BOOLEAN RETURN TRUE;";
+        let mixed_bundle =
+            SourceBundle::new([SourceUnit::new("mixed.orna", mixed_source)]).unwrap();
+        let report = check_standard_application(&mixed_bundle, &context);
+        assert_eq!(report.diagnostics(), &[]);
+
+        let function = active.catalogue().functions()[0].id();
+        let parameter = active.catalogue().functions()[0].parameters()[0].id();
+        let mut hostile = report;
+        assert!(hostile.replace_server_parameter_name_for_test(0, "first-renamed".to_owned()));
+        assert!(hostile.replace_server_parameter_name_for_test(1, "second-renamed".to_owned()));
+        assert!(hostile.replace_first_client_body_with_unsupported_for_test());
+        let error = prepare_standard_application_with_allocator(
+            &hostile,
+            active.pair(),
+            &active,
+            retrying_standard_allocator(&verified),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            &error,
+            PrepareStandardApplicationError::Prepare {
+                source: PrepareError::ExistingDefinitionMismatch {
+                    definition: DefinitionIdentity::Parameter { owner, parameter: actual },
+                }
+            } if *owner == function && *actual == parameter
+        ));
+        assert_eq!(
+            error.to_string(),
+            "the standard application could not be prepared: existing checked definition differs from active catalogue"
+        );
+        assert!(std::error::Error::source(&error).is_some());
+        assert_no_standard_preparation_allocations();
+    }
+
+    #[test]
+    fn standard_preparation_checks_both_active_function_domain_directions_and_name_continuity() {
+        let _allocation_lock = PREPARE_ALLOCATION_LOCK.lock().unwrap();
+        let verified = verified_standard_source_fixture();
+        let standard = check_standard_library_source(&verified).unwrap();
+        let initial = empty_version_two_active(&verified);
+        let initial_context =
+            StandardApplicationCheckContext::try_new(initial.catalogue(), &standard).unwrap();
+        let client_source =
+            "CREATE SCHEMA app; CREATE CLIENT FUNCTION app.enabled() RETURNS BOOLEAN RETURN TRUE;";
+        let client_bundle =
+            SourceBundle::new([SourceUnit::new("client.orna", client_source)]).unwrap();
+        let client_report = check_standard_application(&client_bundle, &initial_context);
+        assert_eq!(client_report.diagnostics(), &[]);
+        let prepared_client =
+            prepare_standard_application(&client_report, initial.pair(), &initial).unwrap();
+        let client_active = active_from_prepared_standard_candidate(&prepared_client, Vec::new());
+        let active_client_id = client_active.catalogue().functions()[0].id();
+
+        let server_source = "CREATE SCHEMA app; \
+            CREATE TYPE app.item AS OBJECT (done BOOLEAN NOT NULL); \
+            CREATE SERVER FUNCTION app.by_ref(p_ref REF app.item) RETURNS ROWS (item REF app.item) \
+            TRANSACTION READ ONLY VOLATILITY STABLE \
+            AS SELECT REF(item) FROM app.item item WHERE REF(item) = p_ref;";
+        let server_bundle =
+            SourceBundle::new([SourceUnit::new("server.orna", server_source)]).unwrap();
+        let client_context =
+            StandardApplicationCheckContext::try_new(client_active.catalogue(), &standard).unwrap();
+        let server_report = check_standard_application(&server_bundle, &client_context);
+        assert_eq!(server_report.diagnostics(), &[]);
+        let mut server_as_client = server_report.clone();
+        assert!(
+            server_as_client
+                .replace_first_server_id_for_test(CheckedFunctionId::Existing(active_client_id))
+        );
+        let error = prepare_standard_application_with_allocator(
+            &server_as_client,
+            client_active.pair(),
+            &client_active,
+            retrying_standard_allocator(&verified),
+        )
+        .unwrap_err();
+        assert_existing_function_mismatch(error, active_client_id);
+        assert_no_standard_preparation_allocations();
+
+        let prepared_server =
+            prepare_standard_application(&server_report, client_active.pair(), &client_active)
+                .unwrap();
+        let server_active = active_from_prepared_standard_candidate(&prepared_server, Vec::new());
+        let active_server_id = server_active.catalogue().functions()[0].id();
+        let server_context =
+            StandardApplicationCheckContext::try_new(server_active.catalogue(), &standard).unwrap();
+        let client_report = check_standard_application(&client_bundle, &server_context);
+        assert_eq!(client_report.diagnostics(), &[]);
+        let mut client_as_server = client_report.clone();
+        assert!(
+            client_as_server.replace_first_client_id_with_evidence_for_test(
+                CheckedFunctionId::Existing(active_server_id)
+            )
+        );
+        let error = prepare_standard_application_with_allocator(
+            &client_as_server,
+            server_active.pair(),
+            &server_active,
+            retrying_standard_allocator(&verified),
+        )
+        .unwrap_err();
+        assert_existing_function_mismatch(error, active_server_id);
+        assert_no_standard_preparation_allocations();
+
+        let client_context =
+            StandardApplicationCheckContext::try_new(client_active.catalogue(), &standard).unwrap();
+        let existing_client_report = check_standard_application(&client_bundle, &client_context);
+        assert_eq!(existing_client_report.diagnostics(), &[]);
+        let mut renamed_client = existing_client_report.clone();
+        assert!(
+            renamed_client.replace_first_client_name_for_test(semantic_name(["app", "renamed",]))
+        );
+        let error = prepare_standard_application_with_allocator(
+            &renamed_client,
+            client_active.pair(),
+            &client_active,
+            retrying_standard_allocator(&verified),
+        )
+        .unwrap_err();
+        assert_existing_function_mismatch(error, active_client_id);
+        assert_no_standard_preparation_allocations();
+
+        let ordered_client_source = "CREATE SCHEMA app; \
+            CREATE CLIENT FUNCTION app.enabled() RETURNS BOOLEAN RETURN TRUE; \
+            CREATE CLIENT FUNCTION app.later() RETURNS BOOLEAN RETURN FALSE;";
+        let ordered_client_bundle = SourceBundle::new([SourceUnit::new(
+            "ordered-clients.orna",
+            ordered_client_source,
+        )])
+        .unwrap();
+        let ordered_client_report =
+            check_standard_application(&ordered_client_bundle, &client_context);
+        assert_eq!(ordered_client_report.diagnostics(), &[]);
+        let mut first_continuity_before_second = ordered_client_report.clone();
+        assert!(
+            first_continuity_before_second
+                .replace_first_client_name_for_test(semantic_name(["app", "renamed",]))
+        );
+        assert!(
+            first_continuity_before_second
+                .replace_client_domain_for_test(1, FunctionDomain::Server)
+        );
+        let error = prepare_standard_application_with_allocator(
+            &first_continuity_before_second,
+            client_active.pair(),
+            &client_active,
+            retrying_standard_allocator(&verified),
+        )
+        .unwrap_err();
+        assert_existing_function_mismatch(error, active_client_id);
+        assert_no_standard_preparation_allocations();
     }
 
     #[test]
@@ -1589,7 +2674,7 @@ mod tests {
     }
 
     #[test]
-    fn standard_preparation_checks_multi_unit_signature_references_before_client_staging() {
+    fn standard_preparation_preserves_multi_unit_signature_references_and_mixed_owner_order() {
         let verified = verified_standard_source_fixture();
         let standard = check_standard_library_source(&verified).unwrap();
         let active = empty_version_two_active(&verified);
@@ -1634,14 +2719,51 @@ mod tests {
             ],
             "reference order follows source-unit insertion order and preserves REF ordinal gaps"
         );
-        assert!(matches!(
-            prepare_standard_application(&report, active.pair(), &active),
-            Err(PrepareStandardApplicationError::Prepare {
-                source: PrepareError::InvalidCheckedBundle {
-                    reason: "checked CLIENT function cannot yet be prepared"
-                }
+        let prepared = prepare_standard_application(&report, active.pair(), &active).unwrap();
+        assert_eq!(
+            prepared
+                .candidate()
+                .functions()
+                .iter()
+                .map(|function| (function.name().to_string(), function.domain()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("app.create".to_owned(), FunctionDomain::Server),
+                ("app.enabled".to_owned(), FunctionDomain::Client),
+                ("app.by_ref".to_owned(), FunctionDomain::Server),
+            ],
+            "CLIENT and SERVER lowering follows canonical declaration-evidence owner order"
+        );
+        let candidate_function_ids = prepared
+            .candidate()
+            .functions()
+            .iter()
+            .map(|function| function.id())
+            .collect::<Vec<_>>();
+        let function_origins = prepared
+            .origins()
+            .iter()
+            .filter_map(|origin| match origin.identity() {
+                DefinitionIdentity::Function(id) => Some(id),
+                _ => None,
             })
-        ));
+            .collect::<Vec<_>>();
+        assert_eq!(function_origins, candidate_function_ids);
+        let current = prepared.current_function_revisions().unwrap_or_default();
+        assert_eq!(
+            current
+                .iter()
+                .map(|revision| revision.function())
+                .collect::<Vec<_>>(),
+            candidate_function_ids
+        );
+        let mut reference_groups = Vec::new();
+        for reference in prepared.references() {
+            if reference_groups.last().copied() != Some(reference.source_function()) {
+                reference_groups.push(reference.source_function());
+            }
+        }
+        assert_eq!(reference_groups, candidate_function_ids);
 
         let first = &references[0];
         for (owner, ordinal, target, location) in [
@@ -3442,6 +4564,32 @@ mod tests {
             Vec::new(),
             Vec::new(),
             Vec::new(),
+        )
+        .unwrap()
+    }
+
+    fn active_from_prepared_standard_candidate(
+        prepared: &DeployableRevision,
+        historical_function_revisions: Vec<orna_core::revision::FunctionRevisionRecord>,
+    ) -> ActiveDatabaseRevision {
+        let current_function_revisions = prepared
+            .current_function_revisions()
+            .map_or_else(Vec::new, ToOwned::to_owned);
+        ActiveDatabaseRevision::new_with_catalogue_hash_context(
+            ActiveDatabaseRevisionInput::new(
+                prepared.candidate_pair(),
+                prepared.source().clone(),
+                prepared.candidate().clone(),
+                prepared.catalogue_hash(),
+                ActiveRevisionContent::new(
+                    prepared.expressions().to_vec(),
+                    current_function_revisions,
+                    prepared.origins().to_vec(),
+                    prepared.references().to_vec(),
+                )
+                .with_history(historical_function_revisions),
+            ),
+            prepared.catalogue_hash_context().clone(),
         )
         .unwrap()
     }
