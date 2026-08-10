@@ -502,6 +502,7 @@ dependencies = [
  "orna-artifact",
  "orna-compiler",
  "orna-core",
+ "orna-standard",
  "sha2",
  "tokio",
  "tokio-postgres",
