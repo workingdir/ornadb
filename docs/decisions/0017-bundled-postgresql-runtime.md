@@ -256,27 +256,88 @@ inputs must produce the same manifest bytes and the same payload bytes,
 owners, groups, modes, and link targets.
 
 The signature file is one raw 64-byte Ed25519 signature over the exact shipped
-manifest bytes. It does not sign a parsed or re-encoded JSON value. Checked-in
-accepted-runtime records are the source of truth for runtime identity, exact
-manifest SHA-256 digest, release-key identifier, and Ed25519 public key. The
-current Orna binary marks exactly one accepted record as its distribution
-candidate. The initial binary contains only the PostgreSQL 18.4 record, which
-is therefore the candidate. The runtime-verification crate embeds the records,
-and release and Debian packaging consume the same records.
+manifest bytes. It does not sign a parsed or re-encoded JSON value.
+
+### Accepted-runtime record
+
+Each checked-in accepted-runtime record is one UTF-8 TOML document with exactly
+these root keys and no others. This is a schema illustration, not an accepted
+record or a key.
+
+```toml
+format = 1
+runtime_identity = "<canonical runtime identity>"
+manifest_sha256 = "<64 lowercase hexadecimal characters>"
+release_key_id = "ed25519-sha256:<64 lowercase hexadecimal characters>"
+ed25519_public_key = "<64 lowercase hexadecimal characters>"
+```
+
+`format` is the integer `1`. Every other field is a string. The parser rejects
+a missing, duplicate, or unknown key, a non-root value, or a value of another
+type. `manifest_sha256` and `ed25519_public_key` each contain exactly 64 ASCII
+lowercase hexadecimal characters. The public-key field decodes to the raw
+RFC8032 32-byte Ed25519 public key. It is not PEM, OpenSSH, base64, or another
+container or encoding.
+
+`release_key_id` contains exactly the ASCII prefix `ed25519-sha256:` followed
+by the 64 lowercase hexadecimal characters of the SHA-256 digest of those raw
+32 public-key bytes. It is 79 ASCII bytes in total. A record has no archive
+digest, candidate marker, signature, private key, path, seed, or URL. In
+particular, the manifest digest is not an archive digest, and the binary, not
+the record, marks one accepted runtime as its distribution candidate.
+
+The record parser uses this exact order:
+
+1. parse the TOML document as one root table;
+2. require the exact five-key schema and value types;
+3. require `format = 1`;
+4. for the first record, require `runtime_identity` to be exactly
+   `postgresql-18.4-debian12-amd64-orna.1`;
+5. require the exact lowercase hexadecimal `manifest_sha256` value;
+6. require and decode the exact lowercase hexadecimal
+   `ed25519_public_key` value as 32 raw bytes; and
+7. compute the public-key SHA-256 digest and require the exact canonical
+   `release_key_id` value.
+
+Only after this record validation does runtime verification select the record
+by exact `runtime_identity`, compare the exact raw manifest digest, verify the
+raw signature, and then parse the manifest JSON and verify the payload.
+
+Before the first accepted record can be committed, the designated Orna release
+authority generates its initial Ed25519 key only on a protected offline
+software signer or hardware signer. The signer exports only the raw 32-byte
+public key and one raw 64-byte Ed25519 possession proof. That proof is a
+signature over the exact candidate manifest bytes, not a separate domain. For
+the first acceptance, the authority receives the proposed five-field record,
+exact candidate manifest bytes, and that signature. It applies the parser
+order above, recomputes the manifest SHA-256 digest and compares it to
+`manifest_sha256`, then verifies the signature against the raw public key. Only
+then can it commit the proposed record as the public accepted record. The
+signature is not a record field. The publish row can publish the same raw bytes
+as the detached `orna-runtime-manifest.sig` signature.
+
+The private key never leaves the protected signer. It never enters an online or
+development workstation, source repository, ordinary continuous integration
+system, Debian package, or installed host.
+
+After this commit, the checked-in accepted-runtime record is the source of
+truth for runtime identity, exact manifest SHA-256 digest, release-key
+identifier, and Ed25519 public key. The current Orna binary marks exactly one
+accepted record as its distribution candidate. The initial binary contains
+only the PostgreSQL 18.4 record, which is therefore the candidate. The
+runtime-verification crate embeds the records, and release and Debian packaging
+consume the same records.
 
 Pull-request and ordinary build continuous integration have no release private
 key. They build the candidate twice and publish only the keyless candidate
 archive, exact manifest bytes, and digest for review. The checked-in accepted
 record then fixes the reviewed digest, key identifier, and public key.
 
-A protected offline or hardware-backed signer receives the accepted record
-and candidate manifest. It independently hashes the exact bytes, refuses a
-mismatch, and signs only the matching byte sequence. A protected publisher
-combines the unchanged payload, manifest, and signature and publishes one
-immutable signed runtime archive addressed by the manifest SHA-256 digest. A
-digest address can never be replaced with different bytes. The private key
-never enters source control, ordinary continuous integration, a Debian
-package, or an installed host.
+The protected signer signs only the exact candidate manifest bytes that match
+the proposed record digest. A protected publisher combines the unchanged
+payload, manifest, and detached signature and publishes one immutable signed
+runtime archive addressed by the manifest SHA-256 digest. A digest address can
+never be replaced with different bytes.
 
 The Debian build ingests only that protected signed archive. Before extraction
 into the package staging tree, it verifies the archive address, accepted
@@ -1113,11 +1174,30 @@ The release and implementation must prove:
   and one changed source byte fails before compilation;
 * two isolated builds produce identical manifest bytes, payload bytes, owners,
   groups, modes, and link targets, with no second tree identity;
+* accepted-runtime record parsing accepts only the five declared TOML keys,
+  `format = 1`, the exact first runtime identity
+  `postgresql-18.4-debian12-amd64-orna.1` before digest or key validation,
+  lowercase 64-character manifest and raw-public-key hex, and a
+  `release_key_id` derived from the raw 32-byte public key; it rejects missing,
+  duplicate, unknown, differently typed, wrong-runtime-identity, PEM, OpenSSH,
+  base64, archive-digest, candidate, signature, private-key, path, seed, and
+  URL inputs before runtime selection;
+* the initial release key is generated only by the designated release authority
+  on a protected offline software signer or hardware signer; only its raw
+  public key and raw 64-byte signature over the exact candidate manifest leave
+  that signer; the authority receives the proposed five-field record and
+  manifest, recomputes and compares the digest, verifies that signature against
+  the raw public key, and only then commits the public record; the signature
+  remains outside that record and can become the detached published signature;
+  and a private key never leaves the signer or enters an online or development
+  workstation, source control, ordinary continuous integration, packages, or
+  installed hosts;
 * pull-request and ordinary build jobs contain no signing key, and the
   protected signer refuses manifest bytes whose digest differs from the
   reviewed accepted-runtime record; the protected publisher preserves the
-  exact bytes at their immutable digest address; and Debian ingestion rejects
-  a changed archive, address, record, manifest, signature, or candidate;
+  exact bytes at their immutable manifest-digest address; and Debian ingestion
+  rejects a changed archive, address, record, manifest, signature, or
+  candidate;
 * raw-manifest digest verification and Ed25519 verification occur before JSON
   parsing, and a changed runtime identity, accepted record, signature,
   manifest, payload, SBOM, licence, or support file fails closed;
@@ -1294,10 +1374,10 @@ that earlier ownership.
 | --- | --- | --- |
 | `docs(architecture): own the PostgreSQL runtime` | `docs/decisions/0017-bundled-postgresql-runtime.md`; `docs/decisions/README.md` | Accept the production dependency, trust, lifecycle, update, and proof contract. |
 | `build(postgres): produce a deterministic runtime` | `packaging/postgresql/runtime-build.toml`; `packaging/postgresql/build-runtime.sh`; `.github/workflows/postgresql-runtime.yml` | Verify source and dependency inputs, build twice without a key, and emit identical candidate payload and manifest bytes. |
-| `build(postgres): accept the first signed runtime` | `packaging/postgresql/accepted-runtime-18.4.toml` | Record the one reviewed runtime identity, manifest digest, key identifier, and public key consumed by code and packaging. |
-| `release(postgres): publish the signed runtime` | `packaging/postgresql/publish-runtime.sh`; `.github/workflows/postgresql-release.yml` | Let only the protected signer sign matching exact manifest bytes and publish the unchanged signed archive at its immutable manifest-digest address. |
-| `feat(runtime): verify accepted PostgreSQL trees` | `crates/orna-postgres-runtime/Cargo.toml`; `crates/orna-postgres-runtime/src/lib.rs`; `Cargo.lock` | Embed the accepted record and expose only signature-, ABI-, ancestor-, and payload-verified absolute program handles. |
-| `test(runtime): reject untrusted PostgreSQL trees` | `crates/orna-postgres-runtime/tests/runtime_tree.rs` | Prove digest, signature, inventory, ELF closure, metadata, link, ancestor, and hostile-environment rejection. |
+| `build(postgres): accept the first signed runtime` | `packaging/postgresql/accepted-runtime-18.4.toml` | The authority receives the proposed strict five-key public record, exact candidate manifest bytes, and raw detached signature. It requires the exact first runtime identity before digest or key checks, recomputes and compares the manifest digest, verifies the signature with the raw public key, and only then commits format, runtime identity, manifest digest, derived release-key identifier, and raw public key. Do not commit an archive digest, candidate marker, signature, private key, path, seed, or URL. |
+| `release(postgres): publish the signed runtime` | `packaging/postgresql/publish-runtime.sh`; `.github/workflows/postgresql-release.yml` | Let only the protected offline software signer or hardware signer sign matching exact manifest bytes. Publish the same raw signature as the detached signature with the unchanged archive at its immutable manifest-digest address. |
+| `feat(runtime): verify accepted PostgreSQL trees` | `crates/orna-postgres-runtime/Cargo.toml`; `crates/orna-postgres-runtime/src/lib.rs`; `Cargo.lock` | Embed and strictly validate the accepted record, then expose only signature-, ABI-, ancestor-, and payload-verified absolute program handles. |
+| `test(runtime): reject untrusted PostgreSQL trees` | `crates/orna-postgres-runtime/tests/runtime_tree.rs` | Prove the strict five-key accepted-record schema and validation order, first-runtime-identity rejection before digest or key checks, public-key and release-key derivation, manifest-byte signature verification, inventory, ELF closure, metadata, link, ancestor, and hostile-environment rejection. |
 | `build(server): declare host dependencies` | `crates/orna-server/Cargo.toml`; `Cargo.lock` | Feature-pin the runtime verifier, Tokio and tokio-postgres, SHA-256 and TOML, direct account-file, path, `openat2`, `fcntl`, signal, and systemd notify and service-state dependencies needed by every later production row, without changing behaviour. |
 | `feat(server): model the default instance host` | `crates/orna-server/src/runtime.rs`; `crates/orna-server/src/lib.rs` | Add service-account, trusted-path, filesystem, lifetime-lock, durable-manifest, generation, transition, and ready-record types. |
 | `test(server): prove instance host invariants` | `crates/orna-server/tests/instance_host.rs` | Prove owners, modes, links, EUID, filesystems, instance locking, manifest durability, and stale-readiness behaviour. |
