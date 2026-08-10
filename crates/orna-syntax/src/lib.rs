@@ -457,6 +457,8 @@ pub struct InsertStatement {
     pub values: Vec<InsertValue>,
     /// The alias written inside the `RETURNING REF(...)` expression.
     pub returning_alias: NamePart,
+    /// The span from `REF` through the closing `RETURNING REF(...)` parenthesis.
+    pub returning_ref_span: SourceSpan,
     /// The span from `INSERT` through the closing `RETURNING REF(...)` parenthesis.
     pub span: SourceSpan,
 }
@@ -494,8 +496,14 @@ pub struct UpdateStatement {
     pub selector_alias: NamePart,
     /// The declared function parameter that supplies the selected object identity.
     pub selector_parameter: NamePart,
+    /// The span from the selector `REF` through the declared selector parameter.
+    pub selector_equality_span: SourceSpan,
+    /// The span from selector `REF` through its closing parenthesis.
+    pub selector_ref_span: SourceSpan,
     /// The alias written inside the `RETURNING REF(...)` expression.
     pub returning_alias: NamePart,
+    /// The span from `REF` through the closing `RETURNING REF(...)` parenthesis.
+    pub returning_ref_span: SourceSpan,
     /// The span from `UPDATE` through the closing `RETURNING REF(...)` parenthesis.
     pub span: SourceSpan,
 }
@@ -520,6 +528,10 @@ pub struct DeleteStatement {
     pub selector_alias: NamePart,
     /// The declared function parameter that supplies the selected object identity.
     pub selector_parameter: NamePart,
+    /// The span from the selector `REF` through the declared selector parameter.
+    pub selector_equality_span: SourceSpan,
+    /// The span from selector `REF` through its closing parenthesis.
+    pub selector_ref_span: SourceSpan,
     /// The exact `TRUE` source written after `RETURNING`.
     pub returning_true: SourceSlice,
     /// The span from `DELETE` through the `RETURNING TRUE` literal.
@@ -2260,6 +2272,34 @@ mod tests {
     }
 
     #[test]
+    fn retains_insert_returning_ref_span_with_trivia() {
+        let source = "cReAtE sErVeR fUnCtIoN t.i(p TEXT) ReTuRnS rOwS (r REF t.o) aS iNsErT /* target */ iNtO t.o aS r (x) vAlUeS (p) rEtUrNiNg rEf( /* before close */ r /* after */ );";
+        let parsed = parse(source);
+
+        assert!(parsed.diagnostics().is_empty());
+        assert_eq!(parsed.syntax().text(), source);
+        let insert = &parsed.server_functions()[0]
+            .body
+            .as_sql_insert()
+            .expect("the function must have an INSERT body")
+            .insert;
+        assert_eq!(insert.target_alias.text, "r");
+        assert_eq!(insert.values.len(), 1);
+        assert_eq!(insert.returning_alias.text, "r");
+        assert_eq!(
+            insert.returning_ref_span,
+            SourceSpan {
+                start: 122,
+                end: 161,
+            }
+        );
+        assert_eq!(
+            &source[insert.returning_ref_span.start..insert.returning_ref_span.end],
+            "rEf( /* before close */ r /* after */ )"
+        );
+    }
+
+    #[test]
     fn rejects_closed_insert_forms_and_recovers_to_a_valid_declaration() {
         let invalid = [
             "INSERT INTO tasks.task created (title) VALUES (p_title) RETURNING REF(created)",
@@ -2521,6 +2561,58 @@ mod tests {
     }
 
     #[test]
+    fn retains_update_selector_and_returning_ref_spans_with_trivia() {
+        let source = "cReAtE sErVeR fUnCtIoN t.u(p REF t.o, x TEXT) ReTuRnS rOwS (r REF t.o) aS uPdAtE /* target */ t.o aS r SeT x = p wHeRe rEf( /* selector */ r /* close */ ) /* equals */ = /* parameter */ p rEtUrNiNg rEf( /* returning */ r /* close */ );";
+        let parsed = parse(source);
+
+        assert!(parsed.diagnostics().is_empty());
+        assert_eq!(parsed.syntax().text(), source);
+        let update = &parsed.server_functions()[0]
+            .body
+            .as_sql_update()
+            .expect("the function must have an UPDATE body")
+            .update;
+        assert_eq!(update.target_alias.text, "r");
+        assert_eq!(update.assignments.len(), 1);
+        assert_eq!(update.selector_alias.text, "r");
+        assert_eq!(update.selector_parameter.text, "p");
+        assert_eq!(update.returning_alias.text, "r");
+        assert_eq!(
+            update.selector_ref_span,
+            SourceSpan {
+                start: 119,
+                end: 154,
+            }
+        );
+        assert_eq!(
+            update.selector_equality_span,
+            SourceSpan {
+                start: 119,
+                end: 187,
+            }
+        );
+        assert_eq!(
+            update.returning_ref_span,
+            SourceSpan {
+                start: 198,
+                end: 234,
+            }
+        );
+        assert_eq!(
+            &source[update.selector_ref_span.start..update.selector_ref_span.end],
+            "rEf( /* selector */ r /* close */ )"
+        );
+        assert_eq!(
+            &source[update.selector_equality_span.start..update.selector_equality_span.end],
+            "rEf( /* selector */ r /* close */ ) /* equals */ = /* parameter */ p"
+        );
+        assert_eq!(
+            &source[update.returning_ref_span.start..update.returning_ref_span.end],
+            "rEf( /* returning */ r /* close */ )"
+        );
+    }
+
+    #[test]
     fn update_diagnostics_are_direct_and_select_the_offending_source() {
         let cases = [
             (
@@ -2716,6 +2808,46 @@ mod tests {
             source.rfind("TrUe").unwrap()
         );
         assert_eq!(body.delete.returning_true.span.end, body_end);
+    }
+
+    #[test]
+    fn retains_delete_selector_spans_with_trivia() {
+        let source = "cReAtE sErVeR fUnCtIoN t.d(p REF t.o) ReTuRnS rOwS (d bOoL) aS dElEtE /* target */ fRoM t.o aS r wHeRe rEf( /* selector */ r /* close */ ) /* equals */ = /* parameter */ p rEtUrNiNg tRuE;";
+        let parsed = parse(source);
+
+        assert!(parsed.diagnostics().is_empty());
+        assert_eq!(parsed.syntax().text(), source);
+        let delete = &parsed.server_functions()[0]
+            .body
+            .as_sql_delete()
+            .expect("the function must have a DELETE body")
+            .delete;
+        assert_eq!(delete.target_alias.text, "r");
+        assert_eq!(delete.selector_alias.text, "r");
+        assert_eq!(delete.selector_parameter.text, "p");
+        assert_eq!(delete.returning_true.text, "tRuE");
+        assert_eq!(
+            delete.selector_ref_span,
+            SourceSpan {
+                start: 103,
+                end: 138,
+            }
+        );
+        assert_eq!(
+            delete.selector_equality_span,
+            SourceSpan {
+                start: 103,
+                end: 171,
+            }
+        );
+        assert_eq!(
+            &source[delete.selector_ref_span.start..delete.selector_ref_span.end],
+            "rEf( /* selector */ r /* close */ )"
+        );
+        assert_eq!(
+            &source[delete.selector_equality_span.start..delete.selector_equality_span.end],
+            "rEf( /* selector */ r /* close */ ) /* equals */ = /* parameter */ p"
+        );
     }
 
     #[test]

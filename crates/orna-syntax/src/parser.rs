@@ -1972,6 +1972,18 @@ struct QueryParseError {
     span: SourceSpan,
 }
 
+struct ParsedReference {
+    alias: NamePart,
+    span: SourceSpan,
+}
+
+struct ParsedIdentitySelector {
+    alias: NamePart,
+    parameter: NamePart,
+    equality_span: SourceSpan,
+    reference_span: SourceSpan,
+}
+
 #[derive(Debug, Clone, Copy)]
 enum SqlBodySyntax {
     Select,
@@ -2536,7 +2548,11 @@ impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
             }
             return Err(self.expected("RETURNING after one VALUES row"));
         }
-        let (returning_alias, close) = self.parse_returning_ref(&target_alias, "INSERT")?;
+        let ParsedReference {
+            alias: returning_alias,
+            span: returning_ref_span,
+        } = self.parse_returning_ref(&target_alias, "INSERT")?;
+        let body_end = returning_ref_span.end;
         self.skip_trivia();
         if self.current().is_some() {
             return Err(self.implementation_gap(
@@ -2551,9 +2567,10 @@ impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
             target_fields,
             values,
             returning_alias,
+            returning_ref_span,
             span: SourceSpan {
                 start: insert.range.start,
-                end: close.range.end,
+                end: body_end,
             },
         })
     }
@@ -2687,8 +2704,12 @@ impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
             return Err(self.expected("WHERE after the UPDATE assignments"));
         }
         self.skip_trivia();
-        let (selector_alias, selector_parameter) =
-            self.parse_identity_selector(&target_alias, "UPDATE")?;
+        let ParsedIdentitySelector {
+            alias: selector_alias,
+            parameter: selector_parameter,
+            equality_span: selector_equality_span,
+            reference_span: selector_ref_span,
+        } = self.parse_identity_selector(&target_alias, "UPDATE")?;
 
         if !self
             .current()
@@ -2696,7 +2717,11 @@ impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
         {
             return Err(self.expected("RETURNING after the UPDATE selector"));
         }
-        let (returning_alias, close) = self.parse_returning_ref(&target_alias, "UPDATE")?;
+        let ParsedReference {
+            alias: returning_alias,
+            span: returning_ref_span,
+        } = self.parse_returning_ref(&target_alias, "UPDATE")?;
+        let body_end = returning_ref_span.end;
         self.skip_trivia();
         if self.current().is_some() {
             return Err(self.implementation_gap(
@@ -2711,10 +2736,13 @@ impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
             assignments,
             selector_alias,
             selector_parameter,
+            selector_equality_span,
+            selector_ref_span,
             returning_alias,
+            returning_ref_span,
             span: SourceSpan {
                 start: update.range.start,
-                end: close.range.end,
+                end: body_end,
             },
         })
     }
@@ -2737,8 +2765,12 @@ impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
             return Err(self.expected("WHERE after the DELETE target alias"));
         }
         self.skip_trivia();
-        let (selector_alias, selector_parameter) =
-            self.parse_identity_selector(&target_alias, "DELETE")?;
+        let ParsedIdentitySelector {
+            alias: selector_alias,
+            parameter: selector_parameter,
+            equality_span: selector_equality_span,
+            reference_span: selector_ref_span,
+        } = self.parse_identity_selector(&target_alias, "DELETE")?;
 
         if self.take_word("RETURNING").is_none() {
             return Err(self.expected("RETURNING after the DELETE selector"));
@@ -2764,6 +2796,8 @@ impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
             target_alias,
             selector_alias,
             selector_parameter,
+            selector_equality_span,
+            selector_ref_span,
             returning_true,
             span: SourceSpan {
                 start: delete.range.start,
@@ -2778,10 +2812,10 @@ impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
         &mut self,
         target_alias: &NamePart,
         statement: &str,
-    ) -> Result<(NamePart, NamePart), QueryParseError> {
-        if self.take_word("REF").is_none() {
-            return Err(self.expected("REF(target_alias) after WHERE"));
-        }
+    ) -> Result<ParsedIdentitySelector, QueryParseError> {
+        let reference = self
+            .take_word("REF")
+            .ok_or_else(|| self.expected("REF(target_alias) after WHERE"))?;
         self.skip_trivia();
         self.take_kind(TokenKind::LeftParenthesis)
             .ok_or_else(|| self.expected("'(' after WHERE REF"))?;
@@ -2796,7 +2830,8 @@ impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
             ));
         }
         self.skip_trivia();
-        self.take_kind(TokenKind::RightParenthesis)
+        let close = self
+            .take_kind(TokenKind::RightParenthesis)
             .ok_or_else(|| self.expected("')' after the WHERE REF alias"))?;
         self.skip_trivia();
         if self.take_symbol("=").is_none() {
@@ -2828,7 +2863,18 @@ impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
             ));
         }
         self.skip_trivia();
-        Ok((selector_alias, selector_parameter))
+        Ok(ParsedIdentitySelector {
+            alias: selector_alias,
+            equality_span: SourceSpan {
+                start: reference.range.start,
+                end: selector_parameter.span.end,
+            },
+            parameter: selector_parameter,
+            reference_span: SourceSpan {
+                start: reference.range.start,
+                end: close.range.end,
+            },
+        })
     }
 
     fn parse_aliased_mutation_target(
@@ -2850,13 +2896,13 @@ impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
         &mut self,
         target_alias: &NamePart,
         statement: &str,
-    ) -> Result<(NamePart, Token<'source>), QueryParseError> {
+    ) -> Result<ParsedReference, QueryParseError> {
         self.take_word("RETURNING")
             .ok_or_else(|| self.expected("RETURNING"))?;
         self.skip_trivia();
-        if self.take_word("REF").is_none() {
-            return Err(self.expected("REF in the RETURNING expression"));
-        }
+        let reference = self
+            .take_word("REF")
+            .ok_or_else(|| self.expected("REF in the RETURNING expression"))?;
         self.skip_trivia();
         self.take_kind(TokenKind::LeftParenthesis)
             .ok_or_else(|| self.expected("'(' after RETURNING REF"))?;
@@ -2874,7 +2920,13 @@ impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
         let close = self
             .take_kind(TokenKind::RightParenthesis)
             .ok_or_else(|| self.expected("')' after the RETURNING REF alias"))?;
-        Ok((returning_alias, close))
+        Ok(ParsedReference {
+            alias: returning_alias,
+            span: SourceSpan {
+                start: reference.range.start,
+                end: close.range.end,
+            },
+        })
     }
 
     fn parse_qualified_name(&mut self, expected: &str) -> Result<QualifiedName, QueryParseError> {

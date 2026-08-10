@@ -1203,6 +1203,7 @@ mod tests {
             target_fields: fields,
             values,
             returning_alias: name(returning, 50),
+            returning_ref_span: span(46, 60),
             span: span(0, 60),
         }
     }
@@ -1213,6 +1214,8 @@ mod tests {
         selector_parameter: &str,
         returning_alias: &str,
     ) -> UpdateStatement {
+        let selector_parameter = name(selector_parameter, 90);
+        let selector_equality_span = span(76, selector_parameter.span.end);
         UpdateStatement {
             target_object: QualifiedName {
                 parts: vec![name("crm", 7), name("person", 11)],
@@ -1221,13 +1224,18 @@ mod tests {
             target_alias: name("p", 22),
             assignments,
             selector_alias: name(selector_alias, 80),
-            selector_parameter: name(selector_parameter, 90),
+            selector_parameter,
+            selector_equality_span,
+            selector_ref_span: span(76, 88),
             returning_alias: name(returning_alias, 110),
+            returning_ref_span: span(106, 120),
             span: span(0, 120),
         }
     }
 
     fn delete(selector_alias: &str, selector_parameter: &str) -> DeleteStatement {
+        let selector_parameter = name(selector_parameter, 50);
+        let selector_equality_span = span(36, selector_parameter.span.end);
         DeleteStatement {
             target_object: QualifiedName {
                 parts: vec![name("crm", 12), name("person", 16)],
@@ -1235,7 +1243,9 @@ mod tests {
             },
             target_alias: name("p", 27),
             selector_alias: name(selector_alias, 40),
-            selector_parameter: name(selector_parameter, 50),
+            selector_parameter,
+            selector_equality_span,
+            selector_ref_span: span(36, 48),
             returning_true: SourceSlice {
                 text: "TRUE".to_owned(),
                 span: span(70, 74),
@@ -1274,6 +1284,21 @@ mod tests {
                 span: span(start, start + 4),
             },
         }
+    }
+
+    #[test]
+    fn synthetic_selector_spans_end_at_the_parameter() {
+        let update = update(Vec::new(), "p", "p_person", "p");
+        assert_eq!(
+            update.selector_equality_span.end,
+            update.selector_parameter.span.end
+        );
+
+        let delete = delete("p", "p_person");
+        assert_eq!(
+            delete.selector_equality_span.end,
+            delete.selector_parameter.span.end
+        );
     }
 
     fn catalogue() -> TestCatalogue {
