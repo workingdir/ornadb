@@ -9,7 +9,7 @@ use orna_core::{
     canonical_hash::CanonicalHashError,
     catalogue::CatalogueSnapshotError,
     physical::PhysicalPlanError,
-    revision::{RevisionInvariantError, RevisionPair},
+    revision::{CatalogueHashVersion, RevisionInvariantError, RevisionPair},
 };
 
 use tokio::task::{JoinError, JoinHandle};
@@ -25,6 +25,7 @@ mod server_mutation_execution;
 mod server_runtime;
 mod storage;
 
+pub use apply::StandardContextIdentity;
 pub use bootstrap::ActiveRevision;
 pub use server_execution::{ServerSelectContext, ServerSelectError, ServerSelectResult};
 pub use server_mutation_execution::{
@@ -129,6 +130,20 @@ pub enum PostgresKernelError {
         /// The pair locked by the apply transaction.
         active: RevisionPair,
     },
+    /// The candidate uses a different catalogue hash context version.
+    StandardContextTransitionRequired {
+        /// The locked active catalogue hash version.
+        active: CatalogueHashVersion,
+        /// The candidate catalogue hash version.
+        candidate: CatalogueHashVersion,
+    },
+    /// The candidate is pinned to a different verified standard context.
+    StandardContextMismatch {
+        /// The context reconstructed from the locked active revision.
+        active: Box<StandardContextIdentity>,
+        /// The context carried by the candidate.
+        candidate: Box<StandardContextIdentity>,
+    },
     /// Backend-neutral physical planning rejected the candidate.
     PhysicalPlan(PhysicalPlanError),
     /// A SERVER SELECT function cannot execute against the active revision.
@@ -202,6 +217,12 @@ impl fmt::Display for PostgresKernelError {
             Self::ExpectedBaseMismatch { .. } => {
                 formatter.write_str("expected revision pair is not active")
             }
+            Self::StandardContextTransitionRequired { .. } => formatter.write_str(
+                "the active and candidate catalogue hash versions require a standard context transition",
+            ),
+            Self::StandardContextMismatch { .. } => {
+                formatter.write_str("the active and candidate standard contexts do not match")
+            }
             Self::PhysicalPlan(error) => write!(formatter, "physical plan failed: {error}"),
             Self::ServerSelect(error) => write!(formatter, "server SELECT failed: {error}"),
             Self::ServerInsert(error) => write!(formatter, "row creation failed: {error}"),
@@ -250,6 +271,8 @@ impl Error for PostgresKernelError {
             Self::MigrationMismatch { .. }
             | Self::CatalogueInvariant(_)
             | Self::ExpectedBaseMismatch { .. }
+            | Self::StandardContextTransitionRequired { .. }
+            | Self::StandardContextMismatch { .. }
             | Self::DurableInvariant { .. } => None,
         }
     }
@@ -260,9 +283,11 @@ mod tests {
     use std::{error::Error, str::FromStr};
 
     use orna_core::{
-        CatalogueRevisionId, SourceRevisionId, canonical_hash::CanonicalHashError,
-        catalogue::CatalogueSnapshotError, physical::PhysicalPlanError,
-        revision::RevisionInvariantError,
+        CatalogueRevisionId, SourceRevisionId,
+        canonical_hash::CanonicalHashError,
+        catalogue::CatalogueSnapshotError,
+        physical::PhysicalPlanError,
+        revision::{CatalogueHashVersion, RevisionInvariantError},
     };
 
     use super::{PostgresKernel, PostgresKernelError};
@@ -318,6 +343,20 @@ mod tests {
             .source()
             .is_none()
         );
+    }
+
+    #[test]
+    fn standard_context_transition_error_is_exact_and_source_free() {
+        let error = PostgresKernelError::StandardContextTransitionRequired {
+            active: CatalogueHashVersion::Version1,
+            candidate: CatalogueHashVersion::Version2,
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "the active and candidate catalogue hash versions require a standard context transition"
+        );
+        assert!(error.source().is_none());
     }
 
     #[tokio::test]
