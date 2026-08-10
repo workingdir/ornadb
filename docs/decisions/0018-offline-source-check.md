@@ -15,11 +15,12 @@ It accepts no flag, standard-input form, directory, glob, second file, active
 revision, or database target. The `<file.orna>` text in usage describes the
 path argument. The command does not require an `.orna` suffix.
 
-This is a standalone compiler check. It ends at one `CheckReport`. It does not
-compute a semantic diff, call `prepare`, create a `DeployableRevision`, apply a
-candidate, activate a revision, or create a durable source or catalogue
-revision. Its empty-base identity is an observable in-memory checking sentinel,
-not durable identity or continuity evidence.
+This is a standalone compiler check. It ends at one
+`StandardApplicationCheckReport`; it does not compute a semantic diff, call
+`prepare`, create a `DeployableRevision`, apply a candidate, activate a
+revision, or create a durable source or catalogue revision. Its empty-base
+identity is an observable in-memory checking sentinel, not durable identity or
+continuity evidence.
 
 The command is offline. It does not read configuration or environment
 variables, connect to PostgreSQL, inspect an Orna service or instance, use the
@@ -37,18 +38,20 @@ compiler exposes this exact public seam:
 ```rust
 pub fn check_new_application(
     bundle: &SourceBundle,
-    standard: &VerifiedStandardLibrarySnapshot,
-) -> Result<CheckReport, NewApplicationCheckError>
+    standard: &CheckedStandardLibrary,
+) -> Result<StandardApplicationCheckReport, NewApplicationCheckError>
 ```
 
 `NewApplicationCheckError` is a public compiler-owned error with exactly these
 variants:
 
 ```rust
-#[derive(Debug)]
+#[non_exhaustive]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum NewApplicationCheckError {
     SourceUnitCount { actual: usize },
-    StandardLibrary { source: StandardLibraryError },
+    Catalogue { source: CatalogueSnapshotError },
+    Context { source: StandardApplicationContextError },
 }
 ```
 
@@ -56,21 +59,37 @@ Its exact `Display` text is:
 
 ```text
 SourceUnitCount    new-application check requires exactly one source unit; received <actual>
-StandardLibrary   new-application check could not use the standard library: <source>
+Catalogue          new-application check could not create the empty application catalogue: <source>
+Context            new-application check could not establish the standard application context: <source>
 ```
 
-`<actual>` is the decimal `usize` value. `<source>` is the exact
-`StandardLibraryError` display text. `std::error::Error::source()` returns
-`None` for `SourceUnitCount` and the contained `StandardLibraryError` for
-`StandardLibrary`. `NewApplicationCheckError` implements
+`<actual>` is the decimal `usize` value. For `Catalogue`, `<source>` is the
+exact `CatalogueSnapshotError` display text. For `Context`, `<source>` is the
+exact `StandardApplicationContextError` display text.
+`std::error::Error::source()` returns `None` for `SourceUnitCount` and
+`Some(source)` for `Catalogue` and `Context`.
+`NewApplicationCheckError` implements
 `std::error::Error`. No other variant or implicit conversion is accepted.
 
 `check_new_application` reads `bundle.len()` first. If the value is not exactly
-`1`, it returns `SourceUnitCount` without consulting the standard snapshot,
-parsing source, or starting semantic checking. It wraps every later
-`StandardLibraryError` as `StandardLibrary { source }` without changing that
-source. A one-unit bundle returns the normal `CheckReport`, including compiler
-diagnostics, inside `Ok`.
+`1`, it returns `SourceUnitCount` before parsing source or starting semantic
+checking. For one source unit, it calls `CatalogueSnapshot::new` with the empty
+sentinel and empty vectors, maps a failure to `Catalogue { source }`, then
+constructs `StandardApplicationCheckContext::try_new` from that catalogue and
+the supplied checked standard library, maps a failure to `Context { source }`,
+and returns `check_standard_application`'s distinct report. It never receives
+or wraps an `orna_standard::StandardLibraryError`, and it uses no `panic!` or
+`expect` path for empty-catalogue construction.
+
+The gate order is `SourceUnitCount`, `CatalogueSnapshot::new` mapped to
+`Catalogue`, context construction mapped to `Context`, then
+`check_standard_application`.
+
+The public path and module tests use the same production-private empty-catalogue
+construction seam. Module tests supply a typed `CatalogueSnapshotError` result
+through that seam together with hostile context data, proving that `Catalogue`
+wins before context construction. The seam has no public interface and no
+test-only production branch.
 
 The compiler also exposes this exact sentinel identity:
 
@@ -82,8 +101,8 @@ pub const EMPTY_APPLICATION_CATALOGUE_REVISION_ID: CatalogueRevisionId =
 The all-zero value is reserved only for the ephemeral empty application
 catalogue used by `check_new_application`. It is distinct from work ADR 0016's
 standard `CatalogueRevisionId`, whose bytes are fifteen zero bytes followed by
-`01`. A successful `CheckReport` from this seam exposes the all-zero sentinel
-through its checked bundle's base catalogue revision.
+`01`. A successful `StandardApplicationCheckReport` exposes the all-zero
+sentinel through its distinct checked bundle's base catalogue revision.
 
 The shared revision model exposes this exact public role type:
 
@@ -133,41 +152,44 @@ checks its expected-base catalogue, explicit parent catalogue, and candidate
 catalogue in that order and rejects the sentinel at every position with the
 corresponding typed role before another deployable invariant or allocation.
 
-`prepare` must reject a checked bundle whose base is the sentinel before
-candidate identity allocation or durable work. A valid active catalogue can
-never have that identity, so the checked-base comparison rejects the offline
-report as exact `PrepareError::CheckedBaseMismatch`. Supplying the sentinel as
-the expected active base returns exact `PrepareError::ExpectedBaseMismatch`.
-Both failures occur before `DeployableRevision` construction.
+Report separation is compile-time: no legacy `prepare` signature accepts
+`StandardApplicationCheckReport` or `CheckedStandardApplicationBundle`, and
+neither type offers a conversion, dereference, borrow, inner, or extraction
+path to `CheckReport` or `CheckedBundle`. The sentinel remains visible in the
+distinct bundle and the durable core rejection remains fail-closed. A later
+`prepare_standard_application` row owns standard-application preparation and
+any preparation-specific sentinel rejection.
 
 The seam checks the supplied bundle against an empty application catalogue and
-the supplied verified standard-library overlay. It does not accept an active
+the supplied checked standard-library overlay. It does not accept an active
 application catalogue, a source revision, or a prior `RevisionPair`. Every
 application declaration is new for this check. A rename, delete, or reference
 that needs an earlier application definition has no continuity context and
 cannot infer one.
 
 The empty application base is a checking input only. The returned
-`CheckReport` retains the normal lossless parse report, diagnostics, and, on
-success, checked definitions labelled with the exact sentinel. The caller does
-not prepare that report. The compiler must return diagnostics in its
-established order and must preserve the invariant that a report with no
-diagnostics contains one complete checked bundle.
+`StandardApplicationCheckReport` retains its lossless parse report,
+diagnostics, and, on success, distinct checked definitions labelled with the
+exact sentinel. The caller does not prepare that report through the legacy
+path. The compiler returns diagnostics in its established order and preserves
+the invariant that a report with no diagnostics contains one complete distinct
+checked bundle.
 
 The only standard-library authority accepted by this seam is a
-`VerifiedStandardLibrarySnapshot`. The command reconstructs the embedded
-standard snapshot from the retained standard source and verifies it through
-`orna_standard::verify_standard_library_snapshot`. That wrapper must compare
-the exact reserved standard catalogue identity and retained digest with the
-hard-coded accepted digest before the core canonical verifier grants the
-capability.
+`CheckedStandardLibrary`. Host composition reconstructs the embedded standard
+snapshot, calls `orna_standard::verify_standard_library_snapshot`, and passes
+the resulting core capability to `check_standard_library_source` before it
+calls `check_new_application`. Retained-source mismatch, accepted-golden
+mismatch, standard verification failure, and standard source reconciliation
+failure all stop host composition before this seam. The compiler accepts no raw
+verified snapshot, standard-owned error, manifest, digest, or trust flag.
 
 The source-independent `StandardLibraryManifest` from work ADR 0016 can help
 validate the retained standard source, but it has no source, origins, hashes,
 accepted digest, or verification capability. The command must never pass that
 manifest or its catalogue to application checking as standard-library
 authority. It must not fall back to `StandardScalar` spelling rules or another
-hard-coded type-name table when standard verification fails.
+hard-coded type-name table when host standard composition fails.
 
 The check therefore uses the one standard identity relationship accepted by
 work ADR 0016:
@@ -282,8 +304,9 @@ The command performs its work in this exact order:
 4. decode the exact bytes as UTF-8;
 5. construct the one-unit `SourceBundle` with the exact logical path;
 6. confirm that the constructed bundle contains exactly one source unit;
-7. reconstruct and verify the embedded standard library;
-8. call `check_new_application`; and
+7. reconstruct and verify the embedded standard library, then pass the
+   verified capability to `check_standard_library_source`;
+8. call `check_new_application` with the resulting `CheckedStandardLibrary`; and
 9. escape each diagnostic message and render the diagnostics in compiler
    order.
 
@@ -296,10 +319,11 @@ service.
 
 ## Diagnostics and exit status
 
-If embedded standard-library reconstruction or verification fails, or if
-`check_new_application` returns
-`NewApplicationCheckError::StandardLibrary`, the command writes exactly this
-line to standard error and exits with status `1`:
+If embedded standard-library reconstruction, accepted-golden verification, or
+compiler standard-source reconciliation fails before `check_new_application`,
+or if `check_new_application` returns `NewApplicationCheckError::Catalogue` or
+`NewApplicationCheckError::Context`, the command writes exactly this line to
+standard error and exits with status `1`:
 
 ```text
 orna: embedded standard library could not be verified
@@ -307,6 +331,12 @@ orna: embedded standard library could not be verified
 
 It does not expose a manifest error, digest, identity, retained standard
 source path, or internal error chain.
+
+The host matches the public non-exhaustive `NewApplicationCheckError` with
+explicit `Catalogue { .. }` and `Context { .. }` arms and a mandatory wildcard
+arm. All three arms write the same embedded-standard line and exit `1`. The
+wildcard remains fail-closed when the compiler adds a future error variant
+before host code has an explicit mapping.
 
 The accepted CLI construction always supplies one source unit. If the host
 integration violates that invariant before or during the compiler call, it
@@ -342,7 +372,8 @@ and a backslash in a valid path remains a backslash. The escaped message has no
 physical line-feed or carriage-return character. It has no source excerpt or
 path rewrite.
 
-The command emits diagnostics in the order returned by `CheckReport`. It does
+The command emits diagnostics in the order returned by
+`StandardApplicationCheckReport`. It does
 not sort, group, deduplicate, colour, annotate, or convert them to another
 format. Every line has one final line feed.
 
@@ -354,7 +385,7 @@ The complete exit contract is:
 | One or more compiler diagnostics | empty | exact diagnostic lines | `1` |
 | Source read failure | empty | exact read line | `1` |
 | Invalid source UTF-8 | empty | exact UTF-8 line | `1` |
-| Embedded standard failure | empty | exact standard line | `1` |
+| Embedded standard, empty-catalogue, or context failure | empty | exact standard line | `1` |
 | Usage error | empty | exact global usage | `2` |
 
 Checking never emits a success message. A compiler diagnostic is a failed
@@ -403,10 +434,11 @@ does not give `orna-compiler` filesystem or process authority.
 | Exact source | UTF-8 byte-order mark; LF; CRLF; no final line feed; multi-byte Unicode; combining characters; leading and trailing whitespace | `SourceUnit::content`, lossless syntax text, diagnostics, and byte spans prove that no byte-order mark, line ending, Unicode sequence, whitespace, or final-line state was changed. |
 | UTF-8 failure | invalid first byte; truncated multi-byte sequence; valid prefix followed by invalid bytes | Each case prints only the exact UTF-8 line with the submitted logical path and exits `1`. No standard verification or compiler check runs. |
 | Bundle scope | empty source; declarations and references in one file; reference that exists only in a neighbouring file; directory containing valid `.orna` files | The command checks one source unit only. It performs no directory walk, import, project discovery, or implicit bundle merge. |
-| Compiler source-unit cardinality | direct `check_new_application` calls with zero, one, and two ordered source units | Zero and two return exact `SourceUnitCount { actual: 0 }` and `{ actual: 2 }` before standard lookup, parsing, or semantic work. Their exact display text and absent error source match the contract. One proceeds to the normal standard-backed `CheckReport`. |
-| Empty application identity | successful and failed offline checks; direct active application and standard construction; raw recovered application and standard catalogues; deployable expected base, explicit parent, and candidate, each separately set to the sentinel; `prepare` with the sentinel as checked or expected base | A successful offline checked bundle exposes exact `EMPTY_APPLICATION_CATALOGUE_REVISION_ID` bytes `[0; 16]`. A diagnostic report has no checked bundle. Each direct durable revision position returns exact `ReservedOfflineCheckCatalogueRevision { revision, role }` with the corresponding `DurableCatalogueRevisionRole`, exact display text, and no error source. Deployable checks run in expected-base, parent, candidate order. Preparation returns exact `CheckedBaseMismatch` or `ExpectedBaseMismatch` before candidate identity allocation, deployable construction, or writes. The sentinel is distinct from the standard catalogue identity ending in `01`. |
-| New-application context | new definitions; rename, delete, and reference that require prior application state; hostile or available database state | Checking uses the all-zero empty application base and no continuity. Database state cannot make a missing application definition resolve or change an identity decision. The CLI never calls prepare, and a later caller cannot prepare its sentinel-labelled checked bundle. |
-| Standard authority | accepted retained source and digest; changed retained source; changed hard-coded digest; self-consistent but non-golden snapshot; source-independent manifest alone; direct compiler standard failure | Only the exact retained and verified `orna.std/1` snapshot reaches application checking. The compiler preserves the exact source as `NewApplicationCheckError::StandardLibrary { source }`, with exact wrapper display text and `Error::source()`. The CLI maps that variant to the exact embedded-standard line and no application diagnostic. The manifest alone grants no compiler authority. |
+| Compiler source-unit cardinality | direct `check_new_application` calls with zero, one, and two ordered source units | Zero and two return exact `SourceUnitCount { actual: 0 }` and `{ actual: 2 }` before `CatalogueSnapshot::new`, parsing, or semantic work. Their exact display text and absent error source match the contract. One proceeds to empty-catalogue construction. |
+| Empty application catalogue | one source unit; the same production-private empty-catalogue construction seam used by the public path supplies a typed `CatalogueSnapshotError` for the empty sentinel and empty vectors; simultaneous hostile context data; `Catalogue` derive, field, display, and error source; attempted `panic!` or `expect` construction | `Catalogue { source }` retains the exact supplied `CatalogueSnapshotError` as its only source and wins before context construction or checking. The implementation handles its `Result` directly, with no `panic!` or `expect` path, public seam, or test-only production branch. |
+| Empty application identity | successful and failed offline checks; direct active application and standard construction; raw recovered application and standard catalogues; deployable expected base, explicit parent, and candidate, each separately set to the sentinel | A successful offline distinct checked bundle exposes exact `EMPTY_APPLICATION_CATALOGUE_REVISION_ID` bytes `[0; 16]`. A diagnostic report has no checked bundle. Each direct durable revision position returns exact `ReservedOfflineCheckCatalogueRevision { revision, role }` with the corresponding `DurableCatalogueRevisionRole`, exact display text, and no error source. Deployable checks run in expected-base, parent, candidate order. The sentinel remains distinct from the standard catalogue identity ending in `01`; legacy preparation cannot accept the distinct report or bundle at compile time. |
+| New-application context | new definitions; rename, delete, and reference that require prior application state; hostile or available database state; every `StandardApplicationContextError` and `NewApplicationCheckError::Context` field, display, and source case; host `Context` mapping; mandatory non-exhaustive wildcard review | Checking uses the all-zero empty application base and no continuity. Database state cannot make a missing application definition resolve or change an identity decision. After successful empty-catalogue construction, the compiler constructs its context from `CheckedStandardLibrary`, preserves the exact typed context error, and never accepts raw verified authority or a standard-owned error. The CLI maps `Catalogue`, `Context`, and every unmatched future compiler error through its mandatory wildcard to the exact embedded-standard line and status `1`; it never calls legacy prepare. |
+| Standard authority | accepted retained source and digest; changed retained source; changed hard-coded digest; self-consistent but non-golden snapshot; source-independent manifest alone; host standard-source reconciliation failure; direct compiler raw-capability attempt | Host composition alone verifies the accepted retained `orna.std/1` snapshot and checks its source before application checking. Only `CheckedStandardLibrary` reaches `check_new_application`; no `orna_standard::StandardLibraryError` crosses the compiler seam. The CLI maps host standard failure to the exact embedded-standard line and no application diagnostic. The manifest alone grants no compiler authority. A core-verified nongolden checked standard library remains acceptable only when its checked facts agree and every compatibility contract is supported and unique. |
 | Standard type identity | `BOOLEAN`, `BOOL`, `std.boolean`, and `std.types.boolean` in accepted type positions | Every spelling resolves to the same Boolean `TypeId` and emits the exact standard value-type reference evidence. No spelling adapter or second scalar identity participates. |
 | Protected standard source | application-owned `std` declaration, `KERNEL CONTRACT`, qualified type export, and prelude export, alone and after valid declarations | The accepted `ORNA0303` code, message, span, protection precedence, and compiler order are preserved. No checked bundle or durable change results. |
 | Diagnostic rendering | syntax and semantic failures; multiple ordered diagnostics; path containing spaces and punctuation; CRLF and Unicode before a failure; quoted identifiers containing line feed, carriage return, tab, another control, backslash, `U+2028`, and `U+2029` | Each line is exactly `<path>:<start>..<end>: <code>: <message>` with the exact logical path, zero-based byte offsets, exclusive end, compiler order, exact message escaping, one physical final line feed, and no injected line. Path, span, and code text remain unescaped. |
@@ -421,29 +453,31 @@ the built `orna` binary with controlled raw arguments, streams, environment,
 current working directory, file types, and permissions. Assertions must use
 exact bytes, exit status, diagnostic order, paths, spans, and side-effect
 snapshots rather than only checking that an error exists. Compiler and core
-unit tests own direct zero/one/two-bundle, sentinel-role, deployable-order, and
-prepare-before-allocation proof. The PostgreSQL recovery integration test owns
-the two raw recovered sentinel positions.
+unit tests own direct zero/one/two-bundle, sentinel-role, deployable-order,
+compile-time report-separation, and durable-guard proof. The PostgreSQL
+recovery integration test owns the two raw recovered sentinel positions.
 
 ## Implementation prerequisites
 
-This command must not land on the current compatibility scalar resolver or the
-source-independent standard manifest. It starts only after these exact work
-ADR 0016 implementation rows are complete, in their listed order:
+This command must not use the legacy compatibility scalar resolver as standard
+type authority or the source-independent standard manifest as authority. It
+starts only after these exact work ADR 0016 implementation rows are complete,
+in their listed order:
 
 * `feat(syntax): parse primitive value types`;
 * `feat(std): retain the standard source`;
 * `feat(compiler): check standard type source`;
 * `feat(compiler): resolve types through std`;
-* `refactor(types): remove scalar naming authority`; and
+* `feat(compiler): preserve relational value provenance`;
+* `feat(compiler): preserve mutation value provenance`;
 * `feat(compiler): reference standard function types`.
 
 The dedicated `feat(compiler): check verified new applications` row below
 follows those prerequisites and owns the exact public seam and error, sentinel,
-durable-role guards, deployable guards, and preparation-rejection proof. The
-later PostgreSQL recovery test, CLI dependency, and command rows cannot start
-before that compiler row is complete. The source-check slice does not reorder,
-weaken, or bypass any work ADR 0016 authority gate.
+durable-role guards, deployable guards, and compile-time report-separation
+proof. The later PostgreSQL recovery test, CLI dependency, and command rows
+cannot start before that compiler row is complete. The source-check slice does
+not reorder, weaken, or bypass any work ADR 0016 authority gate.
 
 Implementation order also requires work ADR 0017's command dispatcher through
 all three accepted server leaves. Its sequence must be complete through and
@@ -478,10 +512,10 @@ existing `orna` target; no new crate or executable is added.
 | Conventional Commit | Exact files | Required result |
 | --- | --- | --- |
 | `docs(cli): define offline source check` | `docs/decisions/0018-offline-source-check.md`; `docs/decisions/README.md` | Accept this command, compiler, standard-authority, file, diagnostic, offline, and proof contract. |
-| `feat(compiler): check verified new applications` | `crates/orna-core/src/revision.rs`; `crates/orna-compiler/src/lib.rs`; `crates/orna-compiler/src/resolver.rs` | Implement and export exact `NewApplicationCheckError` and `check_new_application`; reject zero and multiple source units before standard or semantic work; reserve and expose exact `EMPTY_APPLICATION_CATALOGUE_REVISION_ID`; add exact `DurableCatalogueRevisionRole` and `ReservedOfflineCheckCatalogueRevision`; reject the sentinel from active or recovered application and standard roles and from deployable expected-base, parent, and candidate positions; label the successful checked bundle with the sentinel; and prove that normal preparation rejects that bundle before allocation. This row starts only after all work ADR 0016 prerequisites above. |
+| `feat(compiler): check verified new applications` | `crates/orna-core/src/revision.rs`; `crates/orna-compiler/src/lib.rs`; `crates/orna-compiler/src/resolver.rs` | Implement and export exact `NewApplicationCheckError` and `check_new_application`; accept only `&CheckedStandardLibrary`, return `StandardApplicationCheckReport`, reject zero and multiple source units before `CatalogueSnapshot::new`, map empty-sentinel empty-vector catalogue construction to `Catalogue { source }`, then map context construction to `Context { source }`, with no `panic!` or `expect`; reserve and expose exact `EMPTY_APPLICATION_CATALOGUE_REVISION_ID`; add exact `DurableCatalogueRevisionRole` and `ReservedOfflineCheckCatalogueRevision`; reject the sentinel from active or recovered application and standard roles and from deployable expected-base, parent, and candidate positions; label the successful distinct checked bundle with the sentinel; and use the same production-private construction seam as the public path to supply typed `CatalogueSnapshotError` plus hostile context, proving exact `Catalogue` precedence, display, and source without a public seam or test-only production branch, while legacy preparation cannot accept the distinct report or bundle at compile time and durable core rejection remains. This row starts only after all work ADR 0016 prerequisites above. |
 | `test(postgres): reject offline catalogue identity` | `crates/orna-kernel-postgres/tests/recovery.rs` | Insert the all-zero identity separately as the raw recovered application catalogue and raw recovered standard catalogue. Prove that each fails through exact shared `RevisionInvariantError::ReservedOfflineCheckCatalogueRevision`, carries the corresponding active-or-recovered role, preserves the exact display and source contract, does not return an active revision, and performs no repair or write. |
 | `build(server): add offline source-check dependencies` | `crates/orna-server/Cargo.toml`; `Cargo.lock` | Add normal path dependencies on the core source model, compiler, and retained standard-library orchestrator. Add no PostgreSQL, network, configuration, child-process, glob, or CLI-framework dependency. |
-| `feat(server): check one source file offline` | `crates/orna-server/src/main.rs`; `crates/orna-server/src/source_check.rs`; `crates/orna-server/tests/backend_shell.rs` | Preserve every server command leaf, append exact source dispatch and the final global usage, update the existing backend-shell usage assertions without changing its operation, validate the path, read one regular UTF-8 file, verify the embedded standard, call `check_new_application`, render exact diagnostics, and keep standard output empty. |
+| `feat(server): check one source file offline` | `crates/orna-server/src/main.rs`; `crates/orna-server/src/source_check.rs`; `crates/orna-server/tests/backend_shell.rs` | Preserve every server command leaf, append exact source dispatch and the final global usage, update the existing backend-shell usage assertions without changing its operation, validate the path, read one regular UTF-8 file, reconstruct and verify the embedded standard, check its source, call `check_new_application` with `CheckedStandardLibrary`, render exact diagnostics, and keep standard output empty. |
 | `test(server): prove offline source checking` | `crates/orna-server/tests/source_check.rs` | Run the built binary across the complete CLI proof matrix, including raw Unix arguments, exact bytes, escaped messages and spans, piped standard input, hostile PostgreSQL environment, absent and stopped PostgreSQL service states, no command-issued filesystem writes, atime-safe snapshots, and the unchanged backend-shell dispatch boundary. |
 
 ## Deferred surface

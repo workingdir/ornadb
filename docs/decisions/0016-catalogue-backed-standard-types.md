@@ -345,23 +345,24 @@ the same declaration after the first one.
 Any diagnostic rejects the complete candidate and no standard or application
 catalogue state changes.
 
-A malformed private checked or prepared value that supplies or replaces a
-reserved `TypeId` has no source diagnostic. It fails through the typed
-`StandardLibraryError::ReservedTypeIdentity` rule, whose public display is
-`the standard library has an unexpected type identity`, before
-identity allocation or durable writes.
+The compiler accepts no caller-provided standard `TypeId` or installable
+standard-upgrade value. It accepts only a `CheckedStandardLibrary` and returns
+an opaque prepared capability. A malformed private value therefore cannot
+replace a reserved type identity through a public compiler path.
 
 An existing version-1 application catalogue may predate the protected
 namespace. Standard installation does not reinterpret or overwrite it. If an
 application definition already has `std` as its first semantic name part,
-`prepare_standard_upgrade` returns
-`StandardLibraryError::NamespaceOccupied`, displayed as
+`prepare_checked_standard_upgrade` returns
+`PrepareStandardUpgradeError::NamespaceOccupied`, displayed as
 `the application catalogue already uses the reserved std namespace`. If an
 application identity collides with any reserved manifest identity, it returns
-`StandardLibraryError::ReservedIdentity`, displayed as
-`the application catalogue conflicts with a reserved standard library identity`.
-Both failures occur before an upgrade value or durable write exists. This
-decision does not invent an automatic rename for either conflict.
+`PrepareStandardUpgradeError::ReservedIdentity`, displayed as
+`the application state conflicts with a reserved standard library identity`.
+The public `orna-standard` wrapper returns these compiler failures as its
+transparent `StandardUpgradeError::Prepare` source. Both failures occur before
+an upgrade value or durable write exists. This decision does not invent an
+automatic rename for either conflict.
 
 ## Bootstrap and revision authority
 
@@ -447,8 +448,8 @@ pub fn verify_standard_library_snapshot(
 ```
 
 `StandardLibraryError` is `#[non_exhaustive]` and derives `Clone`, `Debug`,
-`Eq`, and `PartialEq`. It has exactly these variants and fields for this
-stage:
+`Eq`, and `PartialEq`. Retained-source construction and verification construct
+exactly these variants and fields:
 
 ```rust
 Manifest { source: StandardLibraryManifestError }
@@ -477,7 +478,23 @@ Its public `Display` text is exact:
 | `AcceptedDigestMismatch` | `the standard library digest does not match the hard-coded accepted digest` |
 
 Its `Error::source` is `Some(source)` only for `Manifest`, `Revision`, and
-`CanonicalHash`. It is `None` for the other variants.
+`CanonicalHash`. It is `None` for the other variants. These are the only six
+`StandardLibraryError` variants implemented by the retained-source row.
+
+The later `feat(std): orchestrate standard upgrades` row, in
+`crates/orna-standard/src/lib.rs`, extends this non-exhaustive error with only
+`Unavailable`. Its display is `the standard library is not installed`. It is
+returned only at a service, orchestration, or database boundary when an
+installed standard is absent. It is not returned by retained-source construction
+or verification.
+
+`StandardLibraryAlreadyInstalled`, `NamespaceOccupied`, and
+`ReservedIdentity` are compiler-owned `PrepareStandardUpgradeError` variants.
+The standard wrapper returns them through its transparent
+`StandardUpgradeError::Prepare` source.
+Neither the compiler checker nor `StandardApplicationCheckContext` has an
+`Unavailable` error. Later standard-application preparation owns its distinct
+`StandardLibraryUnavailable` error.
 
 `retained_standard_library_snapshot` constructs the source unit, bundle, and
 parentless source revision under the existing source hash contracts. It parses
@@ -694,15 +711,274 @@ database has no standard catalogue and cannot check or execute normal Orna
 source. This preserves the explicit diagnostic and recovery environment
 allowed by `spec/docs/06-bootstrapping-recovery.md`.
 
-The new `orna-standard` orchestration crate owns normal standard installation.
-Its public `prepare_standard_upgrade(active)` operation embeds and checks the
-exact standard source and manifest, reconstructs the active application source,
-and returns one closed `StandardUpgrade`. That value contains the standard
-revision, one companion application `SourceRevision`, the version-2 catalogue,
-and every new or reused function revision and reference needed by the
-transition. The PostgreSQL kernel accepts it only through
-`apply_standard_upgrade`, which verifies and commits the entire value in one
-read-write repeatable-read transaction.
+The `orna-standard` crate owns normal standard installation. Its public
+`prepare_standard_upgrade` operation embeds and checks the exact standard
+source and manifest, reconstructs the active application source, and returns
+one opaque `StandardUpgrade`. The PostgreSQL kernel accepts that type only
+through `apply_standard_upgrade`, which verifies and commits the complete value
+in one read-write repeatable-read transaction.
+
+The compiler row owns only `crates/orna-compiler/src/prepare.rs` and
+`crates/orna-compiler/src/lib.rs`. It defines and re-exports an opaque prepared
+capability, not an installable standard upgrade:
+
+```rust
+#[derive(Clone, Debug)]
+pub struct PreparedStandardUpgrade {
+    standard: CheckedStandardLibrary,
+    application: DeployableRevision,
+}
+
+impl PreparedStandardUpgrade {
+    pub fn standard_library(&self) -> &CheckedStandardLibrary;
+    pub fn application_revision(&self) -> &DeployableRevision;
+}
+
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StandardUpgradeIdentity {
+    StandardLibraryRevision(StandardLibraryRevisionId),
+    CatalogueRevision(CatalogueRevisionId),
+    SourceBundle(SourceBundleId),
+    SourceRevision(SourceRevisionId),
+    SourceUnit(SourceUnitId),
+    Schema(SchemaId),
+    Type(TypeId),
+    TypeBinding(TypeBindingId),
+}
+
+pub fn prepare_checked_standard_upgrade(
+    standard: &CheckedStandardLibrary,
+    active: &ActiveDatabaseRevision,
+) -> Result<PreparedStandardUpgrade, PrepareStandardUpgradeError>;
+
+#[non_exhaustive]
+#[derive(Debug)]
+pub enum PrepareStandardUpgradeError {
+    StandardLibraryAlreadyInstalled { revision: StandardLibraryRevisionId },
+    NamespaceOccupied { name: QualifiedSemanticName },
+    ReservedIdentity { identity: StandardUpgradeIdentity },
+    ActiveSourceDiagnostics { diagnostics: Vec<CompilerDiagnostic> },
+    ActiveSourceMismatch,
+    Catalogue { source: CatalogueSnapshotError },
+    CanonicalHash { source: CanonicalHashError },
+    Revision { source: RevisionInvariantError },
+}
+```
+
+`PreparedStandardUpgrade` has private fields and no public constructor, owned
+extraction, conversion, `Deref`, or `inner` interface. Its
+`application_revision()` accessor is intentionally a borrow escape to normal
+kernel input. It does not transfer ownership of the candidate or permit direct
+standard installation. Its two accessors are the complete public interface.
+
+`StandardUpgradeIdentity` is compiler-owned. It retains the exact conflicting
+durable identity in `ReservedIdentity`; it is not a core upgrade model.
+`StandardUpgradeIdentity::StandardLibraryRevision` is kernel-only. The
+compiler does not return it from `ReservedIdentity`: its first gate rejects an
+active standard library before the visible-identity gate starts.
+
+`PrepareStandardUpgradeError` public `Display` text is exact:
+
+| Variant | Display |
+| --- | --- |
+| `StandardLibraryAlreadyInstalled` | `standard library {revision} is already installed` |
+| `NamespaceOccupied` | `the application catalogue already uses the reserved std namespace` |
+| `ReservedIdentity` | `the application state conflicts with a reserved standard library identity` |
+| `ActiveSourceDiagnostics` | `the active application source has compiler diagnostics` |
+| `ActiveSourceMismatch` | `the active application source does not match the active catalogue` |
+| `Catalogue` | `the standard upgrade catalogue is invalid: {source}` |
+| `CanonicalHash` | `the standard upgrade canonical hashes are invalid: {source}` |
+| `Revision` | `the standard upgrade revision is invalid: {source}` |
+
+`Error::source()` is `Some(source)` only for `Catalogue`, `CanonicalHash`, and
+`Revision`. It is `None` for every other variant. This compiler path has no
+`Unavailable` error and accepts only `CheckedStandardLibrary`.
+
+The active catalogue family order is schemas, object types, value types, type
+bindings, then functions. Each family uses snapshot order. The compiler applies
+these complete gates in this exact order:
+
+1. reject an active revision that already contains a standard library with
+   `StandardLibraryAlreadyInstalled { revision }`;
+2. inspect visible active catalogue names in that explicit family and snapshot
+   order and reject the first `std` namespace occupant with
+   `NamespaceOccupied { name }`;
+3. inspect visible active identities in this exact order and reject the first
+   match with `ReservedIdentity { identity }`: active catalogue revision,
+   source bundle, source revision, source units by ordinal, schemas in snapshot
+   order, object `TypeId` values in snapshot order, value `TypeId` values in
+   snapshot order, then type bindings in snapshot order;
+4. parse the active application source and return its complete ordered vector
+   through `ActiveSourceDiagnostics { diagnostics }`;
+5. compare that lossless active source with the active catalogue and return
+   `ActiveSourceMismatch` on a difference;
+6. validate the candidate catalogue and map failure to `Catalogue`;
+7. validate its canonical hashes and map failure to `CanonicalHash`; and
+8. validate its revision invariants and map failure to `Revision`.
+
+After gate 5 and before candidate catalogue, canonical-hash, or revision
+construction, private retry allocation excludes reserved manifest IDs of the
+same class only for the newly allocated companion application
+`CatalogueRevisionId`, `SourceBundleId`, `SourceRevisionId`, and every copied
+`SourceUnitId`. It reuses existing application `SchemaId` and `TypeId` values,
+which active gate 3 already covers. It creates no `TypeBindingId`: that
+identity is derived from its name, and neither current preparation slice
+creates an application type binding. This retry mechanism is private and has
+no public error. The active `ReservedIdentity` gate remains before allocation.
+
+The compiler sees only the active revision. Database-wide reserved-identity
+collisions in inactive source records belong to the atomic kernel special apply
+path, before it writes anything.
+
+The one-file `feat(std): orchestrate standard upgrades` row adds this public
+opaque capability and wrapper in `crates/orna-standard/src/lib.rs`:
+
+```rust
+pub use orna_compiler::StandardUpgradeIdentity;
+
+#[derive(Clone, Debug)]
+pub struct StandardUpgrade {
+    prepared: PreparedStandardUpgrade,
+}
+
+impl StandardUpgrade {
+    pub fn checked_standard_library(&self) -> &CheckedStandardLibrary;
+    pub fn verified_standard_snapshot(&self) -> &VerifiedStandardLibrarySnapshot;
+    pub fn application_revision(&self) -> &DeployableRevision;
+}
+
+pub fn prepare_standard_upgrade(
+    active: &ActiveDatabaseRevision,
+) -> Result<StandardUpgrade, StandardUpgradeError>;
+
+#[non_exhaustive]
+#[derive(Debug)]
+pub enum StandardUpgradeError {
+    StandardLibrary { source: StandardLibraryError },
+    StandardSource { source: StandardLibraryCheckError },
+    Prepare { source: PrepareStandardUpgradeError },
+}
+```
+
+`StandardUpgrade` has a private field and no public constructor, owned
+conversion, `Deref`, or `inner` interface. Only
+`prepare_standard_upgrade` constructs it after the retained snapshot,
+accepted-golden verification, standard-source check, and compiler preparation
+succeed. Its `application_revision()` accessor intentionally retains the
+borrow escape to normal kernel input. The permanent normal-apply guard rejects
+that borrowed version-2 candidate from a version-1 active revision and locks
+it to the same standard context from a version-2 active revision.
+
+`orna-standard` re-exports the compiler-owned `StandardUpgradeIdentity` for
+the atomic kernel error. This preserves the exact typed conflicting identity
+without a direct `orna-kernel-postgres -> orna-compiler` dependency.
+
+Every `StandardUpgradeError` variant has transparent `Display` text and returns
+its contained error from `Error::source()`. The wrapper calls
+`retained_standard_library_snapshot`,
+`verify_standard_library_snapshot`, `check_standard_library_source`, then
+`prepare_checked_standard_upgrade`, in that exact order. It does not call a
+raw-standard or unnamed compiler preparation route.
+
+### PostgreSQL standard-context transition guard
+
+Before the standard-upgrade rows, `fix(postgres): guard standard context
+transitions` changes only `crates/orna-kernel-postgres/src/apply.rs`,
+`crates/orna-kernel-postgres/src/lib.rs`, and
+`crates/orna-kernel-postgres/tests/apply.rs`. It defines this public
+standard-context value with private fields:
+
+```rust
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StandardContextIdentity {
+    standard_library_revision: StandardLibraryRevisionId,
+    standard_catalogue_revision: CatalogueRevisionId,
+    source_bundle: SourceBundleId,
+    source_revision: SourceRevisionId,
+    source_bundle_hash: Sha256Digest,
+    source_revision_hash: Sha256Digest,
+    standard_library_digest: Sha256Digest,
+}
+
+impl StandardContextIdentity {
+    pub fn standard_library_revision(&self) -> StandardLibraryRevisionId;
+    pub fn standard_catalogue_revision(&self) -> CatalogueRevisionId;
+    pub fn source_bundle(&self) -> SourceBundleId;
+    pub fn source_revision(&self) -> SourceRevisionId;
+    pub fn source_bundle_hash(&self) -> Sha256Digest;
+    pub fn source_revision_hash(&self) -> Sha256Digest;
+    pub fn standard_library_digest(&self) -> Sha256Digest;
+}
+```
+
+The guard row adds the first two `PostgresKernelError` variants. The later
+atomic special-apply row adds `ReservedStandardIdentity`. All three have no
+error source and their displays are static and exact:
+
+```rust
+StandardContextTransitionRequired {
+    active: CatalogueHashVersion,
+    candidate: CatalogueHashVersion,
+}
+StandardContextMismatch {
+    active: StandardContextIdentity,
+    candidate: StandardContextIdentity,
+}
+ReservedStandardIdentity {
+    identity: StandardUpgradeIdentity,
+}
+```
+
+| Variant | Display |
+| --- | --- |
+| `StandardContextTransitionRequired` | `the active and candidate catalogue hash versions require a standard context transition` |
+| `StandardContextMismatch` | `the active and candidate standard contexts do not match` |
+| `ReservedStandardIdentity` | `the database contains an identity reserved for the standard library` |
+
+Normal apply performs this permanent guard after expected-base recovery and
+before materialisation, planning, or writes. It rejects every version-1 to
+version-2 or version-2 to version-1 catalogue-hash transition with
+`StandardContextTransitionRequired`. For version-2 to version-2 normal apply,
+it reconstructs the two `StandardContextIdentity` values and requires exact
+equality, otherwise returning `StandardContextMismatch`. Version-1 to
+version-1 normal apply keeps its existing path.
+
+The normal-apply guard makes a borrowed version-2 application candidate
+non-installable from a version-1 active revision and context-locked from a
+version-2 active revision. The atomic `apply_standard_upgrade` accepts only
+`&orna_standard::StandardUpgrade`. It executes these complete steps in order:
+
+1. enter the trusted special-apply path and start its one atomic transaction;
+2. lock and recover the active revision;
+3. check the expected base;
+4. complete the database-wide `ReservedStandardIdentity` gate;
+5. materialise the candidate;
+6. build the physical plan; and
+7. perform writes.
+
+`StandardUpgrade` has a private field and one constructor, so its prepared
+association is unforgeable. Compiler construction already proves the
+`DeployableRevision` core invariants. The kernel has no additional opaque
+association or invariant gate.
+
+The special gate uses identity-class order: standard-library revision,
+catalogue revision, source bundle, source revision, source unit, schema, type,
+then type binding. It includes `StandardLibraryRevision` first in this
+kernel-only scan. For every class, it checks active-visible records first in
+the explicit active family order. It then checks all remaining inactive records,
+excluding those active IDs, by raw durable ID byte order within that class.
+An active standard-library revision, if present, precedes inactive
+standard-library revisions; inactive standard-library revisions use raw durable
+ID byte order. Active source units use durable ordinal order; inactive source
+units use raw durable ID byte order only. `ReservedStandardIdentity` has no
+error source.
+
+Replaying the same already-applied `StandardUpgrade` returns the existing
+`ExpectedBaseMismatch` at step 3, before the reserved-identity scan or any
+writes. Calling `prepare_standard_upgrade` again against an active version-2
+revision returns `StandardLibraryAlreadyInstalled` at the compiler's first
+gate. The dependency graph is `postgres -> standard -> compiler -> core`.
 
 The companion application source revision retains byte-identical ordered
 source-unit paths, contents, content hashes, and ordinals, has the previous
@@ -736,12 +1012,13 @@ application source bundle. Application source remains the complete candidate
 snapshot for application-owned schemas under work ADR 0003. Every version-2
 active database revision pins the verified standard revision alongside one
 application catalogue revision. The effective catalogue view contains both.
-Normal checking, preparation, apply, SERVER execution, and CLIENT evaluation
-require that view. They return a typed unavailable-standard-library error for
-a bare version-1 database rather than falling back to hard-coded names.
-The shared rule is `StandardLibraryError::Unavailable`, displayed as
-`the standard library is not installed`; each public boundary retains its
-normal operation context and nests that source where it already exposes one.
+Normal service, orchestration, and database operations require that view. At
+those boundaries only, the later standard-orchestration extension returns
+`orna_standard::StandardLibraryError::Unavailable`, displayed as
+`the standard library is not installed`, for a bare version-1 database rather
+than falling back to hard-coded names. The compiler has no
+unavailable-standard-library error: its standard-backed entry point cannot be
+called without an already checked standard-library capability.
 
 `orna.language/1` is paired with `orna.std/1`. Existing executable artefacts
 therefore continue to pin the standard scalar semantics without adding the
@@ -976,23 +1253,518 @@ rejected merely because standard scalars were formerly keyword-only.
 
 `REF` accepts only an object-type definition. A standard or custom value type
 used as a `REF` target reports the existing scalar/value-category diagnostic at
-the exact target span. A field, parameter, return, expression, or result value
-retains the resolved `TypeId`; later stages do not re-resolve its source name.
-A function signature or body use of a standard value type emits the normal
-ordered `NamedType` definition reference to the canonical value-type `TypeId`
-at the written type span. Prelude and qualified spellings therefore produce
-the same reference target with different retained source origins.
+the exact target span. The active standard application checker retains the
+resolved `TypeId` for a field, parameter, or declared return value and never
+re-resolves its source name. Its later relational and mutation body-owner rows
+retain expression and result uses. The later function-evidence row emits the
+normal ordered `NamedType` definition reference to the canonical value-type
+`TypeId` at the written type span. Prelude and qualified spellings therefore
+produce the same reference target with different retained source origins.
 `DefinitionReferenceKind::NamedType` consequently means a dependency on any
 named object or value type. `ObjectReference`, `QueryObject`, `WriteObject`, and
 `REF` remain restricted to object definitions.
 
 SERVER signature evidence remains the prefix before the body evidence fixed by
-work ADRs 0005 and 0007 through 0012. That prefix scans parameters in ordinal
-order and then a single return or `ROWS` columns in ordinal order. Each direct
-value type contributes `NamedType` at its written type; each `REF` continues to
-contribute only its existing `ObjectReference` at the written target. Repeated
-written type uses produce repeated ordered references. The body sequences in
-those decisions retain their exact relative order after this expanded prefix.
+work ADRs 0005 and 0007 through 0012. The later function-evidence row scans
+parameters in ordinal order and then a single return or `ROWS` columns in
+ordinal order. Each direct value type then contributes `NamedType` at its
+written type; each `REF` continues to contribute only its existing
+`ObjectReference` at the written target. Repeated written type uses produce
+repeated ordered references. The body sequences in those decisions retain their
+exact relative order after this expanded prefix.
+
+### Standard application checking
+
+The standard-backed application seam accepts a checked standard library, not a
+raw `VerifiedStandardLibrarySnapshot`. Its exact public capability is:
+
+```rust
+#[derive(Clone, Copy, Debug)]
+pub struct StandardApplicationCheckContext<'a> {
+    application: &'a CatalogueSnapshot,
+    standard: &'a CheckedStandardLibrary,
+}
+
+impl<'a> StandardApplicationCheckContext<'a> {
+    pub fn try_new(
+        application: &'a CatalogueSnapshot,
+        standard: &'a CheckedStandardLibrary,
+    ) -> Result<Self, StandardApplicationContextError>;
+
+    pub fn application_catalogue(&self) -> &'a CatalogueSnapshot;
+    pub fn standard_library(&self) -> &'a CheckedStandardLibrary;
+}
+
+pub fn check_standard_application(
+    bundle: &SourceBundle,
+    context: &StandardApplicationCheckContext<'_>,
+) -> StandardApplicationCheckReport;
+```
+
+`CheckedStandardLibrary` is unforgeable outside `orna-compiler` and has already
+reconciled its source, catalogue, and origins. `try_new` trusts that checked
+capability. It does not re-run reconciliation or validate checked facts against
+their own snapshot catalogue. It uses the checked source-ordered facts and the
+checked capability's owned snapshot catalogue for lookup. Those facts, rather
+than a raw verified snapshot, are the required authority for application
+checking. Accepted `orna.std/1` golden enforcement remains outside the
+compiler.
+
+`StandardApplicationContextError` is public, `#[non_exhaustive]`, and derives
+`Clone`, `Debug`, `Eq`, and `PartialEq`. It has exactly these variants:
+
+```rust
+#[non_exhaustive]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StandardApplicationContextError {
+    SchemaIdentityConflict { id: SchemaId },
+    SchemaNameConflict { name: QualifiedSemanticName },
+    TypeIdentityConflict { id: TypeId },
+    TypeBindingIdentityConflict { id: TypeBindingId },
+    TypeNameConflict { name: TypeLookupName },
+    UnsupportedCompatibilityContract { type_id: TypeId, contract: String },
+    CompatibilityContractConflict { contract: String },
+}
+```
+
+Its exact actionable `Display` text is:
+
+| Variant | Display |
+| --- | --- |
+| `SchemaIdentityConflict` | `the application catalogue conflicts with standard schema identity {id}` |
+| `SchemaNameConflict` | `the application catalogue conflicts with standard schema name {name}` |
+| `TypeIdentityConflict` | `the application catalogue conflicts with standard type identity {id}` |
+| `TypeBindingIdentityConflict` | `the application catalogue conflicts with standard type binding identity {id}` |
+| `TypeNameConflict` | `the application catalogue conflicts with standard type name {name}` |
+| `UnsupportedCompatibilityContract` | `the standard value type {type_id} uses unsupported compatibility contract {contract}` |
+| `CompatibilityContractConflict` | `the standard library uses compatibility contract {contract} for more than one type` |
+
+`std::error::Error::source()` returns `None` for every context-error variant.
+`try_new` has no lookup-order winner. It completes each of these source-ordered
+gates over every checked fact before it starts the next gate:
+
+1. schema identities;
+2. schema names;
+3. type identities;
+4. type-binding identities;
+5. primary type names;
+6. qualified binding names;
+7. prelude binding names;
+8. complete unsupported-contract mapping; and
+9. complete duplicate-contract detection.
+
+The first seven gates compare the appropriate checked standard facts with the
+application catalogue. The final two gates derive private compatibility from
+the checked value-type facts. A context cannot substitute a raw verified
+snapshot, manifest, standard digest, or trust flag for
+`CheckedStandardLibrary`.
+
+`StandardApplicationCheckReport` is a distinct public result. It derives
+`Clone` and implements `Debug` manually. It owns a clone of the exact
+`CheckedStandardLibrary`, a `ParseReport`, diagnostics, and, only when there
+are no diagnostics, a distinct `CheckedStandardApplicationBundle`. Its exact
+read-only accessors are:
+
+```rust
+#[derive(Clone)]
+pub struct StandardApplicationCheckReport {
+    standard_library: CheckedStandardLibrary,
+    parse_report: ParseReport,
+    diagnostics: Vec<CompilerDiagnostic>,
+    checked_bundle: Option<CheckedStandardApplicationBundle>,
+}
+
+pub fn standard_library(&self) -> &CheckedStandardLibrary;
+pub fn parse_report(&self) -> &ParseReport;
+pub fn diagnostics(&self) -> &[CompilerDiagnostic];
+pub fn checked_bundle(&self) -> Option<&CheckedStandardApplicationBundle>;
+```
+
+It has no conversion, `Deref`, borrow, `inner`, or extraction API to
+`CheckReport` or `CheckedBundle`. A standard application report cannot be
+prepared by the legacy preparation path.
+
+`CheckedStandardApplicationBundle` derives `Clone`, `Eq`, and `PartialEq` and
+implements `Debug` manually. It owns the following implementation boundary:
+
+```rust
+#[derive(Clone, Eq, PartialEq)]
+pub struct CheckedStandardApplicationBundle {
+    pub(super) inner: CheckedBundle,
+    standard_catalogue_revision: CatalogueRevisionId,
+    standard_library_revision: StandardLibraryRevisionId,
+    standard_library_digest: Sha256Digest,
+    uses: Vec<CheckedApplicationTypeUse>,
+    standard_type_references: Vec<CheckedStandardTypeReference>,
+    /* private lookup into uses */
+}
+```
+
+The private state stores the standard catalogue revision, standard-library
+revision, standard-library digest, one canonical
+`Vec<CheckedApplicationTypeUse>` arena, an initially empty
+`Vec<CheckedStandardTypeReference>` arena, and a private lookup into the type
+use arena. Each declared or body type use occurs in that arena exactly once.
+Its exact public accessors are:
+
+```rust
+pub fn base_catalogue_revision(&self) -> CatalogueRevisionId;
+pub fn standard_catalogue_revision(&self) -> CatalogueRevisionId;
+pub fn standard_library_revision(&self) -> StandardLibraryRevisionId;
+pub fn standard_library_digest(&self) -> Sha256Digest;
+pub fn uses(&self) -> &[CheckedApplicationTypeUse];
+pub fn value_type_uses(&self) -> impl Iterator<Item = &CheckedValueTypeUse> + '_;
+pub fn standard_type_references(&self) -> &[CheckedStandardTypeReference];
+pub fn schemas(&self) -> &[CheckedSchema];
+pub fn object_types(
+    &self,
+) -> impl ExactSizeIterator<Item = CheckedStandardApplicationObjectType<'_>> + '_;
+pub fn server_functions(
+    &self,
+) -> impl ExactSizeIterator<Item = CheckedStandardApplicationServerFunction<'_>> + '_;
+pub fn client_functions(
+    &self,
+) -> impl ExactSizeIterator<Item = CheckedStandardApplicationClientFunction<'_>> + '_;
+```
+
+The family iterators return scalar-free borrowed views over that one `inner`
+state. They do not expose an existing checked object or function family,
+`SemanticType`, or a parallel owned family copy. Each view has only private
+references and indices, derives `Clone` and `Copy`, and implements `Debug`
+manually:
+
+```rust
+#[derive(Clone, Copy)]
+pub struct CheckedStandardApplicationObjectType<'a> { /* private references and indices */ }
+
+#[derive(Clone, Copy)]
+pub struct CheckedStandardApplicationField<'a> { /* private references and indices */ }
+
+#[derive(Clone, Copy)]
+pub struct CheckedStandardApplicationServerFunction<'a> { /* private references and indices */ }
+
+#[derive(Clone, Copy)]
+pub struct CheckedStandardApplicationClientFunction<'a> { /* private references and indices */ }
+
+#[derive(Clone, Copy)]
+pub struct CheckedStandardApplicationParameter<'a> { /* private references and indices */ }
+
+#[derive(Clone, Copy)]
+pub struct CheckedStandardApplicationReturnColumn<'a> { /* private references and indices */ }
+
+impl<'a> CheckedStandardApplicationObjectType<'a> {
+    pub fn id(&self) -> CheckedTypeId;
+    pub fn name(&self) -> &QualifiedSemanticName;
+    pub fn fields(
+        &self,
+    ) -> impl ExactSizeIterator<Item = CheckedStandardApplicationField<'a>> + '_;
+    pub fn location(&self) -> &SourceLocation;
+}
+
+impl<'a> CheckedStandardApplicationField<'a> {
+    pub fn id(&self) -> CheckedFieldId;
+    pub fn name(&self) -> &str;
+    pub fn ordinal(&self) -> u32;
+    pub fn resolved_type(&self) -> &CheckedApplicationTypeUse;
+    pub fn nullable(&self) -> bool;
+    pub fn unique(&self) -> bool;
+    pub fn default(&self) -> Option<(&ConstantValue, &SourceLocation)>;
+    pub fn on_delete(&self) -> Option<OnDeleteAction>;
+    pub fn location(&self) -> &SourceLocation;
+}
+
+impl<'a> CheckedStandardApplicationServerFunction<'a> {
+    pub fn id(&self) -> CheckedFunctionId;
+    pub fn name(&self) -> &QualifiedSemanticName;
+    pub fn parameters(
+        &self,
+    ) -> impl ExactSizeIterator<Item = CheckedStandardApplicationParameter<'a>> + '_;
+    pub fn return_columns(
+        &self,
+    ) -> impl ExactSizeIterator<Item = CheckedStandardApplicationReturnColumn<'a>> + '_;
+    pub fn security(&self) -> FunctionSecurity;
+    pub fn transaction(&self) -> Option<FunctionTransaction>;
+    pub fn volatility(&self) -> FunctionVolatility;
+    pub fn location(&self) -> &SourceLocation;
+    pub fn references(&self) -> &[CheckedDefinitionReference];
+}
+
+impl<'a> CheckedStandardApplicationClientFunction<'a> {
+    pub fn id(&self) -> CheckedFunctionId;
+    pub fn name(&self) -> &QualifiedSemanticName;
+    pub fn domain(&self) -> FunctionDomain;
+    pub fn parameters(
+        &self,
+    ) -> impl ExactSizeIterator<Item = CheckedStandardApplicationParameter<'a>> + '_;
+    pub fn return_type(&self) -> &CheckedApplicationTypeUse;
+    pub fn security(&self) -> FunctionSecurity;
+    pub fn transaction(&self) -> Option<FunctionTransaction>;
+    pub fn volatility(&self) -> FunctionVolatility;
+    pub fn location(&self) -> &SourceLocation;
+    pub fn references(&self) -> &[CheckedDefinitionReference];
+}
+
+impl<'a> CheckedStandardApplicationParameter<'a> {
+    pub fn id(&self) -> CheckedParameterId;
+    pub fn name(&self) -> &str;
+    pub fn ordinal(&self) -> u32;
+    pub fn resolved_type(&self) -> &CheckedApplicationTypeUse;
+    pub fn location(&self) -> &SourceLocation;
+}
+
+impl<'a> CheckedStandardApplicationReturnColumn<'a> {
+    pub fn name(&self) -> &str;
+    pub fn ordinal(&self) -> u32;
+    pub fn resolved_type(&self) -> &CheckedApplicationTypeUse;
+    pub fn location(&self) -> &SourceLocation;
+}
+```
+
+`references()` in those function views exposes application and object evidence
+only until the later standard-reference row adds its separate arena. The
+borrowed default value has no type-resolution surface; no existing checked
+family leaks through a view.
+
+The canonical type-use arena has this exact public model:
+
+```rust
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum CheckedTypeUseKind {
+    Field {
+        owner: CheckedTypeId,
+        field: CheckedFieldId,
+    },
+    Parameter {
+        owner: CheckedFunctionId,
+        parameter: CheckedParameterId,
+    },
+    Return {
+        owner: CheckedFunctionId,
+        ordinal: u32,
+    },
+    Expression {
+        owner: CheckedFunctionId,
+        ordinal: u32,
+    },
+    Result {
+        owner: CheckedFunctionId,
+        ordinal: u32,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CheckedValueTypeUse {
+    type_id: TypeId,
+    kind: CheckedTypeUseKind,
+    location: SourceLocation,
+}
+
+impl CheckedValueTypeUse {
+    pub fn type_id(&self) -> TypeId;
+    pub fn kind(&self) -> CheckedTypeUseKind;
+    pub fn location(&self) -> &SourceLocation;
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CheckedObjectReferenceUse {
+    target: CheckedTypeId,
+    kind: CheckedTypeUseKind,
+    location: SourceLocation,
+}
+
+impl CheckedObjectReferenceUse {
+    pub fn target(&self) -> CheckedTypeId;
+    pub fn kind(&self) -> CheckedTypeUseKind;
+    pub fn location(&self) -> &SourceLocation;
+}
+
+#[non_exhaustive]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CheckedApplicationTypeUse {
+    Value(CheckedValueTypeUse),
+    ObjectReference(CheckedObjectReferenceUse),
+}
+
+impl CheckedApplicationTypeUse {
+    pub fn value(&self) -> Option<&CheckedValueTypeUse>;
+    pub fn object_reference(&self) -> Option<&CheckedObjectReferenceUse>;
+    pub fn kind(&self) -> CheckedTypeUseKind;
+    pub fn location(&self) -> &SourceLocation;
+}
+```
+
+Every direct written value type and `REF` target records its exact target span
+in this one arena. `Field`, `Parameter`, and `Return` are emitted by the active
+checker row. `Return` records a declared CLIENT or SERVER return, including
+each declared `ROWS` column, and never a body result. `Expression` and `Result`
+are exact future variants but are not emitted until their body-owner rows; they
+must not use `CheckedExpressionId`.
+
+`Expression` records every accepted value-producing body expression. Its
+ordinal is zero-based deterministic preorder within the owning function body.
+`Result` records a final body projection or return value. Its ordinal is the
+zero-based declared result order. It may share a source span with an
+`Expression`; for coincident spans, `Expression` precedes `Result`. A CLIENT
+Boolean body therefore adds `Expression { ordinal: 0 }` and
+`Result { ordinal: 0 }` in its later owner row.
+
+The complete arena order is source-unit ordinal, source start, source end, and
+then kind tag in this order: `Field`, `Parameter`, `Return`, `Expression`,
+`Result`. Within one kind, the stored ordinal or durable checked identity order
+breaks a tie. Family views borrow the corresponding arena use through the
+private lookup; they never copy it.
+
+Resolution retains exact lossless spelling and quotedness. It accepts the
+unquoted standard type spelling set fixed by this decision: all thirteen
+qualified primaries, all thirteen qualified bindings, and all seventeen prelude
+bindings, including `BOOLEAN`, `BOOL`, `INTEGER`, `INT`, `TEXT`, `BYTES`,
+their qualified aliases, and the remaining manifest spellings. The two schemas
+are schema facts, not type spellings. Quoted names follow exact catalogue lookup
+and do not acquire prelude meaning.
+After `TypeId` lookup and a checked standard-value definition lookup, the
+checker derives a compatibility scalar privately from that definition's exact,
+unique supported contract. It never reverse-maps a `StandardScalar` to a
+`TypeId`. An unsupported contract or duplicate supported contract fails
+context construction with the exact context error above.
+
+The exact private compatibility mapping is:
+
+| Representation contract | `StandardScalar` |
+| --- | --- |
+| `orna.kernel.value.boolean@1` | `Boolean` |
+| `orna.kernel.value.integer@1` | `Integer` |
+| `orna.kernel.value.bigint@1` | `BigInt` |
+| `orna.kernel.value.float@1` | `Float` |
+| `orna.kernel.value.decimal@1` | `Decimal` |
+| `orna.kernel.value.character-large-object@1` | `CharacterLargeObject` |
+| `orna.kernel.value.binary-large-object@1` | `BinaryLargeObject` |
+| `orna.kernel.value.uuid@1` | `Uuid` |
+| `orna.kernel.value.date@1` | `Date` |
+| `orna.kernel.value.time@1` | `Time` |
+| `orna.kernel.value.timestamp@1` | `Timestamp` |
+| `orna.kernel.value.duration@1` | `Duration` |
+| `orna.kernel.value.void@1` | `Void` |
+
+The unsupported-contract gate completes before the duplicate-contract gate.
+Two distinct `TypeId` values using the same supported contract are rejected by
+the latter. No `StandardScalar` to `TypeId` reverse lookup exists.
+
+### Standard type-reference arena
+
+The active `feat(compiler): resolve types through std` row defines this
+compiler-owned model and adds an empty arena to every
+`CheckedStandardApplicationBundle`. It remains separate from existing
+application and object definition references:
+
+```rust
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CheckedStandardTypeReference {
+    owner: CheckedFunctionId,
+    ordinal: u32,
+    target: TypeId,
+    location: SourceLocation,
+}
+
+impl CheckedStandardTypeReference {
+    pub fn owner(&self) -> CheckedFunctionId;
+    pub fn ordinal(&self) -> u32;
+    pub fn target(&self) -> TypeId;
+    pub fn location(&self) -> &SourceLocation;
+}
+```
+
+`CheckedStandardApplicationBundle` owns a source/function-order arena of these
+references. `ordinal` is one flattened zero-based ordinal for each function
+signature: parameters first in declaration order, followed by the one scalar
+return or the `ROWS` columns in declaration order. It never resets between
+parameters and returns. The arena is initially empty. The later
+`feat(compiler): reference standard function types` row populates it so every
+value declaration use yields repeated `NamedType` and `ValueType` evidence. Its
+arena order is source-unit ordinal, function declaration start, then this
+flattened signature ordinal. That later row performs no preparation.
+
+### Standard application preparation
+
+Only the later dedicated preparation row adds this public function:
+
+```rust
+pub fn prepare_standard_application(
+    report: &StandardApplicationCheckReport,
+    expected_base: RevisionPair,
+    active: &ActiveDatabaseRevision,
+) -> Result<DeployableRevision, PrepareStandardApplicationError>;
+```
+
+`PrepareStandardApplicationError` is public, `#[non_exhaustive]`, and derives
+`Debug` only. It has exactly these variants:
+
+```rust
+#[non_exhaustive]
+#[derive(Debug)]
+pub enum PrepareStandardApplicationError {
+    CheckNotComplete { diagnostic_count: usize },
+    ExpectedBaseMismatch { expected: RevisionPair, active: RevisionPair },
+    CheckedBaseMismatch { checked: CatalogueRevisionId, active: CatalogueRevisionId },
+    StandardLibraryUnavailable,
+    StandardCatalogueMismatch { checked: CatalogueRevisionId, active: CatalogueRevisionId },
+    StandardRevisionMismatch {
+        checked: StandardLibraryRevisionId,
+        active: StandardLibraryRevisionId,
+    },
+    StandardDigestMismatch { checked: Sha256Digest, active: Sha256Digest },
+    DeclarationTypeEvidenceMismatch { kind: CheckedTypeUseKind },
+    BodyTypeEvidenceMismatch { function: CheckedFunctionId },
+    FunctionTypeReferenceMismatch { function: CheckedFunctionId },
+    Prepare { source: PrepareError },
+}
+```
+
+Its exact `Display` text is:
+
+| Variant | Display |
+| --- | --- |
+| `CheckNotComplete` | `the standard application check has {diagnostic_count} diagnostics` |
+| `ExpectedBaseMismatch` | `the expected application base does not match the active revision` |
+| `CheckedBaseMismatch` | `the checked application base does not match the active revision` |
+| `StandardLibraryUnavailable` | `the active database has no standard library` |
+| `StandardCatalogueMismatch` | `the checked standard catalogue does not match the active standard catalogue` |
+| `StandardRevisionMismatch` | `the checked standard library revision does not match the active standard library revision` |
+| `StandardDigestMismatch` | `the checked standard library digest does not match the active standard library digest` |
+| `DeclarationTypeEvidenceMismatch` | `the checked declaration type evidence does not match its {kind} type use` |
+| `BodyTypeEvidenceMismatch` | `the checked body type evidence does not match function {function}` |
+| `FunctionTypeReferenceMismatch` | `the checked function type references do not match function {function}` |
+| `Prepare` | `the standard application could not be prepared: {source}` |
+
+For `DeclarationTypeEvidenceMismatch`, `{kind}` is the lower-case variant tag
+`field`, `parameter`, `return`, `expression`, or `result`, without an owner or
+ordinal. `{function}` is the exact checked-function identity. `{source}` is
+the exact `PrepareError` display text.
+
+`Error::source()` returns `Some(source)` only for `Prepare`; it returns `None`
+for all other variants. Preparation runs in this exact order: complete report;
+expected base; checked application base; active standard presence; standard
+catalogue; standard revision; standard digest; declaration arena one-to-one;
+body arena one-to-one; function-reference arena one-to-one; shared semantic
+preflight; then allocation. It never re-resolves source spelling.
+
+Before it constructs the candidate catalogue, canonical hashes, or revision,
+`prepare_standard_application` privately retries every random new application
+`CatalogueRevisionId`, `SourceBundleId`, `SourceRevisionId`, copied
+`SourceUnitId`, `SchemaId`, and `TypeId` when it equals a reserved standard ID
+of the same class. This retry has no public error. It creates no
+`TypeBindingId`: binding identity is derived from its name, and neither current
+preparation slice creates an application type binding. A later accepted
+application-binding row must run a post-derivation same-class
+`ReservedIdentity` gate before candidate catalogue construction. The private
+deterministic test allocator yields the relevant reserved ID and then a
+non-reserved ID for every listed allocation, proving retry and that no
+constructed candidate ID collides with a reserved ID.
+
+Legacy `check` and legacy `prepare` remain frozen version-1 compatibility
+paths. They retain ordinary `ORNA0303` and scalar behaviour unchanged. Their
+eventual removal is an explicit later migration after all callers use this
+distinct standard application path; the new report has no legacy conversion.
 
 ## Compatibility
 
@@ -1065,6 +1837,18 @@ together, or the previous version-1 active revision remains authoritative.
 | Successful result | A core-verified snapshot whose source, catalogue, and origins agree | The result retains the supplied verified capability and all checked facts and origins in source order. It has no preparation, database, install, or type-use output. |
 | Authority boundary | A core-verified self-consistent non-golden snapshot, including changed logical path, whitespace, comment, content, declaration order, durable identities, or supported-family counts when source, catalogue, and origins agree; a compiler dependency review | The compiler checker proves source, catalogue, and origin agreement only. It accepts the self-consistent non-golden case, has no `orna-standard` dependency, does not recheck the accepted digest, and does not create installable state. |
 | Ordinary path compatibility | Protected application `std` owner, kernel contract, qualified export, and prelude export cases; syntax-error precedence; all established scalar spellings and rejected aliases | Ordinary checking preserves the exact `ORNA0303` diagnostics, spans, category order, scalar compatibility adapter, accepted aliases, and rejected aliases. The trusted checker never calls ordinary `check_parsed`. |
+| Standard application capability | Exact `StandardApplicationCheckContext<'a>` derive, private fields, constructor, accessors, and accepted `CheckedStandardLibrary` capability; raw verified snapshot, manifest, digest, trust flag, and absent checked standard capability | Only the unforgeable, already reconciled `CheckedStandardLibrary` enters `try_new`. The context trusts its checked source-ordered facts and uses its owned snapshot catalogue for lookup without rerunning retained-source reconciliation. It neither accepts nor returns an unavailable-standard-library error, and it does not enforce the accepted `orna.std/1` golden. |
+| Context gate order and errors | Schema-ID, schema-name, type-ID, binding-ID, primary-name, qualified-binding-name, prelude-binding-name, unsupported-contract, and duplicate-contract conflicts; simultaneous conflicts in every adjacent pair; each `StandardApplicationContextError` derive, exact display, and absent error source | Each complete source-ordered fact class finishes before the next begins: schema IDs, schema names, type IDs, binding IDs, primary names, qualified binding names, prelude binding names, unsupported contracts, then duplicate contracts. No map or lookup insertion selects a winner. Each public non-exhaustive context error has the exact typed field, `Display`, and `Error::source() == None`. |
+| Standard application report separation | Success, diagnostics, and clone/debug cases; attempted `CheckReport` or `CheckedBundle` conversion, dereference, borrow, inner access, extraction, and legacy preparation | `StandardApplicationCheckReport` owns the exact checked standard-library clone, parse report, diagnostics, and optional distinct standard application bundle. Its four accessors are exact. It has no legacy report or bundle escape hatch and cannot enter legacy preparation. |
+| Standard application bundle and views | Exact base and standard revision/digest accessors; schemas; all six borrowed view derives, accessors, source order, and manual `Debug`; the initially empty standard type-reference arena and accessor; attempted existing object/function family, `SemanticType`, or parallel-copy exposure | `CheckedStandardApplicationBundle` owns its resolver-visible `pub(super) inner: CheckedBundle`, standard revision data, one canonical type-use arena, an initially empty `CheckedStandardTypeReference` arena, and its private type-use lookup. Schemas safely remain a slice. Object, field, SERVER, CLIENT, parameter, and return-column views borrow that one state and return a borrowed `CheckedApplicationTypeUse` for every resolved direct type. |
+| Canonical type-use arena | Field, SERVER and CLIENT parameter, scalar return, each `ROWS` column, direct `REF`, repeated written type, expression, result, coincident expression/result spans, and all ordering ties; each `CheckedTypeUseKind`, `CheckedValueTypeUse`, `CheckedObjectReferenceUse`, and `CheckedApplicationTypeUse` derive and accessor | One arena owns every use exactly once. The active row emits only `Field`, `Parameter`, and `Return`; direct `REF` target spans retain `ObjectReference` uses in the same arena. Later body rows emit `Expression` and `Result` with the stated deterministic ordinals and kind ordering, never `CheckedExpressionId`. Family views borrow the exact arena item. |
+| Standard resolution and compatibility | Every accepted thirteen qualified primary, thirteen qualified binding, and seventeen prelude type spelling; the two schema facts; quoted counterparts; unknown aliases; non-golden supported catalogue facts; each supported, unsupported, and duplicate representation contract | Accepted unquoted type spellings resolve to the checked `TypeId` with lossless source retained; schemas are not type spellings. Quoted input follows exact catalogue lookup. Compatibility is derived privately only from a resolved checked definition and its exact unique supported contract; unsupported-contract checking completes before duplicate-contract checking, and there is no `StandardScalar` to `TypeId` reverse lookup. |
+| Function type-reference evidence | The active row's empty arena and public model; SERVER and CLIENT parameters, scalar returns, and `ROWS` columns with repeated declaration uses; flattened per-function ordinal; source/function reference order; existing application/object reference separation | The function-evidence row populates the existing `CheckedStandardTypeReference` arena. It emits repeated `NamedType` and `ValueType` evidence in the one flattened parameter-then-return signature ordinal, leaves existing application/object references separate, and performs no preparation. |
+| Standard application preparation | Every `PrepareStandardApplicationError` derive, typed fields, exact display, and source; incomplete report; base, standard-presence, catalogue, revision, digest, declaration-arena, body-arena, and reference-arena mismatches; private deterministic allocation retry for every new application catalogue, source, schema, and type ID | `prepare_standard_application` accepts only the distinct report and validates in the stated complete order before shared semantic preflight or allocation. Its private deterministic allocator yields the relevant reserved ID then a non-reserved ID for every new application `CatalogueRevisionId`, `SourceBundleId`, `SourceRevisionId`, copied `SourceUnitId`, `SchemaId`, and `TypeId`, proving retry before candidate catalogue, hash, and revision construction with no candidate collision. It creates no `TypeBindingId`; a later binding row rejects a same-class reserved collision after derivation. It never re-resolves source spelling. Only `Prepare { source }` exposes an error source. |
+| Prepared standard-upgrade capability | `PreparedStandardUpgrade` private fields, derives, exact accessors, and absent owned extraction, conversion, dereference, and inner interfaces; every compiler-owned `StandardUpgradeIdentity` payload; exact compiler signature, error, display, source, and gate precedence; installed-standard, namespace, every compiler-visible identity class and ordering position, diagnostics, source mismatch, companion source-ID retry, catalogue, canonical hash, and revision failures | `prepare_checked_standard_upgrade` accepts only `CheckedStandardLibrary` and returns only `PreparedStandardUpgrade` or `PrepareStandardUpgradeError`. It has no installable capability, but `application_revision()` intentionally borrows normal kernel input. The permanent normal-apply guard rejects that borrowed version-2 candidate from version 1 and context-locks it in version 2. The compiler rejects an installed standard, then active namespace and visible identity conflicts from `CatalogueRevision` through `TypeBinding`, then diagnostics and source mismatch. It privately retries only its new companion application `CatalogueRevisionId`, `SourceBundleId`, `SourceRevisionId`, and copied `SourceUnitId` before candidate construction. It reuses version-1 application `SchemaId` and `TypeId` values already covered by active gate 3, and creates no `TypeBindingId`. Each earlier gate wins against hostile data for every later gate. `ReservedIdentity` retains the exact conflicting durable identity; `StandardLibraryRevision` is kernel-only. |
+| Opaque standard-upgrade capability | `StandardUpgrade` private field, derives, exact accessors, and absent owned conversion, dereference, and inner interfaces; exact wrapper signature, transparent error, and retain, verify, check, prepare order | Only `prepare_standard_upgrade` constructs the opaque `StandardUpgrade`. It owns a `PreparedStandardUpgrade`, exposes its checked standard library, verified snapshot, and borrowed application revision, and returns retained, checked-source, and compiler-preparation failures through transparent `StandardUpgradeError` variants. It adds only `StandardLibraryError::Unavailable`; no raw or unnamed compiler route exists. |
+| Normal-apply and atomic standard guards | Every `StandardContextIdentity` field, accessor, derive, and error field; version-1/version-2 transitions; matching and mismatching version-2 contexts; `ReservedStandardIdentity` field, display, and source; exact trusted-path, transaction, recovery, expected-base, identity-gate, materialisation, physical-plan, and write ordering; replay and repeat-preparation precedence; active and inactive-record ordering | Normal apply performs the permanent context guard after expected-base recovery and before materialisation, planning, or writes. It rejects every version transition and requires exact version-2 context equality. Atomic special apply accepts only `&orna_standard::StandardUpgrade`, then follows the stated exact order. A replay returns `ExpectedBaseMismatch` before collision scanning or writes. It completes the typed `ReservedStandardIdentity` gate before materialisation and physical planning, with `StandardLibraryRevision` first and every active-visible record in explicit family order before inactive records by durable ID bytes. Compiler construction already proves deployable core invariants, so special apply has no opaque-association or invariant gate. A repeated prepare against active version 2 returns `StandardLibraryAlreadyInstalled`. |
+| Legacy compatibility boundary | Existing `check`, `prepare`, `ORNA0303`, scalar spelling, and legacy preparation tests; attempted standard-report preparation | Version-1 legacy checking and preparation remain unchanged and frozen. The standard application seam is distinct, introduces no compiler `Unavailable` error, and is removed or merged only by an explicit later caller-migration row. |
 
 The later `feat(std): orchestrate standard upgrades` proof, not this compiler
 checker matrix, proves wrapper-before-check production ordering. It calls
@@ -1093,8 +1877,13 @@ Tests must prove:
 * the framed source-unit content digest, bundle digest, source-revision digest,
   and standard-library digest equal the four literal accepted goldens, and the
   content digest is not confused with a raw file SHA-256;
-* `StandardLibraryError` has the stated fields, exact `Display` text, and
-  `Error::source` result for every variant;
+* retained-source `StandardLibraryError` has only the six stated implemented
+  variants, their exact `Display` text, and `Error::source` result; and
+* the later standard-orchestration extension adds only `Unavailable` with its
+  stated service, orchestration, and database ownership; the compiler-owned
+  `PrepareStandardUpgradeError` owns `StandardLibraryAlreadyInstalled`,
+  `NamespaceOccupied`, and `ReservedIdentity`; compiler checking and standard
+  application context construction expose no `Unavailable` variant;
 * `verify_standard_library_snapshot` checks the exact reserved
   `CatalogueRevisionId`, then the hard-coded accepted digest, then the core
   canonical verifier; it yields `VerifiedStandardLibrarySnapshot` for the
@@ -1106,17 +1895,60 @@ Tests must prove:
   namespace;
 * ordinary source cannot own `std`, declare a kernel contract, export a
   qualified or prelude binding, or replace a reserved standard identity;
-* standard installation rejects a pre-existing application `std` owner, a
-  reserved collision in the same identity class including the standard
-  `CatalogueRevisionId`, or a crossed catalogue role without changing the
-  active pair;
+* compiler preparation rejects an already installed standard, a pre-existing
+  active application `std` owner in schema, object-type, value-type,
+  type-binding, then function snapshot order, or each visible active reserved
+  collision from `CatalogueRevision` through `TypeBinding` in the stated
+  identity order without changing the active pair. Upgrade preparation retries
+  only newly allocated companion catalogue and source IDs, while retaining the
+  existing version-1 schema and type identities covered by active gate 3;
+* `prepare_standard_application` uses an injected private deterministic
+  allocator that yields the relevant reserved ID and then a non-reserved ID for
+  every new application catalogue, source, schema, and type allocation. It
+  retries before candidate catalogue, hash, and revision construction, and no
+  candidate ID collides with a reserved ID. Neither current preparation slice
+  creates a `TypeBindingId`; a later binding row rejects a reserved collision
+  after derivation;
+* atomic standard apply separately rejects database-wide collisions after all
+  active-visible records and before inactive records in the stated ordering;
 * bootstrap and recovery reject every missing, duplicate, crossed, renamed,
   contract-mismatched, source-mismatched, or hash-mismatched standard fact;
 * compiler checking consults the standard catalogue bindings rather than a
   source-spelling match over a Rust enum;
-* each accepted type use retains the exact resolved `TypeId`, source path, and
-  span, produces the exact type-reference evidence required by its definition,
-  and a value type cannot be used as a `REF` target;
+* every standard application type use is one `CheckedApplicationTypeUse` in
+  the canonical arena, with exact kind, target or `TypeId`, direct target
+  location, source/unit order, and borrowed view lookup; the active row emits
+  field, parameter, return, and `REF` uses only, while body rows add the exact
+  expression/result ordinals and coincident-span order without
+  `CheckedExpressionId`;
+* the exact private thirteen-contract compatibility table maps only after
+  `TypeId` and checked-definition lookup; unsupported contracts complete before
+  duplicate contracts; and no `StandardScalar` to `TypeId` reverse lookup
+  exists;
+* standard application contexts trust the unforgeable checked standard
+  capability, complete every schema/type/binding name and identity gate in the
+  specified source-order sequence, and expose each typed conflict with exact
+  display and no error source;
+* all six borrowed standard application views have their exact derives,
+  accessors, manual debug contract, and single-arena behaviour; and
+* function type-reference and standard-application preparation evidence have
+  their separate exact models, error contracts, and precedence gates;
+* `PreparedStandardUpgrade` and `StandardUpgrade` have their exact capability
+  fields, derives, accessors, and absent owned extraction, conversion,
+  dereference, and inner interfaces; `application_revision()` is the deliberate
+  borrow escape to normal kernel input; compiler preparation uses every stated
+  gate and error in order, retries only companion catalogue and source IDs
+  before candidate construction without creating a `TypeBindingId`, while only
+  standard orchestration can create the opaque installable capability; and
+* normal apply rejects version-1/version-2 transitions and mismatched
+  version-2 `StandardContextIdentity` values before materialisation, planning,
+  or writes; atomic standard apply accepts only the opaque standard capability,
+  returns existing `ExpectedBaseMismatch` for replay before collision scanning
+  or writes, and returns exact source-free `ReservedStandardIdentity` for the
+  first database-wide collision, including inactive standard-library revisions
+  and source records, in the stated deterministic order before materialisation
+  or physical planning. It has no runtime opaque-association or invariant gate:
+  compiler construction already proves deployable core invariants.
 * every existing standard spelling remains source-compatible and every
   previously rejected non-public alias remains rejected unless this decision
   names it;
@@ -1154,18 +1986,23 @@ standard-orchestration rows remain within their two-file caps.
 | `feat(syntax): parse primitive value types` | `crates/orna-syntax/src/lib.rs`, `crates/orna-syntax/src/parser.rs`, `crates/orna-compiler/src/resolver.rs` | The parser losslessly accepts the privileged primitive and export forms. Before identity allocation, ordinary application checking enforces the complete protected-source table across existing and new declaration forms, including every primitive value declaration and type export, with the exact ordered `ORNA0303` diagnostic text and spans defined above. It cannot silently ignore one. No trusted standard-checking path exists yet. |
 | `feat(std): retain the standard source` | `stdlib/std/types.orna`, `crates/orna-standard/src/lib.rs` | The crate retains the exact 3273-byte source and its 45 complete-declaration origins. It parses directly with `orna_syntax`, checks every unquoted source fact against the manifest, and locks the literal framed content, bundle, revision, and standard digests. It exposes `retained_standard_library_snapshot` and `verify_standard_library_snapshot` with the stated `StandardLibraryError` contract. The verifier checks reserved catalogue identity, then accepted digest, then the core canonical verifier. Tests prove each error field, display text, source result, gate precedence, and rejection of a core-accepted self-consistent non-golden snapshot. |
 | `feat(compiler): check standard type source` | `crates/orna-compiler/src/resolver.rs`, `crates/orna-compiler/src/resolver/model.rs`, `crates/orna-compiler/src/lib.rs` | A dedicated `check_standard_library_source(&VerifiedStandardLibrarySnapshot) -> Result<CheckedStandardLibrary, StandardLibraryCheckError>` path accepts only the core-verified carrier, has no `orna-standard` dependency, and checks the one stored retained unit, diagnostics, lossless declaration families, one-to-one catalogue facts, and exact origins in the stated order. It returns `verified_snapshot()` plus source-ordered checked schema, value-type, and binding fields with durable IDs from matched catalogue facts and exact origins. It never calls ordinary `check_parsed`, `prepare`, database, installation, type-use resolution, or `StandardScalar` conversion. Ordinary application checking retains the exact `ORNA0303` protection introduced with the syntax forms, and ordinary scalar resolution retains its compatibility adapter. |
-| `feat(compiler): resolve types through std` | `crates/orna-compiler/src/resolver.rs`, `crates/orna-compiler/src/resolver/model.rs` | Public and qualified scalar names resolve through an explicitly supplied verified standard snapshot to `TypeId`; compilation without that snapshot returns `StandardLibraryError::Unavailable`. No database can install the snapshot yet. |
-| `refactor(types): remove scalar naming authority` | `crates/orna-core/src/types.rs`, `crates/orna-compiler/src/resolver.rs` | Public `StandardScalar::from_source_spelling`, `canonical_name`, `type_id`, and `ScalarResolutionError` are removed. Diagnostics render names from verified catalogue definitions or retained source, while exact representation matching remains internal. |
-| `feat(compiler): reference standard function types` | `crates/orna-compiler/src/resolver.rs`, `crates/orna-compiler/src/resolver/model.rs`, `crates/orna-compiler/src/prepare.rs` | Standard types in signatures emit exact `ValueType`/`NamedType` evidence and affected functions receive semantic-hash v2 revisions. A checked compatibility projection is derived only after binding resolution. |
+| `feat(compiler): resolve types through std` | `crates/orna-compiler/src/resolver.rs`, `crates/orna-compiler/src/resolver/model.rs`, `crates/orna-compiler/src/lib.rs` | Add `StandardApplicationCheckContext`, `StandardApplicationContextError`, `check_standard_application`, and the distinct standard application report and bundle. The path requires `CheckedStandardLibrary`, separately checks two standard schema facts, preserves all thirteen qualified primaries, thirteen qualified bindings, and seventeen prelude type spellings, derives private compatibility only after checked `TypeId` and contract lookup, records declaration field, parameter, return, and direct `REF` uses, and defines the empty `CheckedStandardTypeReference` arena. It does not call legacy `check` or `prepare`, accept raw verified authority, emit compiler `Unavailable`, or prepare a report. |
+| `feat(compiler): preserve relational value provenance` | `crates/orna-compiler/src/resolver.rs`, `crates/orna-compiler/src/relational.rs`, `crates/orna-compiler/src/resolver/model.rs` | Carry supplied `TypeId` provenance beside the private scalar compatibility value. Through relational queries and CLIENT Boolean bodies, emit `Expression` and `Result` uses with exact spans, deterministic ordinals, and the canonical arena order. Equality is by `TypeId`; there is no reverse scalar map or `CheckedExpressionId` use. Standard application preparation remains unavailable. |
+| `feat(compiler): preserve mutation value provenance` | `crates/orna-compiler/src/resolver.rs`, `crates/orna-compiler/src/mutation.rs`, `crates/orna-compiler/src/resolver/model.rs` | Carry supplied `TypeId` provenance beside the private scalar compatibility value for mutation fields, parameters, literals, nulls, assignments, and DELETE Boolean results. Emit the exact `Expression` and `Result` uses and spans; INSERT and UPDATE object results are not value results. The temporary prior relational-only evidence cannot prepare a standard application. |
+| `feat(compiler): reference standard function types` | `crates/orna-compiler/src/resolver.rs`, `crates/orna-compiler/src/resolver/model.rs` | Populate the existing compiler-owned source/function-order `CheckedStandardTypeReference` arena with repeated `ValueType`/`NamedType` signature evidence for every SERVER and CLIENT parameter, declared return, and `ROWS` column, using the one flattened zero-based signature ordinal. Existing application/object references remain separate. This unconditional row is evidence-only and performs no preparation. |
+| `fix(postgres): guard standard context transitions` | `crates/orna-kernel-postgres/src/apply.rs`, `crates/orna-kernel-postgres/src/lib.rs`, `crates/orna-kernel-postgres/tests/apply.rs` | Define `StandardContextIdentity` and exact source-free `PostgresKernelError` transition and mismatch variants. After expected-base recovery, normal apply rejects every version-1/version-2 transition and requires equal version-2 contexts before materialisation, planning, or writes. The guard rejects a borrowed version-2 candidate from version 1 and context-locks it in version 2. |
+| `feat(compiler): prepare standard applications` | `crates/orna-compiler/src/prepare.rs`, `crates/orna-compiler/src/resolver/model.rs`, `crates/orna-compiler/src/lib.rs` | Add `prepare_standard_application(&StandardApplicationCheckReport, RevisionPair, &ActiveDatabaseRevision) -> Result<DeployableRevision, PrepareStandardApplicationError>` with the exact report-completeness, base, active-standard, arena-evidence, semantic-preflight, then allocation order. Its private retry allocator excludes same-class reserved IDs for every new application catalogue, source, schema, and type ID before candidate construction, with deterministic reserved-then-non-reserved proof and no public retry error. It creates no `TypeBindingId`; a later binding row rejects a post-derivation reserved collision. It accepts no legacy `CheckReport`, preserves report separation, and owns all standard-application preparation rejection and durable evidence proof. |
+| `refactor(types): remove scalar naming authority` | `crates/orna-core/src/types.rs`, `crates/orna-compiler/src/resolver.rs` | Only after callers migrate to the distinct standard application path, remove public `StandardScalar::from_source_spelling`, `canonical_name`, `type_id`, and `ScalarResolutionError`. Diagnostics render names from checked catalogue definitions or retained source, while exact representation matching remains internal. |
 | `feat(client): prepare catalogue Boolean constants` | `crates/orna-compiler/src/prepare.rs`, `crates/orna-compiler/src/resolver/model.rs` | Work ADR 0015 preparation uses the canonical Boolean identity and exact one-reference sequence; no evaluator or database consumer exists yet. |
 | `feat(client): evaluate catalogue Boolean constants` | `crates/orna-client/Cargo.toml`, `crates/orna-client/src/lib.rs`, `Cargo.lock` | The local evaluator verifies canonical hash version 1 or 2 as appropriate, requires the exact standard revision and one-reference sequence for version-2 CLIENT revisions, and retains the exact result and error contract. |
-| `feat(compiler): prepare standard revisions` | `crates/orna-compiler/src/prepare.rs`, `crates/orna-core/src/revision.rs` | A closed `StandardUpgrade` is produced with the companion source and v2 catalogue; no kernel consumer exists yet. |
-| `feat(std): orchestrate standard upgrades` | `crates/orna-standard/src/lib.rs`, `crates/orna-compiler/src/prepare.rs` | `prepare_standard_upgrade` first calls `verify_standard_library_snapshot`, then passes the accepted verified carrier to `check_standard_library_source`, rechecks exact active source, and returns the complete closed upgrade. Its proof owns that wrapper-before-check ordering. The crate has no database authority. |
+| `feat(compiler): prepare checked standard upgrades` | `crates/orna-compiler/src/prepare.rs`, `crates/orna-compiler/src/lib.rs` | Define and re-export private-field `PreparedStandardUpgrade` and compiler-owned payload-bearing `StandardUpgradeIdentity`, then implement `prepare_checked_standard_upgrade(&CheckedStandardLibrary, &ActiveDatabaseRevision) -> Result<PreparedStandardUpgrade, PrepareStandardUpgradeError>`. It has the exact installed-standard, active-source, reserved-identity, and nested catalogue, canonical, and revision error contract. After the active source gates and before candidate construction, its private retry allocator excludes reserved same-class IDs only for new companion application catalogue and source IDs. It reuses version-1 application schema and type identities already covered by active gate 3, and creates no `TypeBindingId`. It produces no opaque installable capability; its application revision is a normal-input borrow guarded by the permanent PostgreSQL transition rule. |
+| `feat(std): orchestrate standard upgrades` | `crates/orna-standard/src/lib.rs` | Define opaque private-field `StandardUpgrade`, re-export `StandardUpgradeIdentity`, and expose `prepare_standard_upgrade(&ActiveDatabaseRevision) -> Result<StandardUpgrade, StandardUpgradeError>`. It calls retained snapshot construction, accepted verification, standard-source checking, and the public `orna_compiler::prepare_checked_standard_upgrade` seam in that exact order. It adds only boundary-owned `StandardLibraryError::Unavailable` and maps retained, checked-source, and compiler-preparation failures through transparent `StandardUpgradeError` variants. Its proof owns wrapper-before-check ordering. The crate has no database authority. |
+| `build(postgres): add standard-upgrade dependency` | `crates/orna-kernel-postgres/Cargo.toml`, `Cargo.lock` | Add the normal `orna-standard` dependency required only by atomic special apply. The dependency graph is `postgres -> standard -> compiler -> core`; no reverse dependency exists. |
 | `feat(postgres): store standard catalogue types` | `crates/orna-kernel-postgres/migrations/0007_catalogue_types.sql`, `crates/orna-kernel-postgres/src/bootstrap.rs` | Bare bootstrap installs only schema support and still recovers all v1 databases exactly. |
 | `feat(postgres): decode standard revisions` | `crates/orna-kernel-postgres/src/recovery.rs`, `crates/orna-kernel-postgres/src/recovery/functions.rs` | Recovery verifies complete raw v2 fixtures and still recovers v1 exactly, but no public production mutation can create v2 active state. |
 | `feat(storage): lower verified value contracts` | `crates/orna-core/src/physical.rs`, `crates/orna-kernel-postgres/src/physical.rs`, `crates/orna-kernel-postgres/src/physical/verify.rs` | Physical planning and verification start from a verified contract; generated SQL and existing physical identities remain exact. |
 | `feat(server): execute verified value contracts` | `crates/orna-kernel-postgres/src/server_runtime.rs`, `crates/orna-kernel-postgres/src/server_execution.rs`, `crates/orna-kernel-postgres/src/server_mutation_execution.rs` | Runtime adapters start from the same contract and preserve every existing plan byte, bind, result, and error. |
-| `feat(postgres): apply standard upgrades` | `crates/orna-kernel-postgres/src/apply.rs`, `crates/orna-kernel-postgres/src/lib.rs` | After compiler, recovery, storage, and execution consumers are ready, one explicit API verifies and atomically applies `StandardUpgrade`; normal apply rejects a bare database. |
+| `feat(postgres): apply standard upgrades` | `crates/orna-kernel-postgres/src/apply.rs`, `crates/orna-kernel-postgres/src/lib.rs` | After compiler, recovery, storage, and execution consumers are ready, `apply_standard_upgrade` accepts only `&orna_standard::StandardUpgrade`. Its trusted transaction path locks and recovers, checks expected base, scans database-wide identities, materialises, plans physically, then writes. Compiler construction already proves deployable core invariants, so no opaque-association or invariant gate exists. A replay returns `ExpectedBaseMismatch` before scanning or writes. The identity scan returns `ReservedStandardIdentity { identity }` for the first active-visible or inactive collision, including an inactive standard-library revision, in the stated order. Normal apply cannot transition standard context. |
 | `feat(server): open standard-backed databases` | `crates/orna-server/Cargo.toml`, `crates/orna-server/src/lib.rs`, `Cargo.lock` | The host opener composes bare bootstrap, exact standard preparation, atomic standard apply when required, and verified recovery. It does not return a normal application database handle until `orna.std/1` is active. |
 | `test(postgres): prove the standard lifecycle` | `crates/orna-kernel-postgres/tests/apply.rs`, `crates/orna-kernel-postgres/tests/recovery.rs`, `justfile` | Fresh install, v1 upgrade, replay, restart, tamper rejection, and exact physical storage pass on PostgreSQL 18. |
 | `test(postgres): preserve standard execution` | `crates/orna-kernel-postgres/tests/server_execution.rs`, `crates/orna-kernel-postgres/tests/server_mutation_execution.rs` | Existing SERVER and mutation behaviour is byte- and value-identical under the installed standard revision. |
