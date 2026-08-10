@@ -3786,7 +3786,37 @@ fn resolve_closed_scalar(name: &QualifiedName) -> Option<StandardScalar> {
     if name.parts.len() != 1 || name.parts[0].text.starts_with('"') {
         return None;
     }
-    StandardScalar::from_source_spelling(&name.parts[0].text).ok()
+
+    let spelling = &name.parts[0].text;
+    if spelling.eq_ignore_ascii_case("BOOLEAN") || spelling.eq_ignore_ascii_case("BOOL") {
+        Some(StandardScalar::Boolean)
+    } else if spelling.eq_ignore_ascii_case("INTEGER") || spelling.eq_ignore_ascii_case("INT") {
+        Some(StandardScalar::Integer)
+    } else if spelling.eq_ignore_ascii_case("BIGINT") {
+        Some(StandardScalar::BigInt)
+    } else if spelling.eq_ignore_ascii_case("FLOAT") {
+        Some(StandardScalar::Float)
+    } else if spelling.eq_ignore_ascii_case("DECIMAL") {
+        Some(StandardScalar::Decimal)
+    } else if spelling.eq_ignore_ascii_case("TEXT") {
+        Some(StandardScalar::CharacterLargeObject)
+    } else if spelling.eq_ignore_ascii_case("BYTES") {
+        Some(StandardScalar::BinaryLargeObject)
+    } else if spelling.eq_ignore_ascii_case("UUID") {
+        Some(StandardScalar::Uuid)
+    } else if spelling.eq_ignore_ascii_case("DATE") {
+        Some(StandardScalar::Date)
+    } else if spelling.eq_ignore_ascii_case("TIME") {
+        Some(StandardScalar::Time)
+    } else if spelling.eq_ignore_ascii_case("TIMESTAMP") {
+        Some(StandardScalar::Timestamp)
+    } else if spelling.eq_ignore_ascii_case("DURATION") {
+        Some(StandardScalar::Duration)
+    } else if spelling.eq_ignore_ascii_case("VOID") {
+        Some(StandardScalar::Void)
+    } else {
+        None
+    }
 }
 
 fn compatibility_scalar(contract: &str) -> Option<StandardScalar> {
@@ -3936,7 +3966,7 @@ mod tests {
     };
 
     use crate::relational::ExpressionKind;
-    use orna_syntax::SourceSpan;
+    use orna_syntax::{SourceSpan, TypeSpecification, parse};
 
     use super::{
         CheckAssignments, CheckedApplicationTypeUse, CheckedDefinitionReferenceTarget,
@@ -3951,9 +3981,103 @@ mod tests {
 
     const STANDARD_SOURCE: &str = "CREATE SCHEMA std;CREATE SCHEMA std.types;CREATE TYPE std.types.BOOLEAN AS VALUE PRIMITIVE KERNEL CONTRACT 'orna.kernel.value.boolean@1' IMMUTABLE PERSISTABLE;EXPORT TYPE std.types.BOOLEAN AS std.BOOLEAN;EXPORT TYPE std.BOOLEAN TO PRELUDE AS BOOLEAN;";
     const TWO_TYPE_STANDARD_SOURCE: &str = "CREATE SCHEMA std.types;CREATE SCHEMA std;CREATE TYPE std.types.INTEGER AS VALUE PRIMITIVE KERNEL CONTRACT 'int@1' IMMUTABLE TRANSIENT;CREATE TYPE std.types.BOOLEAN AS VALUE PRIMITIVE KERNEL CONTRACT 'boolean@1' IMMUTABLE PERSISTABLE;EXPORT TYPE std.INTEGER TO PRELUDE AS INTEGER;EXPORT TYPE std.types.INTEGER AS std.INTEGER;EXPORT TYPE std.BOOLEAN TO PRELUDE AS BOOLEAN;EXPORT TYPE std.types.BOOLEAN AS std.BOOLEAN;";
+    const LEGACY_CANONICAL_SCALAR_SPELLINGS: [&str; 13] = [
+        "BOOLEAN",
+        "INTEGER",
+        "BIGINT",
+        "FLOAT",
+        "DECIMAL",
+        "CHARACTER LARGE OBJECT",
+        "BINARY LARGE OBJECT",
+        "UUID",
+        "DATE",
+        "TIME",
+        "TIMESTAMP",
+        "DURATION",
+        "VOID",
+    ];
 
     fn empty_catalogue() -> CatalogueSnapshot {
         catalogue(Vec::new(), Vec::new(), Vec::new())
+    }
+
+    fn legacy_type_specification(spelling: &str) -> TypeSpecification {
+        let source = format!("CREATE TYPE app.value AS OBJECT (value {spelling});");
+        let parsed = parse(&source);
+
+        assert!(parsed.diagnostics().is_empty(), "{source}");
+        parsed.object_types()[0].fields[0]
+            .type_specification
+            .clone()
+    }
+
+    #[test]
+    fn legacy_scalar_compatibility_adapter_has_the_closed_spelling_matrix() {
+        for (spelling, expected) in [
+            ("BOOLEAN", StandardScalar::Boolean),
+            ("BOOL", StandardScalar::Boolean),
+            ("INTEGER", StandardScalar::Integer),
+            ("INT", StandardScalar::Integer),
+            ("BIGINT", StandardScalar::BigInt),
+            ("FLOAT", StandardScalar::Float),
+            ("DECIMAL", StandardScalar::Decimal),
+            (
+                "CHARACTER LARGE OBJECT",
+                StandardScalar::CharacterLargeObject,
+            ),
+            ("TEXT", StandardScalar::CharacterLargeObject),
+            ("BINARY LARGE OBJECT", StandardScalar::BinaryLargeObject),
+            ("BYTES", StandardScalar::BinaryLargeObject),
+            ("UUID", StandardScalar::Uuid),
+            ("DATE", StandardScalar::Date),
+            ("TIME", StandardScalar::Time),
+            ("TIMESTAMP", StandardScalar::Timestamp),
+            ("DURATION", StandardScalar::Duration),
+            ("VOID", StandardScalar::Void),
+        ] {
+            for spelling in [spelling.to_owned(), spelling.to_ascii_lowercase()] {
+                let mut diagnostics = Vec::new();
+                let resolved = super::resolve_application_type(
+                    &legacy_type_specification(&spelling),
+                    &std::collections::HashMap::new(),
+                    "legacy.orna",
+                    &mut diagnostics,
+                    None,
+                );
+
+                assert_eq!(
+                    resolved.map(|resolved| resolved.semantic_type),
+                    Some(SemanticType::scalar(expected)),
+                    "{spelling}"
+                );
+                assert!(diagnostics.is_empty(), "{spelling}");
+            }
+        }
+
+        for spelling in [
+            "BYTEA",
+            "BLOB",
+            "CLOB",
+            "SERIAL",
+            "JSONB",
+            "TIMESTAMPTZ",
+            "\"BOOLEAN\"",
+            "std.BOOLEAN",
+            "std.types.BOOLEAN",
+        ] {
+            let mut diagnostics = Vec::new();
+            let resolved = super::resolve_application_type(
+                &legacy_type_specification(spelling),
+                &std::collections::HashMap::new(),
+                "legacy.orna",
+                &mut diagnostics,
+                None,
+            );
+
+            assert!(resolved.is_none(), "{spelling}");
+            assert_eq!(diagnostics.len(), 1, "{spelling}");
+            assert_eq!(diagnostics[0].code(), DiagnosticCode::UnknownQualifiedName);
+        }
     }
 
     #[test]
@@ -6688,10 +6812,10 @@ mod tests {
 
     #[test]
     fn rejects_unique_fields_outside_the_required_reference_shape() {
-        for scalar in StandardScalar::ALL {
+        for spelling in LEGACY_CANONICAL_SCALAR_SPELLINGS {
             let source = format!(
                 "CREATE SCHEMA demo; CREATE TYPE demo.item AS OBJECT (value {} UNIQUE);",
-                scalar.canonical_name()
+                spelling
             );
             let bundle =
                 SourceBundle::new([SourceUnit::new("unique.orna", source.clone())]).unwrap();
@@ -6709,7 +6833,7 @@ mod tests {
             assert_eq!(diagnostic.location().span().start(), start);
             assert_eq!(
                 diagnostic.location().span().end(),
-                start + "value ".len() + scalar.canonical_name().len() + " UNIQUE".len()
+                start + "value ".len() + spelling.len() + " UNIQUE".len()
             );
             assert_no_checked_bundle(&report);
         }
