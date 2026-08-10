@@ -13,11 +13,11 @@ use orna_syntax::{
     UpdateStatement,
 };
 
-use crate::resolver::SemanticType;
 use crate::{
     CompilerDiagnostic, DiagnosticCode, SourceLocation, normalise_name_part,
     normalise_qualified_name, semantic_diagnostic,
 };
+use crate::{relational::IntrinsicBooleanType, resolver::SemanticType};
 
 /// A source-free checked one-row mutation plan.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -225,6 +225,7 @@ where
 {
     Ok(MutationValueType {
         semantic_type: map_semantic_type(value_type.semantic_type, map_type)?,
+        standard_value_type: value_type.standard_value_type,
         nullable: value_type.nullable,
     })
 }
@@ -324,6 +325,7 @@ pub(crate) enum MutationExpressionKind<G = FunctionId, P = ParameterId> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct MutationValueType<T = TypeId> {
     semantic_type: SemanticType<T>,
+    standard_value_type: Option<TypeId>,
     nullable: bool,
 }
 
@@ -332,8 +334,15 @@ impl<T> MutationValueType<T> {
     pub(crate) const fn new(semantic_type: SemanticType<T>, nullable: bool) -> Self {
         Self {
             semantic_type,
+            standard_value_type: None,
             nullable,
         }
+    }
+
+    /// Attaches the supplied standard value-type identity.
+    pub(crate) const fn with_standard_value_type(mut self, type_id: TypeId) -> Self {
+        self.standard_value_type = Some(type_id);
+        self
     }
 
     /// Returns the semantic type.
@@ -348,6 +357,11 @@ impl<T> MutationValueType<T> {
     pub(crate) const fn nullable(&self) -> bool {
         self.nullable
     }
+
+    /// Returns the supplied standard value-type identity when available.
+    pub(crate) const fn standard_value_type(&self) -> Option<TypeId> {
+        self.standard_value_type
+    }
 }
 
 /// One declared function parameter available to mutation checking.
@@ -359,6 +373,7 @@ pub(crate) struct MutationParameter<T = TypeId, P = ParameterId> {
     name: String,
     id: P,
     semantic_type: SemanticType<T>,
+    standard_value_type: Option<TypeId>,
     location: SourceSpan,
 }
 
@@ -374,8 +389,15 @@ impl<T, P> MutationParameter<T, P> {
             name: name.into(),
             id,
             semantic_type,
+            standard_value_type: None,
             location,
         }
+    }
+
+    /// Attaches the supplied standard value-type identity.
+    pub(crate) const fn with_standard_value_type(mut self, type_id: TypeId) -> Self {
+        self.standard_value_type = Some(type_id);
+        self
     }
 
     /// Returns the normalized parameter name.
@@ -399,6 +421,11 @@ impl<T, P> MutationParameter<T, P> {
         self.semantic_type
     }
 
+    /// Returns the supplied standard value-type identity when available.
+    pub(crate) const fn standard_value_type(&self) -> Option<TypeId> {
+        self.standard_value_type
+    }
+
     /// Returns the declaration location.
     pub(crate) fn location(&self) -> &SourceSpan {
         &self.location
@@ -410,6 +437,7 @@ impl<T, P> MutationParameter<T, P> {
 pub(crate) struct MutationField<T, F> {
     id: F,
     semantic_type: SemanticType<T>,
+    standard_value_type: Option<TypeId>,
     nullable: bool,
 }
 
@@ -419,8 +447,15 @@ impl<T, F> MutationField<T, F> {
         Self {
             id,
             semantic_type,
+            standard_value_type: None,
             nullable,
         }
+    }
+
+    /// Attaches the supplied standard value-type identity.
+    pub(crate) const fn with_standard_value_type(mut self, type_id: TypeId) -> Self {
+        self.standard_value_type = Some(type_id);
+        self
     }
 
     /// Returns the field identity.
@@ -442,6 +477,11 @@ impl<T, F> MutationField<T, F> {
     /// Reports whether the field accepts NULL.
     pub(crate) const fn nullable(&self) -> bool {
         self.nullable
+    }
+
+    /// Returns the supplied standard value-type identity when available.
+    pub(crate) const fn standard_value_type(&self) -> Option<TypeId> {
+        self.standard_value_type
     }
 }
 
@@ -551,6 +591,36 @@ where
     G: Copy,
     P: Copy,
 {
+    check_insert_with_intrinsic_boolean_in(
+        insert,
+        catalogue,
+        function,
+        parameters,
+        logical_path,
+        IntrinsicBooleanType::Legacy,
+    )
+}
+
+/// Checks one parsed INSERT with explicit intrinsic Boolean provenance.
+pub(crate) fn check_insert_with_intrinsic_boolean_in<T, F, G, P>(
+    insert: &InsertStatement,
+    catalogue: &impl MutationCatalogue<T, F>,
+    function: G,
+    parameters: &[MutationParameter<T, P>],
+    logical_path: &str,
+    intrinsic_boolean: IntrinsicBooleanType,
+) -> Result<MutationCheck<T, F, G, P>, Vec<CompilerDiagnostic>>
+where
+    T: Copy + Eq,
+    F: Copy + Eq,
+    G: Copy,
+    P: Copy,
+{
+    if let Some(diagnostics) =
+        missing_insert_boolean_diagnostics(insert, logical_path, intrinsic_boolean)
+    {
+        return Err(diagnostics);
+    }
     validate_parameter_types("INSERT", parameters, logical_path)?;
 
     if insert.target_fields.is_empty() || insert.values.is_empty() {
@@ -592,6 +662,7 @@ where
             function,
             parameters,
             logical_path,
+            intrinsic_boolean,
         },
         &insert.target_object,
         &target_name,
@@ -646,6 +717,36 @@ where
     G: Copy,
     P: Copy,
 {
+    check_update_with_intrinsic_boolean_in(
+        update,
+        catalogue,
+        function,
+        parameters,
+        logical_path,
+        IntrinsicBooleanType::Legacy,
+    )
+}
+
+/// Checks one parsed UPDATE with explicit intrinsic Boolean provenance.
+pub(crate) fn check_update_with_intrinsic_boolean_in<T, F, G, P>(
+    update: &UpdateStatement,
+    catalogue: &impl MutationCatalogue<T, F>,
+    function: G,
+    parameters: &[MutationParameter<T, P>],
+    logical_path: &str,
+    intrinsic_boolean: IntrinsicBooleanType,
+) -> Result<MutationCheck<T, F, G, P>, Vec<CompilerDiagnostic>>
+where
+    T: Copy + Eq,
+    F: Copy + Eq,
+    G: Copy,
+    P: Copy,
+{
+    if let Some(diagnostics) =
+        missing_update_boolean_diagnostics(update, logical_path, intrinsic_boolean)
+    {
+        return Err(diagnostics);
+    }
     validate_parameter_types("UPDATE", parameters, logical_path)?;
     if update.assignments.is_empty() {
         return Err(vec![semantic_diagnostic(
@@ -678,6 +779,7 @@ where
             function,
             parameters,
             logical_path,
+            intrinsic_boolean,
         },
         &update.target_object,
         &target_name,
@@ -748,6 +850,36 @@ where
     G: Copy,
     P: Copy,
 {
+    check_delete_with_intrinsic_boolean_in(
+        delete,
+        catalogue,
+        function,
+        parameters,
+        logical_path,
+        IntrinsicBooleanType::Legacy,
+    )
+}
+
+/// Checks one parsed DELETE with explicit intrinsic Boolean provenance.
+pub(crate) fn check_delete_with_intrinsic_boolean_in<T, F, G, P>(
+    delete: &DeleteStatement,
+    catalogue: &impl MutationCatalogue<T, F>,
+    function: G,
+    parameters: &[MutationParameter<T, P>],
+    logical_path: &str,
+    intrinsic_boolean: IntrinsicBooleanType,
+) -> Result<DeleteCheck<T, F, G, P>, Vec<CompilerDiagnostic>>
+where
+    T: Copy + Eq,
+    F: Copy,
+    G: Copy,
+    P: Copy,
+{
+    if let Some(diagnostics) =
+        missing_delete_boolean_diagnostics(delete, logical_path, intrinsic_boolean)
+    {
+        return Err(diagnostics);
+    }
     validate_parameter_types("DELETE", parameters, logical_path)?;
     let (target_name, target_object) =
         resolve_mutation_target(&delete.target_object, logical_path, catalogue)?;
@@ -980,6 +1112,7 @@ struct AssignmentCheckContext<'a, T, G, P> {
     function: G,
     parameters: &'a [MutationParameter<T, P>],
     logical_path: &'a str,
+    intrinsic_boolean: IntrinsicBooleanType,
 }
 
 fn check_assignment_expression<T, F, G, P>(
@@ -1011,7 +1144,9 @@ where
                 )]);
             };
             let parameter_type = parameter.semantic_type();
-            if parameter_type != field.semantic_type() {
+            if parameter_type != field.semantic_type()
+                || parameter.standard_value_type() != field.standard_value_type()
+            {
                 let action = if context.operation == "INSERT" {
                     "inserted into"
                 } else {
@@ -1031,12 +1166,14 @@ where
                 parameter: parameter.id(),
                 location: SourceLocation::from_syntax(context.logical_path, &parameter_name.span),
             });
+            let value_type =
+                mutation_value_type(parameter_type, parameter.standard_value_type(), false);
             MutationExpression::new(
                 MutationExpressionKind::ParameterRead {
                     owner: context.function,
                     parameter: parameter.id(),
                 },
-                MutationValueType::new(parameter_type, false),
+                value_type,
             )
         }
         MutationValue::BooleanLiteral { value, source } => {
@@ -1051,7 +1188,11 @@ where
             }
             MutationExpression::new(
                 MutationExpressionKind::BooleanLiteral { value: *value },
-                MutationValueType::new(expected, false),
+                intrinsic_boolean_value_type(
+                    context.intrinsic_boolean,
+                    context.logical_path,
+                    &source.span,
+                )?,
             )
         }
         MutationValue::NullLiteral { source } => {
@@ -1065,7 +1206,7 @@ where
             }
             MutationExpression::new(
                 MutationExpressionKind::TypedNull,
-                MutationValueType::new(field.semantic_type(), true),
+                mutation_value_type(field.semantic_type(), field.standard_value_type(), true),
             )
         }
         _ => {
@@ -1081,6 +1222,115 @@ where
         }
     };
     Ok(expression)
+}
+
+const MISSING_BOOLEAN_MESSAGE: &str =
+    "the checked standard library does not provide a Boolean value type";
+
+fn missing_insert_boolean_diagnostics(
+    insert: &InsertStatement,
+    logical_path: &str,
+    intrinsic_boolean: IntrinsicBooleanType,
+) -> Option<Vec<CompilerDiagnostic>> {
+    missing_boolean_diagnostics(
+        intrinsic_boolean,
+        logical_path,
+        insert.values.iter().filter_map(boolean_literal_span),
+    )
+}
+
+fn missing_update_boolean_diagnostics(
+    update: &UpdateStatement,
+    logical_path: &str,
+    intrinsic_boolean: IntrinsicBooleanType,
+) -> Option<Vec<CompilerDiagnostic>> {
+    missing_boolean_diagnostics(
+        intrinsic_boolean,
+        logical_path,
+        update
+            .assignments
+            .iter()
+            .filter_map(|assignment| boolean_literal_span(&assignment.value))
+            .chain(std::iter::once(&update.selector_equality_span)),
+    )
+}
+
+fn missing_delete_boolean_diagnostics(
+    delete: &DeleteStatement,
+    logical_path: &str,
+    intrinsic_boolean: IntrinsicBooleanType,
+) -> Option<Vec<CompilerDiagnostic>> {
+    missing_boolean_diagnostics(
+        intrinsic_boolean,
+        logical_path,
+        [&delete.selector_equality_span, &delete.returning_true.span],
+    )
+}
+
+fn boolean_literal_span(value: &MutationValue) -> Option<&SourceSpan> {
+    match value {
+        MutationValue::BooleanLiteral { source, .. } => Some(&source.span),
+        MutationValue::Parameter(_) | MutationValue::NullLiteral { .. } => None,
+        _ => None,
+    }
+}
+
+fn missing_boolean_diagnostics<'a>(
+    intrinsic_boolean: IntrinsicBooleanType,
+    logical_path: &str,
+    spans: impl IntoIterator<Item = &'a SourceSpan>,
+) -> Option<Vec<CompilerDiagnostic>> {
+    if !matches!(intrinsic_boolean, IntrinsicBooleanType::Missing) {
+        return None;
+    }
+    let diagnostics = spans
+        .into_iter()
+        .map(|span| {
+            semantic_diagnostic(
+                DiagnosticCode::DomainIncompatible,
+                MISSING_BOOLEAN_MESSAGE,
+                logical_path,
+                span,
+            )
+        })
+        .collect::<Vec<_>>();
+    (!diagnostics.is_empty()).then_some(diagnostics)
+}
+
+fn intrinsic_boolean_value_type<T>(
+    intrinsic_boolean: IntrinsicBooleanType,
+    logical_path: &str,
+    span: &SourceSpan,
+) -> Result<MutationValueType<T>, Vec<CompilerDiagnostic>> {
+    match intrinsic_boolean {
+        IntrinsicBooleanType::Legacy => Ok(MutationValueType::new(
+            SemanticType::scalar(StandardScalar::Boolean),
+            false,
+        )),
+        IntrinsicBooleanType::Standard(type_id) => Ok(MutationValueType::new(
+            SemanticType::scalar(StandardScalar::Boolean),
+            false,
+        )
+        .with_standard_value_type(type_id)),
+        IntrinsicBooleanType::Missing => Err(vec![semantic_diagnostic(
+            DiagnosticCode::DomainIncompatible,
+            MISSING_BOOLEAN_MESSAGE,
+            logical_path,
+            span,
+        )]),
+    }
+}
+
+fn mutation_value_type<T>(
+    semantic_type: SemanticType<T>,
+    standard_value_type: Option<TypeId>,
+    nullable: bool,
+) -> MutationValueType<T> {
+    if let Some(type_id) = standard_value_type {
+        MutationValueType::new(semantic_type, nullable).with_standard_value_type(type_id)
+    } else {
+        MutationValueType::new(semantic_type, nullable)
+    }
 }
 
 fn validate_parameter_types<T, P>(
@@ -1341,6 +1591,252 @@ mod tests {
                 ),
             ],
         }
+    }
+
+    #[test]
+    fn standard_assignment_compatibility_requires_matching_value_type_identities() {
+        let function = FunctionId::from_bytes([5; 16]);
+        let field_type = TypeId::from_bytes([11; 16]);
+        let other_type = TypeId::from_bytes([12; 16]);
+        let mut catalogue = catalogue();
+        catalogue.fields[0].1 = MutationField::new(
+            FieldId::from_bytes([2; 16]),
+            SemanticType::scalar(StandardScalar::CharacterLargeObject),
+            false,
+        )
+        .with_standard_value_type(field_type);
+        let source = insert(
+            vec![name("name", 25), name("active", 31)],
+            vec![parameter("p_name", 47), boolean(true, 56)],
+            "p",
+        );
+
+        let mismatched = check_insert_in(
+            &source,
+            &catalogue,
+            function,
+            &[MutationParameter::new(
+                "p_name",
+                ParameterId::from_bytes([6; 16]),
+                SemanticType::scalar(StandardScalar::CharacterLargeObject),
+                span(100, 106),
+            )
+            .with_standard_value_type(other_type)],
+            "mutation.orna",
+        )
+        .unwrap_err();
+        assert_eq!(mismatched.len(), 1);
+        assert_eq!(mismatched[0].code(), DiagnosticCode::TypeMismatch);
+        assert_eq!(
+            mismatched[0].message(),
+            "parameter p_name cannot be inserted into field name because their types do not match"
+        );
+        assert_eq!(mismatched[0].location().span().start(), 47);
+        assert_eq!(mismatched[0].location().span().end(), 53);
+
+        let matching = check_insert_in(
+            &source,
+            &catalogue,
+            function,
+            &[MutationParameter::new(
+                "p_name",
+                ParameterId::from_bytes([6; 16]),
+                SemanticType::scalar(StandardScalar::CharacterLargeObject),
+                span(100, 106),
+            )
+            .with_standard_value_type(field_type)],
+            "mutation.orna",
+        )
+        .unwrap();
+        assert_eq!(
+            matching.plan().assignments()[0]
+                .expression()
+                .value_type()
+                .standard_value_type(),
+            Some(field_type)
+        );
+
+        let mixed = check_insert_in(
+            &source,
+            &catalogue,
+            function,
+            &[MutationParameter::new(
+                "p_name",
+                ParameterId::from_bytes([6; 16]),
+                SemanticType::scalar(StandardScalar::CharacterLargeObject),
+                span(100, 106),
+            )],
+            "mutation.orna",
+        )
+        .unwrap_err();
+        assert_eq!(mixed[0].code(), DiagnosticCode::TypeMismatch);
+        assert_eq!(
+            mixed[0].message(),
+            "parameter p_name cannot be inserted into field name because their types do not match"
+        );
+
+        let update_mismatch = check_update_in(
+            &update(
+                vec![update_assignment("name", 30, parameter("p_name", 37))],
+                "p",
+                "p_person",
+                "p",
+            ),
+            &catalogue,
+            function,
+            &[
+                MutationParameter::new(
+                    "p_name",
+                    ParameterId::from_bytes([6; 16]),
+                    SemanticType::scalar(StandardScalar::CharacterLargeObject),
+                    span(100, 106),
+                )
+                .with_standard_value_type(other_type),
+                MutationParameter::new(
+                    "p_person",
+                    ParameterId::from_bytes([7; 16]),
+                    SemanticType::reference(catalogue.target),
+                    span(110, 118),
+                ),
+            ],
+            "mutation.orna",
+        )
+        .unwrap_err();
+        assert_eq!(update_mismatch.len(), 1);
+        assert_eq!(update_mismatch[0].code(), DiagnosticCode::TypeMismatch);
+        assert_eq!(
+            update_mismatch[0].message(),
+            "parameter p_name cannot be assigned to field name because their types do not match"
+        );
+        assert_eq!(update_mismatch[0].location().span().start(), 37);
+        assert_eq!(update_mismatch[0].location().span().end(), 43);
+    }
+
+    #[test]
+    fn missing_intrinsic_boolean_rejects_insert_literal_without_a_plan() {
+        let diagnostics = check_insert_with_intrinsic_boolean_in(
+            &insert(vec![name("active", 25)], vec![boolean(true, 34)], "p"),
+            &catalogue(),
+            FunctionId::from_bytes([5; 16]),
+            &[] as &[MutationParameter<TypeId, ParameterId>],
+            "mutation.orna",
+            crate::relational::IntrinsicBooleanType::Missing,
+        )
+        .unwrap_err();
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code(), DiagnosticCode::DomainIncompatible);
+        assert_eq!(
+            diagnostics[0].message(),
+            "the checked standard library does not provide a Boolean value type"
+        );
+        assert_eq!(diagnostics[0].location().span().start(), 34);
+        assert_eq!(diagnostics[0].location().span().end(), 38);
+    }
+
+    #[test]
+    fn missing_intrinsic_boolean_reports_update_and_delete_paths_in_source_order() {
+        let update = update(
+            vec![
+                update_assignment("active", 30, boolean(true, 39)),
+                update_assignment("active", 46, boolean(false, 55)),
+            ],
+            "p",
+            "p_person",
+            "p",
+        );
+        let update_diagnostics = check_update_with_intrinsic_boolean_in(
+            &update,
+            &catalogue(),
+            FunctionId::from_bytes([5; 16]),
+            &[MutationParameter::new(
+                "p_person",
+                ParameterId::from_bytes([6; 16]),
+                SemanticType::reference(TypeId::from_bytes([1; 16])),
+                span(100, 108),
+            )],
+            "mutation.orna",
+            crate::relational::IntrinsicBooleanType::Missing,
+        )
+        .unwrap_err();
+        assert_eq!(update_diagnostics.len(), 3);
+        assert_eq!(
+            update_diagnostics
+                .iter()
+                .map(|diagnostic| {
+                    (
+                        diagnostic.code(),
+                        diagnostic.message(),
+                        diagnostic.location().span().start(),
+                        diagnostic.location().span().end(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    DiagnosticCode::DomainIncompatible,
+                    MISSING_BOOLEAN_MESSAGE,
+                    39,
+                    43,
+                ),
+                (
+                    DiagnosticCode::DomainIncompatible,
+                    MISSING_BOOLEAN_MESSAGE,
+                    55,
+                    60,
+                ),
+                (
+                    DiagnosticCode::DomainIncompatible,
+                    MISSING_BOOLEAN_MESSAGE,
+                    update.selector_equality_span.start,
+                    update.selector_equality_span.end,
+                ),
+            ]
+        );
+
+        let delete = delete("p", "p_person");
+        let delete_diagnostics = check_delete_with_intrinsic_boolean_in(
+            &delete,
+            &catalogue(),
+            FunctionId::from_bytes([5; 16]),
+            &[MutationParameter::new(
+                "p_person",
+                ParameterId::from_bytes([6; 16]),
+                SemanticType::reference(TypeId::from_bytes([1; 16])),
+                span(100, 108),
+            )],
+            "mutation.orna",
+            crate::relational::IntrinsicBooleanType::Missing,
+        )
+        .unwrap_err();
+        assert_eq!(delete_diagnostics.len(), 2);
+        assert_eq!(
+            delete_diagnostics
+                .iter()
+                .map(|diagnostic| {
+                    (
+                        diagnostic.code(),
+                        diagnostic.message(),
+                        diagnostic.location().span().start(),
+                        diagnostic.location().span().end(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    DiagnosticCode::DomainIncompatible,
+                    MISSING_BOOLEAN_MESSAGE,
+                    delete.selector_equality_span.start,
+                    delete.selector_equality_span.end,
+                ),
+                (
+                    DiagnosticCode::DomainIncompatible,
+                    MISSING_BOOLEAN_MESSAGE,
+                    delete.returning_true.span.start,
+                    delete.returning_true.span.end,
+                ),
+            ]
+        );
     }
 
     #[test]

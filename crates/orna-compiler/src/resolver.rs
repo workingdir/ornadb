@@ -33,7 +33,7 @@ pub(crate) use model::{
 use std::collections::{HashMap, HashSet};
 
 use orna_core::{
-    ExpressionId,
+    ExpressionId, TypeId,
     catalogue::{
         CatalogueSnapshot, FunctionDomain, FunctionSecurity as CatalogueFunctionSecurity,
         FunctionTransaction as CatalogueFunctionTransaction,
@@ -58,7 +58,10 @@ use orna_syntax::{
 };
 
 use crate::mutation::{
-    MutationParameter, MutationReference, check_delete_in, check_insert_in, check_update_in,
+    MutationParameter, MutationReference, MutationValueType, check_delete_in,
+    check_delete_with_intrinsic_boolean_in, check_insert_in,
+    check_insert_with_intrinsic_boolean_in, check_update_in,
+    check_update_with_intrinsic_boolean_in,
 };
 use crate::relational::{
     ExpressionIr, ExpressionKind, IdentitySelectedQueryReference, IntrinsicBooleanType, OrderingIr,
@@ -755,6 +758,7 @@ struct ResolvedServerFunctionParameter {
     name: String,
     ordinal: u32,
     semantic_type: SemanticType<CheckedTypeId>,
+    standard_value_type: Option<TypeId>,
     name_span: SourceSpan,
     location: SourceLocation,
     reference_location: Option<SourceLocation>,
@@ -1895,6 +1899,7 @@ fn resolve_server_function_inputs<'a>(
                 name: parameter_name,
                 ordinal: parameter.order as u32,
                 semantic_type: resolved_type.semantic_type,
+                standard_value_type: resolved_type.standard_value_type,
                 name_span: parameter.name.span.clone(),
                 location: location(header.logical_path, &parameter.span),
                 reference_location: reference_location(
@@ -2276,7 +2281,9 @@ fn check_server_functions(
                 continue;
             }
             let column = &columns[0];
-            if column.semantic_type != SemanticType::Scalar(StandardScalar::Boolean) {
+            if column.semantic_type != SemanticType::Scalar(StandardScalar::Boolean)
+                && !matches!(intrinsic_boolean, IntrinsicBooleanType::Missing)
+            {
                 diagnostics.push(DiagnosticCode::semantic(
                     DiagnosticCode::TypeMismatch,
                     "The RETURNS ROWS (...) column for a DELETE SERVER function must use BOOLEAN",
@@ -2285,19 +2292,58 @@ fn check_server_functions(
                 continue;
             }
             let parameters = mutation_parameters(input);
-            let delete_check = match check_delete_in(
-                &delete_body.delete,
-                catalogue,
-                input.id,
-                &parameters,
-                input.location.logical_path(),
-            ) {
+            let delete_check = match if standard.is_some() {
+                check_delete_with_intrinsic_boolean_in(
+                    &delete_body.delete,
+                    catalogue,
+                    input.id,
+                    &parameters,
+                    input.location.logical_path(),
+                    intrinsic_boolean,
+                )
+            } else {
+                check_delete_in(
+                    &delete_body.delete,
+                    catalogue,
+                    input.id,
+                    &parameters,
+                    input.location.logical_path(),
+                )
+            } {
                 Ok(delete_check) => delete_check,
                 Err(delete_diagnostics) => {
                     diagnostics.extend(delete_diagnostics);
                     continue;
                 }
             };
+            let mut mutation_recorder = StandardMutationTypeUseRecorder {
+                uses,
+                standard,
+                owner: input.id,
+                logical_path: input.location.logical_path(),
+                next_expression_ordinal: 0,
+            };
+            mutation_recorder.record_boolean(
+                &delete_body.delete.selector_equality_span,
+                intrinsic_boolean_id(intrinsic_boolean),
+            );
+            mutation_recorder.record_object_reference(
+                &delete_body.delete.selector_ref_span,
+                delete_check.plan().target_object(),
+            );
+            mutation_recorder.record_object_reference(
+                &delete_body.delete.selector_parameter.span,
+                delete_check.plan().target_object(),
+            );
+            mutation_recorder.record_boolean(
+                &delete_body.delete.returning_true.span,
+                intrinsic_boolean_id(intrinsic_boolean),
+            );
+            mutation_recorder.record_boolean_result(
+                &delete_body.delete.returning_true.span,
+                intrinsic_boolean_id(intrinsic_boolean),
+                0,
+            );
             (
                 CheckedServerFunctionBody::Delete(delete_check.plan().clone()),
                 delete_check
@@ -2341,21 +2387,43 @@ fn check_server_functions(
             };
             let parameters = mutation_parameters(input);
             let checked_mutation = if let Some(insert_body) = input.body.as_sql_insert() {
-                check_insert_in(
-                    &insert_body.insert,
-                    catalogue,
-                    input.id,
-                    &parameters,
-                    input.location.logical_path(),
-                )
+                if standard.is_some() {
+                    check_insert_with_intrinsic_boolean_in(
+                        &insert_body.insert,
+                        catalogue,
+                        input.id,
+                        &parameters,
+                        input.location.logical_path(),
+                        intrinsic_boolean,
+                    )
+                } else {
+                    check_insert_in(
+                        &insert_body.insert,
+                        catalogue,
+                        input.id,
+                        &parameters,
+                        input.location.logical_path(),
+                    )
+                }
             } else if let Some(update_body) = input.body.as_sql_update() {
-                check_update_in(
-                    &update_body.update,
-                    catalogue,
-                    input.id,
-                    &parameters,
-                    input.location.logical_path(),
-                )
+                if standard.is_some() {
+                    check_update_with_intrinsic_boolean_in(
+                        &update_body.update,
+                        catalogue,
+                        input.id,
+                        &parameters,
+                        input.location.logical_path(),
+                        intrinsic_boolean,
+                    )
+                } else {
+                    check_update_in(
+                        &update_body.update,
+                        catalogue,
+                        input.id,
+                        &parameters,
+                        input.location.logical_path(),
+                    )
+                }
             } else {
                 continue;
             };
@@ -2384,6 +2452,64 @@ fn check_server_functions(
                         .unwrap_or_else(|| column.location.clone()),
                 ));
                 continue;
+            }
+            let mut mutation_recorder = StandardMutationTypeUseRecorder {
+                uses,
+                standard,
+                owner: input.id,
+                logical_path: input.location.logical_path(),
+                next_expression_ordinal: 0,
+            };
+            if let Some(insert_body) = input.body.as_sql_insert() {
+                for (source, assignment) in insert_body
+                    .insert
+                    .values
+                    .iter()
+                    .zip(mutation_plan.assignments())
+                {
+                    mutation_recorder
+                        .record_value(source.span(), assignment.expression().value_type());
+                }
+                mutation_recorder.record_object_reference(
+                    &insert_body.insert.returning_ref_span,
+                    mutation_plan.returned_object(),
+                );
+                mutation_recorder.record_object_result(
+                    &insert_body.insert.returning_ref_span,
+                    mutation_plan.returned_object(),
+                    0,
+                );
+            } else if let Some(update_body) = input.body.as_sql_update() {
+                for (source, assignment) in update_body
+                    .update
+                    .assignments
+                    .iter()
+                    .zip(mutation_plan.assignments())
+                {
+                    mutation_recorder
+                        .record_value(source.value.span(), assignment.expression().value_type());
+                }
+                mutation_recorder.record_boolean(
+                    &update_body.update.selector_equality_span,
+                    intrinsic_boolean_id(intrinsic_boolean),
+                );
+                mutation_recorder.record_object_reference(
+                    &update_body.update.selector_ref_span,
+                    mutation_plan.target_object(),
+                );
+                mutation_recorder.record_object_reference(
+                    &update_body.update.selector_parameter.span,
+                    mutation_plan.target_object(),
+                );
+                mutation_recorder.record_object_reference(
+                    &update_body.update.returning_ref_span,
+                    mutation_plan.returned_object(),
+                );
+                mutation_recorder.record_object_result(
+                    &update_body.update.returning_ref_span,
+                    mutation_plan.returned_object(),
+                    0,
+                );
             }
             (
                 CheckedServerFunctionBody::Mutation(mutation_plan.clone()),
@@ -2588,13 +2714,18 @@ fn mutation_parameters(
     input
         .parameters
         .iter()
-        .map(|parameter| {
-            MutationParameter::new(
-                parameter.name.clone(),
-                parameter.id,
-                parameter.semantic_type,
-                parameter.name_span.clone(),
-            )
+        .map(|source_parameter| {
+            let parameter = MutationParameter::new(
+                source_parameter.name.clone(),
+                source_parameter.id,
+                source_parameter.semantic_type,
+                source_parameter.name_span.clone(),
+            );
+            if let Some(type_id) = source_parameter.standard_value_type {
+                parameter.with_standard_value_type(type_id)
+            } else {
+                parameter
+            }
         })
         .collect()
 }
@@ -3196,6 +3327,102 @@ fn record_standard_expression_use(
         record_standard_value_type_use(uses, standard, kind, Some(type_id), location);
     } else if let SemanticType::Reference { target } = expression.value_type().semantic_type() {
         record_standard_object_reference_use(uses, standard, kind, target, location);
+    }
+}
+
+struct StandardMutationTypeUseRecorder<'a, 'b> {
+    uses: &'a mut Vec<CheckedApplicationTypeUse>,
+    standard: Option<&'b CheckedStandardLibrary>,
+    owner: CheckedFunctionId,
+    logical_path: &'b str,
+    next_expression_ordinal: u32,
+}
+
+impl StandardMutationTypeUseRecorder<'_, '_> {
+    fn record_value(&mut self, span: &SourceSpan, value_type: &MutationValueType<CheckedTypeId>) {
+        let kind = CheckedTypeUseKind::Expression {
+            owner: self.owner,
+            ordinal: self.next_expression_ordinal,
+        };
+        self.next_expression_ordinal += 1;
+        if let Some(type_id) = value_type.standard_value_type() {
+            record_standard_value_type_use(
+                self.uses,
+                self.standard,
+                kind,
+                Some(type_id),
+                location(self.logical_path, span),
+            );
+        } else if let SemanticType::Reference { target } = value_type.semantic_type() {
+            record_standard_object_reference_use(
+                self.uses,
+                self.standard,
+                kind,
+                target,
+                location(self.logical_path, span),
+            );
+        }
+    }
+
+    fn record_object_reference(&mut self, span: &SourceSpan, target: CheckedTypeId) {
+        let kind = CheckedTypeUseKind::Expression {
+            owner: self.owner,
+            ordinal: self.next_expression_ordinal,
+        };
+        self.next_expression_ordinal += 1;
+        record_standard_object_reference_use(
+            self.uses,
+            self.standard,
+            kind,
+            target,
+            location(self.logical_path, span),
+        );
+    }
+
+    fn record_boolean(&mut self, span: &SourceSpan, boolean_type: Option<TypeId>) {
+        let kind = CheckedTypeUseKind::Expression {
+            owner: self.owner,
+            ordinal: self.next_expression_ordinal,
+        };
+        self.next_expression_ordinal += 1;
+        record_standard_value_type_use(
+            self.uses,
+            self.standard,
+            kind,
+            boolean_type,
+            location(self.logical_path, span),
+        );
+    }
+
+    fn record_object_result(&mut self, span: &SourceSpan, target: CheckedTypeId, ordinal: u32) {
+        record_standard_object_reference_use(
+            self.uses,
+            self.standard,
+            CheckedTypeUseKind::Result {
+                owner: self.owner,
+                ordinal,
+            },
+            target,
+            location(self.logical_path, span),
+        );
+    }
+
+    fn record_boolean_result(
+        &mut self,
+        span: &SourceSpan,
+        boolean_type: Option<TypeId>,
+        ordinal: u32,
+    ) {
+        record_standard_value_type_use(
+            self.uses,
+            self.standard,
+            CheckedTypeUseKind::Result {
+                owner: self.owner,
+                ordinal,
+            },
+            boolean_type,
+            location(self.logical_path, span),
+        );
     }
 }
 
@@ -4239,7 +4466,7 @@ mod tests {
         let application = empty_catalogue();
         let context = StandardApplicationCheckContext::try_new(&application, &standard).unwrap();
         let source = "CREATE SCHEMA app;\
-            CREATE TYPE app.task AS OBJECT (done BOOLEAN NOT NULL);\
+            CREATE TYPE app.task AS OBJECT (done BOOLEAN NOT NULL, other BOOLEAN NOT NULL);\
             CREATE SERVER FUNCTION app.ordinary() RETURNS ROWS (done BOOLEAN, task REF app.task) \
             AS SELECT t.done, REF(t) FROM app.task t WHERE t.done = TRUE ORDER BY t.done;\
             CREATE SERVER FUNCTION app.distinct() RETURNS ROWS (done BOOLEAN) \
@@ -4559,6 +4786,484 @@ mod tests {
                 Some(changed_boolean)
             );
         }
+    }
+
+    #[test]
+    fn records_standard_mutation_body_uses_in_committed_traversal_order() {
+        let standard =
+            check_standard_library_source(&verified_standard_library_for_relational_test())
+                .unwrap();
+        let application = empty_catalogue();
+        let context = StandardApplicationCheckContext::try_new(&application, &standard).unwrap();
+        let source = "CREATE SCHEMA app;\
+            CREATE TYPE app.task AS OBJECT (done BOOLEAN NOT NULL, note BOOLEAN, parent REF app.task);\
+            CREATE SERVER FUNCTION app.create(p_done BOOLEAN) RETURNS ROWS (created REF app.task) \
+            TRANSACTION ATOMIC AS INSERT INTO app.task AS made (done, note) VALUES (p_done, NULL) RETURNING REF(made);\
+            CREATE SERVER FUNCTION app.change(p_task REF app.task, p_done BOOLEAN) RETURNS ROWS (changed REF app.task) \
+            TRANSACTION ATOMIC AS UPDATE app.task AS changed SET done = p_done, note = NULL WHERE REF(changed) = p_task RETURNING REF(changed);\
+            CREATE SERVER FUNCTION app.remove(p_task REF app.task) RETURNS ROWS (deleted BOOLEAN) \
+            TRANSACTION ATOMIC AS DELETE FROM app.task AS deleted WHERE REF(deleted) = p_task RETURNING TRUE;";
+        let report = check_standard_application(&bundle([("application.orna", source)]), &context);
+
+        assert_eq!(report.diagnostics(), &[]);
+        let checked_bundle = report.checked_bundle();
+        assert!(
+            checked_bundle.is_some(),
+            "a diagnostic-free standard application report must contain a checked bundle"
+        );
+        let Some(checked) = checked_bundle else {
+            return;
+        };
+        let functions = checked.server_functions().collect::<Vec<_>>();
+        assert_eq!(functions.len(), 3);
+        let [insert, update, delete] = functions.as_slice() else {
+            return;
+        };
+        let boolean = TypeId::from_bytes([3; 16]);
+        let task = checked.object_types().next().map(|object| object.id());
+        assert!(task.is_some());
+        let Some(task) = task else {
+            return;
+        };
+
+        let insert_uses = checked
+            .uses()
+            .iter()
+            .filter(|type_use| {
+                matches!(
+                    type_use.kind(),
+                    CheckedTypeUseKind::Expression { owner, .. }
+                        | CheckedTypeUseKind::Result { owner, .. }
+                        if owner == insert.id()
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(insert_uses.len(), 4);
+        assert_eq!(
+            insert_uses
+                .iter()
+                .map(|type_use| type_use.kind())
+                .collect::<Vec<_>>(),
+            vec![
+                CheckedTypeUseKind::Expression {
+                    owner: insert.id(),
+                    ordinal: 0,
+                },
+                CheckedTypeUseKind::Expression {
+                    owner: insert.id(),
+                    ordinal: 1,
+                },
+                CheckedTypeUseKind::Expression {
+                    owner: insert.id(),
+                    ordinal: 2,
+                },
+                CheckedTypeUseKind::Result {
+                    owner: insert.id(),
+                    ordinal: 0,
+                },
+            ]
+        );
+        assert_eq!(
+            insert_uses[0].value().map(CheckedValueTypeUse::type_id),
+            Some(boolean)
+        );
+        assert_eq!(
+            insert_uses[1].value().map(CheckedValueTypeUse::type_id),
+            Some(boolean)
+        );
+        assert_eq!(
+            insert_uses[2]
+                .object_reference()
+                .map(|value| value.target()),
+            Some(task)
+        );
+        assert_eq!(
+            insert_uses[3]
+                .object_reference()
+                .map(|value| value.target()),
+            Some(task)
+        );
+        assert_type_use_span(
+            insert_uses[0],
+            source.find("p_done, NULL) RETURNING").unwrap(),
+            "p_done",
+        );
+        assert_type_use_span(
+            insert_uses[1],
+            source.find("NULL) RETURNING").unwrap(),
+            "NULL",
+        );
+        let insert_returning = source.find("REF(made)").unwrap();
+        assert_type_use_span(insert_uses[2], insert_returning, "REF(made)");
+        assert_type_use_span(insert_uses[3], insert_returning, "REF(made)");
+
+        let update_uses = checked
+            .uses()
+            .iter()
+            .filter(|type_use| {
+                matches!(
+                    type_use.kind(),
+                    CheckedTypeUseKind::Expression { owner, .. }
+                        | CheckedTypeUseKind::Result { owner, .. }
+                        if owner == update.id()
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(update_uses.len(), 7);
+        assert_eq!(
+            update_uses
+                .iter()
+                .map(|type_use| type_use.kind())
+                .collect::<Vec<_>>(),
+            vec![
+                CheckedTypeUseKind::Expression {
+                    owner: update.id(),
+                    ordinal: 0,
+                },
+                CheckedTypeUseKind::Expression {
+                    owner: update.id(),
+                    ordinal: 1,
+                },
+                CheckedTypeUseKind::Expression {
+                    owner: update.id(),
+                    ordinal: 3,
+                },
+                CheckedTypeUseKind::Expression {
+                    owner: update.id(),
+                    ordinal: 2,
+                },
+                CheckedTypeUseKind::Expression {
+                    owner: update.id(),
+                    ordinal: 4,
+                },
+                CheckedTypeUseKind::Expression {
+                    owner: update.id(),
+                    ordinal: 5,
+                },
+                CheckedTypeUseKind::Result {
+                    owner: update.id(),
+                    ordinal: 0,
+                },
+            ]
+        );
+        assert_eq!(
+            update_uses[0].value().map(CheckedValueTypeUse::type_id),
+            Some(boolean)
+        );
+        assert_eq!(
+            update_uses[1].value().map(CheckedValueTypeUse::type_id),
+            Some(boolean)
+        );
+        assert_eq!(
+            update_uses[3].value().map(CheckedValueTypeUse::type_id),
+            Some(boolean)
+        );
+        for type_use in [
+            &update_uses[2],
+            &update_uses[4],
+            &update_uses[5],
+            &update_uses[6],
+        ] {
+            assert_eq!(
+                type_use.object_reference().map(|value| value.target()),
+                Some(task)
+            );
+        }
+        let update_assignment = source.find("done = p_done, note").unwrap() + "done = ".len();
+        let update_null = source.find("note = NULL WHERE").unwrap() + "note = ".len();
+        let update_selector = source.find("REF(changed) = p_task").unwrap();
+        let update_left = source.find("REF(changed)").unwrap();
+        let update_right = source.find("p_task RETURNING REF(changed)").unwrap();
+        let update_returning = source.rfind("REF(changed)").unwrap();
+        assert_type_use_span(update_uses[0], update_assignment, "p_done");
+        assert_type_use_span(update_uses[1], update_null, "NULL");
+        assert_type_use_span(update_uses[3], update_selector, "REF(changed) = p_task");
+        assert_type_use_span(update_uses[2], update_left, "REF(changed)");
+        assert_type_use_span(update_uses[4], update_right, "p_task");
+        assert_type_use_span(update_uses[5], update_returning, "REF(changed)");
+        assert_type_use_span(update_uses[6], update_returning, "REF(changed)");
+
+        let delete_uses = checked
+            .uses()
+            .iter()
+            .filter(|type_use| {
+                matches!(
+                    type_use.kind(),
+                    CheckedTypeUseKind::Expression { owner, .. }
+                        | CheckedTypeUseKind::Result { owner, .. }
+                        if owner == delete.id()
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(delete_uses.len(), 5);
+        assert_eq!(
+            delete_uses
+                .iter()
+                .map(|type_use| type_use.kind())
+                .collect::<Vec<_>>(),
+            vec![
+                CheckedTypeUseKind::Expression {
+                    owner: delete.id(),
+                    ordinal: 1,
+                },
+                CheckedTypeUseKind::Expression {
+                    owner: delete.id(),
+                    ordinal: 0,
+                },
+                CheckedTypeUseKind::Expression {
+                    owner: delete.id(),
+                    ordinal: 2,
+                },
+                CheckedTypeUseKind::Expression {
+                    owner: delete.id(),
+                    ordinal: 3,
+                },
+                CheckedTypeUseKind::Result {
+                    owner: delete.id(),
+                    ordinal: 0,
+                },
+            ]
+        );
+        assert_eq!(
+            delete_uses[1].value().map(CheckedValueTypeUse::type_id),
+            Some(boolean)
+        );
+        assert_eq!(
+            delete_uses[3].value().map(CheckedValueTypeUse::type_id),
+            Some(boolean)
+        );
+        assert_eq!(
+            delete_uses[4].value().map(CheckedValueTypeUse::type_id),
+            Some(boolean)
+        );
+        for type_use in [&delete_uses[0], &delete_uses[2]] {
+            assert_eq!(
+                type_use.object_reference().map(|value| value.target()),
+                Some(task)
+            );
+        }
+        let delete_selector = source.find("REF(deleted) = p_task").unwrap();
+        let delete_left = source.find("REF(deleted)").unwrap();
+        let delete_right = source.find("p_task RETURNING TRUE").unwrap();
+        let delete_true = source.rfind("TRUE").unwrap();
+        assert_type_use_span(delete_uses[1], delete_selector, "REF(deleted) = p_task");
+        assert_type_use_span(delete_uses[0], delete_left, "REF(deleted)");
+        assert_type_use_span(delete_uses[2], delete_right, "p_task");
+        assert_type_use_span(delete_uses[3], delete_true, "TRUE");
+        assert_type_use_span(delete_uses[4], delete_true, "TRUE");
+    }
+
+    #[test]
+    fn missing_standard_boolean_rejects_insert_and_update_before_any_checked_bundle() {
+        let snapshot = verified_standard_library_for_relational_test();
+        let standard = checked_standard_library_with_contract_overrides_for_test(
+            &snapshot,
+            &[(0, "orna.kernel.value.integer@1")],
+        )
+        .unwrap();
+        let application = empty_catalogue();
+        let context = StandardApplicationCheckContext::try_new(&application, &standard).unwrap();
+        let source = "CREATE SCHEMA app;\
+            CREATE TYPE app.task AS OBJECT (done BOOLEAN NOT NULL);\
+            CREATE SERVER FUNCTION app.create() RETURNS ROWS (created REF app.task) \
+            TRANSACTION ATOMIC AS INSERT INTO app.task AS made (done) VALUES (TRUE) RETURNING REF(made);\
+            CREATE SERVER FUNCTION app.change(p_task REF app.task) RETURNS ROWS (changed REF app.task) \
+            TRANSACTION ATOMIC AS UPDATE app.task AS changed SET done = TRUE, other = FALSE \
+            WHERE REF(changed) = p_task RETURNING REF(changed);";
+        let report = check_standard_application(&bundle([("application.orna", source)]), &context);
+
+        assert!(report.checked_bundle().is_none());
+        let insert_true = source.find("VALUES (TRUE)").unwrap() + "VALUES (".len();
+        let update_first = source.find("done = TRUE").unwrap() + "done = ".len();
+        let update_second = source.find("other = FALSE").unwrap() + "other = ".len();
+        let selector = source.find("REF(changed) = p_task").unwrap();
+        assert_eq!(
+            report
+                .diagnostics()
+                .iter()
+                .map(|diagnostic| {
+                    (
+                        diagnostic.code(),
+                        diagnostic.message(),
+                        diagnostic.location().span().start(),
+                        diagnostic.location().span().end(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    DiagnosticCode::DomainIncompatible,
+                    "the checked standard library does not provide a Boolean value type",
+                    insert_true,
+                    insert_true + "TRUE".len(),
+                ),
+                (
+                    DiagnosticCode::DomainIncompatible,
+                    "the checked standard library does not provide a Boolean value type",
+                    update_first,
+                    update_first + "TRUE".len(),
+                ),
+                (
+                    DiagnosticCode::DomainIncompatible,
+                    "the checked standard library does not provide a Boolean value type",
+                    update_second,
+                    update_second + "FALSE".len(),
+                ),
+                (
+                    DiagnosticCode::DomainIncompatible,
+                    "the checked standard library does not provide a Boolean value type",
+                    selector,
+                    selector + "REF(changed) = p_task".len(),
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn missing_standard_boolean_rejects_delete_before_return_column_compatibility() {
+        let snapshot = verified_standard_library_for_relational_test();
+        let standard = checked_standard_library_with_contract_overrides_for_test(
+            &snapshot,
+            &[(0, "orna.kernel.value.integer@1")],
+        )
+        .unwrap();
+        let application = empty_catalogue();
+        let context = StandardApplicationCheckContext::try_new(&application, &standard).unwrap();
+        let source = "CREATE SCHEMA app;\
+            CREATE TYPE app.task AS OBJECT ();\
+            CREATE SERVER FUNCTION app.remove(p_task REF app.task) RETURNS ROWS (deleted BOOLEAN) \
+            TRANSACTION ATOMIC AS DELETE FROM app.task AS deleted \
+            WHERE REF(deleted) = p_task RETURNING TRUE;";
+        let report = check_standard_application(&bundle([("application.orna", source)]), &context);
+
+        assert!(report.checked_bundle().is_none());
+        let selector = source.find("REF(deleted) = p_task").unwrap();
+        let returned_true = source.rfind("TRUE").unwrap();
+        assert_eq!(
+            report
+                .diagnostics()
+                .iter()
+                .map(|diagnostic| {
+                    (
+                        diagnostic.code(),
+                        diagnostic.message(),
+                        diagnostic.location().span().start(),
+                        diagnostic.location().span().end(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    DiagnosticCode::DomainIncompatible,
+                    "the checked standard library does not provide a Boolean value type",
+                    selector,
+                    selector + "REF(deleted) = p_task".len(),
+                ),
+                (
+                    DiagnosticCode::DomainIncompatible,
+                    "the checked standard library does not provide a Boolean value type",
+                    returned_true,
+                    returned_true + "TRUE".len(),
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn retains_a_non_golden_boolean_identity_through_every_mutation_boolean_path() {
+        let changed_boolean = TypeId::from_bytes([0x53; 16]);
+        let snapshot = verified_standard_library_for_relational_test_with_boolean_id(
+            changed_boolean,
+            [
+                0xa2, 0x5b, 0xcf, 0x20, 0x76, 0x46, 0x26, 0xdf, 0xe3, 0x77, 0x67, 0xca, 0x79, 0xc9,
+                0x3e, 0x5f, 0xdc, 0x53, 0x8c, 0xc0, 0x7b, 0x74, 0xce, 0xac, 0x54, 0x2d, 0xb9, 0x31,
+                0x3c, 0x56, 0xe1, 0x82,
+            ],
+        );
+        let standard = check_standard_library_source(&snapshot).unwrap();
+        let application = empty_catalogue();
+        let context = StandardApplicationCheckContext::try_new(&application, &standard).unwrap();
+        let source = "CREATE SCHEMA app;\
+            CREATE TYPE app.task AS OBJECT (done BOOLEAN NOT NULL, other BOOLEAN NOT NULL);\
+            CREATE SERVER FUNCTION app.create(p_done BOOLEAN) RETURNS ROWS (created REF app.task) \
+            TRANSACTION ATOMIC AS INSERT INTO app.task AS made (done, other) VALUES (p_done, TRUE) RETURNING REF(made);\
+            CREATE SERVER FUNCTION app.change(p_task REF app.task, p_done BOOLEAN) RETURNS ROWS (changed REF app.task) \
+            TRANSACTION ATOMIC AS UPDATE app.task AS changed SET done = p_done, other = TRUE \
+            WHERE REF(changed) = p_task RETURNING REF(changed);\
+            CREATE SERVER FUNCTION app.remove(p_task REF app.task) RETURNS ROWS (deleted BOOLEAN) \
+            TRANSACTION ATOMIC AS DELETE FROM app.task AS deleted WHERE REF(deleted) = p_task RETURNING TRUE;";
+        let report = check_standard_application(&bundle([("application.orna", source)]), &context);
+
+        assert_eq!(report.diagnostics(), &[]);
+        let checked_bundle = report.checked_bundle();
+        assert!(
+            checked_bundle.is_some(),
+            "a diagnostic-free standard application report must contain a checked bundle"
+        );
+        let Some(checked) = checked_bundle else {
+            return;
+        };
+        let functions = checked.server_functions().collect::<Vec<_>>();
+        let [insert, update, delete] = functions.as_slice() else {
+            assert_eq!(functions.len(), 3);
+            return;
+        };
+        let body_uses = |owner| {
+            checked
+                .uses()
+                .iter()
+                .filter(|type_use| {
+                    matches!(
+                        type_use.kind(),
+                        CheckedTypeUseKind::Expression { owner: candidate, .. }
+                            | CheckedTypeUseKind::Result { owner: candidate, .. }
+                            if candidate == owner
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let insert_uses = body_uses(insert.id());
+        let update_uses = body_uses(update.id());
+        let delete_uses = body_uses(delete.id());
+        let retained = [
+            expression_use(&insert_uses, 0),
+            expression_use(&insert_uses, 1),
+            expression_use(&update_uses, 0),
+            expression_use(&update_uses, 1),
+            expression_use(&update_uses, 2),
+            expression_use(&delete_uses, 0),
+            expression_use(&delete_uses, 3),
+            result_use(&delete_uses, 0),
+        ];
+        for type_use in retained {
+            assert_eq!(
+                type_use.value().map(CheckedValueTypeUse::type_id),
+                Some(changed_boolean)
+            );
+        }
+        let insert_parameter = source.find("p_done, TRUE)").unwrap();
+        let insert_true = source.find("TRUE) RETURNING").unwrap();
+        let update_parameter = source.find("done = p_done, other").unwrap() + "done = ".len();
+        let update_true = source.find("other = TRUE WHERE").unwrap() + "other = ".len();
+        let update_selector = source.find("REF(changed) = p_task").unwrap();
+        let delete_selector = source.find("REF(deleted) = p_task").unwrap();
+        let delete_true = source.rfind("TRUE").unwrap();
+        assert_type_use_span(expression_use(&insert_uses, 0), insert_parameter, "p_done");
+        assert_type_use_span(expression_use(&insert_uses, 1), insert_true, "TRUE");
+        assert_type_use_span(expression_use(&update_uses, 0), update_parameter, "p_done");
+        assert_type_use_span(expression_use(&update_uses, 1), update_true, "TRUE");
+        assert_type_use_span(
+            expression_use(&update_uses, 2),
+            update_selector,
+            "REF(changed) = p_task",
+        );
+        assert_type_use_span(
+            expression_use(&delete_uses, 0),
+            delete_selector,
+            "REF(deleted) = p_task",
+        );
+        assert_type_use_span(expression_use(&delete_uses, 3), delete_true, "TRUE");
+        assert_type_use_span(result_use(&delete_uses, 0), delete_true, "TRUE");
     }
 
     fn rebase_standard_origins_to_source(
