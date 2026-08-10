@@ -7,11 +7,19 @@ use std::{
 
 use orna_compiler::{check, prepare};
 use orna_core::{
-    FieldId, ObjectId, TypeId,
-    catalogue::FunctionReturn,
+    CatalogueRevisionId, FieldId, ObjectId, SourceBundleId, SourceRevisionId, SourceUnitId,
+    StandardLibraryRevisionId, TypeId,
+    canonical_hash::{
+        catalogue_digest_with_context, source_bundle_digest, source_revision_record_digest,
+        source_unit_content_digest, verify_standard_library_snapshot,
+    },
+    catalogue::{CatalogueSnapshot, FunctionReturn},
     revision::{
-        ActiveDatabaseRevision, DefinitionIdentity, DefinitionReferenceKind,
-        DefinitionReferenceTarget, DeployableRevision, FunctionRevisionRecord, SourceOrigin,
+        ActiveDatabaseRevision, CatalogueHashContext, CatalogueHashVersion, DefinitionIdentity,
+        DefinitionReferenceKind, DefinitionReferenceTarget, DeployableRevision,
+        DeployableRevisionContent, DeployableRevisionInput, FunctionRevisionRecord, RevisionPair,
+        Sha256Digest, SourceOrigin, StandardLibraryDigestVersion, StandardLibrarySnapshot,
+        StoredSourceRevision, StoredSourceUnit,
     },
     source::{SourceBundle, SourceUnit},
     types::ResolvedType,
@@ -82,6 +90,11 @@ const RACE_RIGHT_SOURCE: &str = "CREATE SCHEMA race_right;\n\
 
 const APPLY_TIMEOUT: Duration = Duration::from_secs(5);
 const RACE_LOCK_KEY: i64 = 0x4f52_4e41_4150_504c;
+const EMPTY_STANDARD_SOURCE: &str = "CREATE SCHEMA std.;CREATE SCHEMA ;CREATE SCHEMA std;";
+const EMPTY_STANDARD_DIGEST: [u8; 32] = [
+    0x6d, 0x3f, 0xaa, 0x32, 0x82, 0x0e, 0xeb, 0x73, 0x77, 0xc5, 0xbd, 0xfa, 0x3e, 0x8d, 0x6c, 0xaf,
+    0xdc, 0x95, 0xa6, 0x7c, 0xbd, 0xef, 0x5b, 0x02, 0x63, 0x1f, 0x29, 0x1d, 0x14, 0xcc, 0x68, 0xae,
+];
 
 #[derive(Clone, Copy)]
 enum FailurePoint {
@@ -129,6 +142,91 @@ async fn applies_a_compiler_candidate_and_recovers_exactly() -> TestResult<()> {
                 && recovered.function_revisions().len() == 1,
             "basic apply did not recover one schema, object, function, and immutable revision",
         )
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn rejects_a_version_two_candidate_before_any_apply_write() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = kernel(&database)?;
+        kernel.bootstrap().await?;
+        let active = kernel.recover().await?;
+        let candidate = standard_context_candidate(active.pair())?;
+        require(
+            candidate.catalogue_hash_context().version() == CatalogueHashVersion::Version2
+                && candidate.catalogue_hash() != active.catalogue_hash(),
+            "version-two transition fixture did not carry a distinct later catalogue hash",
+        )?;
+        let before = baseline(&database, &active).await?;
+
+        let error = failed_apply_error(
+            kernel.apply(&candidate).await,
+            "version-two candidate unexpectedly reached a successful normal apply",
+        )?;
+
+        require(
+            error.to_string()
+                == "the active and candidate catalogue hash versions require a standard context transition"
+                && std::error::Error::source(&error).is_none(),
+            "standard context transition error did not preserve its exact source-free contract",
+        )?;
+        match error {
+            PostgresKernelError::StandardContextTransitionRequired {
+                active: CatalogueHashVersion::Version1,
+                candidate: CatalogueHashVersion::Version2,
+            } => {}
+            error => {
+                return Err(failure(format!(
+                    "expected standard context transition error, got {error}"
+                )));
+            }
+        }
+        require_baseline(&database, &before, &kernel).await
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn checks_the_expected_base_before_standard_context_transition() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = kernel(&database)?;
+        kernel.bootstrap().await?;
+        let active = kernel.recover().await?;
+        let stale = RevisionPair::new(
+            SourceRevisionId::from_bytes([0x91; 16]),
+            active.pair().catalogue(),
+        );
+        let candidate = standard_context_candidate(stale)?;
+        let before = baseline(&database, &active).await?;
+
+        let error = failed_apply_error(
+            kernel.apply(&candidate).await,
+            "stale version-two candidate unexpectedly reached a successful apply",
+        )?;
+
+        require(
+            error.to_string() == "expected revision pair is not active"
+                && std::error::Error::source(&error).is_none(),
+            "expected-base mismatch did not preserve its existing source-free contract",
+        )?;
+        match error {
+            PostgresKernelError::ExpectedBaseMismatch {
+                expected,
+                active: actual_active,
+            } => require(
+                expected == stale && actual_active == active.pair(),
+                "expected-base mismatch did not win before the standard context guard",
+            )?,
+            error => {
+                return Err(failure(format!(
+                    "expected stale-base mismatch before standard transition, got {error}"
+                )));
+            }
+        }
+        require_baseline(&database, &before, &kernel).await
     })
     .await
 }
@@ -1078,6 +1176,82 @@ fn named_kernel(database: &TestDatabase, application_name: &str) -> TestResult<P
     let mut config = database.config()?;
     config.application_name(application_name);
     Ok(PostgresKernel::new(config))
+}
+
+fn standard_context_candidate(expected_base: RevisionPair) -> TestResult<DeployableRevision> {
+    let context = CatalogueHashContext::version_two(verified_empty_non_golden_standard()?);
+    let bundle = SourceBundleId::from_bytes([0x92; 16]);
+    let bundle_hash = source_bundle_digest(&[])?;
+    let source = StoredSourceRevision::new(
+        bundle,
+        SourceRevisionId::from_bytes([0x93; 16]),
+        Some(expected_base.source()),
+        vec![],
+        bundle_hash,
+        source_revision_record_digest(bundle, Some(expected_base.source()), bundle_hash)?,
+    )?;
+    let catalogue =
+        CatalogueSnapshot::new(CatalogueRevisionId::from_bytes([0x94; 16]), vec![], vec![])?;
+    let catalogue_hash = catalogue_digest_with_context(&context, &catalogue, &[], &[], &[], &[])?;
+
+    Ok(DeployableRevision::new_with_catalogue_hash_context(
+        DeployableRevisionInput::new(
+            expected_base,
+            source,
+            expected_base.catalogue(),
+            catalogue,
+            catalogue_hash,
+            DeployableRevisionContent::new(vec![], vec![], vec![], vec![])
+                .with_current_function_revisions(vec![]),
+        ),
+        context,
+    )?)
+}
+
+fn verified_empty_non_golden_standard()
+-> TestResult<orna_core::revision::VerifiedStandardLibrarySnapshot> {
+    let unit = StoredSourceUnit::new(
+        SourceUnitId::from_bytes([4; 16]),
+        0,
+        "std/malformed.orna",
+        EMPTY_STANDARD_SOURCE,
+        source_unit_content_digest(EMPTY_STANDARD_SOURCE)?,
+    )?;
+    let bundle = SourceBundleId::from_bytes([5; 16]);
+    let bundle_hash = source_bundle_digest(std::slice::from_ref(&unit))?;
+    let source = StoredSourceRevision::new(
+        bundle,
+        SourceRevisionId::from_bytes([6; 16]),
+        None,
+        vec![unit],
+        bundle_hash,
+        source_revision_record_digest(bundle, None, bundle_hash)?,
+    )?;
+    let catalogue = CatalogueSnapshot::new_with_types(
+        CatalogueRevisionId::from_bytes([8; 16]),
+        vec![],
+        vec![],
+        vec![],
+        vec![],
+    )?;
+    let snapshot = StandardLibrarySnapshot::new(
+        StandardLibraryRevisionId::from_bytes([7; 16]),
+        StandardLibraryDigestVersion::Version1,
+        source,
+        "orna.language/1",
+        catalogue,
+        vec![],
+        Sha256Digest::from_bytes(EMPTY_STANDARD_DIGEST),
+    )?;
+
+    Ok(verify_standard_library_snapshot(snapshot)?)
+}
+
+fn failed_apply_error(
+    result: Result<ActiveDatabaseRevision, PostgresKernelError>,
+    success_message: &'static str,
+) -> TestResult<PostgresKernelError> {
+    result.err().ok_or_else(|| failure(success_message))
 }
 
 fn candidate(source: &str, active: &ActiveDatabaseRevision) -> TestResult<DeployableRevision> {
