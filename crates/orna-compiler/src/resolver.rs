@@ -30,20 +30,26 @@ pub(crate) use model::{
     QueryField, QueryObjectType, ResolutionCatalogue,
 };
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    error::Error,
+    fmt,
+};
 
 use orna_core::{
     ExpressionId, TypeId,
     catalogue::{
-        CatalogueSnapshot, FunctionDomain, FunctionSecurity as CatalogueFunctionSecurity,
+        CatalogueSnapshot, CatalogueSnapshotError, FunctionDomain,
+        FunctionSecurity as CatalogueFunctionSecurity,
         FunctionTransaction as CatalogueFunctionTransaction,
         FunctionVolatility as CatalogueFunctionVolatility, OnDeleteAction, PreludeTypeName,
         QualifiedSemanticName, TypeBindingKind, TypeLookupName, ValueTypeKind, ValueTypeMutability,
         ValueTypePersistence,
     },
     revision::{
-        DefinitionIdentity, DefinitionOrigin, DefinitionReferenceKind, SourceOrigin,
-        StoredSourceUnit, VerifiedStandardLibrarySnapshot,
+        DefinitionIdentity, DefinitionOrigin, DefinitionReferenceKind,
+        EMPTY_APPLICATION_CATALOGUE_REVISION_ID, SourceOrigin, StoredSourceUnit,
+        VerifiedStandardLibrarySnapshot,
     },
     source::{SourceBundle, SourceUnit},
     types::StandardScalar,
@@ -82,6 +88,110 @@ use self::identity::{CheckAssignments, IdentityAssignments};
 /// `Parse` values that [`parse_bundle`] retains in the resulting report.
 pub fn check(bundle: &SourceBundle, base: &CatalogueSnapshot) -> CheckReport {
     check_parsed(parse_bundle(bundle), base)
+}
+
+/// An error that prevents a new application from being checked offline.
+#[non_exhaustive]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum NewApplicationCheckError {
+    /// The submitted bundle does not contain exactly one source unit.
+    SourceUnitCount {
+        /// The submitted source-unit count.
+        actual: usize,
+    },
+    /// The compiler could not construct its empty application catalogue.
+    Catalogue {
+        /// The exact empty-catalogue construction failure.
+        source: CatalogueSnapshotError,
+    },
+    /// The checked standard library cannot establish application authority.
+    Context {
+        /// The exact standard-application context failure.
+        source: StandardApplicationContextError,
+    },
+}
+
+impl fmt::Display for NewApplicationCheckError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SourceUnitCount { actual } => write!(
+                formatter,
+                "new-application check requires exactly one source unit; received {actual}"
+            ),
+            Self::Catalogue { source } => write!(
+                formatter,
+                "new-application check could not create the empty application catalogue: {source}"
+            ),
+            Self::Context { source } => write!(
+                formatter,
+                "new-application check could not establish the standard application context: {source}"
+            ),
+        }
+    }
+}
+
+impl Error for NewApplicationCheckError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::SourceUnitCount { .. } => None,
+            Self::Catalogue { source } => Some(source),
+            Self::Context { source } => Some(source),
+        }
+    }
+}
+
+/// Checks one new application source file against checked standard-library authority.
+///
+/// The check uses an ephemeral empty catalogue. It cannot supply application
+/// continuity to renames, deletions, or references that require prior state.
+///
+/// ```compile_fail
+/// use orna_compiler::{CheckReport, StandardApplicationCheckReport};
+///
+/// fn cannot_convert(report: &StandardApplicationCheckReport) {
+///     let _: &CheckReport = report;
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use orna_compiler::{CheckedBundle, CheckedStandardApplicationBundle};
+///
+/// fn cannot_convert(bundle: &CheckedStandardApplicationBundle) {
+///     let _: &CheckedBundle = bundle;
+/// }
+/// ```
+pub fn check_new_application(
+    bundle: &SourceBundle,
+    standard: &CheckedStandardLibrary,
+) -> Result<StandardApplicationCheckReport, NewApplicationCheckError> {
+    check_new_application_with_catalogue(bundle, standard, empty_application_catalogue)
+}
+
+fn check_new_application_with_catalogue(
+    bundle: &SourceBundle,
+    standard: &CheckedStandardLibrary,
+    create_catalogue: impl FnOnce() -> Result<CatalogueSnapshot, CatalogueSnapshotError>,
+) -> Result<StandardApplicationCheckReport, NewApplicationCheckError> {
+    if bundle.len() != 1 {
+        return Err(NewApplicationCheckError::SourceUnitCount {
+            actual: bundle.len(),
+        });
+    }
+
+    let application =
+        create_catalogue().map_err(|source| NewApplicationCheckError::Catalogue { source })?;
+    let context = StandardApplicationCheckContext::try_new(&application, standard)
+        .map_err(|source| NewApplicationCheckError::Context { source })?;
+
+    Ok(check_standard_application(bundle, &context))
+}
+
+fn empty_application_catalogue() -> Result<CatalogueSnapshot, CatalogueSnapshotError> {
+    CatalogueSnapshot::new(
+        EMPTY_APPLICATION_CATALOGUE_REVISION_ID,
+        Vec::new(),
+        Vec::new(),
+    )
 }
 
 impl<'a> StandardApplicationCheckContext<'a> {
@@ -3793,6 +3903,8 @@ fn diagnostic(
 
 #[cfg(test)]
 mod tests {
+    use std::{cell::Cell, error::Error};
+
     use orna_core::{
         CatalogueRevisionId, ExpressionId, FieldId, FunctionId, FunctionRevisionId, ParameterId,
         SchemaId, SourceBundleId, SourceRevisionId, SourceUnitId, StandardLibraryRevisionId,
@@ -3802,11 +3914,12 @@ mod tests {
             verify_standard_library_snapshot,
         },
         catalogue::{
-            CatalogueSnapshot, FieldDefinition, FunctionDefinition, FunctionDomain, FunctionReturn,
-            FunctionReturnColumnDefinition, FunctionSecurity, FunctionTransaction,
-            FunctionVolatility, ObjectTypeDefinition, OnDeleteAction, ParameterDefinition,
-            PreludeTypeName, QualifiedSemanticName, SchemaDefinition, TypeBinding, TypeLookupName,
-            ValueTypeDefinition, ValueTypeMutability, ValueTypePersistence,
+            CatalogueSnapshot, CatalogueSnapshotError, FieldDefinition, FunctionDefinition,
+            FunctionDomain, FunctionReturn, FunctionReturnColumnDefinition, FunctionSecurity,
+            FunctionTransaction, FunctionVolatility, ObjectTypeDefinition, OnDeleteAction,
+            ParameterDefinition, PreludeTypeName, QualifiedSemanticName, SchemaDefinition,
+            TypeBinding, TypeLookupName, ValueTypeDefinition, ValueTypeMutability,
+            ValueTypePersistence,
         },
         revision::{
             DefinitionIdentity, DefinitionOrigin, DefinitionReferenceKind, Sha256Digest,
@@ -3823,10 +3936,11 @@ mod tests {
     use super::{
         CheckAssignments, CheckedApplicationTypeUse, CheckedDefinitionReferenceTarget,
         CheckedTypeId, CheckedTypeUseKind, CheckedValueTypeUse, ConstantValue, DiagnosticCode,
-        IdentityAssignments, SemanticType, StandardApplicationCheckContext, check,
-        check_standard_application, check_standard_library_source,
-        checked_standard_library_with_contract_overrides_for_test, location,
-        reconcile_standard_source, sort_standard_type_uses,
+        IdentityAssignments, NewApplicationCheckError, SemanticType,
+        StandardApplicationCheckContext, StandardApplicationContextError, check,
+        check_new_application, check_new_application_with_catalogue, check_standard_application,
+        check_standard_library_source, checked_standard_library_with_contract_overrides_for_test,
+        location, reconcile_standard_source, sort_standard_type_uses,
     };
     use crate::{ParsedSourceUnit, parse_bundle};
 
@@ -3968,6 +4082,88 @@ mod tests {
                     ordinal: 1,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn new_application_checker_orders_cardinality_catalogue_and_context_gates() {
+        let snapshot = verified_standard_library_for_relational_test();
+        let standard = check_standard_library_source(&snapshot).unwrap();
+        let empty = bundle([]);
+        let two_units = bundle([
+            ("first.orna", "CREATE SCHEMA ;"),
+            ("second.orna", "CREATE SCHEMA ;"),
+        ]);
+
+        for (bundle, actual) in [(&empty, 0), (&two_units, 2)] {
+            let catalogue_was_constructed = Cell::new(false);
+            let error = check_new_application_with_catalogue(bundle, &standard, || {
+                catalogue_was_constructed.set(true);
+                Err(CatalogueSnapshotError::DuplicateSchemaId {
+                    id: SchemaId::from_bytes([0; 16]),
+                })
+            })
+            .unwrap_err();
+            assert_eq!(error, NewApplicationCheckError::SourceUnitCount { actual });
+            assert_eq!(error.clone(), error);
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "new-application check requires exactly one source unit; received {actual}"
+                )
+            );
+            assert!(Error::source(&error).is_none());
+            assert!(!catalogue_was_constructed.get());
+        }
+
+        let hostile_standard =
+            checked_standard_library_with_contract_overrides_for_test(&snapshot, &[(0, "other@1")])
+                .unwrap();
+        let source = bundle([("application.orna", "CREATE SCHEMA ;")]);
+        let catalogue_source = CatalogueSnapshotError::DuplicateSchemaId {
+            id: SchemaId::from_bytes([0; 16]),
+        };
+        let catalogue_error =
+            check_new_application_with_catalogue(&source, &hostile_standard, || {
+                Err(catalogue_source.clone())
+            })
+            .unwrap_err();
+        assert_eq!(
+            catalogue_error,
+            NewApplicationCheckError::Catalogue {
+                source: catalogue_source,
+            }
+        );
+        assert_eq!(
+            catalogue_error.to_string(),
+            "new-application check could not create the empty application catalogue: duplicate schema identity schema:00000000000000000000000000"
+        );
+        assert_eq!(
+            Error::source(&catalogue_error).map(ToString::to_string),
+            Some("duplicate schema identity schema:00000000000000000000000000".to_owned())
+        );
+
+        let context_error = check_new_application(&source, &hostile_standard).unwrap_err();
+        let expected_context = StandardApplicationContextError::UnsupportedCompatibilityContract {
+            type_id: TypeId::from_bytes([3; 16]),
+            contract: "other@1".to_owned(),
+        };
+        assert_eq!(
+            context_error,
+            NewApplicationCheckError::Context {
+                source: expected_context.clone(),
+            }
+        );
+        assert_eq!(
+            context_error.to_string(),
+            "new-application check could not establish the standard application context: the standard value type type:0c1g60r30c1g60r30c1g60r30c uses unsupported compatibility contract other@1"
+        );
+        assert_eq!(
+            Error::source(&context_error).map(ToString::to_string),
+            Some(
+                "the standard value type type:0c1g60r30c1g60r30c1g60r30c uses unsupported compatibility contract other@1"
+                    .to_owned()
+            )
         );
     }
 
