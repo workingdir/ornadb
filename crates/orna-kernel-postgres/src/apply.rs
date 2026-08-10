@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use orna_core::{
     CatalogueRevisionId, ExpressionId, FieldId, FunctionId, FunctionRevisionId, ParameterId,
-    SchemaId, SourceRevisionId, TypeId,
+    SchemaId, SourceBundleId, SourceRevisionId, StandardLibraryRevisionId, TypeId,
     canonical_hash::{
         artifact_payload_digest, catalogue_digest, function_declaration_digest,
         source_bundle_digest, source_revision_digest, source_unit_content_digest,
@@ -15,9 +15,10 @@ use orna_core::{
     },
     physical::plan_physical_changes,
     revision::{
-        ActiveDatabaseRevision, DefinitionIdentity, DefinitionOrigin, DefinitionReference,
-        DefinitionReferenceKind, DefinitionReferenceTarget, DeployableRevision,
-        FunctionRevisionRecord, RevisionPair, Sha256Digest, SourceOrigin,
+        ActiveDatabaseRevision, CatalogueHashContext, DefinitionIdentity, DefinitionOrigin,
+        DefinitionReference, DefinitionReferenceKind, DefinitionReferenceTarget,
+        DeployableRevision, FunctionRevisionRecord, RevisionPair, Sha256Digest, SourceOrigin,
+        VerifiedStandardLibrarySnapshot,
     },
     types::{ResolvedType, StandardScalar},
 };
@@ -32,6 +33,72 @@ use crate::{
 
 const ACTIVE_RELATION: &str = "_orna_kernel.active_revision";
 const CONTRACT_VERSION: i16 = 1;
+
+/// The immutable standard-library facts that pin a version-2 application
+/// catalogue context.
+///
+/// The PostgreSQL kernel constructs this value only from a core-verified
+/// standard snapshot while comparing normal apply revisions.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StandardContextIdentity {
+    standard_library_revision: StandardLibraryRevisionId,
+    standard_catalogue_revision: CatalogueRevisionId,
+    source_bundle: SourceBundleId,
+    source_revision: SourceRevisionId,
+    source_bundle_hash: Sha256Digest,
+    source_revision_hash: Sha256Digest,
+    standard_library_digest: Sha256Digest,
+}
+
+impl StandardContextIdentity {
+    fn from_verified_snapshot(snapshot: &VerifiedStandardLibrarySnapshot) -> Self {
+        let source = snapshot.source();
+        Self {
+            standard_library_revision: snapshot.revision(),
+            standard_catalogue_revision: snapshot.catalogue().revision(),
+            source_bundle: source.bundle(),
+            source_revision: source.id(),
+            source_bundle_hash: source.bundle_hash(),
+            source_revision_hash: source.revision_hash(),
+            standard_library_digest: snapshot.digest(),
+        }
+    }
+
+    /// Returns the pinned immutable standard-library revision identity.
+    pub fn standard_library_revision(&self) -> StandardLibraryRevisionId {
+        self.standard_library_revision
+    }
+
+    /// Returns the pinned standard catalogue revision identity.
+    pub fn standard_catalogue_revision(&self) -> CatalogueRevisionId {
+        self.standard_catalogue_revision
+    }
+
+    /// Returns the standard source-bundle identity.
+    pub fn source_bundle(&self) -> SourceBundleId {
+        self.source_bundle
+    }
+
+    /// Returns the standard source-revision identity.
+    pub fn source_revision(&self) -> SourceRevisionId {
+        self.source_revision
+    }
+
+    /// Returns the canonical standard source-bundle hash.
+    pub fn source_bundle_hash(&self) -> Sha256Digest {
+        self.source_bundle_hash
+    }
+
+    /// Returns the canonical standard source-revision hash.
+    pub fn source_revision_hash(&self) -> Sha256Digest {
+        self.source_revision_hash
+    }
+
+    /// Returns the verified canonical standard-library digest.
+    pub fn standard_library_digest(&self) -> Sha256Digest {
+        self.standard_library_digest
+    }
+}
 
 impl PostgresKernel {
     /// Installs a complete candidate revision as one atomic database change.
@@ -94,6 +161,10 @@ async fn apply_transaction(
             active: active.pair(),
         });
     }
+    guard_standard_context_transition(
+        active.catalogue_hash_context(),
+        candidate.catalogue_hash_context(),
+    )?;
 
     let materialized = materialize(candidate, &active)?;
     verify_candidate_hashes(candidate, &materialized)?;
@@ -126,6 +197,39 @@ async fn apply_transaction(
         ));
     }
     Ok(recovered)
+}
+
+fn guard_standard_context_transition(
+    active: &CatalogueHashContext,
+    candidate: &CatalogueHashContext,
+) -> Result<(), PostgresKernelError> {
+    match (active, candidate) {
+        (CatalogueHashContext::Version1, CatalogueHashContext::Version1) => Ok(()),
+        (
+            CatalogueHashContext::Version2 { standard: active },
+            CatalogueHashContext::Version2 {
+                standard: candidate,
+            },
+        ) => {
+            let active = StandardContextIdentity::from_verified_snapshot(active);
+            let candidate = StandardContextIdentity::from_verified_snapshot(candidate);
+            standard_context_mismatch(active, candidate).map_or(Ok(()), Err)
+        }
+        _ => Err(PostgresKernelError::StandardContextTransitionRequired {
+            active: active.version(),
+            candidate: candidate.version(),
+        }),
+    }
+}
+
+fn standard_context_mismatch(
+    active: StandardContextIdentity,
+    candidate: StandardContextIdentity,
+) -> Option<PostgresKernelError> {
+    (active != candidate).then(|| PostgresKernelError::StandardContextMismatch {
+        active: Box::new(active),
+        candidate: Box::new(candidate),
+    })
 }
 
 async fn lock_active_pair(
@@ -1158,16 +1262,232 @@ fn reference_columns(
 #[cfg(test)]
 mod tests {
     use orna_core::{
-        ExpressionId, FieldId, FunctionId, ParameterId, TypeId,
+        CatalogueRevisionId, ExpressionId, FieldId, FunctionId, ParameterId, SourceBundleId,
+        SourceRevisionId, SourceUnitId, StandardLibraryRevisionId, TypeId,
+        canonical_hash::{
+            source_bundle_digest, source_revision_record_digest, source_unit_content_digest,
+            verify_standard_library_snapshot,
+        },
+        catalogue::CatalogueSnapshot,
         catalogue::FunctionTransaction,
-        revision::{DefinitionReferenceKind, DefinitionReferenceTarget, ExecutableArtifactKind},
+        revision::{
+            CatalogueHashContext, DefinitionReferenceKind, DefinitionReferenceTarget,
+            ExecutableArtifactKind, Sha256Digest, StandardLibraryDigestVersion,
+            StandardLibrarySnapshot, StoredSourceRevision, StoredSourceUnit,
+        },
         types::{ResolvedType, StandardScalar},
     };
 
     use super::{
-        POSTGRES_REFERENCE_KINDS, artifact_kind, function_transaction, positive_i32, positive_i64,
-        reference_kind, reference_target, scalar, type_columns,
+        POSTGRES_REFERENCE_KINDS, StandardContextIdentity, artifact_kind, function_transaction,
+        guard_standard_context_transition, positive_i32, positive_i64, reference_kind,
+        reference_target, scalar, type_columns,
     };
+    use crate::PostgresKernelError;
+
+    #[derive(Clone, Copy)]
+    struct StandardContextFixture {
+        source_unit: [u8; 16],
+        source_bundle: [u8; 16],
+        source_revision: [u8; 16],
+        standard_revision: [u8; 16],
+        catalogue_revision: [u8; 16],
+        logical_path: &'static str,
+        content: &'static str,
+        source_bundle_hash: [u8; 32],
+        source_revision_hash: [u8; 32],
+        standard_digest: [u8; 32],
+    }
+
+    const BASE_STANDARD_CONTEXT: StandardContextFixture = StandardContextFixture {
+        source_unit: [4; 16],
+        source_bundle: [5; 16],
+        source_revision: [6; 16],
+        standard_revision: [7; 16],
+        catalogue_revision: [8; 16],
+        logical_path: "std/malformed.orna",
+        content: "CREATE SCHEMA std.;CREATE SCHEMA ;CREATE SCHEMA std;",
+        source_bundle_hash: [
+            0x7e, 0x67, 0xc9, 0x9b, 0x30, 0x05, 0xb6, 0x4f, 0x0e, 0x4f, 0x6a, 0xb9, 0xe4, 0xde,
+            0x40, 0x3b, 0xe3, 0xb9, 0xdb, 0xb9, 0x57, 0x59, 0xe6, 0x57, 0x6d, 0x8e, 0x3e, 0x7f,
+            0xfb, 0xa4, 0x80, 0xd8,
+        ],
+        source_revision_hash: [
+            0x80, 0x16, 0x8f, 0xbd, 0xf3, 0xba, 0xa8, 0x30, 0x37, 0xd7, 0x17, 0xfc, 0xa8, 0xfd,
+            0xc3, 0x02, 0x34, 0x11, 0x18, 0x79, 0xe1, 0x33, 0x0a, 0x27, 0x98, 0x0f, 0x4a, 0xa7,
+            0x65, 0x6c, 0x61, 0xea,
+        ],
+        standard_digest: [
+            0x6d, 0x3f, 0xaa, 0x32, 0x82, 0x0e, 0xeb, 0x73, 0x77, 0xc5, 0xbd, 0xfa, 0x3e, 0x8d,
+            0x6c, 0xaf, 0xdc, 0x95, 0xa6, 0x7c, 0xbd, 0xef, 0x5b, 0x02, 0x63, 0x1f, 0x29, 0x1d,
+            0x14, 0xcc, 0x68, 0xae,
+        ],
+    };
+
+    const ALTERNATE_STANDARD_CONTEXT: StandardContextFixture = StandardContextFixture {
+        source_unit: [14; 16],
+        source_bundle: [15; 16],
+        source_revision: [16; 16],
+        standard_revision: [17; 16],
+        catalogue_revision: [18; 16],
+        logical_path: "std/alternate.orna",
+        content: "CREATE SCHEMA std.;CREATE SCHEMA ;CREATE SCHEMA std;\n",
+        source_bundle_hash: [
+            0x9c, 0xb1, 0x72, 0x54, 0x07, 0x7f, 0xdb, 0xae, 0x68, 0x2d, 0x7b, 0xd8, 0x52, 0x91,
+            0x3f, 0x91, 0xe6, 0x07, 0x44, 0x16, 0x1f, 0xc9, 0xee, 0x32, 0x20, 0xc9, 0xef, 0xc9,
+            0x9b, 0x5d, 0x19, 0x2d,
+        ],
+        source_revision_hash: [
+            0x67, 0x6a, 0xdc, 0x25, 0xfc, 0xc1, 0xd6, 0x7a, 0x53, 0xfe, 0x5d, 0x84, 0x2e, 0xdc,
+            0x0f, 0xe3, 0x04, 0x61, 0x33, 0x7d, 0x95, 0x5a, 0x4f, 0x04, 0x78, 0x84, 0xd7, 0xed,
+            0xd1, 0x71, 0x19, 0xab,
+        ],
+        standard_digest: [
+            0xa3, 0xce, 0x6d, 0x48, 0x15, 0x61, 0x63, 0x33, 0x7b, 0xad, 0xe0, 0xae, 0xb9, 0x18,
+            0x6e, 0x05, 0x00, 0x66, 0x20, 0x31, 0xe9, 0x0c, 0xae, 0x60, 0x14, 0x87, 0x1a, 0x7c,
+            0x3f, 0xd3, 0xe1, 0x5a,
+        ],
+    };
+
+    fn verified_standard_context(
+        fixture: StandardContextFixture,
+    ) -> orna_core::revision::VerifiedStandardLibrarySnapshot {
+        let unit = StoredSourceUnit::new(
+            SourceUnitId::from_bytes(fixture.source_unit),
+            0,
+            fixture.logical_path,
+            fixture.content,
+            source_unit_content_digest(fixture.content).unwrap(),
+        )
+        .unwrap();
+        let bundle = SourceBundleId::from_bytes(fixture.source_bundle);
+        let bundle_hash = source_bundle_digest(std::slice::from_ref(&unit)).unwrap();
+        let source = StoredSourceRevision::new(
+            bundle,
+            SourceRevisionId::from_bytes(fixture.source_revision),
+            None,
+            vec![unit],
+            bundle_hash,
+            source_revision_record_digest(bundle, None, bundle_hash).unwrap(),
+        )
+        .unwrap();
+        let snapshot = StandardLibrarySnapshot::new(
+            StandardLibraryRevisionId::from_bytes(fixture.standard_revision),
+            StandardLibraryDigestVersion::Version1,
+            source,
+            "orna.language/1",
+            CatalogueSnapshot::new_with_types(
+                CatalogueRevisionId::from_bytes(fixture.catalogue_revision),
+                vec![],
+                vec![],
+                vec![],
+                vec![],
+            )
+            .unwrap(),
+            vec![],
+            Sha256Digest::from_bytes(fixture.standard_digest),
+        )
+        .unwrap();
+
+        verify_standard_library_snapshot(snapshot).unwrap()
+    }
+
+    fn assert_standard_context_identity(
+        identity: StandardContextIdentity,
+        fixture: StandardContextFixture,
+    ) {
+        assert_eq!(
+            identity.standard_library_revision(),
+            StandardLibraryRevisionId::from_bytes(fixture.standard_revision)
+        );
+        assert_eq!(
+            identity.standard_catalogue_revision(),
+            CatalogueRevisionId::from_bytes(fixture.catalogue_revision)
+        );
+        assert_eq!(
+            identity.source_bundle(),
+            SourceBundleId::from_bytes(fixture.source_bundle)
+        );
+        assert_eq!(
+            identity.source_revision(),
+            SourceRevisionId::from_bytes(fixture.source_revision)
+        );
+        assert_eq!(
+            identity.source_bundle_hash(),
+            Sha256Digest::from_bytes(fixture.source_bundle_hash)
+        );
+        assert_eq!(
+            identity.source_revision_hash(),
+            Sha256Digest::from_bytes(fixture.source_revision_hash)
+        );
+        assert_eq!(
+            identity.standard_library_digest(),
+            Sha256Digest::from_bytes(fixture.standard_digest)
+        );
+    }
+
+    #[test]
+    fn standard_context_guard_uses_core_verified_version_two_facts() {
+        let active_standard = verified_standard_context(BASE_STANDARD_CONTEXT);
+        let candidate_standard = verified_standard_context(ALTERNATE_STANDARD_CONTEXT);
+        let active = StandardContextIdentity::from_verified_snapshot(&active_standard);
+        let candidate = StandardContextIdentity::from_verified_snapshot(&candidate_standard);
+
+        assert_standard_context_identity(active, BASE_STANDARD_CONTEXT);
+        assert_standard_context_identity(candidate, ALTERNATE_STANDARD_CONTEXT);
+        assert!(
+            guard_standard_context_transition(
+                &CatalogueHashContext::version_one(),
+                &CatalogueHashContext::version_one(),
+            )
+            .is_ok()
+        );
+
+        let active_context = CatalogueHashContext::version_two(active_standard.clone());
+        assert!(guard_standard_context_transition(&active_context, &active_context).is_ok());
+
+        let transition = guard_standard_context_transition(
+            &active_context,
+            &CatalogueHashContext::version_one(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            transition,
+            PostgresKernelError::StandardContextTransitionRequired {
+                active: orna_core::revision::CatalogueHashVersion::Version2,
+                candidate: orna_core::revision::CatalogueHashVersion::Version1,
+            }
+        ));
+
+        let mismatch = guard_standard_context_transition(
+            &active_context,
+            &CatalogueHashContext::version_two(candidate_standard),
+        )
+        .unwrap_err();
+        let (actual_active, actual_candidate) = match mismatch {
+            PostgresKernelError::StandardContextMismatch { active, candidate } => {
+                (active, candidate)
+            }
+            other => {
+                assert!(
+                    matches!(other, PostgresKernelError::StandardContextMismatch { .. }),
+                    "version-two contexts must report a standard context mismatch"
+                );
+                return;
+            }
+        };
+        assert_eq!(*actual_active, active);
+        assert_eq!(*actual_candidate, candidate);
+        let error = PostgresKernelError::StandardContextMismatch {
+            active: actual_active,
+            candidate: actual_candidate,
+        };
+        assert_eq!(
+            error.to_string(),
+            "the active and candidate standard contexts do not match"
+        );
+        assert!(std::error::Error::source(&error).is_none());
+    }
 
     #[test]
     fn scalar_encoder_uses_the_complete_stable_postgres_vocabulary() {
