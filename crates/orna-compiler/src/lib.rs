@@ -16,6 +16,7 @@ mod resolver;
 
 pub use prepare::{PrepareError, prepare};
 
+pub use orna_core::revision::EMPTY_APPLICATION_CATALOGUE_REVISION_ID;
 pub use resolver::{
     CheckReport, CheckedApplicationTypeUse, CheckedBundle, CheckedClientFunction, CheckedDefault,
     CheckedDefinitionReference, CheckedDefinitionReferenceTarget, CheckedExpressionId,
@@ -27,11 +28,12 @@ pub use resolver::{
     CheckedStandardApplicationParameter, CheckedStandardApplicationReturnColumn,
     CheckedStandardApplicationServerFunction, CheckedStandardLibrary, CheckedStandardSchema,
     CheckedStandardTypeBinding, CheckedStandardTypeReference, CheckedStandardValueType,
-    CheckedTypeId, CheckedTypeUseKind, CheckedValueTypeUse, ConstantValue, ProvisionalExpressionId,
-    ProvisionalFieldId, ProvisionalFunctionId, ProvisionalParameterId, ProvisionalSchemaId,
-    ProvisionalTypeId, SemanticType, StandardApplicationCheckContext,
-    StandardApplicationCheckReport, StandardApplicationContextError, StandardLibraryCheckError,
-    check, check_standard_application, check_standard_library_source,
+    CheckedTypeId, CheckedTypeUseKind, CheckedValueTypeUse, ConstantValue,
+    NewApplicationCheckError, ProvisionalExpressionId, ProvisionalFieldId, ProvisionalFunctionId,
+    ProvisionalParameterId, ProvisionalSchemaId, ProvisionalTypeId, SemanticType,
+    StandardApplicationCheckContext, StandardApplicationCheckReport,
+    StandardApplicationContextError, StandardLibraryCheckError, check, check_new_application,
+    check_standard_application, check_standard_library_source,
 };
 
 /// Resolves an identifier component with Orna quoted-name rules.
@@ -304,8 +306,9 @@ mod tests {
     };
 
     use super::{
-        CheckedTypeUseKind, CheckedValueTypeUse, DiagnosticCode, StandardApplicationCheckContext,
-        StandardApplicationContextError, StandardLibraryCheckError, check,
+        CheckedTypeUseKind, CheckedValueTypeUse, DiagnosticCode,
+        EMPTY_APPLICATION_CATALOGUE_REVISION_ID, StandardApplicationCheckContext,
+        StandardApplicationContextError, StandardLibraryCheckError, check, check_new_application,
         check_standard_application, check_standard_library_source, parse_bundle,
     };
 
@@ -1249,6 +1252,39 @@ mod tests {
         );
         assert!(checked.uses().is_empty());
         assert!(checked.standard_type_references().is_empty());
+    }
+
+    #[test]
+    fn checks_one_new_application_against_the_empty_sentinel_catalogue() {
+        let standard =
+            check_standard_library_source(&verified_canonical_standard_source_fixture()).unwrap();
+        let source = "CREATE SCHEMA app; CREATE TYPE app.task AS OBJECT (done BOOLEAN NOT NULL);";
+        let bundle = SourceBundle::new([SourceUnit::new("application.orna", source)]).unwrap();
+
+        let report = check_new_application(&bundle, &standard).unwrap();
+
+        assert_eq!(report.diagnostics(), &[]);
+        let checked = report.checked_bundle().unwrap();
+        assert_eq!(
+            checked.base_catalogue_revision(),
+            EMPTY_APPLICATION_CATALOGUE_REVISION_ID
+        );
+        assert_eq!(EMPTY_APPLICATION_CATALOGUE_REVISION_ID.to_bytes(), [0; 16]);
+        assert_eq!(checked.object_types().count(), 1);
+        assert_eq!(checked.uses().len(), 1);
+    }
+
+    #[test]
+    fn checks_new_application_source_diagnostics_after_authority_establishment() {
+        let standard = check_standard_library_source(&verified_standard_source_fixture()).unwrap();
+        let bundle =
+            SourceBundle::new([SourceUnit::new("application.orna", "CREATE SCHEMA ;")]).unwrap();
+        let expected_diagnostics = parse_bundle(&bundle).diagnostics().to_vec();
+
+        let report = check_new_application(&bundle, &standard).unwrap();
+
+        assert_eq!(report.diagnostics(), expected_diagnostics);
+        assert!(report.checked_bundle().is_none());
     }
 
     #[test]

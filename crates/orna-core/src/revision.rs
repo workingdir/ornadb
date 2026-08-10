@@ -25,6 +25,27 @@ use crate::{
     catalogue::{CatalogueSnapshot, FunctionDomain, FunctionReturn},
 };
 
+/// The reserved catalogue identity for the ephemeral offline application check.
+///
+/// This identity must not enter an active, recovered, or deployable revision.
+pub const EMPTY_APPLICATION_CATALOGUE_REVISION_ID: CatalogueRevisionId =
+    CatalogueRevisionId::from_bytes([0; 16]);
+
+/// The durable revision position that cannot use the offline-check sentinel.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DurableCatalogueRevisionRole {
+    /// An active or recovered application catalogue.
+    ActiveOrRecoveredApplication,
+    /// An active or recovered standard catalogue.
+    ActiveOrRecoveredStandard,
+    /// A deployable revision's expected base catalogue.
+    DeployableExpectedBase,
+    /// A deployable revision's explicit parent catalogue.
+    DeployableParent,
+    /// A deployable revision's candidate catalogue.
+    DeployableCandidate,
+}
+
 /// A durable catalogue canonical-hash contract version.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -411,6 +432,10 @@ impl StandardLibrarySnapshot {
         origins: Vec<DefinitionOrigin>,
         digest: Sha256Digest,
     ) -> Result<Self, RevisionInvariantError> {
+        reject_offline_check_catalogue_revision(
+            catalogue.revision(),
+            DurableCatalogueRevisionRole::ActiveOrRecoveredStandard,
+        )?;
         if source.parent().is_some() {
             return Err(RevisionInvariantError::StandardLibrarySourceHasParent {
                 source: source.id(),
@@ -1122,6 +1147,16 @@ impl ActiveDatabaseRevision {
                     references,
                 },
         } = input;
+        reject_offline_check_catalogue_revision(
+            catalogue.revision(),
+            DurableCatalogueRevisionRole::ActiveOrRecoveredApplication,
+        )?;
+        if let Some(standard) = catalogue_hash_context.standard() {
+            reject_offline_check_catalogue_revision(
+                standard.catalogue().revision(),
+                DurableCatalogueRevisionRole::ActiveOrRecoveredStandard,
+            )?;
+        }
         validate_pair(&pair, &source, &catalogue)?;
         validate_catalogue_hash_context_coherence(
             &catalogue_hash_context,
@@ -1391,6 +1426,18 @@ impl DeployableRevision {
                     references,
                 },
         } = input;
+        reject_offline_check_catalogue_revision(
+            expected_base.catalogue(),
+            DurableCatalogueRevisionRole::DeployableExpectedBase,
+        )?;
+        reject_offline_check_catalogue_revision(
+            parent_catalogue,
+            DurableCatalogueRevisionRole::DeployableParent,
+        )?;
+        reject_offline_check_catalogue_revision(
+            candidate.revision(),
+            DurableCatalogueRevisionRole::DeployableCandidate,
+        )?;
         if source.parent() != Some(expected_base.source()) {
             return Err(RevisionInvariantError::DeployableSourceParentMismatch {
                 expected: expected_base.source(),
@@ -1598,6 +1645,18 @@ fn validate_pair(
             pair: pair.catalogue,
             catalogue: catalogue.revision(),
         });
+    }
+    Ok(())
+}
+
+fn reject_offline_check_catalogue_revision(
+    revision: CatalogueRevisionId,
+    role: DurableCatalogueRevisionRole,
+) -> Result<(), RevisionInvariantError> {
+    if revision == EMPTY_APPLICATION_CATALOGUE_REVISION_ID {
+        return Err(
+            RevisionInvariantError::ReservedOfflineCheckCatalogueRevision { revision, role },
+        );
     }
     Ok(())
 }
@@ -2282,6 +2341,13 @@ pub enum RevisionInvariantError {
         pair: CatalogueRevisionId,
         catalogue: CatalogueRevisionId,
     },
+    /// A durable revision position uses the offline-check-only catalogue identity.
+    ReservedOfflineCheckCatalogueRevision {
+        /// The reserved identity, always [`EMPTY_APPLICATION_CATALOGUE_REVISION_ID`].
+        revision: CatalogueRevisionId,
+        /// The rejected durable revision position.
+        role: DurableCatalogueRevisionRole,
+    },
     /// A deployable source parent differs from its expected base source.
     DeployableSourceParentMismatch {
         expected: SourceRevisionId,
@@ -2471,6 +2537,8 @@ impl fmt::Display for RevisionInvariantError {
             CatalogueRevisionPairMismatch { .. } => {
                 formatter.write_str("revision pair catalogue does not match catalogue snapshot")
             }
+            ReservedOfflineCheckCatalogueRevision { .. } => formatter
+                .write_str("the reserved offline-check catalogue identity cannot be used in a durable revision"),
             DeployableSourceParentMismatch { .. } => {
                 formatter.write_str("deployable source parent does not match expected base")
             }
@@ -2683,6 +2751,22 @@ mod tests {
         CatalogueSnapshot::new(CatalogueRevisionId::from_bytes(id::<7>()), vec![], vec![]).unwrap()
     }
 
+    fn unchecked_standard_with_catalogue_revision(
+        catalogue_revision: CatalogueRevisionId,
+    ) -> VerifiedStandardLibrarySnapshot {
+        VerifiedStandardLibrarySnapshot::new(StandardLibrarySnapshot {
+            inner: Arc::new(StandardLibrarySnapshotData {
+                revision: StandardLibraryRevisionId::from_bytes(id::<74>()),
+                digest_version: StandardLibraryDigestVersion::Version1,
+                source: source(None),
+                language_version: "orna.language/1".to_owned(),
+                catalogue: CatalogueSnapshot::new(catalogue_revision, vec![], vec![]).unwrap(),
+                origins: vec![],
+                digest: digest::<75>(),
+            }),
+        })
+    }
+
     fn function_catalogue(function_revision: FunctionRevisionId) -> CatalogueSnapshot {
         function_catalogue_with_objects(function_revision, vec![])
     }
@@ -2772,6 +2856,157 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "standard library language version is empty"
+        );
+    }
+
+    #[test]
+    fn rejects_the_offline_application_sentinel_from_a_standard_snapshot() {
+        let revision = StandardLibraryRevisionId::from_bytes(id::<74>());
+        let catalogue =
+            CatalogueSnapshot::new(EMPTY_APPLICATION_CATALOGUE_REVISION_ID, vec![], vec![])
+                .unwrap();
+
+        let error = StandardLibrarySnapshot::new(
+            revision,
+            StandardLibraryDigestVersion::Version1,
+            source(None),
+            "orna.language/1",
+            catalogue,
+            vec![],
+            digest::<75>(),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            RevisionInvariantError::ReservedOfflineCheckCatalogueRevision {
+                revision: EMPTY_APPLICATION_CATALOGUE_REVISION_ID,
+                role: DurableCatalogueRevisionRole::ActiveOrRecoveredStandard,
+            }
+        );
+        assert_eq!(
+            error.to_string(),
+            "the reserved offline-check catalogue identity cannot be used in a durable revision"
+        );
+        assert!(Error::source(&error).is_none());
+    }
+
+    #[test]
+    fn rejects_the_offline_application_sentinel_from_active_and_deployable_positions_in_order() {
+        let regular_catalogue = CatalogueRevisionId::from_bytes(id::<7>());
+        let expected_source = SourceRevisionId::from_bytes(id::<81>());
+        let candidate_source = source(Some(expected_source));
+        let assert_reserved = |error: RevisionInvariantError, role| {
+            assert_eq!(
+                error,
+                RevisionInvariantError::ReservedOfflineCheckCatalogueRevision {
+                    revision: EMPTY_APPLICATION_CATALOGUE_REVISION_ID,
+                    role,
+                }
+            );
+            assert_eq!(
+                error.to_string(),
+                "the reserved offline-check catalogue identity cannot be used in a durable revision"
+            );
+            assert!(Error::source(&error).is_none());
+        };
+
+        let active_source = source(None);
+        let active_error = ActiveDatabaseRevision::new(
+            RevisionPair::new(active_source.id(), EMPTY_APPLICATION_CATALOGUE_REVISION_ID),
+            active_source,
+            CatalogueSnapshot::new(EMPTY_APPLICATION_CATALOGUE_REVISION_ID, vec![], vec![])
+                .unwrap(),
+            digest::<76>(),
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        )
+        .unwrap_err();
+        assert_reserved(
+            active_error,
+            DurableCatalogueRevisionRole::ActiveOrRecoveredApplication,
+        );
+
+        let active_source = source(None);
+        let app_before_standard_error = ActiveDatabaseRevision::new_with_catalogue_hash_context(
+            ActiveDatabaseRevisionInput::new(
+                RevisionPair::new(active_source.id(), EMPTY_APPLICATION_CATALOGUE_REVISION_ID),
+                active_source,
+                CatalogueSnapshot::new(EMPTY_APPLICATION_CATALOGUE_REVISION_ID, vec![], vec![])
+                    .unwrap(),
+                digest::<76>(),
+                ActiveRevisionContent::new(vec![], vec![], vec![], vec![]),
+            ),
+            CatalogueHashContext::version_two(unchecked_standard_with_catalogue_revision(
+                EMPTY_APPLICATION_CATALOGUE_REVISION_ID,
+            )),
+        )
+        .unwrap_err();
+        assert_reserved(
+            app_before_standard_error,
+            DurableCatalogueRevisionRole::ActiveOrRecoveredApplication,
+        );
+
+        let active_source = source(None);
+        let standard_error = ActiveDatabaseRevision::new_with_catalogue_hash_context(
+            ActiveDatabaseRevisionInput::new(
+                RevisionPair::new(active_source.id(), regular_catalogue),
+                active_source,
+                CatalogueSnapshot::new(regular_catalogue, vec![], vec![]).unwrap(),
+                digest::<76>(),
+                ActiveRevisionContent::new(vec![], vec![], vec![], vec![]),
+            ),
+            CatalogueHashContext::version_two(unchecked_standard_with_catalogue_revision(
+                EMPTY_APPLICATION_CATALOGUE_REVISION_ID,
+            )),
+        )
+        .unwrap_err();
+        assert_reserved(
+            standard_error,
+            DurableCatalogueRevisionRole::ActiveOrRecoveredStandard,
+        );
+
+        let deployable = |expected_catalogue, parent_catalogue, candidate_catalogue| {
+            DeployableRevision::new(
+                RevisionPair::new(expected_source, expected_catalogue),
+                candidate_source.clone(),
+                parent_catalogue,
+                CatalogueSnapshot::new(candidate_catalogue, vec![], vec![]).unwrap(),
+                digest::<77>(),
+                vec![],
+                vec![],
+                vec![],
+                vec![],
+            )
+        };
+        assert_reserved(
+            deployable(
+                EMPTY_APPLICATION_CATALOGUE_REVISION_ID,
+                EMPTY_APPLICATION_CATALOGUE_REVISION_ID,
+                EMPTY_APPLICATION_CATALOGUE_REVISION_ID,
+            )
+            .unwrap_err(),
+            DurableCatalogueRevisionRole::DeployableExpectedBase,
+        );
+        assert_reserved(
+            deployable(
+                regular_catalogue,
+                EMPTY_APPLICATION_CATALOGUE_REVISION_ID,
+                EMPTY_APPLICATION_CATALOGUE_REVISION_ID,
+            )
+            .unwrap_err(),
+            DurableCatalogueRevisionRole::DeployableParent,
+        );
+        assert_reserved(
+            deployable(
+                regular_catalogue,
+                regular_catalogue,
+                EMPTY_APPLICATION_CATALOGUE_REVISION_ID,
+            )
+            .unwrap_err(),
+            DurableCatalogueRevisionRole::DeployableCandidate,
         );
     }
 
