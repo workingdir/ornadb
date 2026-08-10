@@ -1,6 +1,6 @@
 mod support;
 
-use std::str::FromStr;
+use std::{error::Error, str::FromStr};
 
 use orna_core::{
     CatalogueRevisionId, ExpressionId, FieldId, FunctionId, FunctionRevisionId, ParameterId,
@@ -18,8 +18,10 @@ use orna_core::{
     },
     revision::{
         DefinitionIdentity, DefinitionOrigin, DefinitionReference, DefinitionReferenceKind,
-        DefinitionReferenceTarget, ExecutableArtifact, ExecutableArtifactKind, ExpressionArtifact,
-        FunctionRevisionRecord, SourceOrigin, StoredSourceUnit,
+        DefinitionReferenceTarget, DurableCatalogueRevisionRole,
+        EMPTY_APPLICATION_CATALOGUE_REVISION_ID, ExecutableArtifact, ExecutableArtifactKind,
+        ExpressionArtifact, FunctionRevisionRecord, RevisionInvariantError, SourceOrigin,
+        StoredSourceUnit,
     },
     types::{ResolvedType, StandardScalar},
 };
@@ -83,6 +85,44 @@ async fn recovers_the_exact_bootstrapped_revision_after_reconnecting() -> TestRe
                 && recovered.function_revisions().is_empty()
                 && recovered.historical_function_revisions().is_empty(),
             "the bootstrapped empty revision recovered invented members",
+        )
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn rejects_the_offline_application_catalogue_identity_without_repair() -> TestResult<()> {
+    with_test_database(|database| async move {
+        kernel(&database)?.bootstrap().await?;
+        replace_active_catalogue_identity_with_offline_sentinel(&database).await?;
+
+        let before = snapshot_kernel_tables(&database).await?;
+        require(
+            active_catalogue_identity(&database).await? == EMPTY_APPLICATION_CATALOGUE_REVISION_ID,
+            "fixture did not retain the offline application catalogue identity",
+        )?;
+
+        let first = recovery_error(&database).await?;
+        require_offline_application_catalogue_error(&first)?;
+        require(
+            active_catalogue_identity(&database).await? == EMPTY_APPLICATION_CATALOGUE_REVISION_ID,
+            "the first rejected recovery changed the offline application catalogue identity",
+        )?;
+        require(
+            snapshot_kernel_tables(&database).await? == before,
+            "recovery repaired or wrote a table after the first sentinel rejection",
+        )?;
+
+        let second = recovery_error(&database).await?;
+        require_offline_application_catalogue_error(&second)?;
+        require(
+            active_catalogue_identity(&database).await? == EMPTY_APPLICATION_CATALOGUE_REVISION_ID,
+            "the repeated rejected recovery changed the offline application catalogue identity",
+        )?;
+        require(
+            snapshot_kernel_tables(&database).await? == before,
+            "recovery repaired or wrote a table after the repeated sentinel rejection",
         )
     })
     .await
@@ -3118,6 +3158,170 @@ async fn install_schema_revision(database: &TestDatabase) -> TestResult<SchemaFi
     }
     .await;
     finish_session(operation_result, session.shutdown().await, "schema fixture")
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct KernelTableSnapshot {
+    name: String,
+    rows: String,
+}
+
+async fn replace_active_catalogue_identity_with_offline_sentinel(
+    database: &TestDatabase,
+) -> TestResult<()> {
+    let active = active_catalogue_identity(database).await?;
+    require(
+        active != EMPTY_APPLICATION_CATALOGUE_REVISION_ID,
+        "bootstrap unexpectedly created the offline application catalogue identity",
+    )?;
+    let session = database.open().await?;
+    let operation_result: TestResult<()> = async {
+        session
+            .client()
+            .batch_execute(
+                "BEGIN;
+                 ALTER TABLE _orna_kernel.active_revision DISABLE TRIGGER ALL;
+                 ALTER TABLE _orna_kernel.catalogue_revisions DISABLE TRIGGER ALL;
+                 UPDATE _orna_kernel.active_revision
+                 SET catalogue_revision_id = decode(repeat('00', 16), 'hex')
+                 WHERE singleton = true;
+                 UPDATE _orna_kernel.catalogue_revisions
+                 SET id = decode(repeat('00', 16), 'hex')
+                 WHERE source_revision_id = (
+                     SELECT source_revision_id
+                     FROM _orna_kernel.active_revision
+                     WHERE singleton = true
+                 );
+                 ALTER TABLE _orna_kernel.catalogue_revisions ENABLE TRIGGER ALL;
+                 ALTER TABLE _orna_kernel.active_revision ENABLE TRIGGER ALL;
+                 COMMIT;",
+            )
+            .await?;
+        Ok(())
+    }
+    .await;
+    finish_session(
+        operation_result,
+        session.shutdown().await,
+        "offline catalogue identity fixture",
+    )
+}
+
+async fn active_catalogue_identity(database: &TestDatabase) -> TestResult<CatalogueRevisionId> {
+    let session = database.open().await?;
+    let operation_result = async {
+        let row = session
+            .client()
+            .query_one(
+                "SELECT catalogue_revision_id
+                 FROM _orna_kernel.active_revision
+                 WHERE singleton = true",
+                &[],
+            )
+            .await?;
+        Ok(CatalogueRevisionId::from_bytes(exact_identity(
+            row.try_get("catalogue_revision_id")?,
+            "active catalogue revision identity",
+        )?))
+    }
+    .await;
+    finish_session(
+        operation_result,
+        session.shutdown().await,
+        "active catalogue identity inspection",
+    )
+}
+
+async fn snapshot_kernel_tables(database: &TestDatabase) -> TestResult<Vec<KernelTableSnapshot>> {
+    let session = database.open().await?;
+    let operation_result: TestResult<Vec<KernelTableSnapshot>> = async {
+        let tables = session
+            .client()
+            .query(
+                "SELECT table_name
+                 FROM information_schema.tables
+                 WHERE table_schema = '_orna_kernel'
+                   AND table_type = 'BASE TABLE'
+                 ORDER BY table_name",
+                &[],
+            )
+            .await?;
+        let mut snapshot = Vec::with_capacity(tables.len());
+        for table in tables {
+            let name: String = table.try_get("table_name")?;
+            require(
+                name.bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_'),
+                format!("unexpected kernel table name in snapshot: {name}"),
+            )?;
+            let row = session
+                .client()
+                .query_one(
+                    &format!(
+                        "SELECT COALESCE(
+                            jsonb_agg(snapshot.payload ORDER BY snapshot.payload::text),
+                            '[]'::jsonb
+                         )::text
+                         FROM (
+                            SELECT to_jsonb(source) AS payload
+                            FROM _orna_kernel.\"{name}\" AS source
+                         ) AS snapshot"
+                    ),
+                    &[],
+                )
+                .await?;
+            snapshot.push(KernelTableSnapshot {
+                name,
+                rows: row.try_get(0)?,
+            });
+        }
+        Ok(snapshot)
+    }
+    .await;
+    finish_session(
+        operation_result,
+        session.shutdown().await,
+        "kernel table snapshot",
+    )
+}
+
+fn require_offline_application_catalogue_error(error: &PostgresKernelError) -> TestResult<()> {
+    let PostgresKernelError::RevisionInvariant(core) = error else {
+        return Err(failure(format!(
+            "offline application catalogue identity produced the wrong wrapper: {error}"
+        )));
+    };
+    require(
+        matches!(
+            core,
+            RevisionInvariantError::ReservedOfflineCheckCatalogueRevision { revision, role }
+                if *revision == EMPTY_APPLICATION_CATALOGUE_REVISION_ID
+                    && *role == DurableCatalogueRevisionRole::ActiveOrRecoveredApplication
+        ),
+        format!("offline application catalogue identity produced the wrong core error: {core}"),
+    )?;
+    require(
+        core.to_string()
+            == "the reserved offline-check catalogue identity cannot be used in a durable revision",
+        "offline application catalogue identity changed the core error display",
+    )?;
+    require(
+        error.to_string()
+            == "recovered revision invariant failed: the reserved offline-check catalogue identity cannot be used in a durable revision",
+        "offline application catalogue identity changed the wrapper error display",
+    )?;
+    require(
+        Error::source(core).is_none(),
+        "offline application catalogue core error unexpectedly has a source",
+    )?;
+    require(
+        Error::source(error).map(ToString::to_string)
+            == Some(
+                "the reserved offline-check catalogue identity cannot be used in a durable revision"
+                    .to_owned(),
+            ),
+        "offline application catalogue wrapper did not retain the exact core source",
+    )
 }
 
 async fn run_batch(database: &TestDatabase, statement: &str) -> TestResult<()> {
