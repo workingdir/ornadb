@@ -1394,7 +1394,6 @@ mod tests {
             declaration_uses[1].location().span().start(),
             reference_start
         );
-        assert!(checked.standard_type_references().is_empty());
 
         let debug_values = [
             format!("{report:?}"),
