@@ -14,7 +14,9 @@ mod prepare;
 pub(crate) mod relational;
 mod resolver;
 
-pub use prepare::{PrepareError, prepare};
+pub use prepare::{
+    PrepareError, PrepareStandardApplicationError, prepare, prepare_standard_application,
+};
 
 pub use orna_core::revision::EMPTY_APPLICATION_CATALOGUE_REVISION_ID;
 pub use resolver::{
@@ -286,11 +288,17 @@ impl ParseReport {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+
     use orna_core::{
-        CatalogueRevisionId, SchemaId, SourceBundleId, SourceRevisionId, SourceUnitId,
+        CatalogueRevisionId, FunctionId, SchemaId, SourceBundleId, SourceRevisionId, SourceUnitId,
         StandardLibraryRevisionId, TypeId,
         canonical_hash::{
-            source_bundle_digest, source_revision_record_digest, source_unit_content_digest,
+            catalogue_digest, catalogue_digest_with_context, source_bundle_digest,
+            source_revision_record_digest, source_unit_content_digest,
             verify_standard_library_snapshot,
         },
         catalogue::{
@@ -298,18 +306,27 @@ mod tests {
             TypeBinding, ValueTypeDefinition, ValueTypeMutability, ValueTypePersistence,
         },
         revision::{
-            DefinitionIdentity, DefinitionOrigin, Sha256Digest, SourceOrigin,
+            ActiveDatabaseRevision, ActiveDatabaseRevisionInput, ActiveRevisionContent,
+            CatalogueHashContext, CatalogueHashVersion, DefinitionIdentity, DefinitionOrigin,
+            DeployableRevision, RevisionPair, Sha256Digest, SourceOrigin,
             StandardLibraryDigestVersion, StandardLibrarySnapshot, StoredSourceRevision,
             StoredSourceUnit,
         },
         source::{SourceBundle, SourceUnit},
+        types::ResolvedType,
     };
 
     use super::{
-        CheckedTypeUseKind, CheckedValueTypeUse, DiagnosticCode,
-        EMPTY_APPLICATION_CATALOGUE_REVISION_ID, StandardApplicationCheckContext,
+        CheckedFunctionId, CheckedTypeId, CheckedTypeUseKind, CheckedValueTypeUse, DiagnosticCode,
+        EMPTY_APPLICATION_CATALOGUE_REVISION_ID, PrepareError, PrepareStandardApplicationError,
+        StandardApplicationCheckContext, StandardApplicationCheckReport,
         StandardApplicationContextError, StandardLibraryCheckError, check, check_new_application,
         check_standard_application, check_standard_library_source, parse_bundle,
+        prepare_standard_application,
+    };
+    use crate::prepare::{
+        CandidateAllocator, CandidateIdSource, ReservedStandardIds,
+        prepare_standard_application_with_allocator,
     };
 
     const SUCCESS_STANDARD_DIGEST: [u8; 32] = [
@@ -319,6 +336,1371 @@ mod tests {
     ];
 
     const CANONICAL_STANDARD_SOURCE: &str = include_str!("../../../stdlib/std/types.orna");
+
+    static PREPARE_CATALOGUE_ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
+    static PREPARE_BUNDLE_ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
+    static PREPARE_REVISION_ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
+    static PREPARE_UNIT_ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
+    static PREPARE_SCHEMA_ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
+    static PREPARE_TYPE_ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
+    static PREPARE_ALLOCATION_LOCK: Mutex<()> = Mutex::new(());
+
+    fn retry_id(counter: &AtomicUsize, reserved: u8, safe: u8) -> u8 {
+        if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+            reserved
+        } else {
+            safe
+        }
+    }
+
+    fn retry_catalogue_id() -> CatalogueRevisionId {
+        CatalogueRevisionId::from_bytes([retry_id(&PREPARE_CATALOGUE_ALLOCATIONS, 8, 0x81); 16])
+    }
+
+    fn retry_bundle_id() -> SourceBundleId {
+        SourceBundleId::from_bytes([retry_id(&PREPARE_BUNDLE_ALLOCATIONS, 5, 0x82); 16])
+    }
+
+    fn retry_revision_id() -> SourceRevisionId {
+        SourceRevisionId::from_bytes([retry_id(&PREPARE_REVISION_ALLOCATIONS, 6, 0x83); 16])
+    }
+
+    fn retry_unit_id() -> SourceUnitId {
+        SourceUnitId::from_bytes([retry_id(&PREPARE_UNIT_ALLOCATIONS, 4, 0x84); 16])
+    }
+
+    fn retry_schema_id() -> SchemaId {
+        SchemaId::from_bytes([retry_id(&PREPARE_SCHEMA_ALLOCATIONS, 1, 0x85); 16])
+    }
+
+    fn retry_type_id() -> TypeId {
+        TypeId::from_bytes([retry_id(&PREPARE_TYPE_ALLOCATIONS, 3, 0x86); 16])
+    }
+
+    fn retrying_standard_allocator(
+        verified: &orna_core::revision::VerifiedStandardLibrarySnapshot,
+    ) -> CandidateAllocator {
+        for counter in [
+            &PREPARE_CATALOGUE_ALLOCATIONS,
+            &PREPARE_BUNDLE_ALLOCATIONS,
+            &PREPARE_REVISION_ALLOCATIONS,
+            &PREPARE_UNIT_ALLOCATIONS,
+            &PREPARE_SCHEMA_ALLOCATIONS,
+            &PREPARE_TYPE_ALLOCATIONS,
+        ] {
+            counter.store(0, Ordering::SeqCst);
+        }
+        CandidateAllocator::with_source(
+            ReservedStandardIds::from_snapshot(verified),
+            CandidateIdSource {
+                catalogue_revision: retry_catalogue_id,
+                source_bundle: retry_bundle_id,
+                source_revision: retry_revision_id,
+                source_unit: retry_unit_id,
+                schema: retry_schema_id,
+                type_id: retry_type_id,
+            },
+        )
+    }
+
+    fn checked_type_use_kind_tag(kind: CheckedTypeUseKind) -> &'static str {
+        match kind {
+            CheckedTypeUseKind::Field { .. } => "field",
+            CheckedTypeUseKind::Parameter { .. } => "parameter",
+            CheckedTypeUseKind::Return { .. } => "return",
+            CheckedTypeUseKind::Expression { .. } => "expression",
+            CheckedTypeUseKind::Result { .. } => "result",
+        }
+    }
+
+    fn assert_declaration_evidence_mismatch(
+        error: PrepareStandardApplicationError,
+        expected_kind: CheckedTypeUseKind,
+    ) {
+        assert!(matches!(
+            &error,
+            PrepareStandardApplicationError::DeclarationTypeEvidenceMismatch { .. }
+        ));
+        if let PrepareStandardApplicationError::DeclarationTypeEvidenceMismatch { kind } = &error {
+            assert_eq!(*kind, expected_kind);
+        }
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "the checked declaration type evidence does not match its {} type use",
+                checked_type_use_kind_tag(expected_kind)
+            )
+        );
+        assert!(std::error::Error::source(&error).is_none());
+    }
+
+    fn assert_body_evidence_mismatch(
+        error: PrepareStandardApplicationError,
+        expected_function: CheckedFunctionId,
+    ) {
+        assert!(matches!(
+            &error,
+            PrepareStandardApplicationError::BodyTypeEvidenceMismatch { .. }
+        ));
+        if let PrepareStandardApplicationError::BodyTypeEvidenceMismatch { function } = &error {
+            assert_eq!(*function, expected_function);
+        }
+        assert_eq!(
+            error.to_string(),
+            format!("the checked body type evidence does not match function {expected_function}")
+        );
+        assert!(std::error::Error::source(&error).is_none());
+    }
+
+    fn assert_function_reference_evidence_mismatch(
+        error: PrepareStandardApplicationError,
+        expected_function: CheckedFunctionId,
+    ) {
+        assert!(matches!(
+            &error,
+            PrepareStandardApplicationError::FunctionTypeReferenceMismatch { .. }
+        ));
+        if let PrepareStandardApplicationError::FunctionTypeReferenceMismatch { function } = &error
+        {
+            assert_eq!(*function, expected_function);
+        }
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "the checked function type references do not match function {expected_function}"
+            )
+        );
+        assert!(std::error::Error::source(&error).is_none());
+    }
+
+    fn assert_check_not_complete(error: PrepareStandardApplicationError, expected_count: usize) {
+        assert!(matches!(
+            &error,
+            PrepareStandardApplicationError::CheckNotComplete { .. }
+        ));
+        if let PrepareStandardApplicationError::CheckNotComplete { diagnostic_count } = &error {
+            assert_eq!(*diagnostic_count, expected_count);
+        }
+        assert_eq!(
+            error.to_string(),
+            format!("the standard application check has {expected_count} diagnostics")
+        );
+        assert!(std::error::Error::source(&error).is_none());
+    }
+
+    fn assert_expected_base_mismatch(
+        error: PrepareStandardApplicationError,
+        expected_expected: RevisionPair,
+        expected_active: RevisionPair,
+    ) {
+        assert!(matches!(
+            &error,
+            PrepareStandardApplicationError::ExpectedBaseMismatch { .. }
+        ));
+        if let PrepareStandardApplicationError::ExpectedBaseMismatch { expected, active } = &error {
+            assert_eq!(*expected, expected_expected);
+            assert_eq!(*active, expected_active);
+        }
+        assert_eq!(
+            error.to_string(),
+            "the expected application base does not match the active revision"
+        );
+        assert!(std::error::Error::source(&error).is_none());
+    }
+
+    fn assert_checked_base_mismatch(
+        error: PrepareStandardApplicationError,
+        expected_checked: CatalogueRevisionId,
+        expected_active: CatalogueRevisionId,
+    ) {
+        assert!(matches!(
+            &error,
+            PrepareStandardApplicationError::CheckedBaseMismatch { .. }
+        ));
+        if let PrepareStandardApplicationError::CheckedBaseMismatch { checked, active } = &error {
+            assert_eq!(*checked, expected_checked);
+            assert_eq!(*active, expected_active);
+        }
+        assert_eq!(
+            error.to_string(),
+            "the checked application base does not match the active revision"
+        );
+        assert!(std::error::Error::source(&error).is_none());
+    }
+
+    fn assert_standard_library_unavailable(error: PrepareStandardApplicationError) {
+        assert!(matches!(
+            &error,
+            PrepareStandardApplicationError::StandardLibraryUnavailable
+        ));
+        assert_eq!(
+            error.to_string(),
+            "the active database has no standard library"
+        );
+        assert!(std::error::Error::source(&error).is_none());
+    }
+
+    fn assert_standard_catalogue_mismatch(
+        error: PrepareStandardApplicationError,
+        expected_checked: CatalogueRevisionId,
+        expected_active: CatalogueRevisionId,
+    ) {
+        assert!(matches!(
+            &error,
+            PrepareStandardApplicationError::StandardCatalogueMismatch { .. }
+        ));
+        if let PrepareStandardApplicationError::StandardCatalogueMismatch { checked, active } =
+            &error
+        {
+            assert_eq!(*checked, expected_checked);
+            assert_eq!(*active, expected_active);
+        }
+        assert_eq!(
+            error.to_string(),
+            "the checked standard catalogue does not match the active standard catalogue"
+        );
+        assert!(std::error::Error::source(&error).is_none());
+    }
+
+    fn assert_standard_revision_mismatch(
+        error: PrepareStandardApplicationError,
+        expected_checked: StandardLibraryRevisionId,
+        expected_active: StandardLibraryRevisionId,
+    ) {
+        assert!(matches!(
+            &error,
+            PrepareStandardApplicationError::StandardRevisionMismatch { .. }
+        ));
+        if let PrepareStandardApplicationError::StandardRevisionMismatch { checked, active } =
+            &error
+        {
+            assert_eq!(*checked, expected_checked);
+            assert_eq!(*active, expected_active);
+        }
+        assert_eq!(
+            error.to_string(),
+            "the checked standard library revision does not match the active standard library revision"
+        );
+        assert!(std::error::Error::source(&error).is_none());
+    }
+
+    fn assert_standard_digest_mismatch(
+        error: PrepareStandardApplicationError,
+        expected_checked: Sha256Digest,
+        expected_active: Sha256Digest,
+    ) {
+        assert!(matches!(
+            &error,
+            PrepareStandardApplicationError::StandardDigestMismatch { .. }
+        ));
+        if let PrepareStandardApplicationError::StandardDigestMismatch { checked, active } = &error
+        {
+            assert_eq!(*checked, expected_checked);
+            assert_eq!(*active, expected_active);
+        }
+        assert_eq!(
+            error.to_string(),
+            "the checked standard library digest does not match the active standard library digest"
+        );
+        assert!(std::error::Error::source(&error).is_none());
+    }
+
+    #[test]
+    fn exposes_the_standard_application_preparation_interface() {
+        let _: fn(
+            &StandardApplicationCheckReport,
+            RevisionPair,
+            &ActiveDatabaseRevision,
+        ) -> Result<DeployableRevision, PrepareStandardApplicationError> =
+            prepare_standard_application;
+    }
+
+    #[test]
+    fn prepares_a_standard_backed_server_only_application_as_version_two() {
+        let verified = verified_standard_source_fixture();
+        let standard = check_standard_library_source(&verified).unwrap();
+        let active = empty_version_two_active(&verified);
+        let context =
+            StandardApplicationCheckContext::try_new(active.catalogue(), &standard).unwrap();
+        let bundle =
+            SourceBundle::new([SourceUnit::new("application.orna", "CREATE SCHEMA app;")]).unwrap();
+        let report = check_standard_application(&bundle, &context);
+
+        assert!(report.diagnostics().is_empty());
+        assert!(report.checked_bundle().is_some());
+
+        let prepared = prepare_standard_application(&report, active.pair(), &active).unwrap();
+
+        assert_eq!(
+            prepared.catalogue_hash_context().version(),
+            CatalogueHashVersion::Version2
+        );
+        assert_eq!(
+            prepared
+                .catalogue_hash_context()
+                .standard()
+                .unwrap()
+                .digest(),
+            verified.digest()
+        );
+        assert_eq!(prepared.current_function_revisions(), Some([].as_slice()));
+        assert_eq!(prepared.candidate().schemas().len(), 1);
+    }
+
+    #[test]
+    fn standard_preparation_rejects_a_checked_client_before_allocation() {
+        let _allocation_lock = PREPARE_ALLOCATION_LOCK.lock().unwrap();
+        let verified = verified_standard_source_fixture();
+        let standard = check_standard_library_source(&verified).unwrap();
+        let active = empty_version_two_active(&verified);
+        let context =
+            StandardApplicationCheckContext::try_new(active.catalogue(), &standard).unwrap();
+        let bundle = SourceBundle::new([SourceUnit::new(
+            "application.orna",
+            "CREATE SCHEMA app; CREATE CLIENT FUNCTION app.enabled() RETURNS BOOLEAN RETURN TRUE;",
+        )])
+        .unwrap();
+        let report = check_standard_application(&bundle, &context);
+
+        assert!(report.diagnostics().is_empty());
+        assert!(report.checked_bundle().is_some());
+        let error = prepare_standard_application_with_allocator(
+            &report,
+            active.pair(),
+            &active,
+            retrying_standard_allocator(&verified),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "the standard application could not be prepared: checked CLIENT function cannot yet be prepared"
+        );
+        assert!(matches!(
+            error,
+            PrepareStandardApplicationError::Prepare {
+                source: PrepareError::InvalidCheckedBundle {
+                    reason: "checked CLIENT function cannot yet be prepared"
+                }
+            }
+        ));
+        assert!(std::error::Error::source(&error).is_some());
+        for counter in [
+            &PREPARE_CATALOGUE_ALLOCATIONS,
+            &PREPARE_BUNDLE_ALLOCATIONS,
+            &PREPARE_REVISION_ALLOCATIONS,
+            &PREPARE_UNIT_ALLOCATIONS,
+            &PREPARE_SCHEMA_ALLOCATIONS,
+            &PREPARE_TYPE_ALLOCATIONS,
+        ] {
+            assert_eq!(counter.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[test]
+    fn standard_preparation_orders_the_first_seven_gates() {
+        let verified = verified_standard_source_fixture();
+        let standard = check_standard_library_source(&verified).unwrap();
+        let active = empty_version_two_active(&verified);
+        let context =
+            StandardApplicationCheckContext::try_new(active.catalogue(), &standard).unwrap();
+        let valid_bundle =
+            SourceBundle::new([SourceUnit::new("application.orna", "CREATE SCHEMA app;")]).unwrap();
+        let valid_report = check_standard_application(&valid_bundle, &context);
+        assert!(valid_report.diagnostics().is_empty());
+
+        let incomplete_bundle =
+            SourceBundle::new([SourceUnit::new("invalid.orna", "CREATE SCHEMA ;")]).unwrap();
+        let incomplete = check_standard_application(&incomplete_bundle, &context);
+        let incomplete_expected_base = RevisionPair::new(
+            SourceRevisionId::from_bytes([0xe1; 16]),
+            active.pair().catalogue(),
+        );
+        let error = prepare_standard_application(&incomplete, incomplete_expected_base, &active)
+            .unwrap_err();
+        assert_check_not_complete(error, incomplete.diagnostics().len());
+
+        let mut wrong_base_after_expected = valid_report.clone();
+        assert!(
+            wrong_base_after_expected.replace_base_catalogue_revision_for_test(
+                CatalogueRevisionId::from_bytes([0xe2; 16])
+            )
+        );
+        let wrong_expected_base = RevisionPair::new(
+            SourceRevisionId::from_bytes([0xe3; 16]),
+            active.pair().catalogue(),
+        );
+        let error =
+            prepare_standard_application(&wrong_base_after_expected, wrong_expected_base, &active)
+                .unwrap_err();
+        assert_expected_base_mismatch(error, wrong_expected_base, active.pair());
+
+        let mut wrong_base = valid_report.clone();
+        assert!(
+            wrong_base.replace_base_catalogue_revision_for_test(CatalogueRevisionId::from_bytes(
+                [0xe4; 16]
+            ))
+        );
+        let no_standard = empty_version_one_active();
+        let error = prepare_standard_application(&wrong_base, no_standard.pair(), &no_standard)
+            .unwrap_err();
+        assert_checked_base_mismatch(
+            error,
+            CatalogueRevisionId::from_bytes([0xe4; 16]),
+            no_standard.pair().catalogue(),
+        );
+
+        let mut report_without_standard = valid_report.clone();
+        assert!(
+            report_without_standard
+                .replace_base_catalogue_revision_for_test(no_standard.pair().catalogue())
+        );
+        let error = prepare_standard_application(
+            &report_without_standard,
+            no_standard.pair(),
+            &no_standard,
+        )
+        .unwrap_err();
+        assert_standard_library_unavailable(error);
+
+        let mut wrong_catalogue = valid_report.clone();
+        assert!(wrong_catalogue.replace_standard_context_for_test(
+            CatalogueRevisionId::from_bytes([0xe5; 16]),
+            StandardLibraryRevisionId::from_bytes([0xe6; 16]),
+            Sha256Digest::from_bytes([0xe7; 32]),
+        ));
+        let error =
+            prepare_standard_application(&wrong_catalogue, active.pair(), &active).unwrap_err();
+        assert_standard_catalogue_mismatch(
+            error,
+            CatalogueRevisionId::from_bytes([0xe5; 16]),
+            verified.catalogue().revision(),
+        );
+
+        let mut wrong_revision = valid_report.clone();
+        assert!(wrong_revision.replace_standard_context_for_test(
+            verified.catalogue().revision(),
+            StandardLibraryRevisionId::from_bytes([0xe8; 16]),
+            Sha256Digest::from_bytes([0xe9; 32]),
+        ));
+        let error =
+            prepare_standard_application(&wrong_revision, active.pair(), &active).unwrap_err();
+        assert_standard_revision_mismatch(
+            error,
+            StandardLibraryRevisionId::from_bytes([0xe8; 16]),
+            verified.revision(),
+        );
+
+        let mut wrong_digest = valid_report;
+        assert!(wrong_digest.replace_standard_context_for_test(
+            verified.catalogue().revision(),
+            verified.revision(),
+            Sha256Digest::from_bytes([0xea; 32]),
+        ));
+        let error =
+            prepare_standard_application(&wrong_digest, active.pair(), &active).unwrap_err();
+        assert_standard_digest_mismatch(
+            error,
+            Sha256Digest::from_bytes([0xea; 32]),
+            verified.digest(),
+        );
+    }
+
+    #[test]
+    fn standard_preparation_retries_reserved_candidate_ids_before_hash_construction() {
+        let _allocation_lock = PREPARE_ALLOCATION_LOCK.lock().unwrap();
+        let verified = verified_standard_source_fixture();
+        let standard = check_standard_library_source(&verified).unwrap();
+        let active = empty_version_two_active(&verified);
+        let context =
+            StandardApplicationCheckContext::try_new(active.catalogue(), &standard).unwrap();
+        let bundle = SourceBundle::new([SourceUnit::new(
+            "application.orna",
+            "CREATE SCHEMA app; \
+             CREATE TYPE app.flag AS OBJECT (value BOOLEAN NOT NULL); \
+             CREATE SERVER FUNCTION app.read() RETURNS ROWS (value BOOLEAN) \
+             TRANSACTION READ ONLY VOLATILITY STABLE AS SELECT f.value FROM app.flag f;",
+        )])
+        .unwrap();
+        let report = check_standard_application(&bundle, &context);
+        assert_eq!(report.diagnostics(), &[]);
+
+        let prepared = prepare_standard_application_with_allocator(
+            &report,
+            active.pair(),
+            &active,
+            retrying_standard_allocator(&verified),
+        )
+        .unwrap();
+
+        for counter in [
+            &PREPARE_CATALOGUE_ALLOCATIONS,
+            &PREPARE_BUNDLE_ALLOCATIONS,
+            &PREPARE_REVISION_ALLOCATIONS,
+            &PREPARE_UNIT_ALLOCATIONS,
+            &PREPARE_SCHEMA_ALLOCATIONS,
+            &PREPARE_TYPE_ALLOCATIONS,
+        ] {
+            assert_eq!(counter.load(Ordering::SeqCst), 2);
+        }
+        assert_eq!(prepared.candidate().revision().to_bytes(), [0x81; 16]);
+        assert_eq!(prepared.source().bundle().to_bytes(), [0x82; 16]);
+        assert_eq!(prepared.source().id().to_bytes(), [0x83; 16]);
+        assert_eq!(prepared.source().units()[0].id().to_bytes(), [0x84; 16]);
+        assert_eq!(
+            prepared.candidate().schemas()[0].id().to_bytes(),
+            [0x85; 16]
+        );
+        assert_eq!(
+            prepared.candidate().object_types()[0].id().to_bytes(),
+            [0x86; 16]
+        );
+    }
+
+    #[test]
+    fn standard_preparation_keeps_reference_only_function_hashes_at_version_one() {
+        let verified = verified_standard_source_fixture();
+        let standard = check_standard_library_source(&verified).unwrap();
+        let active = empty_version_two_active(&verified);
+        let context =
+            StandardApplicationCheckContext::try_new(active.catalogue(), &standard).unwrap();
+        let bundle = SourceBundle::new([SourceUnit::new(
+            "application.orna",
+            "CREATE SCHEMA app; \
+             CREATE TYPE app.flag AS OBJECT (value BOOLEAN NOT NULL); \
+             CREATE SERVER FUNCTION app.read(p_flag REF app.flag) RETURNS ROWS (value REF app.flag) \
+             TRANSACTION READ ONLY VOLATILITY STABLE AS SELECT REF(f) FROM app.flag f WHERE REF(f) = p_flag;",
+        )])
+        .unwrap();
+        let report = check_standard_application(&bundle, &context);
+        assert_eq!(report.diagnostics(), &[]);
+
+        let prepared = prepare_standard_application(&report, active.pair(), &active).unwrap();
+
+        assert_eq!(prepared.new_function_revisions().len(), 1);
+        assert_eq!(
+            prepared.new_function_revisions()[0].semantic_hash_version(),
+            orna_core::revision::FunctionSemanticHashVersion::Version1
+        );
+        assert!(prepared.references().iter().all(|reference| {
+            !matches!(
+                reference.target(),
+                orna_core::revision::DefinitionReferenceTarget::ValueType(_)
+            )
+        }));
+        assert_eq!(
+            prepared.references()[..2]
+                .iter()
+                .map(|reference| reference.kind())
+                .collect::<Vec<_>>(),
+            vec![
+                orna_core::revision::DefinitionReferenceKind::ObjectReference,
+                orna_core::revision::DefinitionReferenceKind::ObjectReference,
+            ]
+        );
+        assert_eq!(
+            prepared.references()[..2]
+                .iter()
+                .map(|reference| reference.ordinal())
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+    }
+
+    #[test]
+    fn standard_preparation_retains_checked_value_type_references() {
+        let verified = verified_standard_source_fixture();
+        let standard = check_standard_library_source(&verified).unwrap();
+        let active = empty_version_two_active(&verified);
+        let context =
+            StandardApplicationCheckContext::try_new(active.catalogue(), &standard).unwrap();
+        let source = "CREATE SCHEMA app;\
+            CREATE TYPE app.flag AS OBJECT (value BOOLEAN NOT NULL);\
+            CREATE SERVER FUNCTION app.read() RETURNS ROWS (value BOOLEAN) \
+            TRANSACTION READ ONLY VOLATILITY STABLE AS SELECT f.value FROM app.flag f WHERE f.value = TRUE;";
+        let bundle = SourceBundle::new([SourceUnit::new("application.orna", source)]).unwrap();
+        let report = check_standard_application(&bundle, &context);
+
+        assert!(report.diagnostics().is_empty());
+        let prepared = prepare_standard_application(&report, active.pair(), &active).unwrap();
+        let standard_boolean = TypeId::from_bytes([3; 16]);
+        assert_eq!(
+            prepared.candidate().object_types()[0].fields()[0].resolved_type(),
+            ResolvedType::Scalar(orna_core::types::StandardScalar::Boolean)
+        );
+        assert_eq!(
+            (
+                prepared.references()[0].kind(),
+                prepared.references()[0].target(),
+            ),
+            (
+                orna_core::revision::DefinitionReferenceKind::NamedType,
+                orna_core::revision::DefinitionReferenceTarget::ValueType(standard_boolean),
+            )
+        );
+        assert_eq!(
+            prepared.new_function_revisions()[0].semantic_hash_version(),
+            orna_core::revision::FunctionSemanticHashVersion::Version2
+        );
+    }
+
+    #[test]
+    fn standard_preparation_lowers_sealed_signature_references_before_body_references() {
+        let verified = verified_standard_source_fixture();
+        let standard = check_standard_library_source(&verified).unwrap();
+        let active = empty_version_two_active(&verified);
+        let context =
+            StandardApplicationCheckContext::try_new(active.catalogue(), &standard).unwrap();
+        let first_source = "CREATE SERVER FUNCTION app.create(p_ref REF app.item, p_boolean BOOLEAN, p_alias std.BOOLEAN) \
+             RETURNS ROWS (created REF app.item) TRANSACTION ATOMIC \
+             AS INSERT INTO app.item AS made (done) VALUES (p_boolean) RETURNING REF(made);";
+        let second_source = "CREATE SERVER FUNCTION app.by_ref(p_ref REF app.item) \
+             RETURNS ROWS (visible std.BOOLEAN) TRANSACTION READ ONLY VOLATILITY STABLE \
+             AS SELECT TRUE FROM app.item item WHERE REF(item) = p_ref;";
+        let declarations_source =
+            "CREATE SCHEMA app; CREATE TYPE app.item AS OBJECT (done BOOLEAN NOT NULL);";
+        let bundle = SourceBundle::new([
+            SourceUnit::new("z-first-server.orna", first_source),
+            SourceUnit::new("a-second-server.orna", second_source),
+            SourceUnit::new("m-declarations.orna", declarations_source),
+        ])
+        .unwrap();
+        let report = check_standard_application(&bundle, &context);
+        assert_eq!(report.diagnostics(), &[]);
+        let checked_bundle = report.checked_bundle();
+        assert!(checked_bundle.is_some());
+        let checked = checked_bundle.expect("a diagnostic-free report has a checked bundle");
+        let checked_functions = checked.server_functions().collect::<Vec<_>>();
+        assert_eq!(checked_functions.len(), 2);
+        let standard_boolean = TypeId::from_bytes([3; 16]);
+        let first_boolean = first_source.find("p_boolean BOOLEAN").unwrap() + "p_boolean ".len();
+        let first_alias = first_source.find("p_alias std.BOOLEAN").unwrap() + "p_alias ".len();
+        let second_boolean = second_source.find("visible std.BOOLEAN").unwrap() + "visible ".len();
+        let sealed_references = checked.standard_type_references();
+        assert_eq!(sealed_references.len(), 3);
+        assert_eq!(
+            sealed_references
+                .iter()
+                .map(|reference| {
+                    (
+                        reference.owner(),
+                        reference.ordinal(),
+                        reference.target(),
+                        reference.location().logical_path(),
+                        reference.location().span().start(),
+                        reference.location().span().end(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    checked_functions[0].id(),
+                    1,
+                    standard_boolean,
+                    "z-first-server.orna",
+                    first_boolean,
+                    first_boolean + "BOOLEAN".len(),
+                ),
+                (
+                    checked_functions[0].id(),
+                    2,
+                    standard_boolean,
+                    "z-first-server.orna",
+                    first_alias,
+                    first_alias + "std.BOOLEAN".len(),
+                ),
+                (
+                    checked_functions[1].id(),
+                    1,
+                    standard_boolean,
+                    "a-second-server.orna",
+                    second_boolean,
+                    second_boolean + "std.BOOLEAN".len(),
+                ),
+            ]
+        );
+
+        let prepared = prepare_standard_application(&report, active.pair(), &active).unwrap();
+        let candidate_functions = prepared.candidate().functions();
+        assert_eq!(candidate_functions.len(), 2);
+        assert_eq!(
+            candidate_functions
+                .iter()
+                .map(|function| function.name().to_string())
+                .collect::<Vec<_>>(),
+            vec!["app.create", "app.by_ref"]
+        );
+        let checked_object_types = checked.object_types().collect::<Vec<_>>();
+        assert_eq!(checked_object_types.len(), 1);
+        let durable_item = prepared.candidate().object_types()[0].id();
+        let source_unit = |path| {
+            prepared
+                .source()
+                .units()
+                .iter()
+                .find(|unit| unit.logical_path() == path)
+                .expect("the prepared source retains every submitted unit")
+                .id()
+        };
+        let first_unit = source_unit("z-first-server.orna");
+        let second_unit = source_unit("a-second-server.orna");
+        let first_ref = first_source.find("p_ref REF app.item").unwrap() + "p_ref REF ".len();
+        let first_return =
+            first_source.find("created REF app.item").unwrap() + "created REF ".len();
+        let first_body = first_source.find("INSERT INTO app.item").unwrap() + "INSERT INTO ".len();
+        let second_ref = second_source.find("p_ref REF app.item").unwrap() + "p_ref REF ".len();
+        let second_body = second_source.find("FROM app.item").unwrap() + "FROM ".len();
+        let object_target =
+            orna_core::revision::DefinitionReferenceTarget::ObjectType(durable_item);
+        let value_target =
+            orna_core::revision::DefinitionReferenceTarget::ValueType(standard_boolean);
+        let object_kind = orna_core::revision::DefinitionReferenceKind::ObjectReference;
+        let value_kind = orna_core::revision::DefinitionReferenceKind::NamedType;
+        let byte = |offset: usize| u32::try_from(offset).unwrap();
+        let reference_details = |function: FunctionId| {
+            prepared
+                .references()
+                .iter()
+                .filter(|reference| reference.source_function() == function)
+                .map(|reference| {
+                    (
+                        reference.ordinal(),
+                        reference.target(),
+                        reference.kind(),
+                        reference.source_origin().source_unit(),
+                        reference.source_origin().byte_start(),
+                        reference.source_origin().byte_end(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let first_references = reference_details(candidate_functions[0].id());
+        let first_prefix = vec![
+            (
+                0,
+                object_target,
+                object_kind,
+                first_unit,
+                byte(first_ref),
+                byte(first_ref + "app.item".len()),
+            ),
+            (
+                1,
+                value_target,
+                value_kind,
+                first_unit,
+                byte(first_boolean),
+                byte(first_boolean + "BOOLEAN".len()),
+            ),
+            (
+                2,
+                value_target,
+                value_kind,
+                first_unit,
+                byte(first_alias),
+                byte(first_alias + "std.BOOLEAN".len()),
+            ),
+            (
+                3,
+                object_target,
+                object_kind,
+                first_unit,
+                byte(first_return),
+                byte(first_return + "app.item".len()),
+            ),
+        ];
+        assert!(first_references.len() > first_prefix.len());
+        assert_eq!(first_references[..first_prefix.len()], first_prefix);
+        assert_eq!(
+            (
+                first_references[first_prefix.len()].0,
+                first_references[first_prefix.len()].3,
+                first_references[first_prefix.len()].4,
+                first_references[first_prefix.len()].5,
+            ),
+            (
+                u32::try_from(first_prefix.len()).unwrap(),
+                first_unit,
+                byte(first_body),
+                byte(first_body + "app.item".len()),
+            ),
+            "body references must begin after the complete interleaved signature prefix"
+        );
+
+        let second_references = reference_details(candidate_functions[1].id());
+        let second_prefix = vec![
+            (
+                0,
+                object_target,
+                object_kind,
+                second_unit,
+                byte(second_ref),
+                byte(second_ref + "app.item".len()),
+            ),
+            (
+                1,
+                value_target,
+                value_kind,
+                second_unit,
+                byte(second_boolean),
+                byte(second_boolean + "std.BOOLEAN".len()),
+            ),
+        ];
+        assert!(second_references.len() > second_prefix.len());
+        assert_eq!(second_references[..second_prefix.len()], second_prefix);
+        assert_eq!(
+            (
+                second_references[second_prefix.len()].0,
+                second_references[second_prefix.len()].3,
+                second_references[second_prefix.len()].4,
+                second_references[second_prefix.len()].5,
+            ),
+            (
+                u32::try_from(second_prefix.len()).unwrap(),
+                second_unit,
+                byte(second_body),
+                byte(second_body + "app.item".len()),
+            ),
+            "the second function body must begin after its signature prefix"
+        );
+    }
+
+    #[test]
+    fn standard_preparation_drives_declaration_body_and_reference_evidence_gates() {
+        let verified = verified_standard_source_fixture();
+        let standard = check_standard_library_source(&verified).unwrap();
+        let active = empty_version_two_active(&verified);
+        let context =
+            StandardApplicationCheckContext::try_new(active.catalogue(), &standard).unwrap();
+        let bundle = SourceBundle::new([SourceUnit::new(
+            "application.orna",
+            "CREATE SCHEMA app;\
+             CREATE TYPE app.item AS OBJECT (done BOOLEAN NOT NULL);\
+             CREATE SERVER FUNCTION app.create(p_ref REF app.item, p_boolean BOOLEAN, p_alias std.BOOLEAN) \
+             RETURNS ROWS (created REF app.item) TRANSACTION ATOMIC \
+             AS INSERT INTO app.item AS made (done) VALUES (p_boolean) RETURNING REF(made);",
+        )])
+        .unwrap();
+        let report = check_standard_application(&bundle, &context);
+        assert_eq!(report.diagnostics(), &[]);
+        let checked = report.checked_bundle().unwrap();
+        let canonical_uses = checked.uses().to_vec();
+        let canonical_references = checked.standard_type_references().to_vec();
+        let server_functions = checked.server_functions().collect::<Vec<_>>();
+        assert_eq!(server_functions.len(), 1);
+        let body_function = server_functions[0].id();
+        let declaration_value_index = canonical_uses
+            .iter()
+            .position(|type_use| {
+                matches!(
+                    type_use.kind(),
+                    CheckedTypeUseKind::Field { .. }
+                        | CheckedTypeUseKind::Parameter { .. }
+                        | CheckedTypeUseKind::Return { .. }
+                ) && type_use.value().is_some()
+            })
+            .unwrap();
+        let declaration_reference_index = canonical_uses
+            .iter()
+            .position(|type_use| {
+                matches!(
+                    type_use.kind(),
+                    CheckedTypeUseKind::Field { .. }
+                        | CheckedTypeUseKind::Parameter { .. }
+                        | CheckedTypeUseKind::Return { .. }
+                ) && type_use.object_reference().is_some()
+            })
+            .unwrap();
+        let body_value_index = canonical_uses
+            .iter()
+            .position(|type_use| {
+                matches!(
+                    type_use.kind(),
+                    CheckedTypeUseKind::Expression { .. } | CheckedTypeUseKind::Result { .. }
+                ) && type_use.value().is_some()
+            })
+            .unwrap();
+        let body_reference_index = canonical_uses
+            .iter()
+            .position(|type_use| {
+                matches!(
+                    type_use.kind(),
+                    CheckedTypeUseKind::Expression { .. } | CheckedTypeUseKind::Result { .. }
+                ) && type_use.object_reference().is_some()
+            })
+            .unwrap();
+
+        let mut declaration_and_body_hostile = report.clone();
+        let mut uses = canonical_uses.clone();
+        let direct_index = uses
+            .iter()
+            .position(|type_use| {
+                matches!(
+                    type_use.kind(),
+                    CheckedTypeUseKind::Field { .. }
+                        | CheckedTypeUseKind::Parameter { .. }
+                        | CheckedTypeUseKind::Return { .. }
+                )
+            })
+            .unwrap();
+        uses.remove(direct_index);
+        let mut body_indices = uses
+            .iter()
+            .enumerate()
+            .filter_map(|(index, type_use)| {
+                matches!(
+                    type_use.kind(),
+                    CheckedTypeUseKind::Expression { .. } | CheckedTypeUseKind::Result { .. }
+                )
+                .then_some(index)
+            })
+            .collect::<Vec<_>>();
+        body_indices.reverse();
+        assert!(body_indices.len() >= 2);
+        uses.swap(body_indices[0], body_indices[1]);
+        assert!(declaration_and_body_hostile.replace_type_uses_for_test(uses));
+        let mut references = canonical_references.clone();
+        references.swap(0, 1);
+        assert!(declaration_and_body_hostile.replace_standard_type_references_for_test(references));
+        let error =
+            prepare_standard_application(&declaration_and_body_hostile, active.pair(), &active)
+                .unwrap_err();
+        assert_declaration_evidence_mismatch(error, canonical_uses[direct_index].kind());
+
+        let mut reordered_declarations = report.clone();
+        let mut uses = canonical_uses.clone();
+        uses.swap(declaration_value_index, declaration_reference_index);
+        assert!(reordered_declarations.replace_type_uses_for_test(uses));
+        let error = prepare_standard_application(&reordered_declarations, active.pair(), &active)
+            .unwrap_err();
+        assert_declaration_evidence_mismatch(error, canonical_uses[declaration_value_index].kind());
+
+        let mut wrong_declaration_kind = report.clone();
+        assert!(wrong_declaration_kind.replace_type_use_kind_for_test(
+            declaration_value_index,
+            canonical_uses[body_value_index].kind(),
+        ));
+        let error = prepare_standard_application(&wrong_declaration_kind, active.pair(), &active)
+            .unwrap_err();
+        assert_declaration_evidence_mismatch(error, canonical_uses[declaration_value_index].kind());
+
+        let mut wrong_declaration_type = report.clone();
+        assert!(wrong_declaration_type.replace_value_type_id_for_test(
+            declaration_value_index,
+            TypeId::from_bytes([0xd1; 16]),
+        ));
+        let error = prepare_standard_application(&wrong_declaration_type, active.pair(), &active)
+            .unwrap_err();
+        assert_declaration_evidence_mismatch(error, canonical_uses[declaration_value_index].kind());
+
+        let mut gate_seven_before_eight = wrong_declaration_type.clone();
+        let hostile_digest = Sha256Digest::from_bytes([0xd0; 32]);
+        assert!(gate_seven_before_eight.replace_standard_context_for_test(
+            verified.catalogue().revision(),
+            verified.revision(),
+            hostile_digest,
+        ));
+        let error = prepare_standard_application(&gate_seven_before_eight, active.pair(), &active)
+            .unwrap_err();
+        assert_standard_digest_mismatch(error, hostile_digest, verified.digest());
+
+        let mut wrong_declaration_target = report.clone();
+        assert!(
+            wrong_declaration_target.replace_object_reference_target_for_test(
+                declaration_reference_index,
+                CheckedTypeId::Existing(TypeId::from_bytes([0xd2; 16])),
+            )
+        );
+        let error = prepare_standard_application(&wrong_declaration_target, active.pair(), &active)
+            .unwrap_err();
+        assert_declaration_evidence_mismatch(
+            error,
+            canonical_uses[declaration_reference_index].kind(),
+        );
+
+        let mut wrong_declaration_location = report.clone();
+        assert!(
+            wrong_declaration_location.replace_type_use_location_for_test(
+                declaration_value_index,
+                canonical_uses[declaration_reference_index]
+                    .location()
+                    .clone(),
+            )
+        );
+        let error =
+            prepare_standard_application(&wrong_declaration_location, active.pair(), &active)
+                .unwrap_err();
+        assert_declaration_evidence_mismatch(error, canonical_uses[declaration_value_index].kind());
+
+        let mut wrong_declaration_class = report.clone();
+        assert!(
+            wrong_declaration_class.replace_value_with_object_reference_for_test(
+                declaration_value_index,
+                CheckedTypeId::Existing(TypeId::from_bytes([0xd3; 16])),
+            )
+        );
+        let error = prepare_standard_application(&wrong_declaration_class, active.pair(), &active)
+            .unwrap_err();
+        assert_declaration_evidence_mismatch(error, canonical_uses[declaration_value_index].kind());
+
+        let mut duplicate_declaration = report.clone();
+        let mut uses = canonical_uses.clone();
+        uses.push(canonical_uses[direct_index].clone());
+        assert!(duplicate_declaration.replace_type_uses_for_test(uses));
+        let error = prepare_standard_application(&duplicate_declaration, active.pair(), &active)
+            .unwrap_err();
+        assert_declaration_evidence_mismatch(error, canonical_uses[direct_index].kind());
+
+        let mut body_hostile = report.clone();
+        let mut uses = canonical_uses.clone();
+        let mut body_indices = uses
+            .iter()
+            .enumerate()
+            .filter_map(|(index, type_use)| {
+                matches!(
+                    type_use.kind(),
+                    CheckedTypeUseKind::Expression { .. } | CheckedTypeUseKind::Result { .. }
+                )
+                .then_some(index)
+            })
+            .collect::<Vec<_>>();
+        body_indices.reverse();
+        assert!(body_indices.len() >= 2);
+        uses.swap(body_indices[0], body_indices[1]);
+        assert!(body_hostile.replace_type_uses_for_test(uses));
+        let error =
+            prepare_standard_application(&body_hostile, active.pair(), &active).unwrap_err();
+        assert_body_evidence_mismatch(error, body_function);
+
+        let mut body_before_declaration = report.clone();
+        let mut uses = canonical_uses.clone();
+        let body = uses.remove(body_value_index);
+        uses.insert(direct_index, body);
+        assert!(body_before_declaration.replace_type_uses_for_test(uses));
+        let error = prepare_standard_application(&body_before_declaration, active.pair(), &active)
+            .unwrap_err();
+        assert_body_evidence_mismatch(error, body_function);
+
+        let mut declaration_after_body = report.clone();
+        let mut uses = canonical_uses.clone();
+        let last_declaration_index = uses
+            .iter()
+            .enumerate()
+            .filter_map(|(index, type_use)| {
+                matches!(
+                    type_use.kind(),
+                    CheckedTypeUseKind::Field { .. }
+                        | CheckedTypeUseKind::Parameter { .. }
+                        | CheckedTypeUseKind::Return { .. }
+                )
+                .then_some(index)
+            })
+            .next_back()
+            .unwrap();
+        let declaration = uses.remove(last_declaration_index);
+        uses.insert(body_value_index, declaration);
+        assert!(declaration_after_body.replace_type_uses_for_test(uses));
+        let error = prepare_standard_application(&declaration_after_body, active.pair(), &active)
+            .unwrap_err();
+        assert_body_evidence_mismatch(error, body_function);
+
+        let mut gate_nine_before_ten = body_hostile.clone();
+        let mut references = canonical_references.clone();
+        references.swap(0, 1);
+        assert!(gate_nine_before_ten.replace_standard_type_references_for_test(references));
+        let error = prepare_standard_application(&gate_nine_before_ten, active.pair(), &active)
+            .unwrap_err();
+        assert_body_evidence_mismatch(error, body_function);
+
+        let mut wrong_body_type = report.clone();
+        assert!(
+            wrong_body_type
+                .replace_value_type_id_for_test(body_value_index, TypeId::from_bytes([0xd4; 16]),)
+        );
+        let error =
+            prepare_standard_application(&wrong_body_type, active.pair(), &active).unwrap_err();
+        assert_body_evidence_mismatch(error, body_function);
+
+        let mut wrong_body_target = report.clone();
+        assert!(wrong_body_target.replace_object_reference_target_for_test(
+            body_reference_index,
+            CheckedTypeId::Existing(TypeId::from_bytes([0xd5; 16])),
+        ));
+        let error =
+            prepare_standard_application(&wrong_body_target, active.pair(), &active).unwrap_err();
+        assert_body_evidence_mismatch(error, body_function);
+
+        let mut wrong_body_location = report.clone();
+        assert!(wrong_body_location.replace_type_use_location_for_test(
+            body_value_index,
+            canonical_uses[body_reference_index].location().clone(),
+        ));
+        let error =
+            prepare_standard_application(&wrong_body_location, active.pair(), &active).unwrap_err();
+        assert_body_evidence_mismatch(error, body_function);
+
+        let mut wrong_body_class = report.clone();
+        assert!(
+            wrong_body_class.replace_value_with_object_reference_for_test(
+                body_value_index,
+                CheckedTypeId::Existing(TypeId::from_bytes([0xd6; 16])),
+            )
+        );
+        let error =
+            prepare_standard_application(&wrong_body_class, active.pair(), &active).unwrap_err();
+        assert_body_evidence_mismatch(error, body_function);
+
+        let mut wrong_body_kind = report.clone();
+        assert!(wrong_body_kind.replace_type_use_kind_for_test(
+            body_value_index,
+            canonical_uses[body_reference_index].kind(),
+        ));
+        let error =
+            prepare_standard_application(&wrong_body_kind, active.pair(), &active).unwrap_err();
+        assert_body_evidence_mismatch(error, body_function);
+
+        let mut empty_body = report.clone();
+        let uses = canonical_uses
+            .iter()
+            .filter(|type_use| {
+                !matches!(
+                    type_use.kind(),
+                    CheckedTypeUseKind::Expression { .. } | CheckedTypeUseKind::Result { .. }
+                )
+            })
+            .cloned()
+            .collect();
+        assert!(empty_body.replace_type_uses_for_test(uses));
+        let error = prepare_standard_application(&empty_body, active.pair(), &active).unwrap_err();
+        assert_body_evidence_mismatch(error, body_function);
+
+        let mut extra_body = report.clone();
+        let mut uses = canonical_uses.clone();
+        let extra = uses
+            .iter()
+            .find(|type_use| {
+                matches!(
+                    type_use.kind(),
+                    CheckedTypeUseKind::Expression { .. } | CheckedTypeUseKind::Result { .. }
+                )
+            })
+            .cloned()
+            .unwrap();
+        uses.push(extra);
+        assert!(extra_body.replace_type_uses_for_test(uses));
+        let error = prepare_standard_application(&extra_body, active.pair(), &active).unwrap_err();
+        assert_body_evidence_mismatch(error, body_function);
+
+        let mut references_hostile = report.clone();
+        let mut references = canonical_references.clone();
+        assert_eq!(references.len(), 2);
+        references.swap(0, 1);
+        assert!(references_hostile.replace_standard_type_references_for_test(references));
+        let error =
+            prepare_standard_application(&references_hostile, active.pair(), &active).unwrap_err();
+        assert_function_reference_evidence_mismatch(error, canonical_references[0].owner());
+
+        let mut wrong_reference = report.clone();
+        let first_reference = &checked.standard_type_references()[0];
+        assert!(wrong_reference.replace_standard_type_reference_for_test(
+            0,
+            CheckedFunctionId::Existing(FunctionId::from_bytes([0xd7; 16])),
+            first_reference.ordinal() + 1,
+            TypeId::from_bytes([0xd8; 16]),
+            canonical_uses[body_value_index].location().clone(),
+        ));
+        let error =
+            prepare_standard_application(&wrong_reference, active.pair(), &active).unwrap_err();
+        assert_function_reference_evidence_mismatch(error, first_reference.owner());
+
+        let mut missing_reference = report.clone();
+        let mut references = checked.standard_type_references().to_vec();
+        references.pop();
+        assert!(missing_reference.replace_standard_type_references_for_test(references));
+        let error =
+            prepare_standard_application(&missing_reference, active.pair(), &active).unwrap_err();
+        assert_function_reference_evidence_mismatch(error, first_reference.owner());
+    }
+
+    #[test]
+    fn standard_preparation_checks_relational_mutation_and_client_body_uses_before_client_staging()
+    {
+        let verified = verified_standard_source_fixture();
+        let standard = check_standard_library_source(&verified).unwrap();
+        let active = empty_version_two_active(&verified);
+        let context =
+            StandardApplicationCheckContext::try_new(active.catalogue(), &standard).unwrap();
+        let bundle = SourceBundle::new([SourceUnit::new(
+            "application.orna",
+            "CREATE SCHEMA app; \
+             CREATE TYPE app.task AS OBJECT (done BOOLEAN NOT NULL); \
+             CREATE SERVER FUNCTION app.read(p_task REF app.task) RETURNS ROWS (done BOOLEAN) \
+             TRANSACTION READ ONLY VOLATILITY STABLE \
+             AS SELECT task.done FROM app.task task WHERE REF(task) = p_task; \
+             CREATE SERVER FUNCTION app.create(p_done BOOLEAN) RETURNS ROWS (created REF app.task) \
+             TRANSACTION ATOMIC \
+             AS INSERT INTO app.task AS made (done) VALUES (p_done) RETURNING REF(made); \
+             CREATE CLIENT FUNCTION app.enabled() RETURNS BOOLEAN RETURN TRUE;",
+        )])
+        .unwrap();
+        let report = check_standard_application(&bundle, &context);
+        assert_eq!(report.diagnostics(), &[]);
+        let checked_bundle = report.checked_bundle();
+        assert!(
+            checked_bundle.is_some(),
+            "a diagnostic-free standard application report must contain a checked bundle"
+        );
+        let checked = checked_bundle.expect("the asserted checked bundle must be present");
+        let servers = checked.server_functions().collect::<Vec<_>>();
+        let clients = checked.client_functions().collect::<Vec<_>>();
+        assert_eq!(servers.len(), 2);
+        assert_eq!(clients.len(), 1);
+        let read = servers[0];
+        let create = servers[1];
+        let enabled = clients[0];
+        let uses = checked.uses();
+        let value_body_index = |owner| {
+            uses.iter().position(|type_use| {
+                matches!(
+                    type_use.kind(),
+                    CheckedTypeUseKind::Expression { owner: actual, .. }
+                        | CheckedTypeUseKind::Result { owner: actual, .. }
+                        if actual == owner
+                ) && type_use.value().is_some()
+            })
+        };
+        let read_body = value_body_index(read.id())
+            .expect("the relational function must retain a value body use");
+        let create_body = value_body_index(create.id())
+            .expect("the mutation function must retain a value body use");
+        let client_body = value_body_index(enabled.id())
+            .expect("the CLIENT function must retain a value body use");
+
+        for (index, owner) in [
+            (read_body, read.id()),
+            (create_body, create.id()),
+            (client_body, enabled.id()),
+        ] {
+            let mut hostile = report.clone();
+            assert!(hostile.replace_value_type_id_for_test(index, TypeId::from_bytes([0xdd; 16])));
+            let error = prepare_standard_application(&hostile, active.pair(), &active).unwrap_err();
+            assert_body_evidence_mismatch(error, owner);
+        }
+    }
+
+    #[test]
+    fn standard_preparation_checks_multi_unit_signature_references_before_client_staging() {
+        let verified = verified_standard_source_fixture();
+        let standard = check_standard_library_source(&verified).unwrap();
+        let active = empty_version_two_active(&verified);
+        let context =
+            StandardApplicationCheckContext::try_new(active.catalogue(), &standard).unwrap();
+        let first_server = "CREATE SERVER FUNCTION app.create(p_ref REF app.item, p_boolean BOOLEAN, p_alias std.BOOLEAN) \
+            RETURNS ROWS (created REF app.item) TRANSACTION ATOMIC \
+            AS INSERT INTO app.item AS made (done) VALUES (p_boolean) RETURNING REF(made);";
+        let client = "CREATE CLIENT FUNCTION app.enabled() RETURNS std.BOOLEAN RETURN TRUE;";
+        let second_server = "CREATE SERVER FUNCTION app.by_ref(p_ref REF app.item) \
+            RETURNS ROWS (value std.BOOLEAN) TRANSACTION READ ONLY VOLATILITY STABLE \
+            AS SELECT TRUE FROM app.item item WHERE REF(item) = p_ref;";
+        let declarations = "CREATE SCHEMA app; \
+            CREATE TYPE app.item AS OBJECT (done BOOLEAN NOT NULL);";
+        let bundle = SourceBundle::new([
+            SourceUnit::new("z-first-server.orna", first_server),
+            SourceUnit::new("a-client.orna", client),
+            SourceUnit::new("y-second-server.orna", second_server),
+            SourceUnit::new("m-declarations.orna", declarations),
+        ])
+        .unwrap();
+        let report = check_standard_application(&bundle, &context);
+        assert_eq!(report.diagnostics(), &[]);
+        let checked_bundle = report.checked_bundle();
+        assert!(
+            checked_bundle.is_some(),
+            "a diagnostic-free standard application report must contain a checked bundle"
+        );
+        let checked = checked_bundle.expect("the asserted checked bundle must be present");
+        let references = checked.standard_type_references().to_vec();
+        assert_eq!(references.len(), 4);
+        assert_eq!(
+            references
+                .iter()
+                .map(|reference| (reference.ordinal(), reference.location().logical_path()))
+                .collect::<Vec<_>>(),
+            vec![
+                (1, "z-first-server.orna"),
+                (2, "z-first-server.orna"),
+                (0, "a-client.orna"),
+                (1, "y-second-server.orna"),
+            ],
+            "reference order follows source-unit insertion order and preserves REF ordinal gaps"
+        );
+        assert!(matches!(
+            prepare_standard_application(&report, active.pair(), &active),
+            Err(PrepareStandardApplicationError::Prepare {
+                source: PrepareError::InvalidCheckedBundle {
+                    reason: "checked CLIENT function cannot yet be prepared"
+                }
+            })
+        ));
+
+        let first = &references[0];
+        for (owner, ordinal, target, location) in [
+            (
+                CheckedFunctionId::Existing(FunctionId::from_bytes([0xde; 16])),
+                first.ordinal(),
+                first.target(),
+                first.location().clone(),
+            ),
+            (
+                first.owner(),
+                first.ordinal() + 1,
+                first.target(),
+                first.location().clone(),
+            ),
+            (
+                first.owner(),
+                first.ordinal(),
+                TypeId::from_bytes([0xdf; 16]),
+                first.location().clone(),
+            ),
+            (
+                first.owner(),
+                first.ordinal(),
+                first.target(),
+                references[1].location().clone(),
+            ),
+        ] {
+            let mut hostile = report.clone();
+            assert!(
+                hostile
+                    .replace_standard_type_reference_for_test(0, owner, ordinal, target, location,)
+            );
+            let error = prepare_standard_application(&hostile, active.pair(), &active).unwrap_err();
+            assert_function_reference_evidence_mismatch(error, first.owner());
+        }
+
+        let mut reordered = report.clone();
+        let mut hostile_references = references.clone();
+        hostile_references.swap(0, 2);
+        assert!(reordered.replace_standard_type_references_for_test(hostile_references));
+        let error = prepare_standard_application(&reordered, active.pair(), &active).unwrap_err();
+        assert_function_reference_evidence_mismatch(error, first.owner());
+
+        let mut missing = report.clone();
+        let mut hostile_references = references.clone();
+        hostile_references.pop();
+        assert!(missing.replace_standard_type_references_for_test(hostile_references));
+        let error = prepare_standard_application(&missing, active.pair(), &active).unwrap_err();
+        assert_function_reference_evidence_mismatch(error, references[3].owner());
+
+        let mut extra = report.clone();
+        let mut hostile_references = references.clone();
+        hostile_references.push(hostile_references[0].clone());
+        assert!(extra.replace_standard_type_references_for_test(hostile_references));
+        let error = prepare_standard_application(&extra, active.pair(), &active).unwrap_err();
+        assert_function_reference_evidence_mismatch(error, references[0].owner());
+    }
+
     const CANONICAL_RESERVED_ID: [u8; 16] = [
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x01,
@@ -1966,6 +3348,102 @@ mod tests {
             assert_eq!(error.to_string(), message);
             assert!(std::error::Error::source(error).is_none());
         }
+    }
+
+    fn empty_version_two_active(
+        standard: &orna_core::revision::VerifiedStandardLibrarySnapshot,
+    ) -> ActiveDatabaseRevision {
+        let source_unit = StoredSourceUnit::new(
+            SourceUnitId::from_bytes([0x41; 16]),
+            0,
+            "active.orna",
+            "",
+            source_unit_content_digest("").unwrap(),
+        )
+        .unwrap();
+        let bundle_hash = source_bundle_digest(std::slice::from_ref(&source_unit)).unwrap();
+        let source = StoredSourceRevision::new(
+            SourceBundleId::from_bytes([0x42; 16]),
+            SourceRevisionId::from_bytes([0x43; 16]),
+            None,
+            vec![source_unit],
+            bundle_hash,
+            source_revision_record_digest(
+                SourceBundleId::from_bytes([0x42; 16]),
+                None,
+                bundle_hash,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let catalogue = CatalogueSnapshot::new_with_types(
+            CatalogueRevisionId::from_bytes([0x44; 16]),
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        )
+        .unwrap();
+        let context = CatalogueHashContext::version_two(standard.clone());
+        let catalogue_hash =
+            catalogue_digest_with_context(&context, &catalogue, &[], &[], &[], &[]).unwrap();
+        ActiveDatabaseRevision::new_with_catalogue_hash_context(
+            ActiveDatabaseRevisionInput::new(
+                RevisionPair::new(source.id(), catalogue.revision()),
+                source,
+                catalogue,
+                catalogue_hash,
+                ActiveRevisionContent::new(Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+            ),
+            context,
+        )
+        .unwrap()
+    }
+
+    fn empty_version_one_active() -> ActiveDatabaseRevision {
+        let source_unit = StoredSourceUnit::new(
+            SourceUnitId::from_bytes([0xf1; 16]),
+            0,
+            "active.orna",
+            "",
+            source_unit_content_digest("").unwrap(),
+        )
+        .unwrap();
+        let bundle_hash = source_bundle_digest(std::slice::from_ref(&source_unit)).unwrap();
+        let source = StoredSourceRevision::new(
+            SourceBundleId::from_bytes([0xf2; 16]),
+            SourceRevisionId::from_bytes([0xf3; 16]),
+            None,
+            vec![source_unit],
+            bundle_hash,
+            source_revision_record_digest(
+                SourceBundleId::from_bytes([0xf2; 16]),
+                None,
+                bundle_hash,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let catalogue = CatalogueSnapshot::new_with_types(
+            CatalogueRevisionId::from_bytes([0xf4; 16]),
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        )
+        .unwrap();
+        let catalogue_hash = catalogue_digest(&catalogue, &[], &[], &[], &[]).unwrap();
+        ActiveDatabaseRevision::new(
+            RevisionPair::new(source.id(), catalogue.revision()),
+            source,
+            catalogue,
+            catalogue_hash,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap()
     }
 
     fn verified_standard_source_fixture() -> orna_core::revision::VerifiedStandardLibrarySnapshot {
