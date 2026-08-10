@@ -77,6 +77,7 @@ impl SemanticType<TypeId> {
 pub(crate) struct QueryField<T, F> {
     id: F,
     resolved_type: SemanticType<T>,
+    standard_value_type: Option<TypeId>,
     nullable: bool,
 }
 
@@ -86,8 +87,15 @@ impl<T, F> QueryField<T, F> {
         Self {
             id,
             resolved_type,
+            standard_value_type: None,
             nullable,
         }
+    }
+
+    /// Attaches resolved standard value-type provenance for relational checking.
+    pub(crate) const fn with_standard_value_type(mut self, type_id: TypeId) -> Self {
+        self.standard_value_type = Some(type_id);
+        self
     }
 
     /// Returns the field identity.
@@ -104,6 +112,11 @@ impl<T, F> QueryField<T, F> {
         T: Copy,
     {
         self.resolved_type
+    }
+
+    /// Returns the supplied standard value-type identity when this field uses one.
+    pub(crate) const fn standard_value_type(&self) -> Option<TypeId> {
+        self.standard_value_type
     }
 
     /// Reports whether the field can contain null.
@@ -1434,7 +1447,7 @@ impl fmt::Display for StandardApplicationContextError {
 
 impl Error for StandardApplicationContextError {}
 
-/// The kind and owner of one direct standard-backed application type use.
+/// The kind and owner of one standard-backed application type use.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum CheckedTypeUseKind {
@@ -1459,14 +1472,14 @@ pub enum CheckedTypeUseKind {
         /// The zero-based scalar-return or `ROWS`-column ordinal.
         ordinal: u32,
     },
-    /// A future value-producing function-body expression use.
+    /// One accepted value-producing function-body expression use.
     Expression {
         /// The checked function that owns the expression.
         owner: CheckedFunctionId,
         /// The deterministic body-expression ordinal.
         ordinal: u32,
     },
-    /// A future function-body result use.
+    /// One function-body result use.
     Result {
         /// The checked function that owns the result.
         owner: CheckedFunctionId,
@@ -1475,7 +1488,7 @@ pub enum CheckedTypeUseKind {
     },
 }
 
-/// One direct value-type use resolved through the checked standard library.
+/// One standard value-type use resolved through the checked standard library.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CheckedValueTypeUse {
     pub(super) type_id: TypeId,
@@ -1489,18 +1502,18 @@ impl CheckedValueTypeUse {
         self.type_id
     }
 
-    /// Returns the direct declaration use kind.
+    /// Returns the type-use kind.
     pub const fn kind(&self) -> CheckedTypeUseKind {
         self.kind
     }
 
-    /// Returns the exact written type location.
+    /// Returns the direct declaration location or complete body-expression location.
     pub fn location(&self) -> &SourceLocation {
         &self.location
     }
 }
 
-/// One direct object-reference type use in a standard-backed application.
+/// One application object-reference type use in a standard-backed application.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CheckedObjectReferenceUse {
     pub(super) target: CheckedTypeId,
@@ -1514,18 +1527,18 @@ impl CheckedObjectReferenceUse {
         self.target
     }
 
-    /// Returns the direct declaration use kind.
+    /// Returns the type-use kind.
     pub const fn kind(&self) -> CheckedTypeUseKind {
         self.kind
     }
 
-    /// Returns the exact written reference-target location.
+    /// Returns the direct declaration location or complete body-expression location.
     pub fn location(&self) -> &SourceLocation {
         &self.location
     }
 }
 
-/// One direct declared or future body type use in a standard-backed application.
+/// One declared or body type use in a standard-backed application.
 #[non_exhaustive]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CheckedApplicationTypeUse {
@@ -1544,7 +1557,7 @@ impl CheckedApplicationTypeUse {
         }
     }
 
-    /// Returns the object-reference use when this use is a `REF` target.
+    /// Returns the object-reference use when this use resolves an application object.
     pub fn object_reference(&self) -> Option<&CheckedObjectReferenceUse> {
         match self {
             Self::Value(_) => None,
@@ -1552,7 +1565,7 @@ impl CheckedApplicationTypeUse {
         }
     }
 
-    /// Returns the direct declaration use kind.
+    /// Returns the type-use kind.
     pub const fn kind(&self) -> CheckedTypeUseKind {
         match self {
             Self::Value(value) => value.kind,
@@ -1560,7 +1573,7 @@ impl CheckedApplicationTypeUse {
         }
     }
 
-    /// Returns the exact written type location.
+    /// Returns the direct declaration location or complete body-expression location.
     pub fn location(&self) -> &SourceLocation {
         match self {
             Self::Value(value) => &value.location,
@@ -1704,7 +1717,7 @@ impl CheckedStandardApplicationBundle {
         self.standard_library_digest
     }
 
-    /// Returns every direct declared or future body type use in canonical order.
+    /// Returns every declared or body type use in canonical order.
     pub fn uses(&self) -> &[CheckedApplicationTypeUse] {
         &self.uses
     }
