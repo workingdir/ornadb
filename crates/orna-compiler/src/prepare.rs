@@ -31,7 +31,8 @@ use orna_artifact::{
 };
 use orna_core::{
     CatalogueRevisionId, ExpressionId, FieldId, FunctionId, FunctionRevisionId, ParameterId,
-    SchemaId, SourceBundleId, SourceRevisionId, SourceUnitId, StandardLibraryRevisionId, TypeId,
+    SchemaId, SourceBundleId, SourceRevisionId, SourceUnitId, StandardLibraryRevisionId,
+    TypeBindingId, TypeId,
     canonical_hash::{
         CanonicalHashError, artifact_payload_digest, catalogue_digest,
         catalogue_digest_with_context, function_declaration_digest, function_semantic_digest,
@@ -42,7 +43,7 @@ use orna_core::{
         CatalogueSnapshot, CatalogueSnapshotError, FieldDefinition, FunctionDefinition,
         FunctionDomain, FunctionReturn, FunctionReturnColumnDefinition, FunctionSecurity,
         FunctionTransaction, FunctionVolatility, ObjectTypeDefinition, ParameterDefinition,
-        SchemaDefinition,
+        QualifiedSemanticName, SchemaDefinition,
     },
     revision::{
         ActiveDatabaseRevision, CatalogueHashContext, DefinitionIdentity, DefinitionOrigin,
@@ -52,13 +53,16 @@ use orna_core::{
         FunctionSemanticHashVersion, RevisionInvariantError, RevisionPair, Sha256Digest,
         SourceOrigin, StoredSourceRevision, StoredSourceUnit, VerifiedStandardLibrarySnapshot,
     },
+    source::{SourceBundle, SourceUnit},
     types::{ResolvedType, StandardScalar},
 };
 
 use crate::{
     CheckReport, CheckedBundle, CheckedDefinitionReferenceTarget, CheckedExpressionId,
     CheckedFieldId, CheckedFunctionId, CheckedParameterId, CheckedSchemaId, CheckedTypeId,
-    ConstantValue, ParseReport, SemanticType, SourceLocation, StandardApplicationCheckReport,
+    CompilerDiagnostic, ConstantValue, ParseReport, SemanticType, SourceLocation,
+    StandardApplicationCheckContext, StandardApplicationCheckReport,
+    StandardApplicationContextError, check_standard_application,
 };
 use crate::{
     mutation::{DeletePlanIr, MutationExpressionKind, MutationOperation, MutationPlanIr},
@@ -69,9 +73,10 @@ use crate::{
 };
 
 /// One encoded SERVER artifact with the language version that defines it.
+#[derive(Clone)]
 struct PreparedFunctionArtifact {
     artifact: ExecutableArtifact,
-    language_version: &'static str,
+    language_version: String,
 }
 
 struct FunctionFinalisation<'a> {
@@ -82,6 +87,192 @@ struct FunctionFinalisation<'a> {
     definition: &'a FunctionDefinition,
     prepared_artifact: PreparedFunctionArtifact,
     references: &'a [DefinitionReference],
+}
+
+#[derive(Clone)]
+struct FunctionRevisionPlan {
+    definition: FunctionDefinition,
+    semantic_hash_version: FunctionSemanticHashVersion,
+    semantic_hash: Sha256Digest,
+    language_version: String,
+    artifact: ExecutableArtifact,
+    references: Vec<DefinitionReference>,
+    reusable: Option<FunctionRevisionRecord>,
+    next_revision_number: Option<u64>,
+}
+
+struct FunctionRevisionPlanInput<'a> {
+    semantic_hash_version: FunctionSemanticHashVersion,
+    definition: &'a FunctionDefinition,
+    language_version: &'a str,
+    artifact: &'a ExecutableArtifact,
+    expressions: &'a [ExpressionArtifact],
+    references: &'a [DefinitionReference],
+    current_only: bool,
+    reuse_policy: FunctionRevisionReusePolicy,
+}
+
+#[derive(Clone, Copy)]
+enum FunctionRevisionReusePolicy {
+    SemanticHashOnly,
+    Complete,
+}
+
+impl FunctionRevisionPlan {
+    fn new(
+        active: &ActiveDatabaseRevision,
+        function: FunctionId,
+        input: FunctionRevisionPlanInput<'_>,
+    ) -> Result<Self, PrepareError> {
+        let FunctionRevisionPlanInput {
+            semantic_hash_version,
+            definition,
+            language_version,
+            artifact,
+            expressions,
+            references,
+            current_only,
+            reuse_policy,
+        } = input;
+        let semantic_hash = match semantic_hash_version {
+            FunctionSemanticHashVersion::Version1 => function_semantic_digest(
+                definition,
+                language_version,
+                artifact,
+                expressions,
+                references,
+            )?,
+            FunctionSemanticHashVersion::Version2 => function_semantic_digest_with_version(
+                FunctionSemanticHashVersion::Version2,
+                definition,
+                language_version,
+                artifact,
+                expressions,
+                references,
+            )?,
+            _ => {
+                return Err(PrepareError::InvalidCheckedBundle {
+                    reason: "checked standard application has an unsupported semantic hash version",
+                });
+            }
+        };
+        let current = active.function_revisions().iter();
+        let revisions: Box<dyn Iterator<Item = &FunctionRevisionRecord>> = if current_only {
+            Box::new(current)
+        } else {
+            Box::new(current.chain(active.historical_function_revisions()))
+        };
+        let reusable = revisions
+            .filter(|revision| {
+                revision.function() == function
+                    && revision.semantic_hash() == semantic_hash
+                    && revision.semantic_hash_version() == semantic_hash_version
+                    && (!matches!(reuse_policy, FunctionRevisionReusePolicy::Complete)
+                        || (revision.language_version() == language_version
+                            && revision.artifact() == artifact))
+            })
+            .min_by_key(|revision| (revision.revision_number(), revision.id().to_bytes()))
+            .cloned();
+        let next_revision_number = if reusable.is_some() {
+            None
+        } else {
+            Some(next_function_revision_number(active, function)?)
+        };
+        Ok(Self {
+            definition: definition.clone(),
+            semantic_hash_version,
+            semantic_hash,
+            language_version: language_version.to_owned(),
+            artifact: artifact.clone(),
+            references: references.to_vec(),
+            reusable,
+            next_revision_number,
+        })
+    }
+}
+
+/// The complete Gate-seven lowering result for one standard upgrade.
+///
+/// This private value owns every semantic fact used by later gates. No checked
+/// source, parse report, resolver, or candidate builder crosses this seam.
+struct StandardUpgradeLoweringPlan {
+    source_template: StoredSourceRevision,
+    schemas: Vec<SchemaDefinition>,
+    object_types: Vec<ObjectTypeDefinition>,
+    expressions: Vec<ExpressionArtifact>,
+    origin_templates: Vec<DefinitionOrigin>,
+    functions: Vec<StandardUpgradeFunctionPlan>,
+}
+
+struct StandardUpgradeFunctionPlan {
+    revision: FunctionRevisionPlan,
+    declaration_origin: SourceOrigin,
+    declaration_content_hash: Sha256Digest,
+}
+
+#[derive(Debug)]
+struct AllocatedStandardUpgradePlan {
+    source_template: StoredSourceRevision,
+    source_ids: PreparedSourceIds,
+    catalogue_revision: CatalogueRevisionId,
+    schemas: Vec<SchemaDefinition>,
+    object_types: Vec<ObjectTypeDefinition>,
+    expressions: Vec<ExpressionArtifact>,
+    origin_templates: Vec<DefinitionOrigin>,
+    functions: Vec<AllocatedStandardUpgradeFunctionPlan>,
+}
+
+#[derive(Debug)]
+struct AllocatedStandardUpgradeFunctionPlan {
+    definition: FunctionDefinition,
+    semantic_hash_version: FunctionSemanticHashVersion,
+    semantic_hash: Sha256Digest,
+    language_version: String,
+    artifact: ExecutableArtifact,
+    references: Vec<DefinitionReference>,
+    declaration_origin: SourceOrigin,
+    declaration_content_hash: Sha256Digest,
+    revision: AllocatedStandardUpgradeFunctionRevision,
+}
+
+#[derive(Debug)]
+enum AllocatedStandardUpgradeFunctionRevision {
+    Reused(Box<FunctionRevisionRecord>),
+    New {
+        id: FunctionRevisionId,
+        revision_number: u64,
+    },
+}
+
+/// Gate-eight output. The catalogue is valid and all remaining material is
+/// already lowered and allocated.
+#[derive(Debug)]
+struct StandardUpgradeCatalogueCandidate {
+    plan: AllocatedStandardUpgradePlan,
+    catalogue: CatalogueSnapshot,
+}
+
+/// Gate-nine output. The source hashes are placeholders that cannot escape
+/// this private pipeline.
+#[derive(Debug)]
+struct StandardUpgradeCandidateRecords {
+    source: StoredSourceRevision,
+    catalogue: CatalogueSnapshot,
+    origins: Vec<DefinitionOrigin>,
+    expressions: Vec<ExpressionArtifact>,
+    current_function_revisions: Vec<FunctionRevisionRecord>,
+    new_function_revisions: Vec<FunctionRevisionRecord>,
+    references: Vec<DefinitionReference>,
+}
+
+/// Gate-ten output. Every canonical hash has been calculated from the typed
+/// Gate-nine records.
+#[derive(Debug)]
+struct CanonicalStandardUpgradeCandidate {
+    records: StandardUpgradeCandidateRecords,
+    source_bundle_hash: Sha256Digest,
+    source_revision_hash: Sha256Digest,
+    catalogue_hash: Sha256Digest,
 }
 
 /// Prepares one complete durable candidate from a successful compiler check.
@@ -146,6 +337,546 @@ pub fn prepare_standard_application(
 ) -> Result<DeployableRevision, PrepareStandardApplicationError> {
     let allocations = CandidateAllocator::standard(report.standard_library().verified_snapshot());
     prepare_standard_application_with_allocator(report, expected_base, active, allocations)
+}
+
+/// A compiler-prepared standard upgrade that remains non-installable until the
+/// standard-library wrapper accepts it.
+#[derive(Clone, Debug)]
+pub struct PreparedStandardUpgrade {
+    standard: crate::CheckedStandardLibrary,
+    application: DeployableRevision,
+}
+
+impl PreparedStandardUpgrade {
+    /// Returns the checked standard library used to prepare this upgrade.
+    pub fn standard_library(&self) -> &crate::CheckedStandardLibrary {
+        &self.standard
+    }
+
+    /// Returns the prepared application revision for normal kernel input.
+    pub fn application_revision(&self) -> &DeployableRevision {
+        &self.application
+    }
+}
+
+/// One durable identity reserved for the checked standard-library upgrade.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StandardUpgradeIdentity {
+    /// A standard-library revision identity.
+    StandardLibraryRevision(StandardLibraryRevisionId),
+    /// A catalogue revision identity.
+    CatalogueRevision(CatalogueRevisionId),
+    /// A source bundle identity.
+    SourceBundle(SourceBundleId),
+    /// A source revision identity.
+    SourceRevision(SourceRevisionId),
+    /// A source unit identity.
+    SourceUnit(SourceUnitId),
+    /// A schema identity.
+    Schema(SchemaId),
+    /// A type identity.
+    Type(TypeId),
+    /// A type-binding identity.
+    TypeBinding(TypeBindingId),
+}
+
+/// A fail-closed error returned while preparing a checked standard upgrade.
+#[non_exhaustive]
+#[derive(Debug)]
+pub enum PrepareStandardUpgradeError {
+    /// The active revision already contains a standard library.
+    StandardLibraryAlreadyInstalled {
+        /// The installed standard-library revision.
+        revision: StandardLibraryRevisionId,
+    },
+    /// The active catalogue owns the reserved standard namespace.
+    NamespaceOccupied {
+        /// The first conflicting semantic name.
+        name: QualifiedSemanticName,
+    },
+    /// The active revision contains a reserved durable identity.
+    ReservedIdentity {
+        /// The first conflicting reserved identity.
+        identity: StandardUpgradeIdentity,
+    },
+    /// The checked standard library cannot form application-checking context.
+    Context {
+        /// The application-context failure.
+        source: StandardApplicationContextError,
+    },
+    /// The reconstructed active source has compiler diagnostics.
+    ActiveSourceDiagnostics {
+        /// The ordered active-source diagnostics.
+        diagnostics: Vec<CompilerDiagnostic>,
+    },
+    /// The active source does not match its active catalogue.
+    ActiveSourceMismatch,
+    /// The next immutable function revision number cannot be allocated.
+    FunctionRevisionNumberExhausted {
+        /// The exhausted durable function identity.
+        function: FunctionId,
+    },
+    /// The candidate catalogue is invalid.
+    Catalogue {
+        /// The catalogue validation failure.
+        source: CatalogueSnapshotError,
+    },
+    /// The typed candidate records are invalid.
+    CandidateRecords {
+        /// The candidate-record invariant failure.
+        source: RevisionInvariantError,
+    },
+    /// The candidate canonical hashes are invalid.
+    CanonicalHash {
+        /// The canonical-hash validation failure.
+        source: CanonicalHashError,
+    },
+    /// The candidate revision invariants are invalid.
+    Revision {
+        /// The revision validation failure.
+        source: RevisionInvariantError,
+    },
+}
+
+impl fmt::Display for PrepareStandardUpgradeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::StandardLibraryAlreadyInstalled { revision } => {
+                write!(
+                    formatter,
+                    "standard library {revision} is already installed"
+                )
+            }
+            Self::NamespaceOccupied { .. } => formatter
+                .write_str("the application catalogue already uses the reserved std namespace"),
+            Self::ReservedIdentity { .. } => formatter.write_str(
+                "the application state conflicts with a reserved standard library identity",
+            ),
+            Self::Context { source } => write!(
+                formatter,
+                "the checked standard library cannot form an application context: {source}"
+            ),
+            Self::ActiveSourceDiagnostics { .. } => {
+                formatter.write_str("the active application source has compiler diagnostics")
+            }
+            Self::ActiveSourceMismatch => formatter
+                .write_str("the active application source does not match the active catalogue"),
+            Self::FunctionRevisionNumberExhausted { .. } => {
+                formatter.write_str("function revision number is exhausted")
+            }
+            Self::Catalogue { source } => {
+                write!(
+                    formatter,
+                    "the standard upgrade catalogue is invalid: {source}"
+                )
+            }
+            Self::CandidateRecords { source } => write!(
+                formatter,
+                "the standard upgrade candidate records are invalid: {source}"
+            ),
+            Self::CanonicalHash { source } => write!(
+                formatter,
+                "the standard upgrade canonical hashes are invalid: {source}"
+            ),
+            Self::Revision { source } => {
+                write!(
+                    formatter,
+                    "the standard upgrade revision is invalid: {source}"
+                )
+            }
+        }
+    }
+}
+
+impl Error for PrepareStandardUpgradeError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Context { source } => Some(source),
+            Self::Catalogue { source } => Some(source),
+            Self::CandidateRecords { source } => Some(source),
+            Self::CanonicalHash { source } => Some(source),
+            Self::Revision { source } => Some(source),
+            Self::StandardLibraryAlreadyInstalled { .. }
+            | Self::NamespaceOccupied { .. }
+            | Self::ReservedIdentity { .. }
+            | Self::ActiveSourceDiagnostics { .. }
+            | Self::ActiveSourceMismatch
+            | Self::FunctionRevisionNumberExhausted { .. } => None,
+        }
+    }
+}
+
+/// Prepares a checked standard library for a later standard-library upgrade.
+pub fn prepare_checked_standard_upgrade(
+    standard: &crate::CheckedStandardLibrary,
+    active: &ActiveDatabaseRevision,
+) -> Result<PreparedStandardUpgrade, PrepareStandardUpgradeError> {
+    prepare_checked_standard_upgrade_with_allocator(
+        standard,
+        active,
+        CandidateAllocator::standard(standard.verified_snapshot()),
+    )
+}
+
+/// Runs the production upgrade pipeline with an injected private allocator.
+///
+/// The public entry point always supplies the reserved-aware random allocator;
+/// compiler tests use this seam to prove that every gate before allocation is
+/// allocation-free and that the final companion identities retry collisions.
+pub(crate) fn prepare_checked_standard_upgrade_with_allocator(
+    standard: &crate::CheckedStandardLibrary,
+    active: &ActiveDatabaseRevision,
+    mut allocations: CandidateAllocator,
+) -> Result<PreparedStandardUpgrade, PrepareStandardUpgradeError> {
+    if let Some(installed) = active.catalogue_hash_context().standard() {
+        return Err(
+            PrepareStandardUpgradeError::StandardLibraryAlreadyInstalled {
+                revision: installed.revision(),
+            },
+        );
+    }
+
+    if let Some(name) = active_std_namespace_occupant(active.catalogue()) {
+        return Err(PrepareStandardUpgradeError::NamespaceOccupied { name });
+    }
+    if let Some(identity) = active_reserved_standard_identity(standard, active) {
+        return Err(PrepareStandardUpgradeError::ReservedIdentity { identity });
+    }
+    let context = StandardApplicationCheckContext::try_new(active.catalogue(), standard)
+        .map_err(|source| PrepareStandardUpgradeError::Context { source })?;
+    let source = SourceBundle::new(
+        active
+            .source()
+            .units()
+            .iter()
+            .map(|unit| SourceUnit::new(unit.logical_path(), unit.content())),
+    )
+    .map_err(|_| PrepareStandardUpgradeError::ActiveSourceMismatch)?;
+    let report = check_standard_application(&source, &context);
+    if !report.diagnostics().is_empty() {
+        return Err(PrepareStandardUpgradeError::ActiveSourceDiagnostics {
+            diagnostics: report.diagnostics().to_vec(),
+        });
+    }
+
+    let matched = match_active_standard_source(report, active, standard)?;
+    let Some(view) = matched.report.preparation_view() else {
+        return Err(PrepareStandardUpgradeError::ActiveSourceMismatch);
+    };
+
+    let lowering_plan = CandidateBuilder::new(
+        matched.report.parse_report(),
+        view.checked(),
+        active,
+        matched.identities.clone(),
+        PreparedSource::from_active(active.source())
+            .map_err(|_| PrepareStandardUpgradeError::ActiveSourceMismatch)?,
+        PreparationMode::StandardV2Plan {
+            signature_evidence: matched.signature_evidence.clone(),
+            standard_preflight: Box::new(matched.standard_preflight.clone()),
+        },
+        active.catalogue().revision(),
+    )
+    .plan_standard_upgrade_lowering()
+    .map_err(map_upgrade_revision_plan_error)?;
+
+    let allocated = allocate_standard_upgrade_plan(lowering_plan, &mut allocations)?;
+    let candidate = allocated
+        .into_catalogue()
+        .map_err(|source| PrepareStandardUpgradeError::Catalogue { source })?;
+    let records = candidate
+        .into_candidate_records()
+        .map_err(|source| PrepareStandardUpgradeError::CandidateRecords { source })?;
+    let context = CatalogueHashContext::version_two(standard.verified_snapshot().clone());
+    let canonical = records
+        .canonicalise(&context)
+        .map_err(|source| PrepareStandardUpgradeError::CanonicalHash { source })?;
+    let application = canonical
+        .into_deployable(active, context)
+        .map_err(|source| PrepareStandardUpgradeError::Revision { source })?;
+    Ok(PreparedStandardUpgrade {
+        standard: standard.clone(),
+        application,
+    })
+}
+
+fn allocate_standard_upgrade_plan(
+    plan: StandardUpgradeLoweringPlan,
+    allocations: &mut CandidateAllocator,
+) -> Result<AllocatedStandardUpgradePlan, PrepareStandardUpgradeError> {
+    for function in &plan.functions {
+        match (
+            function.revision.reusable.is_some(),
+            function.revision.next_revision_number.is_some(),
+        ) {
+            (true, false) | (false, true) => {}
+            (true, true) | (false, false) => {
+                return Err(PrepareStandardUpgradeError::ActiveSourceMismatch);
+            }
+        }
+    }
+
+    let mut functions = Vec::with_capacity(plan.functions.len());
+    for function in plan.functions {
+        let FunctionRevisionPlan {
+            definition,
+            semantic_hash_version,
+            semantic_hash,
+            language_version,
+            artifact,
+            references,
+            reusable,
+            next_revision_number,
+        } = function.revision;
+        let revision = match (reusable, next_revision_number) {
+            (Some(revision), None) => {
+                AllocatedStandardUpgradeFunctionRevision::Reused(Box::new(revision))
+            }
+            (None, Some(revision_number)) => AllocatedStandardUpgradeFunctionRevision::New {
+                id: allocations.function_revision(),
+                revision_number,
+            },
+            (Some(_), Some(_)) | (None, None) => {
+                return Err(PrepareStandardUpgradeError::ActiveSourceMismatch);
+            }
+        };
+        functions.push(AllocatedStandardUpgradeFunctionPlan {
+            definition,
+            semantic_hash_version,
+            semantic_hash,
+            language_version,
+            artifact,
+            references,
+            declaration_origin: function.declaration_origin,
+            declaration_content_hash: function.declaration_content_hash,
+            revision,
+        });
+    }
+
+    let catalogue_revision = allocations.catalogue_revision();
+    let source_ids = PreparedSourceIds {
+        bundle: allocations.source_bundle(),
+        revision: allocations.source_revision(),
+        units: plan
+            .source_template
+            .units()
+            .iter()
+            .map(|_| allocations.source_unit())
+            .collect(),
+    };
+    Ok(AllocatedStandardUpgradePlan {
+        source_template: plan.source_template,
+        source_ids,
+        catalogue_revision,
+        schemas: plan.schemas,
+        object_types: plan.object_types,
+        expressions: plan.expressions,
+        origin_templates: plan.origin_templates,
+        functions,
+    })
+}
+
+/// Gate-six output. This keeps the single standard resolver result, its exact
+/// sealed evidence, and the allocation-free active identity reconciliation
+/// together until the V2 candidate consumes them.
+struct MatchedActiveStandardSource {
+    report: StandardApplicationCheckReport,
+    signature_evidence: SignatureEvidence,
+    standard_preflight: StandardPreflight,
+    identities: IdentityMap,
+}
+
+fn match_active_standard_source(
+    report: StandardApplicationCheckReport,
+    active: &ActiveDatabaseRevision,
+    standard: &crate::CheckedStandardLibrary,
+) -> Result<MatchedActiveStandardSource, PrepareStandardUpgradeError> {
+    let Some(view) = report.preparation_view() else {
+        return Err(PrepareStandardUpgradeError::ActiveSourceMismatch);
+    };
+    let evidence = view.evidence();
+    let declaration_evidence = declaration_type_evidence(evidence.declaration_uses(), view.uses())
+        .map_err(|_| PrepareStandardUpgradeError::ActiveSourceMismatch)?;
+    body_type_evidence(evidence.type_uses(), view.uses())
+        .map_err(|_| PrepareStandardUpgradeError::ActiveSourceMismatch)?;
+    let signature_evidence = function_type_reference_evidence(
+        &declaration_evidence,
+        evidence.standard_type_references(),
+        view.standard_type_references(),
+    )
+    .map_err(|_| PrepareStandardUpgradeError::ActiveSourceMismatch)?;
+    let client_returns = signature_evidence
+        .materialise_client_returns(view.checked())
+        .map_err(|_| PrepareStandardUpgradeError::ActiveSourceMismatch)?;
+    let standard_preflight = standard_preflight(
+        report.parse_report(),
+        view.checked(),
+        active,
+        standard,
+        &client_returns,
+        &declaration_evidence,
+    )
+    .map_err(|_| PrepareStandardUpgradeError::ActiveSourceMismatch)?;
+    let identities = IdentityMap::build_matching_active(
+        view.checked(),
+        active,
+        &standard_preflight.function_identities,
+    )
+    .map_err(|_| PrepareStandardUpgradeError::ActiveSourceMismatch)?;
+    let material = CandidateBuilder::new(
+        report.parse_report(),
+        view.checked(),
+        active,
+        identities.clone(),
+        PreparedSource::from_active(active.source())
+            .map_err(|_| PrepareStandardUpgradeError::ActiveSourceMismatch)?,
+        PreparationMode::StandardV1Match {
+            declaration_evidence: declaration_evidence.clone(),
+            standard_preflight: Box::new(standard_preflight.clone()),
+        },
+        active.catalogue().revision(),
+    )
+    .materialise()
+    .map_err(|_| PrepareStandardUpgradeError::ActiveSourceMismatch)?;
+    if !material
+        .matches_active(active)
+        .map_err(|_| PrepareStandardUpgradeError::ActiveSourceMismatch)?
+    {
+        return Err(PrepareStandardUpgradeError::ActiveSourceMismatch);
+    }
+    Ok(MatchedActiveStandardSource {
+        report,
+        signature_evidence,
+        standard_preflight,
+        identities,
+    })
+}
+
+fn map_upgrade_revision_plan_error(error: PrepareError) -> PrepareStandardUpgradeError {
+    match error {
+        PrepareError::FunctionRevisionNumberExhausted { function } => {
+            PrepareStandardUpgradeError::FunctionRevisionNumberExhausted { function }
+        }
+        _ => PrepareStandardUpgradeError::ActiveSourceMismatch,
+    }
+}
+
+fn active_std_namespace_occupant(catalogue: &CatalogueSnapshot) -> Option<QualifiedSemanticName> {
+    catalogue
+        .schemas()
+        .iter()
+        .map(SchemaDefinition::name)
+        .chain(
+            catalogue
+                .object_types()
+                .iter()
+                .map(ObjectTypeDefinition::name),
+        )
+        .chain(catalogue.value_types().iter().map(|value| value.name()))
+        .find(|name| name_starts_std(name))
+        .cloned()
+        .or_else(|| {
+            catalogue.type_bindings().iter().find_map(|binding| {
+                let orna_core::catalogue::TypeLookupName::Qualified(name) = binding.name() else {
+                    return None;
+                };
+                name_starts_std(name).then(|| name.clone())
+            })
+        })
+        .or_else(|| {
+            catalogue.functions().iter().find_map(|function| {
+                name_starts_std(function.name()).then(|| function.name().clone())
+            })
+        })
+}
+
+fn name_starts_std(name: &QualifiedSemanticName) -> bool {
+    name.parts().first().is_some_and(|part| part == "std")
+}
+
+pub(crate) fn active_reserved_standard_identity(
+    standard: &crate::CheckedStandardLibrary,
+    active: &ActiveDatabaseRevision,
+) -> Option<StandardUpgradeIdentity> {
+    let snapshot = standard.verified_snapshot();
+    let catalogue = active.catalogue();
+    if catalogue.revision() == snapshot.catalogue().revision() {
+        return Some(StandardUpgradeIdentity::CatalogueRevision(
+            catalogue.revision(),
+        ));
+    }
+    if active.source().bundle() == snapshot.source().bundle() {
+        return Some(StandardUpgradeIdentity::SourceBundle(
+            active.source().bundle(),
+        ));
+    }
+    if active.source().id() == snapshot.source().id() {
+        return Some(StandardUpgradeIdentity::SourceRevision(
+            active.source().id(),
+        ));
+    }
+    for unit in active.source().units() {
+        if snapshot
+            .source()
+            .units()
+            .iter()
+            .any(|reserved| reserved.id() == unit.id())
+        {
+            return Some(StandardUpgradeIdentity::SourceUnit(unit.id()));
+        }
+    }
+    for schema in catalogue.schemas() {
+        if snapshot
+            .catalogue()
+            .schemas()
+            .iter()
+            .any(|reserved| reserved.id() == schema.id())
+        {
+            return Some(StandardUpgradeIdentity::Schema(schema.id()));
+        }
+    }
+    for object in catalogue.object_types() {
+        if snapshot
+            .catalogue()
+            .object_types()
+            .iter()
+            .any(|reserved| reserved.id() == object.id())
+            || snapshot
+                .catalogue()
+                .value_types()
+                .iter()
+                .any(|reserved| reserved.id() == object.id())
+        {
+            return Some(StandardUpgradeIdentity::Type(object.id()));
+        }
+    }
+    for value in catalogue.value_types() {
+        if snapshot
+            .catalogue()
+            .object_types()
+            .iter()
+            .any(|reserved| reserved.id() == value.id())
+            || snapshot
+                .catalogue()
+                .value_types()
+                .iter()
+                .any(|reserved| reserved.id() == value.id())
+        {
+            return Some(StandardUpgradeIdentity::Type(value.id()));
+        }
+    }
+    for binding in catalogue.type_bindings() {
+        if snapshot
+            .catalogue()
+            .type_bindings()
+            .iter()
+            .any(|reserved| reserved.id() == binding.id())
+        {
+            return Some(StandardUpgradeIdentity::TypeBinding(binding.id()));
+        }
+    }
+    None
 }
 
 pub(crate) fn prepare_standard_application_with_allocator(
@@ -360,6 +1091,14 @@ fn checked_type_use_kind_tag(kind: crate::CheckedTypeUseKind) -> &'static str {
 
 enum PreparationMode<'a> {
     LegacyV1,
+    StandardV1Match {
+        declaration_evidence: DeclarationEvidence,
+        standard_preflight: Box<StandardPreflight>,
+    },
+    StandardV2Plan {
+        signature_evidence: SignatureEvidence,
+        standard_preflight: Box<StandardPreflight>,
+    },
     StandardV2 {
         standard: &'a crate::CheckedStandardLibrary,
         declaration_evidence: DeclarationEvidence,
@@ -371,12 +1110,81 @@ enum PreparationMode<'a> {
 impl PreparationMode<'_> {
     fn catalogue_hash_context(&self) -> CatalogueHashContext {
         match self {
-            Self::LegacyV1 => CatalogueHashContext::version_one(),
+            Self::LegacyV1 | Self::StandardV1Match { .. } => CatalogueHashContext::version_one(),
+            Self::StandardV2Plan { .. } => CatalogueHashContext::version_one(),
             Self::StandardV2 { standard, .. } => {
                 CatalogueHashContext::version_two(standard.verified_snapshot().clone())
             }
         }
     }
+
+    fn standard_preflight(&self) -> Option<&StandardPreflight> {
+        match self {
+            Self::LegacyV1 => None,
+            Self::StandardV1Match {
+                standard_preflight, ..
+            }
+            | Self::StandardV2Plan {
+                standard_preflight, ..
+            }
+            | Self::StandardV2 {
+                standard_preflight, ..
+            } => Some(standard_preflight),
+        }
+    }
+
+    fn signature_evidence(&self) -> Option<&SignatureEvidence> {
+        match self {
+            Self::StandardV2 {
+                signature_evidence, ..
+            }
+            | Self::StandardV2Plan {
+                signature_evidence, ..
+            } => Some(signature_evidence),
+            Self::LegacyV1 | Self::StandardV1Match { .. } => None,
+        }
+    }
+
+    fn semantic_hash_version(
+        &self,
+        references: &[DefinitionReference],
+    ) -> FunctionSemanticHashVersion {
+        match self {
+            Self::LegacyV1 | Self::StandardV1Match { .. } => FunctionSemanticHashVersion::Version1,
+            Self::StandardV2Plan { .. } | Self::StandardV2 { .. }
+                if references.iter().any(|reference| {
+                    matches!(reference.target(), DefinitionReferenceTarget::ValueType(_))
+                }) =>
+            {
+                FunctionSemanticHashVersion::Version2
+            }
+            Self::StandardV2Plan { .. } | Self::StandardV2 { .. } => {
+                FunctionSemanticHashVersion::Version1
+            }
+        }
+    }
+}
+
+/// Rebinds only the revision identity of a Gate-seven function signature.
+///
+/// Gate seven creates the complete semantic signature before the private
+/// allocator can issue a new revision identity. Gate eight keeps that checked
+/// signature and changes only this durable link.
+fn rebind_function_definition_revision(
+    definition: &FunctionDefinition,
+    revision: FunctionRevisionId,
+) -> FunctionDefinition {
+    FunctionDefinition::new(
+        definition.id(),
+        definition.name().clone(),
+        definition.domain(),
+        definition.parameters().to_vec(),
+        definition.return_type().clone(),
+        revision,
+        definition.security(),
+        definition.transaction(),
+        definition.volatility(),
+    )
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2521,6 +3329,7 @@ pub(crate) struct CandidateIdSource {
     pub(crate) source_unit: fn() -> SourceUnitId,
     pub(crate) schema: fn() -> SchemaId,
     pub(crate) type_id: fn() -> TypeId,
+    pub(crate) function_revision: fn() -> FunctionRevisionId,
 }
 
 impl CandidateIdSource {
@@ -2531,6 +3340,7 @@ impl CandidateIdSource {
         source_unit: SourceUnitId::new,
         schema: SchemaId::new,
         type_id: TypeId::new,
+        function_revision: FunctionRevisionId::new,
     };
 }
 
@@ -2638,9 +3448,13 @@ impl CandidateAllocator {
             }
         }
     }
+
+    fn function_revision(&mut self) -> FunctionRevisionId {
+        (self.source.function_revision)()
+    }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct IdentityMap {
     schemas: HashMap<CheckedSchemaId, SchemaId>,
     types: HashMap<CheckedTypeId, TypeId>,
@@ -2656,7 +3470,7 @@ impl IdentityMap {
         active: &ActiveDatabaseRevision,
         allocations: &mut CandidateAllocator,
     ) -> Result<Self, PrepareError> {
-        Self::build(checked, active, allocations, None)
+        Self::build(checked, active, allocations, None, true)
     }
 
     fn build_standard(
@@ -2665,7 +3479,28 @@ impl IdentityMap {
         allocations: &mut CandidateAllocator,
         function_identities: &ValidatedFunctionIdentities,
     ) -> Result<Self, PrepareError> {
-        Self::build(checked, active, allocations, Some(function_identities))
+        Self::build(
+            checked,
+            active,
+            allocations,
+            Some(function_identities),
+            true,
+        )
+    }
+
+    fn build_matching_active(
+        checked: &CheckedBundle,
+        active: &ActiveDatabaseRevision,
+        function_identities: &ValidatedFunctionIdentities,
+    ) -> Result<Self, PrepareError> {
+        let mut no_allocations = CandidateAllocator::legacy();
+        Self::build(
+            checked,
+            active,
+            &mut no_allocations,
+            Some(function_identities),
+            false,
+        )
     }
 
     fn build(
@@ -2673,13 +3508,19 @@ impl IdentityMap {
         active: &ActiveDatabaseRevision,
         allocations: &mut CandidateAllocator,
         function_identities: Option<&ValidatedFunctionIdentities>,
+        allow_provisional: bool,
     ) -> Result<Self, PrepareError> {
         Self::validate_existing(checked, active, function_identities.is_none())?;
         let mut result = Self::default();
         for schema in checked.schemas() {
             let id = match schema.id() {
                 CheckedSchemaId::Existing(id) => id,
-                CheckedSchemaId::Provisional(_) => allocations.schema(),
+                CheckedSchemaId::Provisional(_) if allow_provisional => allocations.schema(),
+                CheckedSchemaId::Provisional(_) => {
+                    return Err(PrepareError::InvalidCheckedBundle {
+                        reason: "matched active source contains a provisional schema",
+                    });
+                }
             };
             insert_unique(
                 &mut result.schemas,
@@ -2692,7 +3533,12 @@ impl IdentityMap {
         for object_type in checked.object_types() {
             let type_id = match object_type.id() {
                 CheckedTypeId::Existing(id) => id,
-                CheckedTypeId::Provisional(_) => allocations.type_id(),
+                CheckedTypeId::Provisional(_) if allow_provisional => allocations.type_id(),
+                CheckedTypeId::Provisional(_) => {
+                    return Err(PrepareError::InvalidCheckedBundle {
+                        reason: "matched active source contains a provisional object type",
+                    });
+                }
             };
             insert_unique(
                 &mut result.types,
@@ -2704,7 +3550,12 @@ impl IdentityMap {
             for field in object_type.fields() {
                 let field_id = match field.id() {
                     CheckedFieldId::Existing(id) => id,
-                    CheckedFieldId::Provisional(_) => FieldId::new(),
+                    CheckedFieldId::Provisional(_) if allow_provisional => FieldId::new(),
+                    CheckedFieldId::Provisional(_) => {
+                        return Err(PrepareError::InvalidCheckedBundle {
+                            reason: "matched active source contains a provisional field",
+                        });
+                    }
                 };
                 insert_consistent(
                     &mut result.fields,
@@ -2716,7 +3567,14 @@ impl IdentityMap {
                 if let Some(default) = field.default() {
                     let expression_id = match default.id() {
                         CheckedExpressionId::Existing(id) => id,
-                        CheckedExpressionId::Provisional(_) => ExpressionId::new(),
+                        CheckedExpressionId::Provisional(_) if allow_provisional => {
+                            ExpressionId::new()
+                        }
+                        CheckedExpressionId::Provisional(_) => {
+                            return Err(PrepareError::InvalidCheckedBundle {
+                                reason: "matched active source contains a provisional expression",
+                            });
+                        }
                     };
                     insert_consistent(
                         &mut result.expressions,
@@ -2731,7 +3589,7 @@ impl IdentityMap {
         match function_identities {
             None => {
                 for function in checked.server_functions() {
-                    Self::map_server_function(&mut result, function, true)?;
+                    Self::map_server_function(&mut result, function, true, allow_provisional)?;
                 }
             }
             Some(function_identities) => {
@@ -2745,7 +3603,12 @@ impl IdentityMap {
                                 .ok_or(PrepareError::InvalidCheckedBundle {
                                     reason: "checked standard function owners do not match declaration evidence",
                                 })?;
-                            Self::map_server_function(&mut result, function, false)?;
+                            Self::map_server_function(
+                                &mut result,
+                                function,
+                                false,
+                                allow_provisional,
+                            )?;
                         }
                         FunctionDomain::Client => {
                             let function = checked
@@ -2757,7 +3620,14 @@ impl IdentityMap {
                                 })?;
                             let function_id = match function.id() {
                                 CheckedFunctionId::Existing(id) => id,
-                                CheckedFunctionId::Provisional(_) => FunctionId::new(),
+                                CheckedFunctionId::Provisional(_) if allow_provisional => {
+                                    FunctionId::new()
+                                }
+                                CheckedFunctionId::Provisional(_) => {
+                                    return Err(PrepareError::InvalidCheckedBundle {
+                                        reason: "matched active source contains a provisional function",
+                                    });
+                                }
                             };
                             result.functions.insert(function.id(), function_id);
                         }
@@ -2772,10 +3642,16 @@ impl IdentityMap {
         result: &mut Self,
         function: &crate::CheckedServerFunction,
         reject_duplicate: bool,
+        allow_provisional: bool,
     ) -> Result<(), PrepareError> {
         let function_id = match function.id() {
             CheckedFunctionId::Existing(id) => id,
-            CheckedFunctionId::Provisional(_) => FunctionId::new(),
+            CheckedFunctionId::Provisional(_) if allow_provisional => FunctionId::new(),
+            CheckedFunctionId::Provisional(_) => {
+                return Err(PrepareError::InvalidCheckedBundle {
+                    reason: "matched active source contains a provisional function",
+                });
+            }
         };
         if reject_duplicate {
             insert_unique(
@@ -2791,7 +3667,12 @@ impl IdentityMap {
         for parameter in function.parameters() {
             let parameter_id = match parameter.id() {
                 CheckedParameterId::Existing(id) => id,
-                CheckedParameterId::Provisional(_) => ParameterId::new(),
+                CheckedParameterId::Provisional(_) if allow_provisional => ParameterId::new(),
+                CheckedParameterId::Provisional(_) => {
+                    return Err(PrepareError::InvalidCheckedBundle {
+                        reason: "matched active source contains a provisional parameter",
+                    });
+                }
             };
             insert_consistent(
                 &mut result.parameters,
@@ -3034,10 +3915,349 @@ struct PreparedSource {
     unit_ids: HashMap<String, SourceUnitId>,
 }
 
+#[derive(Debug)]
 struct PreparedSourceIds {
     bundle: SourceBundleId,
     revision: SourceRevisionId,
     units: Vec<SourceUnitId>,
+}
+
+struct CandidateMaterial {
+    source: StoredSourceRevision,
+    catalogue: CatalogueSnapshot,
+    origins: Vec<DefinitionOrigin>,
+    expressions: Vec<ExpressionArtifact>,
+    current_function_revisions: Vec<FunctionRevisionRecord>,
+    new_function_revisions: Vec<FunctionRevisionRecord>,
+    references: Vec<DefinitionReference>,
+}
+
+impl AllocatedStandardUpgradeFunctionPlan {
+    fn revision_id(&self) -> FunctionRevisionId {
+        match &self.revision {
+            AllocatedStandardUpgradeFunctionRevision::Reused(revision) => revision.id(),
+            AllocatedStandardUpgradeFunctionRevision::New { id, .. } => *id,
+        }
+    }
+}
+
+impl AllocatedStandardUpgradePlan {
+    /// Gate 8 constructs and validates only the candidate catalogue.
+    fn into_catalogue(self) -> Result<StandardUpgradeCatalogueCandidate, CatalogueSnapshotError> {
+        let functions = self
+            .functions
+            .iter()
+            .map(|function| {
+                rebind_function_definition_revision(&function.definition, function.revision_id())
+            })
+            .collect();
+        let catalogue = CatalogueSnapshot::new_with_functions(
+            self.catalogue_revision,
+            self.schemas.clone(),
+            self.object_types.clone(),
+            functions,
+        )?;
+        Ok(StandardUpgradeCatalogueCandidate {
+            plan: self,
+            catalogue,
+        })
+    }
+}
+
+impl StandardUpgradeCatalogueCandidate {
+    /// Gate 9 constructs every typed candidate record. It does not calculate
+    /// a canonical hash.
+    fn into_candidate_records(
+        self,
+    ) -> Result<StandardUpgradeCandidateRecords, RevisionInvariantError> {
+        let StandardUpgradeCatalogueCandidate { plan, catalogue } = self;
+        let PreparedSourceIds {
+            bundle,
+            revision,
+            units: source_unit_ids,
+        } = plan.source_ids;
+        let units = plan
+            .source_template
+            .units()
+            .iter()
+            .zip(source_unit_ids)
+            .map(|(template, id)| {
+                StoredSourceUnit::new(
+                    id,
+                    template.ordinal(),
+                    template.logical_path(),
+                    template.content(),
+                    template.content_hash(),
+                )
+            })
+            .collect::<Result<Vec<_>, RevisionInvariantError>>()?;
+        let zero_hash = Sha256Digest::from_bytes([0; 32]);
+        let source = StoredSourceRevision::new(
+            bundle,
+            revision,
+            Some(plan.source_template.id()),
+            units,
+            zero_hash,
+            zero_hash,
+        )?;
+
+        let origins = plan
+            .origin_templates
+            .iter()
+            .map(|origin| {
+                Ok(DefinitionOrigin::new(
+                    origin.identity(),
+                    rebase_standard_upgrade_origin(
+                        &plan.source_template,
+                        &source,
+                        origin.source(),
+                    )?,
+                ))
+            })
+            .collect::<Result<Vec<_>, RevisionInvariantError>>()?;
+        let mut current_function_revisions = Vec::with_capacity(plan.functions.len());
+        let mut new_function_revisions = Vec::new();
+        let mut references = Vec::new();
+        for function in plan.functions {
+            let function_id = function.definition.id();
+            let revision_id = function.revision_id();
+            let current = match function.revision {
+                AllocatedStandardUpgradeFunctionRevision::Reused(revision) => *revision,
+                AllocatedStandardUpgradeFunctionRevision::New {
+                    id,
+                    revision_number,
+                } => {
+                    let declaration_origin = rebase_standard_upgrade_origin(
+                        &plan.source_template,
+                        &source,
+                        function.declaration_origin,
+                    )?;
+                    let revision = FunctionRevisionRecord::new(
+                        function_id,
+                        id,
+                        revision_number,
+                        declaration_origin,
+                        function.declaration_content_hash,
+                        function.semantic_hash,
+                        function.language_version,
+                        function.artifact,
+                    )?
+                    .with_semantic_hash_version(function.semantic_hash_version);
+                    new_function_revisions.push(revision.clone());
+                    revision
+                }
+            };
+            for reference in function.references {
+                references.push(DefinitionReference::new(
+                    function_id,
+                    revision_id,
+                    reference.ordinal(),
+                    reference.target(),
+                    reference.kind(),
+                    rebase_standard_upgrade_origin(
+                        &plan.source_template,
+                        &source,
+                        reference.source_origin(),
+                    )?,
+                ));
+            }
+            current_function_revisions.push(current);
+        }
+        Ok(StandardUpgradeCandidateRecords {
+            source,
+            catalogue,
+            origins,
+            expressions: plan.expressions,
+            current_function_revisions,
+            new_function_revisions,
+            references,
+        })
+    }
+}
+
+impl StandardUpgradeCandidateRecords {
+    /// Gate 10 is the only standard-upgrade canonical encoder authority.
+    fn canonicalise(
+        self,
+        context: &CatalogueHashContext,
+    ) -> Result<CanonicalStandardUpgradeCandidate, CanonicalHashError> {
+        let source_bundle_hash = source_bundle_digest(self.source.units())?;
+        let source_revision_hash = source_revision_record_digest(
+            self.source.bundle(),
+            self.source.parent(),
+            source_bundle_hash,
+        )?;
+        let catalogue_hash = catalogue_digest_with_context(
+            context,
+            &self.catalogue,
+            &self.current_function_revisions,
+            &self.expressions,
+            &self.origins,
+            &self.references,
+        )?;
+        Ok(CanonicalStandardUpgradeCandidate {
+            records: self,
+            source_bundle_hash,
+            source_revision_hash,
+            catalogue_hash,
+        })
+    }
+}
+
+impl CanonicalStandardUpgradeCandidate {
+    /// Gate 11 rebuilds the hashed source and constructs the final revision.
+    fn into_deployable(
+        self,
+        active: &ActiveDatabaseRevision,
+        context: CatalogueHashContext,
+    ) -> Result<DeployableRevision, RevisionInvariantError> {
+        let records = self.records;
+        let source = StoredSourceRevision::new(
+            records.source.bundle(),
+            records.source.id(),
+            records.source.parent(),
+            records.source.units().to_vec(),
+            self.source_bundle_hash,
+            self.source_revision_hash,
+        )?;
+        DeployableRevision::new_with_catalogue_hash_context(
+            DeployableRevisionInput::new(
+                active.pair(),
+                source,
+                active.pair().catalogue(),
+                records.catalogue,
+                self.catalogue_hash,
+                DeployableRevisionContent::new(
+                    records.origins,
+                    records.expressions,
+                    records.new_function_revisions,
+                    records.references,
+                )
+                .with_current_function_revisions(records.current_function_revisions),
+            ),
+            context,
+        )
+    }
+}
+
+fn rebase_standard_upgrade_origin(
+    source_template: &StoredSourceRevision,
+    source: &StoredSourceRevision,
+    origin: SourceOrigin,
+) -> Result<SourceOrigin, RevisionInvariantError> {
+    let index = source_template
+        .units()
+        .iter()
+        .position(|unit| unit.id() == origin.source_unit())
+        .ok_or(RevisionInvariantError::SourceOriginUnitNotInRevision {
+            source_unit: origin.source_unit(),
+        })?;
+    let source_unit =
+        source
+            .units()
+            .get(index)
+            .ok_or(RevisionInvariantError::SourceOriginUnitNotInRevision {
+                source_unit: origin.source_unit(),
+            })?;
+    SourceOrigin::new(source_unit.id(), origin.byte_start(), origin.byte_end())
+}
+
+impl CandidateMaterial {
+    fn matches_active(&self, active: &ActiveDatabaseRevision) -> Result<bool, PrepareError> {
+        if self.source != *active.source()
+            || !catalogue_matches(&self.catalogue, active.catalogue())
+            || self.origins != active.origins()
+            || self.expressions != active.expressions()
+            || self.current_function_revisions != active.function_revisions()
+            || !self.new_function_revisions.is_empty()
+            || self.references != active.references()
+        {
+            return Ok(false);
+        }
+        Ok(catalogue_digest(
+            &self.catalogue,
+            &self.current_function_revisions,
+            &self.expressions,
+            &self.origins,
+            &self.references,
+        )? == active.catalogue_hash())
+    }
+
+    fn into_deployable(
+        self,
+        active: &ActiveDatabaseRevision,
+        context: CatalogueHashContext,
+    ) -> Result<DeployableRevision, PrepareError> {
+        let catalogue_hash = self.catalogue_hash(&context)?;
+        self.into_deployable_with_catalogue_hash(active, context, catalogue_hash)
+    }
+
+    fn catalogue_hash(&self, context: &CatalogueHashContext) -> Result<Sha256Digest, PrepareError> {
+        if context.standard().is_none() {
+            return Ok(catalogue_digest(
+                &self.catalogue,
+                &self.current_function_revisions,
+                &self.expressions,
+                &self.origins,
+                &self.references,
+            )?);
+        }
+        Ok(catalogue_digest_with_context(
+            context,
+            &self.catalogue,
+            &self.current_function_revisions,
+            &self.expressions,
+            &self.origins,
+            &self.references,
+        )?)
+    }
+
+    fn into_deployable_with_catalogue_hash(
+        self,
+        active: &ActiveDatabaseRevision,
+        context: CatalogueHashContext,
+        catalogue_hash: Sha256Digest,
+    ) -> Result<DeployableRevision, PrepareError> {
+        if context.standard().is_none() {
+            return Ok(DeployableRevision::new(
+                active.pair(),
+                self.source,
+                active.pair().catalogue(),
+                self.catalogue,
+                catalogue_hash,
+                self.origins,
+                self.expressions,
+                self.new_function_revisions,
+                self.references,
+            )?);
+        }
+        Ok(DeployableRevision::new_with_catalogue_hash_context(
+            DeployableRevisionInput::new(
+                active.pair(),
+                self.source,
+                active.pair().catalogue(),
+                self.catalogue,
+                catalogue_hash,
+                DeployableRevisionContent::new(
+                    self.origins,
+                    self.expressions,
+                    self.new_function_revisions,
+                    self.references,
+                )
+                .with_current_function_revisions(self.current_function_revisions),
+            ),
+            context,
+        )?)
+    }
+}
+
+fn catalogue_matches(left: &CatalogueSnapshot, right: &CatalogueSnapshot) -> bool {
+    left.revision() == right.revision()
+        && left.schemas() == right.schemas()
+        && left.object_types() == right.object_types()
+        && left.value_types() == right.value_types()
+        && left.type_bindings() == right.type_bindings()
+        && left.functions() == right.functions()
 }
 
 impl PreparedSourceIds {
@@ -3060,6 +4280,24 @@ impl PreparedSourceIds {
 }
 
 impl PreparedSource {
+    fn from_active(revision: &StoredSourceRevision) -> Result<Self, PrepareError> {
+        let mut unit_ids = HashMap::with_capacity(revision.units().len());
+        for unit in revision.units() {
+            if unit_ids
+                .insert(unit.logical_path().to_owned(), unit.id())
+                .is_some()
+            {
+                return Err(PrepareError::InvalidCheckedBundle {
+                    reason: "active source revision contains a duplicate logical path",
+                });
+            }
+        }
+        Ok(Self {
+            revision: revision.clone(),
+            unit_ids,
+        })
+    }
+
     fn new(
         parse_report: &ParseReport,
         parent: SourceRevisionId,
@@ -3177,7 +4415,12 @@ impl<'a> CandidateBuilder<'a> {
     ) -> Self {
         let declaration_evidence = match &mode {
             PreparationMode::LegacyV1 => None,
-            PreparationMode::StandardV2 {
+            PreparationMode::StandardV2Plan { .. } => None,
+            PreparationMode::StandardV1Match {
+                declaration_evidence,
+                ..
+            }
+            | PreparationMode::StandardV2 {
                 declaration_evidence,
                 ..
             } => Some(RefCell::new(declaration_evidence.clone())),
@@ -3200,7 +4443,13 @@ impl<'a> CandidateBuilder<'a> {
         }
     }
 
-    fn build(mut self) -> Result<DeployableRevision, PrepareError> {
+    fn build(self) -> Result<DeployableRevision, PrepareError> {
+        let active = self.active;
+        let context = self.mode.catalogue_hash_context();
+        self.materialise()?.into_deployable(active, context)
+    }
+
+    fn materialise(mut self) -> Result<CandidateMaterial, PrepareError> {
         let schemas = self.build_schemas()?;
         let object_types = self.build_object_types()?;
         self.build_functions(&object_types)?;
@@ -3220,56 +4469,15 @@ impl<'a> CandidateBuilder<'a> {
             object_types,
             self.functions,
         )?;
-        match &self.mode {
-            PreparationMode::LegacyV1 => {
-                let catalogue_hash = catalogue_digest(
-                    &catalogue,
-                    &self.current_function_revisions,
-                    &self.expressions,
-                    &self.origins,
-                    &self.references,
-                )?;
-                Ok(DeployableRevision::new(
-                    self.active.pair(),
-                    self.source.revision,
-                    self.active.pair().catalogue(),
-                    catalogue,
-                    catalogue_hash,
-                    self.origins,
-                    self.expressions,
-                    self.new_function_revisions,
-                    self.references,
-                )?)
-            }
-            PreparationMode::StandardV2 { .. } => {
-                let context = self.mode.catalogue_hash_context();
-                let catalogue_hash = catalogue_digest_with_context(
-                    &context,
-                    &catalogue,
-                    &self.current_function_revisions,
-                    &self.expressions,
-                    &self.origins,
-                    &self.references,
-                )?;
-                Ok(DeployableRevision::new_with_catalogue_hash_context(
-                    DeployableRevisionInput::new(
-                        self.active.pair(),
-                        self.source.revision,
-                        self.active.pair().catalogue(),
-                        catalogue,
-                        catalogue_hash,
-                        DeployableRevisionContent::new(
-                            self.origins,
-                            self.expressions,
-                            self.new_function_revisions,
-                            self.references,
-                        )
-                        .with_current_function_revisions(self.current_function_revisions),
-                    ),
-                    context,
-                )?)
-            }
-        }
+        Ok(CandidateMaterial {
+            source: self.source.revision,
+            catalogue,
+            origins: self.origins,
+            expressions: self.expressions,
+            current_function_revisions: self.current_function_revisions,
+            new_function_revisions: self.new_function_revisions,
+            references: self.references,
+        })
     }
 
     fn resolved_type(
@@ -3311,23 +4519,75 @@ impl<'a> CandidateBuilder<'a> {
     }
 
     fn build_schemas(&mut self) -> Result<Vec<SchemaDefinition>, PrepareError> {
+        let schemas = self.catalogue_schemas()?;
+        for checked in self.checked.schemas() {
+            self.push_origin(
+                DefinitionIdentity::Schema(self.identities.schema(checked.id())?),
+                checked.location(),
+            )?;
+        }
+        Ok(schemas)
+    }
+
+    fn catalogue_schemas(&self) -> Result<Vec<SchemaDefinition>, PrepareError> {
         let mut schemas = Vec::with_capacity(self.checked.schemas().len());
         for checked in self.checked.schemas() {
             let id = self.identities.schema(checked.id())?;
             schemas.push(SchemaDefinition::new(id, checked.name().clone()));
-            self.push_origin(DefinitionIdentity::Schema(id), checked.location())?;
         }
         Ok(schemas)
     }
 
     fn build_object_types(&mut self) -> Result<Vec<ObjectTypeDefinition>, PrepareError> {
+        let object_types = self.catalogue_object_types()?;
+        self.record_object_type_metadata()?;
+        Ok(object_types)
+    }
+
+    fn catalogue_object_types(&self) -> Result<Vec<ObjectTypeDefinition>, PrepareError> {
         let mut object_types = Vec::with_capacity(self.checked.object_types().len());
         for checked_type in self.checked.object_types() {
             let type_id = self.identities.type_id(checked_type.id())?;
             let mut fields = Vec::with_capacity(checked_type.fields().len());
             for checked_field in checked_type.fields() {
                 let field_id = self.identities.field(checked_field.id())?;
-                let default_expression = if let Some(default) = checked_field.default() {
+                let default_expression = checked_field
+                    .default()
+                    .map(|default| self.identities.expression(default.id()))
+                    .transpose()?;
+
+                fields.push(FieldDefinition::new(
+                    field_id,
+                    checked_field.name(),
+                    checked_field.ordinal(),
+                    self.resolved_type(
+                        checked_field.semantic_type(),
+                        crate::CheckedTypeUseKind::Field {
+                            owner: checked_type.id(),
+                            field: checked_field.id(),
+                        },
+                    )?,
+                    checked_field.nullable(),
+                    checked_field.unique(),
+                    default_expression,
+                    checked_field.on_delete(),
+                ));
+            }
+            object_types.push(ObjectTypeDefinition::new(
+                type_id,
+                checked_type.name().clone(),
+                fields,
+            ));
+        }
+        Ok(object_types)
+    }
+
+    fn record_object_type_metadata(&mut self) -> Result<(), PrepareError> {
+        for checked_type in self.checked.object_types() {
+            let type_id = self.identities.type_id(checked_type.id())?;
+            for checked_field in checked_type.fields() {
+                let field_id = self.identities.field(checked_field.id())?;
+                if let Some(default) = checked_field.default() {
                     let expression_id = self.identities.expression(default.id())?;
                     let value = match default.value() {
                         ConstantValue::Null => ConstantExpression::Null,
@@ -3360,27 +4620,7 @@ impl<'a> CandidateBuilder<'a> {
                             default.location(),
                         )?;
                     }
-                    Some(expression_id)
-                } else {
-                    None
-                };
-
-                fields.push(FieldDefinition::new(
-                    field_id,
-                    checked_field.name(),
-                    checked_field.ordinal(),
-                    self.resolved_type(
-                        checked_field.semantic_type(),
-                        crate::CheckedTypeUseKind::Field {
-                            owner: checked_type.id(),
-                            field: checked_field.id(),
-                        },
-                    )?,
-                    checked_field.nullable(),
-                    checked_field.unique(),
-                    default_expression,
-                    checked_field.on_delete(),
-                ));
+                }
                 self.push_origin(
                     DefinitionIdentity::Field {
                         owner: type_id,
@@ -3389,28 +4629,22 @@ impl<'a> CandidateBuilder<'a> {
                     checked_field.location(),
                 )?;
             }
-            object_types.push(ObjectTypeDefinition::new(
-                type_id,
-                checked_type.name().clone(),
-                fields,
-            ));
             self.push_origin(
                 DefinitionIdentity::ObjectType(type_id),
                 checked_type.location(),
             )?;
         }
-        Ok(object_types)
+        Ok(())
     }
 
     fn build_functions(
         &mut self,
         object_types: &[ObjectTypeDefinition],
     ) -> Result<(), PrepareError> {
-        let standard_owners = match &self.mode {
-            PreparationMode::LegacyV1 => None,
-            PreparationMode::StandardV2 {
-                standard_preflight, ..
-            } => Some(
+        let standard_owners = self
+            .mode
+            .standard_preflight()
+            .map(|standard_preflight| {
                 standard_preflight
                     .function_identities
                     .order()
@@ -3421,9 +4655,9 @@ impl<'a> CandidateBuilder<'a> {
                             standard_preflight.function_identities.domain(*owner)?,
                         ))
                     })
-                    .collect::<Result<Vec<_>, PrepareError>>()?,
-            ),
-        };
+                    .collect::<Result<Vec<_>, PrepareError>>()
+            })
+            .transpose()?;
 
         let Some(standard_owners) = standard_owners else {
             for checked in self.checked.server_functions() {
@@ -3453,6 +4687,154 @@ impl<'a> CandidateBuilder<'a> {
             }
         }
         Ok(())
+    }
+
+    fn plan_standard_upgrade_lowering(
+        mut self,
+    ) -> Result<StandardUpgradeLoweringPlan, PrepareError> {
+        let schemas = self.build_schemas()?;
+        let object_types = self.build_object_types()?;
+        let standard_preflight =
+            self.mode
+                .standard_preflight()
+                .ok_or(PrepareError::InvalidCheckedBundle {
+                    reason: "checked standard function requires standard preparation evidence",
+                })?;
+        let owners = standard_preflight
+            .function_identities
+            .order()
+            .iter()
+            .map(|owner| {
+                Ok((
+                    *owner,
+                    standard_preflight.function_identities.domain(*owner)?,
+                ))
+            })
+            .collect::<Result<Vec<_>, PrepareError>>()?;
+        let mut plans = HashMap::with_capacity(owners.len());
+        for (owner, domain) in owners {
+            let function_plan = match domain {
+                FunctionDomain::Server => {
+                    let checked = self
+                        .checked
+                        .server_functions()
+                        .iter()
+                        .find(|function| function.id() == owner)
+                        .ok_or(PrepareError::InvalidCheckedBundle {
+                            reason: "checked standard function owners do not match declaration evidence",
+                        })?
+                        .clone();
+                    let function = self.identities.function(checked.id())?;
+                    let revision = self.initial_function_revision(checked.id(), function)?;
+                    let definition = self.function_definition(&checked, revision, true)?;
+                    let artifact = self.server_artifact(&checked, &definition, &object_types)?;
+                    let references = self.function_references(&checked, function, revision)?;
+                    let semantic_hash_version = self.mode.semantic_hash_version(&references);
+                    let plan = FunctionRevisionPlan::new(
+                        self.active,
+                        function,
+                        FunctionRevisionPlanInput {
+                            semantic_hash_version,
+                            definition: &definition,
+                            language_version: &artifact.language_version,
+                            artifact: &artifact.artifact,
+                            expressions: &self.expressions,
+                            references: &references,
+                            current_only: standard_upgrade_reuse_is_current_only(
+                                semantic_hash_version,
+                            ),
+                            reuse_policy: FunctionRevisionReusePolicy::Complete,
+                        },
+                    )?;
+                    let declaration_origin = self.source.origin(checked.location())?;
+                    let declaration_content_hash = function_declaration_digest(
+                        self.source
+                            .declaration(self.parse_report, checked.location())?,
+                    )?;
+                    self.push_function_origins(&checked, function)?;
+                    StandardUpgradeFunctionPlan {
+                        revision: plan,
+                        declaration_origin,
+                        declaration_content_hash,
+                    }
+                }
+                FunctionDomain::Client => {
+                    let client = self.validated_client(owner)?.clone();
+                    let function = self.identities.function(client.id)?;
+                    let revision = self.initial_function_revision(client.id, function)?;
+                    let definition = self.client_function_definition(&client, revision, true)?;
+                    let artifact = self.client_artifact(&client)?;
+                    let references =
+                        self.client_function_references(function, revision, &client)?;
+                    let semantic_hash_version = self.mode.semantic_hash_version(&references);
+                    let plan = FunctionRevisionPlan::new(
+                        self.active,
+                        function,
+                        FunctionRevisionPlanInput {
+                            semantic_hash_version,
+                            definition: &definition,
+                            language_version: &artifact.language_version,
+                            artifact: &artifact.artifact,
+                            expressions: &self.expressions,
+                            references: &references,
+                            current_only: standard_upgrade_reuse_is_current_only(
+                                semantic_hash_version,
+                            ),
+                            reuse_policy: FunctionRevisionReusePolicy::Complete,
+                        },
+                    )?;
+                    let declaration_origin = self.source.origin(&client.location)?;
+                    let declaration_content_hash = function_declaration_digest(
+                        self.source
+                            .declaration(self.parse_report, &client.location)?,
+                    )?;
+                    self.push_origin(DefinitionIdentity::Function(function), &client.location)?;
+                    StandardUpgradeFunctionPlan {
+                        revision: plan,
+                        declaration_origin,
+                        declaration_content_hash,
+                    }
+                }
+            };
+            let function = function_plan.revision.definition.id();
+            if plans.insert(function, function_plan).is_some() {
+                return Err(PrepareError::InvalidCheckedBundle {
+                    reason: "duplicate checked function",
+                });
+            }
+        }
+        if self
+            .declaration_evidence
+            .as_ref()
+            .is_some_and(|evidence| !evidence.borrow().is_empty())
+        {
+            return Err(PrepareError::InvalidCheckedBundle {
+                reason: "checked standard declaration type evidence was not consumed",
+            });
+        }
+
+        let mut functions = Vec::with_capacity(plans.len());
+        for definition in self.active.catalogue().functions() {
+            let plan = plans.remove(&definition.id()).ok_or(
+                PrepareError::InvalidCheckedBundle {
+                    reason: "checked standard function owners do not match the active catalogue",
+                },
+            )?;
+            functions.push(plan);
+        }
+        if !plans.is_empty() {
+            return Err(PrepareError::InvalidCheckedBundle {
+                reason: "checked standard function owners do not match the active catalogue",
+            });
+        }
+        Ok(StandardUpgradeLoweringPlan {
+            source_template: self.source.revision,
+            schemas,
+            object_types,
+            expressions: self.expressions,
+            origin_templates: self.origins,
+            functions,
+        })
     }
 
     fn build_server_function(
@@ -3492,8 +4874,11 @@ impl<'a> CandidateBuilder<'a> {
         let initial_definition =
             self.client_function_definition(validated, initial_revision, false)?;
         let prepared_artifact = self.client_artifact(validated)?;
-        let initial_references =
-            self.client_function_references(function_id, initial_revision, validated)?;
+        let initial_references = if self.mode.signature_evidence().is_some() {
+            self.client_function_references(function_id, initial_revision, validated)?
+        } else {
+            Vec::new()
+        };
         let (revision_id, current_revision) =
             self.finalise_function_revision(FunctionFinalisation {
                 checked: validated.id,
@@ -3551,7 +4936,7 @@ impl<'a> CandidateBuilder<'a> {
                 payload,
                 hash,
             )?,
-            language_version: CLIENT_PLAN_LANGUAGE_VERSION,
+            language_version: CLIENT_PLAN_LANGUAGE_VERSION.to_owned(),
         })
     }
 
@@ -3600,59 +4985,64 @@ impl<'a> CandidateBuilder<'a> {
             prepared_artifact,
             references,
         } = input;
-        let semantic_hash_version = match &self.mode {
-            PreparationMode::LegacyV1 => FunctionSemanticHashVersion::Version1,
-            PreparationMode::StandardV2 { .. }
-                if references.iter().any(|reference| {
-                    matches!(reference.target(), DefinitionReferenceTarget::ValueType(_))
-                }) =>
-            {
-                FunctionSemanticHashVersion::Version2
-            }
-            PreparationMode::StandardV2 { .. } => FunctionSemanticHashVersion::Version1,
-        };
-        let semantic_hash = match semantic_hash_version {
-            FunctionSemanticHashVersion::Version1 => function_semantic_digest(
+        let semantic_hash_version = self.mode.semantic_hash_version(references);
+        let calculated = FunctionRevisionPlan::new(
+            self.active,
+            function,
+            FunctionRevisionPlanInput {
+                semantic_hash_version,
                 definition,
-                prepared_artifact.language_version,
-                &prepared_artifact.artifact,
-                &self.expressions,
+                language_version: &prepared_artifact.language_version,
+                artifact: &prepared_artifact.artifact,
+                expressions: &self.expressions,
                 references,
-            )?,
-            FunctionSemanticHashVersion::Version2 => function_semantic_digest_with_version(
-                FunctionSemanticHashVersion::Version2,
-                definition,
+                current_only: matches!(self.mode, PreparationMode::StandardV1Match { .. }),
+                reuse_policy: if matches!(self.mode, PreparationMode::LegacyV1) {
+                    FunctionRevisionReusePolicy::SemanticHashOnly
+                } else {
+                    FunctionRevisionReusePolicy::Complete
+                },
+            },
+        )?;
+        if matches!(self.mode, PreparationMode::StandardV1Match { .. }) {
+            let current = self
+                .active
+                .function_revisions()
+                .iter()
+                .find(|revision| {
+                    revision.function() == function && revision.id() == initial_revision
+                })
+                .ok_or(PrepareError::InvalidCheckedBundle {
+                    reason: "matched active source has no current function revision",
+                })?;
+            let declaration_origin = self.source.origin(location)?;
+            let declaration = self.source.declaration(self.parse_report, location)?;
+            let expected = FunctionRevisionRecord::new(
+                function,
+                initial_revision,
+                current.revision_number(),
+                declaration_origin,
+                function_declaration_digest(declaration)?,
+                calculated.semantic_hash,
                 prepared_artifact.language_version,
-                &prepared_artifact.artifact,
-                &self.expressions,
-                references,
-            )?,
-            _ => {
-                return Err(PrepareError::InvalidCheckedBundle {
-                    reason: "checked standard application has an unsupported semantic hash version",
-                });
-            }
-        };
-        let reusable = self
-            .active
-            .function_revisions()
-            .iter()
-            .chain(self.active.historical_function_revisions())
-            .filter(|revision| {
-                revision.function() == function
-                    && revision.semantic_hash() == semantic_hash
-                    && revision.semantic_hash_version() == semantic_hash_version
-            })
-            .min_by_key(|revision| (revision.revision_number(), revision.id().to_bytes()))
-            .cloned();
-        if let Some(revision) = reusable {
+                prepared_artifact.artifact,
+            )?
+            .with_semantic_hash_version(semantic_hash_version);
+            return Ok((expected.id(), expected));
+        }
+        let plan = calculated;
+        if let Some(revision) = plan.reusable {
             return Ok((revision.id(), revision));
         }
         let revision_id = match checked {
             CheckedFunctionId::Existing(_) => FunctionRevisionId::new(),
             CheckedFunctionId::Provisional(_) => initial_revision,
         };
-        let revision_number = self.next_revision_number(function)?;
+        let revision_number =
+            plan.next_revision_number
+                .ok_or(PrepareError::InvalidCheckedBundle {
+                    reason: "checked standard function has no validated next revision number",
+                })?;
         let declaration_origin = self.source.origin(location)?;
         let declaration = self.source.declaration(self.parse_report, location)?;
         let revision = FunctionRevisionRecord::new(
@@ -3661,11 +5051,11 @@ impl<'a> CandidateBuilder<'a> {
             revision_number,
             declaration_origin,
             function_declaration_digest(declaration)?,
-            semantic_hash,
+            plan.semantic_hash,
             prepared_artifact.language_version,
             prepared_artifact.artifact,
         )?
-        .with_semantic_hash_version(semantic_hash_version);
+        .with_semantic_hash_version(plan.semantic_hash_version);
         self.new_function_revisions.push(revision.clone());
         Ok((revision_id, revision))
     }
@@ -3692,10 +5082,7 @@ impl<'a> CandidateBuilder<'a> {
     }
 
     fn validated_client(&self, owner: CheckedFunctionId) -> Result<&ValidatedClient, PrepareError> {
-        let PreparationMode::StandardV2 {
-            standard_preflight, ..
-        } = &self.mode
-        else {
+        let Some(standard_preflight) = self.mode.standard_preflight() else {
             return Err(PrepareError::InvalidCheckedBundle {
                 reason: "checked CLIENT function requires standard preparation evidence",
             });
@@ -3815,7 +5202,7 @@ impl<'a> CandidateBuilder<'a> {
                     payload,
                     hash,
                 )?,
-                language_version: SERVER_PLAN_LANGUAGE_VERSION,
+                language_version: SERVER_PLAN_LANGUAGE_VERSION.to_owned(),
             });
         }
 
@@ -3836,7 +5223,7 @@ impl<'a> CandidateBuilder<'a> {
                     payload,
                     hash,
                 )?,
-                language_version: SERVER_PLAN_LANGUAGE_VERSION,
+                language_version: SERVER_PLAN_LANGUAGE_VERSION.to_owned(),
             });
         }
 
@@ -3856,7 +5243,7 @@ impl<'a> CandidateBuilder<'a> {
                     payload,
                     hash,
                 )?,
-                language_version: SERVER_PLAN_LANGUAGE_VERSION,
+                language_version: SERVER_PLAN_LANGUAGE_VERSION.to_owned(),
             });
         }
 
@@ -3894,7 +5281,7 @@ impl<'a> CandidateBuilder<'a> {
                 payload,
                 hash,
             )?,
-            language_version: SERVER_MUTATION_PLAN_LANGUAGE_VERSION,
+            language_version: SERVER_MUTATION_PLAN_LANGUAGE_VERSION.to_owned(),
         })
     }
 
@@ -3922,10 +5309,7 @@ impl<'a> CandidateBuilder<'a> {
     ) -> Result<Vec<DefinitionReference>, PrepareError> {
         let mut references = Vec::with_capacity(checked.references().len());
         let mut remaining_references = checked.references().iter().collect::<Vec<_>>();
-        if let PreparationMode::StandardV2 {
-            signature_evidence, ..
-        } = &self.mode
-        {
+        if let Some(signature_evidence) = self.mode.signature_evidence() {
             for signature_slot in signature_evidence.function_slots(checked.id()) {
                 let ordinal = u32::try_from(references.len()).map_err(|_| {
                     PrepareError::ReferenceCountExceedsU32 {
@@ -4005,21 +5389,6 @@ impl<'a> CandidateBuilder<'a> {
         Ok(references)
     }
 
-    fn next_revision_number(&self, function: FunctionId) -> Result<u64, PrepareError> {
-        self.active
-            .function_revisions()
-            .iter()
-            .chain(self.active.historical_function_revisions())
-            .filter(|revision| revision.function() == function)
-            .map(FunctionRevisionRecord::revision_number)
-            .max()
-            .map_or(Ok(1), |maximum| {
-                maximum
-                    .checked_add(1)
-                    .ok_or(PrepareError::FunctionRevisionNumberExhausted { function })
-            })
-    }
-
     fn push_function_origins(
         &mut self,
         checked: &crate::CheckedServerFunction,
@@ -4058,6 +5427,30 @@ impl<'a> CandidateBuilder<'a> {
         ));
         Ok(())
     }
+}
+
+fn standard_upgrade_reuse_is_current_only(
+    semantic_hash_version: FunctionSemanticHashVersion,
+) -> bool {
+    semantic_hash_version == FunctionSemanticHashVersion::Version1
+}
+
+fn next_function_revision_number(
+    active: &ActiveDatabaseRevision,
+    function: FunctionId,
+) -> Result<u64, PrepareError> {
+    active
+        .function_revisions()
+        .iter()
+        .chain(active.historical_function_revisions())
+        .filter(|revision| revision.function() == function)
+        .map(FunctionRevisionRecord::revision_number)
+        .max()
+        .map_or(Ok(1), |maximum| {
+            maximum
+                .checked_add(1)
+                .ok_or(PrepareError::FunctionRevisionNumberExhausted { function })
+        })
 }
 
 #[cfg(test)]
@@ -4172,6 +5565,49 @@ mod tests {
         TypeId::from_bytes([allocation_byte(&TYPE_ALLOCATION); 16])
     }
 
+    fn next_function_revision_id() -> FunctionRevisionId {
+        FunctionRevisionId::new()
+    }
+
+    fn allocated_standard_upgrade_plan_for_construction_test() -> AllocatedStandardUpgradePlan {
+        let unit = StoredSourceUnit::new(
+            SourceUnitId::from_bytes([0x74; 16]),
+            0,
+            "application.orna",
+            "",
+            source_unit_content_digest("").unwrap(),
+        )
+        .unwrap();
+        let bundle_hash = source_bundle_digest(std::slice::from_ref(&unit)).unwrap();
+        AllocatedStandardUpgradePlan {
+            source_template: StoredSourceRevision::new(
+                SourceBundleId::from_bytes([0x75; 16]),
+                SourceRevisionId::from_bytes([0x76; 16]),
+                None,
+                vec![unit],
+                bundle_hash,
+                source_revision_record_digest(
+                    SourceBundleId::from_bytes([0x75; 16]),
+                    None,
+                    bundle_hash,
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+            source_ids: PreparedSourceIds {
+                bundle: SourceBundleId::from_bytes([0x77; 16]),
+                revision: SourceRevisionId::from_bytes([0x78; 16]),
+                units: vec![SourceUnitId::from_bytes([0x79; 16])],
+            },
+            catalogue_revision: CatalogueRevisionId::from_bytes([0x7a; 16]),
+            schemas: Vec::new(),
+            object_types: Vec::new(),
+            expressions: Vec::new(),
+            origin_templates: Vec::new(),
+            functions: Vec::new(),
+        }
+    }
+
     #[test]
     fn standard_allocator_retries_each_same_class_reserved_identity() {
         CATALOGUE_ALLOCATION.store(0, Ordering::SeqCst);
@@ -4202,6 +5638,7 @@ mod tests {
             source_unit: next_unit_id,
             schema: next_schema_id,
             type_id: next_type_id,
+            function_revision: next_function_revision_id,
         };
         let mut allocator = CandidateAllocator::with_source(reserved, source);
 
@@ -4220,6 +5657,175 @@ mod tests {
         assert_eq!(allocator.source_unit(), SourceUnitId::from_bytes([2; 16]));
         assert_eq!(allocator.schema(), SchemaId::from_bytes([2; 16]));
         assert_eq!(allocator.type_id(), TypeId::from_bytes([2; 16]));
+    }
+
+    #[test]
+    fn standard_upgrade_final_construction_errors_preserve_their_exact_sources() {
+        let catalogue = PrepareStandardUpgradeError::Catalogue {
+            source: orna_core::catalogue::CatalogueSnapshotError::DuplicateSchemaId {
+                id: SchemaId::from_bytes([0x71; 16]),
+            },
+        };
+        assert!(matches!(
+            &catalogue,
+            PrepareStandardUpgradeError::Catalogue {
+                source: orna_core::catalogue::CatalogueSnapshotError::DuplicateSchemaId { id },
+            } if *id == SchemaId::from_bytes([0x71; 16])
+        ));
+        assert_eq!(
+            catalogue.to_string(),
+            format!(
+                "the standard upgrade catalogue is invalid: {}",
+                std::error::Error::source(&catalogue).unwrap()
+            )
+        );
+        assert!(std::error::Error::source(&catalogue).is_some());
+
+        let candidate_records = PrepareStandardUpgradeError::CandidateRecords {
+            source: RevisionInvariantError::EmptyArtifactFormat,
+        };
+        assert_eq!(
+            candidate_records.to_string(),
+            format!(
+                "the standard upgrade candidate records are invalid: {}",
+                std::error::Error::source(&candidate_records).unwrap()
+            )
+        );
+        assert!(std::error::Error::source(&candidate_records).is_some());
+
+        let canonical = PrepareStandardUpgradeError::CanonicalHash {
+            source: orna_core::canonical_hash::CanonicalHashError::LengthExceedsU32 {
+                value: "upgrade test",
+                length: usize::MAX,
+            },
+        };
+        assert!(matches!(
+            &canonical,
+            PrepareStandardUpgradeError::CanonicalHash {
+                source: orna_core::canonical_hash::CanonicalHashError::LengthExceedsU32 {
+                    value: "upgrade test",
+                    length,
+                },
+            } if *length == usize::MAX
+        ));
+        assert_eq!(
+            canonical.to_string(),
+            format!(
+                "the standard upgrade canonical hashes are invalid: {}",
+                std::error::Error::source(&canonical).unwrap()
+            )
+        );
+        assert!(std::error::Error::source(&canonical).is_some());
+
+        let revision = PrepareStandardUpgradeError::Revision {
+            source: orna_core::revision::RevisionInvariantError::EmptyArtifactFormat,
+        };
+        assert!(matches!(
+            revision,
+            PrepareStandardUpgradeError::Revision {
+                source: orna_core::revision::RevisionInvariantError::EmptyArtifactFormat,
+            }
+        ));
+        assert_eq!(
+            revision.to_string(),
+            format!(
+                "the standard upgrade revision is invalid: {}",
+                std::error::Error::source(&revision).unwrap()
+            )
+        );
+        assert!(std::error::Error::source(&revision).is_some());
+    }
+
+    #[test]
+    fn standard_upgrade_gate_eight_uses_the_real_catalogue_transition() {
+        let mut plan = allocated_standard_upgrade_plan_for_construction_test();
+        let duplicate = SchemaId::from_bytes([0x72; 16]);
+        plan.schemas = vec![
+            SchemaDefinition::new(duplicate, semantic_name(&["first"])),
+            SchemaDefinition::new(duplicate, semantic_name(&["second"])),
+        ];
+        let catalogue_error = plan.into_catalogue().unwrap_err();
+
+        assert!(matches!(
+            catalogue_error,
+            orna_core::catalogue::CatalogueSnapshotError::DuplicateSchemaId { id }
+                if id == duplicate
+        ));
+    }
+
+    #[test]
+    fn standard_upgrade_gate_nine_uses_the_real_candidate_record_transition() {
+        let mut plan = allocated_standard_upgrade_plan_for_construction_test();
+        plan.source_ids.revision = plan.source_template.id();
+        let error = plan
+            .into_catalogue()
+            .unwrap()
+            .into_candidate_records()
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            RevisionInvariantError::SourceRevisionSelfParent { revision }
+                if revision == SourceRevisionId::from_bytes([0x76; 16])
+        ));
+    }
+
+    #[test]
+    fn standard_upgrade_gate_ten_uses_the_real_canonical_transition() {
+        let mut records = allocated_standard_upgrade_plan_for_construction_test()
+            .into_catalogue()
+            .unwrap()
+            .into_candidate_records()
+            .unwrap();
+        let unit = &records.source.units()[0];
+        let invalid = StoredSourceUnit::new(
+            unit.id(),
+            unit.ordinal(),
+            unit.logical_path(),
+            unit.content(),
+            Sha256Digest::from_bytes([0x7b; 32]),
+        )
+        .unwrap();
+        records.source = StoredSourceRevision::new(
+            records.source.bundle(),
+            records.source.id(),
+            records.source.parent(),
+            vec![invalid],
+            Sha256Digest::from_bytes([0; 32]),
+            Sha256Digest::from_bytes([0; 32]),
+        )
+        .unwrap();
+        let error = records
+            .canonicalise(&CatalogueHashContext::version_one())
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            CanonicalHashError::SourceContentHashMismatch { source_unit }
+                if source_unit == SourceUnitId::from_bytes([0x79; 16])
+        ));
+    }
+
+    #[test]
+    fn standard_upgrade_gate_eleven_follows_eight_nine_and_ten() {
+        let candidate = allocated_standard_upgrade_plan_for_construction_test()
+            .into_catalogue()
+            .unwrap()
+            .into_candidate_records()
+            .unwrap()
+            .canonicalise(&CatalogueHashContext::version_one())
+            .unwrap();
+        let active = empty_active();
+        let error = candidate
+            .into_deployable(&active, CatalogueHashContext::version_one())
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            RevisionInvariantError::DeployableSourceParentMismatch { expected, actual }
+                if expected == active.source().id()
+                    && actual == Some(SourceRevisionId::from_bytes([0x76; 16]))
+        ));
     }
 
     #[test]
@@ -8235,6 +9841,121 @@ mod tests {
             prepared.candidate().functions()[0].current_revision(),
             old.id()
         );
+    }
+
+    #[test]
+    fn legacy_reuse_remains_semantic_hash_only() {
+        let empty = empty_active();
+        let initial = prepare(
+            &checked_report(SOURCE, empty.catalogue()),
+            empty.pair(),
+            &empty,
+        )
+        .unwrap();
+        let old = initial.new_function_revisions()[0].clone();
+        let active_v1 = activate(&initial, vec![old.clone()], Vec::new());
+        let changed = prepare(
+            &checked_report(CHANGED_SOURCE, active_v1.catalogue()),
+            active_v1.pair(),
+            &active_v1,
+        )
+        .unwrap();
+        let current = changed.new_function_revisions()[0].clone();
+        let legacy_match = FunctionRevisionRecord::new(
+            old.function(),
+            old.id(),
+            old.revision_number(),
+            old.declaration_origin(),
+            old.declaration_content_hash(),
+            old.semantic_hash(),
+            "legacy.claimed-language",
+            old.artifact().clone(),
+        )
+        .unwrap();
+        let active = activate(&changed, vec![current], vec![legacy_match.clone()]);
+
+        let error = prepare(
+            &checked_report(REFORMATTED_SOURCE, active.catalogue()),
+            active.pair(),
+            &active,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            PrepareError::CanonicalHash(CanonicalHashError::FunctionSemanticHashMismatch {
+                function,
+                revision,
+            }) if function == legacy_match.function() && revision == legacy_match.id()
+        ));
+    }
+
+    #[test]
+    fn standard_upgrade_gate_seven_retains_the_current_version_one_revision() {
+        let empty = empty_active();
+        let initial = prepare(
+            &checked_report(SOURCE, empty.catalogue()),
+            empty.pair(),
+            &empty,
+        )
+        .unwrap();
+        let first = initial.new_function_revisions()[0].clone();
+        let first_active = activate(&initial, vec![first], Vec::new());
+        let changed = prepare(
+            &checked_report(CHANGED_SOURCE, first_active.catalogue()),
+            first_active.pair(),
+            &first_active,
+        )
+        .unwrap();
+        let current = changed.new_function_revisions()[0].clone();
+        let older_equal = FunctionRevisionRecord::new(
+            current.function(),
+            FunctionRevisionId::new(),
+            1,
+            SourceOrigin::new(SourceUnitId::new(), 0, 1).unwrap(),
+            digest(74),
+            current.semantic_hash(),
+            current.language_version(),
+            current.artifact().clone(),
+        )
+        .unwrap();
+        let active = activate(&changed, vec![current.clone()], vec![older_equal.clone()]);
+        let definition = active.catalogue().functions()[0].clone();
+        let make_plan = |current_only| {
+            FunctionRevisionPlan::new(
+                &active,
+                current.function(),
+                FunctionRevisionPlanInput {
+                    semantic_hash_version: FunctionSemanticHashVersion::Version1,
+                    definition: &definition,
+                    language_version: current.language_version(),
+                    artifact: current.artifact(),
+                    expressions: active.expressions(),
+                    references: active.references(),
+                    current_only,
+                    reuse_policy: FunctionRevisionReusePolicy::Complete,
+                },
+            )
+            .unwrap()
+        };
+
+        assert_eq!(
+            make_plan(false).reusable.unwrap().id(),
+            older_equal.id(),
+            "the fixture must expose the historical rollback"
+        );
+        assert_eq!(
+            make_plan(standard_upgrade_reuse_is_current_only(
+                FunctionSemanticHashVersion::Version1,
+            ))
+            .reusable
+            .unwrap()
+            .id(),
+            current.id()
+        );
+        assert!(!standard_upgrade_reuse_is_current_only(
+            FunctionSemanticHashVersion::Version2
+        ));
     }
 
     fn checked_report(source: &str, base: &CatalogueSnapshot) -> CheckReport {
