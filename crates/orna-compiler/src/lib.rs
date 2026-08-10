@@ -17,15 +17,21 @@ mod resolver;
 pub use prepare::{PrepareError, prepare};
 
 pub use resolver::{
-    CheckReport, CheckedBundle, CheckedClientFunction, CheckedDefault, CheckedDefinitionReference,
-    CheckedDefinitionReferenceTarget, CheckedExpressionId, CheckedField, CheckedFieldId,
-    CheckedFunctionId, CheckedObjectType, CheckedParameterId, CheckedSchema, CheckedSchemaId,
-    CheckedServerFunction, CheckedServerFunctionParameter, CheckedServerFunctionReturnColumn,
-    CheckedStandardLibrary, CheckedStandardSchema, CheckedStandardTypeBinding,
-    CheckedStandardValueType, CheckedTypeId, ConstantValue, ProvisionalExpressionId,
+    CheckReport, CheckedApplicationTypeUse, CheckedBundle, CheckedClientFunction, CheckedDefault,
+    CheckedDefinitionReference, CheckedDefinitionReferenceTarget, CheckedExpressionId,
+    CheckedField, CheckedFieldId, CheckedFunctionId, CheckedObjectReferenceUse, CheckedObjectType,
+    CheckedParameterId, CheckedSchema, CheckedSchemaId, CheckedServerFunction,
+    CheckedServerFunctionParameter, CheckedServerFunctionReturnColumn,
+    CheckedStandardApplicationBundle, CheckedStandardApplicationClientFunction,
+    CheckedStandardApplicationField, CheckedStandardApplicationObjectType,
+    CheckedStandardApplicationParameter, CheckedStandardApplicationReturnColumn,
+    CheckedStandardApplicationServerFunction, CheckedStandardLibrary, CheckedStandardSchema,
+    CheckedStandardTypeBinding, CheckedStandardTypeReference, CheckedStandardValueType,
+    CheckedTypeId, CheckedTypeUseKind, CheckedValueTypeUse, ConstantValue, ProvisionalExpressionId,
     ProvisionalFieldId, ProvisionalFunctionId, ProvisionalParameterId, ProvisionalSchemaId,
-    ProvisionalTypeId, SemanticType, StandardLibraryCheckError, check,
-    check_standard_library_source,
+    ProvisionalTypeId, SemanticType, StandardApplicationCheckContext,
+    StandardApplicationCheckReport, StandardApplicationContextError, StandardLibraryCheckError,
+    check, check_standard_application, check_standard_library_source,
 };
 
 /// Resolves an identifier component with Orna quoted-name rules.
@@ -298,7 +304,9 @@ mod tests {
     };
 
     use super::{
-        DiagnosticCode, StandardLibraryCheckError, check_standard_library_source, parse_bundle,
+        CheckedTypeUseKind, CheckedValueTypeUse, DiagnosticCode, StandardApplicationCheckContext,
+        StandardApplicationContextError, StandardLibraryCheckError, check,
+        check_standard_application, check_standard_library_source, parse_bundle,
     };
 
     const SUCCESS_STANDARD_DIGEST: [u8; 32] = [
@@ -1216,6 +1224,581 @@ mod tests {
     }
 
     #[test]
+    fn checks_an_empty_application_against_a_checked_standard_library() {
+        let standard = check_standard_library_source(&verified_standard_source_fixture()).unwrap();
+        let application = CatalogueSnapshot::new(
+            CatalogueRevisionId::from_bytes([0x2a; 16]),
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        let context = StandardApplicationCheckContext::try_new(&application, &standard).unwrap();
+        let bundle = SourceBundle::new([SourceUnit::new("application.orna", "")]).unwrap();
+
+        let report = check_standard_application(&bundle, &context);
+
+        assert_eq!(report.diagnostics(), &[]);
+        assert_eq!(
+            report.standard_library().verified_snapshot().digest(),
+            standard.verified_snapshot().digest()
+        );
+        let checked = report.checked_bundle().unwrap();
+        assert_eq!(
+            checked.base_catalogue_revision(),
+            CatalogueRevisionId::from_bytes([0x2a; 16])
+        );
+        assert!(checked.uses().is_empty());
+        assert!(checked.standard_type_references().is_empty());
+    }
+
+    #[test]
+    fn resolves_a_prelude_standard_value_type_and_retains_its_durable_identity() {
+        let standard = check_standard_library_source(&verified_standard_source_fixture()).unwrap();
+        let application = CatalogueSnapshot::new(
+            CatalogueRevisionId::from_bytes([0x2b; 16]),
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        let context = StandardApplicationCheckContext::try_new(&application, &standard).unwrap();
+        let source = "CREATE SCHEMA app; CREATE TYPE app.task AS OBJECT (done BOOLEAN NOT NULL);";
+        let bundle = SourceBundle::new([SourceUnit::new("application.orna", source)]).unwrap();
+
+        let report = check_standard_application(&bundle, &context);
+
+        assert_eq!(report.diagnostics(), &[]);
+        let checked = report.checked_bundle().unwrap();
+        let objects = checked.object_types().collect::<Vec<_>>();
+        assert_eq!(objects.len(), 1);
+        let fields = objects[0].fields().collect::<Vec<_>>();
+        assert_eq!(fields.len(), 1);
+        let resolved = fields[0].resolved_type();
+        assert!(resolved.value().is_some());
+        let Some(value) = resolved.value() else {
+            return;
+        };
+        assert_eq!(value.type_id(), TypeId::from_bytes([3; 16]));
+        assert_eq!(
+            value.kind(),
+            CheckedTypeUseKind::Field {
+                owner: objects[0].id(),
+                field: fields[0].id(),
+            }
+        );
+        let start = source.find("BOOLEAN").unwrap();
+        assert_eq!(value.location().logical_path(), "application.orna");
+        assert_eq!(value.location().span().start(), start);
+        assert_eq!(value.location().span().end(), start + "BOOLEAN".len());
+    }
+
+    #[test]
+    fn records_standard_server_and_client_signature_uses_without_accepting_client_parameters() {
+        let standard = check_standard_library_source(&verified_standard_source_fixture()).unwrap();
+        let application = CatalogueSnapshot::new(
+            CatalogueRevisionId::from_bytes([0x2c; 16]),
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        let context = StandardApplicationCheckContext::try_new(&application, &standard).unwrap();
+        let source = "CREATE SCHEMA app;\
+            CREATE TYPE app.flag AS OBJECT (value BOOLEAN);\
+            CREATE SERVER FUNCTION app.read(p_flag REF app.flag) RETURNS ROWS (value BOOLEAN) \
+            TRANSACTION READ ONLY VOLATILITY STABLE AS SELECT f.value FROM app.flag f \
+            WHERE REF(f) = p_flag;\
+            CREATE CLIENT FUNCTION app.enabled() RETURNS BOOLEAN RETURN TRUE;";
+        let bundle = SourceBundle::new([SourceUnit::new("application.orna", source)]).unwrap();
+
+        let report = check_standard_application(&bundle, &context);
+
+        assert_eq!(report.diagnostics(), &[]);
+        let checked = report.checked_bundle().unwrap();
+        assert_eq!(checked.uses().len(), 4);
+
+        let objects = checked.object_types().collect::<Vec<_>>();
+        let servers = checked.server_functions().collect::<Vec<_>>();
+        let clients = checked.client_functions().collect::<Vec<_>>();
+        assert_eq!(objects.len(), 1);
+        assert_eq!(servers.len(), 1);
+        assert_eq!(clients.len(), 1);
+
+        let fields = objects[0].fields().collect::<Vec<_>>();
+        let parameters = servers[0].parameters().collect::<Vec<_>>();
+        let columns = servers[0].return_columns().collect::<Vec<_>>();
+        assert_eq!(fields.len(), 1);
+        assert_eq!(parameters.len(), 1);
+        assert_eq!(columns.len(), 1);
+        assert_eq!(clients[0].parameters().count(), 0);
+
+        assert_eq!(
+            fields[0]
+                .resolved_type()
+                .value()
+                .map(CheckedValueTypeUse::type_id),
+            Some(TypeId::from_bytes([3; 16]))
+        );
+        assert!(parameters[0].resolved_type().object_reference().is_some());
+        assert_eq!(
+            columns[0]
+                .resolved_type()
+                .value()
+                .map(CheckedValueTypeUse::type_id),
+            Some(TypeId::from_bytes([3; 16]))
+        );
+        assert_eq!(
+            clients[0]
+                .return_type()
+                .value()
+                .map(CheckedValueTypeUse::type_id),
+            Some(TypeId::from_bytes([3; 16]))
+        );
+        let reference_start = source.find("app.flag) RETURNS").unwrap();
+        assert_eq!(checked.uses()[1].location().span().start(), reference_start);
+        assert!(checked.standard_type_references().is_empty());
+
+        let debug_values = [
+            format!("{report:?}"),
+            format!("{checked:?}"),
+            format!("{:?}", objects[0]),
+            format!("{:?}", fields[0]),
+            format!("{:?}", servers[0]),
+            format!("{:?}", parameters[0]),
+            format!("{:?}", columns[0]),
+            format!("{:?}", clients[0]),
+        ];
+        for rendered in debug_values {
+            assert!(!rendered.contains("SemanticType"));
+            assert!(!rendered.contains("Scalar"));
+        }
+    }
+
+    #[test]
+    fn preserves_the_client_parameter_diagnostic_with_standard_authority() {
+        let standard = check_standard_library_source(&verified_standard_source_fixture()).unwrap();
+        let application = CatalogueSnapshot::new(
+            CatalogueRevisionId::from_bytes([0x2d; 16]),
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        let context = StandardApplicationCheckContext::try_new(&application, &standard).unwrap();
+        let source = "CREATE SCHEMA app; CREATE CLIENT FUNCTION app.enabled(value BOOLEAN) RETURNS BOOLEAN RETURN TRUE;";
+        let bundle = SourceBundle::new([SourceUnit::new("application.orna", source)]).unwrap();
+
+        let report = check_standard_application(&bundle, &context);
+        let legacy_report = check(&bundle, &application);
+
+        assert_eq!(report.diagnostics().len(), 1);
+        assert_eq!(
+            report.diagnostics()[0].message(),
+            "this CLIENT function cannot declare parameters yet"
+        );
+        assert_eq!(report.diagnostics(), legacy_report.diagnostics());
+        assert!(report.checked_bundle().is_none());
+    }
+
+    #[test]
+    fn resolves_every_accepted_canonical_standard_spelling_to_its_checked_type_id() {
+        let standard =
+            check_standard_library_source(&verified_canonical_standard_source_fixture()).unwrap();
+        let application = CatalogueSnapshot::new(
+            CatalogueRevisionId::from_bytes([0x2e; 16]),
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        let context = StandardApplicationCheckContext::try_new(&application, &standard).unwrap();
+        let prelude = [
+            ("BOOLEAN", 0),
+            ("BOOL", 0),
+            ("INTEGER", 1),
+            ("INT", 1),
+            ("BIGINT", 2),
+            ("FLOAT", 3),
+            ("DECIMAL", 4),
+            ("CHARACTER LARGE OBJECT", 5),
+            ("TEXT", 5),
+            ("BINARY LARGE OBJECT", 6),
+            ("BYTES", 6),
+            ("UUID", 7),
+            ("DATE", 8),
+            ("TIME", 9),
+            ("TIMESTAMP", 10),
+            ("DURATION", 11),
+            ("VOID", 12),
+        ];
+        let primaries = [
+            ("std.types.BOOLEAN", 0),
+            ("std.types.INTEGER", 1),
+            ("std.types.BIGINT", 2),
+            ("std.types.FLOAT", 3),
+            ("std.types.DECIMAL", 4),
+            ("std.types.CHARACTER_LARGE_OBJECT", 5),
+            ("std.types.BINARY_LARGE_OBJECT", 6),
+            ("std.types.UUID", 7),
+            ("std.types.DATE", 8),
+            ("std.types.TIME", 9),
+            ("std.types.TIMESTAMP", 10),
+            ("std.types.DURATION", 11),
+            ("std.types.VOID", 12),
+        ];
+        let qualified = [
+            ("std.BOOLEAN", 0),
+            ("std.INTEGER", 1),
+            ("std.BIGINT", 2),
+            ("std.FLOAT", 3),
+            ("std.DECIMAL", 4),
+            ("std.CHARACTER_LARGE_OBJECT", 5),
+            ("std.BINARY_LARGE_OBJECT", 6),
+            ("std.UUID", 7),
+            ("std.DATE", 8),
+            ("std.TIME", 9),
+            ("std.TIMESTAMP", 10),
+            ("std.DURATION", 11),
+            ("std.VOID", 12),
+        ];
+        let spellings = prelude
+            .into_iter()
+            .chain(primaries)
+            .chain(qualified)
+            .collect::<Vec<_>>();
+        let fields = spellings
+            .iter()
+            .enumerate()
+            .map(|(index, (spelling, _))| format!("f{index} {spelling}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let source = format!("CREATE SCHEMA app; CREATE TYPE app.all_types AS OBJECT ({fields});");
+        let bundle = SourceBundle::new([SourceUnit::new("application.orna", source)]).unwrap();
+
+        let report = check_standard_application(&bundle, &context);
+
+        assert_eq!(report.diagnostics(), &[]);
+        let checked = report.checked_bundle().unwrap();
+        assert_eq!(checked.uses().len(), 43);
+        for (type_use, (_, expected_type_index)) in checked.uses().iter().zip(spellings) {
+            assert!(type_use.value().is_some());
+            let Some(value) = type_use.value() else {
+                return;
+            };
+            assert_eq!(
+                value.type_id(),
+                TypeId::from_bytes(CANONICAL_TYPE_IDS[expected_type_index])
+            );
+        }
+    }
+
+    #[test]
+    fn standard_application_context_checks_every_adjacent_gate_precedence_and_error_contract() {
+        let standard = check_standard_library_source(&verified_standard_source_fixture()).unwrap();
+
+        let schema_identity_before_schema_name = CatalogueSnapshot::new(
+            CatalogueRevisionId::from_bytes([0x31; 16]),
+            vec![
+                SchemaDefinition::new(SchemaId::from_bytes([0x32; 16]), semantic_name(["std"])),
+                SchemaDefinition::new(
+                    SchemaId::from_bytes([2; 16]),
+                    semantic_name(["application"]),
+                ),
+            ],
+            Vec::new(),
+        )
+        .unwrap();
+        assert_standard_context_error(
+            StandardApplicationCheckContext::try_new(
+                &schema_identity_before_schema_name,
+                &standard,
+            ),
+            StandardApplicationContextError::SchemaIdentityConflict {
+                id: SchemaId::from_bytes([2; 16]),
+            },
+            format!(
+                "the application catalogue conflicts with standard schema identity {}",
+                SchemaId::from_bytes([2; 16])
+            ),
+        );
+
+        let type_after_schema_name = ValueTypeDefinition::primitive(
+            TypeId::from_bytes([3; 16]),
+            semantic_name(["application", "flag"]),
+            ValueTypeMutability::Immutable,
+            ValueTypePersistence::Persistable,
+            "orna.kernel.value.boolean@1",
+        );
+        let schema_name_before_type_identity = CatalogueSnapshot::new_with_types(
+            CatalogueRevisionId::from_bytes([0x32; 16]),
+            vec![
+                SchemaDefinition::new(
+                    SchemaId::from_bytes([0x33; 16]),
+                    semantic_name(["std", "types"]),
+                ),
+                SchemaDefinition::new(
+                    SchemaId::from_bytes([0x34; 16]),
+                    semantic_name(["application"]),
+                ),
+            ],
+            Vec::new(),
+            vec![type_after_schema_name],
+            Vec::new(),
+        )
+        .unwrap();
+        assert_standard_context_error(
+            StandardApplicationCheckContext::try_new(&schema_name_before_type_identity, &standard),
+            StandardApplicationContextError::SchemaNameConflict {
+                name: semantic_name(["std", "types"]),
+            },
+            "the application catalogue conflicts with standard schema name std.types".to_owned(),
+        );
+
+        let type_identity = ValueTypeDefinition::primitive(
+            TypeId::from_bytes([3; 16]),
+            semantic_name(["application", "flag"]),
+            ValueTypeMutability::Immutable,
+            ValueTypePersistence::Persistable,
+            "orna.kernel.value.boolean@1",
+        );
+        let binding_after_type_identity = TypeBinding::prelude(
+            PreludeTypeName::new(["boolean"]).unwrap(),
+            type_identity.id(),
+        )
+        .unwrap();
+        let type_identity_before_binding_identity = CatalogueSnapshot::new_with_types(
+            CatalogueRevisionId::from_bytes([0x34; 16]),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes([0x35; 16]),
+                semantic_name(["application"]),
+            )],
+            Vec::new(),
+            vec![type_identity],
+            vec![binding_after_type_identity],
+        )
+        .unwrap();
+        assert_standard_context_error(
+            StandardApplicationCheckContext::try_new(
+                &type_identity_before_binding_identity,
+                &standard,
+            ),
+            StandardApplicationContextError::TypeIdentityConflict {
+                id: TypeId::from_bytes([3; 16]),
+            },
+            format!(
+                "the application catalogue conflicts with standard type identity {}",
+                TypeId::from_bytes([3; 16])
+            ),
+        );
+
+        let binding_target = ValueTypeDefinition::primitive(
+            TypeId::from_bytes([0x36; 16]),
+            semantic_name(["application", "flag"]),
+            ValueTypeMutability::Immutable,
+            ValueTypePersistence::Persistable,
+            "orna.kernel.value.boolean@1",
+        );
+        let binding = TypeBinding::prelude(
+            PreludeTypeName::new(["boolean"]).unwrap(),
+            binding_target.id(),
+        )
+        .unwrap();
+        let binding_identity_before_unsupported_contract = CatalogueSnapshot::new_with_types(
+            CatalogueRevisionId::from_bytes([0x37; 16]),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes([0x38; 16]),
+                semantic_name(["application"]),
+            )],
+            Vec::new(),
+            vec![binding_target],
+            vec![binding.clone()],
+        )
+        .unwrap();
+        let unsupported_standard =
+            super::resolver::checked_standard_library_with_contract_overrides_for_test(
+                &verified_standard_source_fixture(),
+                &[(0, "unsupported@1")],
+            )
+            .unwrap();
+        assert_standard_context_error(
+            StandardApplicationCheckContext::try_new(
+                &binding_identity_before_unsupported_contract,
+                &unsupported_standard,
+            ),
+            StandardApplicationContextError::TypeBindingIdentityConflict { id: binding.id() },
+            format!(
+                "the application catalogue conflicts with standard type binding identity {}",
+                binding.id()
+            ),
+        );
+
+        let unsupported_before_duplicate =
+            super::resolver::checked_standard_library_with_contract_overrides_for_test(
+                &verified_canonical_standard_source_fixture(),
+                &[
+                    (0, "unsupported-first@1"),
+                    (1, "orna.kernel.value.boolean@1"),
+                ],
+            )
+            .unwrap();
+        let empty_application = CatalogueSnapshot::new(
+            CatalogueRevisionId::from_bytes([0x38; 16]),
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        assert_standard_context_error(
+            StandardApplicationCheckContext::try_new(
+                &empty_application,
+                &unsupported_before_duplicate,
+            ),
+            StandardApplicationContextError::UnsupportedCompatibilityContract {
+                type_id: TypeId::from_bytes(CANONICAL_TYPE_IDS[0]),
+                contract: "unsupported-first@1".to_owned(),
+            },
+            format!(
+                "the standard value type {} uses unsupported compatibility contract unsupported-first@1",
+                TypeId::from_bytes(CANONICAL_TYPE_IDS[0])
+            ),
+        );
+
+        let duplicate_contract =
+            super::resolver::checked_standard_library_with_contract_overrides_for_test(
+                &verified_canonical_standard_source_fixture(),
+                &[(1, "orna.kernel.value.boolean@1")],
+            )
+            .unwrap();
+        assert_standard_context_error(
+            StandardApplicationCheckContext::try_new(&empty_application, &duplicate_contract),
+            StandardApplicationContextError::CompatibilityContractConflict {
+                contract: "orna.kernel.value.boolean@1".to_owned(),
+            },
+            "the standard library uses compatibility contract orna.kernel.value.boolean@1 for more than one type".to_owned(),
+        );
+    }
+
+    #[test]
+    fn quoted_names_do_not_acquire_standard_prelude_meaning() {
+        let standard = check_standard_library_source(&verified_standard_source_fixture()).unwrap();
+        let application = CatalogueSnapshot::new(
+            CatalogueRevisionId::from_bytes([0x39; 16]),
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        let context = StandardApplicationCheckContext::try_new(&application, &standard).unwrap();
+        let source = "CREATE SCHEMA app; CREATE TYPE app.flag AS OBJECT (value \"BOOLEAN\");";
+        let bundle = SourceBundle::new([SourceUnit::new("application.orna", source)]).unwrap();
+
+        let report = check_standard_application(&bundle, &context);
+
+        assert_eq!(report.diagnostics().len(), 1);
+        assert_eq!(
+            report.diagnostics()[0].code(),
+            DiagnosticCode::UnknownQualifiedName
+        );
+        assert_eq!(
+            report.diagnostics()[0].message(),
+            "unknown type name BOOLEAN"
+        );
+        assert!(report.checked_bundle().is_none());
+    }
+
+    #[test]
+    fn unknown_qualified_aliases_and_quoted_counterparts_do_not_resolve_through_standard() {
+        let standard = check_standard_library_source(&verified_standard_source_fixture()).unwrap();
+        let application = CatalogueSnapshot::new(
+            CatalogueRevisionId::from_bytes([0x3a; 16]),
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        let context = StandardApplicationCheckContext::try_new(&application, &standard).unwrap();
+        let source = "CREATE SCHEMA app; CREATE TYPE app.flag AS OBJECT (alias std.ALIAS, quoted std.\"BOOLEAN\");";
+        let bundle = SourceBundle::new([SourceUnit::new("application.orna", source)]).unwrap();
+
+        let report = check_standard_application(&bundle, &context);
+
+        assert_eq!(report.diagnostics().len(), 2);
+        let expected = [
+            ("std.ALIAS", "unknown type name std.alias"),
+            ("std.\"BOOLEAN\"", "unknown type name std.BOOLEAN"),
+        ];
+        for (diagnostic, (spelling, message)) in report.diagnostics().iter().zip(expected) {
+            assert_eq!(diagnostic.code(), DiagnosticCode::UnknownQualifiedName);
+            assert_eq!(diagnostic.message(), message);
+            let start = source.find(spelling).unwrap();
+            assert_eq!(diagnostic.location().span().start(), start);
+            assert_eq!(diagnostic.location().span().end(), start + spelling.len());
+        }
+        assert!(report.checked_bundle().is_none());
+    }
+
+    #[test]
+    fn standard_type_use_arena_is_ordered_by_written_source_not_declaration_family() {
+        let standard = check_standard_library_source(&verified_standard_source_fixture()).unwrap();
+        let application = CatalogueSnapshot::new(
+            CatalogueRevisionId::from_bytes([0x3a; 16]),
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        let context = StandardApplicationCheckContext::try_new(&application, &standard).unwrap();
+        let source = "CREATE SCHEMA app;\
+            CREATE SERVER FUNCTION app.read() RETURNS ROWS (value BOOLEAN) \
+            AS SELECT f.value FROM app.flag f;\
+            CREATE TYPE app.flag AS OBJECT (value BOOLEAN);";
+        let bundle = SourceBundle::new([SourceUnit::new("application.orna", source)]).unwrap();
+
+        let report = check_standard_application(&bundle, &context);
+
+        assert_eq!(report.diagnostics(), &[]);
+        let checked = report.checked_bundle().unwrap();
+        assert_eq!(checked.uses().len(), 2);
+        assert!(matches!(
+            checked.uses()[0].kind(),
+            CheckedTypeUseKind::Return { .. }
+        ));
+        assert!(matches!(
+            checked.uses()[1].kind(),
+            CheckedTypeUseKind::Field { .. }
+        ));
+        assert!(
+            checked.uses()[0].location().span().start()
+                < checked.uses()[1].location().span().start()
+        );
+    }
+
+    #[test]
+    fn standard_values_are_not_valid_ref_targets() {
+        let standard = check_standard_library_source(&verified_standard_source_fixture()).unwrap();
+        let application = CatalogueSnapshot::new(
+            CatalogueRevisionId::from_bytes([0x3b; 16]),
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        let context = StandardApplicationCheckContext::try_new(&application, &standard).unwrap();
+        let source = "CREATE SCHEMA app; CREATE TYPE app.flag AS OBJECT (value REF std.BOOLEAN);";
+        let bundle = SourceBundle::new([SourceUnit::new("application.orna", source)]).unwrap();
+
+        let report = check_standard_application(&bundle, &context);
+
+        assert_eq!(report.diagnostics().len(), 1);
+        assert_eq!(
+            report.diagnostics()[0].code(),
+            DiagnosticCode::InvalidReferenceTarget
+        );
+        assert_eq!(
+            report.diagnostics()[0].message(),
+            "REF target std.boolean is a scalar type"
+        );
+        let start = source.find("std.BOOLEAN").unwrap();
+        assert_eq!(report.diagnostics()[0].location().span().start(), start);
+        assert_eq!(
+            report.diagnostics()[0].location().span().end(),
+            start + "std.BOOLEAN".len()
+        );
+        assert!(report.checked_bundle().is_none());
+    }
+
+    #[test]
     fn counts_source_units_before_parsing_or_reconciling() {
         let empty = verified_empty_catalogue_fixture(
             &[],
@@ -1505,6 +2088,21 @@ mod tests {
 
     fn semantic_name<const COUNT: usize>(parts: [&str; COUNT]) -> QualifiedSemanticName {
         QualifiedSemanticName::new(parts).unwrap()
+    }
+
+    fn assert_standard_context_error(
+        result: Result<StandardApplicationCheckContext<'_>, StandardApplicationContextError>,
+        expected: StandardApplicationContextError,
+        message: String,
+    ) {
+        assert!(result.is_err());
+        let Err(error) = result else {
+            return;
+        };
+        assert_eq!(error, expected);
+        assert_eq!(error.clone(), error);
+        assert_eq!(error.to_string(), message);
+        assert!(std::error::Error::source(&error).is_none());
     }
 
     fn origin(identity: DefinitionIdentity, byte_start: u32, byte_end: u32) -> DefinitionOrigin {
