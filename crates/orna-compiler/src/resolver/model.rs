@@ -1591,7 +1591,9 @@ impl CheckedApplicationTypeUse {
     }
 }
 
-/// One standard value-type signature reference reserved for a later evidence row.
+/// One standard value-type signature reference derived from a canonical declaration use.
+///
+/// This does not duplicate object references or body type uses.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CheckedStandardTypeReference {
     pub(super) owner: CheckedFunctionId,
@@ -1601,22 +1603,22 @@ pub struct CheckedStandardTypeReference {
 }
 
 impl CheckedStandardTypeReference {
-    /// Returns the checked function that declares the type use.
+    /// Returns the checked function that owns the signature slot.
     pub const fn owner(&self) -> CheckedFunctionId {
         self.owner
     }
 
-    /// Returns the flattened zero-based function-signature ordinal.
+    /// Returns the flattened zero-based signature ordinal, including unrecorded `REF` slots.
     pub const fn ordinal(&self) -> u32 {
         self.ordinal
     }
 
-    /// Returns the durable standard value-type identity.
+    /// Returns the durable checked standard value-type identity.
     pub const fn target(&self) -> TypeId {
         self.target
     }
 
-    /// Returns the exact written type location.
+    /// Returns the exact written location of the canonical value declaration use.
     pub fn location(&self) -> &SourceLocation {
         &self.location
     }
@@ -1738,7 +1740,10 @@ impl CheckedStandardApplicationBundle {
             .filter_map(CheckedApplicationTypeUse::value)
     }
 
-    /// Returns the initially empty standard type-reference arena.
+    /// Returns standard value-type signature references in source-unit insertion order.
+    ///
+    /// Each function's entries follow declaration order, while unrecorded `REF` slots may leave
+    /// ordinal gaps.
     pub fn standard_type_references(&self) -> &[CheckedStandardTypeReference] {
         &self.standard_type_references
     }
