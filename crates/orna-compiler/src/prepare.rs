@@ -8,6 +8,10 @@ use std::{
 };
 
 use orna_artifact::{
+    client_plan::{
+        ClientPlan, FORMAT_IDENTITY as CLIENT_PLAN_FORMAT, FORMAT_VERSION as CLIENT_PLAN_VERSION,
+        LANGUAGE_VERSION_IDENTITY as CLIENT_PLAN_LANGUAGE_VERSION,
+    },
     constant_expression::{
         ConstantExpression, ConstantExpressionError, FORMAT_IDENTITY as CONSTANT_FORMAT,
         FORMAT_VERSION as CONSTANT_VERSION,
@@ -65,9 +69,19 @@ use crate::{
 };
 
 /// One encoded SERVER artifact with the language version that defines it.
-struct PreparedServerArtifact {
+struct PreparedFunctionArtifact {
     artifact: ExecutableArtifact,
     language_version: &'static str,
+}
+
+struct FunctionFinalisation<'a> {
+    checked: CheckedFunctionId,
+    location: &'a SourceLocation,
+    function: FunctionId,
+    initial_revision: FunctionRevisionId,
+    definition: &'a FunctionDefinition,
+    prepared_artifact: PreparedFunctionArtifact,
+    references: &'a [DefinitionReference],
 }
 
 /// Prepares one complete durable candidate from a successful compiler check.
@@ -104,7 +118,7 @@ pub fn prepare(
 
     preflight(report.parse_report(), checked, active)?;
     let mut allocations = CandidateAllocator::legacy();
-    let identities = IdentityMap::build(checked, active, &mut allocations)?;
+    let identities = IdentityMap::build_legacy(checked, active, &mut allocations)?;
     let source = PreparedSource::new(
         report.parse_report(),
         expected_base.source(),
@@ -191,18 +205,24 @@ pub(crate) fn prepare_standard_application_with_allocator(
         evidence.standard_type_references(),
         view.standard_type_references(),
     )?;
-    if !view.checked().client_functions().is_empty() {
-        return Err(PrepareStandardApplicationError::Prepare {
-            source: PrepareError::InvalidCheckedBundle {
-                reason: "checked CLIENT function cannot yet be prepared",
-            },
-        });
-    }
-    preflight(report.parse_report(), view.checked(), active)
-        .map_err(|source| PrepareStandardApplicationError::Prepare { source })?;
+    let client_returns = signature_evidence.materialise_client_returns(view.checked())?;
+    let standard_preflight = standard_preflight(
+        report.parse_report(),
+        view.checked(),
+        active,
+        report.standard_library(),
+        &client_returns,
+        &declaration_evidence,
+    )
+    .map_err(|source| PrepareStandardApplicationError::Prepare { source })?;
+    let identities = IdentityMap::build_standard(
+        view.checked(),
+        active,
+        &mut allocations,
+        &standard_preflight.function_identities,
+    )
+    .map_err(|source| PrepareStandardApplicationError::Prepare { source })?;
     let catalogue_revision = allocations.catalogue_revision();
-    let identities = IdentityMap::build(view.checked(), active, &mut allocations)
-        .map_err(|source| PrepareStandardApplicationError::Prepare { source })?;
     let source_ids = PreparedSourceIds::allocate(report.parse_report(), &mut allocations)
         .map_err(|source| PrepareStandardApplicationError::Prepare { source })?;
     let source =
@@ -218,6 +238,7 @@ pub(crate) fn prepare_standard_application_with_allocator(
             standard: report.standard_library(),
             declaration_evidence,
             signature_evidence,
+            standard_preflight: Box::new(standard_preflight),
         },
         catalogue_revision,
     )
@@ -343,6 +364,7 @@ enum PreparationMode<'a> {
         standard: &'a crate::CheckedStandardLibrary,
         declaration_evidence: DeclarationEvidence,
         signature_evidence: SignatureEvidence,
+        standard_preflight: Box<StandardPreflight>,
     },
 }
 
@@ -414,14 +436,9 @@ impl DeclarationEvidence {
             .iter()
             .position(|evidence| evidence.kind == kind)
         else {
-            return self
-                .consumed
-                .iter()
-                .find(|evidence| evidence.kind == kind)
-                .cloned()
-                .ok_or(PrepareError::InvalidCheckedBundle {
-                    reason: "checked standard declaration has no validated type evidence",
-                });
+            return Err(PrepareError::InvalidCheckedBundle {
+                reason: "checked standard declaration has no validated type evidence",
+            });
         };
         let evidence = self.remaining.remove(index);
         self.consumed.push(evidence.clone());
@@ -484,8 +501,147 @@ fn signature_owner(kind: crate::CheckedTypeUseKind) -> Option<CheckedFunctionId>
 struct SignatureSlot {
     owner: CheckedFunctionId,
     flattened_ordinal: u32,
+    kind: crate::CheckedTypeUseKind,
     target: EvidenceTarget,
     location: SourceLocation,
+}
+
+#[derive(Clone)]
+struct ValidatedClientReturn {
+    owner: CheckedFunctionId,
+    return_type: TypeId,
+    location: SourceLocation,
+}
+
+#[derive(Clone, Default)]
+struct ValidatedClientReturns {
+    ordered: Vec<ValidatedClientReturn>,
+}
+
+impl ValidatedClientReturns {
+    fn for_client(
+        &self,
+        index: usize,
+        owner: CheckedFunctionId,
+    ) -> Result<&ValidatedClientReturn, PrepareError> {
+        let Some(return_evidence) = self.ordered.get(index) else {
+            return Err(PrepareError::InvalidCheckedBundle {
+                reason: "checked CLIENT function has no exact validated return evidence",
+            });
+        };
+        if return_evidence.owner != owner {
+            return Err(PrepareError::InvalidCheckedBundle {
+                reason: "checked CLIENT function has no exact validated return evidence",
+            });
+        }
+        Ok(return_evidence)
+    }
+}
+
+#[derive(Clone)]
+struct ValidatedClient {
+    id: CheckedFunctionId,
+    name: orna_core::catalogue::QualifiedSemanticName,
+    location: SourceLocation,
+    security: FunctionSecurity,
+    transaction: Option<FunctionTransaction>,
+    volatility: FunctionVolatility,
+    return_type: TypeId,
+    return_location: SourceLocation,
+    return_scalar: StandardScalar,
+    body_value: bool,
+}
+
+#[derive(Clone)]
+struct ValidatedFunctionIdentity {
+    domain: FunctionDomain,
+}
+
+#[derive(Clone, Default)]
+struct ValidatedFunctionIdentities {
+    order: Vec<CheckedFunctionId>,
+    functions: HashMap<CheckedFunctionId, ValidatedFunctionIdentity>,
+}
+
+impl ValidatedFunctionIdentities {
+    fn from_declarations(
+        declarations: &DeclarationEvidence,
+        checked: &CheckedBundle,
+    ) -> Result<Self, PrepareError> {
+        let mut functions = HashMap::with_capacity(
+            checked.server_functions().len() + checked.client_functions().len(),
+        );
+        for function in checked.server_functions() {
+            if functions
+                .insert(
+                    function.id(),
+                    ValidatedFunctionIdentity {
+                        domain: FunctionDomain::Server,
+                    },
+                )
+                .is_some()
+            {
+                return Err(PrepareError::InvalidCheckedBundle {
+                    reason: "duplicate checked function",
+                });
+            }
+        }
+        for function in checked.client_functions() {
+            if functions
+                .insert(
+                    function.id(),
+                    ValidatedFunctionIdentity {
+                        domain: FunctionDomain::Client,
+                    },
+                )
+                .is_some()
+            {
+                return Err(PrepareError::InvalidCheckedBundle {
+                    reason: "duplicate checked function",
+                });
+            }
+        }
+
+        let mut order = Vec::with_capacity(functions.len());
+        for declaration in &declarations.ordered {
+            let Some(owner) = signature_owner(declaration.kind) else {
+                continue;
+            };
+            if !functions.contains_key(&owner) {
+                return Err(PrepareError::InvalidCheckedBundle {
+                    reason: "checked standard function owners do not match declaration evidence",
+                });
+            }
+            if !order.contains(&owner) {
+                order.push(owner);
+            }
+        }
+        if order.len() != functions.len() {
+            return Err(PrepareError::InvalidCheckedBundle {
+                reason: "checked standard function owners do not match declaration evidence",
+            });
+        }
+        Ok(Self { order, functions })
+    }
+
+    fn order(&self) -> &[CheckedFunctionId] {
+        &self.order
+    }
+
+    fn domain(&self, owner: CheckedFunctionId) -> Result<FunctionDomain, PrepareError> {
+        self.functions
+            .get(&owner)
+            .map(|identity| identity.domain)
+            .ok_or(PrepareError::InvalidCheckedBundle {
+                reason: "checked standard function owners do not match declaration evidence",
+            })
+    }
+}
+
+#[derive(Clone)]
+struct StandardPreflight {
+    clients: HashMap<CheckedFunctionId, ValidatedClient>,
+    function_identities: ValidatedFunctionIdentities,
 }
 
 #[derive(Clone, Default)]
@@ -546,6 +702,7 @@ impl SignatureEvidence {
             ordered.push(SignatureSlot {
                 owner,
                 flattened_ordinal,
+                kind: declaration.kind,
                 target: declaration.target.clone(),
                 location: declaration.location.clone(),
             });
@@ -564,6 +721,55 @@ impl SignatureEvidence {
 
     fn function_slots(&self, owner: CheckedFunctionId) -> impl Iterator<Item = &SignatureSlot> {
         self.ordered.iter().filter(move |slot| slot.owner == owner)
+    }
+
+    fn materialise_client_returns(
+        &self,
+        checked: &CheckedBundle,
+    ) -> Result<ValidatedClientReturns, PrepareStandardApplicationError> {
+        let mut ordered = Vec::with_capacity(checked.client_functions().len());
+        for function in checked.client_functions() {
+            let owner = function.id();
+            let slots = self.function_slots(owner).collect::<Vec<_>>();
+            let [slot] = slots.as_slice() else {
+                return Err(
+                    PrepareStandardApplicationError::FunctionTypeReferenceMismatch {
+                        function: owner,
+                    },
+                );
+            };
+            let crate::CheckedTypeUseKind::Return {
+                owner: slot_owner,
+                ordinal,
+            } = slot.kind
+            else {
+                return Err(
+                    PrepareStandardApplicationError::FunctionTypeReferenceMismatch {
+                        function: owner,
+                    },
+                );
+            };
+            let EvidenceTarget::Value(return_type) = &slot.target else {
+                return Err(
+                    PrepareStandardApplicationError::FunctionTypeReferenceMismatch {
+                        function: owner,
+                    },
+                );
+            };
+            if slot_owner != owner || ordinal != 0 || slot.flattened_ordinal != 0 {
+                return Err(
+                    PrepareStandardApplicationError::FunctionTypeReferenceMismatch {
+                        function: owner,
+                    },
+                );
+            }
+            ordered.push(ValidatedClientReturn {
+                owner,
+                return_type: *return_type,
+                location: slot.location.clone(),
+            });
+        }
+        Ok(ValidatedClientReturns { ordered })
     }
 }
 
@@ -1772,33 +1978,8 @@ fn preflight(
     checked: &CheckedBundle,
     active: &ActiveDatabaseRevision,
 ) -> Result<(), PrepareError> {
-    let units = parse_report.units();
-    if u32::try_from(units.len()).is_err() {
-        return Err(PrepareError::SourceUnitCountExceedsU32 { count: units.len() });
-    }
-    let mut sources = HashMap::with_capacity(units.len());
-    for unit in units {
-        if sources
-            .insert(unit.logical_path(), unit.source_text())
-            .is_some()
-        {
-            return Err(PrepareError::InvalidCheckedBundle {
-                reason: "checked source bundle contains a duplicate logical path",
-            });
-        }
-        if u32::try_from(unit.source_text().len()).is_err() {
-            return Err(PrepareError::SourceContentTooLarge {
-                logical_path: unit.logical_path().to_owned(),
-                bytes: unit.source_text().len(),
-            });
-        }
-    }
-
-    for location in checked_locations(checked) {
-        validate_location(location, &sources)?;
-    }
-    validate_unique_fields(checked)?;
-    validate_field_renames(checked, active)?;
+    let locations = checked_locations(checked);
+    validate_common_preflight(parse_report, checked, active, &locations)?;
     for function in checked.server_functions() {
         if u32::try_from(function.references().len()).is_err() {
             return Err(PrepareError::ReferenceCountExceedsU32 {
@@ -1817,6 +1998,242 @@ fn preflight(
         }
     }
     Ok(())
+}
+
+fn standard_preflight(
+    parse_report: &ParseReport,
+    checked: &CheckedBundle,
+    active: &ActiveDatabaseRevision,
+    standard: &crate::CheckedStandardLibrary,
+    client_returns: &ValidatedClientReturns,
+    declarations: &DeclarationEvidence,
+) -> Result<StandardPreflight, PrepareError> {
+    let locations = standard_checked_locations(checked, client_returns)?;
+    validate_common_preflight(parse_report, checked, active, &locations)?;
+
+    for function in checked.server_functions() {
+        validate_server_function_preflight(function, active)?;
+    }
+
+    let mut ordered_clients = Vec::with_capacity(checked.client_functions().len());
+    for (index, function) in checked.client_functions().iter().enumerate() {
+        let return_evidence = client_returns.for_client(index, function.id())?;
+        ordered_clients.push((
+            function.id(),
+            validate_client_function_preflight(function, active, standard, return_evidence)?,
+        ));
+    }
+    let function_identities =
+        ValidatedFunctionIdentities::from_declarations(declarations, checked)?;
+    let clients = ordered_clients.into_iter().collect();
+    Ok(StandardPreflight {
+        clients,
+        function_identities,
+    })
+}
+
+fn validate_common_preflight(
+    parse_report: &ParseReport,
+    checked: &CheckedBundle,
+    active: &ActiveDatabaseRevision,
+    locations: &[&SourceLocation],
+) -> Result<(), PrepareError> {
+    let sources = validated_sources(parse_report)?;
+    for location in locations {
+        validate_location(location, sources.as_map())?;
+    }
+    validate_unique_fields(checked)?;
+    validate_field_renames(checked, active)
+}
+
+struct ValidatedSources<'a> {
+    by_logical_path: HashMap<&'a str, &'a str>,
+}
+
+impl ValidatedSources<'_> {
+    fn as_map(&self) -> &HashMap<&str, &str> {
+        &self.by_logical_path
+    }
+}
+
+fn validated_sources(parse_report: &ParseReport) -> Result<ValidatedSources<'_>, PrepareError> {
+    let units = parse_report.units();
+    if u32::try_from(units.len()).is_err() {
+        return Err(PrepareError::SourceUnitCountExceedsU32 { count: units.len() });
+    }
+    let mut by_logical_path = HashMap::with_capacity(units.len());
+    for unit in units {
+        if by_logical_path
+            .insert(unit.logical_path(), unit.source_text())
+            .is_some()
+        {
+            return Err(PrepareError::InvalidCheckedBundle {
+                reason: "checked source bundle contains a duplicate logical path",
+            });
+        }
+        if u32::try_from(unit.source_text().len()).is_err() {
+            return Err(PrepareError::SourceContentTooLarge {
+                logical_path: unit.logical_path().to_owned(),
+                bytes: unit.source_text().len(),
+            });
+        }
+    }
+    Ok(ValidatedSources { by_logical_path })
+}
+
+fn validate_server_function_preflight(
+    function: &crate::CheckedServerFunction,
+    active: &ActiveDatabaseRevision,
+) -> Result<(), PrepareError> {
+    if u32::try_from(function.references().len()).is_err() {
+        return Err(PrepareError::ReferenceCountExceedsU32 {
+            function: function.id(),
+            count: function.references().len(),
+        });
+    }
+    if function
+        .references()
+        .iter()
+        .any(|reference| !supports_definition_reference_kind(reference.kind()))
+    {
+        return Err(PrepareError::InvalidCheckedBundle {
+            reason: "checked function contains an unsupported definition reference kind",
+        });
+    }
+    validate_existing_function(
+        function.id(),
+        function.name(),
+        FunctionDomain::Server,
+        active,
+    )?;
+    validate_existing_server_parameters(function, active)
+}
+
+fn validate_existing_server_parameters(
+    function: &crate::CheckedServerFunction,
+    active: &ActiveDatabaseRevision,
+) -> Result<(), PrepareError> {
+    let CheckedFunctionId::Existing(owner) = function.id() else {
+        if function
+            .parameters()
+            .iter()
+            .any(|parameter| matches!(parameter.id(), CheckedParameterId::Existing(_)))
+        {
+            return Err(PrepareError::InvalidCheckedBundle {
+                reason: "existing checked parameter belongs to a provisional function",
+            });
+        }
+        return Ok(());
+    };
+
+    for parameter in function.parameters() {
+        let CheckedParameterId::Existing(id) = parameter.id() else {
+            continue;
+        };
+        let matches = active
+            .catalogue()
+            .function_by_id(owner)
+            .and_then(|base| base.parameter_by_id(id))
+            .is_some_and(|base| base.name() == parameter.name());
+        if !matches {
+            return Err(existing_mismatch(DefinitionIdentity::Parameter {
+                owner,
+                parameter: id,
+            }));
+        }
+    }
+    Ok(())
+}
+
+fn validate_client_function_preflight(
+    function: &crate::CheckedClientFunction,
+    active: &ActiveDatabaseRevision,
+    standard: &crate::CheckedStandardLibrary,
+    return_evidence: &ValidatedClientReturn,
+) -> Result<ValidatedClient, PrepareError> {
+    if function.domain() != FunctionDomain::Client {
+        return Err(PrepareError::InvalidCheckedBundle {
+            reason: "checked CLIENT function has an unsupported domain",
+        });
+    }
+    if !function.parameters().is_empty() {
+        return Err(PrepareError::InvalidCheckedBundle {
+            reason: "checked CLIENT function declares parameters",
+        });
+    }
+    let standard_boolean = standard.value_types().iter().any(|value_type| {
+        value_type.id() == return_evidence.return_type
+            && value_type.representation_contract() == "orna.kernel.value.boolean@1"
+    });
+    if function.return_type() != SemanticType::Scalar(StandardScalar::Boolean) || !standard_boolean
+    {
+        return Err(PrepareError::InvalidCheckedBundle {
+            reason: "checked CLIENT function does not return BOOLEAN from the checked standard library",
+        });
+    }
+    if function.security() != FunctionSecurity::Invoker {
+        return Err(PrepareError::InvalidCheckedBundle {
+            reason: "checked CLIENT function has an unsupported security mode",
+        });
+    }
+    if function.transaction().is_some() {
+        return Err(PrepareError::InvalidCheckedBundle {
+            reason: "checked CLIENT function has an unsupported transaction mode",
+        });
+    }
+    if function.volatility() != FunctionVolatility::Immutable {
+        return Err(PrepareError::InvalidCheckedBundle {
+            reason: "checked CLIENT function has an unsupported volatility mode",
+        });
+    }
+    let (body_value, _) = function
+        .boolean_body()
+        .ok_or(PrepareError::InvalidCheckedBundle {
+            reason: "checked CLIENT function has an unsupported body",
+        })?;
+    if !function.references().is_empty() {
+        return Err(PrepareError::InvalidCheckedBundle {
+            reason: "checked CLIENT function contains unsupported application definition references",
+        });
+    }
+    validate_existing_function(
+        function.id(),
+        function.name(),
+        FunctionDomain::Client,
+        active,
+    )?;
+    Ok(ValidatedClient {
+        id: function.id(),
+        name: function.name().clone(),
+        location: function.location().clone(),
+        security: function.security(),
+        transaction: function.transaction(),
+        volatility: function.volatility(),
+        return_type: return_evidence.return_type,
+        return_location: return_evidence.location.clone(),
+        return_scalar: StandardScalar::Boolean,
+        body_value,
+    })
+}
+
+fn validate_existing_function(
+    id: CheckedFunctionId,
+    name: &orna_core::catalogue::QualifiedSemanticName,
+    domain: FunctionDomain,
+    active: &ActiveDatabaseRevision,
+) -> Result<(), PrepareError> {
+    let CheckedFunctionId::Existing(id) = id else {
+        return Ok(());
+    };
+    let matches = active
+        .catalogue()
+        .function_by_id(id)
+        .is_some_and(|function| function.name() == name && function.domain() == domain);
+    if matches {
+        Ok(())
+    } else {
+        Err(existing_mismatch(DefinitionIdentity::Function(id)))
+    }
 }
 
 fn validate_unique_fields(checked: &CheckedBundle) -> Result<(), PrepareError> {
@@ -1996,6 +2413,33 @@ fn checked_locations(checked: &CheckedBundle) -> Vec<&SourceLocation> {
         locations.extend(function.references().iter().map(|value| value.location()));
     }
     locations
+}
+
+fn standard_checked_locations<'a>(
+    checked: &'a CheckedBundle,
+    client_returns: &'a ValidatedClientReturns,
+) -> Result<Vec<&'a SourceLocation>, PrepareError> {
+    let mut locations = checked_locations(checked);
+    for (index, function) in checked.client_functions().iter().enumerate() {
+        locations.push(function.location());
+        locations.extend(
+            function
+                .parameters()
+                .iter()
+                .map(|parameter| parameter.location()),
+        );
+        locations.push(&client_returns.for_client(index, function.id())?.location);
+        if let Some((_, location)) = function.boolean_body() {
+            locations.push(location);
+        }
+        locations.extend(
+            function
+                .references()
+                .iter()
+                .map(|reference| reference.location()),
+        );
+    }
+    Ok(locations)
 }
 
 fn validate_location(
@@ -2207,12 +2651,30 @@ struct IdentityMap {
 }
 
 impl IdentityMap {
-    fn build(
+    fn build_legacy(
         checked: &CheckedBundle,
         active: &ActiveDatabaseRevision,
         allocations: &mut CandidateAllocator,
     ) -> Result<Self, PrepareError> {
-        Self::validate_existing(checked, active)?;
+        Self::build(checked, active, allocations, None)
+    }
+
+    fn build_standard(
+        checked: &CheckedBundle,
+        active: &ActiveDatabaseRevision,
+        allocations: &mut CandidateAllocator,
+        function_identities: &ValidatedFunctionIdentities,
+    ) -> Result<Self, PrepareError> {
+        Self::build(checked, active, allocations, Some(function_identities))
+    }
+
+    fn build(
+        checked: &CheckedBundle,
+        active: &ActiveDatabaseRevision,
+        allocations: &mut CandidateAllocator,
+        function_identities: Option<&ValidatedFunctionIdentities>,
+    ) -> Result<Self, PrepareError> {
+        Self::validate_existing(checked, active, function_identities.is_none())?;
         let mut result = Self::default();
         for schema in checked.schemas() {
             let id = match schema.id() {
@@ -2266,37 +2728,85 @@ impl IdentityMap {
             }
         }
 
-        for function in checked.server_functions() {
-            let function_id = match function.id() {
-                CheckedFunctionId::Existing(id) => id,
-                CheckedFunctionId::Provisional(_) => FunctionId::new(),
-            };
+        match function_identities {
+            None => {
+                for function in checked.server_functions() {
+                    Self::map_server_function(&mut result, function, true)?;
+                }
+            }
+            Some(function_identities) => {
+                for owner in function_identities.order() {
+                    match function_identities.domain(*owner)? {
+                        FunctionDomain::Server => {
+                            let function = checked
+                                .server_functions()
+                                .iter()
+                                .find(|function| function.id() == *owner)
+                                .ok_or(PrepareError::InvalidCheckedBundle {
+                                    reason: "checked standard function owners do not match declaration evidence",
+                                })?;
+                            Self::map_server_function(&mut result, function, false)?;
+                        }
+                        FunctionDomain::Client => {
+                            let function = checked
+                                .client_functions()
+                                .iter()
+                                .find(|function| function.id() == *owner)
+                                .ok_or(PrepareError::InvalidCheckedBundle {
+                                    reason: "checked standard function owners do not match declaration evidence",
+                                })?;
+                            let function_id = match function.id() {
+                                CheckedFunctionId::Existing(id) => id,
+                                CheckedFunctionId::Provisional(_) => FunctionId::new(),
+                            };
+                            result.functions.insert(function.id(), function_id);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(result)
+    }
+
+    fn map_server_function(
+        result: &mut Self,
+        function: &crate::CheckedServerFunction,
+        reject_duplicate: bool,
+    ) -> Result<(), PrepareError> {
+        let function_id = match function.id() {
+            CheckedFunctionId::Existing(id) => id,
+            CheckedFunctionId::Provisional(_) => FunctionId::new(),
+        };
+        if reject_duplicate {
             insert_unique(
                 &mut result.functions,
                 function.id(),
                 function_id,
                 "duplicate checked function",
             )?;
-
-            for parameter in function.parameters() {
-                let parameter_id = match parameter.id() {
-                    CheckedParameterId::Existing(id) => id,
-                    CheckedParameterId::Provisional(_) => ParameterId::new(),
-                };
-                insert_consistent(
-                    &mut result.parameters,
-                    parameter.id(),
-                    parameter_id,
-                    "checked parameter identity maps inconsistently",
-                )?;
-            }
+        } else {
+            result.functions.insert(function.id(), function_id);
         }
-        Ok(result)
+
+        for parameter in function.parameters() {
+            let parameter_id = match parameter.id() {
+                CheckedParameterId::Existing(id) => id,
+                CheckedParameterId::Provisional(_) => ParameterId::new(),
+            };
+            insert_consistent(
+                &mut result.parameters,
+                parameter.id(),
+                parameter_id,
+                "checked parameter identity maps inconsistently",
+            )?;
+        }
+        Ok(())
     }
 
     fn validate_existing(
         checked: &CheckedBundle,
         active: &ActiveDatabaseRevision,
+        validate_legacy_server_functions: bool,
     ) -> Result<(), PrepareError> {
         for schema in checked.schemas() {
             let CheckedSchemaId::Existing(id) = schema.id() else {
@@ -2382,9 +2892,9 @@ impl IdentityMap {
             }
         }
 
-        for function in checked.server_functions() {
-            let owner = match function.id() {
-                CheckedFunctionId::Existing(id) => {
+        if validate_legacy_server_functions {
+            for function in checked.server_functions() {
+                if let CheckedFunctionId::Existing(id) = function.id() {
                     let matches = active
                         .catalogue()
                         .function_by_id(id)
@@ -2392,29 +2902,8 @@ impl IdentityMap {
                     if !matches {
                         return Err(existing_mismatch(DefinitionIdentity::Function(id)));
                     }
-                    Some(id)
                 }
-                CheckedFunctionId::Provisional(_) => None,
-            };
-
-            for parameter in function.parameters() {
-                let CheckedParameterId::Existing(id) = parameter.id() else {
-                    continue;
-                };
-                let owner = owner.ok_or(PrepareError::InvalidCheckedBundle {
-                    reason: "existing checked parameter belongs to a provisional function",
-                })?;
-                let matches = active
-                    .catalogue()
-                    .function_by_id(owner)
-                    .and_then(|base| base.parameter_by_id(id))
-                    .is_some_and(|base| base.name() == parameter.name());
-                if !matches {
-                    return Err(existing_mismatch(DefinitionIdentity::Parameter {
-                        owner,
-                        parameter: id,
-                    }));
-                }
+                validate_existing_server_parameters(function, active)?;
             }
         }
         Ok(())
@@ -2808,6 +3297,19 @@ impl<'a> CandidateBuilder<'a> {
         self.identities.resolved_type(semantic_type)
     }
 
+    fn resolved_declaration_type(
+        &self,
+        semantic_type: SemanticType<CheckedTypeId>,
+        kind: crate::CheckedTypeUseKind,
+        consume_evidence: bool,
+    ) -> Result<ResolvedType, PrepareError> {
+        if consume_evidence {
+            self.resolved_type(semantic_type, kind)
+        } else {
+            self.identities.resolved_type(semantic_type)
+        }
+    }
+
     fn build_schemas(&mut self) -> Result<Vec<SchemaDefinition>, PrepareError> {
         let mut schemas = Vec::with_capacity(self.checked.schemas().len());
         for checked in self.checked.schemas() {
@@ -2904,110 +3406,336 @@ impl<'a> CandidateBuilder<'a> {
         &mut self,
         object_types: &[ObjectTypeDefinition],
     ) -> Result<(), PrepareError> {
-        for checked in self.checked.server_functions() {
-            let function_id = self.identities.function(checked.id())?;
-            let initial_revision = match checked.id() {
-                CheckedFunctionId::Existing(_) => self
-                    .active
-                    .catalogue()
-                    .function_by_id(function_id)
-                    .ok_or(existing_mismatch(DefinitionIdentity::Function(function_id)))?
-                    .current_revision(),
-                CheckedFunctionId::Provisional(_) => FunctionRevisionId::new(),
-            };
-            let initial_definition = self.function_definition(checked, initial_revision)?;
-            let prepared_artifact =
-                self.server_artifact(checked, &initial_definition, object_types)?;
-            let initial_references =
-                self.function_references(checked, function_id, initial_revision)?;
-            let semantic_hash_version = match &self.mode {
-                PreparationMode::LegacyV1 => FunctionSemanticHashVersion::Version1,
-                PreparationMode::StandardV2 { .. }
-                    if initial_references.iter().any(|reference| {
-                        matches!(reference.target(), DefinitionReferenceTarget::ValueType(_))
-                    }) =>
-                {
-                    FunctionSemanticHashVersion::Version2
+        let standard_owners = match &self.mode {
+            PreparationMode::LegacyV1 => None,
+            PreparationMode::StandardV2 {
+                standard_preflight, ..
+            } => Some(
+                standard_preflight
+                    .function_identities
+                    .order()
+                    .iter()
+                    .map(|owner| {
+                        Ok((
+                            *owner,
+                            standard_preflight.function_identities.domain(*owner)?,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, PrepareError>>()?,
+            ),
+        };
+
+        let Some(standard_owners) = standard_owners else {
+            for checked in self.checked.server_functions() {
+                self.build_server_function(checked, object_types)?;
+            }
+            return Ok(());
+        };
+
+        for (owner, domain) in standard_owners {
+            match domain {
+                FunctionDomain::Server => {
+                    let checked = self
+                        .checked
+                        .server_functions()
+                        .iter()
+                        .find(|function| function.id() == owner)
+                        .cloned()
+                        .ok_or(PrepareError::InvalidCheckedBundle {
+                            reason: "checked standard function owners do not match declaration evidence",
+                        })?;
+                    self.build_server_function(&checked, object_types)?;
                 }
-                PreparationMode::StandardV2 { .. } => FunctionSemanticHashVersion::Version1,
-            };
-            let semantic_hash = match semantic_hash_version {
-                FunctionSemanticHashVersion::Version1 => function_semantic_digest(
-                    &initial_definition,
-                    prepared_artifact.language_version,
-                    &prepared_artifact.artifact,
-                    &self.expressions,
-                    &initial_references,
-                )?,
-                FunctionSemanticHashVersion::Version2 => function_semantic_digest_with_version(
-                    FunctionSemanticHashVersion::Version2,
-                    &initial_definition,
-                    prepared_artifact.language_version,
-                    &prepared_artifact.artifact,
-                    &self.expressions,
-                    &initial_references,
-                )?,
-                _ => {
-                    return Err(PrepareError::InvalidCheckedBundle {
-                        reason: "checked standard application has an unsupported semantic hash version",
-                    });
+                FunctionDomain::Client => {
+                    let validated = self.validated_client(owner)?.clone();
+                    self.build_client_function(&validated)?;
                 }
-            };
-
-            let reusable = self
-                .active
-                .function_revisions()
-                .iter()
-                .chain(self.active.historical_function_revisions())
-                .filter(|revision| {
-                    revision.function() == function_id
-                        && revision.semantic_hash() == semantic_hash
-                        && revision.semantic_hash_version() == semantic_hash_version
-                })
-                .min_by_key(|revision| (revision.revision_number(), revision.id().to_bytes()))
-                .cloned();
-
-            let (revision_id, current_revision) = if let Some(revision) = reusable {
-                (revision.id(), revision)
-            } else {
-                let revision_id = match checked.id() {
-                    CheckedFunctionId::Existing(_) => FunctionRevisionId::new(),
-                    CheckedFunctionId::Provisional(_) => initial_revision,
-                };
-                let revision_number = self.next_revision_number(function_id)?;
-                let declaration_origin = self.source.origin(checked.location())?;
-                let declaration = self
-                    .source
-                    .declaration(self.parse_report, checked.location())?;
-                let revision = FunctionRevisionRecord::new(
-                    function_id,
-                    revision_id,
-                    revision_number,
-                    declaration_origin,
-                    function_declaration_digest(declaration)?,
-                    semantic_hash,
-                    prepared_artifact.language_version,
-                    prepared_artifact.artifact,
-                )?
-                .with_semantic_hash_version(semantic_hash_version);
-                self.new_function_revisions.push(revision.clone());
-                (revision_id, revision)
-            };
-
-            let definition = self.function_definition(checked, revision_id)?;
-            let references = self.function_references(checked, function_id, revision_id)?;
-            self.push_function_origins(checked, function_id)?;
-            self.functions.push(definition);
-            self.current_function_revisions.push(current_revision);
-            self.references.extend(references);
+            }
         }
         Ok(())
+    }
+
+    fn build_server_function(
+        &mut self,
+        checked: &crate::CheckedServerFunction,
+        object_types: &[ObjectTypeDefinition],
+    ) -> Result<(), PrepareError> {
+        let function_id = self.identities.function(checked.id())?;
+        let initial_revision = self.initial_function_revision(checked.id(), function_id)?;
+        let initial_definition = self.function_definition(checked, initial_revision, false)?;
+        let prepared_artifact = self.server_artifact(checked, &initial_definition, object_types)?;
+        let initial_references =
+            self.function_references(checked, function_id, initial_revision)?;
+        let (revision_id, current_revision) =
+            self.finalise_function_revision(FunctionFinalisation {
+                checked: checked.id(),
+                location: checked.location(),
+                function: function_id,
+                initial_revision,
+                definition: &initial_definition,
+                prepared_artifact,
+                references: &initial_references,
+            })?;
+        let definition = self.function_definition(checked, revision_id, true)?;
+        let references =
+            self.rebind_function_references(function_id, revision_id, &initial_references);
+        self.push_function_origins(checked, function_id)?;
+        self.functions.push(definition);
+        self.current_function_revisions.push(current_revision);
+        self.references.extend(references);
+        Ok(())
+    }
+
+    fn build_client_function(&mut self, validated: &ValidatedClient) -> Result<(), PrepareError> {
+        let function_id = self.identities.function(validated.id)?;
+        let initial_revision = self.initial_function_revision(validated.id, function_id)?;
+        let initial_definition =
+            self.client_function_definition(validated, initial_revision, false)?;
+        let prepared_artifact = self.client_artifact(validated)?;
+        let initial_references =
+            self.client_function_references(function_id, initial_revision, validated)?;
+        let (revision_id, current_revision) =
+            self.finalise_function_revision(FunctionFinalisation {
+                checked: validated.id,
+                location: &validated.location,
+                function: function_id,
+                initial_revision,
+                definition: &initial_definition,
+                prepared_artifact,
+                references: &initial_references,
+            })?;
+
+        let definition = self.client_function_definition(validated, revision_id, true)?;
+        let references =
+            self.rebind_function_references(function_id, revision_id, &initial_references);
+        self.push_origin(
+            DefinitionIdentity::Function(function_id),
+            &validated.location,
+        )?;
+        self.functions.push(definition);
+        self.current_function_revisions.push(current_revision);
+        self.references.extend(references);
+        Ok(())
+    }
+
+    fn client_function_definition(
+        &self,
+        validated: &ValidatedClient,
+        current_revision: FunctionRevisionId,
+        consume_evidence: bool,
+    ) -> Result<FunctionDefinition, PrepareError> {
+        Ok(FunctionDefinition::new(
+            self.identities.function(validated.id)?,
+            validated.name.clone(),
+            FunctionDomain::Client,
+            Vec::new(),
+            FunctionReturn::Single(self.client_return_type(validated, consume_evidence)?),
+            current_revision,
+            validated.security,
+            validated.transaction,
+            validated.volatility,
+        ))
+    }
+
+    fn client_artifact(
+        &self,
+        validated: &ValidatedClient,
+    ) -> Result<PreparedFunctionArtifact, PrepareError> {
+        let payload = ClientPlan::return_boolean(validated.body_value).encode();
+        let hash = artifact_payload_digest(&payload)?;
+        Ok(PreparedFunctionArtifact {
+            artifact: ExecutableArtifact::new(
+                ExecutableArtifactKind::Client,
+                CLIENT_PLAN_FORMAT,
+                CLIENT_PLAN_VERSION,
+                payload,
+                hash,
+            )?,
+            language_version: CLIENT_PLAN_LANGUAGE_VERSION,
+        })
+    }
+
+    fn client_function_references(
+        &self,
+        function: FunctionId,
+        revision: FunctionRevisionId,
+        validated: &ValidatedClient,
+    ) -> Result<Vec<DefinitionReference>, PrepareError> {
+        Ok(vec![DefinitionReference::new(
+            function,
+            revision,
+            0,
+            DefinitionReferenceTarget::ValueType(validated.return_type),
+            DefinitionReferenceKind::NamedType,
+            self.source.origin(&validated.return_location)?,
+        )])
+    }
+
+    fn initial_function_revision(
+        &self,
+        checked: CheckedFunctionId,
+        function: FunctionId,
+    ) -> Result<FunctionRevisionId, PrepareError> {
+        match checked {
+            CheckedFunctionId::Existing(_) => self
+                .active
+                .catalogue()
+                .function_by_id(function)
+                .ok_or(existing_mismatch(DefinitionIdentity::Function(function)))
+                .map(|definition| definition.current_revision()),
+            CheckedFunctionId::Provisional(_) => Ok(FunctionRevisionId::new()),
+        }
+    }
+
+    fn finalise_function_revision(
+        &mut self,
+        input: FunctionFinalisation<'_>,
+    ) -> Result<(FunctionRevisionId, FunctionRevisionRecord), PrepareError> {
+        let FunctionFinalisation {
+            checked,
+            location,
+            function,
+            initial_revision,
+            definition,
+            prepared_artifact,
+            references,
+        } = input;
+        let semantic_hash_version = match &self.mode {
+            PreparationMode::LegacyV1 => FunctionSemanticHashVersion::Version1,
+            PreparationMode::StandardV2 { .. }
+                if references.iter().any(|reference| {
+                    matches!(reference.target(), DefinitionReferenceTarget::ValueType(_))
+                }) =>
+            {
+                FunctionSemanticHashVersion::Version2
+            }
+            PreparationMode::StandardV2 { .. } => FunctionSemanticHashVersion::Version1,
+        };
+        let semantic_hash = match semantic_hash_version {
+            FunctionSemanticHashVersion::Version1 => function_semantic_digest(
+                definition,
+                prepared_artifact.language_version,
+                &prepared_artifact.artifact,
+                &self.expressions,
+                references,
+            )?,
+            FunctionSemanticHashVersion::Version2 => function_semantic_digest_with_version(
+                FunctionSemanticHashVersion::Version2,
+                definition,
+                prepared_artifact.language_version,
+                &prepared_artifact.artifact,
+                &self.expressions,
+                references,
+            )?,
+            _ => {
+                return Err(PrepareError::InvalidCheckedBundle {
+                    reason: "checked standard application has an unsupported semantic hash version",
+                });
+            }
+        };
+        let reusable = self
+            .active
+            .function_revisions()
+            .iter()
+            .chain(self.active.historical_function_revisions())
+            .filter(|revision| {
+                revision.function() == function
+                    && revision.semantic_hash() == semantic_hash
+                    && revision.semantic_hash_version() == semantic_hash_version
+            })
+            .min_by_key(|revision| (revision.revision_number(), revision.id().to_bytes()))
+            .cloned();
+        if let Some(revision) = reusable {
+            return Ok((revision.id(), revision));
+        }
+        let revision_id = match checked {
+            CheckedFunctionId::Existing(_) => FunctionRevisionId::new(),
+            CheckedFunctionId::Provisional(_) => initial_revision,
+        };
+        let revision_number = self.next_revision_number(function)?;
+        let declaration_origin = self.source.origin(location)?;
+        let declaration = self.source.declaration(self.parse_report, location)?;
+        let revision = FunctionRevisionRecord::new(
+            function,
+            revision_id,
+            revision_number,
+            declaration_origin,
+            function_declaration_digest(declaration)?,
+            semantic_hash,
+            prepared_artifact.language_version,
+            prepared_artifact.artifact,
+        )?
+        .with_semantic_hash_version(semantic_hash_version);
+        self.new_function_revisions.push(revision.clone());
+        Ok((revision_id, revision))
+    }
+
+    fn rebind_function_references(
+        &self,
+        function: FunctionId,
+        revision: FunctionRevisionId,
+        references: &[DefinitionReference],
+    ) -> Vec<DefinitionReference> {
+        references
+            .iter()
+            .map(|reference| {
+                DefinitionReference::new(
+                    function,
+                    revision,
+                    reference.ordinal(),
+                    reference.target(),
+                    reference.kind(),
+                    reference.source_origin(),
+                )
+            })
+            .collect()
+    }
+
+    fn validated_client(&self, owner: CheckedFunctionId) -> Result<&ValidatedClient, PrepareError> {
+        let PreparationMode::StandardV2 {
+            standard_preflight, ..
+        } = &self.mode
+        else {
+            return Err(PrepareError::InvalidCheckedBundle {
+                reason: "checked CLIENT function requires standard preparation evidence",
+            });
+        };
+        standard_preflight
+            .clients
+            .get(&owner)
+            .ok_or(PrepareError::InvalidCheckedBundle {
+                reason: "checked CLIENT function has no exact validated return evidence",
+            })
+    }
+
+    fn client_return_type(
+        &self,
+        validated: &ValidatedClient,
+        consume_evidence: bool,
+    ) -> Result<ResolvedType, PrepareError> {
+        if consume_evidence && let Some(evidence) = &self.declaration_evidence {
+            let evidence = evidence
+                .borrow_mut()
+                .consume(crate::CheckedTypeUseKind::Return {
+                    owner: validated.id,
+                    ordinal: 0,
+                })?;
+            if evidence.target != EvidenceTarget::Value(validated.return_type)
+                || evidence.location != validated.return_location
+            {
+                return Err(PrepareError::InvalidCheckedBundle {
+                    reason: "checked CLIENT function return evidence does not match its validated slot",
+                });
+            }
+        }
+        Ok(ResolvedType::Scalar(validated.return_scalar))
     }
 
     fn function_definition(
         &self,
         checked: &crate::CheckedServerFunction,
         current_revision: FunctionRevisionId,
+        consume_evidence: bool,
     ) -> Result<FunctionDefinition, PrepareError> {
         let function_id = self.identities.function(checked.id())?;
         let parameters = checked
@@ -3018,12 +3746,13 @@ impl<'a> CandidateBuilder<'a> {
                     self.identities.parameter(parameter.id())?,
                     parameter.name(),
                     parameter.ordinal(),
-                    self.resolved_type(
+                    self.resolved_declaration_type(
                         parameter.semantic_type(),
                         crate::CheckedTypeUseKind::Parameter {
                             owner: checked.id(),
                             parameter: parameter.id(),
                         },
+                        consume_evidence,
                     )?,
                     None,
                 ))
@@ -3036,12 +3765,13 @@ impl<'a> CandidateBuilder<'a> {
                 Ok(FunctionReturnColumnDefinition::new(
                     column.name(),
                     column.ordinal(),
-                    self.resolved_type(
+                    self.resolved_declaration_type(
                         column.semantic_type(),
                         crate::CheckedTypeUseKind::Return {
                             owner: checked.id(),
                             ordinal: column.ordinal(),
                         },
+                        consume_evidence,
                     )?,
                 ))
             })
@@ -3065,7 +3795,7 @@ impl<'a> CandidateBuilder<'a> {
         checked: &crate::CheckedServerFunction,
         function: &FunctionDefinition,
         object_types: &[ObjectTypeDefinition],
-    ) -> Result<PreparedServerArtifact, PrepareError> {
+    ) -> Result<PreparedFunctionArtifact, PrepareError> {
         if let Some(checked_plan) = checked.identity_selected_query_plan() {
             let plan = checked_plan.try_map_identities(
                 |id| self.identities.type_id(id),
@@ -3077,7 +3807,7 @@ impl<'a> CandidateBuilder<'a> {
             let encoded = identity_selected_query_plan(&plan, function, object_types, &references)?;
             let payload = encoded.payload().to_vec();
             let hash = artifact_payload_digest(&payload)?;
-            return Ok(PreparedServerArtifact {
+            return Ok(PreparedFunctionArtifact {
                 artifact: ExecutableArtifact::new(
                     ExecutableArtifactKind::Server,
                     SERVER_PLAN_FORMAT,
@@ -3098,7 +3828,7 @@ impl<'a> CandidateBuilder<'a> {
             let encoded = distinct_query_plan(&plan, function, object_types, &references)?;
             let payload = encoded.payload().to_vec();
             let hash = artifact_payload_digest(&payload)?;
-            return Ok(PreparedServerArtifact {
+            return Ok(PreparedFunctionArtifact {
                 artifact: ExecutableArtifact::new(
                     ExecutableArtifactKind::Server,
                     SERVER_PLAN_FORMAT,
@@ -3118,7 +3848,7 @@ impl<'a> CandidateBuilder<'a> {
             let references = self.mapped_references(checked)?;
             let payload = version_one_query_plan(&plan, function, object_types, &references)?;
             let hash = artifact_payload_digest(&payload)?;
-            return Ok(PreparedServerArtifact {
+            return Ok(PreparedFunctionArtifact {
                 artifact: ExecutableArtifact::new(
                     ExecutableArtifactKind::Server,
                     SERVER_PLAN_FORMAT,
@@ -3156,7 +3886,7 @@ impl<'a> CandidateBuilder<'a> {
             (plan.format_version(), plan.encode()?)
         };
         let hash = artifact_payload_digest(&payload)?;
-        Ok(PreparedServerArtifact {
+        Ok(PreparedFunctionArtifact {
             artifact: ExecutableArtifact::new(
                 ExecutableArtifactKind::Server,
                 SERVER_MUTATION_PLAN_FORMAT,
