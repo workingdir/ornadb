@@ -328,8 +328,7 @@ where
     }
 
     fn field_by_name(&self, owner: T, name: &str) -> Option<MutationField<T, F>> {
-        QueryCatalogue::field_by_name(self, owner, name)
-            .map(|field| MutationField::new(field.id(), field.semantic_type(), field.nullable()))
+        QueryCatalogue::field_by_name(self, owner, name).map(mutation_field)
     }
 
     fn visit_fields(&self, owner: T, visitor: &mut dyn FnMut(&str, MutationField<T, F>)) {
@@ -337,11 +336,21 @@ where
             return;
         };
         for (name, field) in &self.object_types[*index].fields {
-            visitor(
-                name,
-                MutationField::new(field.id(), field.semantic_type(), field.nullable()),
-            );
+            visitor(name, mutation_field(*field));
         }
+    }
+}
+
+fn mutation_field<T: Copy, F: Copy>(query_field: QueryField<T, F>) -> MutationField<T, F> {
+    let mutation_field = MutationField::new(
+        query_field.id(),
+        query_field.semantic_type(),
+        query_field.nullable(),
+    );
+    if let Some(type_id) = query_field.standard_value_type() {
+        mutation_field.with_standard_value_type(type_id)
+    } else {
+        mutation_field
     }
 }
 
