@@ -17,8 +17,8 @@ use orna_core::{
         FunctionVolatility,
     },
     revision::{
-        ActiveDatabaseRevision, DefinitionReferenceKind, DefinitionReferenceTarget,
-        ExecutableArtifactKind, RevisionPair,
+        ActiveDatabaseRevision, CatalogueHashContext, DefinitionReferenceKind,
+        DefinitionReferenceTarget, ExecutableArtifactKind, RevisionPair,
     },
     types::{ResolvedType, StandardScalar},
     value::{
@@ -35,7 +35,8 @@ use crate::{
     PostgresKernel, PostgresKernelError,
     server_runtime::{
         ExpectedDefinitionReference, ReferenceReplayMismatch, ResolvedRuntimeType,
-        configure_and_recover, postgres_type, validate_function_reference_replay,
+        configure_and_recover, postgres_type, resolve_runtime_type, runtime_types_match,
+        validate_function_reference_replay,
     },
     storage::{DATA_SCHEMA, OBJECT_ID_COLUMN, field_name, relation_name},
 };
@@ -658,33 +659,75 @@ async fn execute_active_transaction(
             validate_plan(active, function, plan)?;
             validate_reference_evidence(active, function, plan)?;
             let columns = result_columns_for_projections(function, &plan.projections)?;
-            validate_target_entries(plan.projections.len(), &columns, plan.ordering.len())?;
-            let lowered = lower_plan(active.catalogue(), plan, &columns)?;
+            validate_target_entries(
+                active.catalogue_hash_context(),
+                plan.projections.len(),
+                &columns,
+                plan.ordering.len(),
+            )?;
+            let lowered = lower_plan(
+                active.catalogue(),
+                active.catalogue_hash_context(),
+                plan,
+                &columns,
+            )?;
             (columns, lowered, ResultCardinality::BoundedMany)
         }
         DecodedServerPlan::V2(plan) => {
             validate_identity_selected_function_signature(active.catalogue(), function)?;
-            validate_identity_selected_plan(active.catalogue(), function, plan)?;
+            validate_identity_selected_plan(
+                active.catalogue(),
+                active.catalogue_hash_context(),
+                function,
+                plan,
+            )?;
             validate_identity_selected_reference_evidence(active, function, plan)?;
             let object = validate_identity_selected_arguments(
                 active.catalogue(),
+                active.catalogue_hash_context(),
                 function,
                 plan,
                 arguments,
             )?;
             let columns = result_columns_for_projections(function, plan.projections())?;
-            validate_target_entries(plan.projections().len(), &columns, 0)?;
-            let lowered = lower_identity_selected_plan(active.catalogue(), plan, &columns, object)?;
+            validate_target_entries(
+                active.catalogue_hash_context(),
+                plan.projections().len(),
+                &columns,
+                0,
+            )?;
+            let lowered = lower_identity_selected_plan(
+                active.catalogue(),
+                active.catalogue_hash_context(),
+                plan,
+                &columns,
+                object,
+            )?;
             (columns, lowered, ResultCardinality::AtMostOne)
         }
         DecodedServerPlan::V3(plan) => {
             validate_distinct_function_signature(function)?;
             validate_no_arguments(arguments)?;
-            validate_distinct_plan(active.catalogue(), function, plan)?;
+            validate_distinct_plan(
+                active.catalogue(),
+                active.catalogue_hash_context(),
+                function,
+                plan,
+            )?;
             validate_distinct_reference_evidence(active, function, plan)?;
             let columns = result_columns_for_projections(function, plan.projections())?;
-            validate_target_entries(plan.projections().len(), &columns, 0)?;
-            let lowered = lower_distinct_plan(active.catalogue(), plan, &columns)?;
+            validate_target_entries(
+                active.catalogue_hash_context(),
+                plan.projections().len(),
+                &columns,
+                0,
+            )?;
+            let lowered = lower_distinct_plan(
+                active.catalogue(),
+                active.catalogue_hash_context(),
+                plan,
+                &columns,
+            )?;
             (columns, lowered, ResultCardinality::BoundedMany)
         }
     };
@@ -692,15 +735,23 @@ async fn execute_active_transaction(
         .prepare_typed(&lowered.sql, &lowered.bind_types)
         .await
         .map_err(PostgresKernelError::Database)?;
-    validate_prepared_columns(&statement, &columns, &lowered.guards)?;
+    validate_prepared_columns(
+        active.catalogue_hash_context(),
+        &statement,
+        &columns,
+        &lowered.guards,
+    )?;
     let rows = stream_rows(
         transaction,
         &statement,
         &lowered.binds,
-        &columns,
-        &lowered.guards,
-        lowered.variable_payload_limit,
-        cardinality,
+        ResultReadShape {
+            context: active.catalogue_hash_context(),
+            columns: &columns,
+            guards: &lowered.guards,
+            variable_payload_limit: lowered.variable_payload_limit,
+            cardinality,
+        },
     )
     .await?;
     Ok(ServerSelectResult::new(
@@ -841,9 +892,7 @@ fn validate_identity_selected_function_signature(
             "the identity selector parameter cannot have a default expression",
         ));
     }
-    let ResolvedRuntimeType::Reference(target) =
-        ResolvedRuntimeType::from_resolved_type(parameter.resolved_type())
-    else {
+    let Some(target) = parameter.resolved_type().reference_target() else {
         return Err(function_signature_error(
             function.id(),
             "the selector parameter must use REF to an available object type",
@@ -901,6 +950,7 @@ fn validate_distinct_function_signature(
 
 fn validate_identity_selected_plan(
     catalogue: &orna_core::catalogue::CatalogueSnapshot,
+    context: &CatalogueHashContext,
     function: &FunctionDefinition,
     plan: &IdentitySelectedServerPlan,
 ) -> Result<(), PostgresKernelError> {
@@ -922,14 +972,19 @@ fn validate_identity_selected_plan(
     for (projection, column) in plan.projections().iter().zip(return_columns) {
         validate_expression_with_equality_rule(
             catalogue,
+            context,
             scan.object_type,
             projection,
             PARAMETERISED_EQUALITY_RULE,
         )?;
-        if projection.value_type.resolved_type != column.resolved_type() {
+        if !runtime_types_match(
+            context,
+            projection.value_type.resolved_type,
+            column.resolved_type(),
+        ) {
             return Err(plan_invariant("projection type must equal its ROWS column"));
         }
-        if !supports_result_type(projection.value_type.resolved_type) {
+        if !supports_result_type(context, projection.value_type.resolved_type) {
             return Err(plan_invariant(
                 "projection type is outside the initial runtime result subset",
             ));
@@ -956,6 +1011,7 @@ fn validate_identity_selected_plan(
 
 fn validate_distinct_plan(
     catalogue: &orna_core::catalogue::CatalogueSnapshot,
+    context: &CatalogueHashContext,
     function: &FunctionDefinition,
     plan: &DistinctServerPlan,
 ) -> Result<(), PostgresKernelError> {
@@ -977,17 +1033,22 @@ fn validate_distinct_plan(
     for (projection, column) in plan.projections().iter().zip(return_columns) {
         validate_expression_with_equality_rule(
             catalogue,
+            context,
             scan.object_type,
             projection,
             DISTINCT_EQUALITY_RULE,
         )?;
-        if projection.value_type.resolved_type != column.resolved_type() {
+        if !runtime_types_match(
+            context,
+            projection.value_type.resolved_type,
+            column.resolved_type(),
+        ) {
             return Err(plan_invariant("projection type must equal its ROWS column"));
         }
-        if !supports_distinct_projection_type(projection.value_type.resolved_type) {
+        if !supports_distinct_projection_type(context, projection.value_type.resolved_type) {
             return Err(distinct_error(DISTINCT_PROJECTION_RULE));
         }
-        if !supports_result_type(projection.value_type.resolved_type) {
+        if !supports_result_type(context, projection.value_type.resolved_type) {
             return Err(plan_invariant(
                 "projection type is outside the initial runtime result subset",
             ));
@@ -996,6 +1057,7 @@ fn validate_distinct_plan(
     if let Some(selection) = plan.selection() {
         validate_expression_with_equality_rule(
             catalogue,
+            context,
             scan.object_type,
             selection,
             DISTINCT_EQUALITY_RULE,
@@ -1044,6 +1106,7 @@ fn validate_expression_complexity<'a>(
 
 fn validate_identity_selected_arguments(
     catalogue: &orna_core::catalogue::CatalogueSnapshot,
+    context: &CatalogueHashContext,
     function: &FunctionDefinition,
     plan: &IdentitySelectedServerPlan,
     arguments: &[FunctionArgument],
@@ -1070,13 +1133,13 @@ fn validate_identity_selected_arguments(
                 "function arguments cannot be NULL",
             ));
         }
-        if !runtime_type_is_active(catalogue, value.resolved_type()) {
+        if !runtime_type_is_active(catalogue, context, value.resolved_type()) {
             return Err(argument_error(
                 Some(parameter_id),
                 "the argument uses an unsupported type or refers to an unavailable object type",
             ));
         }
-        if value.resolved_type() != parameter.resolved_type() {
+        if !runtime_types_match(context, value.resolved_type(), parameter.resolved_type()) {
             return Err(argument_error(
                 Some(parameter_id),
                 "the argument type does not match the declared parameter type",
@@ -1111,12 +1174,12 @@ fn validate_no_arguments(arguments: &[FunctionArgument]) -> Result<(), PostgresK
 
 fn runtime_type_is_active(
     catalogue: &orna_core::catalogue::CatalogueSnapshot,
+    context: &CatalogueHashContext,
     resolved_type: ResolvedType,
 ) -> bool {
-    match ResolvedRuntimeType::from_resolved_type(resolved_type) {
-        ResolvedRuntimeType::LegacyScalar(scalar) => {
-            postgres_type(ResolvedType::scalar(scalar)).is_some()
-        }
+    match resolve_runtime_type(context, resolved_type) {
+        runtime @ ResolvedRuntimeType::LegacyScalar(_)
+        | runtime @ ResolvedRuntimeType::VerifiedValue { .. } => postgres_type(runtime).is_some(),
         ResolvedRuntimeType::Reference(target) => catalogue.object_type_by_id(target).is_some(),
         ResolvedRuntimeType::Unsupported => false,
     }
@@ -1144,6 +1207,7 @@ fn validate_plan(
     plan: &ServerPlan,
 ) -> Result<(), PostgresKernelError> {
     let catalogue = active.catalogue();
+    let context = active.catalogue_hash_context();
     validate_execution_complexity(plan)?;
     if plan.scan.input != 0 || catalogue.object_type_by_id(plan.scan.object_type).is_none() {
         return Err(plan_invariant(
@@ -1159,25 +1223,34 @@ fn validate_plan(
         ));
     }
     for (projection, column) in plan.projections.iter().zip(return_columns) {
-        validate_expression(catalogue, plan.scan.object_type, projection)?;
-        if projection.value_type.resolved_type != column.resolved_type() {
+        validate_expression(catalogue, context, plan.scan.object_type, projection)?;
+        if !runtime_types_match(
+            context,
+            projection.value_type.resolved_type,
+            column.resolved_type(),
+        ) {
             return Err(plan_invariant("projection type must equal its ROWS column"));
         }
-        if !supports_result_type(projection.value_type.resolved_type) {
+        if !supports_result_type(context, projection.value_type.resolved_type) {
             return Err(plan_invariant(
                 "projection type is outside the initial runtime result subset",
             ));
         }
     }
     if let Some(selection) = &plan.selection {
-        validate_expression(catalogue, plan.scan.object_type, selection)?;
+        validate_expression(catalogue, context, plan.scan.object_type, selection)?;
         if selection.value_type.resolved_type != ResolvedType::scalar(StandardScalar::Boolean) {
             return Err(plan_invariant("selection must have BOOLEAN type"));
         }
     }
     for ordering in &plan.ordering {
-        validate_expression(catalogue, plan.scan.object_type, &ordering.expression)?;
-        if !supports_ordering_type(ordering.expression.value_type.resolved_type) {
+        validate_expression(
+            catalogue,
+            context,
+            plan.scan.object_type,
+            &ordering.expression,
+        )?;
+        if !supports_ordering_type(context, ordering.expression.value_type.resolved_type) {
             return Err(plan_invariant(
                 "version 1 SERVER SELECT ordering supports only INTEGER and BIGINT",
             ));
@@ -1188,14 +1261,22 @@ fn validate_plan(
 
 fn validate_expression(
     catalogue: &orna_core::catalogue::CatalogueSnapshot,
+    context: &CatalogueHashContext,
     scan: TypeId,
     expression: &Expression,
 ) -> Result<(), PostgresKernelError> {
-    validate_expression_with_equality_rule(catalogue, scan, expression, VERSION_ONE_EQUALITY_RULE)
+    validate_expression_with_equality_rule(
+        catalogue,
+        context,
+        scan,
+        expression,
+        VERSION_ONE_EQUALITY_RULE,
+    )
 }
 
 fn validate_expression_with_equality_rule(
     catalogue: &orna_core::catalogue::CatalogueSnapshot,
+    context: &CatalogueHashContext,
     scan: TypeId,
     expression: &Expression,
     equality_rule: &'static str,
@@ -1216,7 +1297,7 @@ fn validate_expression_with_equality_rule(
                 return Err(plan_invariant("field path must use input zero"));
             }
             let (resolved_type, nullable) = field_path_type(catalogue, scan, steps)?;
-            if expression.value_type.resolved_type != resolved_type
+            if !runtime_types_match(context, expression.value_type.resolved_type, resolved_type)
                 || expression.value_type.nullable != nullable
             {
                 return Err(plan_invariant(
@@ -1234,8 +1315,8 @@ fn validate_expression_with_equality_rule(
             }
         }
         ExpressionKind::Equality { left, right } => {
-            validate_expression_with_equality_rule(catalogue, scan, left, equality_rule)?;
-            validate_expression_with_equality_rule(catalogue, scan, right, equality_rule)?;
+            validate_expression_with_equality_rule(catalogue, context, scan, left, equality_rule)?;
+            validate_expression_with_equality_rule(catalogue, context, scan, right, equality_rule)?;
             if left.value_type.resolved_type != right.value_type.resolved_type
                 || expression.value_type.resolved_type
                     != ResolvedType::scalar(StandardScalar::Boolean)
@@ -1246,7 +1327,7 @@ fn validate_expression_with_equality_rule(
                     "equality operands and nullable BOOLEAN result must match",
                 ));
             }
-            if !supports_equality_type(left.value_type.resolved_type) {
+            if !supports_equality_type(context, left.value_type.resolved_type) {
                 return Err(plan_invariant(equality_rule));
             }
         }
@@ -1254,48 +1335,60 @@ fn validate_expression_with_equality_rule(
     Ok(())
 }
 
-fn supports_ordering_type(resolved_type: ResolvedType) -> bool {
+fn supports_ordering_type(context: &CatalogueHashContext, resolved_type: ResolvedType) -> bool {
     matches!(
-        ResolvedRuntimeType::from_resolved_type(resolved_type),
-        ResolvedRuntimeType::LegacyScalar(StandardScalar::Integer | StandardScalar::BigInt)
+        resolve_runtime_type(context, resolved_type).compatibility_scalar(),
+        Some(StandardScalar::Integer | StandardScalar::BigInt)
     )
 }
 
-fn supports_equality_type(resolved_type: ResolvedType) -> bool {
+fn supports_equality_type(context: &CatalogueHashContext, resolved_type: ResolvedType) -> bool {
     matches!(
-        ResolvedRuntimeType::from_resolved_type(resolved_type),
-        ResolvedRuntimeType::LegacyScalar(
+        resolve_runtime_type(context, resolved_type).compatibility_scalar(),
+        Some(
             StandardScalar::Boolean
                 | StandardScalar::Integer
                 | StandardScalar::BigInt
                 | StandardScalar::BinaryLargeObject
-        ) | ResolvedRuntimeType::Reference(_)
+        )
+    ) || matches!(
+        resolve_runtime_type(context, resolved_type),
+        ResolvedRuntimeType::Reference(_)
     )
 }
 
-fn supports_distinct_projection_type(resolved_type: ResolvedType) -> bool {
+fn supports_distinct_projection_type(
+    context: &CatalogueHashContext,
+    resolved_type: ResolvedType,
+) -> bool {
     matches!(
-        ResolvedRuntimeType::from_resolved_type(resolved_type),
-        ResolvedRuntimeType::LegacyScalar(
+        resolve_runtime_type(context, resolved_type).compatibility_scalar(),
+        Some(
             StandardScalar::Boolean
                 | StandardScalar::Integer
                 | StandardScalar::BigInt
                 | StandardScalar::BinaryLargeObject
-        ) | ResolvedRuntimeType::Reference(_)
+        )
+    ) || matches!(
+        resolve_runtime_type(context, resolved_type),
+        ResolvedRuntimeType::Reference(_)
     )
 }
 
-fn supports_result_type(resolved_type: ResolvedType) -> bool {
+fn supports_result_type(context: &CatalogueHashContext, resolved_type: ResolvedType) -> bool {
     matches!(
-        ResolvedRuntimeType::from_resolved_type(resolved_type),
-        ResolvedRuntimeType::LegacyScalar(
+        resolve_runtime_type(context, resolved_type).compatibility_scalar(),
+        Some(
             StandardScalar::Boolean
                 | StandardScalar::Integer
                 | StandardScalar::BigInt
                 | StandardScalar::Float
                 | StandardScalar::CharacterLargeObject
                 | StandardScalar::BinaryLargeObject
-        ) | ResolvedRuntimeType::Reference(_)
+        )
+    ) || matches!(
+        resolve_runtime_type(context, resolved_type),
+        ResolvedRuntimeType::Reference(_)
     )
 }
 
@@ -1309,13 +1402,14 @@ fn validate_execution_complexity(plan: &ServerPlan) -> Result<(), PostgresKernel
 }
 
 fn validate_target_entries(
+    context: &CatalogueHashContext,
     projections: usize,
     columns: &[ResultColumn],
     ordering: usize,
 ) -> Result<(), PostgresKernelError> {
     let guards = columns
         .iter()
-        .filter(|column| is_variable_type(column.resolved_type()))
+        .filter(|column| is_variable_type(context, column.resolved_type()))
         .count();
     validate_target_entry_count(projections, guards, ordering)
 }
@@ -1393,8 +1487,7 @@ fn field_path_type(
             .ok_or_else(|| plan_invariant("field path field must exist on its active owner"))?;
         nullable |= field.nullable();
         if index + 1 == steps.len() {
-            if let ResolvedRuntimeType::Reference(target) =
-                ResolvedRuntimeType::from_resolved_type(field.resolved_type())
+            if let Some(target) = field.resolved_type().reference_target()
                 && catalogue.object_type_by_id(target).is_none()
             {
                 return Err(plan_invariant(
@@ -1403,9 +1496,7 @@ fn field_path_type(
             }
             return Ok((field.resolved_type(), nullable));
         }
-        let ResolvedRuntimeType::Reference(target) =
-            ResolvedRuntimeType::from_resolved_type(field.resolved_type())
-        else {
+        let Some(target) = field.resolved_type().reference_target() else {
             return Err(plan_invariant(
                 "each non-final field path hop must be an object reference",
             ));
@@ -1630,6 +1721,12 @@ struct PartialLoweredSelect<'a> {
     variable_payload_limit: usize,
 }
 
+#[derive(Clone, Copy)]
+struct RuntimeResultColumns<'a> {
+    context: &'a CatalogueHashContext,
+    columns: &'a [ResultColumn],
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DuplicatePolicy {
     Preserve,
@@ -1647,9 +1744,11 @@ impl DuplicatePolicy {
 
 fn lower_plan(
     catalogue: &orna_core::catalogue::CatalogueSnapshot,
+    context: &CatalogueHashContext,
     plan: &ServerPlan,
     columns: &[ResultColumn],
 ) -> Result<LoweredPlan, PostgresKernelError> {
+    let result_columns = RuntimeResultColumns { context, columns };
     lower_parameter_free_plan(
         catalogue,
         plan.scan.object_type,
@@ -1657,15 +1756,17 @@ fn lower_plan(
         plan.selection.as_ref(),
         &plan.ordering,
         DuplicatePolicy::Preserve,
-        columns,
+        result_columns,
     )
 }
 
 fn lower_distinct_plan(
     catalogue: &orna_core::catalogue::CatalogueSnapshot,
+    context: &CatalogueHashContext,
     plan: &DistinctServerPlan,
     columns: &[ResultColumn],
 ) -> Result<LoweredPlan, PostgresKernelError> {
+    let result_columns = RuntimeResultColumns { context, columns };
     lower_parameter_free_plan(
         catalogue,
         plan.scan().object_type,
@@ -1673,7 +1774,7 @@ fn lower_distinct_plan(
         plan.selection(),
         &[],
         DuplicatePolicy::Distinct,
-        columns,
+        result_columns,
     )
 }
 
@@ -1684,9 +1785,9 @@ fn lower_parameter_free_plan(
     selection: Option<&Expression>,
     ordering: &[Ordering],
     duplicate_policy: DuplicatePolicy,
-    columns: &[ResultColumn],
+    result_columns: RuntimeResultColumns<'_>,
 ) -> Result<LoweredPlan, PostgresKernelError> {
-    let mut lowered = lower_select_projections(catalogue, scan, projections, columns)?;
+    let mut lowered = lower_select_projections(catalogue, result_columns, scan, projections)?;
     let selection = selection
         .map(|expression| lowered.lowerer.expression(expression))
         .transpose()?;
@@ -1714,13 +1815,19 @@ fn lower_parameter_free_plan(
 
 fn lower_identity_selected_plan(
     catalogue: &orna_core::catalogue::CatalogueSnapshot,
+    context: &CatalogueHashContext,
     plan: &IdentitySelectedServerPlan,
     columns: &[ResultColumn],
     selector: ObjectId,
 ) -> Result<LoweredPlan, PostgresKernelError> {
     let scan = plan.scan();
-    let mut lowered =
-        lower_select_projections(catalogue, scan.object_type, plan.projections(), columns)?;
+    let result_columns = RuntimeResultColumns { context, columns };
+    let mut lowered = lower_select_projections(
+        catalogue,
+        result_columns,
+        scan.object_type,
+        plan.projections(),
+    )?;
     lowered
         .lowerer
         .binds
@@ -1732,10 +1839,12 @@ fn lower_identity_selected_plan(
 
 fn lower_select_projections<'a>(
     catalogue: &'a orna_core::catalogue::CatalogueSnapshot,
+    result_columns: RuntimeResultColumns<'_>,
     scan: TypeId,
     expressions: &[Expression],
-    columns: &[ResultColumn],
 ) -> Result<PartialLoweredSelect<'a>, PostgresKernelError> {
+    let context = result_columns.context;
+    let columns = result_columns.columns;
     let mut lowerer = Lowerer {
         catalogue,
         scan,
@@ -1744,13 +1853,13 @@ fn lower_select_projections<'a>(
         binds: Vec::new(),
         field_path_steps: 0,
     };
-    let variable_payload_limit = variable_payload_limit(columns)?;
+    let variable_payload_limit = variable_payload_limit(context, columns)?;
     let mut projections = Vec::with_capacity(expressions.len());
     let mut guard_projections = Vec::new();
     let mut guards = Vec::new();
     for (index, expression) in expressions.iter().enumerate() {
         let expression = lowerer.expression(expression)?;
-        if is_variable_type(columns[index].resolved_type()) {
+        if is_variable_type(context, columns[index].resolved_type()) {
             let alias = format!("g{}", guards.len());
             projections.push(format!(
                 "CASE WHEN octet_length({expression}) <= {variable_payload_limit} THEN {expression} ELSE NULL END AS c{index}"
@@ -1821,23 +1930,24 @@ const fn ordering_sql(direction: SortDirection) -> &'static str {
     }
 }
 
-fn is_variable_type(resolved_type: ResolvedType) -> bool {
+fn is_variable_type(context: &CatalogueHashContext, resolved_type: ResolvedType) -> bool {
     matches!(
-        ResolvedRuntimeType::from_resolved_type(resolved_type),
-        ResolvedRuntimeType::LegacyScalar(
-            StandardScalar::CharacterLargeObject | StandardScalar::BinaryLargeObject
-        )
+        resolve_runtime_type(context, resolved_type).compatibility_scalar(),
+        Some(StandardScalar::CharacterLargeObject | StandardScalar::BinaryLargeObject)
     )
 }
 
-fn variable_payload_limit(columns: &[ResultColumn]) -> Result<usize, PostgresKernelError> {
+fn variable_payload_limit(
+    context: &CatalogueHashContext,
+    columns: &[ResultColumn],
+) -> Result<usize, PostgresKernelError> {
     let names = initial_payload_len(columns)?;
     let fixed = columns
         .iter()
-        .filter(|column| !is_variable_type(column.resolved_type()))
+        .filter(|column| !is_variable_type(context, column.resolved_type()))
         .try_fold(0usize, |total, column| {
             total
-                .checked_add(maximum_fixed_payload_len(column.resolved_type()))
+                .checked_add(maximum_fixed_payload_len(context, column.resolved_type()))
                 .ok_or_else(|| {
                     server_error(ServerSelectError::PayloadLimit {
                         maximum: PAYLOAD_LIMIT,
@@ -1854,7 +1964,7 @@ fn variable_payload_limit(columns: &[ResultColumn]) -> Result<usize, PostgresKer
         })?;
     let variable_count = columns
         .iter()
-        .filter(|column| is_variable_type(column.resolved_type()))
+        .filter(|column| is_variable_type(context, column.resolved_type()))
         .count();
     if variable_count == 0 {
         return Ok(0);
@@ -1862,13 +1972,22 @@ fn variable_payload_limit(columns: &[ResultColumn]) -> Result<usize, PostgresKer
     Ok(available / variable_count)
 }
 
-fn maximum_fixed_payload_len(resolved_type: ResolvedType) -> usize {
-    match ResolvedRuntimeType::from_resolved_type(resolved_type) {
-        ResolvedRuntimeType::LegacyScalar(StandardScalar::Boolean) => 1,
-        ResolvedRuntimeType::LegacyScalar(StandardScalar::Integer) => 4,
-        ResolvedRuntimeType::LegacyScalar(StandardScalar::BigInt | StandardScalar::Float) => 8,
+fn maximum_fixed_payload_len(context: &CatalogueHashContext, resolved_type: ResolvedType) -> usize {
+    match resolve_runtime_type(context, resolved_type) {
+        runtime if runtime.compatibility_scalar() == Some(StandardScalar::Boolean) => 1,
+        runtime if runtime.compatibility_scalar() == Some(StandardScalar::Integer) => 4,
+        runtime
+            if matches!(
+                runtime.compatibility_scalar(),
+                Some(StandardScalar::BigInt | StandardScalar::Float)
+            ) =>
+        {
+            8
+        }
         ResolvedRuntimeType::Reference(_) => 16,
-        ResolvedRuntimeType::LegacyScalar(_) | ResolvedRuntimeType::Unsupported => 0,
+        ResolvedRuntimeType::LegacyScalar(_)
+        | ResolvedRuntimeType::VerifiedValue { .. }
+        | ResolvedRuntimeType::Unsupported => 0,
     }
 }
 
@@ -1940,9 +2059,7 @@ impl Lowerer<'_> {
             if index + 1 == steps.len() {
                 return Ok(format!("{alias}.{}", field_name(step.field)));
             }
-            let ResolvedRuntimeType::Reference(target) =
-                ResolvedRuntimeType::from_resolved_type(field.resolved_type())
-            else {
+            let Some(target) = field.resolved_type().reference_target() else {
                 return Err(plan_invariant(
                     "non-final lowered field path hop must be a reference",
                 ));
@@ -1979,6 +2096,7 @@ impl Lowerer<'_> {
 }
 
 fn validate_prepared_columns(
+    context: &CatalogueHashContext,
     statement: &Statement,
     expected: &[ResultColumn],
     guards: &[VariableGuard],
@@ -1990,7 +2108,7 @@ fn validate_prepared_columns(
     }
     for (index, (column, expected)) in statement.columns().iter().zip(expected).enumerate() {
         if column.name() != format!("c{index}")
-            || *column.type_() != expected_postgres_type(expected.resolved_type())?
+            || *column.type_() != expected_postgres_type(context, expected.resolved_type())?
         {
             return Err(server_error(ServerSelectError::PreparedResult {
                 rule: "prepared result column name and PostgreSQL type must match generated shape",
@@ -2007,8 +2125,11 @@ fn validate_prepared_columns(
     Ok(())
 }
 
-fn expected_postgres_type(resolved_type: ResolvedType) -> Result<Type, PostgresKernelError> {
-    postgres_type(resolved_type).ok_or_else(|| {
+fn expected_postgres_type(
+    context: &CatalogueHashContext,
+    resolved_type: ResolvedType,
+) -> Result<Type, PostgresKernelError> {
+    postgres_type(resolve_runtime_type(context, resolved_type)).ok_or_else(|| {
         server_error(ServerSelectError::PreparedResult {
             rule: "result type is outside the initial runtime subset",
         })
@@ -2030,14 +2151,19 @@ impl ResultCardinality {
     }
 }
 
+struct ResultReadShape<'a> {
+    context: &'a CatalogueHashContext,
+    columns: &'a [ResultColumn],
+    guards: &'a [VariableGuard],
+    variable_payload_limit: usize,
+    cardinality: ResultCardinality,
+}
+
 async fn stream_rows(
     transaction: &Transaction<'_>,
     statement: &Statement,
     binds: &[SelectBindValue],
-    columns: &[ResultColumn],
-    guards: &[VariableGuard],
-    variable_payload_limit: usize,
-    cardinality: ResultCardinality,
+    shape: ResultReadShape<'_>,
 ) -> Result<ResultRows, PostgresKernelError> {
     let parameters = binds
         .iter()
@@ -2050,19 +2176,19 @@ async fn stream_rows(
     futures_util::pin_mut!(stream);
     let mut rows = Vec::new();
     let mut cells = 0usize;
-    let mut payload = initial_payload_len(columns)?;
+    let mut payload = initial_payload_len(shape.columns)?;
     while let Some(row) = stream
         .try_next()
         .await
         .map_err(PostgresKernelError::Database)?
     {
-        cardinality.validate(rows.len().saturating_add(1))?;
+        shape.cardinality.validate(rows.len().saturating_add(1))?;
         if rows.len() == ROW_LIMIT {
             return Err(server_error(ServerSelectError::RowLimit {
                 maximum: ROW_LIMIT,
             }));
         }
-        cells = cells.checked_add(columns.len()).ok_or_else(|| {
+        cells = cells.checked_add(shape.columns.len()).ok_or_else(|| {
             server_error(ServerSelectError::CellLimit {
                 maximum: CELL_LIMIT,
             })
@@ -2073,13 +2199,13 @@ async fn stream_rows(
             }));
         }
         let row_index = rows.len();
-        for (guard_index, guard) in guards.iter().enumerate() {
+        for (guard_index, guard) in shape.guards.iter().enumerate() {
             let accepted = row
-                .try_get::<usize, bool>(columns.len() + guard_index)
+                .try_get::<usize, bool>(shape.columns.len() + guard_index)
                 .map_err(|source| {
                     server_error(ServerSelectError::RowDecode {
                         row: row_index,
-                        column: columns.len() + guard_index,
+                        column: shape.columns.len() + guard_index,
                         source,
                     })
                 })?;
@@ -2087,19 +2213,19 @@ async fn stream_rows(
                 return Err(server_error(ServerSelectError::VariablePayload {
                     row: row_index,
                     column: guard.column,
-                    maximum: variable_payload_limit,
+                    maximum: shape.variable_payload_limit,
                 }));
             }
         }
-        let mut values = Vec::with_capacity(columns.len());
-        for (column_index, column) in columns.iter().enumerate() {
-            let value = decode_value(&row, row_index, column_index, column)?;
+        let mut values = Vec::with_capacity(shape.columns.len());
+        for (column_index, column) in shape.columns.iter().enumerate() {
+            let value = decode_value(shape.context, &row, row_index, column_index, column)?;
             payload = add_payload(payload, logical_payload_len(&value)?)?;
             values.push(value);
         }
         rows.push(ResultRow::new(values));
     }
-    ResultRows::new(columns.to_vec(), rows)
+    ResultRows::new(shape.columns.to_vec(), rows)
         .map_err(ServerSelectError::ResultRows)
         .map_err(server_error)
 }
@@ -2134,6 +2260,7 @@ fn add_payload(payload: usize, additional: usize) -> Result<usize, PostgresKerne
 }
 
 fn decode_value(
+    context: &CatalogueHashContext,
     row: &Row,
     row_index: usize,
     column_index: usize,
@@ -2154,26 +2281,28 @@ fn decode_value(
         };
     }
     let resolved_type = column.resolved_type();
-    let value = match ResolvedRuntimeType::from_resolved_type(resolved_type) {
-        ResolvedRuntimeType::LegacyScalar(StandardScalar::Boolean) => {
+    let value = match resolve_runtime_type(context, resolved_type) {
+        runtime if runtime.compatibility_scalar() == Some(StandardScalar::Boolean) => {
             decode!(bool, |value| Ok(RuntimeValue::Boolean(value)))
         }
-        ResolvedRuntimeType::LegacyScalar(StandardScalar::Integer) => {
+        runtime if runtime.compatibility_scalar() == Some(StandardScalar::Integer) => {
             decode!(i32, |value| Ok(RuntimeValue::Integer(value)))
         }
-        ResolvedRuntimeType::LegacyScalar(StandardScalar::BigInt) => {
+        runtime if runtime.compatibility_scalar() == Some(StandardScalar::BigInt) => {
             decode!(i64, |value| Ok(RuntimeValue::BigInt(value)))
         }
-        ResolvedRuntimeType::LegacyScalar(StandardScalar::Float) => decode!(f64, |value| {
-            RuntimeFloat::new(value)
-                .map(RuntimeValue::Float)
-                .map_err(ServerSelectError::ResultRows)
-                .map_err(server_error)
-        }),
-        ResolvedRuntimeType::LegacyScalar(StandardScalar::CharacterLargeObject) => {
+        runtime if runtime.compatibility_scalar() == Some(StandardScalar::Float) => {
+            decode!(f64, |value| {
+                RuntimeFloat::new(value)
+                    .map(RuntimeValue::Float)
+                    .map_err(ServerSelectError::ResultRows)
+                    .map_err(server_error)
+            })
+        }
+        runtime if runtime.compatibility_scalar() == Some(StandardScalar::CharacterLargeObject) => {
             decode!(String, |value| Ok(RuntimeValue::Text(value)))
         }
-        ResolvedRuntimeType::LegacyScalar(StandardScalar::BinaryLargeObject) => {
+        runtime if runtime.compatibility_scalar() == Some(StandardScalar::BinaryLargeObject) => {
             decode!(Vec<u8>, |value| Ok(RuntimeValue::Bytes(value)))
         }
         ResolvedRuntimeType::Reference(target) => decode!(Vec<u8>, |value| {
@@ -2186,7 +2315,9 @@ fn decode_value(
             })?;
             Ok(RuntimeValue::Reference { target, object })
         }),
-        ResolvedRuntimeType::LegacyScalar(_) | ResolvedRuntimeType::Unsupported => {
+        ResolvedRuntimeType::LegacyScalar(_)
+        | ResolvedRuntimeType::VerifiedValue { .. }
+        | ResolvedRuntimeType::Unsupported => {
             return Err(server_error(ServerSelectError::PreparedResult {
                 rule: "result value type is outside the initial runtime subset",
             }));
@@ -2278,6 +2409,7 @@ mod tests {
             CatalogueSnapshot, FieldDefinition, FunctionReturnColumnDefinition,
             ObjectTypeDefinition, ParameterDefinition, QualifiedSemanticName, SchemaDefinition,
         },
+        revision::CatalogueHashContext,
     };
 
     use super::*;
@@ -2355,6 +2487,66 @@ mod tests {
             value_type: ValueType {
                 resolved_type: ResolvedType::scalar(StandardScalar::CharacterLargeObject),
                 nullable: true,
+            },
+        }
+    }
+
+    fn retained_value_context(contract: &str) -> (CatalogueHashContext, TypeId) {
+        let standard = orna_standard::verify_standard_library_snapshot(
+            orna_standard::retained_standard_library_snapshot()
+                .expect("retained standard-library snapshot"),
+        )
+        .expect("verified standard-library snapshot");
+        let value_type = standard
+            .catalogue()
+            .value_types()
+            .iter()
+            .find(|definition| definition.representation_contract() == contract)
+            .expect("retained value type")
+            .id();
+        (CatalogueHashContext::version_two(standard), value_type)
+    }
+
+    fn catalogue_with_value_field(value_type: TypeId) -> (CatalogueSnapshot, TypeId, FieldId) {
+        let source = TypeId::from_bytes([0x70; 16]);
+        let field = FieldId::from_bytes([0x71; 16]);
+        let catalogue = CatalogueSnapshot::new(
+            CatalogueRevisionId::from_bytes([0x72; 16]),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes([0x73; 16]),
+                name(&["value_test"]),
+            )],
+            vec![ObjectTypeDefinition::new(
+                source,
+                name(&["value_test", "source"]),
+                vec![FieldDefinition::new(
+                    field,
+                    "value",
+                    0,
+                    ResolvedType::value(value_type),
+                    false,
+                    false,
+                    None,
+                    None,
+                )],
+            )],
+        )
+        .expect("value catalogue");
+        (catalogue, source, field)
+    }
+
+    fn field_projection(source: TypeId, field: FieldId, scalar: StandardScalar) -> Expression {
+        Expression {
+            kind: ExpressionKind::FieldPath {
+                input: 0,
+                steps: vec![FieldStep {
+                    owner: source,
+                    field,
+                }],
+            },
+            value_type: ValueType {
+                resolved_type: ResolvedType::scalar(scalar),
+                nullable: false,
             },
         }
     }
@@ -2465,6 +2657,7 @@ mod tests {
     #[test]
     fn lowerer_uses_identity_names_cached_nullable_joins_and_boolean_binds() {
         let (catalogue, source, reference, value) = catalogue();
+        let context = CatalogueHashContext::version_one();
         let target = TypeId::from_bytes([0x20; 16]);
         let path = nullable_text_path(source, reference, target, value);
         let plan = ServerPlan {
@@ -2501,7 +2694,7 @@ mod tests {
             )
             .unwrap(),
         ];
-        let lowered = lower_plan(&catalogue, &plan, &columns).unwrap();
+        let lowered = lower_plan(&catalogue, &context, &plan, &columns).unwrap();
 
         assert_eq!(lowered.binds, vec![SelectBindValue::Boolean(true)]);
         assert_eq!(lowered.sql.matches("LEFT JOIN").count(), 1);
@@ -2531,6 +2724,7 @@ mod tests {
     #[test]
     fn identity_selected_lowering_keeps_projection_bind_order_and_appends_selector() {
         let (catalogue, source, _, _) = catalogue();
+        let context = CatalogueHashContext::version_one();
         let function = FunctionId::from_bytes([0x31; 16]);
         let parameter = ParameterId::from_bytes([0x33; 16]);
         let plan = IdentitySelectedServerPlan::new(
@@ -2555,7 +2749,8 @@ mod tests {
         )
         .unwrap()];
         let object = ObjectId::from_bytes([0x41; 16]);
-        let lowered = lower_identity_selected_plan(&catalogue, &plan, &columns, object).unwrap();
+        let lowered =
+            lower_identity_selected_plan(&catalogue, &context, &plan, &columns, object).unwrap();
 
         assert_eq!(
             lowered.binds,
@@ -2574,6 +2769,7 @@ mod tests {
     #[test]
     fn distinct_lowering_changes_only_the_select_policy_and_adds_no_bind() {
         let (catalogue, source, _, _) = catalogue();
+        let context = CatalogueHashContext::version_one();
         let projection = Expression {
             kind: ExpressionKind::BooleanLiteral { value: true },
             value_type: ValueType {
@@ -2610,8 +2806,8 @@ mod tests {
         )
         .unwrap()];
 
-        let distinct = lower_distinct_plan(&catalogue, &plan, &columns).unwrap();
-        let preserving = lower_plan(&catalogue, &version_one, &columns).unwrap();
+        let distinct = lower_distinct_plan(&catalogue, &context, &plan, &columns).unwrap();
+        let preserving = lower_plan(&catalogue, &context, &version_one, &columns).unwrap();
         assert_eq!(
             distinct.sql,
             format!(
@@ -3176,6 +3372,7 @@ mod tests {
     #[test]
     fn identity_selected_plan_requires_the_exact_selector_owner_parameter_and_target() {
         let (catalogue, source, _, _) = catalogue();
+        let context = CatalogueHashContext::version_one();
         let other_active = TypeId::from_bytes([0x20; 16]);
         let function_id = FunctionId::from_bytes([0x31; 16]);
         let parameter_id = ParameterId::from_bytes([0x33; 16]);
@@ -3214,8 +3411,13 @@ mod tests {
         };
         let valid = function_for_target(source);
         assert!(
-            validate_identity_selected_plan(&catalogue, &valid, &plan(function_id, parameter_id))
-                .is_ok()
+            validate_identity_selected_plan(
+                &catalogue,
+                &context,
+                &valid,
+                &plan(function_id, parameter_id),
+            )
+            .is_ok()
         );
 
         for invalid in [
@@ -3223,13 +3425,14 @@ mod tests {
             plan(function_id, ParameterId::from_bytes([0x97; 16])),
         ] {
             assert_plan_rule(
-                validate_identity_selected_plan(&catalogue, &valid, &invalid),
+                validate_identity_selected_plan(&catalogue, &context, &valid, &invalid),
                 "identity selector owner and parameter must equal the active function signature",
             );
         }
         assert_plan_rule(
             validate_identity_selected_plan(
                 &catalogue,
+                &context,
                 &function_for_target(other_active),
                 &plan(function_id, parameter_id),
             ),
@@ -3238,8 +3441,98 @@ mod tests {
     }
 
     #[test]
+    fn version_two_value_rows_accept_compatibility_plan_scalars() {
+        let (context, integer) = retained_value_context("orna.kernel.value.integer@1");
+        let (catalogue, source, field) = catalogue_with_value_field(integer);
+        let function_id = FunctionId::from_bytes([0x31; 16]);
+        let parameter_id = ParameterId::from_bytes([0x75; 16]);
+        let function = function(
+            FunctionDomain::Server,
+            vec![ParameterDefinition::new(
+                parameter_id,
+                "selected",
+                0,
+                ResolvedType::reference(source),
+                None,
+            )],
+            FunctionReturn::Rows(vec![FunctionReturnColumnDefinition::new(
+                "value",
+                0,
+                ResolvedType::value(integer),
+            )]),
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+        );
+        let plan = IdentitySelectedServerPlan::new(
+            Scan {
+                input: 0,
+                object_type: source,
+            },
+            [field_projection(source, field, StandardScalar::Integer)],
+            IdentitySelector::new(function_id, parameter_id),
+        )
+        .expect("identity selected plan");
+
+        assert!(validate_identity_selected_plan(&catalogue, &context, &function, &plan).is_ok());
+        let columns = result_columns_for_projections(&function, plan.projections()).unwrap();
+        assert_eq!(
+            columns[0].resolved_type(),
+            ResolvedType::scalar(StandardScalar::Integer)
+        );
+        let lowered = lower_identity_selected_plan(
+            &catalogue,
+            &context,
+            &plan,
+            &columns,
+            ObjectId::from_bytes([0x76; 16]),
+        )
+        .unwrap();
+        assert_eq!(lowered.bind_types, vec![Type::BYTEA]);
+    }
+
+    #[test]
+    fn version_two_value_contracts_keep_the_existing_runtime_allowlist_error() {
+        let (context, decimal) = retained_value_context("orna.kernel.value.decimal@1");
+        let (catalogue, source, field) = catalogue_with_value_field(decimal);
+        let function_id = FunctionId::from_bytes([0x31; 16]);
+        let parameter_id = ParameterId::from_bytes([0x78; 16]);
+        let function = function(
+            FunctionDomain::Server,
+            vec![ParameterDefinition::new(
+                parameter_id,
+                "selected",
+                0,
+                ResolvedType::reference(source),
+                None,
+            )],
+            FunctionReturn::Rows(vec![FunctionReturnColumnDefinition::new(
+                "value",
+                0,
+                ResolvedType::value(decimal),
+            )]),
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+        );
+        let plan = IdentitySelectedServerPlan::new(
+            Scan {
+                input: 0,
+                object_type: source,
+            },
+            [field_projection(source, field, StandardScalar::Decimal)],
+            IdentitySelector::new(function_id, parameter_id),
+        )
+        .expect("identity selected plan");
+
+        assert_plan_rule(
+            validate_identity_selected_plan(&catalogue, &context, &function, &plan),
+            "projection type is outside the initial runtime result subset",
+        );
+    }
+
+    #[test]
     fn identity_selected_equality_rejection_names_the_parameterised_query() {
         let (catalogue, source, reference, value) = catalogue();
+        let context = CatalogueHashContext::version_one();
         let target = TypeId::from_bytes([0x20; 16]);
         let function_id = FunctionId::from_bytes([0x31; 16]);
         let parameter_id = ParameterId::from_bytes([0x33; 16]);
@@ -3277,7 +3570,7 @@ mod tests {
         );
 
         assert_plan_rule(
-            validate_identity_selected_plan(&catalogue, &function, &plan),
+            validate_identity_selected_plan(&catalogue, &context, &function, &plan),
             PARAMETERISED_EQUALITY_RULE,
         );
     }
@@ -3285,6 +3578,7 @@ mod tests {
     #[test]
     fn identity_selector_arguments_are_exact_complete_and_target_typed() {
         let (catalogue, source, _, _) = catalogue();
+        let context = CatalogueHashContext::version_one();
         let function_id = FunctionId::from_bytes([0x31; 16]);
         let parameter_id = ParameterId::from_bytes([0x33; 16]);
         let function = function(
@@ -3329,6 +3623,7 @@ mod tests {
         assert_eq!(
             validate_identity_selected_arguments(
                 &catalogue,
+                &context,
                 &function,
                 &plan,
                 std::slice::from_ref(&argument),
@@ -3337,13 +3632,14 @@ mod tests {
             object
         );
         assert_argument_rule(
-            validate_identity_selected_arguments(&catalogue, &function, &plan, &[]),
+            validate_identity_selected_arguments(&catalogue, &context, &function, &plan, &[]),
             Some(parameter_id),
             "a required argument is missing",
         );
         assert_argument_rule(
             validate_identity_selected_arguments(
                 &catalogue,
+                &context,
                 &function,
                 &plan,
                 &[argument.clone(), argument],
@@ -3361,13 +3657,25 @@ mod tests {
         )
         .unwrap();
         assert_argument_rule(
-            validate_identity_selected_arguments(&catalogue, &function, &plan, &[unknown]),
+            validate_identity_selected_arguments(
+                &catalogue,
+                &context,
+                &function,
+                &plan,
+                &[unknown],
+            ),
             Some(unknown_parameter),
             "an argument was supplied for a parameter that this function does not declare",
         );
         let wrong_scalar = FunctionArgument::new(parameter_id, RuntimeValue::Integer(7)).unwrap();
         assert_argument_rule(
-            validate_identity_selected_arguments(&catalogue, &function, &plan, &[wrong_scalar]),
+            validate_identity_selected_arguments(
+                &catalogue,
+                &context,
+                &function,
+                &plan,
+                &[wrong_scalar],
+            ),
             Some(parameter_id),
             "the argument type does not match the declared parameter type",
         );
@@ -3382,6 +3690,7 @@ mod tests {
         assert_argument_rule(
             validate_identity_selected_arguments(
                 &catalogue,
+                &context,
                 &function,
                 &plan,
                 &[wrong_active_target],
@@ -3400,6 +3709,7 @@ mod tests {
         assert_argument_rule(
             validate_identity_selected_arguments(
                 &catalogue,
+                &context,
                 &function,
                 &plan,
                 &[wrong_inactive_target],
@@ -3653,6 +3963,7 @@ mod tests {
 
     #[test]
     fn operation_matrix_is_closed_for_equality_and_ordering() {
+        let context = CatalogueHashContext::version_one();
         for resolved_type in [
             ResolvedType::scalar(StandardScalar::Boolean),
             ResolvedType::scalar(StandardScalar::Integer),
@@ -3660,7 +3971,7 @@ mod tests {
             ResolvedType::scalar(StandardScalar::BinaryLargeObject),
             ResolvedType::reference(TypeId::from_bytes([0x55; 16])),
         ] {
-            assert!(supports_equality_type(resolved_type));
+            assert!(supports_equality_type(&context, resolved_type));
         }
         for scalar in [
             StandardScalar::Float,
@@ -3673,27 +3984,36 @@ mod tests {
             StandardScalar::Duration,
             StandardScalar::Void,
         ] {
-            assert!(!supports_equality_type(ResolvedType::scalar(scalar)));
+            assert!(!supports_equality_type(
+                &context,
+                ResolvedType::scalar(scalar)
+            ));
         }
-        assert!(!supports_equality_type(ResolvedType::named(
-            TypeId::from_bytes([0x56; 16])
-        )));
-        assert!(supports_ordering_type(ResolvedType::scalar(
-            StandardScalar::Integer
-        )));
-        assert!(supports_ordering_type(ResolvedType::scalar(
-            StandardScalar::BigInt
-        )));
-        assert!(!supports_ordering_type(ResolvedType::scalar(
-            StandardScalar::Boolean
-        )));
-        assert!(!supports_ordering_type(ResolvedType::reference(
-            TypeId::from_bytes([0x57; 16])
-        )));
+        assert!(!supports_equality_type(
+            &context,
+            ResolvedType::named(TypeId::from_bytes([0x56; 16]))
+        ));
+        assert!(supports_ordering_type(
+            &context,
+            ResolvedType::scalar(StandardScalar::Integer)
+        ));
+        assert!(supports_ordering_type(
+            &context,
+            ResolvedType::scalar(StandardScalar::BigInt)
+        ));
+        assert!(!supports_ordering_type(
+            &context,
+            ResolvedType::scalar(StandardScalar::Boolean)
+        ));
+        assert!(!supports_ordering_type(
+            &context,
+            ResolvedType::reference(TypeId::from_bytes([0x57; 16]))
+        ));
     }
 
     #[test]
     fn distinct_projection_domain_is_exhaustive_and_independent() {
+        let context = CatalogueHashContext::version_one();
         let mut accepted_scalars = 0usize;
         for scalar in StandardScalar::ALL {
             let expected = matches!(
@@ -3704,24 +4024,27 @@ mod tests {
                     | StandardScalar::BinaryLargeObject
             );
             assert_eq!(
-                supports_distinct_projection_type(ResolvedType::scalar(scalar)),
+                supports_distinct_projection_type(&context, ResolvedType::scalar(scalar)),
                 expected,
                 "unexpected SELECT DISTINCT support for {scalar:?}",
             );
             accepted_scalars += usize::from(expected);
         }
         assert_eq!(accepted_scalars, 4);
-        assert!(supports_distinct_projection_type(ResolvedType::reference(
-            TypeId::from_bytes([0x55; 16])
-        )));
-        assert!(!supports_distinct_projection_type(ResolvedType::named(
-            TypeId::from_bytes([0x56; 16])
-        )));
+        assert!(supports_distinct_projection_type(
+            &context,
+            ResolvedType::reference(TypeId::from_bytes([0x55; 16]))
+        ));
+        assert!(!supports_distinct_projection_type(
+            &context,
+            ResolvedType::named(TypeId::from_bytes([0x56; 16]))
+        ));
     }
 
     #[test]
     fn distinct_plan_revalidates_catalogue_shape_and_uses_its_own_equality_copy() {
         let (catalogue, source, reference, value) = catalogue();
+        let context = CatalogueHashContext::version_one();
         let target = TypeId::from_bytes([0x20; 16]);
         let reference_projection = |scan| Expression {
             kind: ExpressionKind::ObjectReference { input: 0 },
@@ -3751,7 +4074,7 @@ mod tests {
             FunctionSecurity::Invoker,
             Some(FunctionTransaction::ReadOnly),
         );
-        assert!(validate_distinct_plan(&catalogue, &reference_function, &plan).is_ok());
+        assert!(validate_distinct_plan(&catalogue, &context, &reference_function, &plan).is_ok());
 
         let inactive = TypeId::from_bytes([0x99; 16]);
         let inactive_plan = DistinctServerPlan::new(
@@ -3764,12 +4087,13 @@ mod tests {
         )
         .unwrap();
         assert_plan_rule(
-            validate_distinct_plan(&catalogue, &reference_function, &inactive_plan),
+            validate_distinct_plan(&catalogue, &context, &reference_function, &inactive_plan),
             "scan must use active input zero and an active object type",
         );
         assert_plan_rule(
             validate_distinct_plan(
                 &catalogue,
+                &context,
                 &function(
                     FunctionDomain::Server,
                     Vec::new(),
@@ -3806,6 +4130,7 @@ mod tests {
         assert_plan_rule(
             validate_distinct_plan(
                 &catalogue,
+                &context,
                 &function(
                     FunctionDomain::Server,
                     Vec::new(),
@@ -3840,6 +4165,7 @@ mod tests {
         assert_plan_rule(
             validate_distinct_plan(
                 &catalogue,
+                &context,
                 &function(
                     FunctionDomain::Server,
                     Vec::new(),
@@ -3855,6 +4181,7 @@ mod tests {
 
     #[test]
     fn variable_payload_budget_reserves_names_and_fixed_values() {
+        let context = CatalogueHashContext::version_one();
         let columns = [
             ResultColumn::new(
                 "integer",
@@ -3876,7 +4203,7 @@ mod tests {
             .unwrap(),
         ];
         assert_eq!(
-            variable_payload_limit(&columns).unwrap(),
+            variable_payload_limit(&context, &columns).unwrap(),
             (PAYLOAD_LIMIT - "integerleftright".len() - 4) / 2
         );
     }
