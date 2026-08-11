@@ -26,7 +26,7 @@ diff -U0 -Nr a/src/backend/main/main.c b/src/backend/main/main.c
 diff -U0 -Nr a/src/backend/main/orna_embedded.c b/src/backend/main/orna_embedded.c
 --- a/src/backend/main/orna_embedded.c
 +++ b/src/backend/main/orna_embedded.c
-@@ -0,0 +1,137 @@
+@@ -0,0 +1,143 @@
 +/*-------------------------------------------------------------------------
 + *
 + * orna_embedded.c
@@ -48,6 +48,10 @@ diff -U0 -Nr a/src/backend/main/orna_embedded.c b/src/backend/main/orna_embedded
 +#include <sys/shm.h>
 +#include <sys/syscall.h>
 +#include <sys/mman.h>
++
++#ifndef __X32_SYSCALL_BIT
++#error "the embedded PostgreSQL seccomp filter requires x86-64 syscall definitions"
++#endif
 +#endif
 +
 +#include "miscadmin.h"
@@ -113,6 +117,8 @@ diff -U0 -Nr a/src/backend/main/orna_embedded.c b/src/backend/main/orna_embedded
 +		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS),
 +		BPF_STMT(BPF_LD | BPF_W | BPF_ABS,
 +				 offsetof(struct seccomp_data, nr)),
++		BPF_JUMP(BPF_JMP | BPF_JSET | BPF_K, __X32_SYSCALL_BIT, 0, 1),
++		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
 +		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_execve, 0, 1),
 +		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
 +		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_execveat, 0, 1),
