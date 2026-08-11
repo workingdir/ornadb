@@ -1,6 +1,11 @@
 # ADR 0017: Orna Ships and Owns Its PostgreSQL Runtime
 
-**Status:** Accepted
+**Status:** Accepted; program-distribution model superseded by work ADR 0019
+
+Work ADR 0019 replaces this record's separate PostgreSQL executable tree,
+runtime-signing, publication, verification, and package-ingestion model. This
+record's other host, instance, service, command, update, and package contracts
+remain accepted as specified by work ADR 0019.
 
 ## Decision
 
