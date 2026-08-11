@@ -14,9 +14,9 @@
 
 ## Frontpage
 
-- [ ] Build the responsive frontpage with real Orna source and invocation examples.
-- [ ] Show product model, features, use cases, architecture, dogfooding, and project status.
-- [ ] Add keyboard focus, reduced-motion handling, metadata, and a skip link.
+- [x] Build the responsive frontpage with real Orna source and invocation examples.
+- [x] Show product model, features, use cases, architecture, dogfooding, and project status.
+- [x] Add keyboard focus, reduced-motion handling, metadata, and a skip link.
 
 ## Documentation
 

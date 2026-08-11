@@ -78,6 +78,22 @@
         text-underline-offset: 0.2em;
     }
 
+    a,
+    button {
+        -webkit-tap-highlight-color: oklch(0.87 0.145 98 / 0.3);
+        touch-action: manipulation;
+    }
+
+    :where(h1, h2, h3)[id],
+    section[id] {
+        scroll-margin-top: 2rem;
+    }
+
+    code {
+        font-family: var(--font-mono);
+        font-size: 0.88em;
+    }
+
     :focus-visible {
         outline: 0.2rem solid var(--colour-accent);
         outline-offset: 0.2rem;
