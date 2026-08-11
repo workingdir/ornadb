@@ -45,6 +45,10 @@ const EXPECTED_KERNEL_TABLES: &[&str] = &[
     "source_bundles",
     "source_revisions",
     "source_units",
+    "standard_catalogue_schemas",
+    "standard_catalogue_type_bindings",
+    "standard_catalogue_value_types",
+    "standard_library_revisions",
 ];
 
 const MIGRATIONS: &[(i64, &str, &str)] = &[
@@ -77,6 +81,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         6,
         "definition reference write evidence",
         include_str!("../migrations/0006_write_reference_evidence.sql"),
+    ),
+    (
+        7,
+        "standard catalogue type storage",
+        include_str!("../migrations/0007_catalogue_types.sql"),
     ),
 ];
 const MIGRATION_DATA_STEP_SEPARATOR: &[u8] = b"\0orna.kernel.migration-step\0";
@@ -141,6 +150,7 @@ struct DefinitionReferenceSnapshot {
 #[derive(Debug, Eq, PartialEq)]
 struct UpgradeSnapshot {
     active_pair: (Vec<u8>, Vec<u8>),
+    source_unit_count: i64,
     migrations: Vec<(i64, String, Vec<u8>)>,
     references: Vec<DefinitionReferenceSnapshot>,
     catalogue_hashes: Vec<(Vec<u8>, Vec<u8>)>,
@@ -185,6 +195,14 @@ fn write_reference_migration_checksum_binds_exact_sql_bytes() {
     assert_eq!(
         hex_bytes(expected_migration_checksum(6, MIGRATIONS[5].2)),
         "e831811c0f42d6f4b3ab2601cf480fabaaed03b5547e2615400b9eec4b6b53bf"
+    );
+}
+
+#[test]
+fn standard_catalogue_migration_checksum_binds_exact_sql_bytes() {
+    assert_eq!(
+        hex_bytes(expected_migration_checksum(7, MIGRATIONS[6].2)),
+        "da58e39fb08edf1c214f6c041c792adb1446a6acb2939560d9091759a218c90f"
     );
 }
 
@@ -285,8 +303,8 @@ async fn bootstrap_upgrades_v5_write_reference_evidence_without_mutating_semanti
 
         let after = snapshot_upgrade_state(&database).await?;
         require(
-            after.migrations.len() == 6 && after.migrations[..5] == before.migrations[..],
-            format!("v6 changed prior migration records: {:?}", after.migrations),
+            after.migrations.len() == 7 && after.migrations[..5] == before.migrations[..],
+            format!("v6/v7 changed prior migration records: {:?}", after.migrations),
         )?;
         require(
             after.migrations[5]
@@ -296,6 +314,15 @@ async fn bootstrap_upgrades_v5_write_reference_evidence_without_mutating_semanti
                     expected_migration_checksum(6, MIGRATIONS[5].2),
                 ),
             format!("v6 migration record is not exact: {:?}", after.migrations[5]),
+        )?;
+        require(
+            after.migrations[6]
+                == (
+                    7,
+                    "standard catalogue type storage".to_owned(),
+                    expected_migration_checksum(7, MIGRATIONS[6].2),
+                ),
+            format!("v7 migration record is not exact: {:?}", after.migrations[6]),
         )?;
         require(
             after.active_pair == before.active_pair,
@@ -356,6 +383,168 @@ async fn bootstrap_upgrades_v5_write_reference_evidence_without_mutating_semanti
             (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
             (Err(verification_error), Err(shutdown_error)) => Err(failure(format!(
                 "write-reference compatibility verification failed: {verification_error}; verification driver shutdown failed: {shutdown_error}"
+            ))),
+        }
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn bootstrap_upgrades_registered_v6_without_standard_rows() -> TestResult<()> {
+    with_test_database(|database| async move {
+        seed_registered_v6_catalogue(&database).await?;
+        let expected_revision = registered_v4_semantic_fixture()?;
+        let before = snapshot_upgrade_state(&database).await?;
+        require(
+            before.migrations.len() == 6
+                && before.migrations.last().map(|migration| migration.0) == Some(6),
+            format!(
+                "manual v6 setup produced unexpected migrations: {:?}",
+                before.migrations
+            ),
+        )?;
+
+        let kernel = PostgresKernel::from_str(&database.connection_string())?;
+        kernel.bootstrap().await?;
+
+        let after = snapshot_upgrade_state(&database).await?;
+        require(
+            after.migrations.len() == 7
+                && after.migrations[..6] == before.migrations[..]
+                && after.migrations[6]
+                    == (
+                        7,
+                        "standard catalogue type storage".to_owned(),
+                        expected_migration_checksum(7, MIGRATIONS[6].2),
+                    ),
+            format!(
+                "v6 upgrade produced unexpected migrations: {:?}",
+                after.migrations
+            ),
+        )?;
+        require(
+            after.active_pair == before.active_pair
+                && after.source_unit_count == before.source_unit_count
+                && after.references == before.references
+                && after.catalogue_hashes == before.catalogue_hashes
+                && after.function_hashes == before.function_hashes,
+            "migration 0007 changed the active pair, references, or semantic hashes",
+        )?;
+        let recovered = kernel.recover().await?;
+        let catalogue_matches = recovered.catalogue().revision()
+            == expected_revision.catalogue().revision()
+            && recovered.catalogue().schemas() == expected_revision.catalogue().schemas()
+            && recovered.catalogue().object_types() == expected_revision.catalogue().object_types()
+            && recovered.catalogue().functions() == expected_revision.catalogue().functions();
+        require(
+            recovered.pair() == expected_revision.pair()
+                && recovered.source() == expected_revision.source()
+                && recovered.catalogue_hash() == expected_revision.catalogue_hash()
+                && catalogue_matches
+                && recovered.expressions() == expected_revision.expressions()
+                && recovered.function_revisions() == expected_revision.function_revisions()
+                && same_members(recovered.origins(), expected_revision.origins())
+                && recovered.references() == expected_revision.references(),
+            "migration 0007 changed recoverable application revision facts",
+        )?;
+        let session = database.open().await?;
+        let inspection_result = inspect_standard_catalogue_schema(session.client()).await;
+        let shutdown_result = session.shutdown().await;
+        match (inspection_result, shutdown_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+            (Err(inspection_error), Err(shutdown_error)) => Err(failure(format!(
+                "v6 standard schema inspection failed: {inspection_error}; shutdown failed: {shutdown_error}"
+            ))),
+        }
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn standard_catalogue_zero_catalogue_id_is_schema_valid_without_activation() -> TestResult<()>
+{
+    with_test_database(|database| async move {
+        let kernel = PostgresKernel::from_str(&database.connection_string())?;
+        kernel.bootstrap().await?;
+        let session = database.open().await?;
+        let result = async {
+            let source_revision_id = session
+                .client()
+                .query_one(
+                    "SELECT source_revision_id
+                     FROM _orna_kernel.active_revision
+                     WHERE singleton = true",
+                    &[],
+                )
+                .await?
+                .get::<_, Vec<u8>>(0);
+            let standard_library_revision_id = vec![0x71_u8; 16];
+            let zero_catalogue_revision_id = vec![0_u8; 16];
+            session
+                .client()
+                .execute(
+                    "INSERT INTO _orna_kernel.standard_library_revisions
+                        (id, source_revision_id, catalogue_revision_id,
+                         language_version, content_hash)
+                     VALUES ($1, $2, $3, 'standard-v1', $4)",
+                    &[
+                        &standard_library_revision_id,
+                        &source_revision_id,
+                        &zero_catalogue_revision_id,
+                        &vec![0x72_u8; 32],
+                    ],
+                )
+                .await?;
+            let row = session
+                .client()
+                .query_one(
+                    "SELECT catalogue_revision_id, digest_version, hash_algorithm
+                     FROM _orna_kernel.standard_library_revisions
+                     WHERE id = $1",
+                    &[&standard_library_revision_id],
+                )
+                .await?;
+            let catalogue_revision_id: Vec<u8> = row.get(0);
+            let digest_version: i16 = row.get(1);
+            let hash_algorithm: String = row.get(2);
+            require(
+                catalogue_revision_id == zero_catalogue_revision_id
+                    && digest_version == 1
+                    && hash_algorithm == "sha256",
+                "the all-zero standard catalogue ID did not remain schema-valid",
+            )?;
+            let active_pin: Option<Vec<u8>> = session
+                .client()
+                .query_one(
+                    "SELECT standard_library_revision_id
+                     FROM _orna_kernel.catalogue_revisions",
+                    &[],
+                )
+                .await?
+                .get(0);
+            require(
+                active_pin.is_none(),
+                "the raw sentinel fixture changed the application catalogue pin",
+            )?;
+            session
+                .client()
+                .execute(
+                    "DELETE FROM _orna_kernel.standard_library_revisions WHERE id = $1",
+                    &[&standard_library_revision_id],
+                )
+                .await?;
+            Ok(())
+        }
+        .await;
+        let shutdown_result = session.shutdown().await;
+        match (result, shutdown_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+            (Err(insert_error), Err(shutdown_error)) => Err(failure(format!(
+                "all-zero standard catalogue fixture failed: {insert_error}; shutdown failed: {shutdown_error}"
             ))),
         }
     })
@@ -511,7 +700,7 @@ async fn bootstrap_rejects_tampered_gapped_and_newer_migration_history() -> Test
         Sha256::digest(MIGRATIONS[1].2.as_bytes()).to_vec(),
     )
     .await?;
-    reject_migration_history(7, "future migration", vec![0; 32]).await
+    reject_migration_history(8, "future migration", vec![0; 32]).await
 }
 
 async fn inspect_bootstrap_state(database: &TestDatabase) -> TestResult<()> {
@@ -572,6 +761,7 @@ async fn inspect_client(client: &Client) -> TestResult<()> {
     inspect_owner_qualified_catalogue_members(client).await?;
     inspect_definition_references(client).await?;
     inspect_function_revision_constraints(client).await?;
+    inspect_standard_catalogue_schema(client).await?;
 
     for schema in ["_orna_kernel", "_orna_data"] {
         let role = "public";
@@ -614,6 +804,752 @@ async fn inspect_client(client: &Client) -> TestResult<()> {
             "protected table set differs; expected {expected_tables:?}, found {actual_tables:?}"
         ),
     )
+}
+
+async fn inspect_standard_catalogue_schema(client: &Client) -> TestResult<()> {
+    for (table, expected_columns) in [
+        (
+            "standard_library_revisions",
+            &[
+                ("id", "bytea", "bytea", "NO", Some("")),
+                ("source_revision_id", "bytea", "bytea", "NO", Some("")),
+                ("catalogue_revision_id", "bytea", "bytea", "NO", Some("")),
+                ("digest_version", "smallint", "int2", "NO", Some("1")),
+                ("language_version", "text", "text", "NO", Some("")),
+                ("content_hash", "bytea", "bytea", "NO", Some("")),
+                (
+                    "hash_algorithm",
+                    "text",
+                    "text",
+                    "NO",
+                    Some("'sha256'::text"),
+                ),
+                (
+                    "created_at",
+                    "timestamp with time zone",
+                    "timestamptz",
+                    "NO",
+                    Some("transaction_timestamp()"),
+                ),
+            ][..],
+        ),
+        (
+            "standard_catalogue_schemas",
+            &[
+                (
+                    "standard_library_revision_id",
+                    "bytea",
+                    "bytea",
+                    "NO",
+                    Some(""),
+                ),
+                ("schema_id", "bytea", "bytea", "NO", Some("")),
+                ("name_parts", "ARRAY", "_text", "NO", Some("")),
+                ("source_unit_id", "bytea", "bytea", "NO", Some("")),
+                ("source_start", "bigint", "int8", "NO", Some("")),
+                ("source_end", "bigint", "int8", "NO", Some("")),
+            ][..],
+        ),
+        (
+            "standard_catalogue_value_types",
+            &[
+                (
+                    "standard_library_revision_id",
+                    "bytea",
+                    "bytea",
+                    "NO",
+                    Some(""),
+                ),
+                ("type_id", "bytea", "bytea", "NO", Some("")),
+                ("schema_id", "bytea", "bytea", "NO", Some("")),
+                ("name_parts", "ARRAY", "_text", "NO", Some("")),
+                ("value_kind", "text", "text", "NO", Some("")),
+                ("mutability", "text", "text", "NO", Some("")),
+                ("persistence", "text", "text", "NO", Some("")),
+                ("representation_contract", "text", "text", "NO", Some("")),
+                ("source_unit_id", "bytea", "bytea", "NO", Some("")),
+                ("source_start", "bigint", "int8", "NO", Some("")),
+                ("source_end", "bigint", "int8", "NO", Some("")),
+            ][..],
+        ),
+        (
+            "standard_catalogue_type_bindings",
+            &[
+                (
+                    "standard_library_revision_id",
+                    "bytea",
+                    "bytea",
+                    "NO",
+                    Some(""),
+                ),
+                ("type_binding_id", "bytea", "bytea", "NO", Some("")),
+                ("kind", "text", "text", "NO", Some("")),
+                ("name_parts", "ARRAY", "_text", "NO", Some("")),
+                ("target_type_id", "bytea", "bytea", "NO", Some("")),
+                ("source_unit_id", "bytea", "bytea", "NO", Some("")),
+                ("source_start", "bigint", "int8", "NO", Some("")),
+                ("source_end", "bigint", "int8", "NO", Some("")),
+            ][..],
+        ),
+    ] {
+        inspect_columns(client, table, expected_columns).await?;
+        require_count(
+            client,
+            table,
+            &format!("SELECT count(*) FROM _orna_kernel.{table}"),
+            0,
+        )
+        .await?;
+    }
+
+    inspect_column_contract(
+        client,
+        "catalogue_revisions",
+        &[
+            (
+                "canonical_hash_version",
+                "smallint",
+                "int2",
+                "NO",
+                Some("1"),
+            ),
+            (
+                "standard_library_revision_id",
+                "bytea",
+                "bytea",
+                "YES",
+                Some(""),
+            ),
+        ],
+    )
+    .await?;
+    inspect_column_contract(
+        client,
+        "function_revisions",
+        &[("semantic_hash_version", "smallint", "int2", "NO", Some("1"))],
+    )
+    .await?;
+    inspect_column_contract(
+        client,
+        "definition_references",
+        &[(
+            "target_standard_library_revision_id",
+            "bytea",
+            "bytea",
+            "YES",
+            Some(""),
+        )],
+    )
+    .await?;
+
+    let catalogue_version = client
+        .query_one(
+            "SELECT canonical_hash_version, standard_library_revision_id
+             FROM _orna_kernel.catalogue_revisions",
+            &[],
+        )
+        .await?;
+    let canonical_hash_version: i16 = value(&catalogue_version, 0)?;
+    let standard_library_revision_id: Option<Vec<u8>> = value(&catalogue_version, 1)?;
+    require(
+        canonical_hash_version == 1 && standard_library_revision_id.is_none(),
+        format!(
+            "application catalogue standard context is ({canonical_hash_version}, {standard_library_revision_id:?}); expected (1, NULL)"
+        ),
+    )?;
+    let semantic_versions = client
+        .query(
+            "SELECT semantic_hash_version
+             FROM _orna_kernel.function_revisions
+             ORDER BY id",
+            &[],
+        )
+        .await?;
+    for row in semantic_versions {
+        let semantic_hash_version: i16 = value(&row, 0)?;
+        require(
+            semantic_hash_version == 1,
+            format!("function semantic hash version is {semantic_hash_version}; expected 1"),
+        )?;
+    }
+
+    inspect_standard_catalogue_constraints(client).await?;
+    inspect_standard_catalogue_indexes(client).await?;
+    inspect_standard_catalogue_privileges(client).await
+}
+
+async fn inspect_columns(
+    client: &Client,
+    table: &str,
+    expected_columns: &[(&str, &str, &str, &str, Option<&str>)],
+) -> TestResult<()> {
+    let rows = client
+        .query(
+            "SELECT column_name, data_type, udt_name, is_nullable, column_default
+             FROM information_schema.columns
+             WHERE table_schema = '_orna_kernel' AND table_name = $1
+             ORDER BY ordinal_position",
+            &[&table],
+        )
+        .await?;
+    let expected_names = expected_columns
+        .iter()
+        .map(|column| column.0)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let actual_names = rows
+        .iter()
+        .map(|row| value::<String>(row, 0))
+        .collect::<TestResult<Vec<_>>>()?;
+    for expected in expected_columns {
+        let column = expected.0;
+        let row = rows
+            .iter()
+            .find(|row| row.get::<_, String>(0) == column)
+            .ok_or_else(|| failure(format!("missing {table}.{column}")))?;
+        let actual = (
+            value::<String>(row, 1)?,
+            value::<String>(row, 2)?,
+            value::<String>(row, 3)?,
+            value::<Option<String>>(row, 4)?,
+        );
+        require(
+            actual.0 == expected.1
+                && actual.1 == expected.2
+                && actual.2 == expected.3
+                && match expected.4 {
+                    Some("") => actual.3.is_none(),
+                    Some(default) => actual.3.as_deref() == Some(default),
+                    None => true,
+                },
+            format!(
+                "{table}.{column} is ({:?}, {:?}, {:?}, {:?}); expected ({:?}, {:?}, {:?}, {:?})",
+                actual.0,
+                actual.1,
+                actual.2,
+                actual.3,
+                expected.1,
+                expected.2,
+                expected.3,
+                expected.4,
+            ),
+        )?;
+    }
+    require(
+        actual_names == expected_names,
+        format!("{table} columns differ: {actual_names:?}"),
+    )
+}
+
+async fn inspect_column_contract(
+    client: &Client,
+    table: &str,
+    expected_columns: &[(&str, &str, &str, &str, Option<&str>)],
+) -> TestResult<()> {
+    for expected in expected_columns {
+        let row = client
+            .query_opt(
+                "SELECT data_type, udt_name, is_nullable, column_default
+                 FROM information_schema.columns
+                 WHERE table_schema = '_orna_kernel'
+                   AND table_name = $1
+                   AND column_name = $2",
+                &[&table, &expected.0],
+            )
+            .await?
+            .ok_or_else(|| failure(format!("missing {table}.{}", expected.0)))?;
+        let actual = (
+            value::<String>(&row, 0)?,
+            value::<String>(&row, 1)?,
+            value::<String>(&row, 2)?,
+            value::<Option<String>>(&row, 3)?,
+        );
+        require(
+            actual.0 == expected.1
+                && actual.1 == expected.2
+                && actual.2 == expected.3
+                && match expected.4 {
+                    Some("") => actual.3.is_none(),
+                    Some(default) => actual.3.as_deref() == Some(default),
+                    None => true,
+                },
+            format!(
+                "{table}.{} is ({:?}, {:?}, {:?}, {:?}); expected ({:?}, {:?}, {:?}, {:?})",
+                expected.0,
+                actual.0,
+                actual.1,
+                actual.2,
+                actual.3,
+                expected.1,
+                expected.2,
+                expected.3,
+                expected.4,
+            ),
+        )?;
+    }
+    Ok(())
+}
+
+fn exact_0007_constraint_definition(constraint: &str) -> Option<&'static str> {
+    Some(match constraint {
+        "std_lib_rev_pkey" => "PRIMARY KEY (id)",
+        "std_lib_rev_id_length" => "CHECK ((octet_length(id) = 16))",
+        "std_lib_rev_source_revision_id_length" => {
+            "CHECK ((octet_length(source_revision_id) = 16))"
+        }
+        "std_lib_rev_source_revision_key" => "UNIQUE (source_revision_id)",
+        "std_lib_rev_source_revision_fk" => {
+            "FOREIGN KEY (source_revision_id) REFERENCES _orna_kernel.source_revisions(id)"
+        }
+        "std_lib_rev_catalogue_revision_id_length" => {
+            "CHECK ((octet_length(catalogue_revision_id) = 16))"
+        }
+        "std_lib_rev_catalogue_revision_key" => "UNIQUE (catalogue_revision_id)",
+        "std_lib_rev_digest_version_check" => "CHECK ((digest_version = 1))",
+        "std_lib_rev_language_version_check" => "CHECK ((length(language_version) > 0))",
+        "std_lib_rev_content_hash_length" => "CHECK ((octet_length(content_hash) = 32))",
+        "std_lib_rev_hash_algorithm_check" => "CHECK ((hash_algorithm = 'sha256'::text))",
+        "std_cat_schemas_pkey" => "PRIMARY KEY (standard_library_revision_id, schema_id)",
+        "std_cat_schemas_std_lib_rev_id_length" => {
+            "CHECK ((octet_length(standard_library_revision_id) = 16))"
+        }
+        "std_cat_schemas_std_lib_rev_fk" => {
+            "FOREIGN KEY (standard_library_revision_id) REFERENCES _orna_kernel.standard_library_revisions(id)"
+        }
+        "std_cat_schemas_schema_id_length" => "CHECK ((octet_length(schema_id) = 16))",
+        "std_cat_schemas_name_parts_check" => {
+            "CHECK (((cardinality(name_parts) > 0) AND (array_position(name_parts, NULL::text) IS NULL) AND (array_position(name_parts, ''::text) IS NULL)))"
+        }
+        "std_cat_schemas_name_key" => "UNIQUE (standard_library_revision_id, name_parts)",
+        "std_cat_schemas_source_origin_check" => {
+            "CHECK (((octet_length(source_unit_id) = 16) AND (source_start >= 0) AND (source_start <= '4294967295'::bigint) AND (source_end >= source_start) AND (source_end <= '4294967295'::bigint)))"
+        }
+        "std_cat_schemas_source_unit_fk" => {
+            "FOREIGN KEY (source_unit_id) REFERENCES _orna_kernel.source_units(id)"
+        }
+        "std_cat_value_types_pkey" => "PRIMARY KEY (standard_library_revision_id, type_id)",
+        "std_cat_value_types_std_lib_rev_id_length" => {
+            "CHECK ((octet_length(standard_library_revision_id) = 16))"
+        }
+        "std_cat_value_types_std_lib_rev_fk" => {
+            "FOREIGN KEY (standard_library_revision_id) REFERENCES _orna_kernel.standard_library_revisions(id)"
+        }
+        "std_cat_value_types_type_id_length" => "CHECK ((octet_length(type_id) = 16))",
+        "std_cat_value_types_schema_id_length" => "CHECK ((octet_length(schema_id) = 16))",
+        "std_cat_value_types_schema_fk" => {
+            "FOREIGN KEY (standard_library_revision_id, schema_id) REFERENCES _orna_kernel.standard_catalogue_schemas(standard_library_revision_id, schema_id)"
+        }
+        "std_cat_value_types_name_parts_check" => {
+            "CHECK (((cardinality(name_parts) >= 2) AND (array_position(name_parts, NULL::text) IS NULL) AND (array_position(name_parts, ''::text) IS NULL)))"
+        }
+        "std_cat_value_types_name_key" => "UNIQUE (standard_library_revision_id, name_parts)",
+        "std_cat_value_types_value_kind_check" => "CHECK ((value_kind = 'primitive'::text))",
+        "std_cat_value_types_mutability_check" => "CHECK ((mutability = 'immutable'::text))",
+        "std_cat_value_types_persistence_check" => {
+            "CHECK ((persistence = ANY (ARRAY['persistable'::text, 'transient'::text])))"
+        }
+        "std_cat_value_types_representation_contract_check" => {
+            "CHECK ((length(representation_contract) > 0))"
+        }
+        "std_cat_value_types_source_origin_check" => {
+            "CHECK (((octet_length(source_unit_id) = 16) AND (source_start >= 0) AND (source_start <= '4294967295'::bigint) AND (source_end >= source_start) AND (source_end <= '4294967295'::bigint)))"
+        }
+        "std_cat_value_types_source_unit_fk" => {
+            "FOREIGN KEY (source_unit_id) REFERENCES _orna_kernel.source_units(id)"
+        }
+        "std_cat_type_bindings_pkey" => {
+            "PRIMARY KEY (standard_library_revision_id, type_binding_id)"
+        }
+        "std_cat_type_bindings_std_lib_rev_id_length" => {
+            "CHECK ((octet_length(standard_library_revision_id) = 16))"
+        }
+        "std_cat_type_bindings_std_lib_rev_fk" => {
+            "FOREIGN KEY (standard_library_revision_id) REFERENCES _orna_kernel.standard_library_revisions(id)"
+        }
+        "std_cat_type_bindings_type_binding_id_length" => {
+            "CHECK ((octet_length(type_binding_id) = 16))"
+        }
+        "std_cat_type_bindings_kind_check" => {
+            "CHECK ((kind = ANY (ARRAY['qualified'::text, 'prelude'::text])))"
+        }
+        "std_cat_type_bindings_name_parts_check" => {
+            "CHECK ((((kind = 'qualified'::text) AND (cardinality(name_parts) >= 2) AND (array_position(name_parts, NULL::text) IS NULL) AND (array_position(name_parts, ''::text) IS NULL)) OR ((kind = 'prelude'::text) AND (cardinality(name_parts) >= 1) AND (array_position(name_parts, NULL::text) IS NULL) AND (array_position(name_parts, ''::text) IS NULL))))"
+        }
+        "std_cat_type_bindings_name_key" => {
+            "UNIQUE (standard_library_revision_id, kind, name_parts)"
+        }
+        "std_cat_type_bindings_target_type_id_length" => {
+            "CHECK ((octet_length(target_type_id) = 16))"
+        }
+        "std_cat_type_bindings_target_type_fk" => {
+            "FOREIGN KEY (standard_library_revision_id, target_type_id) REFERENCES _orna_kernel.standard_catalogue_value_types(standard_library_revision_id, type_id)"
+        }
+        "std_cat_type_bindings_source_origin_check" => {
+            "CHECK (((octet_length(source_unit_id) = 16) AND (source_start >= 0) AND (source_start <= '4294967295'::bigint) AND (source_end >= source_start) AND (source_end <= '4294967295'::bigint)))"
+        }
+        "std_cat_type_bindings_source_unit_fk" => {
+            "FOREIGN KEY (source_unit_id) REFERENCES _orna_kernel.source_units(id)"
+        }
+        "catalogue_revisions_canonical_hash_version_check" => {
+            "CHECK ((canonical_hash_version = ANY (ARRAY[1, 2])))"
+        }
+        "catalogue_revisions_std_lib_rev_id_length" => {
+            "CHECK (((standard_library_revision_id IS NULL) OR (octet_length(standard_library_revision_id) = 16)))"
+        }
+        "catalogue_revisions_std_lib_rev_fk" => {
+            "FOREIGN KEY (standard_library_revision_id) REFERENCES _orna_kernel.standard_library_revisions(id)"
+        }
+        "catalogue_revisions_standard_context_check" => {
+            "CHECK ((((canonical_hash_version = 1) AND (standard_library_revision_id IS NULL)) OR ((canonical_hash_version = 2) AND (standard_library_revision_id IS NOT NULL))))"
+        }
+        "catalogue_revisions_id_std_lib_rev_key" => "UNIQUE (id, standard_library_revision_id)",
+        "function_revisions_semantic_hash_version_check" => {
+            "CHECK ((semantic_hash_version = ANY (ARRAY[1, 2])))"
+        }
+        _ => return None,
+    })
+}
+
+async fn inspect_standard_catalogue_constraints(client: &Client) -> TestResult<()> {
+    for (table, constraint, _fragment) in [
+        (
+            "standard_library_revisions",
+            "std_lib_rev_pkey",
+            "PRIMARY KEY (id)",
+        ),
+        (
+            "standard_library_revisions",
+            "std_lib_rev_id_length",
+            "octet_length(id) = 16",
+        ),
+        (
+            "standard_library_revisions",
+            "std_lib_rev_source_revision_id_length",
+            "octet_length(source_revision_id) = 16",
+        ),
+        (
+            "standard_library_revisions",
+            "std_lib_rev_source_revision_key",
+            "UNIQUE (source_revision_id)",
+        ),
+        (
+            "standard_library_revisions",
+            "std_lib_rev_source_revision_fk",
+            "FOREIGN KEY (source_revision_id) REFERENCES _orna_kernel.source_revisions(id)",
+        ),
+        (
+            "standard_library_revisions",
+            "std_lib_rev_catalogue_revision_id_length",
+            "octet_length(catalogue_revision_id) = 16",
+        ),
+        (
+            "standard_library_revisions",
+            "std_lib_rev_catalogue_revision_key",
+            "UNIQUE (catalogue_revision_id)",
+        ),
+        (
+            "standard_library_revisions",
+            "std_lib_rev_digest_version_check",
+            "digest_version = 1",
+        ),
+        (
+            "standard_library_revisions",
+            "std_lib_rev_language_version_check",
+            "length(language_version) > 0",
+        ),
+        (
+            "standard_library_revisions",
+            "std_lib_rev_content_hash_length",
+            "octet_length(content_hash) = 32",
+        ),
+        (
+            "standard_library_revisions",
+            "std_lib_rev_hash_algorithm_check",
+            "hash_algorithm = 'sha256'::text",
+        ),
+        (
+            "standard_catalogue_schemas",
+            "std_cat_schemas_pkey",
+            "PRIMARY KEY (standard_library_revision_id, schema_id)",
+        ),
+        (
+            "standard_catalogue_schemas",
+            "std_cat_schemas_std_lib_rev_id_length",
+            "octet_length(standard_library_revision_id) = 16",
+        ),
+        (
+            "standard_catalogue_schemas",
+            "std_cat_schemas_std_lib_rev_fk",
+            "FOREIGN KEY (standard_library_revision_id) REFERENCES _orna_kernel.standard_library_revisions(id)",
+        ),
+        (
+            "standard_catalogue_schemas",
+            "std_cat_schemas_schema_id_length",
+            "octet_length(schema_id) = 16",
+        ),
+        (
+            "standard_catalogue_schemas",
+            "std_cat_schemas_name_parts_check",
+            "cardinality(name_parts) > 0",
+        ),
+        (
+            "standard_catalogue_schemas",
+            "std_cat_schemas_name_key",
+            "UNIQUE (standard_library_revision_id, name_parts)",
+        ),
+        (
+            "standard_catalogue_schemas",
+            "std_cat_schemas_source_origin_check",
+            "source_start <= '4294967295'::bigint",
+        ),
+        (
+            "standard_catalogue_schemas",
+            "std_cat_schemas_source_unit_fk",
+            "FOREIGN KEY (source_unit_id) REFERENCES _orna_kernel.source_units(id)",
+        ),
+        (
+            "standard_catalogue_value_types",
+            "std_cat_value_types_pkey",
+            "PRIMARY KEY (standard_library_revision_id, type_id)",
+        ),
+        (
+            "standard_catalogue_value_types",
+            "std_cat_value_types_std_lib_rev_id_length",
+            "octet_length(standard_library_revision_id) = 16",
+        ),
+        (
+            "standard_catalogue_value_types",
+            "std_cat_value_types_std_lib_rev_fk",
+            "FOREIGN KEY (standard_library_revision_id) REFERENCES _orna_kernel.standard_library_revisions(id)",
+        ),
+        (
+            "standard_catalogue_value_types",
+            "std_cat_value_types_type_id_length",
+            "octet_length(type_id) = 16",
+        ),
+        (
+            "standard_catalogue_value_types",
+            "std_cat_value_types_schema_id_length",
+            "octet_length(schema_id) = 16",
+        ),
+        (
+            "standard_catalogue_value_types",
+            "std_cat_value_types_schema_fk",
+            "FOREIGN KEY (standard_library_revision_id, schema_id) REFERENCES _orna_kernel.standard_catalogue_schemas(standard_library_revision_id, schema_id)",
+        ),
+        (
+            "standard_catalogue_value_types",
+            "std_cat_value_types_name_parts_check",
+            "cardinality(name_parts) >= 2",
+        ),
+        (
+            "standard_catalogue_value_types",
+            "std_cat_value_types_name_key",
+            "UNIQUE (standard_library_revision_id, name_parts)",
+        ),
+        (
+            "standard_catalogue_value_types",
+            "std_cat_value_types_value_kind_check",
+            "value_kind = 'primitive'::text",
+        ),
+        (
+            "standard_catalogue_value_types",
+            "std_cat_value_types_mutability_check",
+            "mutability = 'immutable'::text",
+        ),
+        (
+            "standard_catalogue_value_types",
+            "std_cat_value_types_persistence_check",
+            "persistence = ANY (ARRAY['persistable'::text, 'transient'::text])",
+        ),
+        (
+            "standard_catalogue_value_types",
+            "std_cat_value_types_representation_contract_check",
+            "length(representation_contract) > 0",
+        ),
+        (
+            "standard_catalogue_value_types",
+            "std_cat_value_types_source_origin_check",
+            "source_start <= '4294967295'::bigint",
+        ),
+        (
+            "standard_catalogue_value_types",
+            "std_cat_value_types_source_unit_fk",
+            "FOREIGN KEY (source_unit_id) REFERENCES _orna_kernel.source_units(id)",
+        ),
+        (
+            "standard_catalogue_type_bindings",
+            "std_cat_type_bindings_pkey",
+            "PRIMARY KEY (standard_library_revision_id, type_binding_id)",
+        ),
+        (
+            "standard_catalogue_type_bindings",
+            "std_cat_type_bindings_std_lib_rev_id_length",
+            "octet_length(standard_library_revision_id) = 16",
+        ),
+        (
+            "standard_catalogue_type_bindings",
+            "std_cat_type_bindings_std_lib_rev_fk",
+            "FOREIGN KEY (standard_library_revision_id) REFERENCES _orna_kernel.standard_library_revisions(id)",
+        ),
+        (
+            "standard_catalogue_type_bindings",
+            "std_cat_type_bindings_type_binding_id_length",
+            "octet_length(type_binding_id) = 16",
+        ),
+        (
+            "standard_catalogue_type_bindings",
+            "std_cat_type_bindings_kind_check",
+            "kind = ANY (ARRAY['qualified'::text, 'prelude'::text])",
+        ),
+        (
+            "standard_catalogue_type_bindings",
+            "std_cat_type_bindings_name_parts_check",
+            "kind = 'qualified'::text",
+        ),
+        (
+            "standard_catalogue_type_bindings",
+            "std_cat_type_bindings_name_key",
+            "UNIQUE (standard_library_revision_id, kind, name_parts)",
+        ),
+        (
+            "standard_catalogue_type_bindings",
+            "std_cat_type_bindings_target_type_id_length",
+            "octet_length(target_type_id) = 16",
+        ),
+        (
+            "standard_catalogue_type_bindings",
+            "std_cat_type_bindings_target_type_fk",
+            "FOREIGN KEY (standard_library_revision_id, target_type_id) REFERENCES _orna_kernel.standard_catalogue_value_types(standard_library_revision_id, type_id)",
+        ),
+        (
+            "standard_catalogue_type_bindings",
+            "std_cat_type_bindings_source_origin_check",
+            "source_start <= '4294967295'::bigint",
+        ),
+        (
+            "standard_catalogue_type_bindings",
+            "std_cat_type_bindings_source_unit_fk",
+            "FOREIGN KEY (source_unit_id) REFERENCES _orna_kernel.source_units(id)",
+        ),
+        (
+            "catalogue_revisions",
+            "catalogue_revisions_canonical_hash_version_check",
+            "canonical_hash_version = ANY (ARRAY[1, 2])",
+        ),
+        (
+            "catalogue_revisions",
+            "catalogue_revisions_std_lib_rev_id_length",
+            "octet_length(standard_library_revision_id) = 16",
+        ),
+        (
+            "catalogue_revisions",
+            "catalogue_revisions_std_lib_rev_fk",
+            "FOREIGN KEY (standard_library_revision_id) REFERENCES _orna_kernel.standard_library_revisions(id)",
+        ),
+        (
+            "catalogue_revisions",
+            "catalogue_revisions_standard_context_check",
+            "canonical_hash_version = 1",
+        ),
+        (
+            "catalogue_revisions",
+            "catalogue_revisions_id_std_lib_rev_key",
+            "UNIQUE (id, standard_library_revision_id)",
+        ),
+        (
+            "function_revisions",
+            "function_revisions_semantic_hash_version_check",
+            "semantic_hash_version = ANY (ARRAY[1, 2])",
+        ),
+    ] {
+        let expected_definition = exact_0007_constraint_definition(constraint)
+            .ok_or_else(|| failure(format!("missing exact 0007 contract for {constraint}")))?;
+        require_exact_constraint(client, table, constraint, expected_definition, false, false)
+            .await?;
+    }
+
+    require_no_foreign_key_to(
+        client,
+        "standard_library_revisions",
+        "_orna_kernel.catalogue_revisions",
+    )
+    .await?;
+    Ok(())
+}
+
+async fn inspect_standard_catalogue_indexes(client: &Client) -> TestResult<()> {
+    for (index, relation, columns) in [
+        (
+            "catalogue_schemas_identity_index",
+            "catalogue_schemas",
+            "(schema_id, catalogue_revision_id)",
+        ),
+        (
+            "catalogue_object_types_identity_index",
+            "catalogue_object_types",
+            "(type_id, catalogue_revision_id)",
+        ),
+        (
+            "standard_catalogue_schemas_identity_index",
+            "standard_catalogue_schemas",
+            "(schema_id, standard_library_revision_id)",
+        ),
+        (
+            "standard_catalogue_value_types_identity_index",
+            "standard_catalogue_value_types",
+            "(type_id, standard_library_revision_id)",
+        ),
+        (
+            "standard_catalogue_type_bindings_identity_index",
+            "standard_catalogue_type_bindings",
+            "(type_binding_id, standard_library_revision_id)",
+        ),
+    ] {
+        require_index_shape(client, index, relation, columns, None).await?;
+    }
+    require_index_shape(
+        client,
+        "definition_references_value_type_target_index",
+        "definition_references",
+        "(target_standard_library_revision_id, target_definition_id, catalogue_revision_id)",
+        Some("(target_kind = 'value_type'::text)"),
+    )
+    .await
+}
+
+async fn inspect_standard_catalogue_privileges(client: &Client) -> TestResult<()> {
+    for table in [
+        "standard_library_revisions",
+        "standard_catalogue_schemas",
+        "standard_catalogue_value_types",
+        "standard_catalogue_type_bindings",
+    ] {
+        for privilege in [
+            "SELECT",
+            "INSERT",
+            "UPDATE",
+            "DELETE",
+            "TRUNCATE",
+            "REFERENCES",
+            "TRIGGER",
+            "MAINTAIN",
+        ] {
+            let relation = format!("_orna_kernel.{table}");
+            let row = client
+                .query_one(
+                    "SELECT has_table_privilege('public', $1, $2)",
+                    &[&relation, &privilege],
+                )
+                .await?;
+            let granted: bool = value(&row, 0)?;
+            require(
+                !granted,
+                format!("PUBLIC has {privilege} on protected table {relation}"),
+            )?;
+        }
+    }
+    Ok(())
 }
 
 async fn inspect_migrations(client: &Client) -> TestResult<()> {
@@ -689,6 +1625,11 @@ async fn snapshot_upgrade_state(database: &TestDatabase) -> TestResult<UpgradeSn
             )
             .await?;
         let active_pair = (value(&active, 0)?, value(&active, 1)?);
+        let source_unit_count = session
+            .client()
+            .query_one("SELECT count(*) FROM _orna_kernel.source_units", &[])
+            .await?
+            .get(0);
         let migrations = session
             .client()
             .query(
@@ -761,6 +1702,7 @@ async fn snapshot_upgrade_state(database: &TestDatabase) -> TestResult<UpgradeSn
             .collect::<TestResult<Vec<(Vec<u8>, Vec<u8>)>>>()?;
         Ok(UpgradeSnapshot {
             active_pair,
+            source_unit_count,
             migrations,
             references,
             catalogue_hashes,
@@ -962,6 +1904,10 @@ async fn inspect_definition_references(client: &Client) -> TestResult<()> {
         ("source_end".to_owned(), "NO".to_owned()),
         ("target_owner_type_id".to_owned(), "YES".to_owned()),
         ("target_owner_function_id".to_owned(), "YES".to_owned()),
+        (
+            "target_standard_library_revision_id".to_owned(),
+            "YES".to_owned(),
+        ),
     ];
     require(
         actual_columns == expected_columns,
@@ -988,42 +1934,15 @@ async fn inspect_definition_references(client: &Client) -> TestResult<()> {
         "FOREIGN KEY (source_unit_id) REFERENCES _orna_kernel.source_units(id)",
     )
     .await?;
-    require_constraint(
+    require_exact_constraint(
         client,
         "definition_references",
         "definition_references_target_kind_check",
-        "target_kind = ANY",
+        "CHECK ((target_kind = ANY (ARRAY['object_type'::text, 'field'::text, 'function'::text, 'parameter'::text, 'expression'::text, 'value_type'::text])))",
+        false,
+        false,
     )
     .await?;
-    let target_kind_constraint = constraint_definition(
-        client,
-        "definition_references",
-        "definition_references_target_kind_check",
-    )
-    .await?;
-    for target_kind in [
-        "object_type",
-        "field",
-        "function",
-        "parameter",
-        "expression",
-    ] {
-        require(
-            target_kind_constraint.contains(&format!("'{target_kind}'::text")),
-            format!(
-                "definition_references target kind constraint omits {target_kind:?}: {target_kind_constraint:?}"
-            ),
-        )?;
-    }
-    for unsupported_kind in ["schema", "return_column"] {
-        require(
-            !target_kind_constraint.contains(&format!("'{unsupported_kind}'::text")),
-            format!(
-                "definition_references incorrectly accepts {unsupported_kind:?} as a stable target: {target_kind_constraint:?}"
-            ),
-        )?;
-    }
-
     let reference_kind_constraint = constraint_definition(
         client,
         "definition_references",
@@ -1064,59 +1983,24 @@ async fn inspect_definition_references(client: &Client) -> TestResult<()> {
     )
     .await?;
 
-    let owner_shape_constraint = constraint_definition(
+    require_exact_constraint(
         client,
         "definition_references",
         "definition_references_target_owner_shape_check",
+        "CHECK ((((target_kind = 'field'::text) AND (target_owner_type_id IS NOT NULL) AND (target_owner_function_id IS NULL)) OR ((target_kind = 'parameter'::text) AND (target_owner_type_id IS NULL) AND (target_owner_function_id IS NOT NULL)) OR ((target_kind = 'value_type'::text) AND (target_owner_type_id IS NULL) AND (target_owner_function_id IS NULL)) OR ((target_kind <> ALL (ARRAY['field'::text, 'parameter'::text, 'value_type'::text])) AND (target_owner_type_id IS NULL) AND (target_owner_function_id IS NULL))))",
+        false,
+        false,
     )
     .await?;
-    for expected_fragment in [
-        "target_kind = 'field'::text",
-        "target_kind = 'parameter'::text",
-        "target_owner_type_id IS NOT NULL",
-        "target_owner_function_id IS NOT NULL",
-        "target_owner_type_id IS NULL",
-        "target_owner_function_id IS NULL",
-        "target_kind <> ALL",
-    ] {
-        require(
-            owner_shape_constraint.contains(expected_fragment),
-            format!(
-                "definition reference owner-shape constraint omits {expected_fragment:?}: {owner_shape_constraint:?}"
-            ),
-        )?;
-    }
-
-    let compatibility_constraint = constraint_definition(
+    require_exact_constraint(
         client,
         "definition_references",
         "definition_references_reference_target_compatibility_check",
+        "CHECK ((((reference_kind = 'function_call'::text) AND (target_kind = 'function'::text)) OR ((reference_kind = ANY (ARRAY['named_type'::text, 'object_reference'::text, 'query_object'::text])) AND (target_kind = 'object_type'::text)) OR ((reference_kind = 'parameter_read'::text) AND (target_kind = 'parameter'::text)) OR ((reference_kind = 'query_field'::text) AND (target_kind = 'field'::text)) OR ((reference_kind = 'expression'::text) AND (target_kind = 'expression'::text)) OR ((reference_kind = 'write_object'::text) AND (target_kind = 'object_type'::text)) OR ((reference_kind = 'write_field'::text) AND (target_kind = 'field'::text)) OR ((reference_kind = 'named_type'::text) AND (target_kind = 'value_type'::text))))",
+        false,
+        false,
     )
     .await?;
-    for expected_fragment in [
-        "reference_kind = 'function_call'::text",
-        "target_kind = 'function'::text",
-        "'named_type'::text",
-        "'object_reference'::text",
-        "'query_object'::text",
-        "target_kind = 'object_type'::text",
-        "reference_kind = 'parameter_read'::text",
-        "target_kind = 'parameter'::text",
-        "reference_kind = 'query_field'::text",
-        "target_kind = 'field'::text",
-        "reference_kind = 'expression'::text",
-        "target_kind = 'expression'::text",
-        "reference_kind = 'write_object'::text",
-        "reference_kind = 'write_field'::text",
-    ] {
-        require(
-            compatibility_constraint.contains(expected_fragment),
-            format!(
-                "definition reference compatibility constraint omits {expected_fragment:?}: {compatibility_constraint:?}"
-            ),
-        )?;
-    }
-
     require_constraint(
         client,
         "definition_references",
@@ -1129,6 +2013,42 @@ async fn inspect_definition_references(client: &Client) -> TestResult<()> {
         "definition_references",
         "definition_references_parameter_target_fk",
         "FOREIGN KEY (catalogue_revision_id, target_owner_function_id, target_definition_id) REFERENCES _orna_kernel.catalogue_function_parameters(catalogue_revision_id, function_id, parameter_id) DEFERRABLE INITIALLY DEFERRED",
+    )
+    .await?;
+    require_exact_constraint(
+        client,
+        "definition_references",
+        "definition_references_target_std_lib_rev_id_length",
+        "CHECK (((target_standard_library_revision_id IS NULL) OR (octet_length(target_standard_library_revision_id) = 16)))",
+        false,
+        false,
+    )
+    .await?;
+    require_exact_constraint(
+        client,
+        "definition_references",
+        "definition_references_target_std_lib_rev_shape_check",
+        "CHECK ((((target_kind = 'value_type'::text) AND (target_standard_library_revision_id IS NOT NULL)) OR ((target_kind <> 'value_type'::text) AND (target_standard_library_revision_id IS NULL))))",
+        false,
+        false,
+    )
+    .await?;
+    require_exact_constraint(
+        client,
+        "definition_references",
+        "definition_references_catalogue_std_lib_rev_fk",
+        "FOREIGN KEY (catalogue_revision_id, target_standard_library_revision_id) REFERENCES _orna_kernel.catalogue_revisions(id, standard_library_revision_id) DEFERRABLE INITIALLY DEFERRED",
+        true,
+        true,
+    )
+    .await?;
+    require_exact_constraint(
+        client,
+        "definition_references",
+        "definition_references_std_value_type_target_fk",
+        "FOREIGN KEY (target_standard_library_revision_id, target_definition_id) REFERENCES _orna_kernel.standard_catalogue_value_types(standard_library_revision_id, type_id) DEFERRABLE INITIALLY DEFERRED",
+        true,
+        true,
     )
     .await?;
     require_index(
@@ -1234,6 +2154,39 @@ async fn require_constraint(
     )
 }
 
+async fn require_exact_constraint(
+    client: &Client,
+    table: &str,
+    constraint: &str,
+    expected_definition: &str,
+    expected_deferrable: bool,
+    expected_deferred: bool,
+) -> TestResult<()> {
+    let row = client
+        .query_opt(
+            "SELECT pg_get_constraintdef(constraint_row.oid),
+                    constraint_row.condeferrable,
+                    constraint_row.condeferred
+             FROM pg_constraint AS constraint_row
+             WHERE constraint_row.conrelid = to_regclass($1)
+               AND constraint_row.conname = $2",
+            &[&format!("_orna_kernel.{table}"), &constraint],
+        )
+        .await?
+        .ok_or_else(|| failure(format!("missing {table} constraint {constraint}")))?;
+    let definition: String = value(&row, 0)?;
+    let deferrable: bool = value(&row, 1)?;
+    let deferred: bool = value(&row, 2)?;
+    require(
+        definition == expected_definition
+            && deferrable == expected_deferrable
+            && deferred == expected_deferred,
+        format!(
+            "{table} constraint {constraint} is ({definition:?}, deferrable={deferrable}, deferred={deferred}); expected ({expected_definition:?}, deferrable={expected_deferrable}, deferred={expected_deferred})"
+        ),
+    )
+}
+
 async fn require_index(client: &Client, index: &str, expected_fragment: &str) -> TestResult<()> {
     let row = client
         .query_opt(
@@ -1247,6 +2200,88 @@ async fn require_index(client: &Client, index: &str, expected_fragment: &str) ->
     require(
         definition.contains(expected_fragment),
         format!("index {index} is {definition:?}; expected {expected_fragment:?}"),
+    )
+}
+
+async fn require_index_shape(
+    client: &Client,
+    index: &str,
+    relation: &str,
+    expected_columns: &str,
+    expected_predicate: Option<&str>,
+) -> TestResult<()> {
+    let row = client
+        .query_opt(
+            "SELECT index_class.relname,
+                    index_namespace.nspname,
+                    table_class.relname,
+                    table_namespace.nspname,
+                    pg_get_indexdef(index_row.indexrelid),
+                    pg_get_expr(index_row.indpred, index_row.indrelid),
+                    index_row.indisunique
+             FROM pg_index AS index_row
+             JOIN pg_class AS index_class
+               ON index_class.oid = index_row.indexrelid
+             JOIN pg_namespace AS index_namespace
+               ON index_namespace.oid = index_class.relnamespace
+             JOIN pg_class AS table_class
+               ON table_class.oid = index_row.indrelid
+             JOIN pg_namespace AS table_namespace
+               ON table_namespace.oid = table_class.relnamespace
+             WHERE index_row.indexrelid = to_regclass($1)",
+            &[&format!("_orna_kernel.{index}")],
+        )
+        .await?
+        .ok_or_else(|| failure(format!("missing index {index}")))?;
+    let actual_index: String = value(&row, 0)?;
+    let actual_index_schema: String = value(&row, 1)?;
+    let actual_relation: String = value(&row, 2)?;
+    let actual_relation_schema: String = value(&row, 3)?;
+    let definition: String = value(&row, 4)?;
+    let predicate: Option<String> = value(&row, 5)?;
+    let unique: bool = value(&row, 6)?;
+    let expected_definition = format!(
+        "CREATE INDEX {index} ON _orna_kernel.{relation} USING btree {expected_columns}{}",
+        expected_predicate
+            .map(|predicate| format!(" WHERE {predicate}"))
+            .unwrap_or_default()
+    );
+    require(
+        actual_index == index
+            && actual_index_schema == "_orna_kernel"
+            && actual_relation == relation
+            && actual_relation_schema == "_orna_kernel"
+            && !unique
+            && definition == expected_definition,
+        format!(
+            "index {index} is ({actual_index_schema}.{actual_index} on {actual_relation_schema}.{actual_relation}, unique={unique}, definition={definition:?}); expected {expected_definition:?}"
+        ),
+    )?;
+    require(
+        predicate.as_deref() == expected_predicate,
+        format!("index {index} predicate is {predicate:?}; expected {expected_predicate:?}"),
+    )
+}
+
+async fn require_no_foreign_key_to(
+    client: &Client,
+    table: &str,
+    target_table: &str,
+) -> TestResult<()> {
+    let row = client
+        .query_one(
+            "SELECT count(*)
+             FROM pg_constraint AS constraint_row
+             WHERE constraint_row.conrelid = to_regclass($1)
+               AND constraint_row.confrelid = to_regclass($2)
+               AND constraint_row.contype = 'f'",
+            &[&format!("_orna_kernel.{table}"), &target_table.to_owned()],
+        )
+        .await?;
+    let count: i64 = value(&row, 0)?;
+    require(
+        count == 0,
+        format!("{table} has {count} foreign keys to {target_table}; expected none"),
     )
 }
 
@@ -1382,6 +2417,36 @@ async fn seed_registered_v5_semantic_catalogue(database: &TestDatabase) -> TestR
         (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
         (Err(seed_error), Err(shutdown_error)) => Err(failure(format!(
             "registered v5 semantic catalogue seed failed: {seed_error}; seed driver shutdown failed: {shutdown_error}"
+        ))),
+    }
+}
+
+async fn seed_registered_v6_catalogue(database: &TestDatabase) -> TestResult<()> {
+    seed_registered_v5_semantic_catalogue(database).await?;
+    seed_registered_v4_physical_catalogue(database).await?;
+    let session = database.open().await?;
+    let migration = &MIGRATIONS[5];
+    let seed_result = async {
+        session.client().batch_execute(migration.2).await?;
+        let checksum = expected_migration_checksum(migration.0, migration.2);
+        session
+            .client()
+            .execute(
+                "INSERT INTO _orna_kernel.schema_migrations (version, name, checksum)
+                 VALUES ($1, $2, $3)",
+                &[&migration.0, &migration.1, &checksum],
+            )
+            .await?;
+        Ok(())
+    }
+    .await;
+    let shutdown_result = session.shutdown().await;
+
+    match (seed_result, shutdown_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(seed_error), Err(shutdown_error)) => Err(failure(format!(
+            "registered v6 catalogue seed failed: {seed_error}; seed driver shutdown failed: {shutdown_error}"
         ))),
     }
 }
