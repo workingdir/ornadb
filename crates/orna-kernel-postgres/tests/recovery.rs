@@ -202,9 +202,198 @@ async fn recovers_a_complete_raw_v2_standard_revision() -> TestResult<()> {
                 && recovered.references() == expected.application.references
                 && recovered.origins() == expected.application.origins,
             "version-2 recovery changed application semantic facts",
+        )?;
+        require_raw_v2_value_slots(&recovered, &expected.standard)?;
+        require_raw_v2_value_inventory(&recovered, &expected.standard)?;
+        require(
+            recovered
+                .catalogue()
+                .object_types()
+                .iter()
+                .flat_map(ObjectTypeDefinition::fields)
+                .filter(|field| field.name().starts_with("scalar_"))
+                .count()
+                == 12,
+            "version-2 raw fixture did not retain all twelve value fields",
         )
     })
     .await
+}
+
+fn require_raw_v2_value_inventory(
+    revision: &orna_core::revision::ActiveDatabaseRevision,
+    standard: &VerifiedStandardLibrarySnapshot,
+) -> TestResult<()> {
+    let mut value_ids = Vec::new();
+    let mut legacy_scalar_slots = 0;
+    let mut field_value_slots = 0;
+    let mut parameter_value_slots = 0;
+    let mut return_value_slots = 0;
+
+    for object in revision.catalogue().object_types() {
+        for field in object.fields() {
+            let resolved = field.resolved_type();
+            if let Some(value_type) = resolved.value_type() {
+                value_ids.push(value_type);
+                field_value_slots += 1;
+            } else if resolved.legacy_scalar().is_some() {
+                legacy_scalar_slots += 1;
+            }
+        }
+    }
+    for function in revision.catalogue().functions() {
+        for parameter in function.parameters() {
+            let resolved = parameter.resolved_type();
+            if let Some(value_type) = resolved.value_type() {
+                value_ids.push(value_type);
+                parameter_value_slots += 1;
+            } else if resolved.legacy_scalar().is_some() {
+                legacy_scalar_slots += 1;
+            }
+        }
+        match function.return_type() {
+            FunctionReturn::Single(resolved) => {
+                if let Some(value_type) = resolved.value_type() {
+                    value_ids.push(value_type);
+                    return_value_slots += 1;
+                } else if resolved.legacy_scalar().is_some() {
+                    legacy_scalar_slots += 1;
+                }
+            }
+            FunctionReturn::Rows(columns) => {
+                for column in columns {
+                    let resolved = column.resolved_type();
+                    if let Some(value_type) = resolved.value_type() {
+                        value_ids.push(value_type);
+                        return_value_slots += 1;
+                    } else if resolved.legacy_scalar().is_some() {
+                        legacy_scalar_slots += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    require(
+        legacy_scalar_slots == 0,
+        format!("raw V2 recovery retained {legacy_scalar_slots} legacy scalar slots"),
+    )?;
+    require(
+        field_value_slots == 12,
+        format!("raw V2 recovery returned {field_value_slots} value fields, expected 12"),
+    )?;
+    require(
+        parameter_value_slots == 13,
+        format!("raw V2 recovery returned {parameter_value_slots} value parameters, expected 13"),
+    )?;
+    require(
+        return_value_slots == 2,
+        format!("raw V2 recovery returned {return_value_slots} value return slots, expected 2"),
+    )?;
+    require(
+        value_ids.len() == 27,
+        format!(
+            "raw V2 recovery returned {} value slots, expected 27",
+            value_ids.len()
+        ),
+    )?;
+
+    for (local_name, expected_count) in [
+        ("boolean", 3),
+        ("integer", 3),
+        ("bigint", 2),
+        ("float", 2),
+        ("decimal", 2),
+        ("character_large_object", 2),
+        ("binary_large_object", 2),
+        ("uuid", 2),
+        ("date", 2),
+        ("time", 2),
+        ("timestamp", 2),
+        ("duration", 2),
+        ("void", 1),
+    ] {
+        let name = QualifiedSemanticName::new(["std", "types", local_name])?;
+        let value_type = standard
+            .catalogue()
+            .value_type_by_name(&name)
+            .ok_or_else(|| failure(format!("retained standard fixture has no {name} value")))?;
+        let actual_count = value_ids
+            .iter()
+            .filter(|value_type_id| **value_type_id == value_type.id())
+            .count();
+        require(
+            actual_count == expected_count,
+            format!(
+                "raw V2 recovery returned {actual_count} {name} value slots, expected {expected_count}"
+            ),
+        )?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn rejects_raw_v2_value_tuple_pin_and_definition_tampering_without_repair() -> TestResult<()>
+{
+    let field_record = format!(
+        "owner={} field={}",
+        TypeId::from_bytes([0x81; 16]).canonical(),
+        FieldId::from_bytes([0x90; 16]).canonical(),
+    );
+    let cases = [
+        (
+            "ALTER TABLE _orna_kernel.catalogue_fields DISABLE TRIGGER ALL;
+             UPDATE _orna_kernel.catalogue_fields
+             SET value_type_id = decode(repeat('ee', 16), 'hex')
+             WHERE owner_type_id = decode(repeat('81', 16), 'hex')
+               AND field_id = decode(repeat('90', 16), 'hex')",
+            "resolved value type must identify one value type in the selected pinned standard library",
+        ),
+        (
+            "ALTER TABLE _orna_kernel.catalogue_fields DISABLE TRIGGER ALL;
+             UPDATE _orna_kernel.catalogue_fields
+             SET value_standard_library_revision_id = decode(repeat('ee', 16), 'hex')
+             WHERE owner_type_id = decode(repeat('81', 16), 'hex')
+               AND field_id = decode(repeat('90', 16), 'hex')",
+            "resolved value type standard library revision must equal the selected catalogue pin",
+        ),
+        (
+            "ALTER TABLE _orna_kernel.catalogue_fields
+                 DROP CONSTRAINT catalogue_fields_check;
+             ALTER TABLE _orna_kernel.catalogue_fields DISABLE TRIGGER ALL;
+             UPDATE _orna_kernel.catalogue_fields
+             SET scalar_type = 'boolean'
+             WHERE owner_type_id = decode(repeat('81', 16), 'hex')
+               AND field_id = decode(repeat('90', 16), 'hex')",
+            "field type kind, scalar type, target identity, value type identity, and standard library revision must form one exact supported tuple",
+        ),
+    ];
+    for (statement, rule) in cases {
+        let expected_record = field_record.clone();
+        with_test_database(|database| async move {
+            kernel(&database)?.bootstrap().await?;
+            install_raw_v2_standard_revision(&database).await?;
+            run_batch(&database, statement).await?;
+
+            let before = snapshot_kernel_tables(&database).await?;
+            let first = recovery_error(&database).await?;
+            require_exact_raw_v2_error(&first, &expected_record, rule)?;
+            require(
+                snapshot_kernel_tables(&database).await? == before,
+                "first raw V2 value recovery rejection changed a durable table",
+            )?;
+
+            let second = recovery_error(&database).await?;
+            require_exact_raw_v2_error(&second, &expected_record, rule)?;
+            require(
+                snapshot_kernel_tables(&database).await? == before,
+                "repeated raw V2 value recovery rejection changed a durable table",
+            )
+        })
+        .await?;
+    }
+    Ok(())
 }
 
 #[tokio::test]
@@ -1560,6 +1749,306 @@ struct RawV2Fixture {
     revisions: Vec<FunctionRevisionRecord>,
 }
 
+fn raw_v2_value_type_by_slot(
+    standard: &VerifiedStandardLibrarySnapshot,
+    slot: &str,
+) -> TestResult<Option<TypeId>> {
+    let local_name = match slot {
+        "scalar_0" | "duplicate_owner_qualified_parameter" => "boolean",
+        "scalar_1" | "value" => "integer",
+        "scalar_2" => "bigint",
+        "scalar_3" => "float",
+        "scalar_4" => "decimal",
+        "scalar_5" => "character_large_object",
+        "scalar_6" => "binary_large_object",
+        "scalar_7" => "uuid",
+        "scalar_8" => "date",
+        "scalar_9" => "time",
+        "scalar_10" => "timestamp",
+        "scalar_11" => "duration",
+        _ => return Ok(None),
+    };
+    let name = QualifiedSemanticName::new(["std", "types", local_name])?;
+    standard
+        .catalogue()
+        .value_type_by_name(&name)
+        .map(|value_type| Some(value_type.id()))
+        .ok_or_else(|| failure(format!("raw V2 fixture has no standard value named {name}")))
+}
+
+fn raw_v2_single_return_value_type(
+    standard: &VerifiedStandardLibrarySnapshot,
+    function: &FunctionDefinition,
+) -> TestResult<Option<TypeId>> {
+    if function.name().parts().last().map(String::as_str) != Some("client_single") {
+        return Ok(None);
+    }
+    let name = QualifiedSemanticName::new(["std", "types", "void"])?;
+    standard
+        .catalogue()
+        .value_type_by_name(&name)
+        .map(|value_type| Some(value_type.id()))
+        .ok_or_else(|| failure(format!("raw V2 fixture has no standard value named {name}")))
+}
+
+fn raw_v2_value_catalogue(
+    standard: &VerifiedStandardLibrarySnapshot,
+    catalogue: &CatalogueSnapshot,
+) -> TestResult<CatalogueSnapshot> {
+    let objects = catalogue
+        .object_types()
+        .iter()
+        .map(|object| {
+            let fields = object
+                .fields()
+                .iter()
+                .map(|field| {
+                    Ok(FieldDefinition::new(
+                        field.id(),
+                        field.name(),
+                        field.ordinal(),
+                        raw_v2_value_type_by_slot(standard, field.name())?
+                            .map_or(field.resolved_type(), ResolvedType::value),
+                        field.nullable(),
+                        field.unique(),
+                        field.default_expression(),
+                        field.on_delete(),
+                    ))
+                })
+                .collect::<TestResult<Vec<_>>>()?;
+            Ok(ObjectTypeDefinition::new(
+                object.id(),
+                object.name().clone(),
+                fields,
+            ))
+        })
+        .collect::<TestResult<Vec<_>>>()?;
+    let functions = catalogue
+        .functions()
+        .iter()
+        .map(|function| {
+            let parameters = function
+                .parameters()
+                .iter()
+                .map(|parameter| {
+                    Ok(ParameterDefinition::new(
+                        parameter.id(),
+                        parameter.name(),
+                        parameter.ordinal(),
+                        raw_v2_value_type_by_slot(standard, parameter.name())?
+                            .map_or(parameter.resolved_type(), ResolvedType::value),
+                        parameter.default_expression(),
+                    ))
+                })
+                .collect::<TestResult<Vec<_>>>()?;
+            let return_type = match function.return_type() {
+                FunctionReturn::Single(resolved_type) => FunctionReturn::Single(
+                    raw_v2_single_return_value_type(standard, function)?
+                        .map_or(*resolved_type, ResolvedType::value),
+                ),
+                FunctionReturn::Rows(columns) => FunctionReturn::Rows(
+                    columns
+                        .iter()
+                        .map(|column| {
+                            Ok(FunctionReturnColumnDefinition::new(
+                                column.name(),
+                                column.ordinal(),
+                                raw_v2_value_type_by_slot(standard, column.name())?
+                                    .map_or(column.resolved_type(), ResolvedType::value),
+                            ))
+                        })
+                        .collect::<TestResult<Vec<_>>>()?,
+                ),
+            };
+            Ok(FunctionDefinition::new(
+                function.id(),
+                function.name().clone(),
+                function.domain(),
+                parameters,
+                return_type,
+                function.current_revision(),
+                function.security(),
+                function.transaction(),
+                function.volatility(),
+            ))
+        })
+        .collect::<TestResult<Vec<_>>>()?;
+    Ok(CatalogueSnapshot::new_with_functions(
+        catalogue.revision(),
+        catalogue.schemas().to_vec(),
+        objects,
+        functions,
+    )?)
+}
+
+fn require_raw_v2_value_slots(
+    revision: &orna_core::revision::ActiveDatabaseRevision,
+    standard: &VerifiedStandardLibrarySnapshot,
+) -> TestResult<()> {
+    for object in revision.catalogue().object_types() {
+        for field in object.fields() {
+            let Some(value_type) = raw_v2_value_type_by_slot(standard, field.name())? else {
+                continue;
+            };
+            require(
+                field.resolved_type() == ResolvedType::value(value_type),
+                format!(
+                    "raw V2 field {} did not recover exact value type {}",
+                    field.id().canonical(),
+                    value_type.canonical()
+                ),
+            )?;
+        }
+    }
+    for function in revision.catalogue().functions() {
+        for parameter in function.parameters() {
+            let Some(value_type) = raw_v2_value_type_by_slot(standard, parameter.name())? else {
+                continue;
+            };
+            require(
+                parameter.resolved_type() == ResolvedType::value(value_type),
+                format!(
+                    "raw V2 parameter {} did not recover exact value type {}",
+                    parameter.id().canonical(),
+                    value_type.canonical()
+                ),
+            )?;
+        }
+        match function.return_type() {
+            FunctionReturn::Single(resolved_type) => {
+                let Some(value_type) = raw_v2_single_return_value_type(standard, function)? else {
+                    continue;
+                };
+                require(
+                    *resolved_type == ResolvedType::value(value_type),
+                    format!(
+                        "raw V2 SINGLE return for {} did not recover exact value type {}",
+                        function.id().canonical(),
+                        value_type.canonical()
+                    ),
+                )?;
+            }
+            FunctionReturn::Rows(columns) => {
+                for column in columns {
+                    let Some(value_type) = raw_v2_value_type_by_slot(standard, column.name())?
+                    else {
+                        continue;
+                    };
+                    require(
+                        column.resolved_type() == ResolvedType::value(value_type),
+                        format!(
+                            "raw V2 ROWS column {} did not recover exact value type {}",
+                            column.ordinal(),
+                            value_type.canonical()
+                        ),
+                    )?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn upgrade_raw_v2_value_rows(
+    client: &tokio_postgres::Client,
+    catalogue: &CatalogueSnapshot,
+    standard: &VerifiedStandardLibrarySnapshot,
+) -> TestResult<()> {
+    for object in catalogue.object_types() {
+        for field in object.fields() {
+            let Some(value_type) = raw_v2_value_type_by_slot(standard, field.name())? else {
+                continue;
+            };
+            client
+                .execute(
+                    "UPDATE _orna_kernel.catalogue_fields
+                     SET type_kind = 'value', scalar_type = NULL, target_type_id = NULL,
+                         value_type_id = $1, value_standard_library_revision_id = $2
+                     WHERE catalogue_revision_id = $3
+                       AND owner_type_id = $4 AND field_id = $5",
+                    &[
+                        &value_type.to_bytes().to_vec(),
+                        &standard.revision().to_bytes().to_vec(),
+                        &catalogue.revision().to_bytes().to_vec(),
+                        &object.id().to_bytes().to_vec(),
+                        &field.id().to_bytes().to_vec(),
+                    ],
+                )
+                .await?;
+        }
+    }
+    for function in catalogue.functions() {
+        for parameter in function.parameters() {
+            let Some(value_type) = raw_v2_value_type_by_slot(standard, parameter.name())? else {
+                continue;
+            };
+            client
+                .execute(
+                    "UPDATE _orna_kernel.catalogue_function_parameters
+                     SET type_kind = 'value', scalar_type = NULL, target_type_id = NULL,
+                         value_type_id = $1, value_standard_library_revision_id = $2
+                     WHERE catalogue_revision_id = $3
+                       AND function_id = $4 AND parameter_id = $5",
+                    &[
+                        &value_type.to_bytes().to_vec(),
+                        &standard.revision().to_bytes().to_vec(),
+                        &catalogue.revision().to_bytes().to_vec(),
+                        &function.id().to_bytes().to_vec(),
+                        &parameter.id().to_bytes().to_vec(),
+                    ],
+                )
+                .await?;
+        }
+        match function.return_type() {
+            FunctionReturn::Single(_) => {
+                let Some(value_type) = raw_v2_single_return_value_type(standard, function)? else {
+                    continue;
+                };
+                client
+                    .execute(
+                        "UPDATE _orna_kernel.catalogue_functions
+                         SET return_type_kind = 'value', return_scalar_type = NULL,
+                             return_target_type_id = NULL, return_value_type_id = $1,
+                             return_standard_library_revision_id = $2
+                         WHERE catalogue_revision_id = $3 AND function_id = $4",
+                        &[
+                            &value_type.to_bytes().to_vec(),
+                            &standard.revision().to_bytes().to_vec(),
+                            &catalogue.revision().to_bytes().to_vec(),
+                            &function.id().to_bytes().to_vec(),
+                        ],
+                    )
+                    .await?;
+            }
+            FunctionReturn::Rows(columns) => {
+                for column in columns {
+                    let Some(value_type) = raw_v2_value_type_by_slot(standard, column.name())?
+                    else {
+                        continue;
+                    };
+                    client
+                        .execute(
+                            "UPDATE _orna_kernel.catalogue_function_return_columns
+                             SET type_kind = 'value', scalar_type = NULL, target_type_id = NULL,
+                                 value_type_id = $1, value_standard_library_revision_id = $2
+                             WHERE catalogue_revision_id = $3
+                               AND function_id = $4 AND ordinal = $5",
+                            &[
+                                &value_type.to_bytes().to_vec(),
+                                &standard.revision().to_bytes().to_vec(),
+                                &catalogue.revision().to_bytes().to_vec(),
+                                &function.id().to_bytes().to_vec(),
+                                &i64::from(column.ordinal()),
+                            ],
+                        )
+                        .await?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn install_function_revision(database: &TestDatabase) -> TestResult<FunctionFixture> {
     let object = install_object_revision(database, false).await?;
     let session = database.open().await?;
@@ -1882,6 +2371,8 @@ async fn install_raw_v2_standard_revision(database: &TestDatabase) -> TestResult
         orna_standard::retained_standard_library_snapshot()?,
     )?;
     insert_standard_snapshot(database, &standard).await?;
+    let legacy_catalogue = application.catalogue.clone();
+    application.catalogue = raw_v2_value_catalogue(&standard, &legacy_catalogue)?;
     let standard_boolean = standard
         .catalogue()
         .value_types()
@@ -1980,6 +2471,7 @@ async fn install_raw_v2_standard_revision(database: &TestDatabase) -> TestResult
             standard.revision(),
         )
         .await?;
+        upgrade_raw_v2_value_rows(session.client(), &legacy_catalogue, &standard).await?;
         for revision in &revisions {
             session
                 .client()
@@ -4011,6 +4503,42 @@ fn require_expected_error(
     require(
         matches,
         format!("durable tamper produced the wrong recovery failure: {error}"),
+    )
+}
+
+fn require_exact_raw_v2_error(
+    error: &PostgresKernelError,
+    expected_record: &str,
+    expected_rule: &str,
+) -> TestResult<()> {
+    let PostgresKernelError::DurableInvariant {
+        relation,
+        record,
+        rule,
+    } = error
+    else {
+        return Err(failure(format!(
+            "raw V2 value tuple produced the wrong wrapper: {error}"
+        )));
+    };
+    require(
+        *relation == "_orna_kernel.catalogue_fields"
+            && record == expected_record
+            && *rule == expected_rule,
+        format!(
+            "raw V2 value tuple produced relation={relation:?}, record={record:?}, rule={rule:?}"
+        ),
+    )?;
+    require(
+        error.to_string()
+            == format!(
+                "durable invariant failed for _orna_kernel.catalogue_fields record {expected_record}: {expected_rule}"
+            ),
+        "raw V2 value tuple changed the durable error display",
+    )?;
+    require(
+        error.source().is_none(),
+        "raw V2 value tuple durable error unexpectedly has a source",
     )
 }
 
