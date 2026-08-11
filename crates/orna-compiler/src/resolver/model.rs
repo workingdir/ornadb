@@ -1555,13 +1555,19 @@ impl CheckedObjectReferenceUse {
     }
 }
 
-/// One declared or body type use in a standard-backed application.
+/// The canonical public type use for one written slot in a standard-backed application.
+///
+/// This use is the canonical public resolved-type carrier for its slot. `Value` carries the
+/// checked standard [`TypeId`]. `ObjectReference` carries the checked application object target.
+/// Separate signature references are evidence about the same resolution, not another resolved
+/// type. The compatibility [`SemanticType::Scalar`] is not a source-name or `TypeId` authority,
+/// and declarations do not own a scalar-to-`TypeId` sidecar.
 #[non_exhaustive]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CheckedApplicationTypeUse {
-    /// A resolved standard value-type use.
+    /// A resolved standard value-type use with its checked standard [`TypeId`].
     Value(CheckedValueTypeUse),
-    /// A resolved application object-reference use.
+    /// A resolved application object-reference use with its checked application object target.
     ObjectReference(CheckedObjectReferenceUse),
 }
 
@@ -2587,6 +2593,8 @@ impl CheckedStandardApplicationBundle {
     }
 
     /// Returns every declared or body type use in canonical order.
+    ///
+    /// The `Value` entry for a standard-value slot is its canonical public resolved-type carrier.
     pub fn uses(&self) -> &[CheckedApplicationTypeUse] {
         &self.uses
     }
@@ -2742,7 +2750,10 @@ impl CheckedStandardApplicationField<'_> {
         self.field.ordinal
     }
 
-    /// Returns the direct resolved type use.
+    /// Returns the canonical public type use for this field's written slot.
+    ///
+    /// A standard value use carries its checked standard [`TypeId`]; the declaration's
+    /// compatibility [`SemanticType::Scalar`] is not a source-name or `TypeId` authority.
     pub fn resolved_type(&self) -> &CheckedApplicationTypeUse {
         self.bundle.type_use(CheckedTypeUseKind::Field {
             owner: self.owner,
@@ -2912,7 +2923,10 @@ impl<'a> CheckedStandardApplicationClientFunction<'a> {
             })
     }
 
-    /// Returns the direct declared return-type use.
+    /// Returns the canonical public type use for this CLIENT return slot.
+    ///
+    /// A standard value use carries its checked standard [`TypeId`]; the declaration's
+    /// compatibility [`SemanticType::Scalar`] is not a source-name or `TypeId` authority.
     pub fn return_type(&self) -> &CheckedApplicationTypeUse {
         self.bundle.type_use(CheckedTypeUseKind::Return {
             owner: self.function.id,
@@ -2982,7 +2996,10 @@ impl CheckedStandardApplicationParameter<'_> {
         self.parameter.ordinal
     }
 
-    /// Returns the direct resolved type use.
+    /// Returns the canonical public type use for this parameter's written slot.
+    ///
+    /// A standard value use carries its checked standard [`TypeId`]; the declaration's
+    /// compatibility [`SemanticType::Scalar`] is not a source-name or `TypeId` authority.
     pub fn resolved_type(&self) -> &CheckedApplicationTypeUse {
         self.bundle.type_use(CheckedTypeUseKind::Parameter {
             owner: self.owner,
@@ -3026,7 +3043,10 @@ impl CheckedStandardApplicationReturnColumn<'_> {
         self.column.ordinal
     }
 
-    /// Returns the direct resolved type use.
+    /// Returns the canonical public type use for this return column's written slot.
+    ///
+    /// A standard value use carries its checked standard [`TypeId`]; the declaration's
+    /// compatibility [`SemanticType::Scalar`] is not a source-name or `TypeId` authority.
     pub fn resolved_type(&self) -> &CheckedApplicationTypeUse {
         self.bundle.type_use(CheckedTypeUseKind::Return {
             owner: self.owner,
