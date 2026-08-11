@@ -1184,6 +1184,357 @@ rows are backfilled with `1`. A standard-library revision row stores positive
 here. Only their values encoded inside canonical byte streams use the
 big-endian `u32` framing stated above.
 
+### PostgreSQL standard catalogue schema support
+
+Migration `0007_catalogue_types.sql` adds schema support only. It has registry
+version `7`, the exact name `standard catalogue type storage`, and an SQL-only
+checksum. It has no migration data step. It creates no standard-library row,
+source row, catalogue row, binding, value type, active revision, accepted ID,
+accepted digest, or immutable trigger.
+
+The existing `_orna_kernel.source_bundles`, `_orna_kernel.source_units`, and
+`_orna_kernel.source_revisions` tables store standard source. The standard
+source revision uses the existing source tables and is parentless. No standard
+source table duplicates a source bundle, source unit, or source revision. A
+later recovery row checks that parentless fact.
+
+Migration `0007` creates `_orna_kernel.standard_library_revisions` with these
+exact columns and constraints:
+
+* `id` is the 16-byte primary key.
+* `source_revision_id` is a 16-byte, non-null, unique foreign key to the
+  generic `_orna_kernel.source_revisions` table.
+* `catalogue_revision_id` is a 16-byte, non-null, unique value. It has no
+  foreign key to the generic application `_orna_kernel.catalogue_revisions`
+  table.
+* `digest_version` is a non-null `smallint` with the exact value `1`.
+* `language_version` is non-null and nonempty.
+* `content_hash` is non-null and exactly 32 bytes. It stores the standard
+  library digest.
+* `hash_algorithm` is non-null and has the exact value `sha256`.
+* `created_at` is non-null and defaults to `transaction_timestamp()`.
+
+Migration `0007` creates these standard-catalogue tables. Each table has a
+foreign key from `standard_library_revision_id` to
+`standard_library_revisions(id)`. Each primary key starts with
+`standard_library_revision_id` and then the stated durable ID. Each table
+stores an inline required source origin as `source_unit_id`, `source_start`,
+and `source_end`. `source_unit_id` is exactly 16 bytes and is a foreign key to
+the generic source-unit table. `source_start` and `source_end` are non-null
+integers in the inclusive range `0..=4294967295`, and
+`source_end >= source_start`. Recovery later checks source membership, UTF-8
+boundaries, and complete declaration ranges.
+
+* `_orna_kernel.standard_catalogue_schemas` uses
+  `(standard_library_revision_id, schema_id)` as its key. `schema_id` is
+  exactly 16 bytes. `name_parts` is nonempty and contains no null or empty
+  part. It is unique per standard-library revision.
+* `_orna_kernel.standard_catalogue_value_types` uses
+  `(standard_library_revision_id, type_id)` as its key. `type_id` is exactly
+  16 bytes. `schema_id` is exactly 16 bytes and has a composite foreign key to
+  the schema in the same standard-library revision. `name_parts` has at least
+  two non-null, nonempty parts and is unique per standard-library revision.
+  `value_kind` has the exact value `primitive`, `mutability` has the exact
+  value `immutable`, `persistence` is exactly `persistable` or `transient`,
+  and `representation_contract` is nonempty.
+* `_orna_kernel.standard_catalogue_type_bindings` uses
+  `(standard_library_revision_id, type_binding_id)` as its key.
+  `type_binding_id` is exactly 16 bytes. `kind` is exactly `qualified` or
+  `prelude`. It stores one `name_parts` array. A qualified binding has at
+  least two non-null, nonempty parts; a prelude binding has at least one such
+  part. `(standard_library_revision_id, kind, name_parts)` is unique.
+  `target_type_id` is exactly 16 bytes and has a composite foreign key to the
+  target value type in the same standard-library revision. Recovery later
+  checks derived binding IDs, names across the primary and binding families,
+  and all cross-family collisions.
+
+Migration `0007` alters `_orna_kernel.catalogue_revisions` as follows:
+
+* `canonical_hash_version` is a non-null `smallint` that defaults to `1` and
+  accepts only `1` or `2`.
+* `standard_library_revision_id` is nullable, exactly 16 bytes when present,
+  and has a foreign key to `_orna_kernel.standard_library_revisions(id)`.
+* A check requires the exact version-1/null or version-2/non-null shape.
+* `(id, standard_library_revision_id)` is unique.
+
+This migration does not change `catalogue_revisions.hash_contract_version`; it
+remains exactly `1`. It also adds non-null `semantic_hash_version` to
+`_orna_kernel.function_revisions`. The column defaults to `1` and accepts only
+`1` or `2`. `function_revisions.hash_contract_version` remains exactly `1`.
+
+Migration `0007` extends `_orna_kernel.definition_references` with nullable
+`target_standard_library_revision_id`. When present, it is exactly 16 bytes.
+It adds `value_type` to the target-kind domain. A `value_type` target requires
+that standard-library ID and requires both `target_owner_type_id` and
+`target_owner_function_id` to be null. Every other target kind requires the
+standard-library ID to be null. The reference-kind compatibility check permits
+`value_type` only with `named_type`; existing compatibility cases remain
+unchanged. The migration adds these composite foreign keys:
+
+* `(catalogue_revision_id, target_standard_library_revision_id)` references
+  the application catalogue revision and its pinned standard-library revision.
+* `(target_standard_library_revision_id, target_definition_id)` references a
+  value type in the same standard-library revision.
+
+The migration adds a partial lookup index for `value_type` references. It also
+adds identity-first indexes for application schema IDs and object-type IDs, and
+for standard schema IDs, value-type IDs, and type-binding IDs. These indexes
+use the durable ID before the owning revision ID. They support the later
+database-wide collision scan. No unique constraint spans revisions.
+
+The migration revokes all public privileges on every new standard table. It
+does not add a duplicate standard pin to `_orna_kernel.active_revision`; the
+application catalogue revision owns that pin. The raw all-zero standard
+catalogue ID remains SQL-constructible. Later recovery, not this migration,
+maps it to the exact core standard-role sentinel error.
+
+#### Exact PostgreSQL DDL contract for migration 0007
+
+This subsection is normative. It fixes the SQL relation, column, constraint,
+and index names for migration `0007`. All relations in this subsection are in
+the `_orna_kernel` schema. The migration uses `bytea`, `text`, `text[]`,
+`bigint`, `smallint`, and `timestamp with time zone`; it creates no PostgreSQL
+enum type. An ID check uses `octet_length(column) = 16`. A hash check uses
+`octet_length(column) = 32`. A declaration with no `DEFAULT` clause has no
+default.
+
+`_orna_kernel.standard_library_revisions` has these exact columns and named
+constraints:
+
+| Column | Exact declaration | Named constraint or relation |
+| --- | --- | --- |
+| `id` | `bytea NOT NULL` | `std_lib_rev_pkey` primary key; `std_lib_rev_id_length` checks 16 bytes |
+| `source_revision_id` | `bytea NOT NULL` | `std_lib_rev_source_revision_id_length` checks 16 bytes; `std_lib_rev_source_revision_key` is unique; `std_lib_rev_source_revision_fk` references `_orna_kernel.source_revisions(id)` |
+| `catalogue_revision_id` | `bytea NOT NULL` | `std_lib_rev_catalogue_revision_id_length` checks 16 bytes; `std_lib_rev_catalogue_revision_key` is unique. It has no foreign key to `_orna_kernel.catalogue_revisions`. |
+| `digest_version` | `smallint NOT NULL DEFAULT 1` | `std_lib_rev_digest_version_check` checks `digest_version = 1` |
+| `language_version` | `text NOT NULL` | `std_lib_rev_language_version_check` checks `length(language_version) > 0` |
+| `content_hash` | `bytea NOT NULL` | `std_lib_rev_content_hash_length` checks 32 bytes |
+| `hash_algorithm` | `text NOT NULL DEFAULT 'sha256'` | `std_lib_rev_hash_algorithm_check` checks `hash_algorithm = 'sha256'` |
+| `created_at` | `timestamp with time zone NOT NULL DEFAULT transaction_timestamp()` | none |
+
+`_orna_kernel.standard_catalogue_schemas` has these exact columns and named
+constraints:
+
+| Column | Exact declaration | Named constraint or relation |
+| --- | --- | --- |
+| `standard_library_revision_id` | `bytea NOT NULL` | `std_cat_schemas_std_lib_rev_id_length` checks 16 bytes; `std_cat_schemas_std_lib_rev_fk` references `_orna_kernel.standard_library_revisions(id)` |
+| `schema_id` | `bytea NOT NULL` | `std_cat_schemas_schema_id_length` checks 16 bytes; part of `std_cat_schemas_pkey` |
+| `name_parts` | `text[] NOT NULL` | `std_cat_schemas_name_parts_check` checks `cardinality(name_parts) > 0`, no null part, and no empty part; `std_cat_schemas_name_key` is unique on `(standard_library_revision_id, name_parts)` |
+| `source_unit_id` | `bytea NOT NULL` | `std_cat_schemas_source_origin_check` checks its 16-byte length; `std_cat_schemas_source_unit_fk` references `_orna_kernel.source_units(id)` |
+| `source_start` | `bigint NOT NULL` | `std_cat_schemas_source_origin_check` checks `source_start >= 0 AND source_start <= 4294967295` |
+| `source_end` | `bigint NOT NULL` | `std_cat_schemas_source_origin_check` checks `source_end >= source_start AND source_end <= 4294967295` |
+
+`std_cat_schemas_pkey` is exactly `PRIMARY KEY
+(standard_library_revision_id, schema_id)`. The exact `name_parts` expression
+in `std_cat_schemas_name_parts_check` is:
+
+```sql
+cardinality(name_parts) > 0
+AND array_position(name_parts, NULL::text) IS NULL
+AND array_position(name_parts, '') IS NULL
+```
+
+`_orna_kernel.standard_catalogue_value_types` has these exact columns and
+named constraints:
+
+| Column | Exact declaration | Named constraint or relation |
+| --- | --- | --- |
+| `standard_library_revision_id` | `bytea NOT NULL` | `std_cat_value_types_std_lib_rev_id_length` checks 16 bytes; `std_cat_value_types_std_lib_rev_fk` references `_orna_kernel.standard_library_revisions(id)` |
+| `type_id` | `bytea NOT NULL` | `std_cat_value_types_type_id_length` checks 16 bytes; part of `std_cat_value_types_pkey` |
+| `schema_id` | `bytea NOT NULL` | `std_cat_value_types_schema_id_length` checks 16 bytes; `std_cat_value_types_schema_fk` references `_orna_kernel.standard_catalogue_schemas(standard_library_revision_id, schema_id)` |
+| `name_parts` | `text[] NOT NULL` | `std_cat_value_types_name_parts_check` checks two or more parts, no null part, and no empty part; `std_cat_value_types_name_key` is unique on `(standard_library_revision_id, name_parts)` |
+| `value_kind` | `text NOT NULL` | `std_cat_value_types_value_kind_check` checks `value_kind = 'primitive'` |
+| `mutability` | `text NOT NULL` | `std_cat_value_types_mutability_check` checks `mutability = 'immutable'` |
+| `persistence` | `text NOT NULL` | `std_cat_value_types_persistence_check` checks `persistence IN ('persistable', 'transient')` |
+| `representation_contract` | `text NOT NULL` | `std_cat_value_types_representation_contract_check` checks `length(representation_contract) > 0` |
+| `source_unit_id` | `bytea NOT NULL` | `std_cat_value_types_source_origin_check` checks its 16-byte length; `std_cat_value_types_source_unit_fk` references `_orna_kernel.source_units(id)` |
+| `source_start` | `bigint NOT NULL` | `std_cat_value_types_source_origin_check` checks `source_start >= 0 AND source_start <= 4294967295` |
+| `source_end` | `bigint NOT NULL` | `std_cat_value_types_source_origin_check` checks `source_end >= source_start AND source_end <= 4294967295` |
+
+`std_cat_value_types_pkey` is exactly `PRIMARY KEY
+(standard_library_revision_id, type_id)`. The exact `name_parts` expression in
+`std_cat_value_types_name_parts_check` is:
+
+```sql
+cardinality(name_parts) >= 2
+AND array_position(name_parts, NULL::text) IS NULL
+AND array_position(name_parts, '') IS NULL
+```
+
+`_orna_kernel.standard_catalogue_type_bindings` has these exact columns and
+named constraints:
+
+| Column | Exact declaration | Named constraint or relation |
+| --- | --- | --- |
+| `standard_library_revision_id` | `bytea NOT NULL` | `std_cat_type_bindings_std_lib_rev_id_length` checks 16 bytes; `std_cat_type_bindings_std_lib_rev_fk` references `_orna_kernel.standard_library_revisions(id)` |
+| `type_binding_id` | `bytea NOT NULL` | `std_cat_type_bindings_type_binding_id_length` checks 16 bytes; part of `std_cat_type_bindings_pkey` |
+| `kind` | `text NOT NULL` | `std_cat_type_bindings_kind_check` checks `kind IN ('qualified', 'prelude')` |
+| `name_parts` | `text[] NOT NULL` | `std_cat_type_bindings_name_parts_check` checks the exact qualified or prelude shape below; `std_cat_type_bindings_name_key` is unique on `(standard_library_revision_id, kind, name_parts)` |
+| `target_type_id` | `bytea NOT NULL` | `std_cat_type_bindings_target_type_id_length` checks 16 bytes; `std_cat_type_bindings_target_type_fk` references `_orna_kernel.standard_catalogue_value_types(standard_library_revision_id, type_id)` |
+| `source_unit_id` | `bytea NOT NULL` | `std_cat_type_bindings_source_origin_check` checks its 16-byte length; `std_cat_type_bindings_source_unit_fk` references `_orna_kernel.source_units(id)` |
+| `source_start` | `bigint NOT NULL` | `std_cat_type_bindings_source_origin_check` checks `source_start >= 0 AND source_start <= 4294967295` |
+| `source_end` | `bigint NOT NULL` | `std_cat_type_bindings_source_origin_check` checks `source_end >= source_start AND source_end <= 4294967295` |
+
+`std_cat_type_bindings_pkey` is exactly `PRIMARY KEY
+(standard_library_revision_id, type_binding_id)`. The exact
+`std_cat_type_bindings_name_parts_check` expression is:
+
+```sql
+(
+    kind = 'qualified'
+    AND cardinality(name_parts) >= 2
+    AND array_position(name_parts, NULL::text) IS NULL
+    AND array_position(name_parts, '') IS NULL
+)
+OR (
+    kind = 'prelude'
+    AND cardinality(name_parts) >= 1
+    AND array_position(name_parts, NULL::text) IS NULL
+    AND array_position(name_parts, '') IS NULL
+)
+```
+
+For each of the three standard-catalogue tables, its exact
+`*_source_origin_check` expression combines the listed source-unit length and
+the listed range checks as follows:
+
+```sql
+octet_length(source_unit_id) = 16
+AND source_start >= 0
+AND source_start <= 4294967295
+AND source_end >= source_start
+AND source_end <= 4294967295
+```
+
+Migration `0007` alters `_orna_kernel.catalogue_revisions` with these exact
+columns and constraints:
+
+| Column | Exact declaration | Named constraint or relation |
+| --- | --- | --- |
+| `canonical_hash_version` | `smallint NOT NULL DEFAULT 1` | `catalogue_revisions_canonical_hash_version_check` checks `canonical_hash_version IN (1, 2)` |
+| `standard_library_revision_id` | `bytea NULL` | `catalogue_revisions_std_lib_rev_id_length` checks that it is null or 16 bytes; `catalogue_revisions_std_lib_rev_fk` references `_orna_kernel.standard_library_revisions(id)` |
+
+`catalogue_revisions_standard_context_check` is exactly:
+
+```sql
+(canonical_hash_version = 1 AND standard_library_revision_id IS NULL)
+OR (canonical_hash_version = 2 AND standard_library_revision_id IS NOT NULL)
+```
+
+`catalogue_revisions_id_std_lib_rev_key` is exactly `UNIQUE (id,
+standard_library_revision_id)`. The existing
+`catalogue_revisions_hash_contract_version_check` remains unchanged and still
+checks `hash_contract_version = 1`.
+
+Migration `0007` adds this exact column and constraint to
+`_orna_kernel.function_revisions`:
+
+| Column | Exact declaration | Named constraint |
+| --- | --- | --- |
+| `semantic_hash_version` | `smallint NOT NULL DEFAULT 1` | `function_revisions_semantic_hash_version_check` checks `semantic_hash_version IN (1, 2)` |
+
+The existing `function_revisions_hash_contract_version_check` remains unchanged
+and still checks `hash_contract_version = 1`.
+
+Migration `0007` extends `_orna_kernel.definition_references` with
+`target_standard_library_revision_id bytea NULL`. It has no default. The named
+`definition_references_target_std_lib_rev_id_length` constraint checks that it
+is null or 16 bytes. The migration drops and adds these three existing named
+constraints, in this exact order:
+
+```sql
+definition_references_target_kind_check
+definition_references_target_owner_shape_check
+definition_references_reference_target_compatibility_check
+```
+
+The replacement `definition_references_target_kind_check` permits exactly
+`'object_type'`, `'field'`, `'function'`, `'parameter'`, `'expression'`, and
+`'value_type'`. The replacement
+`definition_references_target_owner_shape_check` is exactly:
+
+```sql
+(
+    target_kind = 'field'
+    AND target_owner_type_id IS NOT NULL
+    AND target_owner_function_id IS NULL
+)
+OR (
+    target_kind = 'parameter'
+    AND target_owner_type_id IS NULL
+    AND target_owner_function_id IS NOT NULL
+)
+OR (
+    target_kind = 'value_type'
+    AND target_owner_type_id IS NULL
+    AND target_owner_function_id IS NULL
+)
+OR (
+    target_kind NOT IN ('field', 'parameter', 'value_type')
+    AND target_owner_type_id IS NULL
+    AND target_owner_function_id IS NULL
+)
+```
+
+The new `definition_references_target_std_lib_rev_shape_check` is exactly:
+
+```sql
+(target_kind = 'value_type' AND target_standard_library_revision_id IS NOT NULL)
+OR (target_kind <> 'value_type' AND target_standard_library_revision_id IS NULL)
+```
+
+The replacement
+`definition_references_reference_target_compatibility_check` retains every
+existing clause and adds only the `named_type` to `value_type` clause:
+
+```sql
+(reference_kind = 'function_call' AND target_kind = 'function')
+OR (
+    reference_kind IN ('named_type', 'object_reference', 'query_object')
+    AND target_kind = 'object_type'
+)
+OR (reference_kind = 'parameter_read' AND target_kind = 'parameter')
+OR (reference_kind = 'query_field' AND target_kind = 'field')
+OR (reference_kind = 'expression' AND target_kind = 'expression')
+OR (reference_kind = 'write_object' AND target_kind = 'object_type')
+OR (reference_kind = 'write_field' AND target_kind = 'field')
+OR (reference_kind = 'named_type' AND target_kind = 'value_type')
+```
+
+`definition_references_reference_kind_check` is not dropped or changed. The
+migration adds these exact deferrable foreign keys:
+
+| Name | Exact foreign key |
+| --- | --- |
+| `definition_references_catalogue_std_lib_rev_fk` | `FOREIGN KEY (catalogue_revision_id, target_standard_library_revision_id) REFERENCES _orna_kernel.catalogue_revisions(id, standard_library_revision_id) DEFERRABLE INITIALLY DEFERRED` |
+| `definition_references_std_value_type_target_fk` | `FOREIGN KEY (target_standard_library_revision_id, target_definition_id) REFERENCES _orna_kernel.standard_catalogue_value_types(standard_library_revision_id, type_id) DEFERRABLE INITIALLY DEFERRED` |
+
+The migration creates these exact indexes. Each index has the stated ordered
+columns and predicate. It creates no global unique index across revisions.
+
+| Index | Relation | Ordered columns | Predicate |
+| --- | --- | --- | --- |
+| `catalogue_schemas_identity_index` | `_orna_kernel.catalogue_schemas` | `(schema_id, catalogue_revision_id)` | none |
+| `catalogue_object_types_identity_index` | `_orna_kernel.catalogue_object_types` | `(type_id, catalogue_revision_id)` | none |
+| `standard_catalogue_schemas_identity_index` | `_orna_kernel.standard_catalogue_schemas` | `(schema_id, standard_library_revision_id)` | none |
+| `standard_catalogue_value_types_identity_index` | `_orna_kernel.standard_catalogue_value_types` | `(type_id, standard_library_revision_id)` | none |
+| `standard_catalogue_type_bindings_identity_index` | `_orna_kernel.standard_catalogue_type_bindings` | `(type_binding_id, standard_library_revision_id)` | none |
+| `definition_references_value_type_target_index` | `_orna_kernel.definition_references` | `(target_standard_library_revision_id, target_definition_id, catalogue_revision_id)` | `WHERE target_kind = 'value_type'` |
+
+The migration ends with these exact privilege statements:
+
+```sql
+REVOKE ALL ON TABLE _orna_kernel.standard_library_revisions FROM PUBLIC;
+REVOKE ALL ON TABLE _orna_kernel.standard_catalogue_schemas FROM PUBLIC;
+REVOKE ALL ON TABLE _orna_kernel.standard_catalogue_value_types FROM PUBLIC;
+REVOKE ALL ON TABLE _orna_kernel.standard_catalogue_type_bindings FROM PUBLIC;
+```
+
+Fresh bootstrap and an upgrade from version 6 leave the active application
+pair, canonical hashes, semantics, and version-1 recovery unchanged. They
+produce `canonical_hash_version = 1`, `semantic_hash_version = 1`, a null
+standard-library pin, and zero standard-library rows.
+
 ## Catalogue and semantic model
 
 The public core catalogue gains one `TypeDefinition` family, a value-type
@@ -2390,7 +2741,19 @@ together, or the previous version-1 active revision remains authoritative.
 | Opaque standard-upgrade capability | `StandardUpgrade` private field, derives, exact accessors, and absent owned conversion, dereference, and inner interfaces; exact wrapper signature, transparent error, and retain, verify, check, prepare order | Only `prepare_standard_upgrade` constructs the opaque `StandardUpgrade`. It owns a `PreparedStandardUpgrade`, exposes its checked standard library, verified snapshot, and borrowed application revision, and returns retained, checked-source, and compiler-preparation failures through transparent `StandardUpgradeError` variants. It adds only `StandardLibraryError::Unavailable`; no raw or unnamed compiler route exists. |
 | Normal-apply and atomic standard guards | Every `StandardContextIdentity` field, accessor, derive, and error field; both boxed mismatch identity payloads and their exact retained values; version-1/version-2 transitions; matching and mismatching version-2 contexts; `ReservedStandardIdentity` field, display, and source; exact trusted-path, transaction, recovery, expected-base, identity-gate, materialisation, physical-plan, and write ordering; replay and repeat-preparation precedence; active and inactive-record ordering | Normal apply performs the permanent standard-context guard after expected-base recovery and before materialisation, planning, or writes. It rejects every version transition and requires exact version-2 context equality. A mismatch owns the complete active and candidate identities in symmetric boxes and allocates them only on the error path. Atomic special apply accepts only `&orna_standard::StandardUpgrade`, then follows the stated exact order. A replay returns `ExpectedBaseMismatch` before collision scanning or writes. It completes the typed `ReservedStandardIdentity` gate before materialisation and physical planning, with `StandardLibraryRevision` first and every active-visible record in explicit family order before inactive records by durable ID bytes. Compiler construction already proves deployable core invariants, so special apply has no opaque-association or invariant gate. A repeated prepare against active version 2 returns `StandardLibraryAlreadyInstalled`. |
 | Standard-revision recovery | Complete raw version-2 fixtures; the raw standard catalogue set separately to `EMPTY_APPLICATION_CATALOGUE_REVISION_ID`; complete version-1 fixtures; a complete table snapshot before and after each rejected recovery | The decoder is the first recovery path with a standard context. It preserves complete version-2 decoding and all version-1 recovery behaviour. A raw standard sentinel returns exact `RevisionInvariantError::ReservedOfflineCheckCatalogueRevision { revision: EMPTY_APPLICATION_CATALOGUE_REVISION_ID, role: ActiveOrRecoveredStandard }`, exact display, and no error source. It returns no active revision and performs no repair or write; the complete table snapshot remains unchanged. |
+| PostgreSQL standard catalogue schema support | Migration registry version, name, and SQL-only checksum; every new table, column, check, primary key, uniqueness rule, foreign key, index, and public privilege; fresh bootstrap; upgrade from version 6; repeat and concurrent bootstrap; migration-history checksum, gap, tamper, and future-version cases | Migration `0007` adds only the stated schema support. The bootstrap tests prove the protected standard-table set and every stated DDL shape, including required inline origins, version-1/version-2 catalogue-pin shape, version columns, value-type reference shape, and identity-first indexes. Fresh and version-6 databases retain the exact version-1 active pair, hashes, and semantics, have zero standard rows, and store only version `1` columns with a null pin. Repeated and concurrent bootstrap are idempotent. Checksum and history rejection remain fail closed; a future migration version is `8`. No test seeds, decodes, applies, or trusts standard facts. |
 | Legacy compatibility boundary | Existing `check`, `prepare`, `ORNA0303`, scalar spelling, and legacy preparation tests; attempted standard-report preparation | Version-1 legacy checking and preparation remain unchanged and frozen. The standard application seam is distinct, introduces no compiler `Unavailable` error, and is removed or merged only by an explicit later caller-migration row. |
+
+The PostgreSQL schema-support row has these non-vacuous gates:
+
+* `cargo test -p orna-kernel-postgres` runs the ordinary, non-ignored package
+  tests. It does not run the ignored bootstrap integration proofs.
+* `just kernel-test` runs the ignored live PostgreSQL bootstrap proof through
+  its exact `orna-kernel-postgres` invocation with `--ignored --test-threads=1`.
+* `cargo clippy -p orna-kernel-postgres --all-targets -- -D warnings` has no
+  warning.
+* `cargo check --workspace`, `cargo fmt --check`, `git diff --check`, and
+  `similarity-rs crates/orna-kernel-postgres` pass.
 
 The later `feat(std): orchestrate standard upgrades` proof, not this compiler
 checker matrix, proves wrapper-before-check production ordering. It calls
@@ -2791,7 +3154,7 @@ standard-orchestration rows remain within their two-file caps.
 | `feat(compiler): prepare checked standard upgrades` | `crates/orna-compiler/src/prepare.rs`, `crates/orna-compiler/src/lib.rs` | Define and re-export private-field `PreparedStandardUpgrade` and compiler-owned payload-bearing `StandardUpgradeIdentity`, then implement `prepare_checked_standard_upgrade(&CheckedStandardLibrary, &ActiveDatabaseRevision) -> Result<PreparedStandardUpgrade, PrepareStandardUpgradeError>`. It has the exact eleven-gate installed-standard, namespace, reserved-identity, `StandardApplicationCheckContext`, diagnostics, matched-active-source, revision-number-exhaustion, and nested catalogue, candidate-record, canonical, and revision error contract. Gate 4 maps exact reachable `SchemaNameConflict { name }`, `UnsupportedCompatibilityContract { type_id, contract }`, and `CompatibilityContractConflict { contract }` through transparent `Context`. Gates 5 and 6 reconstruct stored source with exact ordinal, path, and content facts, then use one sealed allocation-free version-1 matched-active-source capability for all final version-2 lowering. Gate 6 compares the active catalogue current ID, definitions, expressions, origins, references, and every listed source-derived current `FunctionRevisionRecord` fact, including a core-valid changed language-version mismatch, while retaining the core-validated non-monotonic current revision number and excluding history only from that agreement. In active function snapshot order, gate 7 reuses only an exact current or historical same-function `Version2` record with the freshly recomputed desired semantic digest, desired language version, and complete same-domain artefact kind, format, version, payload, and content hash; declaration origin and content hash may differ. Only otherwise does it check the combined current-and-historical maximum revision number before allocation. Its tests cover a current maximum, historical maximum without reuse, and exact historical reuse, plus a claimed-digest historical maximum with changed same-domain artefact or language that exhausts. After gate 7 and before gate 8 catalogue construction, its private retry allocator excludes reserved same-class IDs only for new companion application catalogue and source IDs. It reuses version-1 application schema and type identities already covered by active gate 3, and creates no `TypeBindingId`. Gate 9 constructs typed candidate records and a private uncanonical source, gate 10 calculates all canonical hashes through core's typed canonical API, and gate 11 reconstructs the hashed source and final deployable revision. Production tests drive every gate and adjacent precedence, zero allocation, and no second source traversal, resolver, or lowering authority. It produces no opaque installable capability; its application revision is a normal-input borrow guarded by the permanent PostgreSQL transition rule. |
 | `feat(std): orchestrate standard upgrades` | `crates/orna-standard/src/lib.rs` | Define opaque private-field `StandardUpgrade`, re-export `StandardUpgradeIdentity`, and expose `prepare_standard_upgrade(&ActiveDatabaseRevision) -> Result<StandardUpgrade, StandardUpgradeError>`. It calls retained snapshot construction, accepted verification, standard-source checking, and the public `orna_compiler::prepare_checked_standard_upgrade` seam in that exact order. It adds only boundary-owned `StandardLibraryError::Unavailable` and maps retained, checked-source, and compiler-preparation failures through transparent `StandardUpgradeError` variants. Its proof owns wrapper-before-check ordering. The crate has no database authority. |
 | `build(postgres): add standard-upgrade dependency` | `crates/orna-kernel-postgres/Cargo.toml`, `Cargo.lock` | Add the normal `orna-standard` dependency required only by atomic special apply. The dependency graph is `postgres -> standard -> compiler -> core`; no reverse dependency exists. |
-| `feat(postgres): store standard catalogue types` | `crates/orna-kernel-postgres/migrations/0007_catalogue_types.sql`, `crates/orna-kernel-postgres/src/bootstrap.rs` | Bare bootstrap installs only schema support and still recovers all v1 databases exactly. |
+| `feat(postgres): store standard catalogue types` | `crates/orna-kernel-postgres/migrations/0007_catalogue_types.sql`, `crates/orna-kernel-postgres/src/bootstrap.rs`, `crates/orna-kernel-postgres/tests/bootstrap.rs` | Register SQL-only migration 0007 as `standard catalogue type storage`. Add only the stated standard catalogue storage schema and bootstrap proof. Bare bootstrap stays application-only, has no standard rows or pin, and still recovers all version-1 databases exactly. |
 | `feat(postgres): decode standard revisions` | `crates/orna-kernel-postgres/src/recovery.rs`, `crates/orna-kernel-postgres/src/recovery/functions.rs`, `crates/orna-kernel-postgres/tests/recovery.rs` | This is the first recovery path with a standard context. It verifies complete raw version-2 fixtures and still recovers version 1 exactly. Its live raw standard-catalogue sentinel test inserts `EMPTY_APPLICATION_CATALOGUE_REVISION_ID` and requires exact `RevisionInvariantError::ReservedOfflineCheckCatalogueRevision { revision: EMPTY_APPLICATION_CATALOGUE_REVISION_ID, role: ActiveOrRecoveredStandard }`, exact display, and no error source, active revision, repair, or write, with an unchanged complete table snapshot. No public production mutation can create version-2 active state. |
 | `feat(storage): lower verified value contracts` | `crates/orna-core/src/physical.rs`, `crates/orna-kernel-postgres/src/physical.rs`, `crates/orna-kernel-postgres/src/physical/verify.rs` | Physical planning and verification start from a verified contract; generated SQL and existing physical identities remain exact. |
 | `feat(server): execute verified value contracts` | `crates/orna-kernel-postgres/src/server_runtime.rs`, `crates/orna-kernel-postgres/src/server_execution.rs`, `crates/orna-kernel-postgres/src/server_mutation_execution.rs` | Runtime adapters start from the same contract and preserve every existing plan byte, bind, result, and error. |
