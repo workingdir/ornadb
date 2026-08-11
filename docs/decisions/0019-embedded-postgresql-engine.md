@@ -48,17 +48,66 @@ readiness state, and other durable database files. These files are data, not a
 PostgreSQL program distribution.
 
 The signed Orna distribution is the only production distribution authority.
-The build must pin the official PostgreSQL source archive and digest, every
-Orna source patch, the complete build inputs, and the PostgreSQL licence. A
-separate PostgreSQL accepted-runtime record, release key, detached runtime
-signature, publisher, tree verifier, or signed-runtime ingestion path is not
-permitted.
+PostgreSQL source is checked out at `third_party/postgresql` as a Git submodule
+of the Orna-owned PostgreSQL fork. The fork retains the official
+`postgres/postgres` `REL_18_4` commit
+`f5cc81719e6da4cbdb1f797c48b693e91018153a` as the accepted base. The
+superproject gitlink pins one exact patched tip. A branch name or moving tag is
+not source authority.
 
-The embedded PostgreSQL build must be reproducible. Two isolated builds must
-produce identical static link inputs and embedded support-asset inputs. One
-generated embedded-engine manifest is the authority for the official
-PostgreSQL source and digest, Orna source patches, C compiler and linker,
-static archive, symbol closure, path remapping, and support assets.
+This first release has one PostgreSQL source gitlink. A future release that
+embeds two PostgreSQL majors must pin one distinct, versioned gitlink per major
+instead of moving this one path between source and candidate trees. The future
+upgrade amendment must name both paths, bases, tips, and patch ranges before a
+second engine is added.
+
+The accepted tip is a direct linear descendant of that base. Every descendant
+commit is one signed Orna source patch, contains one concern, changes at most
+three files, has no merge parent, and is signed by fingerprint
+`29A0841839E8BCDE9542DDEECBF3E7FD23956817`. The build verifies every patch
+commit against the pinned public key before compilation. After the native
+cut-over, PostgreSQL changes are not duplicated as patch files in the Orna
+repository and no build step reapplies them. A native proof build fails if the
+submodule is absent, modified, has untracked files, is at another commit, does
+not have the accepted base as its exact ancestor, contains an unexpected
+commit, has a missing or unacceptable signature, or does not match the pinned
+source-tree inventory. `packaging/postgresql/Makefile` never initialises,
+fetches, updates, or repairs the submodule.
+
+Credential-free workflow checkout is the one provisioning boundary. It may
+initialise and fetch the exact superproject-pinned submodule and its required
+history before the proof starts. Checkout persists no credentials. All native
+source validation, configuration, compilation, and lifecycle work after that
+boundary is network-disabled and fails rather than fetching missing state.
+
+The destination embedded PostgreSQL build must be reproducible. Two isolated builds must
+produce identical static link inputs and embedded support-data inputs. The
+PostgreSQL Makefiles in the pinned source tree own PostgreSQL compilation and
+the deterministic archive targets. After the atomic cut-over,
+`packaging/postgresql/Makefile` is the one Orna build interface. It supplies
+the pinned Debian 12 amd64 toolchain and calls those native targets. It does
+not download PostgreSQL, construct a second source tree, parse or apply a
+patch queue, or generate PostgreSQL source changes.
+
+The `Containerfile` prepares the pinned dependency and toolchain image before
+either proof build. That image preparation may use only the accepted Debian
+snapshot network sources and does not receive PostgreSQL source. Its resulting
+image digest is fixed for both proof builds. Both PostgreSQL source builds and
+all lifecycle probes then run from that same image with `--network=none` and
+the submodule mounted read-only.
+
+One generated embedded-engine manifest records and binds the declared
+submodule URL and path, official base commit, gitlink-selected patched tip,
+ordered Orna commit range, accepted signer fingerprint and verification,
+canonical SHA-256 source-tree inventory, C compiler and linker, static
+archives, symbol closure, path remapping, PostgreSQL licence, and support data
+for downstream build stages. It also binds the exact checked-in `Makefile`,
+`Containerfile`, native recipe, public key, support generator, manifest
+generator, lifecycle probe, lifecycle verifier, prepared builder image digest,
+and pinned Debian package closure. It does not select its own input tip. The
+inventory is derived from the pinned Git tree and blob bytes, not filesystem
+times. The fork and its Git history are build inputs. They are not a separate
+PostgreSQL runtime acceptance, publication, or signing authority.
 
 A later Orna distribution manifest must bind that embedded-engine manifest to
 the exact Rust toolchain, `Cargo.lock`, Rust linker flags, Rust path remapping,
@@ -133,6 +182,15 @@ The first tracer is deliberately smaller than a database lifecycle. It must:
 6. prove that the probe executable is not named `postgres` and that no
    PostgreSQL executable or shared object was opened or executed; and
 7. build the same archive and probe twice and compare their exact bytes.
+
+The fork-backed reproduction of this proof starts only from the checked-out
+gitlink. It runs with the PostgreSQL source tree mounted read-only and network
+access disabled. It must prove the accepted base, linear patch range, exact
+tip, clean worktree, and canonical source-tree SHA-256 inventory before
+`configure` runs. It verifies every patch commit offline against the pinned
+public key and accepted fingerprint in the same pre-configuration gate. It
+uses an out-of-tree build beneath the caller-owned target root and never copies
+or modifies the submodule source.
 
 This tracer does not claim initialisation, support-asset completeness,
 postmaster readiness, worker operation, private SQL, crash recovery, backend
@@ -675,10 +733,66 @@ fresh network-disabled Debian 12 amd64 machine:
   support roots, supervisor-brokered role requests, one-role-per-process,
   copy-only, pre-commit rollback, and post-commit rollback-rejection proof.
 
+## PostgreSQL fork commit sequence
+
+The Orna-owned PostgreSQL fork starts at the accepted base above. It has this
+exact signed, linear change sequence. Ordinary PostgreSQL compilation must
+remain green after every commit. The Orna-specific target introduced by a
+commit must also be green before the next commit. No fork commit changes more
+than three files.
+
+| Conventional Commit | Exact PostgreSQL files | Required result |
+| --- | --- | --- |
+| `build(embedded): add linked backend archive` | `src/backend/Makefile`; `src/backend/main/main.c`; `src/include/orna_embedded.h` | Add the private backend entry and deterministic flattened backend archive without changing the ordinary PostgreSQL executable. |
+| `feat(embedded): add runtime capabilities` | `src/backend/main/orna_embedded.c`; `src/include/orna_embedded.h` | Add the one-shot support root, initialisation capabilities, and executable-load filter implementation without activating it. |
+| `build(embedded): link runtime capabilities` | `src/backend/Makefile`; `src/backend/main/main.c` | Link the runtime object and require the fixed support root and filter before private backend dispatch. |
+| `fix(embedded): use fixed postmaster support paths` | `src/backend/postmaster/postmaster.c`; `src/port/path.c` | Remove executable-relative postmaster, share, and `pkglib` path discovery from linked roles. |
+| `feat(embedded): reject executable SQL utilities` | `src/backend/tcop/utility.c`; `src/include/tcop/utility.h` | Reject executable utility statements before hooks, privilege checks, mutation, or file access. |
+| `feat(embedded): reject external function languages` | `src/backend/commands/functioncmds.c` | Reject external-language function definitions before path or catalogue work. |
+| `feat(embedded): disable dynamic loading` | `src/backend/utils/fmgr/dfmgr.c` | Reject dynamic library loading before path resolution or file access. |
+| `refactor(initdb): call the linked configuration checker` | `src/bin/initdb/initdb.c` | Replace the external configuration-check process with the hardened direct linked child runner. |
+| `refactor(initdb): call the linked bootstrap backend` | `src/bin/initdb/initdb.c` | Stream catalogue bootstrap into the same hardened linked child runner. |
+| `fix(initdb): suppress linked child output` | `src/backend/tcop/postgres.c` | Suppress expected initialisation-child banners and prompts without weakening other backend output. |
+| `refactor(initdb): omit PL/pgSQL bootstrap` | `src/bin/initdb/initdb.c` | Remove the PL/pgSQL declaration, implementation, and invocation together. |
+| `feat(initdb): pin bootstrap collations` | `src/bin/initdb/initdb.c` | Replace operating-system collation import with the exact seven-row catalogue assertion and fixed UTC behaviour. |
+| `fix(initdb): use fixed support paths` | `src/bin/initdb/initdb.c` | Remove sibling-program and executable-relative support discovery from the linked initialiser. |
+| `refactor(initdb): call the linked single-user backend` | `src/bin/initdb/initdb.c`; `src/include/orna_embedded.h` | Pre-render and stream the three exact post-bootstrap phases through fresh linked children and expose the typed initialiser entry. |
+| `build(initdb): add the flattened initialiser archive` | `src/bin/initdb/Makefile` | Namespace the initialiser closure and emit its one-member deterministic archive and symbol evidence. |
+| `build(embedded): join lifecycle archive targets` | `src/backend/Makefile` | Add the dual-archive lifecycle target with the initialiser before the backend in link order. |
+| `fix(embedded): remove backend argv0 authority` | `src/backend/main/main.c` | Remove linked backend locale and service discovery from `argv[0]`, clear hostile service variables, and retain fixed locale semantics. |
+| `fix(initdb): remove argv0 authority` | `src/bin/initdb/initdb.c` | Remove linked initialiser locale and service discovery from `argv[0]`, clear hostile service variables, and retain fixed `locale=C`. |
+
 ## Initial implementation sequence
+
+Before the parent transition starts, the project creates the public
+`https://github.com/workingdir/postgresql.git` fork, retains the official base,
+publishes the complete accepted linear commit range, and proves that every
+referenced object can be fetched. Parent commits do not point at unpublished
+or local-only objects.
+
+The tarball-and-patch builder remains the active proof path until the
+fork-backed build has produced byte-identical backend and initialiser archives,
+support bundle and manifest, symbol evidence, licence, and deterministic entry
+probe output. The new path must also complete its own linked initialiser and
+postmaster lifecycle proof twice. The legacy builder is not claimed to provide
+that later lifecycle evidence. The submodule build is exercised but is not the
+selected proof path during this parallel gate. A committed parity gate
+precedes the cut-over. The cut-over then selects one build path atomically and
+deletes the legacy builder entry point in the same commit, with no automatic
+fallback. The inert legacy recipe and patch files are removed only after the
+new path is green. The obsolete external-runtime builder remains until the
+linked initialisation and postmaster lifecycle proof is green on the new path.
 
 Each row is one buildable, reviewable Conventional Commit. Each commit changes
 only the exact one to three files listed in that row.
+
+### Completed prototype history
+
+These completed rows record how the one-ELF boundary and native seams were
+proved. Until the atomic native cut-over, the legacy builder remains the
+temporary selected proof authority. After that cut-over, rows that name the
+source tarball, copied source, or parent-repository patches are superseded
+prototype history and are not current source or build authority.
 
 | Conventional Commit | Exact files | Required result |
 | --- | --- | --- |
@@ -693,7 +807,44 @@ only the exact one to three files listed in that row.
 | `chore(postgres): stage embedded patch series three` | `packaging/postgresql/embedded-postgresql-18.4/0007-initdb-fixed-support-paths.patch`; `packaging/postgresql/embedded-postgresql-18.4/0008-initdb-single-user-entry-and-archive.patch` | Add fixed initialiser support paths, direct linked `--single` setup, the typed initialiser ABI, public-to-private encoding bridges, and the flattened initialiser archive. Patch `0008` first activates the complete initialiser archive build. Both zero-context patches apply after their exact predecessors with `--fuzz=0`. The monolithic patch remains the sole active builder input. |
 | `build(postgres): freeze embedded patch series` | `packaging/postgresql/embedded-build.toml`; `packaging/postgresql/build-embedded.sh`; `packaging/postgresql/embedded-postgresql-18.4.patch` | Delete the monolithic patch and select the staged series atomically. Make the ordered TOML patch list the sole path, order, and SHA-256 authority. Freeze each listed patch, verify its digest, dry-run and apply it after its exact predecessor with `--fuzz=0`, and bind the ordered list and frozen bytes in the deterministic manifest. Preserve the linked archives, symbols, support bundle, probe, licence, caller-owned output, and no-executable output. |
 | `fix(postgres): remove argv0 service authority` | `packaging/postgresql/embedded-postgresql-18.4/0009-remove-argv0-locale-and-service-authority.patch`; `packaging/postgresql/embedded-build.toml` | Append one pinned patch to the ordered recipe list. Remove both linked calls to `set_pglocale_pgservice`, clear `PGSYSCONFDIR` and `PGLOCALEDIR` before each private entry, preserve the fixed backend locale and initialiser `locale=C`, and make no builder-code change. |
-| `build(postgres): prove embedded initialisation` | `.github/workflows/postgresql-embedded.yml`; `packaging/postgresql/build-embedded.sh`; `packaging/postgresql/embedded-build.toml` | Build twice, run the linked initialiser and postmaster tracer, prove the exact cluster and support facts, prove that hostile `argv[0]`, `PGSYSCONFDIR`, and `PGLOCALEDIR` values supply no locale or service-file authority, and trace no PostgreSQL executable, shared object, executable mapping, or download. |
+
+### Fork-backed source and build transition
+
+| Conventional Commit | Exact files | Required result |
+| --- | --- | --- |
+| `docs(architecture): select fork-backed PostgreSQL source` | `docs/decisions/0019-embedded-postgresql-engine.md` | Select the pinned Orna fork, linear signed commit range, exact gitlink, native Make build, and no-fetch proof boundary as the destination architecture while the legacy proof remains temporarily selected. |
+| `docs(plan): sequence PostgreSQL source migration` | `TODO.md` | Put the inactive submodule import, fork pointer advances, parallel native build, parity gate, atomic cut-over, and legacy removal before further lifecycle work. |
+| `build(postgres): pin PostgreSQL 18.4 source` | `.gitmodules`; `third_party/postgresql` | Add `https://github.com/workingdir/postgresql.git` at the exact official base without activating it as a build input. |
+| `chore(postgres): advance linked backend archive` | `third_party/postgresql` | Advance the gitlink by only `build(embedded): add linked backend archive` after its ordinary and private-target gates pass. |
+| `chore(postgres): advance runtime capabilities` | `third_party/postgresql` | Advance the gitlink by only `feat(embedded): add runtime capabilities` after its ordinary build gate passes. |
+| `chore(postgres): advance runtime linkage` | `third_party/postgresql` | Advance the gitlink by only `build(embedded): link runtime capabilities` after its ordinary and private-target gates pass. |
+| `chore(postgres): advance fixed postmaster paths` | `third_party/postgresql` | Advance the gitlink by only `fix(embedded): use fixed postmaster support paths` after its ordinary build gate passes. |
+| `chore(postgres): advance executable SQL guard` | `third_party/postgresql` | Advance the gitlink by only `feat(embedded): reject executable SQL utilities` after its ordinary build gate passes. |
+| `chore(postgres): advance function-language guard` | `third_party/postgresql` | Advance the gitlink by only `feat(embedded): reject external function languages` after its ordinary build gate passes. |
+| `chore(postgres): advance dynamic-load guard` | `third_party/postgresql` | Advance the gitlink by only `feat(embedded): disable dynamic loading` after its ordinary build gate passes. |
+| `chore(postgres): advance linked config check` | `third_party/postgresql` | Advance the gitlink by only `refactor(initdb): call the linked configuration checker` after its ordinary initialiser build gate passes. |
+| `chore(postgres): advance linked bootstrap` | `third_party/postgresql` | Advance the gitlink by only `refactor(initdb): call the linked bootstrap backend` after its ordinary initialiser build gate passes. |
+| `chore(postgres): advance child-output suppression` | `third_party/postgresql` | Advance the gitlink by only `fix(initdb): suppress linked child output` after its ordinary backend build gate passes. |
+| `chore(postgres): advance PL/pgSQL removal` | `third_party/postgresql` | Advance the gitlink by only `refactor(initdb): omit PL/pgSQL bootstrap` after its ordinary initialiser build gate passes. |
+| `chore(postgres): advance pinned collations` | `third_party/postgresql` | Advance the gitlink by only `feat(initdb): pin bootstrap collations` after its ordinary initialiser build gate passes. |
+| `chore(postgres): advance fixed initdb paths` | `third_party/postgresql` | Advance the gitlink by only `fix(initdb): use fixed support paths` after its ordinary initialiser build gate passes. |
+| `chore(postgres): advance linked single-user setup` | `third_party/postgresql` | Advance the gitlink by only `refactor(initdb): call the linked single-user backend` after its ordinary initialiser build gate passes. |
+| `chore(postgres): advance initialiser archive` | `third_party/postgresql` | Advance the gitlink by only `build(initdb): add the flattened initialiser archive` after its ordinary and private-target gates pass. |
+| `chore(postgres): advance lifecycle targets` | `third_party/postgresql` | Advance the gitlink by only `build(embedded): join lifecycle archive targets` after the dual-archive target passes. |
+| `chore(postgres): advance backend argv0 closure` | `third_party/postgresql` | Advance the gitlink by only `fix(embedded): remove backend argv0 authority` after normal and hostile entry probes pass. |
+| `chore(postgres): advance initdb argv0 closure` | `third_party/postgresql` | Advance the gitlink by only `fix(initdb): remove argv0 authority` after normal and hostile initialiser compilation passes. |
+| `build(postgres): pin the fork signer` | `packaging/postgresql/keys/source-signing.asc` | Add the accepted public key before any native configure or compilation boundary. |
+| `build(postgres): define the native engine build` | `packaging/postgresql/Makefile`; `packaging/postgresql/Containerfile`; `packaging/postgresql/engine-build.toml` | Add the inactive, caller-owned native build interface; pin the submodule URL, path and official base, accepted signer fingerprint, prepared image digest, Debian package closure, toolchain, configure, archive, licence, complete build-input inventory, and output contracts; verify signatures before first compilation and read the exact patched tip only from the superproject gitlink. |
+| `build(postgres): generate embedded support data` | `packaging/postgresql/support_bundle.py`; `packaging/postgresql/Makefile`; `packaging/postgresql/engine-build.toml` | Generate and verify the deterministic data-only support bundle directly from the read-only submodule and out-of-tree build, then add the generator to the bound build-input inventory. |
+| `build(postgres): emit the embedded engine manifest` | `packaging/postgresql/engine_manifest.py`; `packaging/postgresql/Makefile`; `packaging/postgresql/engine-build.toml` | Bind the gitlink, base, linear signed patch range, signer verification, source-tree inventory, every checked-in build/proof input, prepared image digest, pinned Debian package closure, archives, symbols, support data, and licence. |
+| `test(postgres): add the linked lifecycle probe` | `packaging/postgresql/lifecycle_probe.c`; `packaging/postgresql/Makefile`; `packaging/postgresql/engine-build.toml` | Add the unpublished one-ELF initialiser, postmaster, raw-pgwire, hostile-authority, and controlled-shutdown tracer as ordinary reviewed C source and bind it as a build input. |
+| `test(postgres): verify the embedded lifecycle` | `packaging/postgresql/verify_lifecycle.py`; `packaging/postgresql/Makefile`; `packaging/postgresql/engine-build.toml` | Gate the exact cluster, support, process, filter, network, mapping, trace, output, and two-build reproducibility contracts and bind the verifier as a build input. |
+| `build(postgres): prove native engine parity` | `.github/workflows/postgresql-embedded.yml`; `packaging/postgresql/Makefile`; `packaging/postgresql/engine-build.toml` | While the legacy builder remains selected, run both paths and require byte-identical archives, support data, symbol evidence, licence, and deterministic entry-probe output; require the native path's full lifecycle proof twice. |
+| `build(postgres): select the native engine proof` | `.github/workflows/postgresql-embedded.yml`; `justfile`; `packaging/postgresql/build-embedded.sh` | Check out recursive full submodule history with no persisted credentials, atomically select only the already-green native build, delete the legacy builder entry point, and upload only the accepted evidence root. |
+| `chore(postgres): remove legacy embedded recipe` | `packaging/postgresql/embedded-build.toml` | Remove the inert tarball, copied-source, patch-application, generated-tracer, and frozen-input recipe after the native path is the only callable proof. |
+| `chore(postgres): remove legacy patches one` | `packaging/postgresql/embedded-postgresql-18.4/0001-linked-backend-entry-and-archive.patch`; `packaging/postgresql/embedded-postgresql-18.4/0002-embedded-runtime-capabilities-and-seccomp.patch`; `packaging/postgresql/embedded-postgresql-18.4/0003-fixed-postmaster-support-paths.patch` | Remove the first obsolete parent-repository patch group while retaining it in Git history. |
+| `chore(postgres): remove legacy patches two` | `packaging/postgresql/embedded-postgresql-18.4/0004-executable-sql-and-loader-guard.patch`; `packaging/postgresql/embedded-postgresql-18.4/0005-initdb-direct-check-and-bootstrap.patch`; `packaging/postgresql/embedded-postgresql-18.4/0006-fixed-bootstrap-collation-and-no-plpgsql.patch` | Remove the second obsolete parent-repository patch group while retaining it in Git history. |
+| `chore(postgres): remove legacy patches three` | `packaging/postgresql/embedded-postgresql-18.4/0007-initdb-fixed-support-paths.patch`; `packaging/postgresql/embedded-postgresql-18.4/0008-initdb-single-user-entry-and-archive.patch`; `packaging/postgresql/embedded-postgresql-18.4/0009-remove-argv0-locale-and-service-authority.patch` | Remove the final obsolete parent-repository patch group while retaining it in Git history. |
 | `chore(postgres): retire external runtime work` | `.github/workflows/postgresql-runtime.yml`; `packaging/postgresql/build-runtime.sh`; `packaging/postgresql/runtime-build.toml` | Remove the obsolete executable-tree builder after the linked lifecycle proof is green, without adding a fallback or deleting review history from Git. |
 | `build(workspace): reserve the embedded engine crate` | `Cargo.toml` | Exclude the not-yet-created engine crate path from the `crates/*` workspace glob so its three-file creation commit remains independently buildable and cannot create an unrecorded lockfile change. |
 | `feat(postgres): expose the embedded engine boundary` | `crates/orna-postgres-engine/Cargo.toml`; `crates/orna-postgres-engine/build.rs`; `crates/orna-postgres-engine/src/lib.rs` | As an explicitly versioned standalone crate, invoke the checked-in deterministic builder into Cargo `OUT_DIR` only for its embedded feature, validate and link the resulting manifest, archive, support bundle, and licence, then expose typed initialiser, postmaster, control-data, support-materialisation, and process-filter capabilities without a raw C entry. A clean checkout has no dependency on ignored target output. |
@@ -744,6 +895,12 @@ rows cannot proceed.
 
 The separate signed PostgreSQL executable tree from work ADR 0017 is rejected
 because it creates PostgreSQL binaries outside Orna.
+
+An official upstream submodule plus an Orna-owned patch queue is rejected. It
+would keep two source representations, require a disposable copied tree and a
+patch-application mechanism, and make the checked-out PostgreSQL source differ
+from the code that is built. Keeping each Orna change as a small commit in the
+fork gives Git one source tree, one ordered patch history, and one exact tip.
 
 Extracting an embedded PostgreSQL executable to disk or a Linux memory-backed
 file is rejected because it changes packaging, not the runtime boundary.
