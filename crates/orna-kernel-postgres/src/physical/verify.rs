@@ -4,7 +4,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use orna_core::{
     FieldId, TypeId,
-    catalogue::{FieldDefinition, ObjectTypeDefinition, OnDeleteAction},
+    catalogue::OnDeleteAction,
+    physical::{
+        CreateField, CreateObject, PhysicalFieldType, PhysicalPlanError, active_physical_catalogue,
+    },
     revision::ActiveDatabaseRevision,
     types::StandardScalar,
 };
@@ -45,11 +48,12 @@ struct ExpectedCatalogue {
 
 impl ExpectedCatalogue {
     fn from_active(active: &ActiveDatabaseRevision) -> Result<Self, PostgresKernelError> {
+        let physical = active_physical_catalogue(active).map_err(map_physical_projection_error)?;
         let mut tables = BTreeMap::new();
-        for object in active.catalogue().object_types() {
+        for object in physical.objects() {
             let table = ExpectedTable::from_object(object)?;
             if tables.insert(table.name.clone(), table).is_some() {
-                return Err(type_record(object.id())
+                return Err(type_record(object.type_id())
                     .invariant("each object type must lower to one unique private relation name"));
             }
         }
@@ -106,6 +110,33 @@ impl ExpectedCatalogue {
     }
 }
 
+fn map_physical_projection_error(error: PhysicalPlanError) -> PostgresKernelError {
+    match error {
+        PhysicalPlanError::UnsupportedUniqueField { object_type, field } => {
+            field_record(object_type, field).invariant("only NOT NULL REF fields can be UNIQUE")
+        }
+        PhysicalPlanError::UnsupportedFieldDefault { object_type, field } => {
+            field_record(object_type, field)
+                .invariant("physical storage does not support field defaults")
+        }
+        PhysicalPlanError::UnsupportedVoidField { object_type, field } => {
+            field_record(object_type, field)
+                .invariant("VOID cannot lower to a physical PostgreSQL column")
+        }
+        error @ (PhysicalPlanError::ExpectedBaseMismatch { .. }
+        | PhysicalPlanError::UnsupportedObjectDrop { .. }
+        | PhysicalPlanError::UnsupportedExistingObjectChange { .. }
+        | PhysicalPlanError::UnsupportedNamedFieldType { .. }
+        | PhysicalPlanError::MissingValueTypeDefinition { .. }
+        | PhysicalPlanError::UnsupportedValueTypeContract { .. }
+        | PhysicalPlanError::TransientValueType { .. }
+        | PhysicalPlanError::UnknownReferenceTarget { .. }
+        | PhysicalPlanError::InvalidDeleteAction { .. }) => {
+            PostgresKernelError::PhysicalPlan(error)
+        }
+    }
+}
+
 #[derive(Debug, Eq, PartialEq)]
 struct ExpectedTable {
     name: String,
@@ -114,8 +145,8 @@ struct ExpectedTable {
 }
 
 impl ExpectedTable {
-    fn from_object(object: &ObjectTypeDefinition) -> Result<Self, PostgresKernelError> {
-        let type_hex = type_id_hex(object.id());
+    fn from_object(object: &CreateObject) -> Result<Self, PostgresKernelError> {
+        let type_hex = type_id_hex(object.type_id());
         let mut columns = vec![ExpectedColumn {
             name: OBJECT_ID_COLUMN.to_owned(),
             type_name: "bytea",
@@ -127,23 +158,23 @@ impl ExpectedTable {
             &mut constraints,
             format!("pk_{type_hex}"),
             ExpectedConstraint::primary_key(1),
-            &type_record(object.id()),
+            &type_record(object.type_id()),
         )?;
         insert_expected_constraint(
             &mut constraints,
             format!("ck_{type_hex}_object_id"),
             ExpectedConstraint::object_id_check(1, OBJECT_ID_COLUMN),
-            &type_record(object.id()),
+            &type_record(object.type_id()),
         )?;
 
         for field in object.fields() {
             let attribute = i16::try_from(columns.len() + 1).map_err(|_| {
-                type_record(object.id()).invariant("object relation has too many fields")
+                type_record(object.type_id()).invariant("object relation has too many fields")
             })?;
-            let column = ExpectedColumn::from_field(object.id(), field)?;
+            let column = ExpectedColumn::from_field(object.type_id(), field)?;
             if let Some(reference) = column.reference {
-                let field_hex = field_id_hex(field.id());
-                let record = field_record(object.id(), field.id());
+                let field_hex = field_id_hex(field.field_id());
+                let record = field_record(object.type_id(), field.field_id());
                 insert_expected_constraint(
                     &mut constraints,
                     format!("ck_{field_hex}_object_id"),
@@ -160,16 +191,16 @@ impl ExpectedTable {
             if field.unique() {
                 insert_expected_constraint(
                     &mut constraints,
-                    unique_constraint_name(field.id()),
+                    unique_constraint_name(field.field_id()),
                     ExpectedConstraint::unique(attribute),
-                    &field_record(object.id(), field.id()),
+                    &field_record(object.type_id(), field.field_id()),
                 )?;
             }
             columns.push(column);
         }
 
         Ok(Self {
-            name: relation_name(object.id()),
+            name: relation_name(object.type_id()),
             columns,
             constraints,
         })
@@ -205,54 +236,17 @@ struct ExpectedColumn {
 }
 
 impl ExpectedColumn {
-    fn from_field(owner: TypeId, field: &FieldDefinition) -> Result<Self, PostgresKernelError> {
-        let record = field_record(owner, field.id());
-        if field.unique() && !field.is_required_unique_reference() {
-            return Err(record.invariant("only NOT NULL REF fields can be UNIQUE"));
-        }
-        if field.default_expression().is_some() {
-            return Err(record.invariant("physical storage does not support field defaults"));
-        }
-
-        let unsupported = || {
-            record.invariant(
-                "named field types do not have a supported physical PostgreSQL storage mapping",
-            )
-        };
-        let resolved_type = field.resolved_type();
-        let (type_name, reference) = if let Some(scalar) = resolved_type.legacy_scalar() {
-            if scalar == StandardScalar::Void {
-                return Err(record.invariant("VOID cannot lower to a physical PostgreSQL column"));
+    fn from_field(owner: TypeId, field: &CreateField) -> Result<Self, PostgresKernelError> {
+        let record = field_record(owner, field.field_id());
+        let (type_name, reference) = match field.field_type() {
+            PhysicalFieldType::Scalar(scalar) => (postgres_catalogue_type(scalar, &record)?, None),
+            PhysicalFieldType::Reference { target, on_delete } => {
+                ("bytea", Some(ExpectedReference { target, on_delete }))
             }
-            if field.on_delete().is_some() {
-                return Err(
-                    record.invariant("a scalar field must not declare a reference delete action")
-                );
-            }
-            (postgres_catalogue_type(scalar, &record)?, None)
-        } else if let Some(target) = resolved_type.reference_target() {
-            if field.on_delete() == Some(OnDeleteAction::SetNull) && !field.nullable() {
-                return Err(record.invariant("SET NULL reference fields must be nullable"));
-            }
-            (
-                "bytea",
-                Some(ExpectedReference {
-                    target,
-                    on_delete: field.on_delete(),
-                }),
-            )
-        } else {
-            if resolved_type.named_type().is_some() {
-                return Err(unsupported());
-            }
-            if resolved_type.value_type().is_some() {
-                return Err(unsupported());
-            }
-            return Err(unsupported());
         };
 
         Ok(Self {
-            name: field_name(field.id()),
+            name: field_name(field.field_id()),
             type_name,
             nullable: field.nullable(),
             reference,
@@ -1335,6 +1329,7 @@ fn relation_record(name: &str) -> DurableRecord {
 
 #[cfg(test)]
 mod tests {
+    use orna_core::physical::{PhysicalPlanError, active_physical_catalogue};
     use orna_core::{
         CatalogueRevisionId, FieldId, SchemaId, SourceBundleId, SourceRevisionId, SourceUnitId,
         TypeId,
@@ -1357,8 +1352,8 @@ mod tests {
     use super::{
         ExpectedCatalogue, ExpectedConstraint, ExpectedForeignKey, ExpectedIndex, ExpectedTable,
         ObservedIndex, ReferenceTriggerLocation, classify_reference_trigger, expected_indexes,
-        field_name, has_non_foreign_constraint_shape, relation_name, requires_no_inherit,
-        unique_constraint_name, verify_named_constraint,
+        field_name, has_non_foreign_constraint_shape, map_physical_projection_error, relation_name,
+        requires_no_inherit, unique_constraint_name, verify_named_constraint,
     };
     use crate::decode::DurableRecord;
 
@@ -1511,7 +1506,19 @@ mod tests {
             ],
         );
 
-        let expected = ExpectedTable::from_object(&object).expect("supported object");
+        let target_object =
+            ObjectTypeDefinition::new(target, name(&["test", "target"]), Vec::new());
+        let active = active_revision_with_objects(
+            CatalogueHashContext::version_one(),
+            vec![target_object, object.clone()],
+        );
+        let physical = active_physical_catalogue(&active).expect("physical catalogue");
+        let physical_object = physical
+            .objects()
+            .iter()
+            .find(|candidate| candidate.type_id() == object.id())
+            .expect("source physical object");
+        let expected = ExpectedTable::from_object(physical_object).expect("supported object");
 
         assert_eq!(expected.name, relation_name(object.id()));
         assert_eq!(
@@ -1602,6 +1609,34 @@ mod tests {
     }
 
     #[test]
+    fn expected_builder_lowers_a_verified_value_field_to_the_legacy_integer_catalogue_type() {
+        let (active, object, value_type) = value_active_revision();
+        let (legacy_active, _) = scalar_active_revision();
+
+        let expected = ExpectedCatalogue::from_active(&active).expect("supported value revision");
+        let legacy_expected =
+            ExpectedCatalogue::from_active(&legacy_active).expect("supported scalar revision");
+        let table = expected
+            .tables
+            .get(&relation_name(object))
+            .expect("value object table");
+
+        assert_eq!(table.columns[1].type_name, "int4");
+        assert!(!table.columns[1].nullable);
+        assert_eq!(expected, legacy_expected);
+        assert_eq!(
+            active
+                .catalogue()
+                .object_type_by_id(object)
+                .unwrap()
+                .fields()[0]
+                .resolved_type()
+                .value_type(),
+            Some(value_type)
+        );
+    }
+
+    #[test]
     fn expected_builder_accepts_only_required_unique_references() {
         let owner = TypeId::from_bytes([0x20; 16]);
         let target = TypeId::from_bytes([0x21; 16]);
@@ -1611,7 +1646,13 @@ mod tests {
             false,
             FieldId::from_bytes([0x22; 16]),
         );
-        assert!(ExpectedTable::from_object(&required_reference).is_ok());
+        assert!(
+            ExpectedCatalogue::from_active(&active_revision_with_objects(
+                CatalogueHashContext::version_one(),
+                vec![empty_object(target), required_reference,],
+            ))
+            .is_ok()
+        );
 
         let nullable_reference = unique_object(
             owner,
@@ -1619,7 +1660,13 @@ mod tests {
             true,
             FieldId::from_bytes([0x23; 16]),
         );
-        assert!(ExpectedTable::from_object(&nullable_reference).is_err());
+        assert!(
+            ExpectedCatalogue::from_active(&active_revision_with_objects(
+                CatalogueHashContext::version_one(),
+                vec![empty_object(target), nullable_reference],
+            ))
+            .is_err()
+        );
 
         let set_null_reference = ObjectTypeDefinition::new(
             owner,
@@ -1635,7 +1682,13 @@ mod tests {
                 Some(OnDeleteAction::SetNull),
             )],
         );
-        assert!(ExpectedTable::from_object(&set_null_reference).is_err());
+        assert!(
+            ExpectedCatalogue::from_active(&active_revision_with_objects(
+                CatalogueHashContext::version_one(),
+                vec![empty_object(target), set_null_reference],
+            ))
+            .is_err()
+        );
 
         let named = unique_object(
             owner,
@@ -1643,7 +1696,13 @@ mod tests {
             false,
             FieldId::from_bytes([0x24; 16]),
         );
-        assert!(ExpectedTable::from_object(&named).is_err());
+        assert!(
+            ExpectedCatalogue::from_active(&active_revision_with_objects(
+                CatalogueHashContext::version_one(),
+                vec![empty_object(target), named],
+            ))
+            .is_err()
+        );
 
         for (index, scalar) in StandardScalar::ALL.into_iter().enumerate() {
             let field_byte = u8::try_from(index + 0x30).expect("closed scalar set fits byte");
@@ -1653,7 +1712,13 @@ mod tests {
                 false,
                 FieldId::from_bytes([field_byte; 16]),
             );
-            assert!(ExpectedTable::from_object(&scalar).is_err());
+            assert!(
+                ExpectedCatalogue::from_active(&active_revision_with_objects(
+                    CatalogueHashContext::version_one(),
+                    vec![scalar],
+                ))
+                .is_err()
+            );
         }
     }
 
@@ -1770,7 +1835,103 @@ mod tests {
             )],
         );
 
-        assert!(ExpectedTable::from_object(&object).is_err());
+        let active =
+            active_revision_with_objects(CatalogueHashContext::version_one(), vec![object]);
+        let error = ExpectedCatalogue::from_active(&active).expect_err("VOID must fail closed");
+        assert!(matches!(
+            error,
+            crate::PostgresKernelError::DurableInvariant {
+                relation: "_orna_kernel.catalogue_fields",
+                rule: "VOID cannot lower to a physical PostgreSQL column",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn physical_projection_adapter_preserves_legacy_error_boundaries() {
+        let object_type = TypeId::from_bytes([0x51; 16]);
+        let field = FieldId::from_bytes([0x52; 16]);
+        let expected_record = format!("{}.{}", object_type.canonical(), field.canonical());
+
+        for (error, expected_rule) in [
+            (
+                PhysicalPlanError::UnsupportedUniqueField { object_type, field },
+                "only NOT NULL REF fields can be UNIQUE",
+            ),
+            (
+                PhysicalPlanError::UnsupportedFieldDefault { object_type, field },
+                "physical storage does not support field defaults",
+            ),
+            (
+                PhysicalPlanError::UnsupportedVoidField { object_type, field },
+                "VOID cannot lower to a physical PostgreSQL column",
+            ),
+        ] {
+            let mapped = map_physical_projection_error(error);
+            assert!(matches!(
+                &mapped,
+                crate::PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.catalogue_fields",
+                    record,
+                    rule,
+                } if record == &expected_record && *rule == expected_rule
+            ));
+            assert!(std::error::Error::source(&mapped).is_none());
+        }
+    }
+
+    #[test]
+    fn physical_projection_adapter_passes_preempted_and_value_errors_through() {
+        let object_type = TypeId::from_bytes([0x51; 16]);
+        let field = FieldId::from_bytes([0x52; 16]);
+        let named_error =
+            map_physical_projection_error(PhysicalPlanError::UnsupportedNamedFieldType {
+                object_type,
+                field,
+            });
+        assert!(matches!(
+            named_error,
+            crate::PostgresKernelError::PhysicalPlan(
+                PhysicalPlanError::UnsupportedNamedFieldType { .. }
+            )
+        ));
+
+        let unknown_reference =
+            map_physical_projection_error(PhysicalPlanError::UnknownReferenceTarget {
+                object_type,
+                field,
+                target: TypeId::from_bytes([0x53; 16]),
+            });
+        assert!(matches!(
+            unknown_reference,
+            crate::PostgresKernelError::PhysicalPlan(
+                PhysicalPlanError::UnknownReferenceTarget { .. }
+            )
+        ));
+
+        let invalid_delete =
+            map_physical_projection_error(PhysicalPlanError::InvalidDeleteAction {
+                object_type,
+                field,
+            });
+        assert!(matches!(
+            invalid_delete,
+            crate::PostgresKernelError::PhysicalPlan(PhysicalPlanError::InvalidDeleteAction { .. })
+        ));
+
+        let value_error =
+            map_physical_projection_error(PhysicalPlanError::MissingValueTypeDefinition {
+                object_type,
+                field,
+                value_type: TypeId::from_bytes([0x54; 16]),
+            });
+        assert!(matches!(
+            value_error,
+            crate::PostgresKernelError::PhysicalPlan(
+                PhysicalPlanError::MissingValueTypeDefinition { .. }
+            )
+        ));
     }
 
     #[test]
@@ -1791,7 +1952,10 @@ mod tests {
             )],
         );
 
-        assert!(ExpectedTable::from_object(&object).is_err());
+        let active =
+            active_revision_with_objects(CatalogueHashContext::version_one(), vec![object]);
+        let physical = active_physical_catalogue(&active).expect("physical catalogue");
+        assert!(ExpectedTable::from_object(&physical.objects()[0]).is_err());
     }
 
     fn unique_object(
@@ -1832,6 +1996,69 @@ mod tests {
     fn scalar_active_revision_with_context(
         context: CatalogueHashContext,
     ) -> (ActiveDatabaseRevision, TypeId) {
+        let object = TypeId::from_bytes([0x36; 16]);
+        let field = FieldId::from_bytes([0x34; 16]);
+        let scalar = ObjectTypeDefinition::new(
+            object,
+            name(&["test", "scalar"]),
+            vec![FieldDefinition::new(
+                field,
+                "value",
+                0,
+                ResolvedType::scalar(StandardScalar::Integer),
+                false,
+                false,
+                None,
+                None,
+            )],
+        );
+        (active_revision_with_objects(context, vec![scalar]), object)
+    }
+
+    fn value_active_revision() -> (ActiveDatabaseRevision, TypeId, TypeId) {
+        let standard = orna_standard::verify_standard_library_snapshot(
+            orna_standard::retained_standard_library_snapshot()
+                .expect("retained standard-library snapshot"),
+        )
+        .expect("verified standard-library snapshot");
+        let value_type = standard
+            .catalogue()
+            .value_types()
+            .iter()
+            .find(|value| value.representation_contract() == "orna.kernel.value.integer@1")
+            .expect("verified integer value type")
+            .id();
+        let object = TypeId::from_bytes([0x36; 16]);
+        let field = FieldId::from_bytes([0x34; 16]);
+        let value = ObjectTypeDefinition::new(
+            object,
+            name(&["test", "value"]),
+            vec![FieldDefinition::new(
+                field,
+                "value",
+                0,
+                ResolvedType::value(value_type),
+                false,
+                false,
+                None,
+                None,
+            )],
+        );
+        (
+            active_revision_with_objects(CatalogueHashContext::version_two(standard), vec![value]),
+            object,
+            value_type,
+        )
+    }
+
+    fn empty_object(object: TypeId) -> ObjectTypeDefinition {
+        ObjectTypeDefinition::new(object, name(&["test", "target"]), Vec::new())
+    }
+
+    fn active_revision_with_objects(
+        context: CatalogueHashContext,
+        objects: Vec<ObjectTypeDefinition>,
+    ) -> ActiveDatabaseRevision {
         let source_unit = SourceUnitId::from_bytes([0x31; 16]);
         let unit = StoredSourceUnit::new(
             source_unit,
@@ -1853,43 +2080,36 @@ mod tests {
         )
         .expect("source revision");
         let schema = SchemaDefinition::new(SchemaId::from_bytes([0x35; 16]), name(&["test"]));
-        let object = TypeId::from_bytes([0x36; 16]);
-        let field = FieldId::from_bytes([0x34; 16]);
         let catalogue = CatalogueSnapshot::new(
             CatalogueRevisionId::from_bytes([0x37; 16]),
             vec![schema.clone()],
-            vec![ObjectTypeDefinition::new(
-                object,
-                name(&["test", "scalar"]),
-                vec![FieldDefinition::new(
-                    field,
-                    "value",
-                    0,
-                    ResolvedType::scalar(StandardScalar::Integer),
-                    false,
-                    false,
-                    None,
-                    None,
-                )],
-            )],
+            objects.clone(),
         )
         .expect("catalogue");
         let origin = SourceOrigin::new(source_unit, 0, 0).expect("empty source origin");
-        let origins = vec![
-            DefinitionOrigin::new(DefinitionIdentity::Schema(schema.id()), origin),
-            DefinitionOrigin::new(DefinitionIdentity::ObjectType(object), origin),
-            DefinitionOrigin::new(
-                DefinitionIdentity::Field {
-                    owner: object,
-                    field,
-                },
+        let mut origins = vec![DefinitionOrigin::new(
+            DefinitionIdentity::Schema(schema.id()),
+            origin,
+        )];
+        for object in &objects {
+            origins.push(DefinitionOrigin::new(
+                DefinitionIdentity::ObjectType(object.id()),
                 origin,
-            ),
-        ];
+            ));
+            for field in object.fields() {
+                origins.push(DefinitionOrigin::new(
+                    DefinitionIdentity::Field {
+                        owner: object.id(),
+                        field: field.id(),
+                    },
+                    origin,
+                ));
+            }
+        }
         let catalogue_hash =
             catalogue_digest_with_context(&context, &catalogue, &[], &[], &origins, &[])
                 .expect("catalogue digest");
-        let active = ActiveDatabaseRevision::new_with_catalogue_hash_context(
+        ActiveDatabaseRevision::new_with_catalogue_hash_context(
             ActiveDatabaseRevisionInput::new(
                 RevisionPair::new(source.id(), catalogue.revision()),
                 source,
@@ -1899,9 +2119,7 @@ mod tests {
             ),
             context,
         )
-        .expect("active revision");
-
-        (active, object)
+        .expect("active revision")
     }
 
     fn name(parts: &[&str]) -> QualifiedSemanticName {
