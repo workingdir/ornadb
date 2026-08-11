@@ -11,10 +11,11 @@ path = "src/main.rs"
 
 [dependencies]
 nix = { version = "0.31.3", features = ["fs", "process"] }
+orna-kernel-postgres = { path = "../orna-kernel-postgres" }
+orna-standard = { path = "../orna-standard" }
 url = "2.5.8"
 
 [dev-dependencies]
 nix = { version = "0.31.3", features = ["signal", "term"] }
-orna-kernel-postgres = { path = "../orna-kernel-postgres" }
 tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread"] }
 tokio-postgres = "0.7.18"
