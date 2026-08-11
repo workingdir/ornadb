@@ -1,12 +1,12 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-08-11T14:31:34Z",
-  "title": "Design System: OrnaDB Website",
+  "generatedAt": "2026-08-11T15:51:25Z",
+  "title": "Design System: OrnaDB Documentation Website",
   "extensions": {
     "colorMeta": {
       "brand": {
         "role": "primary",
-        "displayName": "Executable Moss",
+        "displayName": "Documentation Moss",
         "canonical": "oklch(0.42 0.105 142)",
         "tonalRamp": [
           "oklch(0.15 0.04 142)",
@@ -19,24 +19,9 @@
           "oklch(0.95 0.02 142)"
         ]
       },
-      "brand-deep": {
-        "role": "primary",
-        "displayName": "Kernel Moss",
-        "canonical": "oklch(0.29 0.075 142)",
-        "tonalRamp": [
-          "oklch(0.12 0.03 142)",
-          "oklch(0.20 0.05 142)",
-          "oklch(0.29 0.075 142)",
-          "oklch(0.40 0.08 142)",
-          "oklch(0.53 0.075 142)",
-          "oklch(0.67 0.06 142)",
-          "oklch(0.82 0.04 142)",
-          "oklch(0.95 0.015 142)"
-        ]
-      },
       "accent": {
         "role": "secondary",
-        "displayName": "Trace Yellow",
+        "displayName": "Focus Yellow",
         "canonical": "oklch(0.87 0.145 98)",
         "tonalRamp": [
           "oklch(0.18 0.05 98)",
@@ -63,135 +48,99 @@
           "oklch(0.80 0.01 145)",
           "oklch(0.95 0.005 145)"
         ]
-      },
-      "background": {
-        "role": "neutral",
-        "displayName": "Pure Reading White",
-        "canonical": "oklch(1 0 0)",
-        "tonalRamp": [
-          "oklch(0.15 0 0)",
-          "oklch(0.28 0 0)",
-          "oklch(0.42 0 0)",
-          "oklch(0.56 0 0)",
-          "oklch(0.70 0 0)",
-          "oklch(0.82 0 0)",
-          "oklch(0.92 0 0)",
-          "oklch(1 0 0)"
-        ]
       }
     },
     "typographyMeta": {
-      "display": {
-        "displayName": "Product Proposition",
-        "purpose": "The frontpage proposition only."
-      },
       "headline": {
-        "displayName": "System Claim",
-        "purpose": "Major section claims and closing statements."
+        "displayName": "Guide Heading",
+        "purpose": "Page titles and section headings."
       },
       "body": {
         "displayName": "Technical Prose",
-        "purpose": "Explanations, status context, and documentation."
+        "purpose": "Long-form explanations and status context."
       },
-      "label": {
-        "displayName": "Source Metadata",
-        "purpose": "Code, commands, navigation, status, and system labels."
+      "code": {
+        "displayName": "Source",
+        "purpose": "Fenced source, commands, identifiers, and technical labels."
       }
     },
     "shadows": [],
     "motion": [
       {
-        "name": "ease-out",
-        "value": "cubic-bezier(0.16, 1, 0.3, 1)",
-        "purpose": "Short hover and entrance transitions."
-      },
-      {
-        "name": "hero-enter",
-        "value": "620ms transform",
-        "purpose": "One restrained first-load movement on the hero."
+        "name": "direct-state-change",
+        "value": "160ms cubic-bezier(0.16, 1, 0.3, 1)",
+        "purpose": "Short Sourcey navigation, search, and focus-adjacent transitions."
       }
     ],
     "breakpoints": [
       {
-        "name": "compact",
-        "value": "544px"
+        "name": "mobile-navigation",
+        "value": "1024px"
       },
       {
-        "name": "stacked",
-        "value": "832px"
-      },
-      {
-        "name": "wide",
-        "value": "1088px"
+        "name": "full-shell",
+        "value": "1280px"
       }
     ]
   },
   "components": [
     {
-      "name": "Brand Button",
-      "kind": "button",
-      "refersTo": "button-brand",
-      "description": "Primary route from a light surface to technical documentation or status.",
-      "html": "<a class=\"ds-button-brand\" href=\"#\">Read the guide</a>",
-      "css": ".ds-button-brand { display: inline-flex; min-height: 48px; align-items: center; justify-content: center; padding: 12px 16px; border: 1px solid transparent; border-radius: var(--radius-sm); background: var(--colour-brand-deep); color: var(--colour-bg); font: 600 11px/1.2 var(--font-mono); text-decoration: none; transition: background-color 160ms var(--ease-out), transform 160ms var(--ease-out); } .ds-button-brand:hover { background: var(--colour-brand); transform: translateY(-2px); } .ds-button-brand:focus-visible { outline: 3px solid var(--colour-accent); outline-offset: 3px; }"
+      "name": "Active Navigation",
+      "kind": "nav",
+      "refersTo": "active-navigation",
+      "description": "The selected Sourcey page, identified with both a surface and text colour.",
+      "html": "<nav class=\"ds-navigation\" aria-label=\"Documentation\"><a class=\"ds-navigation__link ds-navigation__link--active\" href=\"#\" aria-current=\"page\">OrnaDB</a><a class=\"ds-navigation__link\" href=\"#\">Getting started</a></nav>",
+      "css": ".ds-navigation { display: grid; gap: 4px; } .ds-navigation__link { padding: 8px 16px; border-radius: var(--radius-md); color: var(--colour-ink); text-decoration: none; } .ds-navigation__link--active { background: var(--colour-surface-active); color: var(--colour-brand-deep); font-weight: 600; } .ds-navigation__link:focus-visible { outline: 3px solid var(--colour-accent); outline-offset: 3px; }"
     },
     {
-      "name": "Hero Light Button",
-      "kind": "button",
-      "refersTo": "button-light",
-      "description": "High-contrast primary route on the committed moss hero.",
-      "html": "<a class=\"ds-button-light\" href=\"#\">Read the technical guide</a>",
-      "css": ".ds-button-light { display: inline-flex; min-height: 48px; align-items: center; justify-content: center; padding: 12px 16px; border: 1px solid transparent; border-radius: var(--radius-sm); background: var(--colour-bg); color: var(--colour-brand-deep); font: 600 11px/1.2 var(--font-mono); text-decoration: none; transition: background-color 160ms var(--ease-out), transform 160ms var(--ease-out); } .ds-button-light:hover { background: var(--colour-accent); transform: translateY(-2px); } .ds-button-light:focus-visible { outline: 3px solid var(--colour-accent); outline-offset: 3px; }"
-    },
-    {
-      "name": "Status Label",
-      "kind": "chip",
-      "refersTo": "status-label",
-      "description": "A written design or implementation status with colour as supporting information.",
-      "html": "<span class=\"ds-status-label\">LOCKED MODEL</span>",
-      "css": ".ds-status-label { display: inline-flex; align-items: center; padding: 4px 6px; border: 1px solid oklch(0.65 0.075 142); border-radius: var(--radius-sm); color: var(--colour-brand-deep); font: 600 9px/1.2 var(--font-mono); letter-spacing: 0.04em; }"
+      "name": "Inline Code",
+      "kind": "custom",
+      "refersTo": "inline-code",
+      "description": "Short identifiers and syntax inside prose without decorative backticks.",
+      "html": "<p>Run a <code class=\"ds-inline-code\">CREATE SERVER FUNCTION</code> beside the data.</p>",
+      "css": ".ds-inline-code { padding: 2px 4px; border: 1px solid var(--colour-line); border-radius: var(--radius-sm); background: var(--colour-surface); color: var(--colour-brand-deep); font-family: var(--font-mono); font-size: 0.875em; font-weight: 600; }"
     },
     {
       "name": "Source Window",
       "kind": "custom",
       "refersTo": "source-window",
-      "description": "The primary visual material for source, commands, and result traces.",
-      "html": "<figure class=\"ds-source-window\"><figcaption>tasks.orna <span>LOCKED MODEL</span></figcaption><pre><code>CREATE SERVER FUNCTION tasks.overdue()</code></pre></figure>",
-      "css": ".ds-source-window { overflow: hidden; margin: 0; border-radius: var(--radius-md); background: var(--colour-code); color: var(--colour-code-ink); } .ds-source-window figcaption { display: flex; justify-content: space-between; gap: 16px; padding: 10px 16px; border-bottom: 1px solid var(--colour-code-line); color: oklch(0.72 0.025 142); font: 600 9px/1.4 var(--font-mono); } .ds-source-window figcaption span { color: var(--colour-accent); } .ds-source-window pre { overflow-x: auto; margin: 0; padding: 20px; font: 400 12px/1.75 var(--font-mono); }"
+      "description": "The primary visual material for source and invocation commands.",
+      "html": "<figure class=\"ds-source-window\"><button type=\"button\" aria-label=\"Copy code\">Copy</button><pre><code>CREATE SERVER FUNCTION tasks.overdue()</code></pre></figure>",
+      "css": ".ds-source-window { position: relative; overflow: hidden; margin: 0; border-radius: var(--radius-md); background: var(--colour-code); color: var(--colour-code-ink); } .ds-source-window button { position: absolute; top: 12px; right: 12px; border: 0; background: transparent; color: var(--colour-code-ink); } .ds-source-window pre { overflow-x: auto; margin: 0; padding: 20px; font: 400 14px/1.7 var(--font-mono); }"
     },
     {
-      "name": "Project Navigation",
-      "kind": "nav",
-      "description": "A direct project header whose links remain visible and wrap on small screens.",
-      "html": "<nav class=\"ds-nav\" aria-label=\"Primary navigation\"><a href=\"#\">Model</a><a href=\"#\">Docs</a><a href=\"#\">Source</a></nav>",
-      "css": ".ds-nav { display: flex; flex-wrap: wrap; align-items: center; gap: 24px; font: 500 11px/1.4 var(--font-mono); } .ds-nav a { color: var(--colour-ink); text-decoration: none; } .ds-nav a:hover { text-decoration: underline; text-decoration-thickness: 2px; text-underline-offset: 3px; } .ds-nav a:focus-visible { outline: 3px solid var(--colour-accent); outline-offset: 3px; }"
+      "name": "Development Status Callout",
+      "kind": "alert",
+      "description": "An explicit warning that examples may describe intended language rather than released features.",
+      "html": "<aside class=\"ds-status\" aria-label=\"Development status\"><strong>DEVELOPMENT STATUS</strong><p>Examples show the intended language unless a page says that a feature is implemented.</p></aside>",
+      "css": ".ds-status { padding: 16px; border: 1px solid oklch(0.73 0.11 88); border-radius: var(--radius-md); background: oklch(0.96 0.045 95); color: var(--colour-ink); } .ds-status strong { color: oklch(0.48 0.14 75); font: 600 12px/1.4 var(--font-mono); } .ds-status p { margin: 8px 0 0; }"
     }
   ],
   "narrative": {
-    "northStar": "The Executable Systems Manual",
-    "overview": "The interface makes OrnaDB feel like a maintained systems manual whose first page also proves the product argument. The design combines the direct project-page structure of PipeWire and Wayland with the stronger product demonstration used by Handy. Real source, result paths, process boundaries, and implementation status provide the visual material.\n\nThe frontpage commits to moss green, black, white, and a sharp yellow-green accent. Documentation uses the same identity on a quieter white reading surface. The system rejects generic SaaS landing pages, glossy AI database sites, decorative terminal themes, and editorial-magazine styling.",
+    "northStar": "The Maintained Systems Guide",
+    "overview": "The documentation is the website. There is no separate campaign-style frontpage, product pitch, or visual hand-off before readers reach technical material. Sourcey supplies the stable documentation shell at /; the overview page introduces the model with real syntax and links directly into the guide.\n\nThe interface should resemble a maintained open-source systems project: quiet, exact, searchable, and close to source. Navigation, status, code, and cross-references carry the experience.",
     "keyCharacteristics": [
-      "technical content before promotional claims",
-      "visible CLIENT, SERVER, protocol, and runtime boundaries",
-      "code and architecture as the primary imagery",
-      "flat surfaces separated by colour, spacing, and solid rules",
-      "restrained motion with a complete reduced-motion path",
-      "explicit text labels for implementation and design status"
+      "one documentation interface at every route",
+      "technical content and status before promotional claims",
+      "persistent navigation, full-text search, and on-page headings",
+      "code as the primary visual material",
+      "a restrained moss identity on a white reading surface",
+      "responsive navigation and complete keyboard access"
     ],
     "rules": [
       {
         "name": "The Status Is Text Rule",
-        "body": "Every status colour has a written label such as IMPLEMENTED, LOCKED, PROPOSAL, or OPEN.",
+        "body": "Every status colour has a written label such as IMPLEMENTED, LOCKED, CURRENT PROPOSAL, or OPEN.",
         "section": "colors"
       },
       {
-        "name": "The Four-Material Rule",
-        "body": "Build pages from white, moss, near-black, and yellow-green. Do not add decorative hues to create artificial variety.",
+        "name": "The Reading Surface Rule",
+        "body": "Moss identifies selection and structure. It does not become a decorative page-sized field.",
         "section": "colors"
       },
       {
         "name": "The Source Has Priority Rule",
-        "body": "Source stays large enough to read and never becomes a faint background texture.",
+        "body": "Fenced source remains large enough to read, uses high-contrast dark syntax colours, and scrolls horizontally rather than clipping or wrapping semantics.",
         "section": "typography"
       },
       {
@@ -201,20 +150,19 @@
       }
     ],
     "dos": [
-      "Do put valid Orna syntax and copyable commands near the top of the page.",
-      "Do show CLIENT, SERVER, runtime, protocol, and security boundaries as labelled structures.",
-      "Do use semantic HTML, visible focus, and text labels for every status.",
-      "Do keep the documentation visually quieter than the marketing frontpage.",
-      "Do state plainly when a feature is locked design, current proposal, open question, or implemented work."
+      "Do put valid Orna syntax and an honest development-status notice on the overview.",
+      "Do send readers directly to language, invocation, architecture, security, examples, and status pages.",
+      "Do preserve Sourcey's search, navigation, responsive layout, and generated discovery files.",
+      "Do distinguish implemented work, locked design, current proposals, open questions, and future work in text.",
+      "Do keep internal links rooted at their final public routes."
     ],
     "donts": [
-      "Don't build a generic SaaS landing page with conversion funnels, testimonial strips, pricing cards, or inflated claims.",
-      "Don't make a glossy AI database site with gradients, abstract blobs, or vague promises.",
-      "Don't write a beginner SQL tutorial for an expert audience.",
-      "Don't use terminal-themed decoration as a substitute for technical substance.",
+      "Don't add a separate marketing frontpage before the documentation.",
+      "Don't build conversion funnels, testimonial strips, pricing cards, or inflated claims.",
+      "Don't replace technical material with gradients, abstract graphics, or decorative terminals.",
       "Don't present a current proposal or roadmap item as a released feature.",
-      "Don't use gradient text, glass cards, decorative grids, repeated eyebrow labels, coloured side-stripe borders, or ambient shadows.",
-      "Don't round cards, sections, or inputs beyond 8px."
+      "Don't use ambient shadows, glass effects, large radii, or decorative grids.",
+      "Don't fork or recreate Sourcey's navigation and documentation behaviours in custom Astro components."
     ]
   }
 }
