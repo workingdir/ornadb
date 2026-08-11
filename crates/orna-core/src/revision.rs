@@ -1892,101 +1892,118 @@ fn validate_catalogue_hash_context_coherence(
 ) -> Result<(), RevisionInvariantError> {
     match context {
         CatalogueHashContext::Version1 => {
-            if let Some(value_type) = catalogue.value_types().first() {
-                return Err(
-                    RevisionInvariantError::ValueTypeDefinitionRequiresCatalogueHashVersionTwo {
-                        value_type: value_type.id(),
-                    },
-                );
-            }
-            if let Some(binding) = catalogue.type_bindings().first() {
-                return Err(
-                    RevisionInvariantError::TypeBindingRequiresCatalogueHashVersionTwo {
-                        binding: binding.id(),
-                    },
-                );
-            }
-            for origin in origins {
-                match origin.identity() {
-                    DefinitionIdentity::ValueType(_) | DefinitionIdentity::TypeBinding(_) => {
-                        return Err(
-                            RevisionInvariantError::DefinitionOriginRequiresCatalogueHashVersionTwo {
-                                identity: origin.identity(),
-                            },
-                        );
-                    }
-                    DefinitionIdentity::Schema(_)
-                    | DefinitionIdentity::ObjectType(_)
-                    | DefinitionIdentity::Field { .. }
-                    | DefinitionIdentity::Function(_)
-                    | DefinitionIdentity::Parameter { .. }
-                    | DefinitionIdentity::FunctionReturnColumn { .. }
-                    | DefinitionIdentity::Expression(_) => {}
-                }
-            }
-            for reference in references {
-                match reference.target() {
-                    DefinitionReferenceTarget::ValueType(target) => {
-                        return Err(
-                            RevisionInvariantError::ValueTypeReferenceRequiresCatalogueHashVersionTwo {
-                                function: reference.source_function(),
-                                revision: reference.source_revision(),
-                                target,
-                            },
-                        );
-                    }
-                    DefinitionReferenceTarget::ObjectType(_)
-                    | DefinitionReferenceTarget::Field { .. }
-                    | DefinitionReferenceTarget::Function(_)
-                    | DefinitionReferenceTarget::Parameter { .. }
-                    | DefinitionReferenceTarget::Expression(_) => {}
-                }
-            }
-            for revision in revisions {
-                match revision.semantic_hash_version() {
-                    FunctionSemanticHashVersion::Version1 => {}
-                    FunctionSemanticHashVersion::Version2 => {
-                        return Err(RevisionInvariantError::FunctionSemanticHashVersionRequiresCatalogueHashVersionTwo {
-                            function: revision.function(),
-                            revision: revision.id(),
-                        });
-                    }
-                }
-            }
+            validate_catalogue_hash_context_version_one(catalogue, revisions, origins, references)
         }
         CatalogueHashContext::Version2 { .. } => {
-            for reference in references {
-                let target = match reference.target() {
-                    DefinitionReferenceTarget::ValueType(target) => target,
-                    DefinitionReferenceTarget::ObjectType(_)
-                    | DefinitionReferenceTarget::Field { .. }
-                    | DefinitionReferenceTarget::Function(_)
-                    | DefinitionReferenceTarget::Parameter { .. }
-                    | DefinitionReferenceTarget::Expression(_) => continue,
-                };
-                let revision = revisions
-                    .iter()
-                    .find(|revision| revision.id() == reference.source_revision())
-                    .ok_or(
-                        RevisionInvariantError::ValueTypeReferenceFunctionRevisionUnavailable {
-                            function: reference.source_function(),
-                            revision: reference.source_revision(),
-                            target,
-                        },
-                    )?;
-                match revision.semantic_hash_version() {
-                    FunctionSemanticHashVersion::Version1 => {
-                        return Err(
-                            RevisionInvariantError::ValueTypeReferenceRequiresFunctionSemanticHashVersionTwo {
-                                function: reference.source_function(),
-                                revision: reference.source_revision(),
-                                target,
-                            },
-                        );
-                    }
-                    FunctionSemanticHashVersion::Version2 => {}
-                }
+            validate_catalogue_hash_context_version_two(revisions, references)
+        }
+    }
+}
+
+fn validate_catalogue_hash_context_version_one(
+    catalogue: &CatalogueSnapshot,
+    revisions: &[FunctionRevisionRecord],
+    origins: &[DefinitionOrigin],
+    references: &[DefinitionReference],
+) -> Result<(), RevisionInvariantError> {
+    if let Some(value_type) = catalogue.value_types().first() {
+        return Err(
+            RevisionInvariantError::ValueTypeDefinitionRequiresCatalogueHashVersionTwo {
+                value_type: value_type.id(),
+            },
+        );
+    }
+    if let Some(binding) = catalogue.type_bindings().first() {
+        return Err(
+            RevisionInvariantError::TypeBindingRequiresCatalogueHashVersionTwo {
+                binding: binding.id(),
+            },
+        );
+    }
+    for origin in origins {
+        match origin.identity() {
+            DefinitionIdentity::ValueType(_) | DefinitionIdentity::TypeBinding(_) => {
+                return Err(
+                    RevisionInvariantError::DefinitionOriginRequiresCatalogueHashVersionTwo {
+                        identity: origin.identity(),
+                    },
+                );
             }
+            DefinitionIdentity::Schema(_)
+            | DefinitionIdentity::ObjectType(_)
+            | DefinitionIdentity::Field { .. }
+            | DefinitionIdentity::Function(_)
+            | DefinitionIdentity::Parameter { .. }
+            | DefinitionIdentity::FunctionReturnColumn { .. }
+            | DefinitionIdentity::Expression(_) => {}
+        }
+    }
+    for reference in references {
+        match reference.target() {
+            DefinitionReferenceTarget::ValueType(target) => {
+                return Err(
+                    RevisionInvariantError::ValueTypeReferenceRequiresCatalogueHashVersionTwo {
+                        function: reference.source_function(),
+                        revision: reference.source_revision(),
+                        target,
+                    },
+                );
+            }
+            DefinitionReferenceTarget::ObjectType(_)
+            | DefinitionReferenceTarget::Field { .. }
+            | DefinitionReferenceTarget::Function(_)
+            | DefinitionReferenceTarget::Parameter { .. }
+            | DefinitionReferenceTarget::Expression(_) => {}
+        }
+    }
+    for revision in revisions {
+        match revision.semantic_hash_version() {
+            FunctionSemanticHashVersion::Version1 => {}
+            FunctionSemanticHashVersion::Version2 => {
+                return Err(RevisionInvariantError::FunctionSemanticHashVersionRequiresCatalogueHashVersionTwo {
+                    function: revision.function(),
+                    revision: revision.id(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_catalogue_hash_context_version_two(
+    revisions: &[FunctionRevisionRecord],
+    references: &[DefinitionReference],
+) -> Result<(), RevisionInvariantError> {
+    for reference in references {
+        let target = match reference.target() {
+            DefinitionReferenceTarget::ValueType(target) => target,
+            DefinitionReferenceTarget::ObjectType(_)
+            | DefinitionReferenceTarget::Field { .. }
+            | DefinitionReferenceTarget::Function(_)
+            | DefinitionReferenceTarget::Parameter { .. }
+            | DefinitionReferenceTarget::Expression(_) => continue,
+        };
+        let revision = revisions
+            .iter()
+            .find(|revision| revision.id() == reference.source_revision())
+            .ok_or(
+                RevisionInvariantError::ValueTypeReferenceFunctionRevisionUnavailable {
+                    function: reference.source_function(),
+                    revision: reference.source_revision(),
+                    target,
+                },
+            )?;
+        match revision.semantic_hash_version() {
+            FunctionSemanticHashVersion::Version1 => {
+                return Err(
+                    RevisionInvariantError::ValueTypeReferenceRequiresFunctionSemanticHashVersionTwo {
+                        function: reference.source_function(),
+                        revision: reference.source_revision(),
+                        target,
+                    },
+                );
+            }
+            FunctionSemanticHashVersion::Version2 => {}
         }
     }
     Ok(())
