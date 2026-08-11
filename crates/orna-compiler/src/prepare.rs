@@ -1114,8 +1114,8 @@ enum PreparationMode<'a> {
 /// One declaration type selected for candidate lowering.
 ///
 /// A standard value keeps the checked durable identity separate from its
-/// current compatibility type. The compatibility type remains the sole output
-/// until the later core resolved-value form exists.
+/// compatibility scalar. Artefact validation uses the compatibility scalar;
+/// durable candidate lowering selects the mode-specific core type.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CandidateResolvedType {
     LegacyScalar(StandardScalar),
@@ -1230,13 +1230,12 @@ impl CandidateLoweringMode {
 
     fn lower_durable_standard_value(
         self,
-        _type_id: TypeId,
+        type_id: TypeId,
         compatibility: StandardScalar,
     ) -> ResolvedType {
         match self {
-            Self::LegacyV1 | Self::StandardV1Match | Self::StandardV2Plan | Self::StandardV2 => {
-                ResolvedType::Scalar(compatibility)
-            }
+            Self::LegacyV1 | Self::StandardV1Match => ResolvedType::Scalar(compatibility),
+            Self::StandardV2Plan | Self::StandardV2 => ResolvedType::Value(type_id),
         }
     }
 }
@@ -1248,12 +1247,11 @@ struct ObjectTypeProjections {
 }
 
 impl PreparationMode<'_> {
-    /// Selects one current declaration type from one checked carrier.
+    /// Selects one declaration type from one checked carrier.
     ///
-    /// Compatibility serves current artefact validators. Durable serves the
-    /// candidate catalogue and semantic hashing. Every current mode emits the
-    /// compatibility type for both purposes. The later emission row changes
-    /// only durable StandardV2 and StandardV2Plan standard values.
+    /// Compatibility serves artefact validators. Durable serves the candidate
+    /// catalogue and semantic hashing. Standard V2 modes lower standard values
+    /// to their durable identity; version-one modes retain scalar compatibility.
     fn lower_candidate_type(
         &self,
         candidate: CandidateResolvedType,
@@ -5929,30 +5927,43 @@ mod tests {
     }
 
     #[test]
-    fn current_candidate_projections_are_distinct_policy_inputs_and_identical_for_every_mode() {
+    fn candidate_projection_policy_emits_value_identities_only_for_durable_v2_modes() {
+        let type_id = TypeId::from_bytes([0x98; 16]);
         let candidate = CandidateResolvedType::StandardValue {
-            type_id: TypeId::from_bytes([0x98; 16]),
+            type_id,
             compatibility: StandardScalar::Boolean,
         };
-        let expected = ResolvedType::scalar(StandardScalar::Boolean);
+        let compatibility = ResolvedType::scalar(StandardScalar::Boolean);
 
         assert_ne!(
             CandidateTypeProjection::Compatibility,
             CandidateTypeProjection::Durable
         );
-        for mode in [
-            CandidateLoweringMode::LegacyV1,
-            CandidateLoweringMode::StandardV1Match,
-            CandidateLoweringMode::StandardV2Plan,
-            CandidateLoweringMode::StandardV2,
+        for (mode, durable) in [
+            (
+                CandidateLoweringMode::LegacyV1,
+                ResolvedType::scalar(StandardScalar::Boolean),
+            ),
+            (
+                CandidateLoweringMode::StandardV1Match,
+                ResolvedType::scalar(StandardScalar::Boolean),
+            ),
+            (
+                CandidateLoweringMode::StandardV2Plan,
+                ResolvedType::Value(type_id),
+            ),
+            (
+                CandidateLoweringMode::StandardV2,
+                ResolvedType::Value(type_id),
+            ),
         ] {
             assert_eq!(
                 mode.lower(candidate, CandidateTypeProjection::Compatibility),
-                expected
+                compatibility
             );
             assert_eq!(
                 mode.lower(candidate, CandidateTypeProjection::Durable),
-                expected
+                durable
             );
         }
     }
