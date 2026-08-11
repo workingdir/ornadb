@@ -18,7 +18,7 @@ use orna_core::{
         ActiveDatabaseRevision, CatalogueHashContext, DefinitionIdentity, DefinitionOrigin,
         DefinitionReference, DefinitionReferenceKind, DefinitionReferenceTarget,
         DeployableRevision, FunctionRevisionRecord, RevisionPair, Sha256Digest, SourceOrigin,
-        VerifiedStandardLibrarySnapshot,
+        VerifiedStandardLibrarySnapshot, validate_persistable_catalogue,
     },
     types::{ResolvedType, StandardScalar},
 };
@@ -155,16 +155,7 @@ async fn apply_transaction(
             "locked active pair must recover as the same pair",
         ));
     }
-    if candidate.expected_base() != active.pair() {
-        return Err(PostgresKernelError::ExpectedBaseMismatch {
-            expected: candidate.expected_base(),
-            active: active.pair(),
-        });
-    }
-    guard_standard_context_transition(
-        active.catalogue_hash_context(),
-        candidate.catalogue_hash_context(),
-    )?;
+    validate_candidate_preflight(&active, candidate)?;
 
     let materialized = materialize(candidate, &active)?;
     verify_candidate_hashes(candidate, &materialized)?;
@@ -220,6 +211,24 @@ fn guard_standard_context_transition(
             candidate: candidate.version(),
         }),
     }
+}
+
+fn validate_candidate_preflight(
+    active: &ActiveDatabaseRevision,
+    candidate: &DeployableRevision,
+) -> Result<(), PostgresKernelError> {
+    if candidate.expected_base() != active.pair() {
+        return Err(PostgresKernelError::ExpectedBaseMismatch {
+            expected: candidate.expected_base(),
+            active: active.pair(),
+        });
+    }
+    guard_standard_context_transition(
+        active.catalogue_hash_context(),
+        candidate.catalogue_hash_context(),
+    )?;
+    validate_persistable_catalogue(candidate)
+        .map_err(PostgresKernelError::CandidateRevisionInvariant)
 }
 
 fn standard_context_mismatch(
@@ -1298,18 +1307,24 @@ fn reference_columns(
 #[cfg(test)]
 mod tests {
     use orna_core::{
-        CatalogueRevisionId, ExpressionId, FieldId, FunctionId, ParameterId, SourceBundleId,
-        SourceRevisionId, SourceUnitId, StandardLibraryRevisionId, TypeId,
+        CatalogueRevisionId, ExpressionId, FieldId, FunctionId, ParameterId, SchemaId,
+        SourceBundleId, SourceRevisionId, SourceUnitId, StandardLibraryRevisionId, TypeId,
         canonical_hash::{
-            source_bundle_digest, source_revision_record_digest, source_unit_content_digest,
-            verify_standard_library_snapshot,
+            catalogue_digest_with_context, source_bundle_digest, source_revision_record_digest,
+            source_unit_content_digest, verify_standard_library_snapshot,
         },
-        catalogue::CatalogueSnapshot,
-        catalogue::FunctionTransaction,
+        catalogue::{
+            CatalogueSnapshot, FieldDefinition, FunctionTransaction, ObjectTypeDefinition,
+            QualifiedSemanticName, SchemaDefinition,
+        },
+        physical::{PhysicalPlanError, plan_physical_changes},
         revision::{
-            CatalogueHashContext, DefinitionReferenceKind, DefinitionReferenceTarget,
-            ExecutableArtifactKind, Sha256Digest, StandardLibraryDigestVersion,
-            StandardLibrarySnapshot, StoredSourceRevision, StoredSourceUnit,
+            ActiveDatabaseRevision, ActiveDatabaseRevisionInput, ActiveRevisionContent,
+            CatalogueHashContext, DefinitionIdentity, DefinitionOrigin, DefinitionReferenceKind,
+            DefinitionReferenceTarget, DeployableRevision, DeployableRevisionContent,
+            DeployableRevisionInput, ExecutableArtifactKind, RevisionInvariantError, RevisionPair,
+            Sha256Digest, SourceOrigin, StandardLibraryDigestVersion, StandardLibrarySnapshot,
+            StoredSourceRevision, StoredSourceUnit,
         },
         types::{ResolvedType, StandardScalar},
     };
@@ -1318,6 +1333,7 @@ mod tests {
         LegacyTypeColumns, POSTGRES_REFERENCE_KINDS, StandardContextIdentity, artifact_kind,
         function_transaction, guard_standard_context_transition, legacy_type_projection,
         positive_i32, positive_i64, reference_kind, reference_target, scalar, type_columns,
+        validate_candidate_preflight,
     };
     use crate::PostgresKernelError;
 
@@ -1459,6 +1475,225 @@ mod tests {
         assert_eq!(
             identity.standard_library_digest(),
             Sha256Digest::from_bytes(fixture.standard_digest)
+        );
+    }
+
+    fn preflight_object_type() -> TypeId {
+        TypeId::from_bytes([0x44; 16])
+    }
+
+    fn preflight_field() -> FieldId {
+        FieldId::from_bytes([0x45; 16])
+    }
+
+    fn preflight_active(
+        standard: orna_core::revision::VerifiedStandardLibrarySnapshot,
+    ) -> ActiveDatabaseRevision {
+        let bundle = SourceBundleId::from_bytes([0x40; 16]);
+        let bundle_hash = source_bundle_digest(&[]).unwrap();
+        let source = StoredSourceRevision::new(
+            bundle,
+            SourceRevisionId::from_bytes([0x41; 16]),
+            None,
+            Vec::new(),
+            bundle_hash,
+            source_revision_record_digest(bundle, None, bundle_hash).unwrap(),
+        )
+        .unwrap();
+        let catalogue = CatalogueSnapshot::new(
+            CatalogueRevisionId::from_bytes([0x42; 16]),
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        let context = CatalogueHashContext::version_two(standard);
+        let catalogue_hash =
+            catalogue_digest_with_context(&context, &catalogue, &[], &[], &[], &[]).unwrap();
+        ActiveDatabaseRevision::new_with_catalogue_hash_context(
+            ActiveDatabaseRevisionInput::new(
+                RevisionPair::new(source.id(), catalogue.revision()),
+                source,
+                catalogue,
+                catalogue_hash,
+                ActiveRevisionContent::new(Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+            ),
+            context,
+        )
+        .unwrap()
+    }
+
+    fn preflight_scalar_candidate(
+        expected_base: RevisionPair,
+        context: CatalogueHashContext,
+    ) -> DeployableRevision {
+        let source_unit = SourceUnitId::from_bytes([0x46; 16]);
+        let unit = StoredSourceUnit::new(
+            source_unit,
+            0,
+            "preflight.orna",
+            "",
+            source_unit_content_digest("").unwrap(),
+        )
+        .unwrap();
+        let bundle = SourceBundleId::from_bytes([0x47; 16]);
+        let bundle_hash = source_bundle_digest(std::slice::from_ref(&unit)).unwrap();
+        let source = StoredSourceRevision::new(
+            bundle,
+            SourceRevisionId::from_bytes([0x48; 16]),
+            Some(expected_base.source()),
+            vec![unit],
+            bundle_hash,
+            source_revision_record_digest(bundle, Some(expected_base.source()), bundle_hash)
+                .unwrap(),
+        )
+        .unwrap();
+        let schema = SchemaDefinition::new(
+            SchemaId::from_bytes([0x49; 16]),
+            QualifiedSemanticName::new(["preflight"]).unwrap(),
+        );
+        let object_type = ObjectTypeDefinition::new(
+            preflight_object_type(),
+            QualifiedSemanticName::new(["preflight", "flags"]).unwrap(),
+            vec![FieldDefinition::new(
+                preflight_field(),
+                "enabled",
+                0,
+                ResolvedType::scalar(StandardScalar::Boolean),
+                false,
+                true,
+                None,
+                None,
+            )],
+        );
+        let catalogue = CatalogueSnapshot::new(
+            CatalogueRevisionId::from_bytes([0x4a; 16]),
+            vec![schema.clone()],
+            vec![object_type.clone()],
+        )
+        .unwrap();
+        let source_origin = SourceOrigin::new(source_unit, 0, 0).unwrap();
+        let origins = vec![
+            DefinitionOrigin::new(DefinitionIdentity::Schema(schema.id()), source_origin),
+            DefinitionOrigin::new(
+                DefinitionIdentity::ObjectType(object_type.id()),
+                source_origin,
+            ),
+            DefinitionOrigin::new(
+                DefinitionIdentity::Field {
+                    owner: object_type.id(),
+                    field: preflight_field(),
+                },
+                source_origin,
+            ),
+        ];
+        let catalogue_hash =
+            catalogue_digest_with_context(&context, &catalogue, &[], &[], &origins, &[]).unwrap();
+        DeployableRevision::new_with_catalogue_hash_context(
+            DeployableRevisionInput::new(
+                expected_base,
+                source,
+                expected_base.catalogue(),
+                catalogue,
+                catalogue_hash,
+                DeployableRevisionContent::new(origins, Vec::new(), Vec::new(), Vec::new())
+                    .with_current_function_revisions(Vec::new()),
+            ),
+            context,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn candidate_preflight_rejects_a_version_two_scalar_before_physical_planning() {
+        let standard = verified_standard_context(BASE_STANDARD_CONTEXT);
+        let active = preflight_active(standard.clone());
+        let candidate =
+            preflight_scalar_candidate(active.pair(), CatalogueHashContext::version_two(standard));
+
+        assert_eq!(
+            plan_physical_changes(&active, &candidate),
+            Err(PhysicalPlanError::UnsupportedUniqueField {
+                object_type: preflight_object_type(),
+                field: preflight_field(),
+            })
+        );
+
+        let error = validate_candidate_preflight(&active, &candidate).unwrap_err();
+        assert!(matches!(
+            error,
+            PostgresKernelError::CandidateRevisionInvariant(
+                RevisionInvariantError::LegacyScalarRequiresCatalogueHashVersionOne {
+                    identity: DefinitionIdentity::Field { owner, field },
+                    scalar: StandardScalar::Boolean,
+                }
+            ) if owner == preflight_object_type() && field == preflight_field()
+        ));
+        assert_eq!(
+            error.to_string(),
+            "candidate revision invariant failed: legacy scalar resolved type requires catalogue hash version 1"
+        );
+        let source = std::error::Error::source(&error).expect("candidate invariant source");
+        assert_eq!(
+            source.to_string(),
+            "legacy scalar resolved type requires catalogue hash version 1"
+        );
+        assert!(std::error::Error::source(source).is_none());
+    }
+
+    #[test]
+    fn candidate_preflight_preserves_expected_base_and_standard_context_precedence() {
+        let active_standard = verified_standard_context(BASE_STANDARD_CONTEXT);
+        let active = preflight_active(active_standard.clone());
+        let matching_context = CatalogueHashContext::version_two(active_standard.clone());
+
+        let stale_expected = RevisionPair::new(
+            SourceRevisionId::from_bytes([0x50; 16]),
+            CatalogueRevisionId::from_bytes([0x51; 16]),
+        );
+        let stale = preflight_scalar_candidate(stale_expected, matching_context.clone());
+        assert!(matches!(
+            validate_candidate_preflight(&active, &stale),
+            Err(PostgresKernelError::ExpectedBaseMismatch {
+                expected,
+                active: actual_active,
+            }) if expected == stale_expected && actual_active == active.pair()
+        ));
+
+        let version_one =
+            preflight_scalar_candidate(active.pair(), CatalogueHashContext::version_one());
+        assert!(matches!(
+            validate_candidate_preflight(&active, &version_one),
+            Err(PostgresKernelError::StandardContextTransitionRequired {
+                active: orna_core::revision::CatalogueHashVersion::Version2,
+                candidate: orna_core::revision::CatalogueHashVersion::Version1,
+            })
+        ));
+
+        let alternate_standard = verified_standard_context(ALTERNATE_STANDARD_CONTEXT);
+        let different_context = preflight_scalar_candidate(
+            active.pair(),
+            CatalogueHashContext::version_two(alternate_standard.clone()),
+        );
+        let mismatch = validate_candidate_preflight(&active, &different_context).unwrap_err();
+        let (actual_active, actual_candidate) = match mismatch {
+            PostgresKernelError::StandardContextMismatch { active, candidate } => {
+                (active, candidate)
+            }
+            other => {
+                assert!(
+                    matches!(other, PostgresKernelError::StandardContextMismatch { .. }),
+                    "different verified version-two contexts must mismatch before persistence"
+                );
+                return;
+            }
+        };
+        assert_eq!(
+            *actual_active,
+            StandardContextIdentity::from_verified_snapshot(&active_standard)
+        );
+        assert_eq!(
+            *actual_candidate,
+            StandardContextIdentity::from_verified_snapshot(&alternate_standard)
         );
     }
 

@@ -121,6 +121,8 @@ pub enum PostgresKernelError {
     CanonicalHash(CanonicalHashError),
     /// Reconstructed revision values violate a core revision invariant.
     RevisionInvariant(RevisionInvariantError),
+    /// Candidate revision values violate a core persistence invariant.
+    CandidateRevisionInvariant(RevisionInvariantError),
     /// Reconstructed semantic definitions do not form a valid catalogue.
     CatalogueSnapshot(CatalogueSnapshotError),
     /// The candidate was prepared against a revision pair that is no longer active.
@@ -211,6 +213,9 @@ impl fmt::Display for PostgresKernelError {
             Self::RevisionInvariant(error) => {
                 write!(formatter, "recovered revision invariant failed: {error}")
             }
+            Self::CandidateRevisionInvariant(error) => {
+                write!(formatter, "candidate revision invariant failed: {error}")
+            }
             Self::CatalogueSnapshot(error) => {
                 write!(formatter, "recovered catalogue snapshot failed: {error}")
             }
@@ -261,6 +266,7 @@ impl Error for PostgresKernelError {
             Self::DriverTask(error) => Some(error),
             Self::CanonicalHash(error) => Some(error),
             Self::RevisionInvariant(error) => Some(error),
+            Self::CandidateRevisionInvariant(error) => Some(error),
             Self::CatalogueSnapshot(error) => Some(error),
             Self::PhysicalPlan(error) => Some(error),
             Self::ServerSelect(error) => Some(error),
@@ -321,6 +327,12 @@ mod tests {
                 source: SourceRevisionId::from_bytes([2; 16]),
             },
         );
+        let candidate = PostgresKernelError::CandidateRevisionInvariant(
+            RevisionInvariantError::SourceRevisionPairMismatch {
+                pair: SourceRevisionId::from_bytes([6; 16]),
+                source: SourceRevisionId::from_bytes([7; 16]),
+            },
+        );
         let catalogue =
             PostgresKernelError::CatalogueSnapshot(CatalogueSnapshotError::DuplicateSchemaId {
                 id: orna_core::SchemaId::from_bytes([3; 16]),
@@ -332,6 +344,22 @@ mod tests {
 
         assert!(canonical.source().is_some());
         assert!(revision.source().is_some());
+        assert!(candidate.source().is_some());
+        assert_eq!(
+            candidate.to_string(),
+            "candidate revision invariant failed: revision pair source does not match stored source"
+        );
+        let candidate_source = candidate
+            .source()
+            .expect("candidate invariant has a source");
+        assert_eq!(
+            candidate_source.downcast_ref::<RevisionInvariantError>(),
+            Some(&RevisionInvariantError::SourceRevisionPairMismatch {
+                pair: SourceRevisionId::from_bytes([6; 16]),
+                source: SourceRevisionId::from_bytes([7; 16]),
+            })
+        );
+        assert!(candidate_source.source().is_none());
         assert!(catalogue.source().is_some());
         assert!(physical.source().is_some());
         assert!(
@@ -343,6 +371,13 @@ mod tests {
             .source()
             .is_none()
         );
+
+        assert!(matches!(
+            candidate,
+            PostgresKernelError::CandidateRevisionInvariant(
+                RevisionInvariantError::SourceRevisionPairMismatch { .. }
+            )
+        ));
     }
 
     #[test]
