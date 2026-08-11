@@ -7,9 +7,13 @@ use std::str::FromStr;
 #[cfg(feature = "test-hooks")]
 use std::{future::Future, time::Duration};
 
-use orna_compiler::{check, prepare};
+use orna_compiler::{
+    StandardApplicationCheckContext, check, check_standard_application, prepare,
+    prepare_standard_application,
+};
 use orna_core::{
     FieldId, FunctionId, FunctionRevisionId, ObjectId, ParameterId, TypeId,
+    catalogue::FunctionReturn,
     revision::{ActiveDatabaseRevision, DeployableRevision, RevisionPair},
     source::{SourceBundle, SourceUnit},
     types::{ResolvedType, StandardScalar},
@@ -17,6 +21,10 @@ use orna_core::{
 };
 use orna_kernel_postgres::{
     PostgresKernel, PostgresKernelError, ServerSelectError, ServerSelectResult,
+};
+use orna_standard::{
+    BIGINT_TYPE_ID, BINARY_LARGE_OBJECT_TYPE_ID, BOOLEAN_TYPE_ID, CHARACTER_LARGE_OBJECT_TYPE_ID,
+    FLOAT_TYPE_ID, INTEGER_TYPE_ID,
 };
 use support::{TestDatabase, TestResult, TestSession, failure, with_test_database};
 
@@ -131,20 +139,31 @@ async fn executes_the_active_server_select_subset_exactly() -> TestResult<()> {
         let active = kernel.recover().await?;
         let applied = kernel.apply(&candidate(EXECUTION_SOURCE, &active)?).await?;
         let fixture = Fixture::from_active(&applied)?;
-        insert_execution_rows(&database, fixture).await?;
+        execute_exact_fixture(&database, &kernel, &applied, fixture).await
+    })
+    .await
+}
 
-        let result = kernel.execute_server_select(fixture.read).await?;
-        require_result_identity(&result, applied.pair(), fixture.read, fixture.read_revision)?;
-        require_exact_columns(&result, fixture)?;
-        require_exact_rows(&result, fixture, 20)?;
-
-        let empty = kernel.execute_server_select(fixture.none).await?;
-        require_result_identity(&empty, applied.pair(), fixture.none, fixture.none_revision)?;
-        require(
-            empty.rows().rows().is_empty(),
-            "zero-match function returned a row",
-        )?;
-        require_no_session_leaks(&database).await
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn executes_installed_standard_values_with_the_legacy_select_result_shape() -> TestResult<()>
+{
+    with_test_database(|database| async move {
+        let kernel = hostile_kernel(&database)?;
+        kernel.bootstrap().await?;
+        let empty = kernel.recover().await?;
+        let version_one = kernel
+            .apply(&candidate("CREATE SCHEMA exec;\n", &empty)?)
+            .await?;
+        let upgrade = orna_standard::prepare_standard_upgrade(&version_one)
+            .map_err(|error| failure(format!("standard upgrade preparation failed: {error}")))?;
+        let version_two = kernel.apply_standard_upgrade(&upgrade).await?;
+        let standard_candidate =
+            standard_execution_candidate(EXECUTION_SOURCE, &version_two, &upgrade)?;
+        let applied = kernel.apply(&standard_candidate).await?;
+        let fixture = Fixture::from_active(&applied)?;
+        require_standard_execution_value_identities(&applied, fixture, &upgrade)?;
+        execute_exact_fixture(&database, &kernel, &applied, fixture).await
     })
     .await
 }
@@ -1418,6 +1437,28 @@ impl Fixture {
     }
 }
 
+async fn execute_exact_fixture(
+    database: &TestDatabase,
+    kernel: &PostgresKernel,
+    active: &ActiveDatabaseRevision,
+    fixture: Fixture,
+) -> TestResult<()> {
+    insert_execution_rows(database, fixture).await?;
+
+    let result = kernel.execute_server_select(fixture.read).await?;
+    require_result_identity(&result, active.pair(), fixture.read, fixture.read_revision)?;
+    require_exact_columns(&result, fixture)?;
+    require_exact_rows(&result, fixture, 20)?;
+
+    let empty = kernel.execute_server_select(fixture.none).await?;
+    require_result_identity(&empty, active.pair(), fixture.none, fixture.none_revision)?;
+    require(
+        empty.rows().rows().is_empty(),
+        "zero-match function returned a row",
+    )?;
+    require_no_session_leaks(database).await
+}
+
 async fn insert_execution_rows(database: &TestDatabase, fixture: Fixture) -> TestResult<()> {
     let statement = format!(
         "INSERT INTO {} (_orna_object_id, {}, {}, {}, {}, {}, {}, {}) \
@@ -1895,6 +1936,31 @@ fn candidate(source: &str, active: &ActiveDatabaseRevision) -> TestResult<Deploy
     Ok(prepare(&report, active.pair(), active)?)
 }
 
+fn standard_execution_candidate(
+    source: &str,
+    active: &ActiveDatabaseRevision,
+    upgrade: &orna_standard::StandardUpgrade,
+) -> TestResult<DeployableRevision> {
+    let context = StandardApplicationCheckContext::try_new(
+        active.catalogue(),
+        upgrade.checked_standard_library(),
+    )
+    .map_err(|error| failure(format!("standard application context failed: {error}")))?;
+    let bundle = SourceBundle::new([SourceUnit::new("main.orna", source)])?;
+    let report = check_standard_application(&bundle, &context);
+    if !report.diagnostics().is_empty() {
+        return Err(failure(format!(
+            "standard application diagnostics prevented candidate preparation: {:?}",
+            report.diagnostics()
+        )));
+    }
+    Ok(prepare_standard_application(
+        &report,
+        active.pair(),
+        active,
+    )?)
+}
+
 #[cfg(feature = "test-hooks")]
 fn current_revision(
     active: &ActiveDatabaseRevision,
@@ -2018,6 +2084,91 @@ fn require_exact_columns(result: &ServerSelectResult, fixture: Fixture) -> TestR
         require(
             column.nullable() == nullable,
             format!("result column {name} has the wrong nullability"),
+        )?;
+    }
+    Ok(())
+}
+
+fn require_standard_execution_value_identities(
+    active: &ActiveDatabaseRevision,
+    fixture: Fixture,
+    upgrade: &orna_standard::StandardUpgrade,
+) -> TestResult<()> {
+    let expected_standard = upgrade.verified_standard_snapshot();
+    let standard = active
+        .catalogue_hash_context()
+        .standard()
+        .ok_or_else(|| failure("installed-standard execution active context is absent"))?;
+    require(
+        standard.revision() == expected_standard.revision()
+            && standard.catalogue().revision() == expected_standard.catalogue().revision()
+            && standard.digest() == expected_standard.digest(),
+        "installed-standard execution active context differs from the opaque upgrade snapshot",
+    )?;
+    let node = active
+        .catalogue()
+        .object_type_by_id(fixture.node)
+        .ok_or_else(|| failure("installed-standard execution node type is absent"))?;
+    let values = [
+        ("active", fixture.active, BOOLEAN_TYPE_ID),
+        ("value", fixture.value, INTEGER_TYPE_ID),
+        ("amount", fixture.amount, BIGINT_TYPE_ID),
+        ("score", fixture.score, FLOAT_TYPE_ID),
+        ("label", fixture.label, CHARACTER_LARGE_OBJECT_TYPE_ID),
+        ("blob", fixture.blob, BINARY_LARGE_OBJECT_TYPE_ID),
+    ];
+    for (name, field_id, value_type) in values {
+        let field = node.field_by_id(field_id).ok_or_else(|| {
+            failure(format!(
+                "installed-standard execution field {name} is absent"
+            ))
+        })?;
+        require(
+            standard.catalogue().value_type_by_id(value_type).is_some()
+                && field.resolved_type() == ResolvedType::value(value_type),
+            format!("installed-standard execution field {name} lost its exact Value identity"),
+        )?;
+    }
+    let child = node
+        .field_by_id(fixture.child)
+        .ok_or_else(|| failure("installed-standard execution child reference field is absent"))?;
+    require(
+        child.resolved_type() == ResolvedType::reference(fixture.node),
+        "installed-standard execution child field changed its exact REF target",
+    )?;
+
+    let function = active
+        .catalogue()
+        .function_by_id(fixture.read)
+        .ok_or_else(|| failure("installed-standard execution read function is absent"))?;
+    let FunctionReturn::Rows(columns) = function.return_type() else {
+        return Err(failure(
+            "installed-standard execution read function did not retain ROWS return columns",
+        ));
+    };
+    let expected = [
+        ("root", ResolvedType::reference(fixture.node)),
+        ("active", ResolvedType::value(BOOLEAN_TYPE_ID)),
+        ("value", ResolvedType::value(INTEGER_TYPE_ID)),
+        ("amount", ResolvedType::value(BIGINT_TYPE_ID)),
+        ("score", ResolvedType::value(FLOAT_TYPE_ID)),
+        ("label", ResolvedType::value(CHARACTER_LARGE_OBJECT_TYPE_ID)),
+        ("blob", ResolvedType::value(BINARY_LARGE_OBJECT_TYPE_ID)),
+        (
+            "child_label",
+            ResolvedType::value(CHARACTER_LARGE_OBJECT_TYPE_ID),
+        ),
+    ];
+    require(
+        columns.len() == expected.len(),
+        "installed-standard execution read function changed its ROWS column count",
+    )?;
+    for (column, (name, resolved_type)) in columns.iter().zip(expected) {
+        require(
+            column.name() == name && column.resolved_type() == resolved_type,
+            format!(
+                "installed-standard execution ROWS column {name} lost its exact Value identity"
+            ),
         )?;
     }
     Ok(())
