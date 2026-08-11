@@ -14,16 +14,16 @@
     --orna-line: oklch(0.83 0.018 142);
 }
 
-#sourcey {
+body#sourcey {
     --font-mono: "Martian Mono", "Cascadia Mono", "Liberation Mono", monospace;
     --radius: 0.375rem;
 }
 
-#sourcey #page::before {
+body#sourcey #page::before {
     display: none;
 }
 
-#sourcey .page-description {
+body#sourcey .page-description {
     max-width: 65ch;
     color: oklch(0.38 0.025 145);
     font-family: var(--font-sans);
@@ -32,81 +32,81 @@
     line-height: 1.6;
 }
 
-#sourcey .prose,
-#sourcey .page-description {
+body#sourcey .prose,
+body#sourcey .page-description {
     text-wrap: pretty;
 }
 
-#sourcey .prose :where(h1, h2, h3) {
+body#sourcey .prose :where(h1, h2, h3) {
     letter-spacing: -0.025em;
     text-wrap: balance;
 }
 
-#sourcey .prose :where(p, li) {
+body#sourcey .prose :where(p, li) {
     max-width: 72ch;
 }
 
-#sourcey .nav-group-link,
-#sourcey .nav-link,
-#sourcey .prose-code-block,
-#sourcey .callout,
-#sourcey .card-item,
-#sourcey .accordion-item {
+body#sourcey .nav-group-link,
+body#sourcey .nav-link,
+body#sourcey .prose-code-block,
+body#sourcey .callout,
+body#sourcey .card-item,
+body#sourcey .accordion-item {
     border-radius: 0.375rem;
 }
 
-#sourcey #toc .toc-item,
-#sourcey #toc .toc-item.active {
+body#sourcey #toc .toc-item,
+body#sourcey #toc .toc-item.active {
     border-left: 0;
 }
 
-#sourcey #toc .toc-item.active {
+body#sourcey #toc .toc-item.active {
     background: oklch(0.94 0.035 142);
     color: var(--orna-brand-deep);
 }
 
-#sourcey .callout {
+body#sourcey .callout {
     border: 1px solid var(--orna-line);
     border-left: 1px solid var(--orna-line);
     background: oklch(0.965 0.009 142);
 }
 
-#sourcey .callout-warning {
+body#sourcey .callout-warning {
     border-color: oklch(0.73 0.11 88);
     background: oklch(0.96 0.045 95);
 }
 
-#sourcey .prose-code-content {
+body#sourcey .prose-code-content {
     background: var(--orna-code);
 }
 
-#sourcey .prose-code-block {
+body#sourcey .prose-code-block {
     border: 0;
 }
 
-#sourcey .nav-link.active {
+body#sourcey .nav-link.active {
     background: oklch(0.94 0.035 142);
     color: var(--orna-brand-deep);
 }
 
-#sourcey :focus-visible {
+body#sourcey :focus-visible {
     outline: 0.2rem solid var(--orna-accent);
     outline-offset: 0.2rem;
 }
 
-.dark #sourcey .page-description {
+.dark body#sourcey .page-description {
     color: oklch(0.75 0.02 142);
 }
 
-.dark #sourcey .callout {
+.dark body#sourcey .callout {
     border-color: oklch(0.36 0.025 142);
     background: oklch(0.18 0.018 145);
 }
 
 @media (prefers-reduced-motion: reduce) {
-    #sourcey *,
-    #sourcey *::before,
-    #sourcey *::after {
+    body#sourcey *,
+    body#sourcey *::before,
+    body#sourcey *::after {
         scroll-behavior: auto !important;
         transition-duration: 0.01ms !important;
     }
