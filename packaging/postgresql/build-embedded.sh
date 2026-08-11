@@ -1,14 +1,18 @@
-#!/usr/bin/env bash
+#!/bin/bash
 set -euo pipefail
+
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 readonly SCRIPT_PATH="${BASH_SOURCE[0]}"
 readonly SCRIPT_DIRECTORY="$(cd "$(dirname "${SCRIPT_PATH}")" && pwd -P)"
 readonly REPOSITORY_ROOT="$(cd "${SCRIPT_DIRECTORY}/../.." && pwd -P)"
 readonly RECIPE_PATH="${SCRIPT_DIRECTORY}/embedded-build.toml"
 readonly PATCH_PATH="${SCRIPT_DIRECTORY}/embedded-postgresql-18.4.patch"
-readonly TARGET_ROOT="${REPOSITORY_ROOT}/target/postgresql-embedded"
 
 declare -a EMBEDDED_BUILD_CLEANUP_PATHS=()
+EMBEDDED_BUILD_PUBLICATION_IN_PROGRESS=0
+EMBEDDED_BUILD_PUBLICATION_PREVIOUS=""
+EMBEDDED_BUILD_PUBLICATION_RESULT=""
 
 log() {
     printf '[postgres-embedded] %s\n' "$*"
@@ -22,6 +26,16 @@ fail() {
 cleanup_embedded_build_paths() {
     local path
 
+    if [[ "${EMBEDDED_BUILD_PUBLICATION_IN_PROGRESS}" == 1 \
+        && -n "${EMBEDDED_BUILD_PUBLICATION_PREVIOUS}" \
+        && -d "${EMBEDDED_BUILD_PUBLICATION_PREVIOUS}" ]]; then
+        if [[ -e "${EMBEDDED_BUILD_PUBLICATION_RESULT}" ]]; then
+            mv -- "${EMBEDDED_BUILD_PUBLICATION_RESULT}" \
+                "${EMBEDDED_BUILD_PUBLICATION_PREVIOUS}.interrupted"
+        fi
+        mv -- "${EMBEDDED_BUILD_PUBLICATION_PREVIOUS}" \
+            "${EMBEDDED_BUILD_PUBLICATION_RESULT}"
+    fi
     for path in "${EMBEDDED_BUILD_CLEANUP_PATHS[@]}"; do
         if [[ -d "${path}" ]]; then
             rm -rf -- "${path}"
@@ -48,7 +62,8 @@ expected_top_level = {
     "format", "identity", "target", "platform", "source_date_epoch",
     "builder_image", "snapshot_timestamp", "patch", "patch_sha256",
     "postgresql", "postgresql_license", "zlib", "build", "static_archive",
-    "resources", "proof", "apt",
+    "initializer_archive", "lifecycle", "sql_guard", "resources", "output",
+    "proof", "apt",
 }
 if set(recipe) != expected_top_level:
     raise SystemExit("embedded recipe has unexpected top-level keys")
@@ -60,7 +75,11 @@ if recipe["target"] != "debian12-amd64" or recipe["platform"] != "linux/amd64":
     raise SystemExit("embedded recipe target must be Debian 12 amd64")
 if recipe["source_date_epoch"] != 1778528675:
     raise SystemExit("embedded recipe source date epoch is not accepted")
-if recipe["builder_image"] != "docker.io/library/debian@sha256:a1363ada3b45cb3ebc74c78943558f8b0c2b59aaa194d8224e1b02cfd5d78583":
+accepted_builder_image = (
+    "docker.io/library/debian@"
+    "sha256:a1363ada3b45cb3ebc74c78943558f8b0c2b59aaa194d8224e1b02cfd5d78583"
+)
+if recipe["builder_image"] != accepted_builder_image:
     raise SystemExit("embedded recipe builder image is not accepted")
 if recipe["snapshot_timestamp"] != "20251229T000000Z":
     raise SystemExit("embedded recipe snapshot timestamp is not accepted")
@@ -155,8 +174,138 @@ expected_static_archive = {
 }
 if static_archive != expected_static_archive:
     raise SystemExit("embedded static archive facts are not accepted")
-if recipe["resources"] != {"embedded_support_assets": []}:
-    raise SystemExit("the entry tracer must record an empty support-asset input set")
+
+initializer_archive = recipe["initializer_archive"]
+expected_initializer_archive = {
+    "path": "liborna_postgres18_initdb.a",
+    "member": "liborna_postgres18_initdb.o",
+    "entry_symbol": "orna_postgres18_initdb_entry",
+    "symbol_prefix": "orna_postgres18_initdb_",
+    "rename_map_path": "initdb-redefine-symbols.txt",
+    "defined_symbols_path": "initdb-defined-symbols.txt",
+    "undefined_symbols_path": "initdb-undefined-symbols.txt",
+    "allowed_undefined_bridge_symbols": [
+        "orna_postgres18_entry",
+        "orna_postgres18_install_exec_filter",
+        "orna_postgres18_set_system_functions_initialisation_capability",
+        "orna_postgres18_set_initialisation_child_capability",
+        "orna_postgres18_support_root",
+    ],
+}
+if initializer_archive != expected_initializer_archive:
+    raise SystemExit("embedded initialiser archive facts are not accepted")
+
+lifecycle = recipe["lifecycle"]
+expected_lifecycle = {
+    "backend_entry_symbol": "orna_postgres18_entry",
+    "initializer_entry_symbol": "orna_postgres18_initdb_entry",
+    "support_root_setter_symbol": "orna_postgres18_set_support_root",
+    "system_functions_capability_setter_symbol": "orna_postgres18_set_system_functions_initialisation_capability",
+    "initialisation_child_capability_setter_symbol": "orna_postgres18_set_initialisation_child_capability",
+    "seccomp_entry_symbol": "orna_postgres18_install_exec_filter",
+}
+if lifecycle != expected_lifecycle:
+    raise SystemExit("embedded lifecycle entry facts are not accepted")
+
+sql_guard = recipe["sql_guard"]
+expected_sql_guard = {
+    "sqlstate": "0A000",
+    "messages": [
+        "Orna does not permit SQL LOAD",
+        "Orna does not permit COPY PROGRAM",
+        "Orna does not permit PostgreSQL extension management",
+        "Orna does not permit procedural language creation",
+        "Orna does not permit anonymous procedural blocks",
+        "Orna does not permit C or internal language function or procedure definitions",
+        "Orna does not permit PostgreSQL dynamic loading",
+    ],
+}
+if sql_guard != expected_sql_guard:
+    raise SystemExit("embedded SQL guard facts are not accepted")
+
+resources = recipe["resources"]
+if set(resources) != {
+    "bundle_path", "bundle_sha256", "manifest_path", "manifest_sha256",
+    "generation_rules",
+}:
+    raise SystemExit("embedded support resource keys are not accepted")
+if resources["bundle_path"] != "embedded-postgresql-support.tar":
+    raise SystemExit("embedded support bundle path is not accepted")
+if resources["manifest_path"] != "embedded-postgresql-support-manifest.json":
+    raise SystemExit("embedded support manifest path is not accepted")
+for digest_name in ("bundle_sha256", "manifest_sha256"):
+    digest = resources[digest_name]
+    if not isinstance(digest, str) or len(digest) != 64 or any(
+        character not in "0123456789abcdef" for character in digest
+    ):
+        raise SystemExit(f"embedded support {digest_name} is not a lowercase SHA-256 digest")
+expected_generation_rules = [
+    {
+        "name": "top_level",
+        "source_paths": [
+            "src/include/catalog/postgres.bki",
+            "src/backend/libpq/pg_hba.conf.sample",
+            "src/backend/libpq/pg_ident.conf.sample",
+            "src/backend/utils/misc/postgresql.conf.sample",
+            "src/backend/snowball/snowball_create.sql",
+            "src/backend/catalog/information_schema.sql",
+            "src/backend/catalog/sql_features.txt",
+            "src/include/catalog/system_constraints.sql",
+            "src/backend/catalog/system_functions.sql",
+            "src/backend/catalog/system_views.sql",
+        ],
+        "output_prefix": "",
+        "mode": "0600",
+    },
+    {
+        "name": "timezone_tree",
+        "source_paths": ["src/timezone/data/tzdata.zi"],
+        "output_prefix": "timezone",
+        "mode": "0600",
+    },
+    {
+        "name": "timezonesets",
+        "source_paths": [
+            "src/timezone/tznames/Africa.txt",
+            "src/timezone/tznames/America.txt",
+            "src/timezone/tznames/Antarctica.txt",
+            "src/timezone/tznames/Asia.txt",
+            "src/timezone/tznames/Atlantic.txt",
+            "src/timezone/tznames/Australia",
+            "src/timezone/tznames/Australia.txt",
+            "src/timezone/tznames/Default",
+            "src/timezone/tznames/Etc.txt",
+            "src/timezone/tznames/Europe.txt",
+            "src/timezone/tznames/India",
+            "src/timezone/tznames/Indian.txt",
+            "src/timezone/tznames/Pacific.txt",
+        ],
+        "output_prefix": "timezonesets",
+        "mode": "0600",
+    },
+    {
+        "name": "snowball_stopwords",
+        "source_paths": [
+            f"src/backend/snowball/stopwords/{language}.stop"
+            for language in (
+                "danish", "dutch", "english", "finnish", "french", "german",
+                "hungarian", "italian", "nepali", "norwegian", "portuguese",
+                "russian", "spanish", "swedish", "turkish",
+            )
+        ],
+        "output_prefix": "tsearch_data",
+        "mode": "0600",
+    },
+]
+if resources["generation_rules"] != expected_generation_rules:
+    raise SystemExit("embedded support generation rules are not accepted")
+
+expected_output = {
+    "caller_owned_root": True,
+    "forbidden_implicit_root": "target/postgresql-embedded/current",
+}
+if recipe["output"] != expected_output:
+    raise SystemExit("embedded caller-owned output facts are not accepted")
 
 proof = recipe["proof"]
 expected_proof = {
@@ -167,10 +316,19 @@ expected_proof = {
     "deterministic_outputs": [
         "embedded-engine-manifest.json",
         "liborna_postgres18_backend.a",
+        "liborna_postgres18_initdb.a",
         "defined-symbols.txt",
         "undefined-symbols.txt",
+        "initdb-redefine-symbols.txt",
+        "initdb-defined-symbols.txt",
+        "initdb-undefined-symbols.txt",
+        "embedded-postgresql-support.tar",
+        "embedded-postgresql-support-manifest.json",
         "orna-engine-entry-probe.stdout",
         "POSTGRESQL-LICENSE",
+        "inputs/embedded-build.toml",
+        "inputs/build-embedded.sh",
+        "inputs/embedded-postgresql-18.4.patch",
     ],
 }
 if proof != expected_proof:
@@ -211,6 +369,11 @@ def shell_quote(value):
 def emit(name, value):
     print(f"{name}={shell_quote(value)}")
 
+
+def emit_array(name, values):
+    print(f"{name}=(" + " ".join(shell_quote(value) for value in values) + ")")
+
+
 emit("EMBEDDED_IDENTITY", recipe["identity"])
 emit("TARGET_PLATFORM", recipe["platform"])
 emit("SOURCE_DATE_EPOCH_VALUE", recipe["source_date_epoch"])
@@ -229,15 +392,44 @@ emit("PATCH_SHA256", expected_patch_sha256)
 emit("STATIC_ARCHIVE_NAME", static_archive["path"])
 emit("STATIC_ARCHIVE_MEMBER", static_archive["member"])
 emit("STATIC_ENTRY_SYMBOL", static_archive["entry_symbol"])
+emit("INITIALIZER_ARCHIVE_NAME", initializer_archive["path"])
+emit("INITIALIZER_ARCHIVE_MEMBER", initializer_archive["member"])
+emit("INITIALIZER_ENTRY_SYMBOL", initializer_archive["entry_symbol"])
+emit("INITIALIZER_SYMBOL_PREFIX", initializer_archive["symbol_prefix"])
+emit("INITIALIZER_RENAME_MAP_PATH", initializer_archive["rename_map_path"])
+emit("INITIALIZER_DEFINED_SYMBOLS_PATH", initializer_archive["defined_symbols_path"])
+emit("INITIALIZER_UNDEFINED_SYMBOLS_PATH", initializer_archive["undefined_symbols_path"])
+emit("BACKEND_ENTRY_SYMBOL", lifecycle["backend_entry_symbol"])
+emit("SUPPORT_ROOT_SETTER_SYMBOL", lifecycle["support_root_setter_symbol"])
+emit("SYSTEM_FUNCTIONS_CAPABILITY_SETTER_SYMBOL", lifecycle["system_functions_capability_setter_symbol"])
+emit("INITIALISATION_CHILD_CAPABILITY_SETTER_SYMBOL", lifecycle["initialisation_child_capability_setter_symbol"])
+emit("SECCOMP_ENTRY_SYMBOL", lifecycle["seccomp_entry_symbol"])
+emit("SQL_GUARD_SQLSTATE", sql_guard["sqlstate"])
+emit("FORBIDDEN_IMPLICIT_OUTPUT_ROOT", recipe["output"]["forbidden_implicit_root"])
+emit("SUPPORT_BUNDLE_PATH", resources["bundle_path"])
+emit("SUPPORT_BUNDLE_SHA256", resources["bundle_sha256"])
+emit("SUPPORT_MANIFEST_PATH", resources["manifest_path"])
+emit("SUPPORT_MANIFEST_SHA256", resources["manifest_sha256"])
 emit("FROZEN_INPUTS_DIRECTORY", proof["frozen_inputs_directory"])
 emit("UNPUBLISHED_PROBE_PATH", proof["unpublished_probe_path"])
 emit("TRACE_OUTPUT_PATH", proof["trace_path"])
 emit("PROBE_STANDARD_OUTPUT_PATH", proof["stdout_path"])
-print("POSTGRESQL_CONFIGURE_FLAGS=(" + " ".join(shell_quote(flag) for flag in postgresql["configure_flags"]) + ")")
-print("RECIPE_BUILD_ENVIRONMENT=(" + " ".join(shell_quote(f"{key}={environment[key]}") for key in sorted(environment)) + ")")
-print("APT_SOURCES=(" + " ".join(shell_quote(source) for source in apt["sources"]) + ")")
-print("APT_PACKAGES=(" + " ".join(shell_quote(f"{name}={apt['packages'][name]}") for name in sorted(apt["packages"])) + ")")
-print("DETERMINISTIC_OUTPUTS=(" + " ".join(shell_quote(path) for path in proof["deterministic_outputs"]) + ")")
+emit_array("POSTGRESQL_CONFIGURE_FLAGS", postgresql["configure_flags"])
+emit_array(
+    "RECIPE_BUILD_ENVIRONMENT",
+    (f"{key}={environment[key]}" for key in sorted(environment)),
+)
+emit_array("APT_SOURCES", apt["sources"])
+emit_array(
+    "APT_PACKAGES",
+    (f"{name}={apt['packages'][name]}" for name in sorted(apt["packages"])),
+)
+emit_array("DETERMINISTIC_OUTPUTS", proof["deterministic_outputs"])
+emit_array("SQL_GUARD_MESSAGES", sql_guard["messages"])
+emit_array(
+    "INITIALIZER_ALLOWED_UNDEFINED_BRIDGE_SYMBOLS",
+    initializer_archive["allowed_undefined_bridge_symbols"],
+)
 PY_RECIPE
 }
 
@@ -260,6 +452,333 @@ verify_sha256() {
     [[ "${actual}" == "${expected}" ]]
 }
 
+count_defined_symbol() {
+    local binary_path="$1"
+    local symbol="$2"
+
+    nm --extern-only --defined-only "${binary_path}" \
+        | awk -v expected="${symbol}" '$NF == expected { count += 1 } END { print count + 0 }'
+}
+
+stage_support_bundle() {
+    local source_root="$1"
+    local build_root="$2"
+    local timezone_root="$3"
+    local bundle_path="$4"
+    local manifest_path="$5"
+    local staging_root="$6"
+    local member_list="$7"
+    local actual_bundle_sha256
+    local actual_manifest_sha256
+
+    python3 - "${RECIPE_PATH}" "${source_root}" "${build_root}" \
+        "${timezone_root}" "${staging_root}" "${manifest_path}" \
+        "${member_list}" <<'PY_SUPPORT'
+import hashlib
+import json
+import os
+import pathlib
+import stat
+import sys
+import tomllib
+
+recipe_path = pathlib.Path(sys.argv[1])
+source_root = pathlib.Path(sys.argv[2])
+build_root = pathlib.Path(sys.argv[3])
+timezone_root = pathlib.Path(sys.argv[4])
+staging_root = pathlib.Path(sys.argv[5])
+manifest_path = pathlib.Path(sys.argv[6])
+member_list_path = pathlib.Path(sys.argv[7])
+with recipe_path.open("rb") as recipe_file:
+    rules = tomllib.load(recipe_file)["resources"]["generation_rules"]
+
+os.umask(0o077)
+required_build_paths = {
+    "src/include/catalog/postgres.bki",
+    "src/include/catalog/system_constraints.sql",
+    "src/backend/snowball/snowball_create.sql",
+}
+staging_root.mkdir(mode=0o700)
+members = {}
+casefold_paths = set()
+
+
+def read_regular(path, *, permit_hard_links):
+    source_stat = path.lstat()
+    if not stat.S_ISREG(source_stat.st_mode):
+        raise SystemExit(f"support source is not a regular file: {path}")
+    if not permit_hard_links and source_stat.st_nlink != 1:
+        raise SystemExit(f"support source is linked: {path}")
+    if source_stat.st_mode & 0o111:
+        raise SystemExit(f"support source has an executable mode: {path}")
+    descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    try:
+        opened_stat = os.fstat(descriptor)
+        if (
+            opened_stat.st_dev != source_stat.st_dev
+            or opened_stat.st_ino != source_stat.st_ino
+            or opened_stat.st_size != source_stat.st_size
+        ):
+            raise SystemExit(f"support source changed before read: {path}")
+        content = bytearray()
+        while True:
+            block = os.read(descriptor, 1024 * 1024)
+            if not block:
+                break
+            content.extend(block)
+        final_stat = os.fstat(descriptor)
+        if (
+            final_stat.st_size != opened_stat.st_size
+            or final_stat.st_mtime_ns != opened_stat.st_mtime_ns
+            or final_stat.st_ctime_ns != opened_stat.st_ctime_ns
+        ):
+            raise SystemExit(f"support source changed during read: {path}")
+    finally:
+        os.close(descriptor)
+    return bytes(content)
+
+
+def add_member(output_path, content):
+    pure_path = pathlib.PurePosixPath(output_path)
+    if (
+        not output_path
+        or pure_path.is_absolute()
+        or str(pure_path) != output_path
+        or ".." in pure_path.parts
+        or any(character in output_path for character in "*?[]")
+        or any(ord(character) < 0x20 or ord(character) == 0x7f for character in output_path)
+    ):
+        raise SystemExit(f"support output path is not clean and relative: {output_path}")
+    folded_path = output_path.casefold()
+    if output_path in members or folded_path in casefold_paths:
+        raise SystemExit(f"support output path is duplicated or case-colliding: {output_path}")
+    lowered_parts = [part.casefold() for part in pure_path.parts]
+    lowered_name = lowered_parts[-1]
+    if "extension" in lowered_parts or "plpgsql" in folded_path:
+        raise SystemExit(f"support output contains extension or PL/pgSQL material: {output_path}")
+    if lowered_name in {"postgres", "psql", "initdb", "pg_upgrade", "pg_ctl", "pg_resetwal"}:
+        raise SystemExit(f"support output has a PostgreSQL executable name: {output_path}")
+    if (
+        lowered_name.endswith((
+            ".a", ".o", ".so", ".tar", ".tar.gz", ".tgz", ".bz2", ".zip", ".control",
+        ))
+        or ".so." in lowered_name
+    ):
+        raise SystemExit(f"support output contains code, an archive, or a control file: {output_path}")
+
+    destination = staging_root / output_path
+    destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600)
+    try:
+        view = memoryview(content)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise SystemExit(f"support output write failed: {output_path}")
+            view = view[written:]
+        os.fchmod(descriptor, 0o600)
+        final_stat = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    if not stat.S_ISREG(final_stat.st_mode) or final_stat.st_nlink != 1:
+        raise SystemExit(f"staged support output is not one regular file: {output_path}")
+    members[output_path] = {
+        "length": len(content),
+        "mode": "0600",
+        "path": output_path,
+        "sha256": hashlib.sha256(content).hexdigest(),
+        "type": "file",
+    }
+    casefold_paths.add(folded_path)
+
+
+for rule in rules:
+    if rule["name"] == "timezone_tree":
+        continue
+    prefix = rule["output_prefix"]
+    for source_path_text in rule["source_paths"]:
+        build_candidate = build_root / source_path_text
+        source_candidate = source_root / source_path_text
+        build_exists = build_candidate.exists() or build_candidate.is_symlink()
+        source_exists = source_candidate.exists() or source_candidate.is_symlink()
+        if source_path_text in required_build_paths and not build_exists:
+            raise SystemExit(f"generated support source is absent from the build tree: {source_path_text}")
+        if not build_exists and not source_exists:
+            raise SystemExit(f"support source is absent: {source_path_text}")
+        build_content = read_regular(build_candidate, permit_hard_links=False) if build_exists else None
+        source_content = read_regular(source_candidate, permit_hard_links=False) if source_exists else None
+        if build_content is not None and source_content is not None and build_content != source_content:
+            raise SystemExit(f"build and source support inputs differ: {source_path_text}")
+        content = build_content if build_content is not None else source_content
+        output_path = pathlib.PurePosixPath(prefix, pathlib.PurePosixPath(source_path_text).name)
+        add_member(str(output_path), content)
+
+timezone_root_stat = timezone_root.lstat()
+if (
+    timezone_root.is_symlink()
+    or not stat.S_ISDIR(timezone_root_stat.st_mode)
+    or stat.S_IMODE(timezone_root_stat.st_mode) != 0o700
+):
+    raise SystemExit("generated timezone root is not one private directory")
+timezone_files = []
+for directory, directory_names, file_names in os.walk(timezone_root, topdown=True, followlinks=False):
+    directory_path = pathlib.Path(directory)
+    for name in directory_names:
+        candidate = directory_path / name
+        candidate_stat = candidate.lstat()
+        if (
+            candidate.is_symlink()
+            or not stat.S_ISDIR(candidate_stat.st_mode)
+            or stat.S_IMODE(candidate_stat.st_mode) != 0o700
+        ):
+            raise SystemExit(f"generated timezone tree contains a non-private directory: {candidate}")
+    for name in file_names:
+        candidate = directory_path / name
+        relative_path = candidate.relative_to(timezone_root)
+        timezone_files.append((str(pathlib.PurePosixPath(*relative_path.parts)), candidate))
+if len(timezone_files) != 598:
+    raise SystemExit(
+        f"generated timezone tree has {len(timezone_files)} files instead of the accepted 598"
+    )
+for relative_path, candidate in sorted(timezone_files):
+    add_member(
+        str(pathlib.PurePosixPath("timezone", relative_path)),
+        read_regular(candidate, permit_hard_links=True),
+    )
+
+manifest_members = [members[path] for path in sorted(members)]
+staging_root_stat = staging_root.lstat()
+if (
+    staging_root.is_symlink()
+    or not stat.S_ISDIR(staging_root_stat.st_mode)
+    or stat.S_IMODE(staging_root_stat.st_mode) != 0o700
+):
+    raise SystemExit("staged support root is not one private directory")
+actual_stage_paths = set()
+for directory, directory_names, file_names in os.walk(staging_root, topdown=True, followlinks=False):
+    directory_path = pathlib.Path(directory)
+    for name in directory_names:
+        candidate = directory_path / name
+        candidate_stat = candidate.lstat()
+        if not stat.S_ISDIR(candidate_stat.st_mode) or candidate.is_symlink() or candidate_stat.st_mode & 0o077:
+            raise SystemExit(f"staged support directory is not private: {candidate}")
+    for name in file_names:
+        candidate = directory_path / name
+        candidate_stat = candidate.lstat()
+        if (
+            not stat.S_ISREG(candidate_stat.st_mode)
+            or candidate_stat.st_nlink != 1
+            or stat.S_IMODE(candidate_stat.st_mode) != 0o600
+        ):
+            raise SystemExit(f"staged support member metadata is not accepted: {candidate}")
+        actual_stage_paths.add(str(pathlib.PurePosixPath(*candidate.relative_to(staging_root).parts)))
+if actual_stage_paths != set(members):
+    raise SystemExit("staged support inventory differs from the generated manifest")
+
+manifest_path.write_text(
+    json.dumps({"format": 1, "members": manifest_members}, indent=2, sort_keys=True) + "\n",
+    encoding="utf-8",
+    newline="\n",
+)
+manifest_path.chmod(0o600)
+member_list_path.write_text(
+    "".join(f"{member['path']}\n" for member in manifest_members),
+    encoding="utf-8",
+    newline="\n",
+)
+PY_SUPPORT
+
+    env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH_VALUE}" \
+        tar --create --file="${bundle_path}" --directory="${staging_root}" \
+            --no-recursion --format=ustar --owner=0 --group=0 --numeric-owner \
+            --mode=0600 --mtime="@${SOURCE_DATE_EPOCH_VALUE}" \
+            --verbatim-files-from --files-from="${member_list}" \
+        || fail "could not create the deterministic support bundle"
+    actual_manifest_sha256="$(sha256sum "${manifest_path}" | awk '{print $1}')"
+    actual_bundle_sha256="$(sha256sum "${bundle_path}" | awk '{print $1}')"
+    if [[ "${actual_manifest_sha256}" != "${SUPPORT_MANIFEST_SHA256}" \
+        || "${actual_bundle_sha256}" != "${SUPPORT_BUNDLE_SHA256}" ]]; then
+        printf '[postgres-embedded] expected support manifest SHA-256: %s\n' \
+            "${SUPPORT_MANIFEST_SHA256}" >&2
+        printf '[postgres-embedded] actual support manifest SHA-256:   %s\n' \
+            "${actual_manifest_sha256}" >&2
+        printf '[postgres-embedded] expected support bundle SHA-256:   %s\n' \
+            "${SUPPORT_BUNDLE_SHA256}" >&2
+        printf '[postgres-embedded] actual support bundle SHA-256:     %s\n' \
+            "${actual_bundle_sha256}" >&2
+        fail "generated support manifest or bundle digest does not match the embedded recipe"
+    fi
+
+    python3 - "${manifest_path}" "${bundle_path}" \
+        "${SOURCE_DATE_EPOCH_VALUE}" <<'PY_VERIFY_SUPPORT'
+import hashlib
+import json
+import pathlib
+import sys
+import tarfile
+
+manifest_path = pathlib.Path(sys.argv[1])
+bundle_path = pathlib.Path(sys.argv[2])
+source_date_epoch = int(sys.argv[3])
+manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+if set(manifest) != {"format", "members"} or manifest["format"] != 1:
+    raise SystemExit("generated support manifest shape is not accepted")
+members = manifest["members"]
+if not isinstance(members, list) or not members:
+    raise SystemExit("generated support manifest is empty")
+expected = {}
+casefold_paths = set()
+for member in members:
+    if set(member) != {"length", "mode", "path", "sha256", "type"}:
+        raise SystemExit("generated support manifest member shape is not accepted")
+    path = member["path"]
+    pure_path = pathlib.PurePosixPath(path)
+    if (
+        not isinstance(path, str)
+        or not path
+        or pure_path.is_absolute()
+        or str(pure_path) != path
+        or ".." in pure_path.parts
+        or path.casefold() in casefold_paths
+    ):
+        raise SystemExit("generated support manifest path is not accepted")
+    if member["type"] != "file" or member["mode"] != "0600":
+        raise SystemExit(f"generated support manifest type or mode is not accepted: {path}")
+    if isinstance(member["length"], bool) or not isinstance(member["length"], int) or member["length"] < 0:
+        raise SystemExit(f"generated support manifest length is not accepted: {path}")
+    digest = member["sha256"]
+    if not isinstance(digest, str) or len(digest) != 64 or any(
+        character not in "0123456789abcdef" for character in digest
+    ):
+        raise SystemExit(f"generated support manifest digest is not accepted: {path}")
+    casefold_paths.add(path.casefold())
+    expected[path] = member
+if list(expected) != sorted(expected):
+    raise SystemExit("generated support manifest is not ordered")
+
+with tarfile.open(bundle_path, mode="r:") as bundle:
+    actual_members = bundle.getmembers()
+    if [member.name for member in actual_members] != list(expected):
+        raise SystemExit("support bundle order or inventory is not accepted")
+    for member in actual_members:
+        expected_member = expected[member.name]
+        if (
+            not member.isfile()
+            or member.mode != 0o600
+            or member.uid != 0
+            or member.gid != 0
+            or member.mtime != source_date_epoch
+            or member.size != expected_member["length"]
+        ):
+            raise SystemExit(f"support bundle metadata is not accepted: {member.name}")
+        member_file = bundle.extractfile(member)
+        if member_file is None:
+            raise SystemExit(f"support bundle member cannot be read: {member.name}")
+        if hashlib.sha256(member_file.read()).hexdigest() != expected_member["sha256"]:
+            raise SystemExit(f"support bundle member digest is not accepted: {member.name}")
+PY_VERIFY_SUPPORT
+}
+
 container_build() {
     local source_archive="/build/postgresql-source.tar.bz2"
     local source_root="/build/postgresql-source"
@@ -267,14 +786,41 @@ container_build() {
     local postgresql_license_path
     local zlib_archive="/build/zlib-source.tar.gz"
     local zlib_source="/build/zlib-source"
-    local archive_path
+    local backend_archive_path
+    local initializer_archive_path
+    local initializer_directory
+    local initializer_rename_map
+    local initializer_defined_symbols
+    local initializer_undefined_symbols
     local probe_source="/build/orna-engine-entry-probe.c"
     local probe_path
+    local probe_support_root="/build/entry-probe-support"
     local trace_path
     local standard_output
     local configured_macros="/build/pg-config-manual.macros"
     local defined_symbols="/build/defined-symbols.txt"
     local undefined_symbols="/build/undefined-symbols.txt"
+    local generated_timezone_root="/build/generated-timezone"
+    local support_staging_root="/build/support-staging"
+    local support_member_list="/build/support-members.txt"
+    local support_bundle_path
+    local support_manifest_path
+    local publication_root="/build/verified-publication"
+    local expected_output_files="/build/expected-output-files.txt"
+    local actual_output_files="/build/actual-output-files.txt"
+    local expected_bridges="/build/expected-initdb-bridges.txt"
+    local actual_bridges="/build/actual-initdb-bridges.txt"
+    local initializer_archive_defined_names="/build/initdb-archive-defined-names.txt"
+    local backend_strings="/build/backend-strings.txt"
+    local probe_dynamic="/build/entry-probe.dynamic.txt"
+    local postgres_executable_pattern
+    local unexpected_executable
+    local unexpected_link_or_shared_object
+    local unexpected_published_entry
+    local symbol
+
+    postgres_executable_pattern='execve(at)?\([^,]*"([^"/]*/)*'
+    postgres_executable_pattern+='(postgres|psql|initdb|pg_upgrade|pg_ctl|pg_resetwal)"'
 
     [[ "${ORNA_HOST_UID:-}" =~ ^[0-9]+$ ]] || fail "host user ID is not a decimal number"
     [[ "${ORNA_HOST_GID:-}" =~ ^[0-9]+$ ]] || fail "host group ID is not a decimal number"
@@ -286,11 +832,18 @@ container_build() {
     [[ -r /build/recipe.environment ]] || fail "validated recipe environment is absent"
     # shellcheck disable=SC1091
     source /build/recipe.environment
-    archive_path="${build_root}/src/backend/${STATIC_ARCHIVE_NAME}"
+    backend_archive_path="${build_root}/src/backend/${STATIC_ARCHIVE_NAME}"
+    initializer_directory="${build_root}/src/bin/initdb"
+    initializer_archive_path="${initializer_directory}/${INITIALIZER_ARCHIVE_NAME}"
+    initializer_rename_map="${initializer_directory}/${INITIALIZER_RENAME_MAP_PATH}"
+    initializer_defined_symbols="${initializer_directory}/${INITIALIZER_DEFINED_SYMBOLS_PATH}"
+    initializer_undefined_symbols="${initializer_directory}/${INITIALIZER_UNDEFINED_SYMBOLS_PATH}"
     postgresql_license_path="${source_root}/${POSTGRESQL_LICENSE_SOURCE_PATH}"
     probe_path="/build/${UNPUBLISHED_PROBE_PATH}"
     trace_path="/build/${TRACE_OUTPUT_PATH}"
     standard_output="/build/${PROBE_STANDARD_OUTPUT_PATH}"
+    support_bundle_path="/build/${SUPPORT_BUNDLE_PATH}"
+    support_manifest_path="/build/${SUPPORT_MANIFEST_PATH}"
     [[ "$(pwd -P)" == "/build" ]] || fail "container build must use /build"
     [[ -r "${RECIPE_PATH}" && -r "${PATCH_PATH}" ]] || fail "container source inputs are absent"
     mkdir -p /build/tmp
@@ -351,72 +904,193 @@ container_build() {
         fail "embedded build must not define EXEC_BACKEND"
     fi
 
+    env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH_VALUE}" \
+        "${RECIPE_BUILD_ENVIRONMENT[@]}" \
+        make -C "${build_root}/src/backend" -j"${BUILD_JOBS}" \
+            ORNA_EMBEDDED_ZLIB_ARCHIVE="${ZLIB_PREFIX}/lib/libz.a" \
+            orna_postgres18_lifecycle_archives
+    env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH_VALUE}" \
+        "${RECIPE_BUILD_ENVIRONMENT[@]}" \
+        make -C "${build_root}/src/timezone" -j"${BUILD_JOBS}" zic
+    env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH_VALUE}" \
+        "${RECIPE_BUILD_ENVIRONMENT[@]}" \
+        make -C "${build_root}/src/backend/snowball" -j"${BUILD_JOBS}" snowball_create.sql
+
     python3 - "${probe_source}" <<'PY_PROBE'
 import pathlib
 import sys
 
 pathlib.Path(sys.argv[1]).write_text(
     "extern int orna_postgres18_entry(int argc, char *argv[]);\n"
+    "extern int orna_postgres18_initdb_entry(const char *data_directory);\n"
+    "extern int orna_postgres18_set_support_root(const char *absolute_root);\n"
+    "static int (* volatile initializer_entry)(const char *) =\n"
+    "    orna_postgres18_initdb_entry;\n"
     "int main(int argc, char *argv[])\n"
     "{\n"
+    "    if (initializer_entry == 0)\n"
+    "        return 124;\n"
+    "    if (orna_postgres18_set_support_root(\"/build/entry-probe-support\") != 0)\n"
+    "        return 125;\n"
     "    return orna_postgres18_entry(argc, argv);\n"
     "}\n",
     encoding="utf-8",
     newline="\n",
 )
 PY_PROBE
-
+    mkdir -m 0700 "${probe_support_root}"
     env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH_VALUE}" \
         "${RECIPE_BUILD_ENVIRONMENT[@]}" \
         make -C "${build_root}/src/backend" -j"${BUILD_JOBS}" \
             ORNA_EMBEDDED_ZLIB_ARCHIVE="${ZLIB_PREFIX}/lib/libz.a" \
-            ORNA_EMBEDDED_PROBE_SOURCE="${probe_source}" \
-            ORNA_EMBEDDED_PROBE_OUTPUT="${probe_path}" \
-            orna_postgres18_entry_probe
+            ORNA_EMBEDDED_LIFECYCLE_PROBE_SOURCE="${probe_source}" \
+            ORNA_EMBEDDED_LIFECYCLE_PROBE_OUTPUT="${probe_path}" \
+            orna_postgres18_lifecycle_probe
 
-    [[ -f "${archive_path}" ]] || fail "embedded backend archive was not produced"
-    [[ -x "${probe_path}" ]] || fail "embedded entry probe was not produced"
+    [[ -f "${backend_archive_path}" ]] || fail "embedded backend archive was not produced"
+    [[ -f "${initializer_archive_path}" ]] || fail "embedded initialiser archive was not produced"
+    [[ -s "${initializer_rename_map}" ]] || fail "initialiser rename-map evidence was not produced"
+    [[ -s "${initializer_defined_symbols}" ]] || fail "initialiser defined-symbol evidence was not produced"
+    [[ -s "${initializer_undefined_symbols}" ]] || fail "initialiser undefined-symbol evidence was not produced"
+    [[ -x "${probe_path}" ]] || fail "embedded dual-archive entry probe was not produced"
     [[ "$(basename "${probe_path}")" != "postgres" ]] || fail "entry probe must not be named postgres"
-    [[ "$(ar t "${archive_path}")" == "${STATIC_ARCHIVE_MEMBER}" ]] \
-        || fail "embedded archive must contain the one accepted flattened member"
-    [[ "$(nm --extern-only --defined-only "${archive_path}" | awk -v symbol="${STATIC_ENTRY_SYMBOL}" '$NF == symbol { count += 1 } END { print count + 0 }')" == "1" ]] \
-        || fail "embedded archive must define one private PostgreSQL entry"
-    [[ "$(nm --extern-only --defined-only "${archive_path}" | awk '$NF == "main" { count += 1 } END { print count + 0 }')" == "0" ]] \
-        || fail "embedded archive must not define C main"
-    [[ "$(nm --extern-only --defined-only "${archive_path}" | awk '$NF == "deflate" { count += 1 } END { print count + 0 }')" == "1" ]] \
-        || fail "embedded archive must contain the pinned static zlib closure"
-    LC_ALL=C nm --format=posix --extern-only --defined-only "${archive_path}" | LC_ALL=C sort >"${defined_symbols}"
-    LC_ALL=C nm --format=posix --extern-only --undefined-only "${archive_path}" | LC_ALL=C sort >"${undefined_symbols}"
+    [[ "$(count_defined_symbol "${probe_path}" "${INITIALIZER_ENTRY_SYMBOL}")" == "1" ]] \
+        || fail "dual-archive entry probe does not retain the linked initialiser entry"
+    [[ "$(count_defined_symbol "${probe_path}" "${BACKEND_ENTRY_SYMBOL}")" == "1" ]] \
+        || fail "dual-archive entry probe does not retain the linked backend entry"
+    [[ "$(ar t "${backend_archive_path}")" == "${STATIC_ARCHIVE_MEMBER}" ]] \
+        || fail "embedded backend archive must contain the one accepted flattened member"
+    [[ "$(ar t "${initializer_archive_path}")" == "${INITIALIZER_ARCHIVE_MEMBER}" ]] \
+        || fail "embedded initialiser archive must contain the one accepted flattened member"
+    [[ "$(count_defined_symbol "${backend_archive_path}" "${STATIC_ENTRY_SYMBOL}")" == "1" ]] \
+        || fail "embedded backend archive must define one private PostgreSQL entry"
+    [[ "$(count_defined_symbol "${initializer_archive_path}" "${INITIALIZER_ENTRY_SYMBOL}")" == "1" ]] \
+        || fail "embedded initialiser archive must define one private initialiser entry"
+    [[ "$(count_defined_symbol "${backend_archive_path}" main)" == "0" ]] \
+        || fail "embedded backend archive must not define C main"
+    [[ "$(count_defined_symbol "${backend_archive_path}" deflate)" == "1" ]] \
+        || fail "embedded backend archive must contain the pinned static zlib closure"
+    for symbol in "${BACKEND_ENTRY_SYMBOL}" "${SUPPORT_ROOT_SETTER_SYMBOL}" \
+        "${SYSTEM_FUNCTIONS_CAPABILITY_SETTER_SYMBOL}" \
+        "${INITIALISATION_CHILD_CAPABILITY_SETTER_SYMBOL}" \
+        "${SECCOMP_ENTRY_SYMBOL}" orna_postgres18_support_root; do
+        [[ "$(count_defined_symbol "${backend_archive_path}" "${symbol}")" == "1" ]] \
+            || fail "embedded backend archive does not define the required bridge ${symbol} exactly once"
+    done
+    nm --extern-only --defined-only "${initializer_archive_path}" \
+        | awk 'NF >= 2 && $NF !~ /:$/ { print $NF }' \
+        | LC_ALL=C sort -u >"${initializer_archive_defined_names}" \
+        || fail "could not inspect the initialiser archive defined-symbol closure"
+    while IFS= read -r symbol; do
+        [[ "${symbol}" == "${INITIALIZER_ENTRY_SYMBOL}" || "${symbol}" == "${INITIALIZER_SYMBOL_PREFIX}"* ]] \
+            || fail "initialiser archive exposes an unprefixed symbol: ${symbol}"
+    done <"${initializer_archive_defined_names}"
+    printf '%s\n' "${INITIALIZER_ALLOWED_UNDEFINED_BRIDGE_SYMBOLS[@]}" \
+        | LC_ALL=C sort -u >"${expected_bridges}" \
+        || fail "could not write the expected initialiser bridge closure"
+    nm --extern-only --undefined-only "${initializer_archive_path}" \
+        | awk '$NF ~ /^orna_postgres18_/ { print $NF }' \
+        | LC_ALL=C sort -u >"${actual_bridges}" \
+        || fail "could not inspect the initialiser archive undefined bridge closure"
+    cmp --silent "${expected_bridges}" "${actual_bridges}" \
+        || fail "initialiser archive unprefixed bridge closure is not accepted"
+    for symbol in "${INITIALIZER_ALLOWED_UNDEFINED_BRIDGE_SYMBOLS[@]}"; do
+        grep -E "(^|[[:space:]])${symbol}($|[[:space:]])" \
+            "${initializer_undefined_symbols}" >/dev/null \
+            || fail "initialiser undefined-symbol evidence omits ${symbol}"
+    done
+    python3 - "${initializer_rename_map}" "${INITIALIZER_ENTRY_SYMBOL}" \
+        "${INITIALIZER_SYMBOL_PREFIX}" "${INITIALIZER_ALLOWED_UNDEFINED_BRIDGE_SYMBOLS[@]}" <<'PY_RENAME_MAP'
+import pathlib
+import sys
+
+rename_map_path = pathlib.Path(sys.argv[1])
+entry_symbol = sys.argv[2]
+symbol_prefix = sys.argv[3]
+bridge_symbols = set(sys.argv[4:])
+rows = [line.split() for line in rename_map_path.read_text(encoding="utf-8").splitlines()]
+if not rows or any(len(row) != 2 for row in rows):
+    raise SystemExit("initialiser rename map is empty or malformed")
+old_symbols = [row[0] for row in rows]
+new_symbols = [row[1] for row in rows]
+if len(set(old_symbols)) != len(old_symbols) or len(set(new_symbols)) != len(new_symbols):
+    raise SystemExit("initialiser rename map repeats a source or destination symbol")
+for old_symbol, new_symbol in rows:
+    if old_symbol == entry_symbol or old_symbol in bridge_symbols:
+        raise SystemExit(f"initialiser rename map renames a public bridge: {old_symbol}")
+    if new_symbol != f"{symbol_prefix}{old_symbol}":
+        raise SystemExit(f"initialiser rename map has an unexpected destination: {old_symbol}")
+PY_RENAME_MAP
+    LC_ALL=C nm --format=posix --extern-only --defined-only "${backend_archive_path}" \
+        | LC_ALL=C sort >"${defined_symbols}" \
+        || fail "could not record the backend defined-symbol closure"
+    LC_ALL=C nm --format=posix --extern-only --undefined-only "${backend_archive_path}" \
+        | LC_ALL=C sort >"${undefined_symbols}" \
+        || fail "could not record the backend undefined-symbol closure"
+    strings --all "${backend_archive_path}" >"${backend_strings}" \
+        || fail "could not inspect embedded backend archive strings"
+    for message in "${SQL_GUARD_MESSAGES[@]}"; do
+        grep -F -x "${message}" "${backend_strings}" >/dev/null \
+            || fail "embedded backend archive omits SQL guard diagnostic: ${message}"
+    done
+
+    mkdir -m 0700 "${generated_timezone_root}"
+    (
+        umask 077
+        env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH_VALUE}" \
+            "${RECIPE_BUILD_ENVIRONMENT[@]}" \
+            "${build_root}/src/timezone/zic" -d "${generated_timezone_root}" \
+                "${source_root}/src/timezone/data/tzdata.zi"
+    ) || fail "could not generate the pinned PostgreSQL timezone tree"
+    stage_support_bundle "${source_root}" "${build_root}" "${generated_timezone_root}" \
+        "${support_bundle_path}" "${support_manifest_path}" \
+        "${support_staging_root}" "${support_member_list}"
 
     strace --follow-forks --quiet --trace=process,file --output="${trace_path}" \
-        "${probe_path}" --describe-config >"${standard_output}"
+        "${probe_path}" --describe-config >"${standard_output}" \
+        || fail "embedded dual-archive describe-config probe failed"
     [[ -s "${standard_output}" ]] || fail "describe-config probe produced no output"
     grep -F "execve(\"${probe_path}\"" "${trace_path}" >/dev/null \
         || fail "entry probe trace does not start from the accepted probe executable"
-    if grep -E 'execve(at)?\([^,]*"([^"/]*/)*(postgres|psql|initdb|pg_upgrade|pg_ctl|pg_resetwal)"' "${trace_path}" >/dev/null; then
+    if grep -E "${postgres_executable_pattern}" "${trace_path}" >/dev/null; then
         fail "entry probe executed a PostgreSQL executable"
     fi
-    if grep -E 'open(at)?\([^)]*\.(so|so\.[^" ]*)' "${trace_path}" | grep -i postgres >/dev/null; then
+    if awk '/open(at)?\([^)]*\.(so|so\.[^" ]*)/ && tolower($0) ~ /postgres/ { found = 1 } END { exit !found }' \
+        "${trace_path}"; then
         fail "entry probe opened a PostgreSQL shared object"
     fi
-    if readelf --dynamic "${probe_path}" | grep -E 'Shared library: \[libz\.so' >/dev/null; then
-        fail "entry probe must use the zlib code in the embedded archive"
+    readelf --dynamic "${probe_path}" >"${probe_dynamic}" \
+        || fail "could not inspect the dual-archive entry probe dynamic section"
+    if grep -E 'Shared library: \[(libz|libpq)\.so' "${probe_dynamic}" >/dev/null; then
+        fail "entry probe must use the static zlib and libpq closure in the embedded archives"
     fi
 
-    mkdir -p "/output/${FROZEN_INPUTS_DIRECTORY}"
-    install -m 0644 "${archive_path}" /output/liborna_postgres18_backend.a
-    install -m 0644 "${defined_symbols}" /output/defined-symbols.txt
-    install -m 0644 "${undefined_symbols}" /output/undefined-symbols.txt
-    install -m 0644 "${trace_path}" "/output/${TRACE_OUTPUT_PATH}"
-    install -m 0644 "${standard_output}" "/output/${PROBE_STANDARD_OUTPUT_PATH}"
-    install -m 0644 "${postgresql_license_path}" "/output/${POSTGRESQL_LICENSE_OUTPUT_PATH}"
-    install -m 0644 "${RECIPE_PATH}" "/output/${FROZEN_INPUTS_DIRECTORY}/${RECIPE_PATH##*/}"
-    install -m 0644 "${SCRIPT_PATH}" "/output/${FROZEN_INPUTS_DIRECTORY}/${SCRIPT_PATH##*/}"
-    install -m 0644 "${PATCH_PATH}" "/output/${FROZEN_INPUTS_DIRECTORY}/${PATCH_PATH##*/}"
-    verify_sha256 "${POSTGRESQL_LICENSE_SHA256}" "/output/${POSTGRESQL_LICENSE_OUTPUT_PATH}" \
-        || fail "published PostgreSQL licence digest does not match embedded recipe"
+    mkdir -m 0700 "${publication_root}"
+    mkdir -m 0700 "${publication_root}/${FROZEN_INPUTS_DIRECTORY}"
+    install -m 0644 "${backend_archive_path}" "${publication_root}/${STATIC_ARCHIVE_NAME}"
+    install -m 0644 "${initializer_archive_path}" "${publication_root}/${INITIALIZER_ARCHIVE_NAME}"
+    install -m 0644 "${defined_symbols}" "${publication_root}/defined-symbols.txt"
+    install -m 0644 "${undefined_symbols}" "${publication_root}/undefined-symbols.txt"
+    install -m 0644 "${initializer_rename_map}" "${publication_root}/${INITIALIZER_RENAME_MAP_PATH}"
+    install -m 0644 "${initializer_defined_symbols}" "${publication_root}/${INITIALIZER_DEFINED_SYMBOLS_PATH}"
+    install -m 0644 "${initializer_undefined_symbols}" "${publication_root}/${INITIALIZER_UNDEFINED_SYMBOLS_PATH}"
+    install -m 0644 "${support_bundle_path}" "${publication_root}/${SUPPORT_BUNDLE_PATH}"
+    install -m 0644 "${support_manifest_path}" "${publication_root}/${SUPPORT_MANIFEST_PATH}"
+    install -m 0644 "${trace_path}" "${publication_root}/${TRACE_OUTPUT_PATH}"
+    install -m 0644 "${standard_output}" "${publication_root}/${PROBE_STANDARD_OUTPUT_PATH}"
+    install -m 0644 "${postgresql_license_path}" "${publication_root}/${POSTGRESQL_LICENSE_OUTPUT_PATH}"
+    install -m 0644 "${RECIPE_PATH}" "${publication_root}/${FROZEN_INPUTS_DIRECTORY}/${RECIPE_PATH##*/}"
+    install -m 0644 "${SCRIPT_PATH}" "${publication_root}/${FROZEN_INPUTS_DIRECTORY}/${SCRIPT_PATH##*/}"
+    install -m 0644 "${PATCH_PATH}" "${publication_root}/${FROZEN_INPUTS_DIRECTORY}/${PATCH_PATH##*/}"
+    verify_sha256 "${POSTGRESQL_LICENSE_SHA256}" "${publication_root}/${POSTGRESQL_LICENSE_OUTPUT_PATH}" \
+        || fail "staged PostgreSQL licence digest does not match embedded recipe"
+    verify_sha256 "${SUPPORT_BUNDLE_SHA256}" "${publication_root}/${SUPPORT_BUNDLE_PATH}" \
+        || fail "staged support bundle digest does not match embedded recipe"
+    verify_sha256 "${SUPPORT_MANIFEST_SHA256}" "${publication_root}/${SUPPORT_MANIFEST_PATH}" \
+        || fail "staged support manifest digest does not match embedded recipe"
+
     python3 - "${RECIPE_PATH}" "${PATCH_PATH}" "${SCRIPT_PATH}" "${probe_path}" \
-        "${FROZEN_INPUTS_DIRECTORY}" /output <<'PY_MANIFEST'
+        "${FROZEN_INPUTS_DIRECTORY}" "${publication_root}" <<'PY_MANIFEST'
 import hashlib
 import json
 import pathlib
@@ -432,9 +1106,13 @@ output_path = pathlib.Path(sys.argv[6])
 with recipe_path.open("rb") as recipe_file:
     recipe = tomllib.load(recipe_file)
 
+
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
+
+resource_manifest_path = output_path / recipe["resources"]["manifest_path"]
+resource_manifest = json.loads(resource_manifest_path.read_text(encoding="utf-8"))
 document = {
     "format": 1,
     "identity": recipe["identity"],
@@ -453,18 +1131,47 @@ document = {
         },
         "facts": recipe,
     },
-    "static_archive": {
-        "path": "liborna_postgres18_backend.a",
-        "sha256": digest(output_path / "liborna_postgres18_backend.a"),
+    "static_archives": {
+        "backend": {
+            "path": recipe["static_archive"]["path"],
+            "sha256": digest(output_path / recipe["static_archive"]["path"]),
+        },
+        "initializer": {
+            "path": recipe["initializer_archive"]["path"],
+            "sha256": digest(output_path / recipe["initializer_archive"]["path"]),
+        },
     },
     "symbol_closure": {
-        "defined": {
+        "backend_defined": {
             "path": "defined-symbols.txt",
             "sha256": digest(output_path / "defined-symbols.txt"),
         },
-        "undefined": {
+        "backend_undefined": {
             "path": "undefined-symbols.txt",
             "sha256": digest(output_path / "undefined-symbols.txt"),
+        },
+        "initializer_rename_map": {
+            "path": recipe["initializer_archive"]["rename_map_path"],
+            "sha256": digest(output_path / recipe["initializer_archive"]["rename_map_path"]),
+        },
+        "initializer_defined": {
+            "path": recipe["initializer_archive"]["defined_symbols_path"],
+            "sha256": digest(output_path / recipe["initializer_archive"]["defined_symbols_path"]),
+        },
+        "initializer_undefined": {
+            "path": recipe["initializer_archive"]["undefined_symbols_path"],
+            "sha256": digest(output_path / recipe["initializer_archive"]["undefined_symbols_path"]),
+        },
+    },
+    "support": {
+        "bundle": {
+            "path": recipe["resources"]["bundle_path"],
+            "sha256": digest(output_path / recipe["resources"]["bundle_path"]),
+        },
+        "manifest": {
+            "path": recipe["resources"]["manifest_path"],
+            "sha256": digest(resource_manifest_path),
+            "members": resource_manifest["members"],
         },
     },
     "entry_probe": {
@@ -495,30 +1202,51 @@ PY_MANIFEST
         printf '%s/%s\n' "${FROZEN_INPUTS_DIRECTORY}" "${RECIPE_PATH##*/}"
         printf '%s/%s\n' "${FROZEN_INPUTS_DIRECTORY}" "${SCRIPT_PATH##*/}"
         printf '%s/%s\n' "${FROZEN_INPUTS_DIRECTORY}" "${PATCH_PATH##*/}"
-    } | LC_ALL=C sort >/build/expected-output-files.txt
-    find /output -type f -printf '%P\n' | LC_ALL=C sort >/build/actual-output-files.txt
-    cmp --silent /build/expected-output-files.txt /build/actual-output-files.txt \
+    } | LC_ALL=C sort -u >"${expected_output_files}" \
+        || fail "could not write the expected embedded output inventory"
+    find "${publication_root}" -type f -printf '%P\n' \
+        | LC_ALL=C sort >"${actual_output_files}" \
+        || fail "could not inspect the staged embedded output inventory"
+    cmp --silent "${expected_output_files}" "${actual_output_files}" \
         || fail "embedded output file inventory does not match the accepted proof contract"
-    if find /output -type f -name '*.so*' -print -quit | grep -q .; then
-        fail "embedded output contains a shared object"
+    unexpected_link_or_shared_object="$(find "${publication_root}" \
+        \( -type l -o \( -type f -name '*.so*' \) \) -print -quit)" \
+        || fail "could not inspect staged output links and shared objects"
+    if [[ -n "${unexpected_link_or_shared_object}" ]]; then
+        fail "embedded output contains a link or shared object"
     fi
-    if find /output -type f -perm /111 -print -quit | grep -q .; then
+    unexpected_executable="$(find "${publication_root}" -type f -perm /111 -print -quit)" \
+        || fail "could not inspect staged output executable modes"
+    if [[ -n "${unexpected_executable}" ]]; then
         fail "embedded output contains an executable"
     fi
+    unexpected_published_entry="$(find /output -mindepth 1 -print -quit)" \
+        || fail "could not inspect the container output root"
+    if [[ -n "${unexpected_published_entry}" ]]; then
+        fail "container output became non-empty before all proof gates passed"
+    fi
+    cp -a "${publication_root}/." /output/ \
+        || fail "could not publish the verified embedded output from the container"
 }
 
 host_build() {
+    local requested_output_root="$1"
     local first_build_root=""
     local first_output_root=""
     local frozen_inputs_root=""
     local host_gid
     local host_uid
+    local output_name
+    local output_parent
+    local output_root
+    local previous_output_root=""
     local result_root
     local second_build_root=""
     local second_output_root=""
     local frozen_patch_path=""
     local frozen_recipe_path=""
     local frozen_script_path=""
+    local existing_output_entry=""
 
     run_container_build() {
         local build_root="$1"
@@ -526,7 +1254,7 @@ host_build() {
 
         emit_recipe_environment "${frozen_recipe_path}" "${frozen_patch_path}" >"${build_root}/recipe.environment"
         docker run --rm --platform="${TARGET_PLATFORM}" \
-            --mount "type=bind,src=${frozen_inputs_root},dst=/frozen,readonly" \
+            --mount "type=bind,src=${frozen_inputs_root}/frozen,dst=/frozen,readonly" \
             --mount "type=bind,src=${build_root},dst=/build" \
             --mount "type=bind,src=${output_root},dst=/output" \
             --workdir /build \
@@ -541,33 +1269,65 @@ host_build() {
         local description="$1"
         local first_path="$2"
         local second_path="$3"
+        local first_sha256
+        local second_sha256
 
-        cmp --silent "${first_path}" "${second_path}" \
-            || fail "${description} differs between the two isolated builds: $(sha256sum "${first_path}" | awk '{print $1}') != $(sha256sum "${second_path}" | awk '{print $1}')"
-        log "matched ${description}: $(sha256sum "${first_path}" | awk '{print $1}')"
+        if ! cmp --silent "${first_path}" "${second_path}"; then
+            first_sha256="$(sha256sum "${first_path}" | awk '{print $1}')"
+            second_sha256="$(sha256sum "${second_path}" | awk '{print $1}')"
+            fail "${description} differs between the two isolated builds: ${first_sha256} != ${second_sha256}"
+        fi
+        first_sha256="$(sha256sum "${first_path}" | awk '{print $1}')"
+        log "matched ${description}: ${first_sha256}"
     }
 
-    mkdir -p "${TARGET_ROOT}"
-    frozen_inputs_root="$(mktemp -d "${TARGET_ROOT}/inputs.XXXXXXXX")"
+    [[ "${requested_output_root}" == /* ]] \
+        || fail "embedded output root must be an absolute path"
+    [[ "${requested_output_root}" != *$'\n'* && "${requested_output_root}" != *$'\r'* \
+        && "${requested_output_root}" != *$'\t'* \
+        && "${requested_output_root}" != *','* ]] \
+        || fail "embedded output root contains an unsupported character"
+    output_name="$(basename -- "${requested_output_root}")"
+    output_parent="$(dirname -- "${requested_output_root}")"
+    [[ -n "${output_name}" && "${output_name}" != '/' \
+        && "${output_name}" != '.' && "${output_name}" != '..' ]] \
+        || fail "embedded output root must name one owned directory"
+    [[ -d "${output_parent}" && ! -L "${requested_output_root}" ]] \
+        || fail "embedded output parent must exist and the output root must not be a symbolic link"
+    output_parent="$(cd "${output_parent}" && pwd -P)"
+    output_root="${output_parent}/${output_name}"
+
+    frozen_inputs_root="$(mktemp -d "${output_parent}/.${output_name}.build.XXXXXXXX")"
+    previous_output_root="${frozen_inputs_root}/previous-output"
+    first_build_root="${frozen_inputs_root}/build.first"
+    first_output_root="${frozen_inputs_root}/output.first"
+    second_build_root="${frozen_inputs_root}/build.second"
+    second_output_root="${frozen_inputs_root}/output.second"
+    mkdir -p "${first_build_root}" "${first_output_root}" \
+        "${second_build_root}" "${second_output_root}"
     EMBEDDED_BUILD_CLEANUP_PATHS+=("${frozen_inputs_root}")
     trap cleanup_embedded_build_paths EXIT
-    frozen_recipe_path="${frozen_inputs_root}/${RECIPE_PATH##*/}"
-    frozen_patch_path="${frozen_inputs_root}/${PATCH_PATH##*/}"
-    frozen_script_path="${frozen_inputs_root}/${SCRIPT_PATH##*/}"
+    frozen_recipe_path="${frozen_inputs_root}/frozen/${RECIPE_PATH##*/}"
+    frozen_patch_path="${frozen_inputs_root}/frozen/${PATCH_PATH##*/}"
+    frozen_script_path="${frozen_inputs_root}/frozen/${SCRIPT_PATH##*/}"
+    mkdir -p "${frozen_inputs_root}/frozen"
     install -m 0644 "${RECIPE_PATH}" "${frozen_recipe_path}"
     install -m 0644 "${PATCH_PATH}" "${frozen_patch_path}"
     install -m 0644 "${SCRIPT_PATH}" "${frozen_script_path}"
     load_recipe "${frozen_recipe_path}" "${frozen_patch_path}"
+    [[ "${output_root}" != "${REPOSITORY_ROOT}/${FORBIDDEN_IMPLICIT_OUTPUT_ROOT}" ]] \
+        || fail "embedded build cannot publish to the obsolete implicit output root"
+    if [[ -e "${output_root}" ]]; then
+        [[ -d "${output_root}" ]] || fail "embedded output root is not a directory"
+        existing_output_entry="$(find "${output_root}" -mindepth 1 -print -quit)" \
+            || fail "could not inspect the requested embedded output root"
+        if [[ -n "${existing_output_entry}" ]]; then
+            [[ -f "${output_root}/embedded-engine-manifest.json" ]] \
+                || fail "non-empty embedded output root is not a prior verified output"
+        fi
+    fi
     command -v docker >/dev/null 2>&1 || fail "docker is required for the embedded build"
-    first_build_root="$(mktemp -d "${TARGET_ROOT}/build.first.XXXXXXXX")"
-    EMBEDDED_BUILD_CLEANUP_PATHS+=("${first_build_root}")
-    first_output_root="$(mktemp -d "${TARGET_ROOT}/output.first.XXXXXXXX")"
-    EMBEDDED_BUILD_CLEANUP_PATHS+=("${first_output_root}")
-    second_build_root="$(mktemp -d "${TARGET_ROOT}/build.second.XXXXXXXX")"
-    EMBEDDED_BUILD_CLEANUP_PATHS+=("${second_build_root}")
-    second_output_root="$(mktemp -d "${TARGET_ROOT}/output.second.XXXXXXXX")"
-    EMBEDDED_BUILD_CLEANUP_PATHS+=("${second_output_root}")
-    result_root="${TARGET_ROOT}/current"
+    result_root="${output_root}"
     host_uid="$(id -u)"
     host_gid="$(id -g)"
 
@@ -587,18 +1347,25 @@ host_build() {
         "${frozen_patch_path}" "${first_output_root}/${FROZEN_INPUTS_DIRECTORY}/${PATCH_PATH##*/}"
     compare_exact "published frozen script input" \
         "${frozen_script_path}" "${first_output_root}/${FROZEN_INPUTS_DIRECTORY}/${SCRIPT_PATH##*/}"
-    for frozen_input in "${RECIPE_PATH##*/}" "${PATCH_PATH##*/}" "${SCRIPT_PATH##*/}"; do
-        compare_exact "published frozen ${frozen_input}" \
-            "${first_output_root}/${FROZEN_INPUTS_DIRECTORY}/${frozen_input}" \
-            "${second_output_root}/${FROZEN_INPUTS_DIRECTORY}/${frozen_input}"
-    done
     [[ -s "${first_output_root}/${TRACE_OUTPUT_PATH}" && -s "${second_output_root}/${TRACE_OUTPUT_PATH}" ]] \
         || fail "each isolated build must retain trace evidence"
 
-    rm -rf "${result_root}"
-    mv "${first_output_root}" "${result_root}"
+    EMBEDDED_BUILD_PUBLICATION_PREVIOUS="${previous_output_root}"
+    EMBEDDED_BUILD_PUBLICATION_RESULT="${result_root}"
+    EMBEDDED_BUILD_PUBLICATION_IN_PROGRESS=1
+    if [[ -e "${result_root}" ]]; then
+        mv -- "${result_root}" "${previous_output_root}"
+    fi
+    if ! mv -- "${first_output_root}" "${result_root}"; then
+        if [[ -e "${previous_output_root}" ]]; then
+            mv -- "${previous_output_root}" "${result_root}" \
+                || fail "could not restore the previous embedded output after publication failure"
+        fi
+        fail "could not publish the verified embedded output"
+    fi
+    EMBEDDED_BUILD_PUBLICATION_IN_PROGRESS=0
     first_output_root=""
-    log "wrote embedded entry probe evidence to ${result_root}"
+    log "wrote embedded lifecycle inputs and proof to ${result_root}"
 }
 
 main() {
@@ -614,10 +1381,12 @@ main() {
             container_build
             ;;
         '')
-            host_build
+            fail "usage: packaging/postgresql/build-embedded.sh [--validate | <absolute-output-root>]"
             ;;
         *)
-            fail "usage: packaging/postgresql/build-embedded.sh [--validate]"
+            [[ "$#" == 1 ]] \
+                || fail "embedded build accepts exactly one caller-owned output root"
+            host_build "$1"
             ;;
     esac
 }
