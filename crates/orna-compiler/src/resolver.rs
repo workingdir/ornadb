@@ -4859,6 +4859,37 @@ mod tests {
         let second_ref = second_server.find("p_ref REF app.item").unwrap() + "p_ref REF ".len();
         let field_boolean = declarations.find("done BOOLEAN").unwrap() + "done ".len();
         assert_eq!(
+            [
+                done.resolved_type(),
+                create.parameters().next().unwrap().resolved_type(),
+                create.parameters().nth(1).unwrap().resolved_type(),
+                create.parameters().nth(2).unwrap().resolved_type(),
+                create.return_columns().next().unwrap().resolved_type(),
+                enabled.return_type(),
+                list.parameters().next().unwrap().resolved_type(),
+                list.return_columns().next().unwrap().resolved_type(),
+            ]
+            .into_iter()
+            .map(|type_use| match type_use {
+                CheckedApplicationTypeUse::Value(value) => (Some(value.type_id()), None),
+                CheckedApplicationTypeUse::ObjectReference(reference) => {
+                    (None, Some(reference.target()))
+                }
+            })
+            .collect::<Vec<_>>(),
+            vec![
+                (Some(changed_boolean), None),
+                (None, Some(item.id())),
+                (Some(changed_boolean), None),
+                (Some(changed_boolean), None),
+                (None, Some(item.id())),
+                (Some(changed_boolean), None),
+                (None, Some(item.id())),
+                (Some(changed_boolean), None),
+            ],
+            "public scalar-free views must retain each value ID and REF target"
+        );
+        assert_eq!(
             checked
                 .preparation_evidence
                 .declaration_uses
