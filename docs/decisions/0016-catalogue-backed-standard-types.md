@@ -1571,32 +1571,42 @@ Value(TypeId)
 Reference { target: TypeId }
 ```
 
-The initial catalogue migration may retain `ResolvedType::Scalar` as an
-internal compatibility projection for reserved standard identities while the
-ordered `ValueType` evidence carries the durable catalogue dependency. That
-projection must be derived from a previously resolved and verified `TypeId`;
-it cannot resolve source or establish identity itself.
+`ResolvedType::Value(TypeId)` is the only durable carrier for a standard value
+type in a version-2 catalogue. The `TypeId` identifies one definition in the
+catalogue pin's `VerifiedStandardLibrarySnapshot`. It is not a source spelling,
+a contract string, or a compatibility scalar.
 
-`StandardScalar` may remain temporarily as the representation code inside that
-projection and inside existing version-1 codecs and physical lowering. It is not
-the authority for source names, aliases, semantic identity, or catalogue
-membership. The compiler must resolve standard spellings through the verified
-standard bindings. Kernel representation selection must start from the
-resolved `TypeId` and its verified definition before choosing an internal
-primitive code.
+`ResolvedType::Scalar(StandardScalar)` remains a version-1 dual-read form only.
+It preserves every version-1 catalogue hash byte, artefact byte, PostgreSQL
+row, runtime value, error, and physical projection. The final version-2 gate
+rejects a scalar before it calculates a canonical hash, and a version-1
+constructor rejects `Value(TypeId)` before it calculates a canonical hash.
+The buildable migration sequence has one transitional version-2 scalar
+acceptance interval so existing version-2 producers and fixtures remain valid.
+`ResolvedType::Named(TypeId)` remains a non-scalar named type. It does
+not identify a standard primitive and it does not become a compatibility path.
+
+There is no temporary sidecar from a scalar field to a standard `TypeId`.
+Such a sidecar would create a second durable catalogue authority and could
+disagree with the scalar tuple. The compiler must emit `Value(TypeId)` after it
+has checked retained `EvidenceTarget::Value(TypeId)`. It must not reconstruct a
+type ID from `StandardScalar`.
+
+`StandardScalar` remains an internal representation code inside exact
+version-1 codecs, and direct use is allowed only from `Scalar` in a version-1
+context. During the stated transition, existing version-2 scalar codecs remain
+valid without becoming a new identity authority or selecting a representation.
+After the final gate, every version-2 runtime-value and backend adapter derives
+the representation only after it resolves `Value(TypeId)` through the verified
+definition and its exact contract. It is not the authority for source names,
+aliases, semantic identity, catalogue membership, or physical storage
+selection.
 
 The compatibility type therefore loses public source-resolution,
 `canonical_name`, and `type_id` authority as soon as the standard catalogue is
 introduced. Those operations move to the standard definition and binding
-view. Matches over the compatibility kind remain permitted only inside exact
-version-1 artefact adapters, runtime-value adapters, and backend adapters after
-they have validated the originating type definition's contract. Compiler and
-catalogue code may not construct semantics from the compatibility kind alone.
-
-The migration may be staged in buildable commits, but no new public seam may
-make `StandardScalar` the semantic source of truth. Once all consumers accept
-the catalogue identity directly, the compatibility projection can become a
-private kernel representation detail.
+view. Compiler and catalogue code may not construct semantics from the
+compatibility kind alone.
 
 ## Kernel representation contracts
 
@@ -2742,6 +2752,7 @@ together, or the previous version-1 active revision remains authoritative.
 | Normal-apply and atomic standard guards | Every `StandardContextIdentity` field, accessor, derive, and error field; both boxed mismatch identity payloads and their exact retained values; version-1/version-2 transitions; matching and mismatching version-2 contexts; `ReservedStandardIdentity` field, display, and source; exact trusted-path, transaction, recovery, expected-base, identity-gate, materialisation, physical-plan, and write ordering; replay and repeat-preparation precedence; active and inactive-record ordering | Normal apply performs the permanent standard-context guard after expected-base recovery and before materialisation, planning, or writes. It rejects every version transition and requires exact version-2 context equality. A mismatch owns the complete active and candidate identities in symmetric boxes and allocates them only on the error path. Atomic special apply accepts only `&orna_standard::StandardUpgrade`, then follows the stated exact order. A replay returns `ExpectedBaseMismatch` before collision scanning or writes. It completes the typed `ReservedStandardIdentity` gate before materialisation and physical planning, with `StandardLibraryRevision` first and every active-visible record in explicit family order before inactive records by durable ID bytes. Compiler construction already proves deployable core invariants, so special apply has no opaque-association or invariant gate. A repeated prepare against active version 2 returns `StandardLibraryAlreadyInstalled`. |
 | Standard-revision recovery | Complete raw version-2 fixtures; the raw standard catalogue set separately to `EMPTY_APPLICATION_CATALOGUE_REVISION_ID`; complete version-1 fixtures; a complete table snapshot before and after each rejected recovery | The decoder is the first recovery path with a standard context. It preserves complete version-2 decoding and all version-1 recovery behaviour. A raw standard sentinel returns exact `RevisionInvariantError::ReservedOfflineCheckCatalogueRevision { revision: EMPTY_APPLICATION_CATALOGUE_REVISION_ID, role: ActiveOrRecoveredStandard }`, exact display, and no error source. It returns no active revision and performs no repair or write; the complete table snapshot remains unchanged. |
 | PostgreSQL standard catalogue schema support | Migration registry version, name, and SQL-only checksum; every new table, column, check, primary key, uniqueness rule, foreign key, index, and public privilege; fresh bootstrap; upgrade from version 6; repeat and concurrent bootstrap; migration-history checksum, gap, tamper, and future-version cases | Migration `0007` adds only the stated schema support. The bootstrap tests prove the protected standard-table set and every stated DDL shape, including required inline origins, version-1/version-2 catalogue-pin shape, version columns, value-type reference shape, and identity-first indexes. Fresh and version-6 databases retain the exact version-1 active pair, hashes, and semantics, have zero standard rows, and store only version `1` columns with a null pin. Repeated and concurrent bootstrap are idempotent. Checksum and history rejection remain fail closed; a future migration version is `8`. No test seeds, decodes, applies, or trusts standard facts. |
+| Resolved value identity migration | Direct `ResolvedType::Value(TypeId)` construction; tag `4`; the exact three new source-free canonical and revision errors, fields, displays, sources, and slot order; every function parameter, including hostile CLIENT parameter, coverage; exhaustive recovery fixture/helper matches converted before the variant; transitional version-2 scalar acceptance, strict candidate rejection, and final public-hash and construction rejection; version-1 byte, hash, row, and error preservation; all migration-0008 DDL declarations, named replacements, length checks, composite keys, deferrability, and unchanged object keys; non-golden changed `TypeId`; wrong, missing, and crossed pin; restart; physical capability, unsupported, transient, and `VOID` contracts; no-DDL physical parity; exact PostgreSQL storage type | The migration has no sidecar and no `Named` reuse. The two public canonical hash entry points and revision construction scan every field, every function parameter, `ROWS`, and `SINGLE` slot in the stated order. Version 1 rejects `Value`; final version 2 rejects `Scalar`; version 2 rejects a missing pinned value definition. A hostile CLIENT parameter proves the same three rules and proves that transition-only recovery acceptance cannot bypass strict persistence validation. Recovery fixtures preserve raw version-1 and transitional version-2 scalar facts through the non-authoritative accessors without a wildcard. `validate_persistable_catalogue` rejects every new version-2 scalar candidate before materialisation, planning, or SQL writes through `PostgresKernelError::CandidateRevisionInvariant`. SQL accepts a value tuple only with the matching catalogue pin and standard value row. Apply persists the exact catalogue context, function semantic versions, value tuples, and value-reference target pin rather than version-1 defaults. Recovery retains the stated tuple, pin, definition, canonical, then physical error order. A changed non-golden `TypeId` round-trips through field, parameter, `ROWS`, and `SINGLE` return storage and restart. One core `PhysicalCatalogue` authority exposes only ordered `CreateObject` and `CreateField` accessors to PostgreSQL and makes equal allowed version-1 scalar and version-2 value contracts produce the same physical PostgreSQL type without DDL. The named value errors have the stated field, display, source, and gate order. |
 | Legacy compatibility boundary | Existing `check`, `prepare`, `ORNA0303`, scalar spelling, and legacy preparation tests; attempted standard-report preparation | Version-1 legacy checking and preparation remain unchanged and frozen. The standard application seam is distinct, introduces no compiler `Unavailable` error, and is removed or merged only by an explicit later caller-migration row. |
 
 The PostgreSQL schema-support row has these non-vacuous gates:
@@ -3104,6 +3115,29 @@ Tests must prove:
 * every existing standard spelling remains source-compatible and every
   previously rejected non-public alias remains rejected unless this decision
   names it;
+* the direct resolved-value migration has no scalar sidecar and no `Named`
+  reuse. Its proof uses a self-consistent non-golden standard with a changed
+  `TypeId` in a field, parameter, `ROWS` column, and `SINGLE` return. It proves
+  tag `4`, the exact field, every function parameter, `ROWS`, and `SINGLE`
+  slot scan order, and all three source-free canonical and revision errors
+  with exact fields, displays, and sources. A hostile CLIENT parameter proves
+  version-1 `Value` rejection, transition-only version-2 scalar recovery,
+  strict version-2 scalar persistence rejection before writes, final
+  version-2 scalar canonical and construction rejection, and missing pinned
+  version-2 value rejection. It proves version-1 bytes, hashes, rows, and
+  errors unchanged; migration-0008 bytea declarations without defaults, all
+  eight named length checks, all four named type-kind and tuple replacement
+  checks, all eight named deferrable composite foreign keys, and unchanged
+  object foreign keys; a context-equal normal version-2 apply persists its
+  catalogue context, each function semantic version, every value tuple, and
+  every value-reference target pin rather than defaults; a restart round-trip;
+  wrong, missing, and crossed pin or value rows in the stated tuple, pin,
+  definition, canonical, then physical order; exhaustive recovery helper and
+  fixture matches without a wildcard; the private-field `PhysicalCatalogue`
+  boundary with only ordered `CreateObject` and `CreateField` accessors across
+  crates; unsupported, transient, and `VOID` contracts in the stated
+  physical-plan order; and one allowed contract with no physical DDL for a
+  version-1-to-version-2 transition that has the same representation;
 * version-1 artefact goldens and immutable version-1 canonical hashes remain
   byte-identical, while version 2 hashes include the exact standard revision,
   value definitions, bindings, and type references;
@@ -3119,6 +3153,474 @@ Normal formatting, workspace tests, strict Clippy, rustdoc, diff, similarity,
 and live PostgreSQL gates remain required. Assertions must use exact identities,
 typed errors, diagnostic text, paths, and spans rather than only checking that
 an error exists.
+
+## Resolved value identity migration
+
+This is a direct migration to `ResolvedType::Value(TypeId)`. The `TypeId` is
+the durable identity of one value definition in the active catalogue's pinned
+`VerifiedStandardLibrarySnapshot`. No scalar-to-identity sidecar is allowed.
+A sidecar would create a second durable catalogue authority and could disagree
+with the resolved type. `DefinitionReferenceTarget::ValueType` remains function
+evidence. It is not a field or function-signature type carrier. `Named(TypeId)`
+remains an application object type. It cannot identify or stand in for a
+standard value type.
+
+`Scalar(StandardScalar)` is version-1 dual-read in the final model. Version-1
+codecs, canonical bytes, hashes, PostgreSQL rows, runtime values, physical
+plans, and errors remain byte- and value-identical. Version-1 construction
+rejects `Value(TypeId)` before canonical hashing. During the buildable
+transition, version-2 construction also accepts the existing scalar form and
+its existing canonical encoding. It is not a second identity path and no new
+compiler output may select it. The later core canonical-and-revision gate
+rejects version-2 scalar only after compiler emission and all version-2
+PostgreSQL codecs and fixtures use `Value(TypeId)`. A version-2 value type
+encodes as canonical type
+tag `4` followed by the exact 16-byte `TypeId`. Tags for `Scalar`, `Named`, and
+`Reference` do not change. Core requires the active version-2 catalogue pin,
+finds the `TypeId` in its verified standard snapshot, and rejects a missing
+value definition before it accepts the revision. The compiler retains
+`EvidenceTarget::Value(TypeId)` until it emits this variant. It does not recover
+an identity from `StandardScalar`.
+
+### Version and persistence gates
+
+Both public catalogue hash entry points scan resolved type slots before they
+write canonical bytes. The scan order is object types in catalogue snapshot
+order then their fields in declaration order, followed by functions in snapshot
+order then every function parameter in declaration order and their return:
+`ROWS` columns in ordinal order or the one `SINGLE` return. The slot identities
+are `DefinitionIdentity::Field { owner, field }`,
+`DefinitionIdentity::Parameter { owner, parameter }`,
+`DefinitionIdentity::FunctionReturnColumn { owner, ordinal }`, and
+`DefinitionIdentity::Function(function)` respectively.
+
+`catalogue_digest` selects version 1. `catalogue_digest_with_context` selects
+the supplied context. Both return these new source-free `CanonicalHashError`
+variants. Revision construction uses the parallel source-free
+`RevisionInvariantError` variants in its existing catalogue-hash-context
+coherence gate. Each variant has the listed fields and exact `Display` text.
+
+| Error variants in both error types | Fields | `Display` | `Error::source()` |
+| --- | --- | --- | --- |
+| `ResolvedValueRequiresCatalogueHashVersionTwo` | `identity: DefinitionIdentity`, `value_type: TypeId` | `resolved value type requires catalogue hash version 2` | `None` |
+| `LegacyScalarRequiresCatalogueHashVersionOne` | `identity: DefinitionIdentity`, `scalar: StandardScalar` | `legacy scalar resolved type requires catalogue hash version 1` | `None` |
+| `ResolvedValueTypeNotInPinnedStandard` | `identity: DefinitionIdentity`, `value_type: TypeId` | `resolved value type is absent from the pinned standard library` | `None` |
+
+The first failing slot in that order wins. For each slot, version 1 rejects
+`Value(TypeId)` with `ResolvedValueRequiresCatalogueHashVersionTwo` before any
+value-definition lookup. The final version-2 gate rejects
+`Scalar(StandardScalar)` with `LegacyScalarRequiresCatalogueHashVersionOne`.
+Version 2 then resolves each `Value(TypeId)` in its pinned verified standard
+snapshot and rejects an absent definition with
+`ResolvedValueTypeNotInPinnedStandard`. During the stated transition, only the
+version-2 scalar rejection is disabled. Version-1 value rejection and
+version-2 pinned-definition lookup remain active.
+
+Core permits a CLIENT function parameter even though the current compiler
+checker rejects one. A hostile CLIENT parameter fixture therefore exercises the
+same core slot scan. It proves version-1 `Value(TypeId)` rejection, transitional
+version-2 scalar recovery acceptance, strict persistence rejection of that
+same scalar candidate, final version-2 scalar rejection, and rejection of a
+version-2 `Value(TypeId)` absent from the pinned standard snapshot.
+
+Within the canonical entry points and the revision coherence gate, this slot
+scan precedes every existing version-specific catalogue fact, expression,
+origin, reference, semantic-hash, and canonical-byte check. Existing outer
+constructor gates retain their order. In particular, active revision reserved
+identity and pair checks, and deployable expected-base, parent, candidate, and
+complete-current-revision checks, still occur before the coherence gate.
+
+The transition does not permit a new durable version-2 scalar. Core exposes
+`validate_persistable_catalogue(&DeployableRevision) -> Result<(),
+RevisionInvariantError>`. It uses the same field, every function parameter,
+`ROWS`, and `SINGLE` slot scan and always enables
+`LegacyScalarRequiresCatalogueHashVersionOne` for a version-2 candidate, even
+before final recovery closure. It has no scalar-to-identity conversion.
+
+Normal PostgreSQL apply calls that core validation after expected-base recovery
+and the standard-context transition or equality gate, and before
+materialisation, physical planning, or writes. It maps this error only through:
+
+```text
+PostgresKernelError::CandidateRevisionInvariant(RevisionInvariantError)
+```
+
+The variant has one unnamed `RevisionInvariantError` source field, displays
+`candidate revision invariant failed: {source}`, and returns `Some(&source)`
+from `Error::source()`. Existing `PostgresKernelError::RevisionInvariant`
+remains the recovery wrapper and retains its existing display. Atomic standard
+apply retains no runtime invariant gate because its compiler construction has
+already proved this validation. Thus a version-1 scalar encodes the old tuple,
+a version-2 value encodes the exact value tuple, and a version-2 scalar normal
+candidate returns
+`PostgresKernelError::CandidateRevisionInvariant(RevisionInvariantError::LegacyScalarRequiresCatalogueHashVersionOne { identity, scalar })`
+before any SQL write.
+
+The shared PostgreSQL materialisation encoder persists the candidate context; it
+does not use migration defaults for a version-2 candidate. It writes
+`catalogue_revisions.canonical_hash_version` as `1` or `2` and writes
+`catalogue_revisions.standard_library_revision_id` as null for version 1 or the
+candidate's exact verified standard revision for version 2. It writes every
+`function_revisions.semantic_hash_version` from that immutable function record.
+It writes each field, parameter, `ROWS` column, and `SINGLE` return value tuple
+from `Value(TypeId)` with the candidate standard pin. For a
+`DefinitionReferenceTarget::ValueType`, it writes target kind `value_type` and
+the same exact pin to `target_standard_library_revision_id`; every other target
+kind writes a null standard target pin. Thus a context-equal normal version-2
+apply cannot persist version-1 defaults. Normal apply and later atomic standard
+apply use this one context-aware encoder. Atomic apply retains its separate
+orchestration and compiler-proven invariant rule.
+
+### Migration 0008: resolved value type storage
+
+Migration `0008_resolved_value_types.sql` is SQL-only and is registered as
+`resolved value type storage`. It has no data step. It adds only nullable
+`bytea` columns with no default. Every identifier in this DDL is at most 63
+bytes. This is the complete migration-0008 DDL contract. It uses the existing
+0001 generated constraint names exactly.
+
+```sql
+ALTER TABLE _orna_kernel.catalogue_fields
+    ADD COLUMN value_type_id bytea NULL,
+    ADD COLUMN value_standard_library_revision_id bytea NULL,
+    DROP CONSTRAINT catalogue_fields_type_kind_check,
+    DROP CONSTRAINT catalogue_fields_check,
+    ADD CONSTRAINT catalogue_fields_type_kind_check
+        CHECK (type_kind IN ('scalar', 'named', 'reference', 'value')),
+    ADD CONSTRAINT catalogue_fields_check CHECK (
+        (type_kind = 'scalar'
+            AND scalar_type IS NOT NULL
+            AND target_type_id IS NULL
+            AND value_type_id IS NULL
+            AND value_standard_library_revision_id IS NULL)
+        OR (type_kind IN ('named', 'reference')
+            AND scalar_type IS NULL
+            AND target_type_id IS NOT NULL
+            AND value_type_id IS NULL
+            AND value_standard_library_revision_id IS NULL)
+        OR (type_kind = 'value'
+            AND scalar_type IS NULL
+            AND target_type_id IS NULL
+            AND value_type_id IS NOT NULL
+            AND value_standard_library_revision_id IS NOT NULL)
+    ),
+    ADD CONSTRAINT cat_fields_val_type_len
+        CHECK (value_type_id IS NULL OR octet_length(value_type_id) = 16),
+    ADD CONSTRAINT cat_fields_val_std_rev_len CHECK (
+        value_standard_library_revision_id IS NULL
+        OR octet_length(value_standard_library_revision_id) = 16
+    ),
+    ADD CONSTRAINT cat_fields_val_pin_fk
+        FOREIGN KEY (catalogue_revision_id, value_standard_library_revision_id)
+        REFERENCES _orna_kernel.catalogue_revisions(
+            id,
+            standard_library_revision_id
+        )
+        DEFERRABLE INITIALLY DEFERRED,
+    ADD CONSTRAINT cat_fields_val_type_fk
+        FOREIGN KEY (value_standard_library_revision_id, value_type_id)
+        REFERENCES _orna_kernel.standard_catalogue_value_types(
+            standard_library_revision_id,
+            type_id
+        )
+        DEFERRABLE INITIALLY DEFERRED;
+
+ALTER TABLE _orna_kernel.catalogue_function_parameters
+    ADD COLUMN value_type_id bytea NULL,
+    ADD COLUMN value_standard_library_revision_id bytea NULL,
+    DROP CONSTRAINT catalogue_function_parameters_type_kind_check,
+    DROP CONSTRAINT catalogue_function_parameters_check,
+    ADD CONSTRAINT catalogue_function_parameters_type_kind_check
+        CHECK (type_kind IN ('scalar', 'named', 'reference', 'value')),
+    ADD CONSTRAINT catalogue_function_parameters_check CHECK (
+        (type_kind = 'scalar'
+            AND scalar_type IS NOT NULL
+            AND target_type_id IS NULL
+            AND value_type_id IS NULL
+            AND value_standard_library_revision_id IS NULL)
+        OR (type_kind IN ('named', 'reference')
+            AND scalar_type IS NULL
+            AND target_type_id IS NOT NULL
+            AND value_type_id IS NULL
+            AND value_standard_library_revision_id IS NULL)
+        OR (type_kind = 'value'
+            AND scalar_type IS NULL
+            AND target_type_id IS NULL
+            AND value_type_id IS NOT NULL
+            AND value_standard_library_revision_id IS NOT NULL)
+    ),
+    ADD CONSTRAINT cat_fn_params_val_type_len
+        CHECK (value_type_id IS NULL OR octet_length(value_type_id) = 16),
+    ADD CONSTRAINT cat_fn_params_val_std_rev_len CHECK (
+        value_standard_library_revision_id IS NULL
+        OR octet_length(value_standard_library_revision_id) = 16
+    ),
+    ADD CONSTRAINT cat_fn_params_val_pin_fk
+        FOREIGN KEY (catalogue_revision_id, value_standard_library_revision_id)
+        REFERENCES _orna_kernel.catalogue_revisions(
+            id,
+            standard_library_revision_id
+        )
+        DEFERRABLE INITIALLY DEFERRED,
+    ADD CONSTRAINT cat_fn_params_val_type_fk
+        FOREIGN KEY (value_standard_library_revision_id, value_type_id)
+        REFERENCES _orna_kernel.standard_catalogue_value_types(
+            standard_library_revision_id,
+            type_id
+        )
+        DEFERRABLE INITIALLY DEFERRED;
+
+ALTER TABLE _orna_kernel.catalogue_function_return_columns
+    ADD COLUMN value_type_id bytea NULL,
+    ADD COLUMN value_standard_library_revision_id bytea NULL,
+    DROP CONSTRAINT catalogue_function_return_columns_type_kind_check,
+    DROP CONSTRAINT catalogue_function_return_columns_check,
+    ADD CONSTRAINT catalogue_function_return_columns_type_kind_check
+        CHECK (type_kind IN ('scalar', 'named', 'reference', 'value')),
+    ADD CONSTRAINT catalogue_function_return_columns_check CHECK (
+        (type_kind = 'scalar'
+            AND scalar_type IS NOT NULL
+            AND target_type_id IS NULL
+            AND value_type_id IS NULL
+            AND value_standard_library_revision_id IS NULL)
+        OR (type_kind IN ('named', 'reference')
+            AND scalar_type IS NULL
+            AND target_type_id IS NOT NULL
+            AND value_type_id IS NULL
+            AND value_standard_library_revision_id IS NULL)
+        OR (type_kind = 'value'
+            AND scalar_type IS NULL
+            AND target_type_id IS NULL
+            AND value_type_id IS NOT NULL
+            AND value_standard_library_revision_id IS NOT NULL)
+    ),
+    ADD CONSTRAINT cat_fn_ret_cols_val_type_len
+        CHECK (value_type_id IS NULL OR octet_length(value_type_id) = 16),
+    ADD CONSTRAINT cat_fn_ret_cols_val_std_rev_len CHECK (
+        value_standard_library_revision_id IS NULL
+        OR octet_length(value_standard_library_revision_id) = 16
+    ),
+    ADD CONSTRAINT cat_fn_ret_cols_val_pin_fk
+        FOREIGN KEY (catalogue_revision_id, value_standard_library_revision_id)
+        REFERENCES _orna_kernel.catalogue_revisions(
+            id,
+            standard_library_revision_id
+        )
+        DEFERRABLE INITIALLY DEFERRED,
+    ADD CONSTRAINT cat_fn_ret_cols_val_type_fk
+        FOREIGN KEY (value_standard_library_revision_id, value_type_id)
+        REFERENCES _orna_kernel.standard_catalogue_value_types(
+            standard_library_revision_id,
+            type_id
+        )
+        DEFERRABLE INITIALLY DEFERRED;
+
+ALTER TABLE _orna_kernel.catalogue_functions
+    ADD COLUMN return_value_type_id bytea NULL,
+    ADD COLUMN return_standard_library_revision_id bytea NULL,
+    DROP CONSTRAINT catalogue_functions_return_type_kind_check,
+    DROP CONSTRAINT catalogue_functions_check1,
+    ADD CONSTRAINT catalogue_functions_return_type_kind_check
+        CHECK (return_type_kind IN ('scalar', 'named', 'reference', 'value')),
+    ADD CONSTRAINT catalogue_functions_check1 CHECK (
+        (return_shape = 'rows'
+            AND return_type_kind IS NULL
+            AND return_scalar_type IS NULL
+            AND return_target_type_id IS NULL
+            AND return_value_type_id IS NULL
+            AND return_standard_library_revision_id IS NULL)
+        OR (return_shape = 'single' AND (
+            (return_type_kind = 'scalar'
+                AND return_scalar_type IS NOT NULL
+                AND return_target_type_id IS NULL
+                AND return_value_type_id IS NULL
+                AND return_standard_library_revision_id IS NULL)
+            OR (return_type_kind IN ('named', 'reference')
+                AND return_scalar_type IS NULL
+                AND return_target_type_id IS NOT NULL
+                AND return_value_type_id IS NULL
+                AND return_standard_library_revision_id IS NULL)
+            OR (return_type_kind = 'value'
+                AND return_scalar_type IS NULL
+                AND return_target_type_id IS NULL
+                AND return_value_type_id IS NOT NULL
+                AND return_standard_library_revision_id IS NOT NULL)
+        ))
+    ),
+    ADD CONSTRAINT cat_funcs_ret_val_type_len CHECK (
+        return_value_type_id IS NULL
+        OR octet_length(return_value_type_id) = 16
+    ),
+    ADD CONSTRAINT cat_funcs_ret_val_std_rev_len CHECK (
+        return_standard_library_revision_id IS NULL
+        OR octet_length(return_standard_library_revision_id) = 16
+    ),
+    ADD CONSTRAINT cat_funcs_ret_val_pin_fk
+        FOREIGN KEY (catalogue_revision_id, return_standard_library_revision_id)
+        REFERENCES _orna_kernel.catalogue_revisions(
+            id,
+            standard_library_revision_id
+        )
+        DEFERRABLE INITIALLY DEFERRED,
+    ADD CONSTRAINT cat_funcs_ret_val_type_fk
+        FOREIGN KEY (return_standard_library_revision_id, return_value_type_id)
+        REFERENCES _orna_kernel.standard_catalogue_value_types(
+            standard_library_revision_id,
+            type_id
+        )
+        DEFERRABLE INITIALLY DEFERRED;
+```
+
+The eight new checks are `cat_fields_val_type_len`,
+`cat_fields_val_std_rev_len`, `cat_fn_params_val_type_len`,
+`cat_fn_params_val_std_rev_len`, `cat_fn_ret_cols_val_type_len`,
+`cat_fn_ret_cols_val_std_rev_len`, `cat_funcs_ret_val_type_len`, and
+`cat_funcs_ret_val_std_rev_len`. The eight new foreign keys are
+`cat_fields_val_pin_fk`, `cat_fields_val_type_fk`, `cat_fn_params_val_pin_fk`,
+`cat_fn_params_val_type_fk`, `cat_fn_ret_cols_val_pin_fk`,
+`cat_fn_ret_cols_val_type_fk`, `cat_funcs_ret_val_pin_fk`, and
+`cat_funcs_ret_val_type_fk`. All eight foreign keys are `DEFERRABLE INITIALLY
+DEFERRED`.
+
+The existing `target_type_id` columns, their object-type foreign keys, every
+other existing index, and all existing privileges remain unchanged. Migration
+0008 adds no index, relation, trigger, grant, or revoke. The new value tuple
+does not use an application object-type foreign key.
+
+The first key makes the value tuple use the candidate application's exact
+standard-library pin. The second key makes the `TypeId` a member of that
+pinned standard revision. Fresh and migrated version-1 rows keep all added
+columns null. Migration 0008 does not rewrite rows, change a version-1 hash,
+or create a standard row. Its bootstrap proof moves the expected future
+migration version from `8` to `9`.
+
+Apply writes the old tuple with null added values for `Scalar`, `Named`, and
+`Reference`. It writes the value tuple only from a version-2 candidate and its
+verified standard pin. Recovery first checks the row's exact tuple and byte
+lengths, then checks that the stored standard revision equals the active
+catalogue pin, then reads the standard value definition through the pinned
+verified snapshot, and then constructs `Value(TypeId)` for core canonical
+validation. A malformed tuple therefore fails before a pin mismatch; a pin
+mismatch fails before a missing standard definition; and both fail before
+canonical or physical verification. A missing, crossed, or duplicate SQL row
+does not cause a scalar fallback.
+
+### Physical catalogue projection
+
+`orna_core::physical` defines public `PhysicalCatalogue` with private fields.
+It has no public constructor and does not expose a raw contract map. It stores
+ordered `CreateObject` values and exposes only
+`pub fn objects(&self) -> &[CreateObject]`. Existing
+`CreateObject::{type_id, fields}` and
+`CreateField::{field_id, field_type, nullable, unique}` accessors are the only
+cross-crate read view. `CreateObject` rustdoc changes from `One new durable
+object relation.` to `One physical object projection.` Its only projection
+authority is private `project_physical_object`:
+
+```text
+enum PhysicalRevision<'a> {
+    Active(&'a ActiveDatabaseRevision),
+    Deployable(&'a DeployableRevision),
+}
+
+fn project_physical_object(
+    revision: PhysicalRevision<'_>,
+    object: &ObjectTypeDefinition,
+) -> Result<CreateObject, PhysicalPlanError>
+```
+
+`PhysicalRevision` is private. The projector reads only those revision facts.
+`active_physical_catalogue` applies it eagerly to active object types in active
+snapshot order and stores the resulting `CreateObject` values in
+`PhysicalCatalogue` for PostgreSQL verification. The PostgreSQL verifier reads
+only the stated capability and existing `CreateObject` and `CreateField`
+accessors. It does not receive a raw contract or add another mapper. The module
+exposes only these public consumers of that authority:
+
+```text
+active_physical_catalogue(
+    active: &ActiveDatabaseRevision,
+) -> Result<PhysicalCatalogue, PhysicalPlanError>
+
+plan_physical_changes(
+    active: &ActiveDatabaseRevision,
+    candidate: &DeployableRevision,
+) -> Result<PhysicalPlan, PhysicalPlanError>
+```
+
+`plan_physical_changes` uses the same private projector on demand. It first
+checks `ExpectedBaseMismatch`. It then scans active object identities in active
+snapshot order and returns the first `UnsupportedObjectDrop` before it projects
+any object. For each surviving active object in that same order, it projects the
+active object first and the candidate object second. Each projection scans its
+fields in declaration order and returns the first field error in the seven-step
+order below. Only after both projections succeed does it compare their complete
+`CreateObject` projections and return `UnsupportedExistingObjectChange` when
+they differ. After every surviving existing object passes, it projects each new
+candidate object in candidate snapshot order to create its physical plan.
+
+PostgreSQL recovery verification receives `&ActiveDatabaseRevision`, obtains
+one `PhysicalCatalogue` only through `active_physical_catalogue`, and verifies
+that capability. It does not accept `&CatalogueSnapshot` and does not repeat
+the representation-contract mapping. PostgreSQL planning consumes the
+`PhysicalPlan` from `plan_physical_changes`. No other core or PostgreSQL path
+maps a value definition or a `StandardScalar` to `PhysicalFieldType`.
+
+For a version-1 `Scalar(StandardScalar)`, the projection uses that scalar
+directly and preserves the existing representation. For version 2, it resolves
+exactly:
+
+```text
+Value(TypeId) -> pinned VerifiedStandardLibrarySnapshot
+              -> ValueTypeDefinition -> exact representation contract
+              -> PhysicalFieldType
+```
+
+Only a pinned verified definition and its exact contract can select an
+existing `PhysicalFieldType::Scalar(StandardScalar)`. Equal version-1 scalar
+and version-2 value contracts produce equal `CreateObject` projections.
+The plan then contains no physical DDL for that representation-only migration.
+No physical, runtime, compiler, recovery, or PostgreSQL path reverse maps
+`StandardScalar` to `TypeId`.
+
+`PhysicalPlanError` adds these source-free variants. Their
+`Error::source()` result is `None`.
+
+| Variant | Fields | `Display` |
+| --- | --- | --- |
+| `MissingValueTypeDefinition` | `object_type: TypeId`, `field: FieldId`, `value_type: TypeId` | `physical value type is absent from the pinned standard library` |
+| `UnsupportedValueTypeContract` | `object_type: TypeId`, `field: FieldId`, `value_type: TypeId`, `contract: String` | `physical value type contract is not supported` |
+| `TransientValueType` | `object_type: TypeId`, `field: FieldId`, `value_type: TypeId` | `transient value types cannot be stored` |
+
+The existing `PhysicalPlanError` variants retain their fields, displays, and
+source-free behaviour. The complete physical-planning precedence is expected
+base, active-order object drop, active-order surviving-object projection,
+existing-object change, then candidate-order new-object projection. For every
+projected object, the exact field gate order is:
+
+1. `UnsupportedUniqueField`.
+2. `UnsupportedFieldDefault`.
+3. Type-definition lookup: `UnsupportedNamedFieldType` for `Named`,
+   `UnknownReferenceTarget` for a missing `Reference` target, or
+   `MissingValueTypeDefinition` for an absent pinned `Value` definition.
+4. `UnsupportedValueTypeContract` for a value definition whose kind,
+   mutability, or representation contract has no supported scalar projection.
+5. `UnsupportedVoidField` for a direct version-1 `VOID` scalar or a verified
+   value contract that projects to `VOID`.
+6. `TransientValueType` for a verified transient value definition.
+7. `InvalidDeleteAction` for a scalar or value field with any delete action,
+   or a `Reference` field that requests `SET NULL` while non-nullable.
+
+The reference target check in step 3 and its delete check in step 7 retain the
+current reference semantics. A storable immutable value definition must pass
+all seven steps before it projects to `PhysicalFieldType::Scalar`. A combined
+hostile proof has an expected-base mismatch, an active object missing from the
+candidate, a surviving object with an invalid value field, a changed surviving
+object, and an invalid new object. It proves this exact precedence: expected
+base, then drop, then the earlier surviving object's first field failure, then
+existing-object change, then new-object failure. A separate active-catalogue
+verification proof uses the same object and field hostile data through
+`active_physical_catalogue`; it proves that no second contract mapper exists.
 
 ## Initial implementation sequence
 
@@ -3156,23 +3658,32 @@ standard-orchestration rows remain within their two-file caps.
 | `build(postgres): add standard-upgrade dependency` | `crates/orna-kernel-postgres/Cargo.toml`, `Cargo.lock` | Add the normal `orna-standard` dependency required only by atomic special apply. The dependency graph is `postgres -> standard -> compiler -> core`; no reverse dependency exists. |
 | `feat(postgres): store standard catalogue types` | `crates/orna-kernel-postgres/migrations/0007_catalogue_types.sql`, `crates/orna-kernel-postgres/src/bootstrap.rs`, `crates/orna-kernel-postgres/tests/bootstrap.rs` | Register SQL-only migration 0007 as `standard catalogue type storage`. Add only the stated standard catalogue storage schema and bootstrap proof. Bare bootstrap stays application-only, has no standard rows or pin, and still recovers all version-1 databases exactly. |
 | `feat(postgres): decode standard revisions` | `crates/orna-kernel-postgres/src/recovery.rs`, `crates/orna-kernel-postgres/src/recovery/functions.rs`, `crates/orna-kernel-postgres/tests/recovery.rs` | This is the first recovery path with a standard context. It verifies complete raw version-2 fixtures and still recovers version 1 exactly. Its live raw standard-catalogue sentinel test inserts `EMPTY_APPLICATION_CATALOGUE_REVISION_ID` and requires exact `RevisionInvariantError::ReservedOfflineCheckCatalogueRevision { revision: EMPTY_APPLICATION_CATALOGUE_REVISION_ID, role: ActiveOrRecoveredStandard }`, exact display, and no error source, active revision, repair, or write, with an unchanged complete table snapshot. No public production mutation can create version-2 active state. |
-| `feat(storage): lower verified value contracts` | `crates/orna-core/src/physical.rs`, `crates/orna-kernel-postgres/src/physical.rs`, `crates/orna-kernel-postgres/src/physical/verify.rs` | Physical planning and verification start from a verified contract; generated SQL and existing physical identities remain exact. |
+| `refactor(core): add resolved-type inspection seam` | `crates/orna-core/src/types.rs` | Add public, non-authoritative, exhaustive `const` accessors: `legacy_scalar() -> Option<StandardScalar>`, `named_type() -> Option<TypeId>`, `value_type() -> Option<TypeId>`, and `reference_target() -> Option<TypeId>`. The seam adds no `Value` variant, storage form, hash byte, scalar reverse lookup, or identity authority. |
+| `refactor(core): prepare value consumers` | `crates/orna-core/src/catalogue.rs`, `crates/orna-core/src/value.rs`, `crates/orna-core/src/physical.rs` | Move each consumer to the shared public, non-authoritative resolved-type inspection seam. This row adds no enum variant, storage form, hash byte, scalar reverse lookup, or identity authority. |
+| `refactor(core): prepare hash and revision consumers` | `crates/orna-core/src/canonical_hash.rs`, `crates/orna-core/src/revision.rs` | Isolate version-1 canonical and revision validation from the later version-2 branch without changing version-1 bytes, hashes, fields, errors, or public construction. |
+| `refactor(artifact): prepare value plan consumers` | `crates/orna-artifact/src/server_plan.rs`, `crates/orna-artifact/src/server_mutation_plan.rs` | Make artefact plans exhaustive through one internal type projection. Existing version-1 plan bytes and error order remain unchanged. |
+| `refactor(compiler): prepare resolver value consumers` | `crates/orna-compiler/src/resolver.rs`, `crates/orna-compiler/src/resolver/model.rs` | Preserve `EvidenceTarget::Value(TypeId)` through resolver and its public model. This row does not emit `ResolvedType::Value` and does not reverse-map `StandardScalar`. |
+| `refactor(compiler): prepare relational value consumers` | `crates/orna-compiler/src/relational.rs`, `crates/orna-compiler/src/relational/artifact.rs` | Move relational checking and artefact lowering to the prepared resolved-value inspection path. Existing version-1 diagnostics and artefact bytes remain exact. |
+| `refactor(compiler): prepare lowering consumers` | `crates/orna-compiler/src/prepare.rs`, `crates/orna-compiler/src/lib.rs` | Make candidate lowering ready to select a resolved-value carrier after core and SQL dual-read support exists. Legacy preparation remains scalar and byte-identical. |
+| `refactor(postgres): prepare resolved-type codecs` | `crates/orna-kernel-postgres/src/apply.rs`, `crates/orna-kernel-postgres/src/recovery.rs`, `crates/orna-kernel-postgres/src/recovery/functions.rs` | Separate legacy scalar tuple codecs from the later value tuple codecs without changing SQL, recovery, or apply behaviour. |
+| `test(postgres): exhaust recovery resolved-type matches` | `crates/orna-kernel-postgres/tests/recovery.rs` | Before `ResolvedType::Value(TypeId)` exists, convert every exhaustive fixture and helper match to the public non-authoritative resolved-type accessors. Preserve every raw version-1 and version-2 `Scalar` fact and assertion. Do not use a wildcard or other fail-open future-variant branch. |
+| `refactor(postgres): prepare verified physical context` | `crates/orna-kernel-postgres/src/physical.rs`, `crates/orna-kernel-postgres/src/physical/verify.rs`, `crates/orna-kernel-postgres/src/recovery.rs` | Change the physical verification boundary to receive `&ActiveDatabaseRevision`. Recovery already carries version-1 and transitional version-2 `Scalar` facts, and this row preserves both inputs exactly. |
+| `refactor(postgres): prepare runtime value consumers` | `crates/orna-kernel-postgres/src/server_runtime.rs`, `crates/orna-kernel-postgres/src/server_execution.rs`, `crates/orna-kernel-postgres/src/server_mutation_execution.rs` | Move runtime type selection behind an internal resolved-value adapter. Existing binds, results, plans, and errors remain exact. |
+| `refactor(client): prepare value consumer` | `crates/orna-client/src/lib.rs` | Make local evaluation exhaustive without changing accepted version-1 client plans, hashes, values, or errors. |
+| `feat(core): carry transitional resolved value identities` | `crates/orna-core/src/types.rs`, `crates/orna-core/src/canonical_hash.rs`, `crates/orna-core/src/revision.rs` | Add `ResolvedType::Value(TypeId)` and canonical tag `4`. Add the three exact source-free `CanonicalHashError` and `RevisionInvariantError` variants, their fields, displays, sources, and field, every function parameter, `ROWS`, and `SINGLE` slot scan. Version 1 rejects `Value` before canonical bytes. Version 2 preserves its existing scalar form temporarily and validates every present `Value(TypeId)` through the pinned verified standard definition. Export `validate_persistable_catalogue` with strict version-2 scalar rejection for apply, including hostile CLIENT parameters. |
+| `feat(compiler): emit resolved value identities` | `crates/orna-compiler/src/prepare.rs`, `crates/orna-compiler/src/lib.rs` | After core support and the PostgreSQL dual-read seam are ready, lower retained `EvidenceTarget::Value(TypeId)` to `ResolvedType::Value(TypeId)` for fields, parameters, `ROWS` columns, and accepted `SINGLE` returns. Release prepared CLIENT acceptance through retained evidence. It emits no scalar-to-identity reconstruction. |
+| `feat(storage): lower verified value contracts` | `crates/orna-core/src/physical.rs`, `crates/orna-kernel-postgres/src/physical.rs`, `crates/orna-kernel-postgres/src/physical/verify.rs` | Define private-field `PhysicalCatalogue`, with ordered `CreateObject` projections as its only cross-crate read view, and the sole on-demand core object projector. Planning checks expected base and active-order drops first, projects each surviving active/candidate object pair in active order before existing-object comparison, then projects candidate-order new objects. PostgreSQL verification eagerly projects the active catalogue through the same mapper and reads only `CreateObject` and `CreateField` accessors. It temporarily projects transitional version-2 `Scalar` directly and version-2 `Value` through the exact pinned definition. Both use the stated unique, default, definition, contract, `VOID`, persistence, and delete-action error order. Equal allowed version-1 scalar and version-2 value contracts create no DDL. |
+| `feat(postgres): store resolved value type pins` | `crates/orna-kernel-postgres/migrations/0008_resolved_value_types.sql`, `crates/orna-kernel-postgres/src/bootstrap.rs`, `crates/orna-kernel-postgres/tests/bootstrap.rs` | Register SQL-only migration 0008 as `resolved value type storage`. Add the exact nullable no-default `bytea` pairs, four named type-kind and tuple replacements, eight named length checks, and eight named `DEFERRABLE INITIALLY DEFERRED` composite foreign keys. Existing `target_type_id` foreign keys, indexes, and privileges remain exact. Fresh and upgraded version-1 rows retain null pairs and exact version-1 state. |
+| `feat(postgres): encode resolved value types` | `crates/orna-kernel-postgres/src/apply.rs`, `crates/orna-kernel-postgres/src/lib.rs`, `crates/orna-kernel-postgres/tests/apply.rs` | Add `PostgresKernelError::CandidateRevisionInvariant(RevisionInvariantError)` with its exact source wrapper. After expected-base and standard-context gates, and before materialisation, physical planning, or writes, normal apply calls `validate_persistable_catalogue`. Persist the candidate `canonical_hash_version` and exact standard pin, every immutable `semantic_hash_version`, all field and signature value tuples, and each `ValueType` reference target pin. Version 1 writes its old scalar tuple and null pins. Version 2 writes value tuples only from `Value(TypeId)` and the candidate's exact pinned standard revision. A version-2 scalar returns the stated wrapper before every SQL write. Atomic standard apply retains no runtime invariant gate because compiler construction proves it, but it shares this one encoder. |
+| `feat(postgres): decode resolved value types` | `crates/orna-kernel-postgres/src/recovery.rs`, `crates/orna-kernel-postgres/src/recovery/functions.rs`, `crates/orna-kernel-postgres/tests/recovery.rs` | Decode the tuple, pin, and value definition in the stated error order, then construct `Value(TypeId)` for core validation. This row migrates every existing raw version-2 recovery fixture from scalar to value. Recovery remains read-only and retains the exact version-1 query path. |
+| `test(client): migrate version-2 value fixtures` | `crates/orna-client/src/lib.rs` | Migrate every current version-2 client fixture from scalar to `Value(TypeId)` and retain all version-1 client hashes, plans, values, and errors. |
+| `feat(core): close version-2 scalar compatibility` | `crates/orna-core/src/canonical_hash.rs`, `crates/orna-core/src/revision.rs` | After compiler emission, raw recovery, and client fixtures migrate every current version-2 scalar to `Value(TypeId)`, both public canonical hash entry points reject every version-2 scalar in exact field, every function parameter, `ROWS`, and `SINGLE` slot order before bytes, and revision construction rejects it before existing coherence checks. Version-1 scalar behaviour remains byte- and error-identical. |
 | `feat(server): execute verified value contracts` | `crates/orna-kernel-postgres/src/server_runtime.rs`, `crates/orna-kernel-postgres/src/server_execution.rs`, `crates/orna-kernel-postgres/src/server_mutation_execution.rs` | Runtime adapters start from the same contract and preserve every existing plan byte, bind, result, and error. |
-| `feat(postgres): apply standard upgrades` | `crates/orna-kernel-postgres/src/apply.rs`, `crates/orna-kernel-postgres/src/lib.rs` | After compiler, recovery, storage, and execution consumers are ready, `apply_standard_upgrade` accepts only `&orna_standard::StandardUpgrade`. Its trusted transaction path locks and recovers, checks expected base, scans database-wide identities, materialises, plans physically, then writes. Compiler construction already proves deployable core invariants, so no opaque-association or invariant gate exists. A replay returns `ExpectedBaseMismatch` before scanning or writes. The identity scan returns `ReservedStandardIdentity { identity }` for the first active-visible or inactive collision, including an inactive standard-library revision, in the stated order. Normal apply cannot transition standard context. |
+| `feat(postgres): apply standard upgrades` | `crates/orna-kernel-postgres/src/apply.rs`, `crates/orna-kernel-postgres/src/lib.rs`, `crates/orna-kernel-postgres/tests/apply.rs` | After compiler, recovery, storage, and execution consumers are ready, atomic special apply uses the exact normal-apply context-aware encoder for catalogue context, semantic versions, value tuples, and value-reference pins. `apply_standard_upgrade` accepts only `&orna_standard::StandardUpgrade`. Its trusted transaction path locks and recovers, checks expected base, scans database-wide identities, materialises, plans physically, then writes. Compiler construction already proves deployable core invariants, so no opaque-association or invariant gate exists. A replay returns `ExpectedBaseMismatch` before scanning or writes. The identity scan returns `ReservedStandardIdentity { identity }` for the first active-visible or inactive collision, including an inactive standard-library revision, in the stated order. Normal apply cannot transition standard context. |
 | `feat(server): open standard-backed databases` | `crates/orna-server/Cargo.toml`, `crates/orna-server/src/lib.rs`, `Cargo.lock` | The host opener composes bare bootstrap, exact standard preparation, atomic standard apply when required, and verified recovery. It does not return a normal application database handle until `orna.std/1` is active. |
 | `test(postgres): prove the standard lifecycle` | `crates/orna-kernel-postgres/tests/apply.rs`, `crates/orna-kernel-postgres/tests/recovery.rs`, `justfile` | Fresh install, v1 upgrade, replay, restart, tamper rejection, and exact physical storage pass on PostgreSQL 18. |
 | `test(postgres): preserve standard execution` | `crates/orna-kernel-postgres/tests/server_execution.rs`, `crates/orna-kernel-postgres/tests/server_mutation_execution.rs` | Existing SERVER and mutation behaviour is byte- and value-identical under the installed standard revision. |
 | `test(client): recover and evaluate standard Boolean constants` | `crates/orna-client/src/lib.rs`, `crates/orna-kernel-postgres/tests/recovery.rs` | Apply, source-only replay, semantic change, restart, tamper rejection, and local evaluation prove the exact CLIENT version-2 context and leave no PostgreSQL session open. |
-
-The later replacement of public `ResolvedType::Scalar` with
-`ResolvedType::Value(TypeId)` is a separate compatibility migration. Before
-adding the enum variant, consumers are converted in one-to-three-file commits
-to catalogue-aware accessors so the workspace remains exhaustive and
-buildable. Existing executable decoders remain dual-read. This decision does
-not permit a single workspace-wide mechanical commit.
-
-A temporary compatibility adapter is acceptable only while both its input and
-output are exact-tested against the one canonical `TypeId`.
 
 ## Deferred surface
 
