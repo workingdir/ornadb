@@ -23,6 +23,7 @@ use crate::{
     SchemaId, SourceBundleId, SourceRevisionId, SourceUnitId, StandardLibraryRevisionId,
     TypeBindingId, TypeId,
     catalogue::{CatalogueSnapshot, FunctionDomain, FunctionReturn},
+    types::{ResolvedType, StandardScalar},
 };
 
 /// The reserved catalogue identity for the ephemeral offline application check.
@@ -1577,6 +1578,22 @@ impl DeployableRevision {
     }
 }
 
+/// Validates that a deployable catalogue can enter durable storage.
+///
+/// Revision construction temporarily accepts legacy scalar descriptors in a
+/// version-2 catalogue so existing durable revisions can be recovered during
+/// the value-identity migration. This stricter boundary prevents a new
+/// version-2 candidate from persisting that transitional form.
+pub fn validate_persistable_catalogue(
+    revision: &DeployableRevision,
+) -> Result<(), RevisionInvariantError> {
+    validate_resolved_type_slots(
+        revision.catalogue_hash_context(),
+        revision.candidate(),
+        ResolvedTypeValidation::Persistable,
+    )
+}
+
 fn validate_source_units(units: &[StoredSourceUnit]) -> Result<(), RevisionInvariantError> {
     let mut ids = HashSet::with_capacity(units.len());
     let mut paths = HashMap::with_capacity(units.len());
@@ -1883,6 +1900,119 @@ enum FunctionRevisionSet {
     DeployableCurrent,
 }
 
+#[derive(Clone, Copy)]
+enum ResolvedTypeValidation {
+    Transitional,
+    Persistable,
+}
+
+fn validate_resolved_type_slots(
+    context: &CatalogueHashContext,
+    catalogue: &CatalogueSnapshot,
+    validation: ResolvedTypeValidation,
+) -> Result<(), RevisionInvariantError> {
+    for object_type in catalogue.object_types() {
+        for field in object_type.fields() {
+            validate_resolved_type_slot(
+                context,
+                DefinitionIdentity::Field {
+                    owner: object_type.id(),
+                    field: field.id(),
+                },
+                field.resolved_type(),
+                validation,
+            )?;
+        }
+    }
+
+    for function in catalogue.functions() {
+        for parameter in function.parameters() {
+            validate_resolved_type_slot(
+                context,
+                DefinitionIdentity::Parameter {
+                    owner: function.id(),
+                    parameter: parameter.id(),
+                },
+                parameter.resolved_type(),
+                validation,
+            )?;
+        }
+
+        match function.return_type() {
+            FunctionReturn::Rows(columns) => {
+                for column in columns {
+                    validate_resolved_type_slot(
+                        context,
+                        DefinitionIdentity::FunctionReturnColumn {
+                            owner: function.id(),
+                            ordinal: column.ordinal(),
+                        },
+                        column.resolved_type(),
+                        validation,
+                    )?;
+                }
+            }
+            FunctionReturn::Single(resolved_type) => validate_resolved_type_slot(
+                context,
+                DefinitionIdentity::Function(function.id()),
+                *resolved_type,
+                validation,
+            )?,
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_resolved_type_slot(
+    context: &CatalogueHashContext,
+    identity: DefinitionIdentity,
+    resolved_type: ResolvedType,
+    validation: ResolvedTypeValidation,
+) -> Result<(), RevisionInvariantError> {
+    match resolved_type {
+        ResolvedType::Scalar(scalar) => {
+            if matches!(
+                (context, validation),
+                (
+                    CatalogueHashContext::Version2 { .. },
+                    ResolvedTypeValidation::Persistable
+                )
+            ) {
+                return Err(
+                    RevisionInvariantError::LegacyScalarRequiresCatalogueHashVersionOne {
+                        identity,
+                        scalar,
+                    },
+                );
+            }
+        }
+        ResolvedType::Value(value_type) => match context {
+            CatalogueHashContext::Version1 => {
+                return Err(
+                    RevisionInvariantError::ResolvedValueRequiresCatalogueHashVersionTwo {
+                        identity,
+                        value_type,
+                    },
+                );
+            }
+            CatalogueHashContext::Version2 { standard } => {
+                if standard.catalogue().value_type_by_id(value_type).is_none() {
+                    return Err(
+                        RevisionInvariantError::ResolvedValueTypeNotInPinnedStandard {
+                            identity,
+                            value_type,
+                        },
+                    );
+                }
+            }
+        },
+        ResolvedType::Named(_) | ResolvedType::Reference { .. } => {}
+    }
+
+    Ok(())
+}
+
 fn validate_catalogue_hash_context_coherence(
     context: &CatalogueHashContext,
     catalogue: &CatalogueSnapshot,
@@ -1890,6 +2020,7 @@ fn validate_catalogue_hash_context_coherence(
     origins: &[DefinitionOrigin],
     references: &[DefinitionReference],
 ) -> Result<(), RevisionInvariantError> {
+    validate_resolved_type_slots(context, catalogue, ResolvedTypeValidation::Transitional)?;
     match context {
         CatalogueHashContext::Version1 => {
             validate_catalogue_hash_context_version_one(catalogue, revisions, origins, references)
@@ -2299,6 +2430,27 @@ pub enum RevisionInvariantError {
         function: FunctionId,
         id: FunctionRevisionId,
     },
+    /// A resolved value identity was paired with a version-1 catalogue hash.
+    ResolvedValueRequiresCatalogueHashVersionTwo {
+        /// The catalogue slot containing the incompatible resolved value.
+        identity: DefinitionIdentity,
+        /// The supplied durable standard value-type identity.
+        value_type: TypeId,
+    },
+    /// A legacy scalar descriptor was selected for durable version-2 storage.
+    LegacyScalarRequiresCatalogueHashVersionOne {
+        /// The catalogue slot containing the incompatible legacy scalar.
+        identity: DefinitionIdentity,
+        /// The supplied compatibility scalar.
+        scalar: StandardScalar,
+    },
+    /// A resolved value identity is absent from the pinned verified standard.
+    ResolvedValueTypeNotInPinnedStandard {
+        /// The catalogue slot containing the unresolved value identity.
+        identity: DefinitionIdentity,
+        /// The absent durable standard value-type identity.
+        value_type: TypeId,
+    },
     /// A version-2 function semantic hash was paired with a version-1 catalogue hash.
     FunctionSemanticHashVersionRequiresCatalogueHashVersionTwo {
         /// The function whose immutable revision uses the newer contract.
@@ -2530,6 +2682,14 @@ impl fmt::Display for RevisionInvariantError {
             EmptyLanguageVersion { .. } => {
                 formatter.write_str("function language version is empty")
             }
+            ResolvedValueRequiresCatalogueHashVersionTwo { .. } => {
+                formatter.write_str("resolved value type requires catalogue hash version 2")
+            }
+            LegacyScalarRequiresCatalogueHashVersionOne { .. } => {
+                formatter.write_str("legacy scalar resolved type requires catalogue hash version 1")
+            }
+            ResolvedValueTypeNotInPinnedStandard { .. } => formatter
+                .write_str("resolved value type is absent from the pinned standard library"),
             FunctionSemanticHashVersionRequiresCatalogueHashVersionTwo { .. } => formatter
                 .write_str("function semantic hash version 2 requires catalogue hash version 2"),
             ValueTypeDefinitionRequiresCatalogueHashVersionTwo { .. } => {
@@ -2653,8 +2813,8 @@ mod tests {
         catalogue::{
             FieldDefinition, FunctionDefinition, FunctionDomain, FunctionReturn,
             FunctionReturnColumnDefinition, FunctionSecurity, FunctionVolatility,
-            ObjectTypeDefinition, QualifiedSemanticName, SchemaDefinition, TypeBinding,
-            ValueTypeDefinition, ValueTypeMutability, ValueTypePersistence,
+            ObjectTypeDefinition, ParameterDefinition, QualifiedSemanticName, SchemaDefinition,
+            TypeBinding, ValueTypeDefinition, ValueTypeMutability, ValueTypePersistence,
         },
         types::{ResolvedType, StandardScalar},
     };
@@ -2815,6 +2975,55 @@ mod tests {
             CatalogueRevisionId::from_bytes(id::<7>()),
             vec![schema],
             object_types,
+            vec![function],
+        )
+        .unwrap()
+    }
+
+    fn resolved_type_slots_catalogue(
+        field_type: ResolvedType,
+        parameter_type: ResolvedType,
+        return_type: FunctionReturn,
+    ) -> CatalogueSnapshot {
+        let schema = SchemaDefinition::new(
+            SchemaId::from_bytes(id::<8>()),
+            QualifiedSemanticName::new(["crm"]).unwrap(),
+        );
+        let object_type = ObjectTypeDefinition::new(
+            TypeId::from_bytes(id::<80>()),
+            QualifiedSemanticName::new(["crm", "task"]).unwrap(),
+            vec![FieldDefinition::new(
+                FieldId::from_bytes(id::<81>()),
+                "value",
+                0,
+                field_type,
+                false,
+                false,
+                None,
+                None,
+            )],
+        );
+        let function = FunctionDefinition::new(
+            FunctionId::from_bytes(id::<82>()),
+            QualifiedSemanticName::new(["crm", "enabled"]).unwrap(),
+            FunctionDomain::Client,
+            vec![ParameterDefinition::new(
+                ParameterId::from_bytes(id::<83>()),
+                "input",
+                0,
+                parameter_type,
+                None,
+            )],
+            return_type,
+            FunctionRevisionId::from_bytes(id::<84>()),
+            FunctionSecurity::Invoker,
+            None,
+            FunctionVolatility::Immutable,
+        );
+        CatalogueSnapshot::new_with_functions(
+            CatalogueRevisionId::from_bytes(id::<7>()),
+            vec![schema],
+            vec![object_type],
             vec![function],
         )
         .unwrap()
@@ -4506,6 +4715,227 @@ mod tests {
                 revision: crossed_revision,
             }) if function == revision.function() && crossed_revision == revision.id()
         ));
+    }
+
+    #[test]
+    fn revision_construction_validates_resolved_values_in_durable_slot_order() {
+        let field_value = TypeId::from_bytes(id::<90>());
+        let parameter_value = TypeId::from_bytes(id::<91>());
+        let return_value = TypeId::from_bytes(id::<92>());
+        let catalogue = resolved_type_slots_catalogue(
+            ResolvedType::value(field_value),
+            ResolvedType::value(parameter_value),
+            FunctionReturn::Single(ResolvedType::value(return_value)),
+        );
+        let active_source = source(None);
+        let input = ActiveDatabaseRevisionInput::new(
+            RevisionPair::new(active_source.id(), catalogue.revision()),
+            active_source,
+            catalogue,
+            digest::<7>(),
+            ActiveRevisionContent::new(vec![], vec![], vec![], vec![]),
+        );
+
+        assert_eq!(
+            ActiveDatabaseRevision::new_with_catalogue_hash_context(
+                input.clone(),
+                CatalogueHashContext::version_one(),
+            )
+            .unwrap_err(),
+            RevisionInvariantError::ResolvedValueRequiresCatalogueHashVersionTwo {
+                identity: DefinitionIdentity::Field {
+                    owner: TypeId::from_bytes(id::<80>()),
+                    field: FieldId::from_bytes(id::<81>()),
+                },
+                value_type: field_value,
+            }
+        );
+        assert_eq!(
+            ActiveDatabaseRevision::new_with_catalogue_hash_context(input, standard_context())
+                .unwrap_err(),
+            RevisionInvariantError::ResolvedValueTypeNotInPinnedStandard {
+                identity: DefinitionIdentity::Field {
+                    owner: TypeId::from_bytes(id::<80>()),
+                    field: FieldId::from_bytes(id::<81>()),
+                },
+                value_type: field_value,
+            }
+        );
+
+        let pinned_value = TypeId::from_bytes(id::<71>());
+        let catalogue = resolved_type_slots_catalogue(
+            ResolvedType::named(TypeId::from_bytes(id::<80>())),
+            ResolvedType::value(parameter_value),
+            FunctionReturn::Single(ResolvedType::value(pinned_value)),
+        );
+        assert_eq!(
+            validate_resolved_type_slots(
+                &CatalogueHashContext::version_one(),
+                &catalogue,
+                ResolvedTypeValidation::Transitional,
+            ),
+            Err(
+                RevisionInvariantError::ResolvedValueRequiresCatalogueHashVersionTwo {
+                    identity: DefinitionIdentity::Parameter {
+                        owner: FunctionId::from_bytes(id::<82>()),
+                        parameter: ParameterId::from_bytes(id::<83>()),
+                    },
+                    value_type: parameter_value,
+                },
+            )
+        );
+        assert_eq!(
+            validate_resolved_type_slots(
+                &standard_context(),
+                &catalogue,
+                ResolvedTypeValidation::Transitional,
+            ),
+            Err(
+                RevisionInvariantError::ResolvedValueTypeNotInPinnedStandard {
+                    identity: DefinitionIdentity::Parameter {
+                        owner: FunctionId::from_bytes(id::<82>()),
+                        parameter: ParameterId::from_bytes(id::<83>()),
+                    },
+                    value_type: parameter_value,
+                }
+            )
+        );
+
+        let single_value = TypeId::from_bytes(id::<93>());
+        let catalogue = resolved_type_slots_catalogue(
+            ResolvedType::named(TypeId::from_bytes(id::<80>())),
+            ResolvedType::value(pinned_value),
+            FunctionReturn::Single(ResolvedType::value(single_value)),
+        );
+        assert_eq!(
+            validate_resolved_type_slots(
+                &standard_context(),
+                &catalogue,
+                ResolvedTypeValidation::Transitional,
+            ),
+            Err(
+                RevisionInvariantError::ResolvedValueTypeNotInPinnedStandard {
+                    identity: DefinitionIdentity::Function(FunctionId::from_bytes(id::<82>())),
+                    value_type: single_value,
+                }
+            )
+        );
+
+        let rows_value = TypeId::from_bytes(id::<94>());
+        let catalogue = resolved_type_slots_catalogue(
+            ResolvedType::named(TypeId::from_bytes(id::<80>())),
+            ResolvedType::value(pinned_value),
+            FunctionReturn::Rows(vec![FunctionReturnColumnDefinition::new(
+                "result",
+                0,
+                ResolvedType::value(rows_value),
+            )]),
+        );
+        assert_eq!(
+            validate_resolved_type_slots(
+                &standard_context(),
+                &catalogue,
+                ResolvedTypeValidation::Transitional,
+            ),
+            Err(
+                RevisionInvariantError::ResolvedValueTypeNotInPinnedStandard {
+                    identity: DefinitionIdentity::FunctionReturnColumn {
+                        owner: FunctionId::from_bytes(id::<82>()),
+                        ordinal: 0,
+                    },
+                    value_type: rows_value,
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn persistence_rejects_transitional_version_two_scalars_including_client_parameters() {
+        let expected = RevisionPair::new(
+            SourceRevisionId::from_bytes(id::<20>()),
+            CatalogueRevisionId::from_bytes(id::<21>()),
+        );
+        let revision = function_revision_v2();
+        let input = DeployableRevisionInput::new(
+            expected,
+            source(Some(expected.source())),
+            expected.catalogue(),
+            function_catalogue(revision.id()),
+            digest::<7>(),
+            DeployableRevisionContent::new(function_origins(&revision), vec![], vec![], vec![])
+                .with_current_function_revisions(vec![revision]),
+        );
+        let deployable =
+            DeployableRevision::new_with_catalogue_hash_context(input, standard_context()).unwrap();
+
+        assert_eq!(
+            validate_persistable_catalogue(&deployable),
+            Err(
+                RevisionInvariantError::LegacyScalarRequiresCatalogueHashVersionOne {
+                    identity: DefinitionIdentity::FunctionReturnColumn {
+                        owner: FunctionId::from_bytes(id::<9>()),
+                        ordinal: 0,
+                    },
+                    scalar: StandardScalar::Boolean,
+                },
+            )
+        );
+
+        let hostile_client = resolved_type_slots_catalogue(
+            ResolvedType::named(TypeId::from_bytes(id::<80>())),
+            ResolvedType::scalar(StandardScalar::Integer),
+            FunctionReturn::Single(ResolvedType::value(TypeId::from_bytes(id::<71>()))),
+        );
+        assert_eq!(
+            validate_resolved_type_slots(
+                &standard_context(),
+                &hostile_client,
+                ResolvedTypeValidation::Persistable,
+            ),
+            Err(
+                RevisionInvariantError::LegacyScalarRequiresCatalogueHashVersionOne {
+                    identity: DefinitionIdentity::Parameter {
+                        owner: FunctionId::from_bytes(id::<82>()),
+                        parameter: ParameterId::from_bytes(id::<83>()),
+                    },
+                    scalar: StandardScalar::Integer,
+                },
+            )
+        );
+    }
+
+    #[test]
+    fn resolved_value_revision_errors_have_exact_source_free_contracts() {
+        let identity = DefinitionIdentity::Function(FunctionId::from_bytes(id::<82>()));
+        let value_type = TypeId::from_bytes(id::<71>());
+        let cases = [
+            (
+                RevisionInvariantError::ResolvedValueRequiresCatalogueHashVersionTwo {
+                    identity,
+                    value_type,
+                },
+                "resolved value type requires catalogue hash version 2",
+            ),
+            (
+                RevisionInvariantError::LegacyScalarRequiresCatalogueHashVersionOne {
+                    identity,
+                    scalar: StandardScalar::Boolean,
+                },
+                "legacy scalar resolved type requires catalogue hash version 1",
+            ),
+            (
+                RevisionInvariantError::ResolvedValueTypeNotInPinnedStandard {
+                    identity,
+                    value_type,
+                },
+                "resolved value type is absent from the pinned standard library",
+            ),
+        ];
+
+        for (error, display) in cases {
+            assert_eq!(error.to_string(), display);
+            assert!(Error::source(&error).is_none());
+        }
     }
 
     #[test]

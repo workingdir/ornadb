@@ -125,6 +125,27 @@ pub enum CanonicalHashError {
         /// The inconsistent standard-library revision.
         revision: StandardLibraryRevisionId,
     },
+    /// A resolved value type requires the version-2 catalogue hash contract.
+    ResolvedValueRequiresCatalogueHashVersionTwo {
+        /// The resolved catalogue slot that contains the value type.
+        identity: DefinitionIdentity,
+        /// The resolved standard value type identity.
+        value_type: TypeId,
+    },
+    /// A legacy scalar is not valid in the version-2 catalogue hash contract.
+    LegacyScalarRequiresCatalogueHashVersionOne {
+        /// The resolved catalogue slot that contains the scalar.
+        identity: DefinitionIdentity,
+        /// The legacy scalar representation.
+        scalar: StandardScalar,
+    },
+    /// A resolved value type is absent from the pinned standard library.
+    ResolvedValueTypeNotInPinnedStandard {
+        /// The resolved catalogue slot that contains the value type.
+        identity: DefinitionIdentity,
+        /// The missing resolved standard value type identity.
+        value_type: TypeId,
+    },
     /// A typed catalogue fact cannot be represented by the selected hash contract.
     CatalogueFactUnsupportedByHashVersion {
         /// The selected catalogue hash contract.
@@ -285,6 +306,14 @@ impl fmt::Display for CanonicalHashError {
             StandardLibraryDigestMismatch { .. } => {
                 formatter.write_str("stored standard library digest differs from canonical facts")
             }
+            ResolvedValueRequiresCatalogueHashVersionTwo { .. } => {
+                formatter.write_str("resolved value type requires catalogue hash version 2")
+            }
+            LegacyScalarRequiresCatalogueHashVersionOne { .. } => {
+                formatter.write_str("legacy scalar resolved type requires catalogue hash version 1")
+            }
+            ResolvedValueTypeNotInPinnedStandard { .. } => formatter
+                .write_str("resolved value type is absent from the pinned standard library"),
             CatalogueFactUnsupportedByHashVersion { version, fact } => match fact {
                 CatalogueHashFact::ValueTypeDefinition(_) => write!(
                     formatter,
@@ -689,6 +718,7 @@ pub fn catalogue_digest_with_context(
     origins: &[DefinitionOrigin],
     references: &[DefinitionReference],
 ) -> Result<Sha256Digest, CanonicalHashError> {
+    validate_resolved_type_slots(context, catalogue)?;
     validate_catalogue_version_facts(
         context.version(),
         catalogue,
@@ -775,6 +805,84 @@ pub fn catalogue_digest_with_context(
             Ok(encoder.digest())
         }
     }
+}
+
+fn validate_resolved_type_slots(
+    context: &CatalogueHashContext,
+    catalogue: &CatalogueSnapshot,
+) -> Result<(), CanonicalHashError> {
+    for object_type in catalogue.object_types() {
+        for field in object_type.fields() {
+            validate_resolved_type_slot(
+                context,
+                DefinitionIdentity::Field {
+                    owner: object_type.id(),
+                    field: field.id(),
+                },
+                field.resolved_type(),
+            )?;
+        }
+    }
+    for function in catalogue.functions() {
+        for parameter in function.parameters() {
+            validate_resolved_type_slot(
+                context,
+                DefinitionIdentity::Parameter {
+                    owner: function.id(),
+                    parameter: parameter.id(),
+                },
+                parameter.resolved_type(),
+            )?;
+        }
+        match function.return_type() {
+            FunctionReturn::Single(resolved_type) => validate_resolved_type_slot(
+                context,
+                DefinitionIdentity::Function(function.id()),
+                *resolved_type,
+            )?,
+            FunctionReturn::Rows(columns) => {
+                for column in columns {
+                    validate_resolved_type_slot(
+                        context,
+                        DefinitionIdentity::FunctionReturnColumn {
+                            owner: function.id(),
+                            ordinal: column.ordinal(),
+                        },
+                        column.resolved_type(),
+                    )?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_resolved_type_slot(
+    context: &CatalogueHashContext,
+    identity: DefinitionIdentity,
+    resolved_type: ResolvedType,
+) -> Result<(), CanonicalHashError> {
+    let Some(value_type) = resolved_type.value_type() else {
+        return Ok(());
+    };
+    if context.version() == CatalogueHashVersion::Version1 {
+        return Err(
+            CanonicalHashError::ResolvedValueRequiresCatalogueHashVersionTwo {
+                identity,
+                value_type,
+            },
+        );
+    }
+    if context
+        .standard()
+        .is_some_and(|standard| standard.catalogue().value_type_by_id(value_type).is_none())
+    {
+        return Err(CanonicalHashError::ResolvedValueTypeNotInPinnedStandard {
+            identity,
+            value_type,
+        });
+    }
+    Ok(())
 }
 
 fn validate_catalogue_version_facts(
@@ -974,7 +1082,7 @@ fn encode_catalogue_object_types(
             encoder.field_id(field.id());
             encoder.text(field.name(), "field name")?;
             encoder.u32(field.ordinal());
-            encode_version_one_resolved_type(encoder, field.resolved_type());
+            encode_resolved_type(encoder, field.resolved_type());
             encoder.boolean(field.nullable());
             encoder.boolean(field.unique());
             encoder.option_expression_id(field.default_expression());
@@ -1005,7 +1113,7 @@ fn encode_catalogue_functions(
             encoder.parameter_id(parameter.id());
             encoder.text(parameter.name(), "parameter name")?;
             encoder.u32(parameter.ordinal());
-            encode_version_one_resolved_type(encoder, parameter.resolved_type());
+            encode_resolved_type(encoder, parameter.resolved_type());
             encoder.option_expression_id(parameter.default_expression());
         }
 
@@ -1108,7 +1216,7 @@ fn encode_parameter_semantics(
 ) -> Result<(), CanonicalHashError> {
     encoder.parameter_id(parameter.id());
     encoder.u32(parameter.ordinal());
-    encode_version_one_resolved_type(encoder, parameter.resolved_type());
+    encode_resolved_type(encoder, parameter.resolved_type());
     encode_optional_expression_artifact_descriptor(
         encoder,
         parameter.default_expression(),
@@ -1137,7 +1245,7 @@ fn encode_function_return(
     match function_return {
         FunctionReturn::Single(resolved_type) => {
             encoder.u8(1);
-            encode_version_one_resolved_type(encoder, *resolved_type);
+            encode_resolved_type(encoder, *resolved_type);
         }
         FunctionReturn::Rows(columns) => {
             encoder.u8(2);
@@ -1148,7 +1256,7 @@ fn encode_function_return(
                     encoder.text(column.name(), "function return column name")?;
                 }
                 encoder.u32(column.ordinal());
-                encode_version_one_resolved_type(encoder, column.resolved_type());
+                encode_resolved_type(encoder, column.resolved_type());
             }
         }
     }
@@ -1556,13 +1664,11 @@ fn reference_sort_key(reference: &DefinitionReference) -> Vec<u8> {
     encoder.bytes
 }
 
-/// Encodes every current resolved type with the durable version-1 bytes.
+/// Encodes every current resolved type with its canonical type tag and payload.
 ///
-/// This deliberate exhaustive match prevents a future `ResolvedType` variant
-/// from silently reusing or omitting a legacy byte representation. It remains
-/// the sole version-1 policy. The later value-type/version-2 row owns that
-/// variant's encoding.
-fn encode_version_one_resolved_type(encoder: &mut Encoder, resolved_type: ResolvedType) {
+/// The catalogue slot scan rejects value types before any version-1 encoder
+/// can write bytes. Version 2 uses tag 4 for the exact resolved value identity.
+fn encode_resolved_type(encoder: &mut Encoder, resolved_type: ResolvedType) {
     match resolved_type {
         ResolvedType::Scalar(scalar) => {
             encoder.u8(1);
@@ -1575,6 +1681,10 @@ fn encode_version_one_resolved_type(encoder: &mut Encoder, resolved_type: Resolv
         ResolvedType::Reference { target } => {
             encoder.u8(3);
             encoder.type_id(target);
+        }
+        ResolvedType::Value(id) => {
+            encoder.u8(4);
+            encoder.type_id(id);
         }
     }
 }
@@ -2134,6 +2244,111 @@ mod tests {
         .unwrap()
     }
 
+    fn catalogue_with_resolved_slot_types(
+        field_type: ResolvedType,
+        parameter_type: ResolvedType,
+        return_type: FunctionReturn,
+        domain: FunctionDomain,
+    ) -> CatalogueSnapshot {
+        let base = catalogue();
+        let object = &base.object_types()[0];
+        let field = &object.fields()[0];
+        let object_type = ObjectTypeDefinition::new(
+            object.id(),
+            object.name().clone(),
+            vec![FieldDefinition::new(
+                field.id(),
+                field.name(),
+                field.ordinal(),
+                field_type,
+                field.nullable(),
+                field.unique(),
+                field.default_expression(),
+                field.on_delete(),
+            )],
+        );
+        let prior_function = &base.functions()[0];
+        let function = FunctionDefinition::new(
+            prior_function.id(),
+            prior_function.name().clone(),
+            domain,
+            vec![ParameterDefinition::new(
+                ParameterId::from_bytes(id::<5>()),
+                "enabled",
+                0,
+                parameter_type,
+                Some(ExpressionId::from_bytes(id::<8>())),
+            )],
+            return_type,
+            prior_function.current_revision(),
+            FunctionSecurity::Invoker,
+            (domain == FunctionDomain::Server).then_some(FunctionTransaction::ReadOnly),
+            if domain == FunctionDomain::Client {
+                FunctionVolatility::Immutable
+            } else {
+                FunctionVolatility::Stable
+            },
+        );
+        CatalogueSnapshot::new_with_functions(
+            base.revision(),
+            base.schemas().to_vec(),
+            vec![object_type],
+            vec![function],
+        )
+        .unwrap()
+    }
+
+    fn verified_standard_snapshot_with_extra_value(
+        value_type: TypeId,
+    ) -> VerifiedStandardLibrarySnapshot {
+        let base = standard_snapshot(false, None);
+        let mut value_types = base.catalogue().value_types().to_vec();
+        value_types.push(ValueTypeDefinition::primitive(
+            value_type,
+            QualifiedSemanticName::new(["std", "types", "extra"]).unwrap(),
+            ValueTypeMutability::Immutable,
+            ValueTypePersistence::Persistable,
+            "orna.kernel.value.extra@1",
+        ));
+        let mut origins = base.origins().to_vec();
+        origins.push(DefinitionOrigin::new(
+            DefinitionIdentity::ValueType(value_type),
+            SourceOrigin::new(SourceUnitId::from_bytes(id::<22>()), 5, 6).unwrap(),
+        ));
+        let catalogue = CatalogueSnapshot::new_with_types(
+            base.catalogue().revision(),
+            base.catalogue().schemas().to_vec(),
+            base.catalogue().object_types().to_vec(),
+            value_types,
+            base.catalogue().type_bindings().to_vec(),
+        )
+        .unwrap();
+        let provisional = StandardLibrarySnapshot::new(
+            base.revision(),
+            base.digest_version(),
+            base.source().clone(),
+            base.language_version(),
+            catalogue,
+            origins,
+            digest_bytes(b"provisional extra standard"),
+        )
+        .unwrap();
+        let digest = calculate_standard_library_digest_for_test(&provisional).unwrap();
+        verify_standard_library_snapshot(
+            StandardLibrarySnapshot::new(
+                provisional.revision(),
+                provisional.digest_version(),
+                provisional.source().clone(),
+                provisional.language_version(),
+                provisional.catalogue().clone(),
+                provisional.origins().to_vec(),
+                digest,
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
     fn catalogue_with_application_types(
         reverse: bool,
     ) -> (CatalogueSnapshot, Vec<DefinitionOrigin>) {
@@ -2462,21 +2677,224 @@ mod tests {
     }
 
     #[test]
-    fn version_one_resolved_type_encoding_has_exact_tags_and_payloads() {
+    fn resolved_type_encoding_has_exact_tags_and_payloads() {
         for (scalar, tag) in StandardScalar::ALL.into_iter().zip(1_u8..=13) {
             let mut encoder = Encoder::new(&[]);
-            encode_version_one_resolved_type(&mut encoder, ResolvedType::scalar(scalar));
+            encode_resolved_type(&mut encoder, ResolvedType::scalar(scalar));
             assert_eq!(encoder.bytes, vec![1, tag]);
         }
 
         let type_id = TypeId::from_bytes(id::<44>());
         let mut named = Encoder::new(&[]);
-        encode_version_one_resolved_type(&mut named, ResolvedType::named(type_id));
+        encode_resolved_type(&mut named, ResolvedType::named(type_id));
         assert_eq!(named.bytes, [vec![2], id::<44>().to_vec()].concat());
 
         let mut reference = Encoder::new(&[]);
-        encode_version_one_resolved_type(&mut reference, ResolvedType::reference(type_id));
+        encode_resolved_type(&mut reference, ResolvedType::reference(type_id));
         assert_eq!(reference.bytes, [vec![3], id::<44>().to_vec()].concat());
+
+        let mut value = Encoder::new(&[]);
+        encode_resolved_type(&mut value, ResolvedType::value(type_id));
+        assert_eq!(value.bytes, [vec![4], id::<44>().to_vec()].concat());
+    }
+
+    #[test]
+    fn resolved_value_hash_errors_have_exact_source_free_contracts() {
+        let identity = DefinitionIdentity::Parameter {
+            owner: FunctionId::from_bytes(id::<4>()),
+            parameter: ParameterId::from_bytes(id::<5>()),
+        };
+        let value_type = TypeId::from_bytes(id::<99>());
+        let errors = [
+            (
+                CanonicalHashError::ResolvedValueRequiresCatalogueHashVersionTwo {
+                    identity,
+                    value_type,
+                },
+                "resolved value type requires catalogue hash version 2",
+            ),
+            (
+                CanonicalHashError::LegacyScalarRequiresCatalogueHashVersionOne {
+                    identity,
+                    scalar: StandardScalar::Boolean,
+                },
+                "legacy scalar resolved type requires catalogue hash version 1",
+            ),
+            (
+                CanonicalHashError::ResolvedValueTypeNotInPinnedStandard {
+                    identity,
+                    value_type,
+                },
+                "resolved value type is absent from the pinned standard library",
+            ),
+        ];
+        for (error, display) in errors {
+            assert_eq!(error.to_string(), display);
+            assert!(error.source().is_none());
+        }
+    }
+
+    #[test]
+    fn resolved_value_slot_scan_has_the_closed_order_and_version_gates() {
+        let field_value = ResolvedType::value(TypeId::from_bytes(id::<90>()));
+        let parameter_value = ResolvedType::value(TypeId::from_bytes(id::<91>()));
+        let return_value = ResolvedType::value(TypeId::from_bytes(id::<92>()));
+        let standard = verified_standard_snapshot(false);
+        let version_two = CatalogueHashContext::version_two(standard);
+
+        let field_first = catalogue_with_resolved_slot_types(
+            field_value,
+            parameter_value,
+            FunctionReturn::Rows(vec![FunctionReturnColumnDefinition::new(
+                "found",
+                0,
+                return_value,
+            )]),
+            FunctionDomain::Client,
+        );
+        assert!(matches!(
+            catalogue_digest(&field_first, &[], &[], &[], &[]),
+            Err(CanonicalHashError::ResolvedValueRequiresCatalogueHashVersionTwo {
+                identity: DefinitionIdentity::Field { owner, field },
+                value_type,
+            }) if owner == TypeId::from_bytes(id::<2>())
+                && field == FieldId::from_bytes(id::<3>())
+                && value_type == TypeId::from_bytes(id::<90>())
+        ));
+        assert!(matches!(
+            catalogue_digest_with_context(
+                &version_two,
+                &field_first,
+                &[],
+                &[],
+                &[],
+                &[],
+            ),
+            Err(CanonicalHashError::ResolvedValueTypeNotInPinnedStandard {
+                identity: DefinitionIdentity::Field { owner, field },
+                value_type,
+            }) if owner == TypeId::from_bytes(id::<2>())
+                && field == FieldId::from_bytes(id::<3>())
+                && value_type == TypeId::from_bytes(id::<90>())
+        ));
+
+        let parameter_first = catalogue_with_resolved_slot_types(
+            ResolvedType::scalar(StandardScalar::Boolean),
+            parameter_value,
+            FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Boolean)),
+            FunctionDomain::Client,
+        );
+        assert!(matches!(
+            catalogue_digest_with_context(
+                &version_two,
+                &parameter_first,
+                &[],
+                &[],
+                &[],
+                &[],
+            ),
+            Err(CanonicalHashError::ResolvedValueTypeNotInPinnedStandard {
+                identity: DefinitionIdentity::Parameter { owner, parameter },
+                value_type,
+            }) if owner == FunctionId::from_bytes(id::<4>())
+                && parameter == ParameterId::from_bytes(id::<5>())
+                && value_type == TypeId::from_bytes(id::<91>())
+        ));
+
+        let rows_return = catalogue_with_resolved_slot_types(
+            ResolvedType::scalar(StandardScalar::Boolean),
+            ResolvedType::scalar(StandardScalar::Boolean),
+            FunctionReturn::Rows(vec![
+                FunctionReturnColumnDefinition::new(
+                    "first",
+                    0,
+                    ResolvedType::value(TypeId::from_bytes(id::<93>())),
+                ),
+                FunctionReturnColumnDefinition::new(
+                    "second",
+                    1,
+                    ResolvedType::value(TypeId::from_bytes(id::<94>())),
+                ),
+            ]),
+            FunctionDomain::Server,
+        );
+        assert!(matches!(
+            catalogue_digest_with_context(
+                &version_two,
+                &rows_return,
+                &[],
+                &[],
+                &[],
+                &[],
+            ),
+            Err(CanonicalHashError::ResolvedValueTypeNotInPinnedStandard {
+                identity: DefinitionIdentity::FunctionReturnColumn { owner, ordinal },
+                value_type,
+            }) if owner == FunctionId::from_bytes(id::<4>())
+                && ordinal == 0
+                && value_type == TypeId::from_bytes(id::<93>())
+        ));
+
+        let (scalar_transition, scalar_origins) = catalogue_with_application_types(false);
+        let scalar_references = value_type_references(standard_boolean_id());
+        let scalar_revision = function_revision_v2(&scalar_transition, &scalar_references);
+        assert!(
+            catalogue_digest_with_context(
+                &version_two,
+                &scalar_transition,
+                &[scalar_revision],
+                &[expression()],
+                &scalar_origins,
+                &scalar_references,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn version_two_resolved_value_accepts_a_present_non_golden_standard_id() {
+        let value_type = TypeId::from_bytes(id::<95>());
+        let standard = verified_standard_snapshot_with_extra_value(value_type);
+        let context = CatalogueHashContext::version_two(standard);
+        let (catalogue, origins) = catalogue_with_application_types(false);
+        let object = &catalogue.object_types()[0];
+        let field = &object.fields()[0];
+        let value_object = ObjectTypeDefinition::new(
+            object.id(),
+            object.name().clone(),
+            vec![FieldDefinition::new(
+                field.id(),
+                field.name(),
+                field.ordinal(),
+                ResolvedType::value(value_type),
+                field.nullable(),
+                field.unique(),
+                field.default_expression(),
+                field.on_delete(),
+            )],
+        );
+        let value_catalogue = CatalogueSnapshot::new_with_functions_and_types(
+            catalogue.revision(),
+            catalogue.schemas().to_vec(),
+            vec![value_object],
+            catalogue.value_types().to_vec(),
+            catalogue.type_bindings().to_vec(),
+            catalogue.functions().to_vec(),
+        )
+        .unwrap();
+        let references = value_type_references(standard_boolean_id());
+        let revision = function_revision_v2(&value_catalogue, &references);
+        assert!(
+            catalogue_digest_with_context(
+                &context,
+                &value_catalogue,
+                &[revision],
+                &[expression()],
+                &origins,
+                &references,
+            )
+            .is_ok()
+        );
     }
 
     #[test]
