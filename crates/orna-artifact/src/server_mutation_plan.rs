@@ -765,7 +765,10 @@ fn validate_expression(expression: &MutationExpression) -> Result<(), ServerMuta
         }
         MutationExpressionKind::BooleanLiteral { .. } => {
             let expected = ResolvedType::scalar(StandardScalar::Boolean);
-            if expression.resolved_type != expected {
+            if !matches!(
+                project_resolved_type(expression.resolved_type),
+                MutationResolvedType::Scalar(StandardScalar::Boolean)
+            ) {
                 return Err(ServerMutationPlanError::ExpressionTypeMismatch {
                     expression_kind: "BOOLEAN literal",
                     expected,
@@ -778,6 +781,33 @@ fn validate_expression(expression: &MutationExpression) -> Result<(), ServerMuta
             validate_supported_type(expression.resolved_type)?;
             validate_nullability("typed NULL", true, expression.nullable)
         }
+    }
+}
+
+/// The mutation-plan view of a resolved type.
+///
+/// Future resolved-type projections are deliberately not accepted here.
+/// They remain an explicit fail-closed case until this format has a wire
+/// contract for them.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MutationResolvedType {
+    Scalar(StandardScalar),
+    Named(TypeId),
+    Reference(TypeId),
+    Unsupported(ResolvedType),
+}
+
+const fn project_resolved_type(resolved_type: ResolvedType) -> MutationResolvedType {
+    match (
+        resolved_type.legacy_scalar(),
+        resolved_type.named_type(),
+        resolved_type.value_type(),
+        resolved_type.reference_target(),
+    ) {
+        (Some(scalar), None, None, None) => MutationResolvedType::Scalar(scalar),
+        (None, Some(type_id), None, None) => MutationResolvedType::Named(type_id),
+        (None, None, None, Some(target)) => MutationResolvedType::Reference(target),
+        _ => MutationResolvedType::Unsupported(resolved_type),
     }
 }
 
@@ -798,8 +828,8 @@ fn validate_nullability(
 }
 
 fn validate_supported_type(resolved_type: ResolvedType) -> Result<(), ServerMutationPlanError> {
-    let supported = match resolved_type {
-        ResolvedType::Scalar(scalar) => matches!(
+    let supported = match project_resolved_type(resolved_type) {
+        MutationResolvedType::Scalar(scalar) => matches!(
             scalar,
             StandardScalar::Boolean
                 | StandardScalar::Integer
@@ -808,8 +838,8 @@ fn validate_supported_type(resolved_type: ResolvedType) -> Result<(), ServerMuta
                 | StandardScalar::CharacterLargeObject
                 | StandardScalar::BinaryLargeObject
         ),
-        ResolvedType::Reference { .. } => true,
-        ResolvedType::Named(_) => false,
+        MutationResolvedType::Reference(_) => true,
+        MutationResolvedType::Named(_) | MutationResolvedType::Unsupported(_) => false,
     };
     if supported {
         Ok(())
@@ -874,16 +904,16 @@ fn encode_resolved_type(
     writer: &mut Writer,
     resolved_type: ResolvedType,
 ) -> Result<(), ServerMutationPlanError> {
-    match resolved_type {
-        ResolvedType::Scalar(scalar) => {
+    match project_resolved_type(resolved_type) {
+        MutationResolvedType::Scalar(scalar) => {
             writer.u8(SCALAR_TYPE_TAG);
             writer.u8(encode_scalar(scalar)?);
         }
-        ResolvedType::Reference { target } => {
+        MutationResolvedType::Reference(target) => {
             writer.u8(REFERENCE_TYPE_TAG);
             writer.type_id(target);
         }
-        ResolvedType::Named(_) => {
+        MutationResolvedType::Named(_) | MutationResolvedType::Unsupported(_) => {
             return Err(ServerMutationPlanError::UnsupportedValueType { resolved_type });
         }
     }
