@@ -175,7 +175,7 @@ mod tests {
     use orna_core::{
         CatalogueRevisionId, FieldId, SchemaId, SourceBundleId, SourceRevisionId, SourceUnitId,
         canonical_hash::{
-            catalogue_digest, source_bundle_digest, source_revision_record_digest,
+            catalogue_digest_with_context, source_bundle_digest, source_revision_record_digest,
             source_unit_content_digest,
         },
         catalogue::{
@@ -184,8 +184,10 @@ mod tests {
         },
         physical::plan_physical_changes,
         revision::{
-            ActiveDatabaseRevision, DefinitionIdentity, DefinitionOrigin, DeployableRevision,
-            RevisionPair, SourceOrigin, StoredSourceRevision, StoredSourceUnit,
+            ActiveDatabaseRevision, ActiveDatabaseRevisionInput, ActiveRevisionContent,
+            CatalogueHashContext, DefinitionIdentity, DefinitionOrigin, DeployableRevision,
+            DeployableRevisionContent, DeployableRevisionInput, RevisionPair, SourceOrigin,
+            StoredSourceRevision, StoredSourceUnit,
         },
         types::ResolvedType,
     };
@@ -414,7 +416,74 @@ mod tests {
         );
     }
 
+    #[test]
+    fn standard_value_and_legacy_scalar_lower_to_identical_postgres_bytes() {
+        let scalar_active = empty_active();
+        let scalar_field = FieldId::from_bytes([0x41; 16]);
+        let scalar_object = TypeId::from_bytes([0x42; 16]);
+        let scalar_candidate = candidate_with_objects(
+            &scalar_active,
+            vec![ObjectTypeDefinition::new(
+                scalar_object,
+                semantic_name(&["private_words", "scalar"]),
+                vec![FieldDefinition::new(
+                    scalar_field,
+                    "value",
+                    0,
+                    ResolvedType::scalar(StandardScalar::Integer),
+                    false,
+                    false,
+                    None,
+                    None,
+                )],
+            )],
+        );
+        let scalar_plan = plan_physical_changes(&scalar_active, &scalar_candidate).unwrap();
+
+        let standard = orna_standard::verify_standard_library_snapshot(
+            orna_standard::retained_standard_library_snapshot()
+                .expect("retained standard-library snapshot"),
+        )
+        .expect("verified standard-library snapshot");
+        let value_type = standard
+            .catalogue()
+            .value_types()
+            .iter()
+            .find(|value| value.representation_contract() == "orna.kernel.value.integer@1")
+            .expect("verified integer value type")
+            .id();
+        let value_active = empty_active_with_context(CatalogueHashContext::version_two(standard));
+        let value_candidate = candidate_with_objects(
+            &value_active,
+            vec![ObjectTypeDefinition::new(
+                scalar_object,
+                semantic_name(&["private_words", "scalar"]),
+                vec![FieldDefinition::new(
+                    scalar_field,
+                    "value",
+                    0,
+                    ResolvedType::value(value_type),
+                    false,
+                    false,
+                    None,
+                    None,
+                )],
+            )],
+        );
+        let value_plan = plan_physical_changes(&value_active, &value_candidate).unwrap();
+
+        assert_eq!(scalar_plan, value_plan);
+        let scalar_statements = lower_physical_plan(&scalar_plan).unwrap();
+        let value_statements = lower_physical_plan(&value_plan).unwrap();
+        assert_eq!(scalar_statements.creates, value_statements.creates);
+        assert_eq!(scalar_statements.references, value_statements.references);
+    }
+
     fn empty_active() -> ActiveDatabaseRevision {
+        empty_active_with_context(CatalogueHashContext::version_one())
+    }
+
+    fn empty_active_with_context(context: CatalogueHashContext) -> ActiveDatabaseRevision {
         let bundle = SourceBundleId::new();
         let source_revision = SourceRevisionId::new();
         let bundle_hash = source_bundle_digest(&[]).unwrap();
@@ -430,16 +499,17 @@ mod tests {
         let catalogue =
             CatalogueSnapshot::new(CatalogueRevisionId::new(), Vec::new(), Vec::new()).unwrap();
         let pair = RevisionPair::new(source.id(), catalogue.revision());
-        let catalogue_hash = catalogue_digest(&catalogue, &[], &[], &[], &[]).unwrap();
-        ActiveDatabaseRevision::new(
-            pair,
-            source,
-            catalogue,
-            catalogue_hash,
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
+        let catalogue_hash =
+            catalogue_digest_with_context(&context, &catalogue, &[], &[], &[], &[]).unwrap();
+        ActiveDatabaseRevision::new_with_catalogue_hash_context(
+            ActiveDatabaseRevisionInput::new(
+                pair,
+                source,
+                catalogue,
+                catalogue_hash,
+                ActiveRevisionContent::new(Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+            ),
+            context,
         )
         .unwrap()
     }
@@ -498,18 +568,21 @@ mod tests {
                 )
             }));
         }
-        let catalogue_hash = catalogue_digest(&catalogue, &[], &[], &origins, &[]).unwrap();
+        let context = active.catalogue_hash_context().clone();
+        let catalogue_hash =
+            catalogue_digest_with_context(&context, &catalogue, &[], &[], &origins, &[]).unwrap();
 
-        DeployableRevision::new(
-            active.pair(),
-            source,
-            active.pair().catalogue(),
-            catalogue,
-            catalogue_hash,
-            origins,
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
+        DeployableRevision::new_with_catalogue_hash_context(
+            DeployableRevisionInput::new(
+                active.pair(),
+                source,
+                active.pair().catalogue(),
+                catalogue,
+                catalogue_hash,
+                DeployableRevisionContent::new(origins, Vec::new(), Vec::new(), Vec::new())
+                    .with_current_function_revisions(Vec::new()),
+            ),
+            context,
         )
         .unwrap()
     }
