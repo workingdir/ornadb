@@ -80,8 +80,33 @@ body#sourcey .prose-code-content {
     background: var(--orna-code);
 }
 
+body#sourcey .prose-code-block .shiki,
+body#sourcey .prose-code-block .shiki span {
+    color: var(--shiki-dark);
+}
+
 body#sourcey .prose-code-block {
     border: 0;
+}
+
+body#sourcey .orna-skip-link {
+    position: fixed;
+    top: 0.75rem;
+    left: 0.75rem;
+    z-index: 60;
+    padding: 0.625rem 0.875rem;
+    border-radius: 0.25rem;
+    background: var(--orna-brand-deep);
+    color: white;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    font-weight: 600;
+    transform: translateY(-200%);
+    transition: transform 160ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+body#sourcey .orna-skip-link:focus {
+    transform: translateY(0);
 }
 
 body#sourcey .nav-link.active {
