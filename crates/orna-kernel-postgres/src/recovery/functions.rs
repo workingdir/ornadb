@@ -22,9 +22,12 @@ use orna_core::{
         FunctionSemanticHashVersion, RevisionPair, Sha256Digest, SourceOrigin,
         StoredSourceRevision,
     },
-    types::{ResolvedType, StandardScalar},
+    types::ResolvedType,
 };
 use tokio_postgres::{Row, Transaction};
+
+#[cfg(test)]
+use orna_core::types::StandardScalar;
 
 use crate::{
     PostgresKernelError,
@@ -35,8 +38,10 @@ use crate::{
 };
 
 use super::{
-    catalogue_hash_context_for, decode_catalogue_hash_version, decode_durable_version,
-    decode_origin, load_catalogue_semantics, load_source_units, require_hash_contract,
+    LegacyResolvedTypeTupleMember, catalogue_hash_context_for, decode_catalogue_hash_version,
+    decode_durable_version, decode_legacy_resolved_type_tuple,
+    decode_legacy_resolved_type_tuple_kind, decode_origin, load_catalogue_semantics,
+    load_source_units, require_hash_contract,
 };
 
 const FUNCTION_RELATION: &str = "_orna_kernel.catalogue_functions";
@@ -243,7 +248,8 @@ fn decode_parameter(
         &record,
         "parameter ordinal must fit u32",
     )?;
-    let resolved_type = decode_type_columns(row, &record, TypeMember::Parameter)?;
+    let resolved_type =
+        decode_type_columns(row, &record, LegacyResolvedTypeTupleMember::Parameter)?;
     let default_expression = optional_identity_bytes(
         record.column(
             row,
@@ -322,7 +328,8 @@ fn decode_return_column(
     if name.is_empty() {
         return Err(record.invariant("return column name must not be empty"));
     }
-    let resolved_type = decode_type_columns(row, &record, TypeMember::ReturnColumn)?;
+    let resolved_type =
+        decode_type_columns(row, &record, LegacyResolvedTypeTupleMember::ReturnColumn)?;
     let origin = decode_origin(
         row,
         &record,
@@ -474,25 +481,26 @@ fn decode_function(
     let recovered_returns = returns.remove(&id).unwrap_or_default();
     let return_shape: String =
         record.column(row, "return_shape", "function return shape must decode")?;
-    let return_type = match return_shape.as_str() {
-        "single" if recovered_returns.is_empty() => {
-            FunctionReturn::Single(decode_type_columns(row, &record, TypeMember::SingleReturn)?)
-        }
-        "rows" => {
-            require_null_type_columns(row, &record, "ROWS function")?;
-            member_origins.extend(recovered_returns.iter().map(|column| column.origin.clone()));
-            FunctionReturn::Rows(
-                recovered_returns
-                    .into_iter()
-                    .map(|column| column.definition)
-                    .collect(),
-            )
-        }
-        "single" => {
-            return Err(record.invariant("SINGLE functions must not have ROWS return columns"));
-        }
-        _ => return Err(record.invariant("function return shape must be single or rows")),
-    };
+    let return_type =
+        match return_shape.as_str() {
+            "single" if recovered_returns.is_empty() => FunctionReturn::Single(
+                decode_type_columns(row, &record, LegacyResolvedTypeTupleMember::SingleReturn)?,
+            ),
+            "rows" => {
+                require_null_type_columns(row, &record)?;
+                member_origins.extend(recovered_returns.iter().map(|column| column.origin.clone()));
+                FunctionReturn::Rows(
+                    recovered_returns
+                        .into_iter()
+                        .map(|column| column.definition)
+                        .collect(),
+                )
+            }
+            "single" => {
+                return Err(record.invariant("SINGLE functions must not have ROWS return columns"));
+            }
+            _ => return Err(record.invariant("function return shape must be single or rows")),
+        };
     let origin = decode_origin(row, &record, DefinitionIdentity::Function(id))?;
     member_origins.push(origin);
     Ok((
@@ -535,7 +543,7 @@ fn reject_leftover_members<T>(
 fn decode_type_columns(
     row: &Row,
     record: &DurableRecord,
-    member: TypeMember,
+    member: LegacyResolvedTypeTupleMember,
 ) -> Result<ResolvedType, PostgresKernelError> {
     let kind: Option<String> = record.column(
         row,
@@ -557,88 +565,20 @@ fn decode_type_columns(
         "resolved target identity must be null or 16 bytes",
     )?
     .map(TypeId::from_bytes);
-    match (kind.as_deref(), scalar.as_deref(), target) {
-        (Some("scalar"), Some(name), None) => Ok(ResolvedType::scalar(decode_scalar(
-            name,
-            record,
-            member == TypeMember::SingleReturn,
-        )?)),
-        (Some("named"), None, Some(target)) => Ok(ResolvedType::named(target)),
-        (Some("reference"), None, Some(target)) => Ok(ResolvedType::reference(target)),
-        _ => Err(record.invariant(match member {
-            TypeMember::Parameter => {
-                "parameter type columns must form one exact resolved type tuple"
-            }
-            TypeMember::ReturnColumn => {
-                "return column type columns must form one exact resolved type tuple"
-            }
-            TypeMember::SingleReturn => {
-                "function return type columns must form one exact resolved type tuple"
-            }
-        })),
-    }
+    let kind = decode_legacy_resolved_type_tuple_kind(kind.as_deref(), record, member)?;
+    decode_legacy_resolved_type_tuple(kind, scalar.as_deref(), target, record, member)
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum TypeMember {
-    Parameter,
-    ReturnColumn,
-    SingleReturn,
-}
-
-fn require_null_type_columns(
-    row: &Row,
-    record: &DurableRecord,
-    member: &'static str,
-) -> Result<(), PostgresKernelError> {
+fn require_null_type_columns(row: &Row, record: &DurableRecord) -> Result<(), PostgresKernelError> {
     let kind: Option<String> = record.column(row, "type_kind", "ROWS type kind must be null")?;
     let scalar: Option<String> =
         record.column(row, "scalar_type", "ROWS scalar type must be null")?;
     let target: Option<Vec<u8>> =
         record.column(row, "target_type_id", "ROWS target type must be null")?;
     if kind.is_some() || scalar.is_some() || target.is_some() {
-        return Err(record.invariant(match member {
-            "ROWS function" => "ROWS functions must not store one SINGLE return type tuple",
-            _ => "resolved type columns must all be null",
-        }));
+        return Err(record.invariant("ROWS functions must not store one SINGLE return type tuple"));
     }
     Ok(())
-}
-
-fn decode_scalar(
-    name: &str,
-    record: &DurableRecord,
-    allow_void: bool,
-) -> Result<StandardScalar, PostgresKernelError> {
-    let scalar = exact_enum(
-        name,
-        &[
-            ("boolean", StandardScalar::Boolean),
-            ("integer", StandardScalar::Integer),
-            ("bigint", StandardScalar::BigInt),
-            ("float", StandardScalar::Float),
-            ("decimal", StandardScalar::Decimal),
-            (
-                "character_large_object",
-                StandardScalar::CharacterLargeObject,
-            ),
-            ("binary_large_object", StandardScalar::BinaryLargeObject),
-            ("uuid", StandardScalar::Uuid),
-            ("date", StandardScalar::Date),
-            ("time", StandardScalar::Time),
-            ("timestamp", StandardScalar::Timestamp),
-            ("duration", StandardScalar::Duration),
-            ("void", StandardScalar::Void),
-        ],
-        record,
-        "resolved scalar type must be an exact standard scalar name",
-    )?;
-    if scalar == StandardScalar::Void && !allow_void {
-        return Err(record.invariant(
-            "void is valid only as a SINGLE function return, never as a parameter or ROWS column",
-        ));
-    }
-    Ok(scalar)
 }
 
 async fn load_artifacts(
@@ -1834,13 +1774,38 @@ mod tests {
     #[test]
     fn void_scalar_is_reserved_for_single_function_returns() {
         let record = DurableRecord::new(PARAMETER_RELATION, "function=test parameter=test");
+        let single_kind = decode_legacy_resolved_type_tuple_kind(
+            Some("scalar"),
+            &record,
+            LegacyResolvedTypeTupleMember::SingleReturn,
+        )
+        .expect("SINGLE scalar kind");
+        let parameter_kind = decode_legacy_resolved_type_tuple_kind(
+            Some("scalar"),
+            &record,
+            LegacyResolvedTypeTupleMember::Parameter,
+        )
+        .expect("parameter scalar kind");
 
         assert_eq!(
-            decode_scalar("void", &record, true).expect("SINGLE return void"),
-            StandardScalar::Void
+            decode_legacy_resolved_type_tuple(
+                single_kind,
+                Some("void"),
+                None,
+                &record,
+                LegacyResolvedTypeTupleMember::SingleReturn,
+            )
+            .expect("SINGLE return void"),
+            ResolvedType::scalar(StandardScalar::Void)
         );
         assert!(matches!(
-            decode_scalar("void", &record, false),
+            decode_legacy_resolved_type_tuple(
+                parameter_kind,
+                Some("void"),
+                None,
+                &record,
+                LegacyResolvedTypeTupleMember::Parameter,
+            ),
             Err(PostgresKernelError::DurableInvariant {
                 relation: PARAMETER_RELATION,
                 record,
