@@ -13,7 +13,7 @@ use orna_core::{
         ActiveDatabaseRevision, DefinitionReferenceKind, DefinitionReferenceTarget,
         FunctionSemanticHashVersion, RevisionPair,
     },
-    types::{ResolvedType, StandardScalar},
+    types::StandardScalar,
     value::RuntimeValue,
 };
 
@@ -316,6 +316,35 @@ fn invalid_active_revision(
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ClientReturnShape {
+    LegacyBoolean,
+    Unsupported,
+}
+
+fn classify_client_return(return_type: &FunctionReturn) -> ClientReturnShape {
+    let FunctionReturn::Single(resolved_type) = return_type else {
+        return ClientReturnShape::Unsupported;
+    };
+    if let Some(scalar) = resolved_type.legacy_scalar() {
+        return if scalar == StandardScalar::Boolean {
+            ClientReturnShape::LegacyBoolean
+        } else {
+            ClientReturnShape::Unsupported
+        };
+    }
+    if resolved_type.reference_target().is_some() {
+        return ClientReturnShape::Unsupported;
+    }
+    if resolved_type.named_type().is_some() {
+        return ClientReturnShape::Unsupported;
+    }
+    if resolved_type.value_type().is_some() {
+        return ClientReturnShape::Unsupported;
+    }
+    ClientReturnShape::Unsupported
+}
+
 fn validate_function_shape(
     definition: &orna_core::catalogue::FunctionDefinition,
     context: ClientExecutionContext,
@@ -329,10 +358,7 @@ fn validate_function_shape(
     if !definition.parameters().is_empty() {
         return Err(invalid_function(context, ClientExecutionRule::Parameters));
     }
-    if !matches!(
-        definition.return_type(),
-        FunctionReturn::Single(ResolvedType::Scalar(StandardScalar::Boolean))
-    ) {
+    if classify_client_return(definition.return_type()) != ClientReturnShape::LegacyBoolean {
         return Err(invalid_function(context, ClientExecutionRule::ReturnType));
     }
     if definition.security() != FunctionSecurity::Invoker {
@@ -440,8 +466,8 @@ mod tests {
         },
         catalogue::{
             CatalogueSnapshot, FunctionDefinition, FunctionDomain, FunctionReturn,
-            FunctionSecurity, FunctionVolatility, ParameterDefinition, QualifiedSemanticName,
-            SchemaDefinition,
+            FunctionReturnColumnDefinition, FunctionSecurity, FunctionVolatility,
+            ParameterDefinition, QualifiedSemanticName, SchemaDefinition,
         },
         revision::{
             ActiveDatabaseRevision, ActiveDatabaseRevisionInput, ActiveRevisionContent,
@@ -1514,6 +1540,60 @@ mod tests {
             assert_eq!(error.to_string(), rule.to_string(), "{name}");
             assert!(std::error::Error::source(&error).is_none(), "{name}");
         }
+    }
+
+    #[test]
+    fn public_evaluation_accepts_only_a_legacy_boolean_single_return() {
+        for scalar in StandardScalar::ALL {
+            let (active, function, _, _) = version_one_active_with_shape(
+                FunctionDomain::Client,
+                Vec::new(),
+                FunctionReturn::Single(ResolvedType::scalar(scalar)),
+                FunctionSecurity::Invoker,
+                FunctionVolatility::Immutable,
+            );
+            let result = evaluate_client_function(&active, function);
+            if scalar == StandardScalar::Boolean {
+                assert_eq!(result.unwrap().value(), &RuntimeValue::Boolean(true));
+                continue;
+            }
+            let error = result.unwrap_err();
+            assert_return_type_rule(error);
+        }
+
+        for return_type in [
+            FunctionReturn::Single(ResolvedType::named(TypeId::from_bytes([0x71; 16]))),
+            FunctionReturn::Single(ResolvedType::reference(TypeId::from_bytes([0x72; 16]))),
+            FunctionReturn::Rows(vec![FunctionReturnColumnDefinition::new(
+                "value",
+                0,
+                ResolvedType::scalar(StandardScalar::Boolean),
+            )]),
+        ] {
+            let (active, function, _, _) = version_one_active_with_shape(
+                FunctionDomain::Client,
+                Vec::new(),
+                return_type,
+                FunctionSecurity::Invoker,
+                FunctionVolatility::Immutable,
+            );
+            assert_return_type_rule(evaluate_client_function(&active, function).unwrap_err());
+        }
+    }
+
+    fn assert_return_type_rule(error: super::ClientExecutionError) {
+        assert!(matches!(
+            error,
+            super::ClientExecutionError::InvalidFunction {
+                rule: super::ClientExecutionRule::ReturnType,
+                ..
+            }
+        ));
+        assert_eq!(
+            error.to_string(),
+            "this CLIENT function does not return BOOLEAN"
+        );
+        assert!(std::error::Error::source(&error).is_none());
     }
 
     fn assert_references_rule(
