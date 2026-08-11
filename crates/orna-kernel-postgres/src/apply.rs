@@ -1322,8 +1322,8 @@ mod tests {
             ActiveDatabaseRevision, ActiveDatabaseRevisionInput, ActiveRevisionContent,
             CatalogueHashContext, DefinitionIdentity, DefinitionOrigin, DefinitionReferenceKind,
             DefinitionReferenceTarget, DeployableRevision, DeployableRevisionContent,
-            DeployableRevisionInput, ExecutableArtifactKind, RevisionInvariantError, RevisionPair,
-            Sha256Digest, SourceOrigin, StandardLibraryDigestVersion, StandardLibrarySnapshot,
+            DeployableRevisionInput, ExecutableArtifactKind, RevisionPair, Sha256Digest,
+            SourceOrigin, StandardLibraryDigestVersion, StandardLibrarySnapshot,
             StoredSourceRevision, StoredSourceUnit,
         },
         types::{ResolvedType, StandardScalar},
@@ -1486,6 +1486,10 @@ mod tests {
         FieldId::from_bytes([0x45; 16])
     }
 
+    fn preflight_value_type() -> TypeId {
+        orna_standard::BOOLEAN_TYPE_ID
+    }
+
     fn preflight_active(
         standard: orna_core::revision::VerifiedStandardLibrarySnapshot,
     ) -> ActiveDatabaseRevision {
@@ -1522,9 +1526,10 @@ mod tests {
         .unwrap()
     }
 
-    fn preflight_scalar_candidate(
+    fn preflight_candidate(
         expected_base: RevisionPair,
         context: CatalogueHashContext,
+        resolved_type: ResolvedType,
     ) -> DeployableRevision {
         let source_unit = SourceUnitId::from_bytes([0x46; 16]);
         let unit = StoredSourceUnit::new(
@@ -1558,7 +1563,7 @@ mod tests {
                 preflight_field(),
                 "enabled",
                 0,
-                ResolvedType::scalar(StandardScalar::Boolean),
+                resolved_type,
                 false,
                 true,
                 None,
@@ -1604,12 +1609,19 @@ mod tests {
     }
 
     #[test]
-    fn candidate_preflight_rejects_a_version_two_scalar_before_physical_planning() {
-        let standard = verified_standard_context(BASE_STANDARD_CONTEXT);
+    fn candidate_preflight_accepts_a_version_two_value_before_physical_planning() {
+        let standard = orna_standard::verify_standard_library_snapshot(
+            orna_standard::retained_standard_library_snapshot().unwrap(),
+        )
+        .unwrap();
         let active = preflight_active(standard.clone());
-        let candidate =
-            preflight_scalar_candidate(active.pair(), CatalogueHashContext::version_two(standard));
+        let candidate = preflight_candidate(
+            active.pair(),
+            CatalogueHashContext::version_two(standard),
+            ResolvedType::value(preflight_value_type()),
+        );
 
+        assert!(validate_candidate_preflight(&active, &candidate).is_ok());
         assert_eq!(
             plan_physical_changes(&active, &candidate),
             Err(PhysicalPlanError::UnsupportedUniqueField {
@@ -1617,32 +1629,14 @@ mod tests {
                 field: preflight_field(),
             })
         );
-
-        let error = validate_candidate_preflight(&active, &candidate).unwrap_err();
-        assert!(matches!(
-            error,
-            PostgresKernelError::CandidateRevisionInvariant(
-                RevisionInvariantError::LegacyScalarRequiresCatalogueHashVersionOne {
-                    identity: DefinitionIdentity::Field { owner, field },
-                    scalar: StandardScalar::Boolean,
-                }
-            ) if owner == preflight_object_type() && field == preflight_field()
-        ));
-        assert_eq!(
-            error.to_string(),
-            "candidate revision invariant failed: legacy scalar resolved type requires catalogue hash version 1"
-        );
-        let source = std::error::Error::source(&error).expect("candidate invariant source");
-        assert_eq!(
-            source.to_string(),
-            "legacy scalar resolved type requires catalogue hash version 1"
-        );
-        assert!(std::error::Error::source(source).is_none());
     }
 
     #[test]
     fn candidate_preflight_preserves_expected_base_and_standard_context_precedence() {
-        let active_standard = verified_standard_context(BASE_STANDARD_CONTEXT);
+        let active_standard = orna_standard::verify_standard_library_snapshot(
+            orna_standard::retained_standard_library_snapshot().unwrap(),
+        )
+        .unwrap();
         let active = preflight_active(active_standard.clone());
         let matching_context = CatalogueHashContext::version_two(active_standard.clone());
 
@@ -1650,7 +1644,11 @@ mod tests {
             SourceRevisionId::from_bytes([0x50; 16]),
             CatalogueRevisionId::from_bytes([0x51; 16]),
         );
-        let stale = preflight_scalar_candidate(stale_expected, matching_context.clone());
+        let stale = preflight_candidate(
+            stale_expected,
+            matching_context.clone(),
+            ResolvedType::value(preflight_value_type()),
+        );
         assert!(matches!(
             validate_candidate_preflight(&active, &stale),
             Err(PostgresKernelError::ExpectedBaseMismatch {
@@ -1659,8 +1657,11 @@ mod tests {
             }) if expected == stale_expected && actual_active == active.pair()
         ));
 
-        let version_one =
-            preflight_scalar_candidate(active.pair(), CatalogueHashContext::version_one());
+        let version_one = preflight_candidate(
+            active.pair(),
+            CatalogueHashContext::version_one(),
+            ResolvedType::scalar(StandardScalar::Boolean),
+        );
         assert!(matches!(
             validate_candidate_preflight(&active, &version_one),
             Err(PostgresKernelError::StandardContextTransitionRequired {
@@ -1670,9 +1671,10 @@ mod tests {
         ));
 
         let alternate_standard = verified_standard_context(ALTERNATE_STANDARD_CONTEXT);
-        let different_context = preflight_scalar_candidate(
+        let different_context = preflight_candidate(
             active.pair(),
             CatalogueHashContext::version_two(alternate_standard.clone()),
+            ResolvedType::named(preflight_object_type()),
         );
         let mismatch = validate_candidate_preflight(&active, &different_context).unwrap_err();
         let (actual_active, actual_candidate) = match mismatch {
