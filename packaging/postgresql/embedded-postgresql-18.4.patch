@@ -1,0 +1,53 @@
+--- a/src/backend/Makefile
++++ b/src/backend/Makefile
+@@ -59,0 +60,34 @@
++# Build one deterministic, flattened link input for the Orna executable.
++# PostgreSQL normally puts these two server archives in OBJS.  GNU ar cannot
++# safely use archives as members of another archive, so first link every
++# required object into one relocatable object with server and zlib archives whole.
++ORNA_EMBEDDED_ARCHIVE = liborna_postgres18_backend.a
++ORNA_EMBEDDED_RELOCATABLE_OBJECT = liborna_postgres18_backend.o
++ORNA_EMBEDDED_ENTRY_OBJECT = main/orna_embedded_entry.o
++ORNA_EMBEDDED_BACKEND_OBJECTS = $(filter %.o,$(filter-out main/main.o,$(call expand_subsys,$(OBJS)))) $(ORNA_EMBEDDED_ENTRY_OBJECT)
++ORNA_EMBEDDED_SERVER_ARCHIVES = \
++	$(top_builddir)/src/common/libpgcommon_srv.a \
++	$(top_builddir)/src/port/libpgport_srv.a
++ORNA_EMBEDDED_ZLIB_ARCHIVE ?= /build/zlib/lib/libz.a
++ORNA_EMBEDDED_STATIC_ARCHIVES = $(ORNA_EMBEDDED_SERVER_ARCHIVES) $(ORNA_EMBEDDED_ZLIB_ARCHIVE)
++
++$(ORNA_EMBEDDED_ENTRY_OBJECT): $(srcdir)/main/main.c generated-headers
++	$(CC) $(CFLAGS) $(CPPFLAGS) -DORNA_EMBEDDED_ENTRY -c $(srcdir)/main/main.c -o $@
++
++$(ORNA_EMBEDDED_RELOCATABLE_OBJECT): submake-libpgport generated-headers $(OBJS) $(ORNA_EMBEDDED_ENTRY_OBJECT)
++	$(CC) $(CFLAGS) $(LDFLAGS) -r -o $@ $(ORNA_EMBEDDED_BACKEND_OBJECTS) \
++		-Wl,--whole-archive $(ORNA_EMBEDDED_STATIC_ARCHIVES) -Wl,--no-whole-archive
++
++$(ORNA_EMBEDDED_ARCHIVE): $(ORNA_EMBEDDED_RELOCATABLE_OBJECT)
++	$(AR) rcD $@ $<
++	$(RANLIB) -D $@
++
++.PHONY: orna_postgres18_entry_probe
++orna_postgres18_entry_probe: $(ORNA_EMBEDDED_ARCHIVE)
++	test -n "$(ORNA_EMBEDDED_PROBE_SOURCE)" -a -n "$(ORNA_EMBEDDED_PROBE_OUTPUT)"
++	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $(ORNA_EMBEDDED_PROBE_OUTPUT) \
++		$(ORNA_EMBEDDED_PROBE_SOURCE) $(ORNA_EMBEDDED_ARCHIVE) $(LIBS)
++
++.PHONY: orna_postgres18_backend_archive
++orna_postgres18_backend_archive: $(ORNA_EMBEDDED_ARCHIVE)
++
+--- a/src/backend/main/main.c
++++ b/src/backend/main/main.c
+@@ -64,0 +65 @@
++int orna_postgres18_entry(int argc, char *argv[]);
+@@ -71 +72 @@
+-main(int argc, char *argv[])
++orna_postgres18_entry(int argc, char *argv[])
+@@ -233,0 +235,8 @@
++
++#ifndef ORNA_EMBEDDED_ENTRY
++int
++main(int argc, char *argv[])
++{
++	return orna_postgres18_entry(argc, argv);
++}
++#endif
