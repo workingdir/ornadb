@@ -192,9 +192,7 @@ impl FieldDefinition {
 
     /// Reports whether this is the required typed-reference uniqueness shape.
     pub const fn is_required_unique_reference(&self) -> bool {
-        self.unique
-            && !self.nullable
-            && matches!(self.resolved_type, ResolvedType::Reference { .. })
+        self.unique && !self.nullable && self.resolved_type.reference_target().is_some()
     }
 
     /// Returns the identity of the resolved default expression, when present.
