@@ -23,9 +23,10 @@ identity is an observable in-memory checking sentinel, not durable identity or
 continuity evidence.
 
 The command is offline. It does not read configuration or environment
-variables, connect to PostgreSQL, inspect an Orna service or instance, use the
-bundled PostgreSQL runtime, open a network connection, start a child process,
-or open a filesystem path for writing. Apart from output to the caller-supplied
+variables, connect to PostgreSQL, inspect an Orna service or instance, enter
+the embedded PostgreSQL engine or any embedded PostgreSQL role, materialise
+embedded support data, open a network connection, start a child process, or
+open a filesystem path for writing. Apart from output to the caller-supplied
 standard-error stream, it requests no filesystem content, namespace, or
 metadata mutation. Ordinary file reads can update filesystem access time.
 Standard input is never read. Standard output is always empty.
@@ -399,10 +400,13 @@ check, not a usage error.
 
 ## Offline and side-effect boundary
 
-The command can run on a host with no PostgreSQL program, library, package,
-service, data directory, socket, or network access. Hostile
-`ORNA_SERVER_POSTGRES_URL`, `DATABASE_URL`, and `PG*` variables do not affect
-it because it does not read them. It also does not read Orna instance
+The command can run on a host with no separate PostgreSQL program, library,
+package, service, data directory, socket, or network access. PostgreSQL code
+present in the Orna ELF is not entered. Hostile `ORNA_SERVER_POSTGRES_URL`,
+`DATABASE_URL`, `PG*`, and `ORNA_PACKAGE_MAINTENANCE` variables do not affect
+it because public arguments select source checking before any engine, package,
+or instance boundary. The private package entry additionally requires no
+public argument and root identity. The command does not read Orna instance
 configuration, package state, the current working directory as a project, or
 an active database revision.
 
@@ -449,7 +453,7 @@ does not give `orna-compiler` filesystem or process authority.
 | Protected standard source | application-owned `std` declaration, `KERNEL CONTRACT`, qualified type export, and prelude export, alone and after valid declarations | The accepted `ORNA0303` code, message, span, protection precedence, and compiler order are preserved. No checked bundle or durable change results. |
 | Diagnostic rendering | syntax and semantic failures; multiple ordered diagnostics; path containing spaces and punctuation; CRLF and Unicode before a failure; quoted identifiers containing line feed, carriage return, tab, another control, backslash, `U+2028`, and `U+2029` | Each line is exactly `<path>:<start>..<end>: <code>: <message>` with the exact logical path, zero-based byte offsets, exclusive end, compiler order, exact message escaping, one physical final line feed, and no injected line. Path, span, and code text remain unescaped. |
 | Streams and status | success; compiler diagnostics; each pre-check failure; piped hostile standard input; redirected standard output | Standard output is empty in every case. Success is silent `0`, check and operational failures are `1`, usage is `2`, and piped input is neither consumed nor allowed to change or delay the result. |
-| PostgreSQL isolation | no PostgreSQL installation or service; hostile PostgreSQL and Orna environment variables; unavailable bundled runtime; changed server configuration | The same source result is produced without a PostgreSQL load, socket, connection, process, package check, runtime check, or environment read. |
+| PostgreSQL isolation | no external PostgreSQL installation or service; hostile PostgreSQL, package-maintenance, and Orna environment variables; invalid embedded-engine evidence; absent or changed materialised support data; changed server configuration | The same source result is produced without entering an embedded PostgreSQL role or performing a PostgreSQL socket, connection, child, package, engine-manifest, support-data, instance, or environment operation. The hostile private package selector cannot intercept a public source-check shape. |
 | No command-issued state writes | successful and failed checks in a snapshotted writable directory and a read-only directory; process tracing where available; filesystem access-time updates enabled and disabled | The command opens no path for writing and issues no create, content mutation, truncate, rename, remove, ownership, mode, or other metadata mutation. It starts no network or child process. Snapshots exclude access time or use a no-access-time mount. Ordinary read-driven access-time changes do not invalidate the proof. Only the supplied standard-error descriptor can receive command output bytes. |
 | Existing host commands | current backend-shell unit and integration suites, valid backend-shell dispatch, invalid global shapes | Source-check dispatch leaves backend-shell terminal, configuration, process, exit, and pre-attachment write behaviour unchanged. The only shared change is the accepted four-line global usage body. |
 
@@ -487,29 +491,31 @@ proof. The later PostgreSQL recovery test, CLI dependency, and command rows
 cannot start before that compiler row is complete. The source-check slice does
 not reorder, weaken, or bypass any work ADR 0016 authority gate.
 
-Implementation order also requires work ADR 0017's command dispatcher through
-all three accepted server leaves. Its sequence must be complete through and
-including:
+Implementation order also requires ADR 0019's corrected command dispatcher
+through all three accepted server leaves. Its sequence must be complete
+through and including:
 
-* `feat(server): supervise private PostgreSQL`, which implements
+* `feat(server): supervise embedded PostgreSQL`, which implements
   `orna server run`;
-* `feat(server): add offline PostgreSQL upgrade`, which implements
+* `feat(server): add embedded engine upgrade`, which implements
   `orna server upgrade`; and
-* `feat(server): bind backend-shell to the ready host`, which rebinds
-  `orna server backend-shell` and completes the accepted server dispatcher.
+* `feat(server): replace psql with a native shell`, which rebinds
+  `orna server backend-shell` without a second executable and completes the
+  accepted server dispatcher.
 
-All earlier work ADR 0017 rows required by those three rows are therefore
-implementation-order prerequisites. The source-check command row preserves
-that working dispatcher and changes its global three-command usage to the
-exact final four-line usage in this record. There is no conditional or interim
-source-check usage form.
+All earlier ADR 0019 rows required by those three rows are therefore
+implementation-order prerequisites. Retained work ADR 0017 host and instance
+rows remain prerequisites where ADR 0019 does not replace them. The
+source-check command row preserves that working dispatcher and changes its
+global three-command usage to the exact final four-line usage in this record.
+There is no conditional or interim source-check usage form.
 
 This is an implementation-order dependency, not an operational PostgreSQL
 dependency. Dispatch selects `orna source check` before any service-account,
-package, instance, runtime, socket, or service check. Source check shares only
-the public binary and dispatcher. It must produce the same result when the
-bundled PostgreSQL runtime is absent or invalid and when the Orna service is
-absent, stopped, or failed.
+package, instance, embedded-engine, support-data, socket, or service check.
+Source check shares only the public binary and dispatcher. It must produce the
+same result when embedded-engine evidence or materialised support data is
+absent or invalid and when the Orna service is absent, stopped, or failed.
 
 ## Initial implementation sequence
 
@@ -581,11 +587,10 @@ It depends on the verified catalogue-backed standard type authority in work
 ADR 0016 and does not weaken that record's protected source, retained source,
 hard-coded digest, direct binding, type-reference, or fail-closed rules.
 
-It appends the source-check line to work ADR 0017's global usage contract. It
-does not change work ADR 0017's PostgreSQL distribution, host ABI, package,
-service, instance, environment, process, runtime, or backend-shell rules. It
-also preserves work ADR 0014's backend-shell operation where work ADR 0017 has
-not superseded it.
+It appends the source-check line to the retained global usage contract. It does
+not change ADR 0019's embedded-engine, package, service, instance, process, or
+backend-shell rules. It preserves ADR 0014's amended native backend-shell
+operation.
 
 For the first offline developer source-check command, this accepted record has
 precedence.
