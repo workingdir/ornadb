@@ -4354,11 +4354,14 @@ impl CandidateMaterial {
     fn matches_active(&self, active: &ActiveDatabaseRevision) -> Result<bool, PrepareError> {
         if self.source != *active.source()
             || !catalogue_matches(&self.catalogue, active.catalogue())
-            || self.origins != active.origins()
-            || self.expressions != active.expressions()
-            || self.current_function_revisions != active.function_revisions()
+            || !same_member_multiset(&self.origins, active.origins())
+            || !same_member_multiset(&self.expressions, active.expressions())
+            || !same_member_multiset(
+                &self.current_function_revisions,
+                active.function_revisions(),
+            )
             || !self.new_function_revisions.is_empty()
-            || self.references != active.references()
+            || !same_member_multiset(&self.references, active.references())
         {
             return Ok(false);
         }
@@ -4441,11 +4444,22 @@ impl CandidateMaterial {
 
 fn catalogue_matches(left: &CatalogueSnapshot, right: &CatalogueSnapshot) -> bool {
     left.revision() == right.revision()
-        && left.schemas() == right.schemas()
-        && left.object_types() == right.object_types()
-        && left.value_types() == right.value_types()
-        && left.type_bindings() == right.type_bindings()
-        && left.functions() == right.functions()
+        && same_member_multiset(left.schemas(), right.schemas())
+        && same_member_multiset(left.object_types(), right.object_types())
+        && same_member_multiset(left.value_types(), right.value_types())
+        && same_member_multiset(left.type_bindings(), right.type_bindings())
+        && same_member_multiset(left.functions(), right.functions())
+}
+
+fn same_member_multiset<T: Eq>(left: &[T], right: &[T]) -> bool {
+    left.len() == right.len()
+        && left.iter().all(|member| {
+            left.iter().filter(|candidate| *candidate == member).count()
+                == right
+                    .iter()
+                    .filter(|candidate| *candidate == member)
+                    .count()
+        })
 }
 
 impl PreparedSourceIds {
@@ -5787,6 +5801,13 @@ mod tests {
             MutationAssignment, MutationExpression, MutationExpressionKind, MutationValueType,
         },
     };
+
+    #[test]
+    fn member_multiset_comparison_ignores_order_but_preserves_exact_multiplicity() {
+        assert!(same_member_multiset(&[1_u8, 2, 2, 3], &[3, 2, 1, 2]));
+        assert!(!same_member_multiset(&[1_u8, 2, 2, 3], &[3, 2, 1, 4]));
+        assert!(!same_member_multiset(&[1_u8, 2, 2, 3], &[3, 2, 1, 1]));
+    }
 
     const SOURCE: &str = "CREATE SCHEMA tasks;\n\
         CREATE TYPE tasks.person AS OBJECT (name TEXT NOT NULL);\n\
