@@ -4,10 +4,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use orna_core::{
     CatalogueRevisionId, ExpressionId, FunctionId, FunctionRevisionId, ParameterId, SchemaId,
-    SourceBundleId, SourceRevisionId, SourceUnitId, TypeId,
+    SourceBundleId, SourceRevisionId, SourceUnitId, StandardLibraryRevisionId, TypeId,
     canonical_hash::{
-        artifact_payload_digest, catalogue_digest, function_declaration_digest,
-        source_bundle_digest, source_revision_digest,
+        artifact_payload_digest, function_declaration_digest, source_bundle_digest,
+        source_revision_digest,
     },
     catalogue::{
         FunctionDefinition, FunctionDomain, FunctionReturn, FunctionReturnColumnDefinition,
@@ -15,9 +15,11 @@ use orna_core::{
         QualifiedSemanticName,
     },
     revision::{
-        ActiveDatabaseRevision, DefinitionIdentity, DefinitionOrigin, DefinitionReference,
-        DefinitionReferenceKind, DefinitionReferenceTarget, ExecutableArtifact,
-        ExecutableArtifactKind, FunctionRevisionRecord, RevisionPair, Sha256Digest, SourceOrigin,
+        ActiveDatabaseRevision, ActiveDatabaseRevisionInput, ActiveRevisionContent,
+        CatalogueHashContext, CatalogueHashVersion, DefinitionIdentity, DefinitionOrigin,
+        DefinitionReference, DefinitionReferenceKind, DefinitionReferenceTarget,
+        ExecutableArtifact, ExecutableArtifactKind, FunctionRevisionRecord,
+        FunctionSemanticHashVersion, RevisionPair, Sha256Digest, SourceOrigin,
         StoredSourceRevision,
     },
     types::{ResolvedType, StandardScalar},
@@ -32,7 +34,10 @@ use crate::{
     },
 };
 
-use super::{decode_origin, load_catalogue_semantics, load_source_units, require_hash_contract};
+use super::{
+    catalogue_hash_context_for, decode_catalogue_hash_version, decode_durable_version,
+    decode_origin, load_catalogue_semantics, load_source_units, require_hash_contract,
+};
 
 const FUNCTION_RELATION: &str = "_orna_kernel.catalogue_functions";
 const PARAMETER_RELATION: &str = "_orna_kernel.catalogue_function_parameters";
@@ -72,6 +77,8 @@ pub(super) struct RecoveredFunction {
 pub(super) struct RecoveredIntroduction {
     pub(super) catalogue_hash: Sha256Digest,
     pub(super) source: StoredSourceRevision,
+    catalogue_hash_version: CatalogueHashVersion,
+    standard_library_revision: Option<StandardLibraryRevisionId>,
 }
 
 struct RecoveredParameter {
@@ -93,6 +100,7 @@ struct PendingRevision {
     declaration_origin: SourceOrigin,
     declaration_hash: Sha256Digest,
     semantic_hash: Sha256Digest,
+    semantic_hash_version: FunctionSemanticHashVersion,
     language_version: String,
     artifact: ExecutableArtifact,
     status: RevisionStatus,
@@ -114,12 +122,15 @@ struct IntroductionHeader {
     source_hash: Sha256Digest,
     bundle: SourceBundleId,
     bundle_hash: Sha256Digest,
+    catalogue_hash_version: CatalogueHashVersion,
+    standard_library_revision: Option<StandardLibraryRevisionId>,
 }
 
 pub(super) async fn load_function_state(
     transaction: &Transaction<'_>,
     catalogue: CatalogueRevisionId,
     active_ancestry: &BTreeSet<(CatalogueRevisionId, SourceRevisionId)>,
+    catalogue_hash_context: &CatalogueHashContext,
 ) -> Result<RecoveredFunctionState, PostgresKernelError> {
     let (functions, origins) = load_catalogue_functions(transaction, catalogue).await?;
 
@@ -138,10 +149,18 @@ pub(super) async fn load_function_state(
         &active_revisions,
         &historical_revisions,
         &introductions,
+        catalogue_hash_context,
     )
     .await?;
 
-    let references = load_references(transaction, catalogue).await?;
+    let references = load_references(
+        transaction,
+        catalogue,
+        catalogue_hash_context
+            .standard()
+            .map(|standard| standard.revision()),
+    )
+    .await?;
     validate_reference_sources(&functions, &references)?;
 
     Ok(RecoveredFunctionState {
@@ -714,6 +733,7 @@ async fn load_revisions(
         .query(
             "SELECT revision.id, revision.function_id, revision.revision_number,
                     revision.content_hash, revision.semantic_ir_hash,
+                    revision.semantic_hash_version,
                     revision.hash_algorithm, revision.hash_contract_version,
                     revision.language_version, revision.status,
                     revision.introduced_catalogue_revision_id,
@@ -726,6 +746,8 @@ async fn load_revisions(
                     catalogue.content_hash AS catalogue_hash,
                     catalogue.hash_algorithm AS catalogue_algorithm,
                     catalogue.hash_contract_version AS catalogue_contract_version,
+                    catalogue.canonical_hash_version AS catalogue_canonical_hash_version,
+                    catalogue.standard_library_revision_id AS catalogue_standard_library_revision_id,
                     source.parent_source_revision_id,
                     source.bundle_id,
                     source.content_hash AS source_hash,
@@ -825,6 +847,14 @@ fn decode_revision(
         &record,
         "function semantic hash must be 32 bytes",
     )?);
+    let semantic_hash_version = decode_function_semantic_hash_version(
+        record.column(
+            row,
+            "semantic_hash_version",
+            "function semantic hash version must be a supported smallint",
+        )?,
+        &record,
+    )?;
     let language_version: String = record.column(
         row,
         "language_version",
@@ -888,11 +918,25 @@ fn decode_revision(
         declaration_origin,
         declaration_hash,
         semantic_hash,
+        semantic_hash_version,
         language_version,
         artifact,
         status,
         introduction,
     })
+}
+
+fn decode_function_semantic_hash_version(
+    value: i16,
+    record: &DurableRecord,
+) -> Result<FunctionSemanticHashVersion, PostgresKernelError> {
+    let value = decode_durable_version(
+        value,
+        record,
+        "function semantic hash version must be a supported smallint",
+    )?;
+    FunctionSemanticHashVersion::try_from(value)
+        .map_err(|_| record.invariant("function semantic hash version must be 1 or 2"))
 }
 
 fn decode_required_source_origin(
@@ -970,6 +1014,32 @@ fn decode_introduction_header(
         record,
         "introducing source bundle identity must be 16 bytes",
     )?);
+    let catalogue_hash_version = decode_catalogue_hash_version(
+        record.column(
+            row,
+            "catalogue_canonical_hash_version",
+            "introducing catalogue hash version must be a supported smallint",
+        )?,
+        record,
+    )?;
+    let standard_library_revision = optional_identity_bytes(
+        record.column(
+            row,
+            "catalogue_standard_library_revision_id",
+            "introducing catalogue standard library revision identity must be null or 16 bytes",
+        )?,
+        record,
+        "introducing catalogue standard library revision identity must be null or 16 bytes",
+    )?
+    .map(StandardLibraryRevisionId::from_bytes);
+    match (catalogue_hash_version, standard_library_revision) {
+        (CatalogueHashVersion::Version1, None) | (CatalogueHashVersion::Version2, Some(_)) => {}
+        _ => {
+            return Err(record.invariant(
+                "introducing catalogue hash version and standard library revision must form one exact context",
+            ));
+        }
+    }
     for (algorithm, version, algorithm_rule, version_rule) in [
         (
             "catalogue_algorithm",
@@ -1031,6 +1101,8 @@ fn decode_introduction_header(
             record,
             "introducing bundle hash must be 32 bytes",
         )?),
+        catalogue_hash_version,
+        standard_library_revision,
     })
 }
 
@@ -1114,6 +1186,8 @@ async fn finish_revisions(
             RecoveredIntroduction {
                 catalogue_hash: header.catalogue_hash,
                 source,
+                catalogue_hash_version: header.catalogue_hash_version,
+                standard_library_revision: header.standard_library_revision,
             },
         );
     }
@@ -1148,7 +1222,8 @@ async fn finish_revisions(
             revision.language_version,
             revision.artifact,
         )
-        .map_err(PostgresKernelError::RevisionInvariant)?;
+        .map_err(PostgresKernelError::RevisionInvariant)?
+        .with_semantic_hash_version(revision.semantic_hash_version);
         if let Some(expected_function) = current_ids.get(&record.id()) {
             if revision.status != RevisionStatus::Active {
                 return Err(
@@ -1191,6 +1266,7 @@ async fn verify_historical_introductions(
     active_revisions: &[FunctionRevisionRecord],
     historical_revisions: &[FunctionRevisionRecord],
     introductions: &BTreeMap<CatalogueRevisionId, RecoveredIntroduction>,
+    active_catalogue_hash_context: &CatalogueHashContext,
 ) -> Result<(), PostgresKernelError> {
     let revisions = active_revisions
         .iter()
@@ -1203,9 +1279,25 @@ async fn verify_historical_introductions(
             continue;
         }
 
+        let catalogue_record =
+            DurableRecord::new("_orna_kernel.catalogue_revisions", catalogue_id.canonical());
+        let catalogue_hash_context = catalogue_hash_context_for(
+            introduction.catalogue_hash_version,
+            introduction.standard_library_revision,
+            active_catalogue_hash_context.standard(),
+            &catalogue_record,
+        )?;
+
         let (functions, function_origins) =
             load_catalogue_functions(transaction, *catalogue_id).await?;
-        let references = load_references(transaction, *catalogue_id).await?;
+        let references = load_references(
+            transaction,
+            *catalogue_id,
+            catalogue_hash_context
+                .standard()
+                .map(|standard| standard.revision()),
+        )
+        .await?;
         validate_reference_sources(&functions, &references)?;
         let semantics =
             load_catalogue_semantics(transaction, *catalogue_id, functions, function_origins)
@@ -1230,19 +1322,24 @@ async fn verify_historical_introductions(
             current_revisions.push((*revision).clone());
         }
 
-        let recovered = ActiveDatabaseRevision::new_with_history(
-            RevisionPair::new(introduction.source.id(), *catalogue_id),
-            introduction.source.clone(),
-            semantics.catalogue,
-            introduction.catalogue_hash,
-            semantics.expressions,
-            current_revisions,
-            Vec::new(),
-            semantics.origins,
-            references,
+        let recovered = ActiveDatabaseRevision::new_with_catalogue_hash_context(
+            ActiveDatabaseRevisionInput::new(
+                RevisionPair::new(introduction.source.id(), *catalogue_id),
+                introduction.source.clone(),
+                semantics.catalogue,
+                introduction.catalogue_hash,
+                ActiveRevisionContent::new(
+                    semantics.expressions,
+                    current_revisions,
+                    semantics.origins,
+                    references,
+                ),
+            ),
+            catalogue_hash_context,
         )
         .map_err(PostgresKernelError::RevisionInvariant)?;
-        let computed = catalogue_digest(
+        let computed = orna_core::canonical_hash::catalogue_digest_with_context(
+            recovered.catalogue_hash_context(),
             recovered.catalogue(),
             recovered.function_revisions(),
             recovered.expressions(),
@@ -1271,6 +1368,8 @@ fn same_introduction(left: &IntroductionHeader, right: &IntroductionHeader) -> b
         && left.source_hash == right.source_hash
         && left.bundle == right.bundle
         && left.bundle_hash == right.bundle_hash
+        && left.catalogue_hash_version == right.catalogue_hash_version
+        && left.standard_library_revision == right.standard_library_revision
 }
 
 fn validate_declaration(
@@ -1319,6 +1418,7 @@ fn validate_declaration(
 async fn load_references(
     transaction: &Transaction<'_>,
     catalogue: CatalogueRevisionId,
+    expected_standard_library_revision: Option<StandardLibraryRevisionId>,
 ) -> Result<Vec<DefinitionReference>, PostgresKernelError> {
     let rows = transaction
         .query(
@@ -1326,7 +1426,7 @@ async fn load_references(
                     source_function_revision_id, ordinal,
                     target_definition_id, target_kind, reference_kind,
                     source_subobject_id, target_owner_type_id,
-                    target_owner_function_id,
+                    target_owner_function_id, target_standard_library_revision_id,
                     source_unit_id, source_start, source_end
              FROM _orna_kernel.definition_references
              WHERE catalogue_revision_id = $1
@@ -1338,7 +1438,8 @@ async fn load_references(
     let mut references = Vec::with_capacity(rows.len());
     let mut expected_ordinals = BTreeMap::<FunctionRevisionId, u32>::new();
     for (index, row) in rows.iter().enumerate() {
-        let reference = decode_reference(row, index, catalogue)?;
+        let reference =
+            decode_reference(row, index, catalogue, expected_standard_library_revision)?;
         let expected = expected_ordinals
             .entry(reference.source_revision())
             .or_default();
@@ -1366,6 +1467,7 @@ fn decode_reference(
     row: &Row,
     index: usize,
     catalogue: CatalogueRevisionId,
+    expected_standard_library_revision: Option<StandardLibraryRevisionId>,
 ) -> Result<DefinitionReference, PostgresKernelError> {
     let row_record = DurableRecord::new(REFERENCE_RELATION, format!("row={index}"));
     require_catalogue(row, &row_record, catalogue, "reference")?;
@@ -1435,25 +1537,45 @@ fn decode_reference(
         "reference target function owner must be null or 16 bytes",
     )?
     .map(FunctionId::from_bytes);
+    let target_standard_library_revision = optional_identity_bytes(
+        record.column(
+            row,
+            "target_standard_library_revision_id",
+            "reference target standard library revision identity must be null or 16 bytes",
+        )?,
+        &record,
+        "reference target standard library revision identity must be null or 16 bytes",
+    )?
+    .map(StandardLibraryRevisionId::from_bytes);
     let target_kind: String =
         record.column(row, "target_kind", "reference target kind must decode")?;
-    let target = match (target_kind.as_str(), owner_type, owner_function) {
-        ("object_type", None, None) => {
+    let target = match (
+        target_kind.as_str(),
+        owner_type,
+        owner_function,
+        target_standard_library_revision,
+    ) {
+        ("object_type", None, None, None) => {
             DefinitionReferenceTarget::ObjectType(TypeId::from_bytes(target_bytes))
         }
-        ("field", Some(owner), None) => DefinitionReferenceTarget::Field {
+        ("field", Some(owner), None, None) => DefinitionReferenceTarget::Field {
             owner,
             field: orna_core::FieldId::from_bytes(target_bytes),
         },
-        ("function", None, None) => {
+        ("function", None, None, None) => {
             DefinitionReferenceTarget::Function(FunctionId::from_bytes(target_bytes))
         }
-        ("parameter", None, Some(owner)) => DefinitionReferenceTarget::Parameter {
+        ("parameter", None, Some(owner), None) => DefinitionReferenceTarget::Parameter {
             owner,
             parameter: ParameterId::from_bytes(target_bytes),
         },
-        ("expression", None, None) => {
+        ("expression", None, None, None) => {
             DefinitionReferenceTarget::Expression(ExpressionId::from_bytes(target_bytes))
+        }
+        ("value_type", None, None, Some(revision))
+            if Some(revision) == expected_standard_library_revision =>
+        {
+            DefinitionReferenceTarget::ValueType(TypeId::from_bytes(target_bytes))
         }
         _ => {
             return Err(record.invariant(
@@ -1543,6 +1665,9 @@ const fn reference_kind_matches_target(
                 | DefinitionReferenceKind::ObjectReference
                 | DefinitionReferenceKind::QueryObject,
             DefinitionReferenceTarget::ObjectType(_)
+        ) | (
+            DefinitionReferenceKind::NamedType,
+            DefinitionReferenceTarget::ValueType(_)
         ) | (
             DefinitionReferenceKind::ParameterRead,
             DefinitionReferenceTarget::Parameter { .. }
@@ -1689,6 +1814,20 @@ mod tests {
         assert!(!reference_kind_matches_target(
             DefinitionReferenceKind::WriteField,
             DefinitionReferenceTarget::ObjectType(object),
+        ));
+    }
+
+    #[test]
+    fn named_type_references_accept_only_value_type_targets_in_the_new_family() {
+        let value_type = TypeId::from_bytes([3; 16]);
+
+        assert!(reference_kind_matches_target(
+            DefinitionReferenceKind::NamedType,
+            DefinitionReferenceTarget::ValueType(value_type),
+        ));
+        assert!(!reference_kind_matches_target(
+            DefinitionReferenceKind::ObjectReference,
+            DefinitionReferenceTarget::ValueType(value_type),
         ));
     }
 
