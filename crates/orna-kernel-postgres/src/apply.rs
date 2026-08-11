@@ -1152,15 +1152,51 @@ fn scalar(scalar: StandardScalar, allow_void: bool) -> Result<&'static str, Post
         StandardScalar::Void => Err(invariant("VOID is valid only as a SINGLE function return")),
     }
 }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LegacyTypeColumns {
+    Scalar(&'static str),
+    Named(TypeId),
+    Reference(TypeId),
+}
+
+impl LegacyTypeColumns {
+    const fn tuple(self) -> (&'static str, Option<&'static str>, Option<TypeId>) {
+        match self {
+            Self::Scalar(value) => ("scalar", Some(value), None),
+            Self::Named(value) => ("named", None, Some(value)),
+            Self::Reference(target) => ("reference", None, Some(target)),
+        }
+    }
+}
+
+fn legacy_type_projection(
+    value: ResolvedType,
+    allow_void: bool,
+) -> Result<LegacyTypeColumns, PostgresKernelError> {
+    if let Some(value) = value.legacy_scalar() {
+        return Ok(LegacyTypeColumns::Scalar(scalar(value, allow_void)?));
+    }
+    if let Some(value) = value.named_type() {
+        return Ok(LegacyTypeColumns::Named(value));
+    }
+    if let Some(target) = value.reference_target() {
+        return Ok(LegacyTypeColumns::Reference(target));
+    }
+    if value.value_type().is_some() {
+        return Err(invariant(
+            "resolved value types are not supported by legacy PostgreSQL type encoding",
+        ));
+    }
+    Err(invariant(
+        "resolved type must expose one supported PostgreSQL type shape",
+    ))
+}
+
 fn type_columns(
     value: ResolvedType,
     allow_void: bool,
 ) -> Result<(&'static str, Option<&'static str>, Option<TypeId>), PostgresKernelError> {
-    match value {
-        ResolvedType::Scalar(value) => Ok(("scalar", Some(scalar(value, allow_void)?), None)),
-        ResolvedType::Named(value) => Ok(("named", None, Some(value))),
-        ResolvedType::Reference { target } => Ok(("reference", None, Some(target))),
-    }
+    Ok(legacy_type_projection(value, allow_void)?.tuple())
 }
 fn on_delete(value: Option<OnDeleteAction>) -> Option<&'static str> {
     value.map(|value| match value {
@@ -1279,9 +1315,9 @@ mod tests {
     };
 
     use super::{
-        POSTGRES_REFERENCE_KINDS, StandardContextIdentity, artifact_kind, function_transaction,
-        guard_standard_context_transition, positive_i32, positive_i64, reference_kind,
-        reference_target, scalar, type_columns,
+        LegacyTypeColumns, POSTGRES_REFERENCE_KINDS, StandardContextIdentity, artifact_kind,
+        function_transaction, guard_standard_context_transition, legacy_type_projection,
+        positive_i32, positive_i64, reference_kind, reference_target, scalar, type_columns,
     };
     use crate::PostgresKernelError;
 
@@ -1521,6 +1557,18 @@ mod tests {
     #[test]
     fn type_encoder_preserves_closed_type_tuple_shapes() {
         let target = TypeId::from_bytes([3; 16]);
+        assert_eq!(
+            legacy_type_projection(ResolvedType::scalar(StandardScalar::Integer), false).unwrap(),
+            LegacyTypeColumns::Scalar("integer")
+        );
+        assert_eq!(
+            legacy_type_projection(ResolvedType::named(target), false).unwrap(),
+            LegacyTypeColumns::Named(target)
+        );
+        assert_eq!(
+            legacy_type_projection(ResolvedType::reference(target), false).unwrap(),
+            LegacyTypeColumns::Reference(target)
+        );
         assert_eq!(
             type_columns(ResolvedType::scalar(StandardScalar::Integer), false).unwrap(),
             ("scalar", Some("integer"), None)

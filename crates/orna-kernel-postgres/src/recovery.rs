@@ -1484,11 +1484,164 @@ async fn load_fields(
     Ok(fields)
 }
 
-#[derive(Clone, Copy)]
-enum FieldTypeKind {
+/// One current SQL tuple member that stores a legacy resolved type.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(super) enum LegacyResolvedTypeTupleMember {
+    Field,
+    Parameter,
+    ReturnColumn,
+    SingleReturn,
+}
+
+impl LegacyResolvedTypeTupleMember {
+    pub(super) const fn tuple_rule(self) -> &'static str {
+        match self {
+            Self::Field => {
+                "field type kind, scalar type, and target identity must form one exact supported tuple"
+            }
+            Self::Parameter => "parameter type columns must form one exact resolved type tuple",
+            Self::ReturnColumn => {
+                "return column type columns must form one exact resolved type tuple"
+            }
+            Self::SingleReturn => {
+                "function return type columns must form one exact resolved type tuple"
+            }
+        }
+    }
+
+    const fn scalar_rule(self) -> &'static str {
+        match self {
+            Self::Field => "field scalar type must be an exact standard scalar name",
+            Self::Parameter | Self::ReturnColumn | Self::SingleReturn => {
+                "resolved scalar type must be an exact standard scalar name"
+            }
+        }
+    }
+
+    const fn allows_void(self) -> bool {
+        matches!(self, Self::Field | Self::SingleReturn)
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(super) enum LegacyResolvedTypeTupleKind {
     Scalar,
     Named,
     Reference,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum LegacyResolvedTypeTuple {
+    Scalar(StandardScalar),
+    Named(TypeId),
+    Reference(TypeId),
+}
+
+impl LegacyResolvedTypeTuple {
+    fn into_resolved_type(self) -> ResolvedType {
+        match self {
+            Self::Scalar(scalar) => ResolvedType::scalar(scalar),
+            Self::Named(target) => ResolvedType::named(target),
+            Self::Reference(target) => ResolvedType::reference(target),
+        }
+    }
+}
+
+/// Decodes the current scalar, named, or reference SQL kind before tuple data.
+pub(super) fn decode_legacy_resolved_type_tuple_kind(
+    value: Option<&str>,
+    record: &DurableRecord,
+    member: LegacyResolvedTypeTupleMember,
+) -> Result<LegacyResolvedTypeTupleKind, PostgresKernelError> {
+    let rule = if member == LegacyResolvedTypeTupleMember::Field {
+        "field type kind must be scalar, named, or reference"
+    } else {
+        member.tuple_rule()
+    };
+    let value = value.ok_or_else(|| record.invariant(rule))?;
+    exact_enum(
+        value,
+        &[
+            ("scalar", LegacyResolvedTypeTupleKind::Scalar),
+            ("named", LegacyResolvedTypeTupleKind::Named),
+            ("reference", LegacyResolvedTypeTupleKind::Reference),
+        ],
+        record,
+        rule,
+    )
+}
+
+/// Decodes and projects one current legacy SQL resolved-type tuple.
+///
+/// The later value-tuple decoder remains separate. This decoder rejects every
+/// value shape until that later recovery row explicitly enables it.
+pub(super) fn decode_legacy_resolved_type_tuple(
+    kind: LegacyResolvedTypeTupleKind,
+    scalar: Option<&str>,
+    target: Option<TypeId>,
+    record: &DurableRecord,
+    member: LegacyResolvedTypeTupleMember,
+) -> Result<ResolvedType, PostgresKernelError> {
+    if kind == LegacyResolvedTypeTupleKind::Scalar
+        && let Some(name) = scalar
+        && target.is_none()
+    {
+        return decode_legacy_scalar(name, record, member)
+            .map(LegacyResolvedTypeTuple::Scalar)
+            .map(LegacyResolvedTypeTuple::into_resolved_type);
+    }
+    if kind == LegacyResolvedTypeTupleKind::Named
+        && scalar.is_none()
+        && let Some(target) = target
+    {
+        if member == LegacyResolvedTypeTupleMember::Field {
+            return Err(record.invariant("named field types are not supported by active recovery"));
+        }
+        return Ok(LegacyResolvedTypeTuple::Named(target).into_resolved_type());
+    }
+    if kind == LegacyResolvedTypeTupleKind::Reference
+        && scalar.is_none()
+        && let Some(target) = target
+    {
+        return Ok(LegacyResolvedTypeTuple::Reference(target).into_resolved_type());
+    }
+    Err(record.invariant(member.tuple_rule()))
+}
+
+fn decode_legacy_scalar(
+    name: &str,
+    record: &DurableRecord,
+    member: LegacyResolvedTypeTupleMember,
+) -> Result<StandardScalar, PostgresKernelError> {
+    let scalar = exact_enum(
+        name,
+        &[
+            ("boolean", StandardScalar::Boolean),
+            ("integer", StandardScalar::Integer),
+            ("bigint", StandardScalar::BigInt),
+            ("float", StandardScalar::Float),
+            ("decimal", StandardScalar::Decimal),
+            (
+                "character_large_object",
+                StandardScalar::CharacterLargeObject,
+            ),
+            ("binary_large_object", StandardScalar::BinaryLargeObject),
+            ("uuid", StandardScalar::Uuid),
+            ("date", StandardScalar::Date),
+            ("time", StandardScalar::Time),
+            ("timestamp", StandardScalar::Timestamp),
+            ("duration", StandardScalar::Duration),
+            ("void", StandardScalar::Void),
+        ],
+        record,
+        member.scalar_rule(),
+    )?;
+    if scalar == StandardScalar::Void && !member.allows_void() {
+        return Err(record.invariant(
+            "void is valid only as a SINGLE function return, never as a parameter or ROWS column",
+        ));
+    }
+    Ok(scalar)
 }
 
 fn decode_field(
@@ -1531,15 +1684,10 @@ fn decode_field(
         "type_kind",
         "field type kind must be scalar, named, or reference",
     )?;
-    let kind = exact_enum(
-        &kind_name,
-        &[
-            ("scalar", FieldTypeKind::Scalar),
-            ("named", FieldTypeKind::Named),
-            ("reference", FieldTypeKind::Reference),
-        ],
+    let kind = decode_legacy_resolved_type_tuple_kind(
+        Some(&kind_name),
         &record,
-        "field type kind must be scalar, named, or reference",
+        LegacyResolvedTypeTupleMember::Field,
     )?;
     let scalar_name: Option<String> = record.column(
         row,
@@ -1556,7 +1704,13 @@ fn decode_field(
         "field target identity must be null or 16 bytes",
     )?
     .map(TypeId::from_bytes);
-    let resolved_type = decode_field_type(kind, scalar_name.as_deref(), target, &record)?;
+    let resolved_type = decode_legacy_resolved_type_tuple(
+        kind,
+        scalar_name.as_deref(),
+        target,
+        &record,
+        LegacyResolvedTypeTupleMember::Field,
+    )?;
     let nullable: bool = record.column(row, "nullable", "field nullability must be boolean")?;
     let unique: bool = record.column(row, "is_unique", "field uniqueness must be boolean")?;
     let default_expression = optional_identity_bytes(
@@ -1593,56 +1747,13 @@ fn decode_field(
     })
 }
 
-fn decode_field_type(
-    kind: FieldTypeKind,
-    scalar: Option<&str>,
-    target: Option<TypeId>,
-    record: &DurableRecord,
-) -> Result<ResolvedType, PostgresKernelError> {
-    match (kind, scalar, target) {
-        (FieldTypeKind::Scalar, Some(name), None) => {
-            let scalar = exact_enum(
-                name,
-                &[
-                    ("boolean", StandardScalar::Boolean),
-                    ("integer", StandardScalar::Integer),
-                    ("bigint", StandardScalar::BigInt),
-                    ("float", StandardScalar::Float),
-                    ("decimal", StandardScalar::Decimal),
-                    (
-                        "character_large_object",
-                        StandardScalar::CharacterLargeObject,
-                    ),
-                    ("binary_large_object", StandardScalar::BinaryLargeObject),
-                    ("uuid", StandardScalar::Uuid),
-                    ("date", StandardScalar::Date),
-                    ("time", StandardScalar::Time),
-                    ("timestamp", StandardScalar::Timestamp),
-                    ("duration", StandardScalar::Duration),
-                    ("void", StandardScalar::Void),
-                ],
-                record,
-                "field scalar type must be an exact standard scalar name",
-            )?;
-            Ok(ResolvedType::scalar(scalar))
-        }
-        (FieldTypeKind::Reference, None, Some(target)) => Ok(ResolvedType::reference(target)),
-        (FieldTypeKind::Named, None, Some(_)) => {
-            Err(record.invariant("named field types are not supported by active recovery"))
-        }
-        _ => Err(record.invariant(
-            "field type kind, scalar type, and target identity must form one exact supported tuple",
-        )),
-    }
-}
-
 fn decode_on_delete(
     value: Option<&str>,
     resolved_type: ResolvedType,
     nullable: bool,
     record: &DurableRecord,
 ) -> Result<Option<OnDeleteAction>, PostgresKernelError> {
-    if !matches!(resolved_type, ResolvedType::Reference { .. }) {
+    if resolved_type.reference_target().is_none() {
         return value
             .is_none()
             .then_some(None)
@@ -2191,14 +2302,26 @@ fn validate_function_type(
     resolved_type: ResolvedType,
     record: &DurableRecord,
 ) -> Result<(), PostgresKernelError> {
-    if let ResolvedType::Named(target) | ResolvedType::Reference { target } = resolved_type
-        && catalogue.object_type_by_id(target).is_none()
-    {
-        return Err(record.invariant(
-            "every named or reference function type target must be an active object type",
-        ));
+    if resolved_type.legacy_scalar().is_some() {
+        return Ok(());
     }
-    Ok(())
+    if let Some(target) = resolved_type
+        .named_type()
+        .or(resolved_type.reference_target())
+    {
+        if catalogue.object_type_by_id(target).is_none() {
+            return Err(record.invariant(
+                "every named or reference function type target must be an active object type",
+            ));
+        }
+        return Ok(());
+    }
+    if resolved_type.value_type().is_some() {
+        return Err(
+            record.invariant("function resolved value types are not supported by active recovery")
+        );
+    }
+    Err(record.invariant("function resolved types are not supported by active recovery"))
 }
 
 fn validate_field_links(
@@ -2219,12 +2342,16 @@ fn validate_field_links(
                     field.id().canonical()
                 ),
             );
-            if let ResolvedType::Reference { target } = field.resolved_type()
+            if let Some(target) = field.resolved_type().reference_target()
                 && catalogue.object_type_by_id(target).is_none()
             {
                 return Err(
                     record.invariant("every reference field target must be an active object type")
                 );
+            }
+            if field.resolved_type().value_type().is_some() {
+                return Err(record
+                    .invariant("field resolved value types are not supported by active recovery"));
             }
             if let Some(expression) = field.default_expression()
                 && !expression_ids.contains(&expression)
@@ -2241,7 +2368,7 @@ fn validate_field_links(
 #[cfg(test)]
 mod tests {
     use orna_core::{
-        CatalogueRevisionId, SourceBundleId, SourceRevisionId, SourceUnitId,
+        CatalogueRevisionId, SourceBundleId, SourceRevisionId, SourceUnitId, TypeId,
         canonical_hash::{
             catalogue_digest, source_bundle_digest, source_revision_record_digest,
             source_unit_content_digest,
@@ -2249,13 +2376,15 @@ mod tests {
         catalogue::CatalogueSnapshot,
         revision::CatalogueHashVersion,
         revision::StoredSourceUnit,
+        types::{ResolvedType, StandardScalar},
     };
 
-    use crate::decode::DurableRecord;
+    use crate::{PostgresKernelError, decode::DurableRecord};
 
     use super::{
-        RecoveredCatalogueSemantics, RecoveredFunctionState, RecoveredRevisionHeader,
-        assemble_revision, decode_catalogue_hash_version,
+        LegacyResolvedTypeTupleMember, RecoveredCatalogueSemantics, RecoveredFunctionState,
+        RecoveredRevisionHeader, assemble_revision, decode_catalogue_hash_version,
+        decode_legacy_resolved_type_tuple, decode_legacy_resolved_type_tuple_kind,
     };
 
     #[test]
@@ -2271,6 +2400,212 @@ mod tests {
             CatalogueHashVersion::Version2
         );
         assert!(decode_catalogue_hash_version(3, &record).is_err());
+    }
+
+    #[test]
+    fn legacy_resolved_type_tuple_decodes_a_scalar_field() {
+        let record = DurableRecord::new("_orna_kernel.catalogue_fields", "test");
+        let kind = decode_legacy_resolved_type_tuple_kind(
+            Some("scalar"),
+            &record,
+            LegacyResolvedTypeTupleMember::Field,
+        )
+        .expect("scalar field kind");
+
+        assert_eq!(
+            decode_legacy_resolved_type_tuple(
+                kind,
+                Some("boolean"),
+                None,
+                &record,
+                LegacyResolvedTypeTupleMember::Field,
+            )
+            .expect("scalar field tuple"),
+            ResolvedType::scalar(StandardScalar::Boolean)
+        );
+    }
+
+    #[test]
+    fn legacy_resolved_type_tuple_matrix_preserves_current_shapes_and_errors() {
+        let record = DurableRecord::new("_orna_kernel.catalogue_fields", "tuple");
+        let target = TypeId::from_bytes([0x91; 16]);
+        let scalars = [
+            ("boolean", StandardScalar::Boolean),
+            ("integer", StandardScalar::Integer),
+            ("bigint", StandardScalar::BigInt),
+            ("float", StandardScalar::Float),
+            ("decimal", StandardScalar::Decimal),
+            (
+                "character_large_object",
+                StandardScalar::CharacterLargeObject,
+            ),
+            ("binary_large_object", StandardScalar::BinaryLargeObject),
+            ("uuid", StandardScalar::Uuid),
+            ("date", StandardScalar::Date),
+            ("time", StandardScalar::Time),
+            ("timestamp", StandardScalar::Timestamp),
+            ("duration", StandardScalar::Duration),
+            ("void", StandardScalar::Void),
+        ];
+
+        for member in [
+            LegacyResolvedTypeTupleMember::Field,
+            LegacyResolvedTypeTupleMember::Parameter,
+            LegacyResolvedTypeTupleMember::ReturnColumn,
+            LegacyResolvedTypeTupleMember::SingleReturn,
+        ] {
+            let scalar_kind =
+                decode_legacy_resolved_type_tuple_kind(Some("scalar"), &record, member)
+                    .expect("scalar kind");
+            for (name, scalar) in scalars {
+                let decoded = decode_legacy_resolved_type_tuple(
+                    scalar_kind,
+                    Some(name),
+                    None,
+                    &record,
+                    member,
+                );
+                if scalar == StandardScalar::Void
+                    && member != LegacyResolvedTypeTupleMember::Field
+                    && member != LegacyResolvedTypeTupleMember::SingleReturn
+                {
+                    assert!(matches!(
+                        decoded,
+                        Err(PostgresKernelError::DurableInvariant {
+                            relation: "_orna_kernel.catalogue_fields",
+                            record: failed_record,
+                            rule: "void is valid only as a SINGLE function return, never as a parameter or ROWS column",
+                        }) if failed_record == "tuple"
+                    ));
+                } else {
+                    assert_eq!(
+                        decoded.expect("current scalar tuple"),
+                        ResolvedType::scalar(scalar)
+                    );
+                }
+            }
+
+            let named_kind = decode_legacy_resolved_type_tuple_kind(Some("named"), &record, member)
+                .expect("named kind");
+            let named =
+                decode_legacy_resolved_type_tuple(named_kind, None, Some(target), &record, member);
+            if member == LegacyResolvedTypeTupleMember::Field {
+                assert!(matches!(
+                    named,
+                    Err(PostgresKernelError::DurableInvariant {
+                        relation: "_orna_kernel.catalogue_fields",
+                        record: failed_record,
+                        rule: "named field types are not supported by active recovery",
+                    }) if failed_record == "tuple"
+                ));
+            } else {
+                assert_eq!(
+                    named.expect("current named tuple"),
+                    ResolvedType::named(target)
+                );
+            }
+
+            let reference_kind =
+                decode_legacy_resolved_type_tuple_kind(Some("reference"), &record, member)
+                    .expect("reference kind");
+            assert_eq!(
+                decode_legacy_resolved_type_tuple(
+                    reference_kind,
+                    None,
+                    Some(target),
+                    &record,
+                    member,
+                )
+                .expect("current reference tuple"),
+                ResolvedType::reference(target)
+            );
+        }
+
+        let parameter_scalar = decode_legacy_resolved_type_tuple_kind(
+            Some("scalar"),
+            &record,
+            LegacyResolvedTypeTupleMember::Parameter,
+        )
+        .expect("parameter scalar kind");
+        for (scalar, target) in [(None, None), (Some("boolean"), Some(target))] {
+            assert!(matches!(
+                decode_legacy_resolved_type_tuple(
+                    parameter_scalar,
+                    scalar,
+                    target,
+                    &record,
+                    LegacyResolvedTypeTupleMember::Parameter,
+                ),
+                Err(PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.catalogue_fields",
+                    record: failed_record,
+                    rule: "parameter type columns must form one exact resolved type tuple",
+                }) if failed_record == "tuple"
+            ));
+        }
+        assert!(matches!(
+            decode_legacy_resolved_type_tuple_kind(
+                None,
+                &record,
+                LegacyResolvedTypeTupleMember::ReturnColumn,
+            ),
+            Err(PostgresKernelError::DurableInvariant {
+                relation: "_orna_kernel.catalogue_fields",
+                record: failed_record,
+                rule: "return column type columns must form one exact resolved type tuple",
+            }) if failed_record == "tuple"
+        ));
+
+        for kind_name in ["named", "reference"] {
+            let kind = decode_legacy_resolved_type_tuple_kind(
+                Some(kind_name),
+                &record,
+                LegacyResolvedTypeTupleMember::Parameter,
+            )
+            .expect("current parameter kind");
+            for (scalar, target) in [(None, None), (Some("boolean"), Some(target))] {
+                assert!(matches!(
+                    decode_legacy_resolved_type_tuple(
+                        kind,
+                        scalar,
+                        target,
+                        &record,
+                        LegacyResolvedTypeTupleMember::Parameter,
+                    ),
+                    Err(PostgresKernelError::DurableInvariant {
+                        relation: "_orna_kernel.catalogue_fields",
+                        record: failed_record,
+                        rule: "parameter type columns must form one exact resolved type tuple",
+                    }) if failed_record == "tuple"
+                ));
+            }
+        }
+        assert!(matches!(
+            decode_legacy_resolved_type_tuple(
+                parameter_scalar,
+                Some("BOOLEAN"),
+                None,
+                &record,
+                LegacyResolvedTypeTupleMember::Parameter,
+            ),
+            Err(PostgresKernelError::DurableInvariant {
+                relation: "_orna_kernel.catalogue_fields",
+                record: failed_record,
+                rule: "resolved scalar type must be an exact standard scalar name",
+            }) if failed_record == "tuple"
+        ));
+        assert!(matches!(
+            decode_legacy_resolved_type_tuple_kind(
+                Some("value"),
+                &record,
+                LegacyResolvedTypeTupleMember::Field,
+            ),
+            Err(PostgresKernelError::DurableInvariant {
+                relation: "_orna_kernel.catalogue_fields",
+                record: failed_record,
+                rule: "field type kind must be scalar, named, or reference",
+            }) if failed_record == "tuple"
+        ));
     }
 
     #[test]
