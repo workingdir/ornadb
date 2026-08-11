@@ -728,9 +728,7 @@ mod tests {
         assert_eq!(function.parameters(), []);
         assert_eq!(
             function.return_type(),
-            &FunctionReturn::Single(ResolvedType::Scalar(
-                orna_core::types::StandardScalar::Boolean
-            ))
+            &FunctionReturn::Single(ResolvedType::Value(TypeId::from_bytes([3; 16])))
         );
         assert_eq!(prepared.new_function_revisions().len(), 1);
         let revision = &prepared.new_function_revisions()[0];
@@ -2053,7 +2051,7 @@ mod tests {
         let standard_boolean = TypeId::from_bytes([3; 16]);
         assert_eq!(
             prepared.candidate().object_types()[0].fields()[0].resolved_type(),
-            ResolvedType::Scalar(orna_core::types::StandardScalar::Boolean)
+            ResolvedType::Value(TypeId::from_bytes([3; 16]))
         );
         assert_eq!(
             (
@@ -2148,6 +2146,11 @@ mod tests {
         );
 
         let prepared = prepare_standard_application(&report, active.pair(), &active).unwrap();
+        assert_eq!(
+            prepared.catalogue_hash_context().version(),
+            CatalogueHashVersion::Version2
+        );
+        assert!(orna_core::revision::validate_persistable_catalogue(&prepared).is_ok());
         let candidate_functions = prepared.candidate().functions();
         assert_eq!(candidate_functions.len(), 2);
         assert_eq!(
@@ -2720,6 +2723,11 @@ mod tests {
     fn standard_preparation_preserves_multi_unit_signature_references_and_mixed_owner_order() {
         let verified = verified_standard_source_fixture();
         let standard = check_standard_library_source(&verified).unwrap();
+        assert_eq!(standard.value_types()[0].id(), TypeId::from_bytes([3; 16]));
+        assert_ne!(
+            standard.value_types()[0].id(),
+            TypeId::from_bytes(CANONICAL_TYPE_IDS[0])
+        );
         let active = empty_version_two_active(&verified);
         let context =
             StandardApplicationCheckContext::try_new(active.catalogue(), &standard).unwrap();
@@ -2777,11 +2785,15 @@ mod tests {
             ],
             "CLIENT and SERVER lowering follows canonical declaration-evidence owner order"
         );
+        assert_eq!(
+            prepared.catalogue_hash_context().version(),
+            CatalogueHashVersion::Version2
+        );
         let candidate_object = &prepared.candidate().object_types()[0];
         let candidate_item = candidate_object.id();
         assert_eq!(
             candidate_object.fields()[0].resolved_type(),
-            ResolvedType::scalar(StandardScalar::Boolean)
+            ResolvedType::Value(TypeId::from_bytes([3; 16]))
         );
         let candidate_functions = prepared.candidate().functions();
         let create = &candidate_functions[0];
@@ -2791,11 +2803,11 @@ mod tests {
         ));
         assert_eq!(
             create.parameters()[1].resolved_type(),
-            ResolvedType::scalar(StandardScalar::Boolean)
+            ResolvedType::Value(TypeId::from_bytes([3; 16]))
         );
         assert_eq!(
             create.parameters()[2].resolved_type(),
-            ResolvedType::scalar(StandardScalar::Boolean)
+            ResolvedType::Value(TypeId::from_bytes([3; 16]))
         );
         let FunctionReturn::Rows(create_columns) = create.return_type() else {
             panic!("the mutation fixture must retain a ROWS return")
@@ -2806,7 +2818,7 @@ mod tests {
         ));
         assert_eq!(
             candidate_functions[1].return_type(),
-            &FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Boolean))
+            &FunctionReturn::Single(ResolvedType::Value(TypeId::from_bytes([3; 16])))
         );
         let by_ref = &candidate_functions[2];
         assert!(matches!(
@@ -2818,7 +2830,7 @@ mod tests {
         };
         assert_eq!(
             by_ref_columns[0].resolved_type(),
-            ResolvedType::scalar(StandardScalar::Boolean)
+            ResolvedType::Value(TypeId::from_bytes([3; 16]))
         );
         let value_reference_targets = prepared
             .references()
@@ -2837,6 +2849,50 @@ mod tests {
                 .iter()
                 .all(|type_id| *type_id == TypeId::from_bytes([3; 16]))
         );
+        assert_eq!(
+            prepared
+                .references()
+                .iter()
+                .filter_map(|reference| {
+                    if !matches!(reference.target(), DefinitionReferenceTarget::ValueType(_)) {
+                        return None;
+                    }
+                    Some((
+                        reference.source_function(),
+                        reference.ordinal(),
+                        reference.kind(),
+                        reference.target(),
+                    ))
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    candidate_functions[0].id(),
+                    1,
+                    DefinitionReferenceKind::NamedType,
+                    DefinitionReferenceTarget::ValueType(TypeId::from_bytes([3; 16])),
+                ),
+                (
+                    candidate_functions[0].id(),
+                    2,
+                    DefinitionReferenceKind::NamedType,
+                    DefinitionReferenceTarget::ValueType(TypeId::from_bytes([3; 16])),
+                ),
+                (
+                    candidate_functions[1].id(),
+                    0,
+                    DefinitionReferenceKind::NamedType,
+                    DefinitionReferenceTarget::ValueType(TypeId::from_bytes([3; 16])),
+                ),
+                (
+                    candidate_functions[2].id(),
+                    1,
+                    DefinitionReferenceKind::NamedType,
+                    DefinitionReferenceTarget::ValueType(TypeId::from_bytes([3; 16])),
+                ),
+            ]
+        );
+        assert!(orna_core::revision::validate_persistable_catalogue(&prepared).is_ok());
         let candidate_function_ids = prepared
             .candidate()
             .functions()
@@ -4807,6 +4863,83 @@ mod tests {
         .unwrap()
     }
 
+    fn version_one_client_active_from_standard_candidate(
+        prepared: &DeployableRevision,
+    ) -> ActiveDatabaseRevision {
+        const STANDARD_BOOLEAN: TypeId = TypeId::from_bytes([3; 16]);
+        let candidate = prepared.candidate();
+        assert!(candidate.object_types().is_empty());
+        assert_eq!(candidate.functions().len(), 1);
+        let function = &candidate.functions()[0];
+        assert_eq!(function.domain(), FunctionDomain::Client);
+        assert!(function.parameters().is_empty());
+        assert_eq!(
+            function.return_type(),
+            &FunctionReturn::Single(ResolvedType::Value(STANDARD_BOOLEAN))
+        );
+        let legacy_function = FunctionDefinition::new(
+            function.id(),
+            function.name().clone(),
+            function.domain(),
+            Vec::new(),
+            FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Boolean)),
+            function.current_revision(),
+            function.security(),
+            function.transaction(),
+            function.volatility(),
+        );
+        let legacy_catalogue = CatalogueSnapshot::new_with_functions_and_types(
+            candidate.revision(),
+            candidate.schemas().to_vec(),
+            Vec::new(),
+            candidate.value_types().to_vec(),
+            candidate.type_bindings().to_vec(),
+            vec![legacy_function],
+        )
+        .unwrap();
+        let legacy_function = &legacy_catalogue.functions()[0];
+        let current = prepared.current_function_revisions().unwrap_or_default();
+        assert_eq!(current.len(), 1);
+        let revision = &current[0];
+        let version_one_revision = FunctionRevisionRecord::new(
+            revision.function(),
+            revision.id(),
+            revision.revision_number(),
+            revision.declaration_origin(),
+            revision.declaration_content_hash(),
+            function_semantic_digest(
+                legacy_function,
+                revision.language_version(),
+                revision.artifact(),
+                prepared.expressions(),
+                &[],
+            )
+            .unwrap(),
+            revision.language_version(),
+            revision.artifact().clone(),
+        )
+        .unwrap();
+        let catalogue_hash = catalogue_digest(
+            &legacy_catalogue,
+            std::slice::from_ref(&version_one_revision),
+            prepared.expressions(),
+            prepared.origins(),
+            &[],
+        )
+        .unwrap();
+        ActiveDatabaseRevision::new(
+            prepared.candidate_pair(),
+            prepared.source().clone(),
+            legacy_catalogue,
+            catalogue_hash,
+            prepared.expressions().to_vec(),
+            vec![version_one_revision],
+            prepared.origins().to_vec(),
+            Vec::new(),
+        )
+        .unwrap()
+    }
+
     fn active_with_history(
         active: &ActiveDatabaseRevision,
         historical_function_revisions: Vec<FunctionRevisionRecord>,
@@ -4821,52 +4954,6 @@ mod tests {
             historical_function_revisions,
             active.origins().to_vec(),
             active.references().to_vec(),
-        )
-        .unwrap()
-    }
-
-    fn version_one_active_from_standard_candidate(
-        prepared: &DeployableRevision,
-    ) -> ActiveDatabaseRevision {
-        let function = &prepared.candidate().functions()[0];
-        let current = prepared.current_function_revisions().unwrap_or_default();
-        assert_eq!(current.len(), 1);
-        let revision = &current[0];
-        let version_one_revision = FunctionRevisionRecord::new(
-            revision.function(),
-            revision.id(),
-            revision.revision_number(),
-            revision.declaration_origin(),
-            revision.declaration_content_hash(),
-            function_semantic_digest(
-                function,
-                revision.language_version(),
-                revision.artifact(),
-                prepared.expressions(),
-                &[],
-            )
-            .unwrap(),
-            revision.language_version(),
-            revision.artifact().clone(),
-        )
-        .unwrap();
-        let catalogue_hash = catalogue_digest(
-            prepared.candidate(),
-            std::slice::from_ref(&version_one_revision),
-            prepared.expressions(),
-            prepared.origins(),
-            &[],
-        )
-        .unwrap();
-        ActiveDatabaseRevision::new(
-            prepared.candidate_pair(),
-            prepared.source().clone(),
-            prepared.candidate().clone(),
-            catalogue_hash,
-            prepared.expressions().to_vec(),
-            vec![version_one_revision],
-            prepared.origins().to_vec(),
-            Vec::new(),
         )
         .unwrap()
     }
@@ -5955,9 +6042,34 @@ mod tests {
         let report = check(&bundle, empty.catalogue());
         assert!(report.diagnostics().is_empty());
         let version_one = prepare(&report, empty.pair(), &empty).unwrap();
+        assert_eq!(
+            version_one.candidate().object_types()[0].fields()[0].resolved_type(),
+            ResolvedType::scalar(StandardScalar::Boolean)
+        );
+        let version_one_function = &version_one.candidate().functions()[0];
+        let FunctionReturn::Rows(version_one_columns) = version_one_function.return_type() else {
+            panic!("the legacy server fixture must retain a ROWS return")
+        };
+        assert_eq!(
+            version_one_columns[0].resolved_type(),
+            ResolvedType::scalar(StandardScalar::Boolean)
+        );
         let active = active_from_prepared_version_one_candidate(&version_one);
+        assert_eq!(
+            active.function_revisions()[0].semantic_hash_version(),
+            FunctionSemanticHashVersion::Version1
+        );
+        let legacy_payload = active.function_revisions()[0].artifact().payload().to_vec();
+        let legacy_payload_hash = active.function_revisions()[0].artifact().content_hash();
 
         let public_prepared = prepare_checked_standard_upgrade(&standard, &active).unwrap();
+        assert_eq!(
+            public_prepared
+                .application_revision()
+                .catalogue_hash_context()
+                .version(),
+            CatalogueHashVersion::Version2
+        );
         assert_eq!(
             public_prepared
                 .application_revision()
@@ -5965,7 +6077,7 @@ mod tests {
                 .object_types()[0]
                 .fields()[0]
                 .resolved_type(),
-            ResolvedType::scalar(StandardScalar::Boolean)
+            ResolvedType::Value(TypeId::from_bytes([3; 16]))
         );
         let public_function = &public_prepared
             .application_revision()
@@ -5977,7 +6089,13 @@ mod tests {
         assert_eq!(public_columns.len(), 1);
         assert_eq!(
             public_columns[0].resolved_type(),
-            ResolvedType::scalar(StandardScalar::Boolean)
+            ResolvedType::Value(TypeId::from_bytes([3; 16]))
+        );
+        assert!(
+            orna_core::revision::validate_persistable_catalogue(
+                public_prepared.application_revision()
+            )
+            .is_ok()
         );
         assert!(
             public_prepared
@@ -6009,6 +6127,18 @@ mod tests {
             prepared.application_revision().new_function_revisions()[0].semantic_hash_version(),
             FunctionSemanticHashVersion::Version2
         );
+        assert_eq!(
+            prepared.application_revision().new_function_revisions()[0]
+                .artifact()
+                .payload(),
+            legacy_payload
+        );
+        assert_eq!(
+            prepared.application_revision().new_function_revisions()[0]
+                .artifact()
+                .content_hash(),
+            legacy_payload_hash
+        );
         assert!(
             prepared
                 .application_revision()
@@ -6033,7 +6163,7 @@ mod tests {
     }
 
     #[test]
-    fn prepares_version_two_mutation_parameter_and_reference_return_with_legacy_shapes() {
+    fn prepares_version_two_mutation_parameter_and_reference_return_with_value_identity() {
         let verified = verified_standard_source_fixture();
         let standard = check_standard_library_source(&verified).unwrap();
         let empty = empty_version_one_active();
@@ -6047,15 +6177,22 @@ mod tests {
         let active = active_from_prepared_version_one_candidate(&version_one);
 
         let prepared = prepare_checked_standard_upgrade(&standard, &active).unwrap();
+        assert_eq!(
+            prepared
+                .application_revision()
+                .catalogue_hash_context()
+                .version(),
+            CatalogueHashVersion::Version2
+        );
         let candidate = prepared.application_revision().candidate();
         assert_eq!(
             candidate.object_types()[0].fields()[0].resolved_type(),
-            ResolvedType::scalar(StandardScalar::Boolean)
+            ResolvedType::Value(TypeId::from_bytes([3; 16]))
         );
         let function = &candidate.functions()[0];
         assert_eq!(
             function.parameters()[0].resolved_type(),
-            ResolvedType::scalar(StandardScalar::Boolean)
+            ResolvedType::Value(TypeId::from_bytes([3; 16]))
         );
         let item = candidate.object_types()[0].id();
         let FunctionReturn::Rows(columns) = function.return_type() else {
@@ -6075,12 +6212,24 @@ mod tests {
                         == DefinitionReferenceTarget::ValueType(TypeId::from_bytes([3; 16]))
                 })
         );
+        assert!(
+            orna_core::revision::validate_persistable_catalogue(prepared.application_revision())
+                .is_ok()
+        );
         let revision = &prepared.application_revision().new_function_revisions()[0];
         assert_eq!(
             revision.semantic_hash_version(),
             FunctionSemanticHashVersion::Version2
         );
         assert_eq!(revision.artifact().kind(), ExecutableArtifactKind::Server);
+        assert_eq!(
+            revision.artifact().payload(),
+            active.function_revisions()[0].artifact().payload()
+        );
+        assert_eq!(
+            revision.artifact().content_hash(),
+            active.function_revisions()[0].artifact().content_hash()
+        );
     }
 
     #[test]
@@ -6160,16 +6309,35 @@ mod tests {
         .unwrap();
         let report = check_standard_application(&bundle, &context);
         let seeded = prepare_standard_application(&report, initial.pair(), &initial).unwrap();
-        let active = version_one_active_from_standard_candidate(&seeded);
+        let active = version_one_client_active_from_standard_candidate(&seeded);
+        assert_eq!(
+            active.catalogue().functions()[0].return_type(),
+            &FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Boolean))
+        );
+        assert_eq!(
+            active.function_revisions()[0].semantic_hash_version(),
+            FunctionSemanticHashVersion::Version1
+        );
 
         let prepared = prepare_checked_standard_upgrade(&standard, &active).unwrap();
+        assert_eq!(
+            prepared
+                .application_revision()
+                .catalogue_hash_context()
+                .version(),
+            CatalogueHashVersion::Version2
+        );
 
         let function = &prepared.application_revision().candidate().functions()[0];
         let revision = &prepared.application_revision().new_function_revisions()[0];
         assert_eq!(function.domain(), FunctionDomain::Client);
         assert_eq!(
             function.return_type(),
-            &FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Boolean))
+            &FunctionReturn::Single(ResolvedType::Value(TypeId::from_bytes([3; 16])))
+        );
+        assert!(
+            orna_core::revision::validate_persistable_catalogue(prepared.application_revision())
+                .is_ok()
         );
         assert_eq!(
             revision.semantic_hash_version(),
@@ -6179,6 +6347,14 @@ mod tests {
         assert_eq!(
             revision.artifact().payload(),
             b"ORNACP\0\0\0\0\0\x01\x01\x01"
+        );
+        assert_eq!(
+            revision.artifact().payload(),
+            active.function_revisions()[0].artifact().payload()
+        );
+        assert_eq!(
+            revision.artifact().content_hash(),
+            active.function_revisions()[0].artifact().content_hash()
         );
         assert_eq!(prepared.application_revision().references().len(), 1);
         assert_eq!(
