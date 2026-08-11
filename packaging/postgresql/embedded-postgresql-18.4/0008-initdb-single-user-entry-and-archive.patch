@@ -1,0 +1,361 @@
+diff -U0 -Nr a/src/backend/Makefile b/src/backend/Makefile
+--- a/src/backend/Makefile	2026-08-11 21:52:06.855547939 +0100
++++ b/src/backend/Makefile	2026-08-11 21:54:24.114372266 +0100
+@@ -60,3 +60,3 @@
+-# Build one deterministic flattened backend link input.  PostgreSQL normally
+-# puts server archives in OBJS; flatten them before ar so this archive has no
+-# nested archive member.
++# Build deterministic flattened backend and initialiser link inputs.  PostgreSQL
++# normally puts server archives in OBJS; flatten them with whole-archive before
++# ar so neither final archive contains a nested archive member.
+@@ -75,0 +76,21 @@
++NM := $(if $(NM),$(NM),nm)
++OBJCOPY := $(if $(OBJCOPY),$(OBJCOPY),objcopy)
++RANLIB := $(if $(RANLIB),$(RANLIB),ranlib)
++
++ORNA_EMBEDDED_INITDB_ARCHIVE = $(top_builddir)/src/bin/initdb/liborna_postgres18_initdb.a
++ORNA_EMBEDDED_INITDB_RELOCATABLE_OBJECT = $(top_builddir)/src/bin/initdb/liborna_postgres18_initdb.relocatable.o
++ORNA_EMBEDDED_INITDB_OBJECT = $(top_builddir)/src/bin/initdb/liborna_postgres18_initdb.o
++ORNA_EMBEDDED_INITDB_RENAME_MAP = $(top_builddir)/src/bin/initdb/initdb-redefine-symbols.txt
++ORNA_EMBEDDED_INITDB_DEFINED_SYMBOLS = $(top_builddir)/src/bin/initdb/initdb-defined-symbols.txt
++ORNA_EMBEDDED_INITDB_UNDEFINED_SYMBOLS = $(top_builddir)/src/bin/initdb/initdb-undefined-symbols.txt
++ORNA_EMBEDDED_INITDB_OBJECTS = \
++	$(top_builddir)/src/bin/initdb/orna_embedded_initdb.o \
++	$(top_builddir)/src/bin/initdb/findtimezone.o \
++	$(top_builddir)/src/bin/initdb/localtime.o
++ORNA_EMBEDDED_INITDB_ARCHIVES = \
++	$(top_builddir)/src/fe_utils/libpgfeutils.a \
++	$(top_builddir)/src/interfaces/libpq/libpq.a \
++	$(top_builddir)/src/common/libpgcommon.a \
++	$(top_builddir)/src/port/libpgport.a \
++	$(ORNA_EMBEDDED_ZLIB_ARCHIVE)
++
+@@ -91,0 +113,23 @@
++$(ORNA_EMBEDDED_INITDB_RELOCATABLE_OBJECT): generated-headers submake-libpgport
++	$(MAKE) -C $(top_builddir)/src/bin/initdb orna_embedded_initdb.o findtimezone.o localtime.o
++	$(MAKE) -C $(top_builddir)/src/common libpgcommon.a
++	$(MAKE) -C $(top_builddir)/src/port libpgport.a
++	$(MAKE) -C $(top_builddir)/src/interfaces/libpq libpq.a
++	$(MAKE) -C $(top_builddir)/src/fe_utils libpgfeutils.a
++	$(CC) $(CFLAGS) $(LDFLAGS) -r -o $@ $(ORNA_EMBEDDED_INITDB_OBJECTS) \
++		-Wl,--whole-archive $(ORNA_EMBEDDED_INITDB_ARCHIVES) -Wl,--no-whole-archive
++
++$(ORNA_EMBEDDED_INITDB_OBJECT): $(ORNA_EMBEDDED_INITDB_RELOCATABLE_OBJECT)
++	$(NM) --format=posix --extern-only --defined-only $< | \
++		awk -v entry="orna_postgres18_initdb_entry" \
++			-v prefix="orna_postgres18_initdb_" \
++			'$$2 ~ /^[A-Za-z]$$/ && $$1 != entry { print $$1 " " prefix $$1 }' | \
++		LC_ALL=C sort > $(ORNA_EMBEDDED_INITDB_RENAME_MAP)
++	$(OBJCOPY) --redefine-syms=$(ORNA_EMBEDDED_INITDB_RENAME_MAP) $< $@
++	$(NM) --format=posix --extern-only --defined-only $@ | LC_ALL=C sort > $(ORNA_EMBEDDED_INITDB_DEFINED_SYMBOLS)
++	$(NM) --format=posix --extern-only --undefined-only $@ | LC_ALL=C sort > $(ORNA_EMBEDDED_INITDB_UNDEFINED_SYMBOLS)
++
++$(ORNA_EMBEDDED_INITDB_ARCHIVE): $(ORNA_EMBEDDED_INITDB_OBJECT)
++	$(AR) rcD $@ $<
++	$(RANLIB) -D $@
++
+@@ -96,0 +141,9 @@
++
++.PHONY: orna_postgres18_lifecycle_archives
++orna_postgres18_lifecycle_archives: $(ORNA_EMBEDDED_ARCHIVE) $(ORNA_EMBEDDED_INITDB_ARCHIVE)
++
++.PHONY: orna_postgres18_lifecycle_probe
++orna_postgres18_lifecycle_probe: orna_postgres18_lifecycle_archives
++	test -n "$(ORNA_EMBEDDED_LIFECYCLE_PROBE_SOURCE)" -a -n "$(ORNA_EMBEDDED_LIFECYCLE_PROBE_OUTPUT)"
++	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $(ORNA_EMBEDDED_LIFECYCLE_PROBE_OUTPUT) \
++		$(ORNA_EMBEDDED_LIFECYCLE_PROBE_SOURCE) $(ORNA_EMBEDDED_INITDB_ARCHIVE) $(ORNA_EMBEDDED_ARCHIVE) $(LIBS)
+diff -U0 -Nr a/src/bin/initdb/Makefile b/src/bin/initdb/Makefile
+--- a/src/bin/initdb/Makefile	2026-05-11 20:44:35.000000000 +0100
++++ b/src/bin/initdb/Makefile	2026-08-11 21:54:24.115372283 +0100
+@@ -63,0 +64,3 @@
++orna_embedded_initdb.o: initdb.c $(top_builddir)/src/Makefile.global
++	$(CC) $(CFLAGS) $(CPPFLAGS) -DORNA_EMBEDDED_INITDB_ENTRY -c $< -o $@
++
+diff -U0 -Nr a/src/bin/initdb/initdb.c b/src/bin/initdb/initdb.c
+--- a/src/bin/initdb/initdb.c	2026-08-11 21:52:37.543510545 +0100
++++ b/src/bin/initdb/initdb.c	2026-08-11 22:02:36.160106521 +0100
+@@ -218,15 +217,0 @@
+-/*
+- * Centralized knowledge of switches to pass to backend
+- *
+- * Note: we run the backend with -F (fsync disabled) and then do a single
+- * pass of fsync'ing at the end.  This is faster than fsync'ing each step.
+- *
+- * Note: in the shell-script version, we also passed PGDATA as a -D switch,
+- * but here it is more convenient to pass it as an environment variable
+- * (no quoting to worry about).
+- */
+-static const char *const backend_options = "--single -F -O -j -c search_path=pg_catalog -c exit_on_error=true -c log_checkpoints=false";
+-
+-/* Additional switches to pass to backend (either boot or standalone) */
+-static char *extra_options = "";
+-
+@@ -262 +246,0 @@
+-static char backend_exec[MAXPGPATH];
+@@ -278,2 +262,2 @@
+-static FILE *popen_check(const char *command, const char *mode);
+-static FILE *orna_start_backend(char **argv, pid_t *child_pid);
++static FILE *orna_start_backend(char **argv, pid_t *child_pid,
++							bool system_functions_initialisation);
+@@ -280,0 +265,4 @@
++static FILE *orna_open_backend_sql(char **sql, size_t *length);
++static void orna_close_backend_sql(FILE *cmdfd, char **sql);
++static void orna_run_backend_sql(char **argv, char *sql, size_t length,
++						 bool system_functions_initialisation);
+@@ -325,18 +312,0 @@
+-/*
+- * macros for running pipes to postgres
+- */
+-#define PG_CMD_DECL		FILE *cmdfd
+-
+-#define PG_CMD_OPEN(cmd) \
+-do { \
+-	cmdfd = popen_check(cmd, "w"); \
+-	if (cmdfd == NULL) \
+-		exit(1); /* message already printed by popen_check */ \
+-} while (0)
+-
+-#define PG_CMD_CLOSE() \
+-do { \
+-	if (pclose_check(cmdfd)) \
+-		exit(1); /* message already printed by pclose_check */ \
+-} while (0)
+-
+@@ -751,16 +720,0 @@
+- * Open a subcommand with suitable error messaging
+- */
+-static FILE *
+-popen_check(const char *command, const char *mode)
+-{
+-	FILE	   *cmdfd;
+-
+-	fflush(NULL);
+-	errno = 0;
+-	cmdfd = popen(command, mode);
+-	if (cmdfd == NULL)
+-		pg_log_error("could not execute command \"%s\": %m", command);
+-	return cmdfd;
+-}
+-
+-/*
+@@ -812 +766,2 @@
+-orna_start_backend(char **argv, pid_t *child_pid)
++orna_start_backend(char **argv, pid_t *child_pid,
++				   bool system_functions_initialisation)
+@@ -870,0 +826,2 @@
++		orna_postgres18_set_system_functions_initialisation_capability(
++			system_functions_initialisation);
+@@ -930,0 +888,58 @@
++ * Render each standalone SQL phase before its child exists.  Support-file
++ * reads and allocations can fail, but must never strand a linked child.
++ */
++static FILE *
++orna_open_backend_sql(char **sql, size_t *length)
++{
++	FILE	   *cmdfd;
++
++	output_failed = false;
++	output_errno = 0;
++	*sql = NULL;
++	*length = 0;
++	cmdfd = open_memstream(sql, length);
++	if (cmdfd == NULL)
++		pg_fatal("could not prepare linked PostgreSQL child input: %m");
++	return cmdfd;
++}
++
++static void
++orna_close_backend_sql(FILE *cmdfd, char **sql)
++{
++	if (fclose(cmdfd) != 0 || output_failed)
++	{
++		if (output_failed)
++			errno = output_errno;
++		free(*sql);
++		*sql = NULL;
++		pg_fatal("could not prepare linked PostgreSQL child input: %m");
++	}
++}
++
++static void
++orna_run_backend_sql(char **argv, char *sql, size_t length,
++					 bool system_functions_initialisation)
++{
++	FILE	   *cmdfd;
++	pid_t		child_pid;
++	OrnaBackendResult result;
++	bool		write_failed;
++
++	cmdfd = orna_start_backend(argv, &child_pid,
++							 system_functions_initialisation);
++	if (cmdfd == NULL)
++	{
++		free(sql);
++		pg_fatal("could not start linked PostgreSQL child");
++	}
++	write_failed = fwrite(sql, 1, length, cmdfd) != length ||
++		fflush(cmdfd) != 0;
++	result = orna_finish_backend(cmdfd, child_pid);
++	free(sql);
++	if (result != ORNA_BACKEND_OK)
++		pg_fatal("linked PostgreSQL child did not complete successfully");
++	if (write_failed)
++		pg_fatal("could not write to linked PostgreSQL child");
++}
++
++/*
+@@ -1414 +1429 @@
+-	cmdfd = orna_start_backend(argv, &child_pid);
++	cmdfd = orna_start_backend(argv, &child_pid, false);
+@@ -1784 +1799 @@
+-	cmdfd = orna_start_backend(argv, &child_pid);
++	cmdfd = orna_start_backend(argv, &child_pid, false);
+@@ -2741 +2755,0 @@
+-	printf(_("      --discard-caches      set debug_discard_caches=1\n"));
+@@ -2844 +2857,0 @@
+-	strlcpy(backend_exec, "/usr/bin/orna", sizeof(backend_exec));
+@@ -3219,2 +3231,0 @@
+-	PG_CMD_DECL;
+-	PQExpBufferData cmd;
+@@ -3221,0 +3233,8 @@
++	char	   *sql;
++	size_t		sql_length;
++	FILE	   *sqlfd;
++	char	   *single_argv[] = {
++		"/usr/bin/orna", "--single", "-F", "-O", "-j",
++		"-c", "search_path=pg_catalog", "-c", "exit_on_error=true",
++		"-c", "log_checkpoints=false", "template1", NULL
++	};
+@@ -3284,7 +3303,10 @@
+-	initPQExpBuffer(&cmd);
+-	printfPQExpBuffer(&cmd, "\"%s\" %s %s template1 >%s",
+-					  backend_exec, backend_options, extra_options, DEVNULL);
+-
+-	PG_CMD_OPEN(cmd.data);
+-
+-	setup_auth(cmdfd);
++	sqlfd = orna_open_backend_sql(&sql, &sql_length);
++	setup_auth(sqlfd);
++	setup_run_file(sqlfd, system_constraints_file);
++	orna_close_backend_sql(sqlfd, &sql);
++	orna_run_backend_sql(single_argv, sql, sql_length, false);
++
++	sqlfd = orna_open_backend_sql(&sql, &sql_length);
++	setup_run_file(sqlfd, system_functions_file);
++	orna_close_backend_sql(sqlfd, &sql);
++	orna_run_backend_sql(single_argv, sql, sql_length, true);
+@@ -3292,5 +3314,2 @@
+-	setup_run_file(cmdfd, system_constraints_file);
+-
+-	setup_run_file(cmdfd, system_functions_file);
+-
+-	setup_depend(cmdfd);
++	sqlfd = orna_open_backend_sql(&sql, &sql_length);
++	setup_depend(sqlfd);
+@@ -3303,20 +3322,11 @@
+-	setup_run_file(cmdfd, system_views_file);
+-
+-	setup_description(cmdfd);
+-
+-	setup_collation(cmdfd);
+-
+-	setup_run_file(cmdfd, dictionary_file);
+-
+-	setup_privileges(cmdfd);
+-
+-	setup_schema(cmdfd);
+-
+-	vacuum_db(cmdfd);
+-
+-	make_template0(cmdfd);
+-
+-	make_postgres(cmdfd);
+-
+-	PG_CMD_CLOSE();
+-	termPQExpBuffer(&cmd);
++	setup_run_file(sqlfd, system_views_file);
++	setup_description(sqlfd);
++	setup_collation(sqlfd);
++	setup_run_file(sqlfd, dictionary_file);
++	setup_privileges(sqlfd);
++	setup_schema(sqlfd);
++	vacuum_db(sqlfd);
++	make_template0(sqlfd);
++	make_postgres(sqlfd);
++	orna_close_backend_sql(sqlfd, &sql);
++	orna_run_backend_sql(single_argv, sql, sql_length, false);
+@@ -3328,2 +3338,2 @@
+-int
+-main(int argc, char *argv[])
++static int
++orna_postgres18_initdb_main(int argc, char *argv[])
+@@ -3364 +3373,0 @@
+-		{"discard-caches", no_argument, NULL, 14},
+@@ -3533,5 +3541,0 @@
+-			case 14:
+-				extra_options = psprintf("%s %s",
+-										 extra_options,
+-										 "-c debug_discard_caches=1");
+-				break;
+@@ -3734,0 +3739,56 @@
++}
++
++int
++orna_postgres18_initdb_entry(const char *data_directory)
++{
++	char	   *argv[] = {
++		"/usr/bin/orna", "--pgdata", (char *) data_directory,
++		"--username=orna_kernel", "--encoding=UTF8", "--locale=C",
++		"--locale-provider=builtin", "--builtin-locale=PG_UNICODE_FAST",
++		"--data-checksums", "--auth-local=peer", "--auth-host=reject",
++		"--no-instructions", NULL
++	};
++
++	if (data_directory == NULL || data_directory[0] != '/' ||
++		orna_postgres18_support_root() == NULL ||
++		orna_postgres18_install_exec_filter() != 0)
++		return 1;
++	optind = 1;
++#ifdef HAVE_INT_OPTRESET
++	optreset = 1;
++#endif
++	return orna_postgres18_initdb_main(lengthof(argv) - 1, argv);
++}
++
++#ifndef ORNA_EMBEDDED_INITDB_ENTRY
++int
++main(int argc, char *argv[])
++{
++	return orna_postgres18_initdb_main(argc, argv);
++}
++#endif
++
++/*
++ * libpq's static members use its public encoding names, while initdb links
++ * libpgcommon.a's private encoding implementation.  Keep that tiny public
++ * closure inside the initialiser relocatable before its symbol-prefix pass.
++ */
++#undef pg_char_to_encoding
++#undef pg_encoding_to_char
++#undef pg_valid_server_encoding_id
++int
++pg_char_to_encoding(const char *name)
++{
++	return pg_char_to_encoding_private(name);
++}
++
++const char *
++pg_encoding_to_char(int encoding)
++{
++	return pg_encoding_to_char_private(encoding);
++}
++
++int
++pg_valid_server_encoding_id(int encoding)
++{
++	return pg_valid_server_encoding_id_private(encoding);
+diff -U0 -Nr a/src/include/orna_embedded.h b/src/include/orna_embedded.h
+--- a/src/include/orna_embedded.h	2026-08-11 21:52:06.856261962 +0100
++++ b/src/include/orna_embedded.h	2026-08-11 21:54:24.117372319 +0100
+@@ -13,0 +14 @@
++extern int orna_postgres18_initdb_entry(const char *data_directory);
