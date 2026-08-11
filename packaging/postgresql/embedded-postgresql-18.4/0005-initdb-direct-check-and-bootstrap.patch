@@ -1,0 +1,316 @@
+diff -U0 -Nr a/src/backend/tcop/postgres.c b/src/backend/tcop/postgres.c
+--- a/src/backend/tcop/postgres.c
++++ b/src/backend/tcop/postgres.c
+@@ -73,0 +74 @@
++#include "orna_embedded.h"
+@@ -241,5 +242,6 @@
+-	/*
+-	 * display a prompt and obtain input from the user
+-	 */
+-	printf("backend> ");
+-	fflush(stdout);
++	/* display a prompt only for an interactive external backend */
++	if (!orna_postgres18_has_initialisation_child_capability())
++	{
++		printf("backend> ");
++		fflush(stdout);
++	}
+@@ -4196,0 +4199,3 @@
++	if (orna_postgres18_has_initialisation_child_capability())
++		whereToSendOutput = DestNone;
++
+@@ -4346 +4351,2 @@
+-	if (whereToSendOutput == DestDebug)
++	if (whereToSendOutput == DestDebug &&
++		!orna_postgres18_has_initialisation_child_capability())
+diff -U0 -Nr a/src/bin/initdb/initdb.c b/src/bin/initdb/initdb.c
+--- a/src/bin/initdb/initdb.c
++++ b/src/bin/initdb/initdb.c
+@@ -55,0 +56 @@
++#include <sys/wait.h>
+@@ -58,0 +60 @@
++
+@@ -82,0 +85 @@
++#include "orna_embedded.h"
+@@ -225 +227,0 @@
+-static const char *const boot_options = "-F -c log_checkpoints=false";
+@@ -269,0 +272,6 @@
++typedef enum OrnaBackendResult
++{
++	ORNA_BACKEND_OK,
++	ORNA_BACKEND_REJECTED,
++	ORNA_BACKEND_ERROR
++} OrnaBackendResult;
+@@ -270,0 +279,2 @@
++static FILE *orna_start_backend(char **argv, pid_t *child_pid);
++static OrnaBackendResult orna_finish_backend(FILE *cmdfd, pid_t child_pid);
+@@ -757,0 +768,164 @@
++ * Open a linked backend child with suitable error messaging
++ */
++static unsigned int orna_backend_capture_sequence = 0;
++static char orna_backend_capture_path[MAXPGPATH];
++
++static bool
++orna_close_fd(int fd)
++{
++	return close(fd) == 0;
++}
++
++static bool
++orna_unlink_backend_capture(void)
++{
++	return unlink(orna_backend_capture_path) == 0;
++}
++
++static bool
++orna_wait_backend(pid_t child_pid, int *status)
++{
++	pid_t		waited;
++
++	do
++	{
++		waited = waitpid(child_pid, status, 0);
++	} while (waited < 0 && errno == EINTR);
++	return waited == child_pid;
++}
++
++static bool
++orna_discard_backend_child(pid_t child_pid, int writefd)
++{
++	int			status;
++	bool		ok = true;
++
++	if (!orna_close_fd(writefd))
++		ok = false;
++	if (!orna_wait_backend(child_pid, &status))
++		ok = false;
++	if (!orna_unlink_backend_capture())
++		ok = false;
++	return ok;
++}
++
++static FILE *
++orna_start_backend(char **argv, pid_t *child_pid)
++{
++	int			pipefd[2];
++	int			capturefd;
++	pid_t		pid;
++	FILE	   *cmdfd;
++	int			argc = 0;
++
++	while (argv[argc] != NULL)
++		argc++;
++	if (snprintf(orna_backend_capture_path, sizeof(orna_backend_capture_path),
++				 "%s/.orna-postgres18-initdb-output-%ld-%u", pg_data,
++				 (long) getpid(), ++orna_backend_capture_sequence) >=
++		sizeof(orna_backend_capture_path))
++		return NULL;
++	capturefd = open(orna_backend_capture_path,
++					 O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, S_IRUSR | S_IWUSR);
++	if (capturefd < 0)
++		return NULL;
++	if (pipe(pipefd) != 0)
++	{
++		bool		cleanup_ok = orna_close_fd(capturefd);
++
++		if (!orna_unlink_backend_capture())
++			cleanup_ok = false;
++		if (!cleanup_ok)
++			pg_fatal("could not clean up linked PostgreSQL child resources");
++		return NULL;
++	}
++	fflush(NULL);
++	pid = fork();
++	if (pid < 0)
++	{
++		bool		cleanup_ok = orna_close_fd(pipefd[0]);
++
++		if (!orna_close_fd(pipefd[1]))
++			cleanup_ok = false;
++		if (!orna_close_fd(capturefd))
++			cleanup_ok = false;
++		if (!orna_unlink_backend_capture())
++			cleanup_ok = false;
++		if (!cleanup_ok)
++			pg_fatal("could not clean up linked PostgreSQL child resources");
++		return NULL;
++	}
++	if (pid == 0)
++	{
++		if (!orna_close_fd(pipefd[1]))
++			_exit(127);
++		if (dup2(pipefd[0], STDIN_FILENO) < 0)
++			_exit(127);
++		if (!orna_close_fd(pipefd[0]))
++			_exit(127);
++		if (dup2(capturefd, STDOUT_FILENO) < 0 ||
++			dup2(capturefd, STDERR_FILENO) < 0)
++			_exit(127);
++		if (capturefd > STDERR_FILENO && !orna_close_fd(capturefd))
++			_exit(127);
++		orna_postgres18_set_initialisation_child_capability(true);
++		success = true;
++		optind = 1;
++#ifdef HAVE_INT_OPTRESET
++		optreset = 1;
++#endif
++		(void) orna_postgres18_entry(argc, argv);
++		_exit(127);
++	}
++	{
++		bool		parent_cleanup_ok = orna_close_fd(pipefd[0]);
++
++		if (!orna_close_fd(capturefd))
++			parent_cleanup_ok = false;
++		if (!parent_cleanup_ok)
++		{
++			if (!orna_discard_backend_child(pid, pipefd[1]))
++				pg_fatal("could not clean up linked PostgreSQL child resources");
++			pg_fatal("could not close linked PostgreSQL child resources");
++		}
++	}
++	cmdfd = fdopen(pipefd[1], "w");
++	if (cmdfd == NULL)
++	{
++		if (!orna_discard_backend_child(pid, pipefd[1]))
++			pg_fatal("could not clean up linked PostgreSQL child resources");
++		return NULL;
++	}
++	*child_pid = pid;
++	return cmdfd;
++}
++
++static OrnaBackendResult
++orna_finish_backend(FILE *cmdfd, pid_t child_pid)
++{
++	int			status;
++	struct stat capture_stat;
++	OrnaBackendResult result = ORNA_BACKEND_OK;
++
++	if (fclose(cmdfd) != 0)
++		result = ORNA_BACKEND_ERROR;
++	if (!orna_wait_backend(child_pid, &status))
++		result = ORNA_BACKEND_ERROR;
++	if (result == ORNA_BACKEND_OK && !WIFEXITED(status))
++		result = ORNA_BACKEND_ERROR;
++	else if (result == ORNA_BACKEND_OK && WEXITSTATUS(status) == 127)
++		result = ORNA_BACKEND_ERROR;
++	else if (result == ORNA_BACKEND_OK && WEXITSTATUS(status) != 0)
++		result = ORNA_BACKEND_REJECTED;
++	if (lstat(orna_backend_capture_path, &capture_stat) != 0 ||
++		!S_ISREG(capture_stat.st_mode) || capture_stat.st_nlink != 1 ||
++		(capture_stat.st_mode & 0777) != (S_IRUSR | S_IWUSR))
++		result = ORNA_BACKEND_ERROR;
++	else if (result == ORNA_BACKEND_OK && capture_stat.st_size != 0)
++		result = ORNA_BACKEND_ERROR;
++	if (!orna_unlink_backend_capture())
++		result = ORNA_BACKEND_ERROR;
++	return result;
++}
++
++/*
+@@ -1213,2 +1387,2 @@
+-	default_timezone = select_default_timezone(share_path);
+-	printf("%s\n", default_timezone ? default_timezone : "GMT");
++	default_timezone = pg_strdup("UTC");
++	printf("%s\n", default_timezone);
+@@ -1223,17 +1397,11 @@
+-	PQExpBufferData cmd;
+-	_stringlist *gnames,
+-			   *gvalues;
+-	int			status;
+-
+-	initPQExpBuffer(&cmd);
+-
+-	/* Set up the test postmaster invocation */
+-	printfPQExpBuffer(&cmd,
+-					  "\"%s\" --check %s %s "
+-					  "-c max_connections=%d "
+-					  "-c autovacuum_worker_slots=%d "
+-					  "-c shared_buffers=%d "
+-					  "-c dynamic_shared_memory_type=%s",
+-					  backend_exec, boot_options, extra_options,
+-					  test_conns, test_av_slots, test_buffs,
+-					  dynamic_shared_memory_type);
++	char		max_connections[32];
++	char		autovacuum_worker_slots[32];
++	char		shared_buffers[32];
++	char		dynamic_shared_memory[128];
++	char	   *argv[] = {
++		"/usr/bin/orna", "--check", "-F", "-c", "log_checkpoints=false",
++		"-c", max_connections, "-c", autovacuum_worker_slots,
++		"-c", shared_buffers, "-c", dynamic_shared_memory, NULL
++	};
++	FILE	   *cmdfd;
++	pid_t		child_pid;
+@@ -1241,4 +1409,10 @@
+-	/* Add any user-given setting overrides */
+-	for (gnames = extra_guc_names, gvalues = extra_guc_values;
+-		 gnames != NULL;		/* assume lists have the same length */
+-		 gnames = gnames->next, gvalues = gvalues->next)
++	snprintf(max_connections, sizeof(max_connections), "max_connections=%d", test_conns);
++	snprintf(autovacuum_worker_slots, sizeof(autovacuum_worker_slots),
++			 "autovacuum_worker_slots=%d", test_av_slots);
++	snprintf(shared_buffers, sizeof(shared_buffers), "shared_buffers=%d", test_buffs);
++	snprintf(dynamic_shared_memory, sizeof(dynamic_shared_memory),
++			 "dynamic_shared_memory_type=%s", dynamic_shared_memory_type);
++	cmdfd = orna_start_backend(argv, &child_pid);
++	if (cmdfd == NULL)
++		pg_fatal("could not start linked PostgreSQL check child");
++	switch (orna_finish_backend(cmdfd, child_pid))
+@@ -1246,2 +1420,6 @@
+-		appendPQExpBuffer(&cmd, " -c %s=", gnames->str);
+-		appendShellString(&cmd, gvalues->str);
++		case ORNA_BACKEND_OK:
++			return true;
++		case ORNA_BACKEND_REJECTED:
++			return false;
++		case ORNA_BACKEND_ERROR:
++			pg_fatal("linked PostgreSQL check child did not complete successfully");
+@@ -1249,11 +1427 @@
+-
+-	appendPQExpBuffer(&cmd,
+-					  " < \"%s\" > \"%s\" 2>&1",
+-					  DEVNULL, DEVNULL);
+-
+-	fflush(NULL);
+-	status = system(cmd.data);
+-
+-	termPQExpBuffer(&cmd);
+-
+-	return (status == 0);
++	pg_unreachable();
+@@ -1547,2 +1715,2 @@
+-	PG_CMD_DECL;
+-	PQExpBufferData cmd;
++	FILE	   *cmdfd;
++	pid_t		child_pid;
+@@ -1552,0 +1721,5 @@
++	char		wal_segment_size[32];
++	char	   *argv[] = {
++		"/usr/bin/orna", "--boot", "-F", "-c", "log_checkpoints=false",
++		"-X", wal_segment_size, "-k", NULL
++	};
+@@ -1610,11 +1783,5 @@
+-	initPQExpBuffer(&cmd);
+-
+-	printfPQExpBuffer(&cmd, "\"%s\" --boot %s %s", backend_exec, boot_options, extra_options);
+-	appendPQExpBuffer(&cmd, " -X %d", wal_segment_size_mb * (1024 * 1024));
+-	if (data_checksums)
+-		appendPQExpBufferStr(&cmd, " -k");
+-	if (debug)
+-		appendPQExpBufferStr(&cmd, " -d 5");
+-
+-
+-	PG_CMD_OPEN(cmd.data);
++	snprintf(wal_segment_size, sizeof(wal_segment_size), "%d",
++			 wal_segment_size_mb * (1024 * 1024));
++	cmdfd = orna_start_backend(argv, &child_pid);
++	if (cmdfd == NULL)
++		pg_fatal("could not start linked PostgreSQL bootstrap child");
+@@ -1628,3 +1795,2 @@
+-	PG_CMD_CLOSE();
+-
+-	termPQExpBuffer(&cmd);
++	if (orna_finish_backend(cmdfd, child_pid) != ORNA_BACKEND_OK)
++		pg_fatal("linked PostgreSQL child did not complete successfully");
