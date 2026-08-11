@@ -56,13 +56,23 @@ impl<T> SemanticType<T> {
 }
 
 impl SemanticType<TypeId> {
-    /// Converts a durable core type into the compiler identity domain.
-    pub(crate) const fn from_core(resolved_type: ResolvedType) -> Self {
-        match resolved_type {
-            ResolvedType::Scalar(scalar) => Self::Scalar(scalar),
-            ResolvedType::Named(type_id) => Self::Named(type_id),
-            ResolvedType::Reference { target } => Self::Reference { target },
+    /// Converts one legacy durable core type into the compiler identity domain.
+    ///
+    /// Value identities and unknown future shapes have no legacy compiler projection.
+    pub(crate) const fn from_core(resolved_type: ResolvedType) -> Option<Self> {
+        if let Some(scalar) = resolved_type.legacy_scalar() {
+            return Some(Self::Scalar(scalar));
         }
+        if let Some(type_id) = resolved_type.named_type() {
+            return Some(Self::Named(type_id));
+        }
+        if let Some(target) = resolved_type.reference_target() {
+            return Some(Self::Reference { target });
+        }
+        if resolved_type.value_type().is_some() {
+            return None;
+        }
+        None
     }
 
     /// Converts a durable compiler type back into the core representation.
@@ -449,24 +459,21 @@ impl QueryCatalogue<TypeId, FieldId> for CatalogueSnapshot {
     fn field_by_name(&self, owner: TypeId, name: &str) -> Option<QueryField<TypeId, FieldId>> {
         self.object_type_by_id(owner)
             .and_then(|object_type| object_type.field_by_name(name))
-            .map(query_field_from_core)
+            .and_then(query_field_from_core)
     }
 
     fn field_by_id(&self, owner: TypeId, id: FieldId) -> Option<QueryField<TypeId, FieldId>> {
         self.object_type_by_id(owner)
             .and_then(|object_type| object_type.field_by_id(id))
-            .map(query_field_from_core)
+            .and_then(query_field_from_core)
     }
 }
 
 fn query_field_from_core(
     field: &orna_core::catalogue::FieldDefinition,
-) -> QueryField<TypeId, FieldId> {
-    QueryField::new(
-        field.id(),
-        SemanticType::from_core(field.resolved_type()),
-        field.nullable(),
-    )
+) -> Option<QueryField<TypeId, FieldId>> {
+    SemanticType::from_core(field.resolved_type())
+        .map(|resolved_type| QueryField::new(field.id(), resolved_type, field.nullable()))
 }
 
 #[cfg(test)]
@@ -529,6 +536,24 @@ mod tests {
         assert_eq!(
             SemanticType::reference(task_type).into_core(),
             ResolvedType::Reference { target: task_type }
+        );
+    }
+
+    #[test]
+    fn semantic_type_from_core_projects_only_current_legacy_shapes() {
+        let type_id = TypeId::from_bytes([0x71; 16]);
+
+        assert_eq!(
+            SemanticType::from_core(ResolvedType::scalar(StandardScalar::Boolean)),
+            Some(SemanticType::scalar(StandardScalar::Boolean))
+        );
+        assert_eq!(
+            SemanticType::from_core(ResolvedType::named(type_id)),
+            Some(SemanticType::Named(type_id))
+        );
+        assert_eq!(
+            SemanticType::from_core(ResolvedType::reference(type_id)),
+            Some(SemanticType::reference(type_id))
         );
     }
 
