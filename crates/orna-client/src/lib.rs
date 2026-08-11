@@ -6,7 +6,7 @@ use orna_artifact::client_plan::{
     ClientPlan, ClientPlanError, FORMAT_IDENTITY, FORMAT_VERSION, LANGUAGE_VERSION_IDENTITY,
 };
 use orna_core::{
-    FunctionId, FunctionRevisionId,
+    FunctionId, FunctionRevisionId, TypeId,
     canonical_hash::{CanonicalHashError, catalogue_digest_with_context},
     catalogue::{FunctionDomain, FunctionReturn, FunctionSecurity, FunctionVolatility},
     revision::{
@@ -269,8 +269,13 @@ pub fn evaluate_client_function(
         function_revision: revision.id(),
     };
 
-    validate_function_shape(definition, context)?;
-    validate_selected_references(active, revision.semantic_hash_version(), context)?;
+    let return_shape = validate_function_shape(definition, context)?;
+    validate_selected_references(
+        active,
+        revision.semantic_hash_version(),
+        context,
+        return_shape,
+    )?;
     validate_artifact(revision.artifact(), revision.language_version(), context)?;
 
     let plan = ClientPlan::decode(revision.artifact().payload())
@@ -319,6 +324,7 @@ fn invalid_active_revision(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ClientReturnShape {
     LegacyBoolean,
+    Value(TypeId),
     Unsupported,
 }
 
@@ -339,8 +345,8 @@ fn classify_client_return(return_type: &FunctionReturn) -> ClientReturnShape {
     if resolved_type.named_type().is_some() {
         return ClientReturnShape::Unsupported;
     }
-    if resolved_type.value_type().is_some() {
-        return ClientReturnShape::Unsupported;
+    if let Some(type_id) = resolved_type.value_type() {
+        return ClientReturnShape::Value(type_id);
     }
     ClientReturnShape::Unsupported
 }
@@ -348,7 +354,7 @@ fn classify_client_return(return_type: &FunctionReturn) -> ClientReturnShape {
 fn validate_function_shape(
     definition: &orna_core::catalogue::FunctionDefinition,
     context: ClientExecutionContext,
-) -> Result<(), ClientExecutionError> {
+) -> Result<ClientReturnShape, ClientExecutionError> {
     if definition.domain() != FunctionDomain::Client {
         return Err(invalid_function(
             context,
@@ -358,7 +364,8 @@ fn validate_function_shape(
     if !definition.parameters().is_empty() {
         return Err(invalid_function(context, ClientExecutionRule::Parameters));
     }
-    if classify_client_return(definition.return_type()) != ClientReturnShape::LegacyBoolean {
+    let return_shape = classify_client_return(definition.return_type());
+    if matches!(return_shape, ClientReturnShape::Unsupported) {
         return Err(invalid_function(context, ClientExecutionRule::ReturnType));
     }
     if definition.security() != FunctionSecurity::Invoker {
@@ -367,13 +374,14 @@ fn validate_function_shape(
     if definition.volatility() != FunctionVolatility::Immutable {
         return Err(invalid_function(context, ClientExecutionRule::Volatility));
     }
-    Ok(())
+    Ok(return_shape)
 }
 
 fn validate_selected_references(
     active: &ActiveDatabaseRevision,
     semantic_hash_version: FunctionSemanticHashVersion,
     context: ClientExecutionContext,
+    return_shape: ClientReturnShape,
 ) -> Result<(), ClientExecutionError> {
     let selected = active
         .references()
@@ -386,7 +394,8 @@ fn validate_selected_references(
 
     match active.catalogue_hash_context() {
         orna_core::revision::CatalogueHashContext::Version1 => {
-            if semantic_hash_version != FunctionSemanticHashVersion::Version1
+            if return_shape != ClientReturnShape::LegacyBoolean
+                || semantic_hash_version != FunctionSemanticHashVersion::Version1
                 || !selected.is_empty()
             {
                 return Err(invalid_function(context, ClientExecutionRule::References));
@@ -400,17 +409,24 @@ fn validate_selected_references(
                 && selected.len() == 1
                 && reference.ordinal() == 0
                 && reference.kind() == DefinitionReferenceKind::NamedType
-                && matches!(
-                    reference.target(),
-                    DefinitionReferenceTarget::ValueType(type_id)
-                        if standard
+                && match reference.target() {
+                    DefinitionReferenceTarget::ValueType(type_id) => {
+                        let pinned_boolean = standard
                             .catalogue()
                             .value_type_by_id(type_id)
                             .is_some_and(|definition| {
                                 definition.representation_contract()
                                     == "orna.kernel.value.boolean@1"
-                            })
-                );
+                            });
+                        pinned_boolean
+                            && match return_shape {
+                                ClientReturnShape::LegacyBoolean => true,
+                                ClientReturnShape::Value(return_type) => return_type == type_id,
+                                ClientReturnShape::Unsupported => false,
+                            }
+                    }
+                    _ => false,
+                };
             if !valid {
                 return Err(invalid_function(context, ClientExecutionRule::References));
             }
@@ -1045,6 +1061,110 @@ mod tests {
     }
 
     #[test]
+    fn evaluates_a_hand_built_version_two_value_return() {
+        let standard = orna_standard::verify_standard_library_snapshot(
+            orna_standard::retained_standard_library_snapshot().unwrap(),
+        )
+        .unwrap();
+        let boolean_type = standard
+            .catalogue()
+            .value_types()
+            .iter()
+            .find(|definition| {
+                definition.representation_contract() == "orna.kernel.value.boolean@1"
+            })
+            .unwrap()
+            .id();
+        let (active, function, pair, function_revision) =
+            version_two_value_active(boolean_type, boolean_type);
+        assert_eq!(
+            active.function_revisions()[0].artifact().payload(),
+            b"ORNACP\0\0\0\0\0\x01\x01\x01"
+        );
+
+        let result = evaluate_client_function(&active, function).unwrap();
+
+        assert_eq!(result.context().pair(), pair);
+        assert_eq!(result.context().function(), function);
+        assert_eq!(result.context().function_revision(), function_revision);
+        assert_eq!(result.value(), &RuntimeValue::Boolean(true));
+    }
+
+    #[test]
+    fn accepts_a_transitional_version_two_legacy_boolean_return() {
+        let standard = orna_standard::verify_standard_library_snapshot(
+            orna_standard::retained_standard_library_snapshot().unwrap(),
+        )
+        .unwrap();
+        let boolean_type = standard
+            .catalogue()
+            .value_types()
+            .iter()
+            .find(|definition| {
+                definition.representation_contract() == "orna.kernel.value.boolean@1"
+            })
+            .unwrap()
+            .id();
+        let (active, function, _, _) = version_two_legacy_scalar_active(boolean_type);
+
+        assert_eq!(
+            evaluate_client_function(&active, function).unwrap().value(),
+            &RuntimeValue::Boolean(true)
+        );
+    }
+
+    #[test]
+    fn rejects_a_value_return_that_disagrees_with_its_selected_reference() {
+        let standard = orna_standard::verify_standard_library_snapshot(
+            orna_standard::retained_standard_library_snapshot().unwrap(),
+        )
+        .unwrap();
+        let boolean_type = standard
+            .catalogue()
+            .value_types()
+            .iter()
+            .find(|definition| {
+                definition.representation_contract() == "orna.kernel.value.boolean@1"
+            })
+            .unwrap()
+            .id();
+        let alternate_type = standard
+            .catalogue()
+            .value_types()
+            .iter()
+            .find(|definition| definition.id() != boolean_type)
+            .unwrap()
+            .id();
+        let (active, function, pair, function_revision) =
+            version_two_value_active(alternate_type, boolean_type);
+
+        let error = evaluate_client_function(&active, function).unwrap_err();
+
+        assert_eq!(error.pair(), pair);
+        assert_eq!(error.function(), function);
+        assert_eq!(
+            error.context().copied(),
+            Some(super::ClientExecutionContext {
+                pair,
+                function,
+                function_revision,
+            })
+        );
+        assert!(matches!(
+            error,
+            super::ClientExecutionError::InvalidFunction {
+                rule: super::ClientExecutionRule::References,
+                ..
+            }
+        ));
+        assert_eq!(
+            error.to_string(),
+            "this CLIENT function depends on unsupported definitions"
+        );
+        assert!(std::error::Error::source(&error).is_none());
+    }
+
+    #[test]
     fn version_two_reference_validation_uses_only_the_selected_current_function() {
         let prepared = prepared_client_functions();
         let active = active_from_prepared_candidate(&prepared);
@@ -1543,7 +1663,7 @@ mod tests {
     }
 
     #[test]
-    fn public_evaluation_accepts_only_a_legacy_boolean_single_return() {
+    fn version_one_public_evaluation_accepts_only_a_legacy_boolean_single_return() {
         for scalar in StandardScalar::ALL {
             let (active, function, _, _) = version_one_active_with_shape(
                 FunctionDomain::Client,
@@ -1962,6 +2082,134 @@ mod tests {
         semantic_hash_version: FunctionSemanticHashVersion,
     ) -> FunctionSemanticHashVersion {
         semantic_hash_version
+    }
+
+    fn version_two_value_active(
+        return_type: TypeId,
+        reference_target: TypeId,
+    ) -> (
+        ActiveDatabaseRevision,
+        FunctionId,
+        RevisionPair,
+        FunctionRevisionId,
+    ) {
+        version_two_active_with_return(ResolvedType::Value(return_type), reference_target)
+    }
+
+    fn version_two_legacy_scalar_active(
+        reference_target: TypeId,
+    ) -> (
+        ActiveDatabaseRevision,
+        FunctionId,
+        RevisionPair,
+        FunctionRevisionId,
+    ) {
+        version_two_active_with_return(
+            ResolvedType::scalar(StandardScalar::Boolean),
+            reference_target,
+        )
+    }
+
+    fn version_two_active_with_return(
+        return_type: ResolvedType,
+        reference_target: TypeId,
+    ) -> (
+        ActiveDatabaseRevision,
+        FunctionId,
+        RevisionPair,
+        FunctionRevisionId,
+    ) {
+        let standard = orna_standard::verify_standard_library_snapshot(
+            orna_standard::retained_standard_library_snapshot().unwrap(),
+        )
+        .unwrap();
+        let (version_one, function_id, pair, function_revision_id) = version_one_active(true);
+        let prior_function = version_one.catalogue().function_by_id(function_id).unwrap();
+        let function = FunctionDefinition::new(
+            function_id,
+            prior_function.name().clone(),
+            FunctionDomain::Client,
+            Vec::new(),
+            FunctionReturn::Single(return_type),
+            function_revision_id,
+            FunctionSecurity::Invoker,
+            None,
+            FunctionVolatility::Immutable,
+        );
+        let catalogue = CatalogueSnapshot::new_with_functions(
+            version_one.catalogue().revision(),
+            version_one.catalogue().schemas().to_vec(),
+            version_one.catalogue().object_types().to_vec(),
+            vec![function.clone()],
+        )
+        .unwrap();
+        let prior_revision = &version_one.function_revisions()[0];
+        let payload = b"ORNACP\0\0\0\0\0\x01\x01\x01".to_vec();
+        let artifact = ExecutableArtifact::new(
+            ExecutableArtifactKind::Client,
+            "orna.client-plan",
+            1,
+            payload.clone(),
+            artifact_payload_digest(&payload).unwrap(),
+        )
+        .unwrap();
+        let reference = DefinitionReference::new(
+            function_id,
+            function_revision_id,
+            0,
+            DefinitionReferenceTarget::ValueType(reference_target),
+            DefinitionReferenceKind::NamedType,
+            prior_revision.declaration_origin(),
+        );
+        let semantic_hash = function_semantic_digest_with_version(
+            FunctionSemanticHashVersion::Version2,
+            &function,
+            prior_revision.language_version(),
+            &artifact,
+            version_one.expressions(),
+            std::slice::from_ref(&reference),
+        )
+        .unwrap();
+        let revision = FunctionRevisionRecord::new(
+            function_id,
+            function_revision_id,
+            prior_revision.revision_number(),
+            prior_revision.declaration_origin(),
+            prior_revision.declaration_content_hash(),
+            semantic_hash,
+            prior_revision.language_version(),
+            artifact,
+        )
+        .unwrap()
+        .with_semantic_hash_version(FunctionSemanticHashVersion::Version2);
+        let context = orna_core::revision::CatalogueHashContext::version_two(standard);
+        let catalogue_hash = catalogue_digest_with_context(
+            &context,
+            &catalogue,
+            std::slice::from_ref(&revision),
+            version_one.expressions(),
+            version_one.origins(),
+            std::slice::from_ref(&reference),
+        )
+        .unwrap();
+        let active = ActiveDatabaseRevision::new_with_catalogue_hash_context(
+            ActiveDatabaseRevisionInput::new(
+                pair,
+                version_one.source().clone(),
+                catalogue,
+                catalogue_hash,
+                ActiveRevisionContent::new(
+                    version_one.expressions().to_vec(),
+                    vec![revision],
+                    version_one.origins().to_vec(),
+                    vec![reference],
+                ),
+            ),
+            context,
+        )
+        .unwrap();
+
+        (active, function_id, pair, function_revision_id)
     }
 
     fn version_one_active(
