@@ -10,7 +10,7 @@ The primary user is a systems or database developer who already knows SQL. They 
 
 ## Product Purpose
 
-The website explains OrnaDB as an object-relational database that stores and runs the programs which work with its data. The frontpage must establish the model with real syntax, system boundaries, use cases, and examples. The documentation must give technical readers a short path from the product thesis to the language, invocation, runtime, security, and implementation status.
+The website is the OrnaDB technical guide, not a separate marketing frontpage followed by documentation. Its overview at `/` establishes the model with real syntax and direct routes into the language, invocation, runtime, security, architecture, examples, and implementation status.
 
 Success means that a technical reader can answer these questions without marketing interpretation:
 
