@@ -4,7 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use orna_core::{
     FieldId, TypeId,
-    catalogue::{CatalogueSnapshot, FieldDefinition, ObjectTypeDefinition, OnDeleteAction},
+    catalogue::{FieldDefinition, ObjectTypeDefinition, OnDeleteAction},
+    revision::ActiveDatabaseRevision,
     types::{ResolvedType, StandardScalar},
 };
 use tokio_postgres::{Row, Transaction};
@@ -18,13 +19,13 @@ use super::{
 
 const DATA_RELATION: &str = "_orna_data";
 
-/// Verifies that PostgreSQL physical storage is exactly the supplied catalogue.
+/// Verifies that PostgreSQL physical storage is exactly the active revision catalogue.
 pub(crate) async fn verify_physical_catalogue(
     transaction: &Transaction<'_>,
-    catalogue: &CatalogueSnapshot,
+    active: &ActiveDatabaseRevision,
 ) -> Result<(), PostgresKernelError> {
     establish_trusted_search_path(transaction).await?;
-    let expected = ExpectedCatalogue::from_catalogue(catalogue)?;
+    let expected = ExpectedCatalogue::from_active(active)?;
     verify_schema_access(transaction).await?;
     let relations = load_relations(transaction).await?;
     expected.verify_relations(&relations)?;
@@ -37,15 +38,15 @@ pub(crate) async fn verify_physical_catalogue(
     verify_external_dependants(transaction, expected.tables.keys()).await
 }
 
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq)]
 struct ExpectedCatalogue {
     tables: BTreeMap<String, ExpectedTable>,
 }
 
 impl ExpectedCatalogue {
-    fn from_catalogue(catalogue: &CatalogueSnapshot) -> Result<Self, PostgresKernelError> {
+    fn from_active(active: &ActiveDatabaseRevision) -> Result<Self, PostgresKernelError> {
         let mut tables = BTreeMap::new();
-        for object in catalogue.object_types() {
+        for object in active.catalogue().object_types() {
             let table = ExpectedTable::from_object(object)?;
             if tables.insert(table.name.clone(), table).is_some() {
                 return Err(type_record(object.id())
@@ -105,7 +106,7 @@ impl ExpectedCatalogue {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq)]
 struct ExpectedTable {
     name: String,
     columns: Vec<ExpectedColumn>,
@@ -189,13 +190,13 @@ fn insert_expected_constraint(
     Ok(())
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ExpectedReference {
     target: TypeId,
     on_delete: Option<OnDeleteAction>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq)]
 struct ExpectedColumn {
     name: String,
     type_name: &'static str,
@@ -276,7 +277,7 @@ fn postgres_catalogue_type(
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq)]
 struct ExpectedConstraint {
     kind: &'static str,
     key: Vec<i16>,
@@ -1328,15 +1329,28 @@ fn relation_record(name: &str) -> DurableRecord {
 #[cfg(test)]
 mod tests {
     use orna_core::{
-        FieldId, TypeId,
-        catalogue::{FieldDefinition, ObjectTypeDefinition, OnDeleteAction, QualifiedSemanticName},
+        CatalogueRevisionId, FieldId, SchemaId, SourceBundleId, SourceRevisionId, SourceUnitId,
+        TypeId,
+        canonical_hash::{
+            catalogue_digest_with_context, source_bundle_digest, source_revision_record_digest,
+            source_unit_content_digest,
+        },
+        catalogue::{
+            CatalogueSnapshot, FieldDefinition, ObjectTypeDefinition, OnDeleteAction,
+            QualifiedSemanticName, SchemaDefinition,
+        },
+        revision::{
+            ActiveDatabaseRevision, ActiveDatabaseRevisionInput, ActiveRevisionContent,
+            CatalogueHashContext, CatalogueHashVersion, DefinitionIdentity, DefinitionOrigin,
+            RevisionPair, SourceOrigin, StoredSourceRevision, StoredSourceUnit,
+        },
         types::{ResolvedType, StandardScalar},
     };
 
     use super::{
-        ExpectedConstraint, ExpectedForeignKey, ExpectedIndex, ExpectedTable, ObservedIndex,
-        ReferenceTriggerLocation, classify_reference_trigger, expected_indexes, field_name,
-        has_non_foreign_constraint_shape, relation_name, requires_no_inherit,
+        ExpectedCatalogue, ExpectedConstraint, ExpectedForeignKey, ExpectedIndex, ExpectedTable,
+        ObservedIndex, ReferenceTriggerLocation, classify_reference_trigger, expected_indexes,
+        field_name, has_non_foreign_constraint_shape, relation_name, requires_no_inherit,
         unique_constraint_name, verify_named_constraint,
     };
     use crate::decode::DurableRecord;
@@ -1526,6 +1540,57 @@ mod tests {
                 key: vec![4],
                 primary: false,
             })
+        );
+    }
+
+    #[test]
+    fn expected_builder_consumes_the_active_revision_catalogue_for_scalar_storage() {
+        let (active, object) = scalar_active_revision();
+
+        let expected = ExpectedCatalogue::from_active(&active).expect("supported active revision");
+        let table = expected
+            .tables
+            .get(&relation_name(object))
+            .expect("scalar object table");
+
+        assert_eq!(expected.tables.len(), 1);
+        assert_eq!(table.columns.len(), 2);
+        assert_eq!(
+            table.columns[1].name,
+            field_name(FieldId::from_bytes([0x34; 16]))
+        );
+        assert_eq!(table.columns[1].type_name, "int4");
+        assert!(!table.columns[1].nullable);
+        assert!(table.columns[1].reference.is_none());
+    }
+
+    #[test]
+    fn expected_builder_keeps_scalar_table_facts_equal_for_version_one_and_two() {
+        let (version_one, object) = scalar_active_revision();
+        let version_two = transitional_scalar_active_revision();
+
+        let version_one_expected =
+            ExpectedCatalogue::from_active(&version_one).expect("version one expected catalogue");
+        let version_two_expected =
+            ExpectedCatalogue::from_active(&version_two).expect("version two expected catalogue");
+
+        assert_eq!(
+            version_one.catalogue_hash_context().version(),
+            CatalogueHashVersion::Version1
+        );
+        assert_eq!(
+            version_two.catalogue_hash_context().version(),
+            CatalogueHashVersion::Version2
+        );
+        assert_eq!(version_one_expected, version_two_expected);
+        assert_eq!(
+            version_two_expected
+                .tables
+                .get(&relation_name(object))
+                .expect("transitional scalar table")
+                .columns[1]
+                .type_name,
+            "int4"
         );
     }
 
@@ -1742,6 +1807,94 @@ mod tests {
                 None,
             )],
         )
+    }
+
+    fn scalar_active_revision() -> (ActiveDatabaseRevision, TypeId) {
+        scalar_active_revision_with_context(CatalogueHashContext::version_one())
+    }
+
+    fn transitional_scalar_active_revision() -> ActiveDatabaseRevision {
+        let standard = orna_standard::verify_standard_library_snapshot(
+            orna_standard::retained_standard_library_snapshot()
+                .expect("retained standard-library snapshot"),
+        )
+        .expect("verified standard-library snapshot");
+        scalar_active_revision_with_context(CatalogueHashContext::version_two(standard)).0
+    }
+
+    fn scalar_active_revision_with_context(
+        context: CatalogueHashContext,
+    ) -> (ActiveDatabaseRevision, TypeId) {
+        let source_unit = SourceUnitId::from_bytes([0x31; 16]);
+        let unit = StoredSourceUnit::new(
+            source_unit,
+            0,
+            "physical-fixture.orna",
+            "",
+            source_unit_content_digest("").expect("source unit digest"),
+        )
+        .expect("source unit");
+        let bundle = SourceBundleId::from_bytes([0x32; 16]);
+        let bundle_hash = source_bundle_digest(std::slice::from_ref(&unit)).expect("bundle digest");
+        let source = StoredSourceRevision::new(
+            bundle,
+            SourceRevisionId::from_bytes([0x33; 16]),
+            None,
+            vec![unit],
+            bundle_hash,
+            source_revision_record_digest(bundle, None, bundle_hash).expect("source digest"),
+        )
+        .expect("source revision");
+        let schema = SchemaDefinition::new(SchemaId::from_bytes([0x35; 16]), name(&["test"]));
+        let object = TypeId::from_bytes([0x36; 16]);
+        let field = FieldId::from_bytes([0x34; 16]);
+        let catalogue = CatalogueSnapshot::new(
+            CatalogueRevisionId::from_bytes([0x37; 16]),
+            vec![schema.clone()],
+            vec![ObjectTypeDefinition::new(
+                object,
+                name(&["test", "scalar"]),
+                vec![FieldDefinition::new(
+                    field,
+                    "value",
+                    0,
+                    ResolvedType::scalar(StandardScalar::Integer),
+                    false,
+                    false,
+                    None,
+                    None,
+                )],
+            )],
+        )
+        .expect("catalogue");
+        let origin = SourceOrigin::new(source_unit, 0, 0).expect("empty source origin");
+        let origins = vec![
+            DefinitionOrigin::new(DefinitionIdentity::Schema(schema.id()), origin),
+            DefinitionOrigin::new(DefinitionIdentity::ObjectType(object), origin),
+            DefinitionOrigin::new(
+                DefinitionIdentity::Field {
+                    owner: object,
+                    field,
+                },
+                origin,
+            ),
+        ];
+        let catalogue_hash =
+            catalogue_digest_with_context(&context, &catalogue, &[], &[], &origins, &[])
+                .expect("catalogue digest");
+        let active = ActiveDatabaseRevision::new_with_catalogue_hash_context(
+            ActiveDatabaseRevisionInput::new(
+                RevisionPair::new(source.id(), catalogue.revision()),
+                source,
+                catalogue,
+                catalogue_hash,
+                ActiveRevisionContent::new(Vec::new(), Vec::new(), origins, Vec::new()),
+            ),
+            context,
+        )
+        .expect("active revision");
+
+        (active, object)
     }
 
     fn name(parts: &[&str]) -> QualifiedSemanticName {
