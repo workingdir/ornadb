@@ -1,8 +1,79 @@
-<!-- SEED: re-run $impeccable document once there is code to capture the actual tokens and components. -->
-
 ---
 name: OrnaDB website
 description: A technical systems manual with a clear, inspectable product argument.
+colors:
+  background: "oklch(1 0 0)"
+  surface: "oklch(0.965 0.009 142)"
+  surface-strong: "oklch(0.925 0.018 142)"
+  ink: "oklch(0.16 0.018 145)"
+  muted: "oklch(0.42 0.025 145)"
+  line: "oklch(0.83 0.018 142)"
+  brand: "oklch(0.42 0.105 142)"
+  brand-deep: "oklch(0.29 0.075 142)"
+  brand-light: "oklch(0.75 0.09 140)"
+  accent: "oklch(0.87 0.145 98)"
+  code: "oklch(0.105 0.015 145)"
+  code-line: "oklch(0.27 0.025 145)"
+  code-ink: "oklch(0.94 0.015 142)"
+typography:
+  display:
+    fontFamily: "Public Sans, Arial, sans-serif"
+    fontSize: "clamp(3.25rem, 6.6vw, 5.75rem)"
+    fontWeight: 700
+    lineHeight: 0.94
+    letterSpacing: "-0.04em"
+  headline:
+    fontFamily: "Public Sans, Arial, sans-serif"
+    fontSize: "clamp(2.25rem, 4.8vw, 4.75rem)"
+    fontWeight: 700
+    lineHeight: 1
+    letterSpacing: "-0.04em"
+  body:
+    fontFamily: "Public Sans, Arial, sans-serif"
+    fontSize: "1rem"
+    fontWeight: 400
+    lineHeight: 1.6
+  label:
+    fontFamily: "Martian Mono, Cascadia Mono, Liberation Mono, monospace"
+    fontSize: "0.6875rem"
+    fontWeight: 600
+    lineHeight: 1.4
+rounded:
+  sm: "4px"
+  md: "8px"
+spacing:
+  xs: "8px"
+  sm: "16px"
+  md: "24px"
+  lg: "48px"
+  section: "clamp(5rem, 10vw, 9rem)"
+components:
+  button-brand:
+    backgroundColor: "{colors.brand-deep}"
+    textColor: "{colors.background}"
+    typography: "{typography.label}"
+    rounded: "{rounded.sm}"
+    padding: "12px 16px"
+    height: "48px"
+  button-light:
+    backgroundColor: "{colors.background}"
+    textColor: "{colors.brand-deep}"
+    typography: "{typography.label}"
+    rounded: "{rounded.sm}"
+    padding: "12px 16px"
+    height: "48px"
+  source-window:
+    backgroundColor: "{colors.code}"
+    textColor: "{colors.code-ink}"
+    typography: "{typography.label}"
+    rounded: "{rounded.md}"
+    padding: "16px 24px"
+  status-label:
+    backgroundColor: "{colors.background}"
+    textColor: "{colors.brand-deep}"
+    typography: "{typography.label}"
+    rounded: "{rounded.sm}"
+    padding: "4px 6px"
 ---
 
 # Design System: OrnaDB Website
@@ -11,52 +82,96 @@ description: A technical systems manual with a clear, inspectable product argume
 
 **Creative North Star: "The Executable Systems Manual"**
 
-The site combines the directness of the PipeWire and Wayland project pages with the stronger product demonstration used by Handy. It should feel maintained, specific, and close to source code. The frontpage can carry a distinct identity, but it must still read as the first page of technical documentation.
+The interface makes OrnaDB feel like a maintained systems manual whose first page also proves the product argument. The design combines the direct project-page structure of PipeWire and Wayland with the stronger product demonstration used by Handy. Real source, result paths, process boundaries, and implementation status provide the visual material.
 
-Use a committed colour field, flat surfaces, real Orna syntax, and visible system structure. Reject generic SaaS landing pages, glossy AI database sites, decorative terminal themes, and editorial-magazine styling.
+The frontpage commits to moss green, black, white, and a sharp yellow-green accent. Documentation uses the same identity on a quieter white reading surface. The system rejects generic SaaS landing pages, glossy AI database sites, decorative terminal themes, and editorial-magazine styling.
 
 **Key Characteristics:**
 
 - technical content before promotional claims;
-- a light reading surface for long documentation;
-- one committed moss-green brand field against black and white;
-- code and architecture used as the primary imagery;
-- restrained motion and square, practical geometry.
+- visible CLIENT, SERVER, protocol, and runtime boundaries;
+- code and architecture as the primary imagery;
+- flat surfaces separated by colour, spacing, and solid rules;
+- restrained motion with a complete reduced-motion path;
+- explicit text labels for implementation and design status.
 
 ## Colors
 
-Use a committed strategy. A moss-green primary carries the hero and major structural moments. Pure white supports long-form reading. Near-black carries code and high-contrast text. A sharp yellow-green accent can identify status or active paths, but it must not become decoration.
+The palette uses a committed moss field for major brand moments, pure white for long reading, near-black for source specimens, and yellow-green for focus and status markers. Muted colours remain strong enough for body-size text.
 
-**The Status Is Text Rule.** Every status colour must have a written label such as `IMPLEMENTED`, `LOCKED`, `PROPOSAL`, or `OPEN`.
+**The Status Is Text Rule.** Every status colour has a written label such as `IMPLEMENTED`, `LOCKED`, `PROPOSAL`, or `OPEN`.
+
+**The Four-Material Rule.** Build pages from white, moss, near-black, and yellow-green. Do not add decorative hues to create artificial variety.
 
 ## Typography
 
-Use a sturdy humanist sans for prose and a clearly different technical mono for code, commands, labels, and data. The type should resemble a systems manual, not a simulated terminal.
+**Display and Body Font:** Public Sans with Arial and system sans-serif fallbacks.
 
-Keep body lines between 65 and 75 characters. Display headings can be strong but must remain below 6rem and use letter spacing no tighter than -0.04em.
+**Label and Code Font:** Martian Mono with Cascadia Mono and Liberation Mono fallbacks.
 
-**The Source Has Priority Rule.** Code must stay large enough to read and must never become a faint background texture.
+**Character:** Public Sans gives the prose a sturdy manual quality. Martian Mono identifies source, commands, labels, and system data without turning the whole site into a simulated terminal.
+
+### Hierarchy
+
+- **Display** (700, fluid to 5.75rem, 0.94 line-height): frontpage proposition only.
+- **Headline** (700, fluid to 4.75rem, 1 line-height): major section claims.
+- **Title** (700, fluid to 2.75rem): feature and diagram titles.
+- **Body** (400, 1rem, 1.6 line-height): explanatory prose, normally limited to 65-75 characters.
+- **Label** (600, 0.6875rem, compact line-height): commands, navigation, status, and technical metadata.
+
+**The Source Has Priority Rule.** Source stays large enough to read and never becomes a faint background texture.
 
 ## Elevation
 
-Use flat tonal layers and solid rules. Do not use ambient drop shadows. A surface can separate from its background through colour, spacing, or one defined border.
+The system uses no shadows. Tonal layers, spacing, and one solid border establish structure. Code specimens sit on a near-black material rather than floating over the page.
 
 **The Flat By Default Rule.** Depth indicates structure or interaction, never decoration.
 
 ## Components
 
-Buttons, code specimens, navigation, status labels, and architecture nodes should use practical geometry with small corner radii. Interactive states need clear hover and focus treatments. Cards are permitted only when the content is a true independent object; use tables, ruled lists, and open layouts for most feature content.
+### Buttons
 
-Motion is restrained. Use one short page-load sequence and direct state transitions. Disable non-essential motion when `prefers-reduced-motion` is active.
+- **Shape:** practical corners (4px) and a minimum height of 48px.
+- **Primary:** deep moss with white text; used for documentation and status routes.
+- **Light:** white with deep moss text; used only on the moss hero.
+- **Hover:** a small upward transform and a higher-contrast background.
+- **Focus:** a visible yellow-green outline with a clear offset.
+
+### Status Labels
+
+- **Style:** compact mono text, a full 1px border, and a 4px radius.
+- **Rule:** the text states the status. Colour only supports the label.
+
+### Source Windows
+
+- **Corner Style:** defined but restrained (8px).
+- **Background:** near-black with pale code text and a darker structural rule.
+- **Header:** filename on the left and design status on the right.
+- **Overflow:** horizontal scrolling preserves source without wrapping or clipping it.
+
+### Architecture and Presentation Maps
+
+- **Structure:** labelled nodes connected with real rules, not a decorative grid.
+- **Responsive behaviour:** multi-column flows become one readable column below 832px.
+- **Status:** captions identify whether a diagram is a locked model, proposal, or implementation view.
+
+### Navigation
+
+- **Style:** white project header, text links, and a visible brand mark.
+- **Mobile:** links wrap in place. There is no hidden menu or required JavaScript.
+- **States:** underline on hover and the global yellow-green focus outline.
+
+Motion uses one short hero entrance and direct state transitions. All movement uses transforms. `prefers-reduced-motion` reduces animation and transition durations to an immediate state.
 
 ## Do's and Don'ts
 
 ### Do:
 
 - **Do** put valid Orna syntax and copyable commands near the top of the page.
-- **Do** show CLIENT, SERVER, runtime, and security boundaries as labelled structures.
+- **Do** show CLIENT, SERVER, runtime, protocol, and security boundaries as labelled structures.
 - **Do** use semantic HTML, visible focus, and text labels for every status.
 - **Do** keep the documentation visually quieter than the marketing frontpage.
+- **Do** state plainly when a feature is locked design, current proposal, open question, or implemented work.
 
 ### Don't:
 
@@ -65,4 +180,5 @@ Motion is restrained. Use one short page-load sequence and direct state transiti
 - **Don't** write a beginner SQL tutorial for an expert audience.
 - **Don't** use terminal-themed decoration as a substitute for technical substance.
 - **Don't** present a current proposal or roadmap item as a released feature.
-- **Don't** use gradient text, glass cards, decorative grids, repeated eyebrow labels, or coloured side-stripe borders.
+- **Don't** use gradient text, glass cards, decorative grids, repeated eyebrow labels, coloured side-stripe borders, or ambient shadows.
+- **Don't** round cards, sections, or inputs beyond 8px.
