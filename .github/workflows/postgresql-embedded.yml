@@ -1,0 +1,35 @@
+name: PostgreSQL embedded entry
+
+on:
+  push:
+    paths:
+      - ".github/workflows/postgresql-embedded.yml"
+      - "packaging/postgresql/build-embedded.sh"
+      - "packaging/postgresql/embedded-build.toml"
+      - "packaging/postgresql/embedded-postgresql-18.4.patch"
+  pull_request:
+    paths:
+      - ".github/workflows/postgresql-embedded.yml"
+      - "packaging/postgresql/build-embedded.sh"
+      - "packaging/postgresql/embedded-build.toml"
+      - "packaging/postgresql/embedded-postgresql-18.4.patch"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Prove the embedded PostgreSQL entry
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Build and compare two isolated embedded entries
+        run: packaging/postgresql/build-embedded.sh
+      - name: Upload embedded PostgreSQL entry evidence and static input
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: postgresql-embedded-entry-evidence-static-input
+          path: target/postgresql-embedded/current/*
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
