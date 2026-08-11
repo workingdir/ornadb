@@ -91,6 +91,20 @@ flattened_inputs = [
 [resources]
 embedded_support_assets = []
 
+[proof]
+frozen_inputs_directory = "inputs"
+unpublished_probe_path = "orna-engine-entry-probe"
+trace_path = "orna-engine-entry-probe.strace"
+stdout_path = "orna-engine-entry-probe.stdout"
+deterministic_outputs = [
+    "embedded-engine-manifest.json",
+    "liborna_postgres18_backend.a",
+    "defined-symbols.txt",
+    "undefined-symbols.txt",
+    "orna-engine-entry-probe.stdout",
+    "POSTGRESQL-LICENSE",
+]
+
 [apt]
 sources = [
     "deb http://snapshot.debian.org/archive/debian/20251229T000000Z bookworm main",

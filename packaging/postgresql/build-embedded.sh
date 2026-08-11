@@ -8,6 +8,8 @@ readonly RECIPE_PATH="${SCRIPT_DIRECTORY}/embedded-build.toml"
 readonly PATCH_PATH="${SCRIPT_DIRECTORY}/embedded-postgresql-18.4.patch"
 readonly TARGET_ROOT="${REPOSITORY_ROOT}/target/postgresql-embedded"
 
+declare -a EMBEDDED_BUILD_CLEANUP_PATHS=()
+
 log() {
     printf '[postgres-embedded] %s\n' "$*"
 }
@@ -17,8 +19,21 @@ fail() {
     exit 1
 }
 
+cleanup_embedded_build_paths() {
+    local path
+
+    for path in "${EMBEDDED_BUILD_CLEANUP_PATHS[@]}"; do
+        if [[ -d "${path}" ]]; then
+            rm -rf -- "${path}"
+        fi
+    done
+}
+
 emit_recipe_environment() {
-    python3 - "${RECIPE_PATH}" "${PATCH_PATH}" <<'PY_RECIPE'
+    local recipe_path="${1:-${RECIPE_PATH}}"
+    local patch_path="${2:-${PATCH_PATH}}"
+
+    python3 - "${recipe_path}" "${patch_path}" <<'PY_RECIPE'
 import hashlib
 import pathlib
 import sys
@@ -33,7 +48,7 @@ expected_top_level = {
     "format", "identity", "target", "platform", "source_date_epoch",
     "builder_image", "snapshot_timestamp", "patch", "patch_sha256",
     "postgresql", "postgresql_license", "zlib", "build", "static_archive",
-    "resources", "apt",
+    "resources", "proof", "apt",
 }
 if set(recipe) != expected_top_level:
     raise SystemExit("embedded recipe has unexpected top-level keys")
@@ -143,6 +158,24 @@ if static_archive != expected_static_archive:
 if recipe["resources"] != {"embedded_support_assets": []}:
     raise SystemExit("the entry tracer must record an empty support-asset input set")
 
+proof = recipe["proof"]
+expected_proof = {
+    "frozen_inputs_directory": "inputs",
+    "unpublished_probe_path": "orna-engine-entry-probe",
+    "trace_path": "orna-engine-entry-probe.strace",
+    "stdout_path": "orna-engine-entry-probe.stdout",
+    "deterministic_outputs": [
+        "embedded-engine-manifest.json",
+        "liborna_postgres18_backend.a",
+        "defined-symbols.txt",
+        "undefined-symbols.txt",
+        "orna-engine-entry-probe.stdout",
+        "POSTGRESQL-LICENSE",
+    ],
+}
+if proof != expected_proof:
+    raise SystemExit("embedded linked-entry proof facts are not accepted")
+
 apt = recipe["apt"]
 if set(apt) != {"sources", "packages"}:
     raise SystemExit("embedded apt keys are not accepted")
@@ -196,17 +229,25 @@ emit("PATCH_SHA256", expected_patch_sha256)
 emit("STATIC_ARCHIVE_NAME", static_archive["path"])
 emit("STATIC_ARCHIVE_MEMBER", static_archive["member"])
 emit("STATIC_ENTRY_SYMBOL", static_archive["entry_symbol"])
+emit("FROZEN_INPUTS_DIRECTORY", proof["frozen_inputs_directory"])
+emit("UNPUBLISHED_PROBE_PATH", proof["unpublished_probe_path"])
+emit("TRACE_OUTPUT_PATH", proof["trace_path"])
+emit("PROBE_STANDARD_OUTPUT_PATH", proof["stdout_path"])
 print("POSTGRESQL_CONFIGURE_FLAGS=(" + " ".join(shell_quote(flag) for flag in postgresql["configure_flags"]) + ")")
 print("RECIPE_BUILD_ENVIRONMENT=(" + " ".join(shell_quote(f"{key}={environment[key]}") for key in sorted(environment)) + ")")
 print("APT_SOURCES=(" + " ".join(shell_quote(source) for source in apt["sources"]) + ")")
 print("APT_PACKAGES=(" + " ".join(shell_quote(f"{name}={apt['packages'][name]}") for name in sorted(apt["packages"])) + ")")
+print("DETERMINISTIC_OUTPUTS=(" + " ".join(shell_quote(path) for path in proof["deterministic_outputs"]) + ")")
 PY_RECIPE
 }
 
 load_recipe() {
+    local patch_path="${2:-${PATCH_PATH}}"
+    local recipe_path="${1:-${RECIPE_PATH}}"
     local recipe_environment
 
-    recipe_environment="$(emit_recipe_environment)" || fail "embedded recipe validation failed"
+    recipe_environment="$(emit_recipe_environment "${recipe_path}" "${patch_path}")" \
+        || fail "embedded recipe validation failed"
     eval "${recipe_environment}"
 }
 
@@ -228,9 +269,9 @@ container_build() {
     local zlib_source="/build/zlib-source"
     local archive_path
     local probe_source="/build/orna-engine-entry-probe.c"
-    local probe_path="/build/orna-engine-entry-probe"
-    local trace_path="/build/entry-probe.strace"
-    local standard_output="/build/entry-probe.stdout"
+    local probe_path
+    local trace_path
+    local standard_output
     local configured_macros="/build/pg-config-manual.macros"
     local defined_symbols="/build/defined-symbols.txt"
     local undefined_symbols="/build/undefined-symbols.txt"
@@ -247,6 +288,9 @@ container_build() {
     source /build/recipe.environment
     archive_path="${build_root}/src/backend/${STATIC_ARCHIVE_NAME}"
     postgresql_license_path="${source_root}/${POSTGRESQL_LICENSE_SOURCE_PATH}"
+    probe_path="/build/${UNPUBLISHED_PROBE_PATH}"
+    trace_path="/build/${TRACE_OUTPUT_PATH}"
+    standard_output="/build/${PROBE_STANDARD_OUTPUT_PATH}"
     [[ "$(pwd -P)" == "/build" ]] || fail "container build must use /build"
     [[ -r "${RECIPE_PATH}" && -r "${PATCH_PATH}" ]] || fail "container source inputs are absent"
     mkdir -p /build/tmp
@@ -289,7 +333,8 @@ container_build() {
         || fail "PostgreSQL licence file is absent from the accepted source archive"
     verify_sha256 "${POSTGRESQL_LICENSE_SHA256}" "${postgresql_license_path}" \
         || fail "PostgreSQL licence digest does not match embedded recipe"
-    patch --batch --forward --strip=1 --directory="${source_root}" --input="${PATCH_PATH}"
+    patch --batch --forward --fuzz=0 --strip=1 \
+        --directory="${source_root}" --input="${PATCH_PATH}"
 
     (
         cd "${build_root}"
@@ -358,16 +403,20 @@ PY_PROBE
         fail "entry probe must use the zlib code in the embedded archive"
     fi
 
-    mkdir -p /output
+    mkdir -p "/output/${FROZEN_INPUTS_DIRECTORY}"
     install -m 0644 "${archive_path}" /output/liborna_postgres18_backend.a
     install -m 0644 "${defined_symbols}" /output/defined-symbols.txt
     install -m 0644 "${undefined_symbols}" /output/undefined-symbols.txt
-    install -m 0644 "${trace_path}" /output/orna-engine-entry-probe.strace
-    install -m 0644 "${standard_output}" /output/orna-engine-entry-probe.stdout
+    install -m 0644 "${trace_path}" "/output/${TRACE_OUTPUT_PATH}"
+    install -m 0644 "${standard_output}" "/output/${PROBE_STANDARD_OUTPUT_PATH}"
     install -m 0644 "${postgresql_license_path}" "/output/${POSTGRESQL_LICENSE_OUTPUT_PATH}"
+    install -m 0644 "${RECIPE_PATH}" "/output/${FROZEN_INPUTS_DIRECTORY}/${RECIPE_PATH##*/}"
+    install -m 0644 "${SCRIPT_PATH}" "/output/${FROZEN_INPUTS_DIRECTORY}/${SCRIPT_PATH##*/}"
+    install -m 0644 "${PATCH_PATH}" "/output/${FROZEN_INPUTS_DIRECTORY}/${PATCH_PATH##*/}"
     verify_sha256 "${POSTGRESQL_LICENSE_SHA256}" "/output/${POSTGRESQL_LICENSE_OUTPUT_PATH}" \
         || fail "published PostgreSQL licence digest does not match embedded recipe"
-    python3 - "${RECIPE_PATH}" "${PATCH_PATH}" "${SCRIPT_PATH}" "${probe_path}" /output <<'PY_MANIFEST'
+    python3 - "${RECIPE_PATH}" "${PATCH_PATH}" "${SCRIPT_PATH}" "${probe_path}" \
+        "${FROZEN_INPUTS_DIRECTORY}" /output <<'PY_MANIFEST'
 import hashlib
 import json
 import pathlib
@@ -378,7 +427,8 @@ recipe_path = pathlib.Path(sys.argv[1])
 patch_path = pathlib.Path(sys.argv[2])
 script_path = pathlib.Path(sys.argv[3])
 probe_path = pathlib.Path(sys.argv[4])
-output_path = pathlib.Path(sys.argv[5])
+frozen_inputs_directory = sys.argv[5]
+output_path = pathlib.Path(sys.argv[6])
 with recipe_path.open("rb") as recipe_file:
     recipe = tomllib.load(recipe_file)
 
@@ -389,9 +439,18 @@ document = {
     "format": 1,
     "identity": recipe["identity"],
     "inputs": {
-        "recipe": {"path": recipe_path.name, "sha256": digest(recipe_path)},
-        "script": {"path": script_path.name, "sha256": digest(script_path)},
-        "patch": {"path": patch_path.name, "sha256": digest(patch_path)},
+        "recipe": {
+            "path": f"{frozen_inputs_directory}/{recipe_path.name}",
+            "sha256": digest(output_path / frozen_inputs_directory / recipe_path.name),
+        },
+        "script": {
+            "path": f"{frozen_inputs_directory}/{script_path.name}",
+            "sha256": digest(output_path / frozen_inputs_directory / script_path.name),
+        },
+        "patch": {
+            "path": f"{frozen_inputs_directory}/{patch_path.name}",
+            "sha256": digest(output_path / frozen_inputs_directory / patch_path.name),
+        },
         "facts": recipe,
     },
     "static_archive": {
@@ -430,6 +489,16 @@ document = {
     newline="\n",
 )
 PY_MANIFEST
+    {
+        printf '%s\n' "${DETERMINISTIC_OUTPUTS[@]}"
+        printf '%s\n' "${TRACE_OUTPUT_PATH}"
+        printf '%s/%s\n' "${FROZEN_INPUTS_DIRECTORY}" "${RECIPE_PATH##*/}"
+        printf '%s/%s\n' "${FROZEN_INPUTS_DIRECTORY}" "${SCRIPT_PATH##*/}"
+        printf '%s/%s\n' "${FROZEN_INPUTS_DIRECTORY}" "${PATCH_PATH##*/}"
+    } | LC_ALL=C sort >/build/expected-output-files.txt
+    find /output -type f -printf '%P\n' | LC_ALL=C sort >/build/actual-output-files.txt
+    cmp --silent /build/expected-output-files.txt /build/actual-output-files.txt \
+        || fail "embedded output file inventory does not match the accepted proof contract"
     if find /output -type f -name '*.so*' -print -quit | grep -q .; then
         fail "embedded output contains a shared object"
     fi
@@ -439,49 +508,96 @@ PY_MANIFEST
 }
 
 host_build() {
-    local build_root
+    local first_build_root=""
+    local first_output_root=""
+    local frozen_inputs_root=""
     local host_gid
     local host_uid
-    local output_root
     local result_root
+    local second_build_root=""
+    local second_output_root=""
+    local frozen_patch_path=""
+    local frozen_recipe_path=""
+    local frozen_script_path=""
 
-    cleanup_host_build() {
-        if [[ -n "${build_root:-}" && -d "${build_root}" ]]; then
-            rm -rf -- "${build_root}"
-        fi
-        if [[ -n "${output_root:-}" && -d "${output_root}" ]]; then
-            rm -rf -- "${output_root}"
-        fi
+    run_container_build() {
+        local build_root="$1"
+        local output_root="$2"
+
+        emit_recipe_environment "${frozen_recipe_path}" "${frozen_patch_path}" >"${build_root}/recipe.environment"
+        docker run --rm --platform="${TARGET_PLATFORM}" \
+            --mount "type=bind,src=${frozen_inputs_root},dst=/frozen,readonly" \
+            --mount "type=bind,src=${build_root},dst=/build" \
+            --mount "type=bind,src=${output_root},dst=/output" \
+            --workdir /build \
+            --env ORNA_EMBEDDED_CONTAINER=1 \
+            --env ORNA_HOST_GID="${host_gid}" \
+            --env ORNA_HOST_UID="${host_uid}" \
+            "${BUILDER_IMAGE}" \
+            bash "/frozen/${frozen_script_path##*/}" --container-build
     }
 
-    load_recipe
-    command -v docker >/dev/null 2>&1 || fail "docker is required for the embedded build"
+    compare_exact() {
+        local description="$1"
+        local first_path="$2"
+        local second_path="$3"
+
+        cmp --silent "${first_path}" "${second_path}" \
+            || fail "${description} differs between the two isolated builds: $(sha256sum "${first_path}" | awk '{print $1}') != $(sha256sum "${second_path}" | awk '{print $1}')"
+        log "matched ${description}: $(sha256sum "${first_path}" | awk '{print $1}')"
+    }
+
     mkdir -p "${TARGET_ROOT}"
-    build_root="$(mktemp -d "${TARGET_ROOT}/build.XXXXXXXX")"
-    output_root="$(mktemp -d "${TARGET_ROOT}/output.XXXXXXXX")"
+    frozen_inputs_root="$(mktemp -d "${TARGET_ROOT}/inputs.XXXXXXXX")"
+    EMBEDDED_BUILD_CLEANUP_PATHS+=("${frozen_inputs_root}")
+    trap cleanup_embedded_build_paths EXIT
+    frozen_recipe_path="${frozen_inputs_root}/${RECIPE_PATH##*/}"
+    frozen_patch_path="${frozen_inputs_root}/${PATCH_PATH##*/}"
+    frozen_script_path="${frozen_inputs_root}/${SCRIPT_PATH##*/}"
+    install -m 0644 "${RECIPE_PATH}" "${frozen_recipe_path}"
+    install -m 0644 "${PATCH_PATH}" "${frozen_patch_path}"
+    install -m 0644 "${SCRIPT_PATH}" "${frozen_script_path}"
+    load_recipe "${frozen_recipe_path}" "${frozen_patch_path}"
+    command -v docker >/dev/null 2>&1 || fail "docker is required for the embedded build"
+    first_build_root="$(mktemp -d "${TARGET_ROOT}/build.first.XXXXXXXX")"
+    EMBEDDED_BUILD_CLEANUP_PATHS+=("${first_build_root}")
+    first_output_root="$(mktemp -d "${TARGET_ROOT}/output.first.XXXXXXXX")"
+    EMBEDDED_BUILD_CLEANUP_PATHS+=("${first_output_root}")
+    second_build_root="$(mktemp -d "${TARGET_ROOT}/build.second.XXXXXXXX")"
+    EMBEDDED_BUILD_CLEANUP_PATHS+=("${second_build_root}")
+    second_output_root="$(mktemp -d "${TARGET_ROOT}/output.second.XXXXXXXX")"
+    EMBEDDED_BUILD_CLEANUP_PATHS+=("${second_output_root}")
     result_root="${TARGET_ROOT}/current"
     host_uid="$(id -u)"
     host_gid="$(id -g)"
-    trap cleanup_host_build EXIT
-    emit_recipe_environment >"${build_root}/recipe.environment"
 
     docker pull --platform="${TARGET_PLATFORM}" "${BUILDER_IMAGE}"
-    docker run --rm --platform="${TARGET_PLATFORM}" \
-        --mount "type=bind,src=${REPOSITORY_ROOT},dst=/repo,readonly" \
-        --mount "type=bind,src=${build_root},dst=/build" \
-        --mount "type=bind,src=${output_root},dst=/output" \
-        --workdir /build \
-        --env ORNA_EMBEDDED_CONTAINER=1 \
-        --env ORNA_HOST_GID="${host_gid}" \
-        --env ORNA_HOST_UID="${host_uid}" \
-        "${BUILDER_IMAGE}" \
-        /repo/packaging/postgresql/build-embedded.sh --container-build
+    run_container_build "${first_build_root}" "${first_output_root}"
+    run_container_build "${second_build_root}" "${second_output_root}"
+
+    compare_exact "unpublished native entry probe" \
+        "${first_build_root}/${UNPUBLISHED_PROBE_PATH}" "${second_build_root}/${UNPUBLISHED_PROBE_PATH}"
+    for deterministic_output in "${DETERMINISTIC_OUTPUTS[@]}"; do
+        compare_exact "${deterministic_output}" \
+            "${first_output_root}/${deterministic_output}" "${second_output_root}/${deterministic_output}"
+    done
+    compare_exact "published frozen recipe input" \
+        "${frozen_recipe_path}" "${first_output_root}/${FROZEN_INPUTS_DIRECTORY}/${RECIPE_PATH##*/}"
+    compare_exact "published frozen patch input" \
+        "${frozen_patch_path}" "${first_output_root}/${FROZEN_INPUTS_DIRECTORY}/${PATCH_PATH##*/}"
+    compare_exact "published frozen script input" \
+        "${frozen_script_path}" "${first_output_root}/${FROZEN_INPUTS_DIRECTORY}/${SCRIPT_PATH##*/}"
+    for frozen_input in "${RECIPE_PATH##*/}" "${PATCH_PATH##*/}" "${SCRIPT_PATH##*/}"; do
+        compare_exact "published frozen ${frozen_input}" \
+            "${first_output_root}/${FROZEN_INPUTS_DIRECTORY}/${frozen_input}" \
+            "${second_output_root}/${FROZEN_INPUTS_DIRECTORY}/${frozen_input}"
+    done
+    [[ -s "${first_output_root}/${TRACE_OUTPUT_PATH}" && -s "${second_output_root}/${TRACE_OUTPUT_PATH}" ]] \
+        || fail "each isolated build must retain trace evidence"
 
     rm -rf "${result_root}"
-    mv "${output_root}" "${result_root}"
-    output_root=""
-    cleanup_host_build
-    trap - EXIT
+    mv "${first_output_root}" "${result_root}"
+    first_output_root=""
     log "wrote embedded entry probe evidence to ${result_root}"
 }
 
