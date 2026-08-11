@@ -7,7 +7,6 @@ readonly SCRIPT_PATH="${BASH_SOURCE[0]}"
 readonly SCRIPT_DIRECTORY="$(cd "$(dirname "${SCRIPT_PATH}")" && pwd -P)"
 readonly REPOSITORY_ROOT="$(cd "${SCRIPT_DIRECTORY}/../.." && pwd -P)"
 readonly RECIPE_PATH="${SCRIPT_DIRECTORY}/embedded-build.toml"
-readonly PATCH_PATH="${SCRIPT_DIRECTORY}/embedded-postgresql-18.4.patch"
 
 declare -a EMBEDDED_BUILD_CLEANUP_PATHS=()
 EMBEDDED_BUILD_PUBLICATION_IN_PROGRESS=0
@@ -45,22 +44,22 @@ cleanup_embedded_build_paths() {
 
 emit_recipe_environment() {
     local recipe_path="${1:-${RECIPE_PATH}}"
-    local patch_path="${2:-${PATCH_PATH}}"
 
-    python3 - "${recipe_path}" "${patch_path}" <<'PY_RECIPE'
+    python3 - "${recipe_path}" <<'PY_RECIPE'
 import hashlib
 import pathlib
+import re
+import stat
 import sys
 import tomllib
 
 recipe_path = pathlib.Path(sys.argv[1])
-patch_path = pathlib.Path(sys.argv[2])
 with recipe_path.open("rb") as recipe_file:
     recipe = tomllib.load(recipe_file)
 
 expected_top_level = {
     "format", "identity", "target", "platform", "source_date_epoch",
-    "builder_image", "snapshot_timestamp", "patch", "patch_sha256",
+    "builder_image", "snapshot_timestamp", "patches",
     "postgresql", "postgresql_license", "zlib", "build", "static_archive",
     "initializer_archive", "lifecycle", "sql_guard", "resources", "output",
     "proof", "apt",
@@ -83,16 +82,84 @@ if recipe["builder_image"] != accepted_builder_image:
     raise SystemExit("embedded recipe builder image is not accepted")
 if recipe["snapshot_timestamp"] != "20251229T000000Z":
     raise SystemExit("embedded recipe snapshot timestamp is not accepted")
-if recipe["patch"] != patch_path.name:
-    raise SystemExit("embedded recipe patch name is not accepted")
-expected_patch_sha256 = recipe["patch_sha256"]
-if len(expected_patch_sha256) != 64 or any(
-    character not in "0123456789abcdef" for character in expected_patch_sha256
-):
-    raise SystemExit("embedded recipe patch digest is not a lowercase SHA-256 digest")
-actual_patch_sha256 = hashlib.sha256(patch_path.read_bytes()).hexdigest()
-if actual_patch_sha256 != expected_patch_sha256:
-    raise SystemExit("embedded PostgreSQL patch digest does not match the recipe")
+
+patches = recipe["patches"]
+if not isinstance(patches, list) or not patches:
+    raise SystemExit("embedded recipe patch series must be a non-empty ordered list")
+
+recipe_directory = recipe_path.parent
+casefold_paths = set()
+patch_root_relative = None
+for patch in patches:
+    if not isinstance(patch, dict) or set(patch) != {"path", "sha256"}:
+        raise SystemExit("embedded recipe patch record keys are not accepted")
+    relative_path = patch["path"]
+    expected_sha256 = patch["sha256"]
+    if not isinstance(relative_path, str) or not isinstance(expected_sha256, str):
+        raise SystemExit("embedded recipe patch record values are not strings")
+    if len(expected_sha256) != 64 or any(
+        character not in "0123456789abcdef" for character in expected_sha256
+    ):
+        raise SystemExit("embedded recipe patch digest is not a lowercase SHA-256 digest")
+    if "\\" in relative_path:
+        raise SystemExit("embedded recipe patch path contains a backslash")
+    pure_path = pathlib.PurePosixPath(relative_path)
+    if (
+        pure_path.is_absolute()
+        or pure_path.as_posix() != relative_path
+        or any(part in {"", ".", ".."} for part in pure_path.parts)
+    ):
+        raise SystemExit("embedded recipe patch path is not a normal relative path")
+    if pure_path.parent == pathlib.PurePosixPath("."):
+        raise SystemExit("embedded recipe patch path has no series directory")
+    if any(
+        re.fullmatch(r"[a-z0-9][a-z0-9.-]*", part) is None
+        for part in pure_path.parts[:-1]
+    ):
+        raise SystemExit("embedded recipe patch directory name is not accepted")
+    if patch_root_relative is None:
+        patch_root_relative = pure_path.parent
+    elif pure_path.parent != patch_root_relative:
+        raise SystemExit("embedded recipe patch path is outside the accepted series directory")
+    match = re.fullmatch(r"([0-9]{4})-[a-z0-9][a-z0-9-]*\.patch", pure_path.name)
+    if match is None:
+        raise SystemExit("embedded recipe patch filename is not accepted")
+    casefold_path = relative_path.casefold()
+    if casefold_path in casefold_paths:
+        raise SystemExit("embedded recipe patch series repeats a path")
+    casefold_paths.add(casefold_path)
+    patch_path = recipe_directory.joinpath(*pure_path.parts)
+    cursor = recipe_directory
+    for part in pure_path.parts:
+        cursor /= part
+        if cursor.is_symlink():
+            raise SystemExit("embedded recipe patch path contains a symbolic link")
+    try:
+        patch_stat = patch_path.stat()
+    except FileNotFoundError as error:
+        raise SystemExit("embedded recipe patch file is absent") from error
+    if not stat.S_ISREG(patch_stat.st_mode):
+        raise SystemExit("embedded recipe patch path is not a regular file")
+    if stat.S_IMODE(patch_stat.st_mode) != 0o644:
+        raise SystemExit("embedded recipe patch mode must be 0644")
+    actual_patch_sha256 = hashlib.sha256(patch_path.read_bytes()).hexdigest()
+    if actual_patch_sha256 != expected_sha256:
+        raise SystemExit("embedded PostgreSQL patch digest does not match the recipe")
+
+patch_root = recipe_directory.joinpath(*patch_root_relative.parts)
+if patch_root.is_symlink() or not patch_root.is_dir():
+    raise SystemExit("embedded recipe patch series directory is not a directory")
+expected_patch_inventory = sorted(patch["path"] for patch in patches)
+actual_patch_inventory = []
+for path in patch_root.rglob("*.patch"):
+    if path.is_symlink() or not path.is_file():
+        raise SystemExit("embedded recipe patch series contains a non-regular patch file")
+    actual_patch_inventory.append(
+        f"{patch_root_relative.as_posix()}/{path.relative_to(patch_root).as_posix()}"
+    )
+actual_patch_inventory.sort()
+if actual_patch_inventory != expected_patch_inventory:
+    raise SystemExit("embedded recipe patch series inventory is not accepted")
 
 postgresql = recipe["postgresql"]
 expected_postgresql = {"version", "url", "sha256", "configure_flags"}
@@ -328,7 +395,6 @@ expected_proof = {
         "POSTGRESQL-LICENSE",
         "inputs/embedded-build.toml",
         "inputs/build-embedded.sh",
-        "inputs/embedded-postgresql-18.4.patch",
     ],
 }
 if proof != expected_proof:
@@ -388,7 +454,6 @@ emit("ZLIB_URL", zlib["url"])
 emit("ZLIB_SHA256", zlib["sha256"])
 emit("ZLIB_PREFIX", zlib["build_prefix"])
 emit("BUILD_JOBS", build["jobs"])
-emit("PATCH_SHA256", expected_patch_sha256)
 emit("STATIC_ARCHIVE_NAME", static_archive["path"])
 emit("STATIC_ARCHIVE_MEMBER", static_archive["member"])
 emit("STATIC_ENTRY_SYMBOL", static_archive["entry_symbol"])
@@ -425,6 +490,8 @@ emit_array(
     (f"{name}={apt['packages'][name]}" for name in sorted(apt["packages"])),
 )
 emit_array("DETERMINISTIC_OUTPUTS", proof["deterministic_outputs"])
+emit_array("PATCH_PATHS", (patch["path"] for patch in patches))
+emit_array("PATCH_SHA256S", (patch["sha256"] for patch in patches))
 emit_array("SQL_GUARD_MESSAGES", sql_guard["messages"])
 emit_array(
     "INITIALIZER_ALLOWED_UNDEFINED_BRIDGE_SYMBOLS",
@@ -434,11 +501,10 @@ PY_RECIPE
 }
 
 load_recipe() {
-    local patch_path="${2:-${PATCH_PATH}}"
     local recipe_path="${1:-${RECIPE_PATH}}"
     local recipe_environment
 
-    recipe_environment="$(emit_recipe_environment "${recipe_path}" "${patch_path}")" \
+    recipe_environment="$(emit_recipe_environment "${recipe_path}")" \
         || fail "embedded recipe validation failed"
     eval "${recipe_environment}"
 }
@@ -450,6 +516,61 @@ verify_sha256() {
 
     actual="$(sha256sum "${path}" | awk '{print $1}')"
     [[ "${actual}" == "${expected}" ]]
+}
+
+patch_series_path() {
+    local recipe_path="$1"
+    local relative_path="$2"
+
+    printf '%s/%s\n' "$(dirname "${recipe_path}")" "${relative_path}"
+}
+
+verify_patch_series() {
+    local recipe_path="$1"
+    local patch_index
+    local patch_path
+
+    [[ "${#PATCH_PATHS[@]}" -gt 0 \
+        && "${#PATCH_PATHS[@]}" == "${#PATCH_SHA256S[@]}" ]] || return 1
+    for patch_index in "${!PATCH_PATHS[@]}"; do
+        patch_path="$(patch_series_path "${recipe_path}" "${PATCH_PATHS[patch_index]}")"
+        [[ -f "${patch_path}" && ! -L "${patch_path}" ]] || return 1
+        [[ "$(stat -c '%a' "${patch_path}")" == 644 ]] || return 1
+        verify_sha256 "${PATCH_SHA256S[patch_index]}" "${patch_path}" || return 1
+    done
+}
+
+freeze_patch_series() {
+    local recipe_path="$1"
+    local frozen_root="$2"
+    local destination_path
+    local patch_index
+    local source_path
+
+    for patch_index in "${!PATCH_PATHS[@]}"; do
+        source_path="$(patch_series_path "${recipe_path}" "${PATCH_PATHS[patch_index]}")"
+        destination_path="${frozen_root}/${PATCH_PATHS[patch_index]}"
+        mkdir -p "$(dirname "${destination_path}")" || return 1
+        install -m 0644 "${source_path}" "${destination_path}" || return 1
+        [[ "$(stat -c '%a' "${destination_path}")" == 644 ]] || return 1
+        verify_sha256 "${PATCH_SHA256S[patch_index]}" "${destination_path}" || return 1
+    done
+}
+
+apply_patch_series() {
+    local recipe_path="$1"
+    local source_root="$2"
+    local patch_index
+    local patch_path
+
+    verify_patch_series "${recipe_path}" || return 1
+    for patch_index in "${!PATCH_PATHS[@]}"; do
+        patch_path="$(patch_series_path "${recipe_path}" "${PATCH_PATHS[patch_index]}")"
+        patch --batch --forward --fuzz=0 -p1 --dry-run \
+            --directory="${source_root}" --input="${patch_path}" || return 1
+        patch --batch --forward --fuzz=0 -p1 \
+            --directory="${source_root}" --input="${patch_path}" || return 1
+    done
 }
 
 count_defined_symbol() {
@@ -817,6 +938,7 @@ container_build() {
     local unexpected_executable
     local unexpected_link_or_shared_object
     local unexpected_published_entry
+    local patch_path
     local symbol
 
     postgres_executable_pattern='execve(at)?\([^,]*"([^"/]*/)*'
@@ -845,7 +967,7 @@ container_build() {
     support_bundle_path="/build/${SUPPORT_BUNDLE_PATH}"
     support_manifest_path="/build/${SUPPORT_MANIFEST_PATH}"
     [[ "$(pwd -P)" == "/build" ]] || fail "container build must use /build"
-    [[ -r "${RECIPE_PATH}" && -r "${PATCH_PATH}" ]] || fail "container source inputs are absent"
+    [[ -r "${RECIPE_PATH}" ]] || fail "container recipe input is absent"
     mkdir -p /build/tmp
 
     find /etc/apt/sources.list.d -mindepth 1 -maxdepth 1 -type f -delete
@@ -853,6 +975,8 @@ container_build() {
     apt-get update -o Acquire::Check-Valid-Until=false
     DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends "${APT_PACKAGES[@]}"
     load_recipe
+    verify_patch_series "${RECIPE_PATH}" \
+        || fail "PostgreSQL patch series does not match the embedded recipe"
 
     env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin "${RECIPE_BUILD_ENVIRONMENT[@]}" \
         curl --fail --location --proto '=https' --tlsv1.2 --output "${source_archive}" "${POSTGRESQL_URL}"
@@ -862,9 +986,6 @@ container_build() {
         curl --fail --location --proto '=https' --tlsv1.2 --output "${zlib_archive}" "${ZLIB_URL}"
     verify_sha256 "${ZLIB_SHA256}" "${zlib_archive}" \
         || fail "zlib source digest does not match embedded recipe"
-    verify_sha256 "${PATCH_SHA256}" "${PATCH_PATH}" \
-        || fail "PostgreSQL patch digest does not match embedded recipe"
-
     mkdir -p "${source_root}" "${build_root}" "${zlib_source}"
     tar --extract --gzip --file="${zlib_archive}" --strip-components=1 --directory="${zlib_source}"
     (
@@ -886,8 +1007,8 @@ container_build() {
         || fail "PostgreSQL licence file is absent from the accepted source archive"
     verify_sha256 "${POSTGRESQL_LICENSE_SHA256}" "${postgresql_license_path}" \
         || fail "PostgreSQL licence digest does not match embedded recipe"
-    patch --batch --forward --fuzz=0 --strip=1 \
-        --directory="${source_root}" --input="${PATCH_PATH}"
+    apply_patch_series "${RECIPE_PATH}" "${source_root}" \
+        || fail "PostgreSQL patch series could not apply to its exact predecessor"
 
     (
         cd "${build_root}"
@@ -1081,7 +1202,8 @@ PY_RENAME_MAP
     install -m 0644 "${postgresql_license_path}" "${publication_root}/${POSTGRESQL_LICENSE_OUTPUT_PATH}"
     install -m 0644 "${RECIPE_PATH}" "${publication_root}/${FROZEN_INPUTS_DIRECTORY}/${RECIPE_PATH##*/}"
     install -m 0644 "${SCRIPT_PATH}" "${publication_root}/${FROZEN_INPUTS_DIRECTORY}/${SCRIPT_PATH##*/}"
-    install -m 0644 "${PATCH_PATH}" "${publication_root}/${FROZEN_INPUTS_DIRECTORY}/${PATCH_PATH##*/}"
+    freeze_patch_series "${RECIPE_PATH}" "${publication_root}/${FROZEN_INPUTS_DIRECTORY}" \
+        || fail "could not freeze the verified PostgreSQL patch series"
     verify_sha256 "${POSTGRESQL_LICENSE_SHA256}" "${publication_root}/${POSTGRESQL_LICENSE_OUTPUT_PATH}" \
         || fail "staged PostgreSQL licence digest does not match embedded recipe"
     verify_sha256 "${SUPPORT_BUNDLE_SHA256}" "${publication_root}/${SUPPORT_BUNDLE_PATH}" \
@@ -1089,7 +1211,7 @@ PY_RENAME_MAP
     verify_sha256 "${SUPPORT_MANIFEST_SHA256}" "${publication_root}/${SUPPORT_MANIFEST_PATH}" \
         || fail "staged support manifest digest does not match embedded recipe"
 
-    python3 - "${RECIPE_PATH}" "${PATCH_PATH}" "${SCRIPT_PATH}" "${probe_path}" \
+    python3 - "${RECIPE_PATH}" "${SCRIPT_PATH}" "${probe_path}" \
         "${FROZEN_INPUTS_DIRECTORY}" "${publication_root}" <<'PY_MANIFEST'
 import hashlib
 import json
@@ -1098,11 +1220,10 @@ import sys
 import tomllib
 
 recipe_path = pathlib.Path(sys.argv[1])
-patch_path = pathlib.Path(sys.argv[2])
-script_path = pathlib.Path(sys.argv[3])
-probe_path = pathlib.Path(sys.argv[4])
-frozen_inputs_directory = sys.argv[5]
-output_path = pathlib.Path(sys.argv[6])
+script_path = pathlib.Path(sys.argv[2])
+probe_path = pathlib.Path(sys.argv[3])
+frozen_inputs_directory = sys.argv[4]
+output_path = pathlib.Path(sys.argv[5])
 with recipe_path.open("rb") as recipe_file:
     recipe = tomllib.load(recipe_file)
 
@@ -1113,6 +1234,16 @@ def digest(path):
 
 resource_manifest_path = output_path / recipe["resources"]["manifest_path"]
 resource_manifest = json.loads(resource_manifest_path.read_text(encoding="utf-8"))
+patches = []
+for patch in recipe["patches"]:
+    frozen_path = output_path / frozen_inputs_directory / patch["path"]
+    frozen_sha256 = digest(frozen_path)
+    if frozen_sha256 != patch["sha256"]:
+        raise SystemExit("frozen PostgreSQL patch digest does not match the recipe")
+    patches.append({
+        "path": f"{frozen_inputs_directory}/{patch['path']}",
+        "sha256": frozen_sha256,
+    })
 document = {
     "format": 1,
     "identity": recipe["identity"],
@@ -1125,10 +1256,7 @@ document = {
             "path": f"{frozen_inputs_directory}/{script_path.name}",
             "sha256": digest(output_path / frozen_inputs_directory / script_path.name),
         },
-        "patch": {
-            "path": f"{frozen_inputs_directory}/{patch_path.name}",
-            "sha256": digest(output_path / frozen_inputs_directory / patch_path.name),
-        },
+        "patches": patches,
         "facts": recipe,
     },
     "static_archives": {
@@ -1201,7 +1329,9 @@ PY_MANIFEST
         printf '%s\n' "${TRACE_OUTPUT_PATH}"
         printf '%s/%s\n' "${FROZEN_INPUTS_DIRECTORY}" "${RECIPE_PATH##*/}"
         printf '%s/%s\n' "${FROZEN_INPUTS_DIRECTORY}" "${SCRIPT_PATH##*/}"
-        printf '%s/%s\n' "${FROZEN_INPUTS_DIRECTORY}" "${PATCH_PATH##*/}"
+        for patch_path in "${PATCH_PATHS[@]}"; do
+            printf '%s/%s\n' "${FROZEN_INPUTS_DIRECTORY}" "${patch_path}"
+        done
     } | LC_ALL=C sort -u >"${expected_output_files}" \
         || fail "could not write the expected embedded output inventory"
     find "${publication_root}" -type f -printf '%P\n' \
@@ -1239,11 +1369,11 @@ host_build() {
     local output_name
     local output_parent
     local output_root
+    local patch_index
     local previous_output_root=""
     local result_root
     local second_build_root=""
     local second_output_root=""
-    local frozen_patch_path=""
     local frozen_recipe_path=""
     local frozen_script_path=""
     local existing_output_entry=""
@@ -1252,7 +1382,7 @@ host_build() {
         local build_root="$1"
         local output_root="$2"
 
-        emit_recipe_environment "${frozen_recipe_path}" "${frozen_patch_path}" >"${build_root}/recipe.environment"
+        emit_recipe_environment "${frozen_recipe_path}" >"${build_root}/recipe.environment"
         docker run --rm --platform="${TARGET_PLATFORM}" \
             --mount "type=bind,src=${frozen_inputs_root}/frozen,dst=/frozen,readonly" \
             --mount "type=bind,src=${build_root},dst=/build" \
@@ -1297,6 +1427,7 @@ host_build() {
     output_parent="$(cd "${output_parent}" && pwd -P)"
     output_root="${output_parent}/${output_name}"
 
+    load_recipe "${RECIPE_PATH}"
     frozen_inputs_root="$(mktemp -d "${output_parent}/.${output_name}.build.XXXXXXXX")"
     previous_output_root="${frozen_inputs_root}/previous-output"
     first_build_root="${frozen_inputs_root}/build.first"
@@ -1308,13 +1439,15 @@ host_build() {
     EMBEDDED_BUILD_CLEANUP_PATHS+=("${frozen_inputs_root}")
     trap cleanup_embedded_build_paths EXIT
     frozen_recipe_path="${frozen_inputs_root}/frozen/${RECIPE_PATH##*/}"
-    frozen_patch_path="${frozen_inputs_root}/frozen/${PATCH_PATH##*/}"
     frozen_script_path="${frozen_inputs_root}/frozen/${SCRIPT_PATH##*/}"
     mkdir -p "${frozen_inputs_root}/frozen"
     install -m 0644 "${RECIPE_PATH}" "${frozen_recipe_path}"
-    install -m 0644 "${PATCH_PATH}" "${frozen_patch_path}"
     install -m 0644 "${SCRIPT_PATH}" "${frozen_script_path}"
-    load_recipe "${frozen_recipe_path}" "${frozen_patch_path}"
+    freeze_patch_series "${RECIPE_PATH}" "${frozen_inputs_root}/frozen" \
+        || fail "could not freeze the PostgreSQL patch series"
+    load_recipe "${frozen_recipe_path}"
+    verify_patch_series "${frozen_recipe_path}" \
+        || fail "frozen PostgreSQL patch series does not match the recipe"
     [[ "${output_root}" != "${REPOSITORY_ROOT}/${FORBIDDEN_IMPLICIT_OUTPUT_ROOT}" ]] \
         || fail "embedded build cannot publish to the obsolete implicit output root"
     if [[ -e "${output_root}" ]]; then
@@ -1343,8 +1476,14 @@ host_build() {
     done
     compare_exact "published frozen recipe input" \
         "${frozen_recipe_path}" "${first_output_root}/${FROZEN_INPUTS_DIRECTORY}/${RECIPE_PATH##*/}"
-    compare_exact "published frozen patch input" \
-        "${frozen_patch_path}" "${first_output_root}/${FROZEN_INPUTS_DIRECTORY}/${PATCH_PATH##*/}"
+    for patch_index in "${!PATCH_PATHS[@]}"; do
+        compare_exact "published frozen patch input ${PATCH_PATHS[patch_index]}" \
+            "$(patch_series_path "${frozen_recipe_path}" "${PATCH_PATHS[patch_index]}")" \
+            "${first_output_root}/${FROZEN_INPUTS_DIRECTORY}/${PATCH_PATHS[patch_index]}"
+        compare_exact "two-build frozen patch input ${PATCH_PATHS[patch_index]}" \
+            "${first_output_root}/${FROZEN_INPUTS_DIRECTORY}/${PATCH_PATHS[patch_index]}" \
+            "${second_output_root}/${FROZEN_INPUTS_DIRECTORY}/${PATCH_PATHS[patch_index]}"
+    done
     compare_exact "published frozen script input" \
         "${frozen_script_path}" "${first_output_root}/${FROZEN_INPUTS_DIRECTORY}/${SCRIPT_PATH##*/}"
     [[ -s "${first_output_root}/${TRACE_OUTPUT_PATH}" && -s "${second_output_root}/${TRACE_OUTPUT_PATH}" ]] \

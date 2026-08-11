@@ -5,8 +5,38 @@ platform = "linux/amd64"
 source_date_epoch = 1778528675
 builder_image = "docker.io/library/debian@sha256:a1363ada3b45cb3ebc74c78943558f8b0c2b59aaa194d8224e1b02cfd5d78583"
 snapshot_timestamp = "20251229T000000Z"
-patch = "embedded-postgresql-18.4.patch"
-patch_sha256 = "c1c4191e1405cb9f108d9371686e866fc36f9d353393eeb28639f07f85a6a562"
+
+[[patches]]
+path = "embedded-postgresql-18.4/0001-linked-backend-entry-and-archive.patch"
+sha256 = "64a6a6136365f48c5c3de05da0dc003f3bd4b7d35e7b44ec33c75bba0e832fd2"
+
+[[patches]]
+path = "embedded-postgresql-18.4/0002-embedded-runtime-capabilities-and-seccomp.patch"
+sha256 = "ab783a60d2a6f2bc3d5fb4be514558943ce66c91fc3006dadb40c3a6506d2a7a"
+
+[[patches]]
+path = "embedded-postgresql-18.4/0003-fixed-postmaster-support-paths.patch"
+sha256 = "138ccb9a37718abf701af8759431830bcd33e1fac6051d7d70d9fa9ea1cbe966"
+
+[[patches]]
+path = "embedded-postgresql-18.4/0004-executable-sql-and-loader-guard.patch"
+sha256 = "da1432438acdaf2226e04312ffde7521b5a0ea2b8c9274f86851ebe11dcf938b"
+
+[[patches]]
+path = "embedded-postgresql-18.4/0005-initdb-direct-check-and-bootstrap.patch"
+sha256 = "0a8d975ffcdef4b417e5471dcec655a642e30d7576f15f24ced2d48c477a2c9c"
+
+[[patches]]
+path = "embedded-postgresql-18.4/0006-fixed-bootstrap-collation-and-no-plpgsql.patch"
+sha256 = "4e610ac47a73998a36c22086d79176a657020dc38b570eec1deff5f4b8d63d53"
+
+[[patches]]
+path = "embedded-postgresql-18.4/0007-initdb-fixed-support-paths.patch"
+sha256 = "ea5c27cf2c549447a2ecb811c1f4ed5dc5d9d6af3c3a94a556cca9c6625f05a8"
+
+[[patches]]
+path = "embedded-postgresql-18.4/0008-initdb-single-user-entry-and-archive.patch"
+sha256 = "425713cf275b52ee1cceb4fbf10bcae166a59f39806386dcc57dc738c681afbd"
 
 [postgresql]
 version = "18.4"
@@ -221,7 +251,6 @@ deterministic_outputs = [
     "POSTGRESQL-LICENSE",
     "inputs/embedded-build.toml",
     "inputs/build-embedded.sh",
-    "inputs/embedded-postgresql-18.4.patch",
 ]
 
 [apt]
