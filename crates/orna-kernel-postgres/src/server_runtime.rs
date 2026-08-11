@@ -1,6 +1,7 @@
 //! Shared PostgreSQL SERVER runtime contracts.
 
 use orna_core::{
+    TypeId,
     catalogue::{FunctionDefinition, FunctionReturn},
     revision::{
         ActiveDatabaseRevision, DefinitionReference, DefinitionReferenceKind,
@@ -16,6 +17,33 @@ use crate::{
 
 const STATEMENT_TIMEOUT: &str = "SET LOCAL statement_timeout = '30s'";
 const LOCK_TIMEOUT: &str = "SET LOCAL lock_timeout = '5s'";
+
+/// The closed current runtime classification of one resolved type.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ResolvedRuntimeType {
+    LegacyScalar(StandardScalar),
+    Reference(TypeId),
+    Unsupported,
+}
+
+impl ResolvedRuntimeType {
+    /// Classifies one resolved type without assigning scalar or value identity.
+    pub(crate) fn from_resolved_type(resolved_type: ResolvedType) -> Self {
+        if let Some(scalar) = resolved_type.legacy_scalar() {
+            return Self::LegacyScalar(scalar);
+        }
+        if let Some(target) = resolved_type.reference_target() {
+            return Self::Reference(target);
+        }
+        if resolved_type.named_type().is_some() {
+            return Self::Unsupported;
+        }
+        if resolved_type.value_type().is_some() {
+            return Self::Unsupported;
+        }
+        Self::Unsupported
+    }
+}
 
 pub(crate) async fn configure_and_recover(
     transaction: &Transaction<'_>,
@@ -33,15 +61,15 @@ pub(crate) async fn configure_and_recover(
 }
 
 pub(crate) fn postgres_type(resolved_type: ResolvedType) -> Option<Type> {
-    match resolved_type {
-        ResolvedType::Scalar(StandardScalar::Boolean) => Some(Type::BOOL),
-        ResolvedType::Scalar(StandardScalar::Integer) => Some(Type::INT4),
-        ResolvedType::Scalar(StandardScalar::BigInt) => Some(Type::INT8),
-        ResolvedType::Scalar(StandardScalar::Float) => Some(Type::FLOAT8),
-        ResolvedType::Scalar(StandardScalar::CharacterLargeObject) => Some(Type::TEXT),
-        ResolvedType::Scalar(StandardScalar::BinaryLargeObject)
-        | ResolvedType::Reference { .. } => Some(Type::BYTEA),
-        ResolvedType::Scalar(_) | ResolvedType::Named(_) => None,
+    match ResolvedRuntimeType::from_resolved_type(resolved_type) {
+        ResolvedRuntimeType::LegacyScalar(StandardScalar::Boolean) => Some(Type::BOOL),
+        ResolvedRuntimeType::LegacyScalar(StandardScalar::Integer) => Some(Type::INT4),
+        ResolvedRuntimeType::LegacyScalar(StandardScalar::BigInt) => Some(Type::INT8),
+        ResolvedRuntimeType::LegacyScalar(StandardScalar::Float) => Some(Type::FLOAT8),
+        ResolvedRuntimeType::LegacyScalar(StandardScalar::CharacterLargeObject) => Some(Type::TEXT),
+        ResolvedRuntimeType::LegacyScalar(StandardScalar::BinaryLargeObject)
+        | ResolvedRuntimeType::Reference(_) => Some(Type::BYTEA),
+        ResolvedRuntimeType::LegacyScalar(_) | ResolvedRuntimeType::Unsupported => None,
     }
 }
 
@@ -104,7 +132,9 @@ fn add_signature_reference(
     expected: &mut Vec<ExpectedDefinitionReference>,
     resolved_type: ResolvedType,
 ) {
-    if let ResolvedType::Reference { target } = resolved_type {
+    if let ResolvedRuntimeType::Reference(target) =
+        ResolvedRuntimeType::from_resolved_type(resolved_type)
+    {
         expected.push(ExpectedDefinitionReference::new(
             DefinitionReferenceKind::ObjectReference,
             DefinitionReferenceTarget::ObjectType(target),
@@ -142,6 +172,49 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn resolved_runtime_type_classifies_every_current_shape_fail_closed() {
+        let scalar_cases = [
+            (StandardScalar::Boolean, Some(Type::BOOL)),
+            (StandardScalar::Integer, Some(Type::INT4)),
+            (StandardScalar::BigInt, Some(Type::INT8)),
+            (StandardScalar::Float, Some(Type::FLOAT8)),
+            (StandardScalar::Decimal, None),
+            (StandardScalar::CharacterLargeObject, Some(Type::TEXT)),
+            (StandardScalar::BinaryLargeObject, Some(Type::BYTEA)),
+            (StandardScalar::Uuid, None),
+            (StandardScalar::Date, None),
+            (StandardScalar::Time, None),
+            (StandardScalar::Timestamp, None),
+            (StandardScalar::Duration, None),
+            (StandardScalar::Void, None),
+        ];
+        assert_eq!(scalar_cases.len(), StandardScalar::ALL.len());
+        for (scalar, postgres) in scalar_cases {
+            let resolved = ResolvedType::scalar(scalar);
+            assert_eq!(
+                ResolvedRuntimeType::from_resolved_type(resolved),
+                ResolvedRuntimeType::LegacyScalar(scalar)
+            );
+            assert_eq!(postgres_type(resolved), postgres);
+        }
+
+        let named = ResolvedType::named(TypeId::from_bytes([0x51; 16]));
+        assert_eq!(
+            ResolvedRuntimeType::from_resolved_type(named),
+            ResolvedRuntimeType::Unsupported
+        );
+        assert_eq!(postgres_type(named), None);
+
+        let target = TypeId::from_bytes([0x52; 16]);
+        let reference = ResolvedType::reference(target);
+        assert_eq!(
+            ResolvedRuntimeType::from_resolved_type(reference),
+            ResolvedRuntimeType::Reference(target)
+        );
+        assert_eq!(postgres_type(reference), Some(Type::BYTEA));
+    }
 
     #[test]
     fn postgres_types_cover_the_exact_runtime_subset() {
