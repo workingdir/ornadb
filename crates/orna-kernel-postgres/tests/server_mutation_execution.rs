@@ -16,10 +16,15 @@ use std::{
     time::{Duration, Instant},
 };
 
-use orna_compiler::{check, prepare};
+use orna_compiler::{
+    StandardApplicationCheckContext, check, check_standard_application, prepare,
+    prepare_standard_application,
+};
 use orna_core::{
     FieldId, FunctionId, FunctionRevisionId, ObjectId, ParameterId, TypeId,
-    revision::{ActiveDatabaseRevision, DeployableRevision, RevisionPair},
+    revision::{
+        ActiveDatabaseRevision, DeployableRevision, RevisionPair, VerifiedStandardLibrarySnapshot,
+    },
     source::{SourceBundle, SourceUnit},
     types::ResolvedType,
     value::{FunctionArgument, RuntimeFloat, RuntimeValue},
@@ -259,6 +264,84 @@ async fn commits_exact_typed_rows_uses_private_ids_and_allocates_unique_ids() ->
         require(
             kernel.recover().await?.pair() == applied.pair(),
             "row execution changed the active revision pair",
+        )?;
+        require_no_session_leaks(&database).await
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn standard_value_mutations_preserve_legacy_bind_and_result_behaviour() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = hostile_kernel(&database)?;
+        kernel.bootstrap().await?;
+        let version_one = kernel.recover().await?;
+        let upgrade = orna_standard::prepare_standard_upgrade(&version_one)
+            .map_err(|error| failure(format!("standard upgrade preparation failed: {error}")))?;
+        let version_two = kernel.apply_standard_upgrade(&upgrade).await?;
+        let version_two_candidate =
+            standard_application_candidate(MUTATION_SOURCE, &version_two, &upgrade)?;
+        let applied = kernel.apply(&version_two_candidate).await?;
+
+        let fixture = Fixture::from_active(&applied)?;
+        require_standard_mutation_catalogue(
+            &applied,
+            fixture,
+            upgrade.verified_standard_snapshot(),
+        )?;
+        let owner = insert_owner(&kernel, fixture, "Ada").await?;
+        let original = ExactTask::new(owner.object());
+        let inserted = kernel
+            .execute_server_insert(fixture.create_task, &task_arguments(fixture, &original)?)
+            .await?;
+        require_insert_result(
+            &inserted,
+            applied.pair(),
+            fixture.create_task,
+            fixture.create_task_revision,
+            fixture.task,
+            "created_task",
+        )?;
+        require_task_row(&database, fixture, inserted.object(), &original).await?;
+
+        let changed = ExactTask {
+            active: true,
+            count: -73,
+            title: String::from("updated task"),
+            ..original.clone()
+        };
+        let updated = kernel
+            .execute_server_update(
+                fixture.update_task,
+                &update_arguments(fixture, inserted.object(), &changed)?,
+            )
+            .await?;
+        require_update_result(&updated, applied.pair(), fixture, inserted.object(), true)?;
+        require_task_row(&database, fixture, inserted.object(), &changed).await?;
+
+        let deleted = kernel
+            .execute_server_delete(
+                fixture.delete_task,
+                &delete_argument(
+                    fixture.delete_task_selector_parameter,
+                    fixture.task,
+                    inserted.object(),
+                )?,
+            )
+            .await?;
+        require_delete_result(
+            &deleted,
+            applied.pair(),
+            fixture.delete_task,
+            fixture.delete_task_revision,
+            fixture.task,
+            inserted.object(),
+            true,
+        )?;
+        require(
+            count_rows(&database, fixture.task).await? == 0,
+            "standard-backed DELETE left the inserted task row",
         )?;
         require_no_session_leaks(&database).await
     })
@@ -1785,6 +1868,281 @@ fn candidate(source: &str, active: &ActiveDatabaseRevision) -> TestResult<Deploy
         )));
     }
     Ok(prepare(&report, active.pair(), active)?)
+}
+
+fn standard_application_candidate(
+    source: &str,
+    active: &ActiveDatabaseRevision,
+    upgrade: &orna_standard::StandardUpgrade,
+) -> TestResult<DeployableRevision> {
+    let context = StandardApplicationCheckContext::try_new(
+        active.catalogue(),
+        upgrade.checked_standard_library(),
+    )
+    .map_err(|error| failure(format!("standard application context failed: {error}")))?;
+    let bundle = SourceBundle::new([SourceUnit::new("main.orna", source)])?;
+    let report = check_standard_application(&bundle, &context);
+    if !report.diagnostics().is_empty() {
+        return Err(failure(format!(
+            "standard application diagnostics prevented mutation preparation: {:?}",
+            report.diagnostics()
+        )));
+    }
+    Ok(prepare_standard_application(
+        &report,
+        active.pair(),
+        active,
+    )?)
+}
+
+fn require_standard_mutation_catalogue(
+    active: &ActiveDatabaseRevision,
+    fixture: Fixture,
+    standard: &VerifiedStandardLibrarySnapshot,
+) -> TestResult<()> {
+    let context_standard = active
+        .catalogue_hash_context()
+        .standard()
+        .ok_or_else(|| failure("standard-backed mutation active revision has no standard pin"))?;
+    require(
+        context_standard.revision() == standard.revision()
+            && context_standard.catalogue().revision() == standard.catalogue().revision()
+            && context_standard.digest_version() == standard.digest_version()
+            && context_standard.digest() == standard.digest(),
+        "standard-backed mutation selected an unexpected standard revision",
+    )?;
+    let text = orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID;
+    let boolean = orna_standard::BOOLEAN_TYPE_ID;
+    let integer = orna_standard::INTEGER_TYPE_ID;
+    let bigint = orna_standard::BIGINT_TYPE_ID;
+    let float = orna_standard::FLOAT_TYPE_ID;
+    let bytes = orna_standard::BINARY_LARGE_OBJECT_TYPE_ID;
+
+    for (object, field, expected, description) in [
+        (fixture.owner, fixture.owner_name, text, "tasks.owner.name"),
+        (fixture.task, fixture.active, boolean, "tasks.task.active"),
+        (fixture.task, fixture.count, integer, "tasks.task.count"),
+        (fixture.task, fixture.amount, bigint, "tasks.task.amount"),
+        (fixture.task, fixture.score, float, "tasks.task.score"),
+        (fixture.task, fixture.title, text, "tasks.task.title"),
+        (fixture.task, fixture.payload, bytes, "tasks.task.payload"),
+        (fixture.task, fixture.note, text, "tasks.task.note"),
+    ] {
+        require_value_type(
+            object_field_type(active, object, field)?,
+            expected,
+            standard,
+            description,
+        )?;
+    }
+    require_reference_type(
+        object_field_type(active, fixture.task, fixture.owner_field)?,
+        fixture.owner,
+        "tasks.task.owner",
+    )?;
+
+    for (function, parameter, expected, description) in [
+        (
+            fixture.create_owner,
+            fixture.owner_name_parameter,
+            text,
+            "tasks.create_owner.p_name",
+        ),
+        (
+            fixture.create_task,
+            fixture.task_active_parameter,
+            boolean,
+            "tasks.create_task.p_active",
+        ),
+        (
+            fixture.create_task,
+            fixture.task_count_parameter,
+            integer,
+            "tasks.create_task.p_count",
+        ),
+        (
+            fixture.create_task,
+            fixture.task_amount_parameter,
+            bigint,
+            "tasks.create_task.p_amount",
+        ),
+        (
+            fixture.create_task,
+            fixture.task_score_parameter,
+            float,
+            "tasks.create_task.p_score",
+        ),
+        (
+            fixture.create_task,
+            fixture.task_title_parameter,
+            text,
+            "tasks.create_task.p_title",
+        ),
+        (
+            fixture.create_task,
+            fixture.task_payload_parameter,
+            bytes,
+            "tasks.create_task.p_payload",
+        ),
+        (
+            fixture.update_task,
+            fixture.update_active_parameter,
+            boolean,
+            "tasks.update_task.p_active",
+        ),
+        (
+            fixture.update_task,
+            fixture.update_count_parameter,
+            integer,
+            "tasks.update_task.p_count",
+        ),
+        (
+            fixture.update_task,
+            fixture.update_title_parameter,
+            text,
+            "tasks.update_task.p_title",
+        ),
+    ] {
+        require_value_type(
+            parameter_type(active, function, parameter)?,
+            expected,
+            standard,
+            description,
+        )?;
+    }
+    for (function, parameter, target, description) in [
+        (
+            fixture.create_task,
+            fixture.task_owner_parameter,
+            fixture.owner,
+            "tasks.create_task.p_owner",
+        ),
+        (
+            fixture.update_task,
+            fixture.update_selector_parameter,
+            fixture.task,
+            "tasks.update_task.p_task",
+        ),
+        (
+            fixture.update_task,
+            fixture.update_owner_parameter,
+            fixture.owner,
+            "tasks.update_task.p_owner",
+        ),
+        (
+            fixture.delete_task,
+            fixture.delete_task_selector_parameter,
+            fixture.task,
+            "tasks.delete_task.p_task",
+        ),
+    ] {
+        require_reference_type(
+            parameter_type(active, function, parameter)?,
+            target,
+            description,
+        )?;
+    }
+    for (function, target, description) in [
+        (
+            fixture.create_owner,
+            fixture.owner,
+            "tasks.create_owner.created_owner",
+        ),
+        (
+            fixture.create_task,
+            fixture.task,
+            "tasks.create_task.created_task",
+        ),
+        (
+            fixture.update_task,
+            fixture.task,
+            "tasks.update_task.updated_task",
+        ),
+    ] {
+        require_reference_type(rows_return_type(active, function, 0)?, target, description)?;
+    }
+    require_value_type(
+        rows_return_type(active, fixture.delete_task, 0)?,
+        boolean,
+        standard,
+        "tasks.delete_task.deleted",
+    )?;
+    Ok(())
+}
+
+fn object_field_type(
+    active: &ActiveDatabaseRevision,
+    object_id: TypeId,
+    field_id: FieldId,
+) -> TestResult<ResolvedType> {
+    active
+        .catalogue()
+        .object_types()
+        .iter()
+        .find(|object| object.id() == object_id)
+        .and_then(|object| object.field_by_id(field_id))
+        .map(|field| field.resolved_type())
+        .ok_or_else(|| failure("standard mutation field is absent"))
+}
+
+fn parameter_type(
+    active: &ActiveDatabaseRevision,
+    function_id: FunctionId,
+    parameter_id: ParameterId,
+) -> TestResult<ResolvedType> {
+    active
+        .catalogue()
+        .functions()
+        .iter()
+        .find(|function| function.id() == function_id)
+        .and_then(|function| function.parameter_by_id(parameter_id))
+        .map(|parameter| parameter.resolved_type())
+        .ok_or_else(|| failure("standard mutation parameter is absent"))
+}
+
+fn rows_return_type(
+    active: &ActiveDatabaseRevision,
+    function_id: FunctionId,
+    ordinal: u32,
+) -> TestResult<ResolvedType> {
+    let function = active
+        .catalogue()
+        .functions()
+        .iter()
+        .find(|function| function.id() == function_id)
+        .ok_or_else(|| failure("standard mutation function is absent"))?;
+    let orna_core::catalogue::FunctionReturn::Rows(columns) = function.return_type() else {
+        return Err(failure("standard mutation function does not return ROWS"));
+    };
+    columns
+        .iter()
+        .find(|column| column.ordinal() == ordinal)
+        .map(|column| column.resolved_type())
+        .ok_or_else(|| failure("standard mutation ROWS column is absent"))
+}
+
+fn require_value_type(
+    resolved: ResolvedType,
+    expected: TypeId,
+    standard: &VerifiedStandardLibrarySnapshot,
+    description: &str,
+) -> TestResult<()> {
+    require(
+        resolved == ResolvedType::value(expected)
+            && standard.catalogue().value_type_by_id(expected).is_some(),
+        format!("{description} did not retain the exact standard Value identity"),
+    )
+}
+
+fn require_reference_type(
+    resolved: ResolvedType,
+    expected: TypeId,
+    description: &str,
+) -> TestResult<()> {
+    require(
+        resolved == ResolvedType::reference(expected),
+        format!("{description} did not retain the exact REF identity"),
+    )
 }
 
 async fn insert_owner(
