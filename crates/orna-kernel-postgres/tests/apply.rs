@@ -54,6 +54,12 @@ const BASIC_CHANGED_SOURCE: &str = "CREATE SCHEMA app;\n\
 
 const STANDARD_APPLICATION_SOURCE: &str = "CREATE SCHEMA app;\n";
 
+const STANDARD_UPGRADE_V1_SOURCE: &str = "CREATE SCHEMA app;\n\
+    CREATE TYPE app.item AS OBJECT (done BOOLEAN NOT NULL);\n\
+    CREATE SERVER FUNCTION app.read()\n\
+    RETURNS ROWS (visible BOOLEAN) TRANSACTION READ ONLY VOLATILITY STABLE\n\
+    AS SELECT item.done FROM app.item item;\n";
+
 const STANDARD_APPLICATION_SOURCE_EDIT: &str = "CREATE SCHEMA app;\n\
     CREATE TYPE app.item AS OBJECT (done BOOLEAN NOT NULL);\n\
     CREATE SERVER FUNCTION app.read()\n\
@@ -341,6 +347,36 @@ async fn applies_the_standard_upgrade_then_reuses_normal_version_two_apply() -> 
             "reconnect changed current or historical function revision facts",
         )?;
         require_recovered_snapshot(&second_candidate, &restarted)
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn prepares_standard_upgrade_from_postgres_recovered_version_one_members() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = kernel(&database)?;
+        kernel.bootstrap().await?;
+        let empty = kernel.recover().await?;
+        let version_one_candidate = candidate(STANDARD_UPGRADE_V1_SOURCE, &empty)?;
+        kernel.apply(&version_one_candidate).await?;
+
+        let recovered = named_kernel(&database, "orna-standard-preparation-recovery")?
+            .recover()
+            .await?;
+        let upgrade = orna_standard::prepare_standard_upgrade(&recovered)
+            .map_err(|error| failure(format!("standard upgrade preparation failed: {error}")))?;
+        require(
+            upgrade.application_revision().expected_base() == recovered.pair(),
+            "standard upgrade expected base did not use the PostgreSQL-recovered pair",
+        )?;
+
+        let upgraded = kernel.apply_standard_upgrade(&upgrade).await?;
+        require(
+            upgraded.catalogue_hash_context().version() == CatalogueHashVersion::Version2,
+            "standard upgrade did not install a version-two catalogue context",
+        )?;
+        require_standard_context(&upgraded, upgrade.verified_standard_snapshot())
     })
     .await
 }
