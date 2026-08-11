@@ -862,6 +862,17 @@ fn validate_resolved_type_slot(
     identity: DefinitionIdentity,
     resolved_type: ResolvedType,
 ) -> Result<(), CanonicalHashError> {
+    if let Some(scalar) = resolved_type.legacy_scalar() {
+        if context.version() == CatalogueHashVersion::Version2 {
+            return Err(
+                CanonicalHashError::LegacyScalarRequiresCatalogueHashVersionOne {
+                    identity,
+                    scalar,
+                },
+            );
+        }
+        return Ok(());
+    }
     let Some(value_type) = resolved_type.value_type() else {
         return Ok(());
     };
@@ -2421,14 +2432,68 @@ mod tests {
         (catalogue, origins)
     }
 
+    fn catalogue_with_standard_boolean_slots(base: &CatalogueSnapshot) -> CatalogueSnapshot {
+        let object = &base.object_types()[0];
+        let field = &object.fields()[0];
+        let object_type = ObjectTypeDefinition::new(
+            object.id(),
+            object.name().clone(),
+            vec![FieldDefinition::new(
+                field.id(),
+                field.name(),
+                field.ordinal(),
+                ResolvedType::value(standard_boolean_id()),
+                field.nullable(),
+                field.unique(),
+                field.default_expression(),
+                field.on_delete(),
+            )],
+        );
+        let prior_function = &base.functions()[0];
+        let parameter = &prior_function.parameters()[0];
+        let function = FunctionDefinition::new(
+            prior_function.id(),
+            prior_function.name().clone(),
+            prior_function.domain(),
+            vec![ParameterDefinition::new(
+                parameter.id(),
+                parameter.name(),
+                parameter.ordinal(),
+                ResolvedType::value(standard_boolean_id()),
+                parameter.default_expression(),
+            )],
+            prior_function.return_type().clone(),
+            prior_function.current_revision(),
+            prior_function.security(),
+            prior_function.transaction(),
+            prior_function.volatility(),
+        );
+        CatalogueSnapshot::new_with_functions_and_types(
+            base.revision(),
+            base.schemas().to_vec(),
+            vec![object_type],
+            base.value_types().to_vec(),
+            base.type_bindings().to_vec(),
+            vec![function],
+        )
+        .unwrap()
+    }
+
+    fn catalogue_with_application_types_version_two(
+        reverse: bool,
+    ) -> (CatalogueSnapshot, Vec<DefinitionOrigin>) {
+        let (catalogue, origins) = catalogue_with_application_types(reverse);
+        (catalogue_with_standard_boolean_slots(&catalogue), origins)
+    }
+
     fn catalogue_with_unaffected_function() -> (CatalogueSnapshot, Vec<DefinitionOrigin>) {
-        let (base, mut origins) = catalogue_with_application_types(false);
+        let (base, mut origins) = catalogue_with_application_types_version_two(false);
         let unaffected = FunctionDefinition::new(
             FunctionId::from_bytes(id::<40>()),
             QualifiedSemanticName::new(["crm", "health"]).unwrap(),
             FunctionDomain::Server,
             vec![],
-            FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Boolean)),
+            FunctionReturn::Single(ResolvedType::value(standard_boolean_id())),
             FunctionRevisionId::from_bytes(id::<41>()),
             FunctionSecurity::Invoker,
             None,
@@ -2779,7 +2844,7 @@ mod tests {
         ));
 
         let parameter_first = catalogue_with_resolved_slot_types(
-            ResolvedType::scalar(StandardScalar::Boolean),
+            ResolvedType::named(TypeId::from_bytes(id::<2>())),
             parameter_value,
             FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Boolean)),
             FunctionDomain::Client,
@@ -2802,8 +2867,8 @@ mod tests {
         ));
 
         let rows_return = catalogue_with_resolved_slot_types(
-            ResolvedType::scalar(StandardScalar::Boolean),
-            ResolvedType::scalar(StandardScalar::Boolean),
+            ResolvedType::named(TypeId::from_bytes(id::<2>())),
+            ResolvedType::named(TypeId::from_bytes(id::<2>())),
             FunctionReturn::Rows(vec![
                 FunctionReturnColumnDefinition::new(
                     "first",
@@ -2835,19 +2900,109 @@ mod tests {
                 && value_type == TypeId::from_bytes(id::<93>())
         ));
 
-        let (scalar_transition, scalar_origins) = catalogue_with_application_types(false);
-        let scalar_references = value_type_references(standard_boolean_id());
-        let scalar_revision = function_revision_v2(&scalar_transition, &scalar_references);
-        assert!(
+        let field_scalar_before_missing_parameter = catalogue_with_resolved_slot_types(
+            ResolvedType::scalar(StandardScalar::Boolean),
+            parameter_value,
+            FunctionReturn::Single(return_value),
+            FunctionDomain::Client,
+        );
+        assert_eq!(
             catalogue_digest_with_context(
                 &version_two,
-                &scalar_transition,
-                &[scalar_revision],
-                &[expression()],
-                &scalar_origins,
-                &scalar_references,
+                &field_scalar_before_missing_parameter,
+                &[],
+                &[],
+                &[],
+                &[],
+            ),
+            Err(
+                CanonicalHashError::LegacyScalarRequiresCatalogueHashVersionOne {
+                    identity: DefinitionIdentity::Field {
+                        owner: TypeId::from_bytes(id::<2>()),
+                        field: FieldId::from_bytes(id::<3>()),
+                    },
+                    scalar: StandardScalar::Boolean,
+                },
             )
-            .is_ok()
+        );
+
+        let hostile_client_parameter = catalogue_with_resolved_slot_types(
+            ResolvedType::named(TypeId::from_bytes(id::<2>())),
+            ResolvedType::scalar(StandardScalar::Integer),
+            FunctionReturn::Single(ResolvedType::value(standard_boolean_id())),
+            FunctionDomain::Client,
+        );
+        assert_eq!(
+            catalogue_digest_with_context(
+                &version_two,
+                &hostile_client_parameter,
+                &[],
+                &[],
+                &[],
+                &[],
+            ),
+            Err(
+                CanonicalHashError::LegacyScalarRequiresCatalogueHashVersionOne {
+                    identity: DefinitionIdentity::Parameter {
+                        owner: FunctionId::from_bytes(id::<4>()),
+                        parameter: ParameterId::from_bytes(id::<5>()),
+                    },
+                    scalar: StandardScalar::Integer,
+                },
+            )
+        );
+
+        let rows_scalar_before_missing_column = catalogue_with_resolved_slot_types(
+            ResolvedType::named(TypeId::from_bytes(id::<2>())),
+            ResolvedType::value(standard_boolean_id()),
+            FunctionReturn::Rows(vec![
+                FunctionReturnColumnDefinition::new(
+                    "first",
+                    0,
+                    ResolvedType::scalar(StandardScalar::Boolean),
+                ),
+                FunctionReturnColumnDefinition::new(
+                    "second",
+                    1,
+                    ResolvedType::value(TypeId::from_bytes(id::<94>())),
+                ),
+            ]),
+            FunctionDomain::Server,
+        );
+        assert_eq!(
+            catalogue_digest_with_context(
+                &version_two,
+                &rows_scalar_before_missing_column,
+                &[],
+                &[],
+                &[],
+                &[],
+            ),
+            Err(
+                CanonicalHashError::LegacyScalarRequiresCatalogueHashVersionOne {
+                    identity: DefinitionIdentity::FunctionReturnColumn {
+                        owner: FunctionId::from_bytes(id::<4>()),
+                        ordinal: 0,
+                    },
+                    scalar: StandardScalar::Boolean,
+                },
+            )
+        );
+
+        let single_scalar = catalogue_with_resolved_slot_types(
+            ResolvedType::named(TypeId::from_bytes(id::<2>())),
+            ResolvedType::value(standard_boolean_id()),
+            FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Boolean)),
+            FunctionDomain::Client,
+        );
+        assert_eq!(
+            catalogue_digest_with_context(&version_two, &single_scalar, &[], &[], &[], &[]),
+            Err(
+                CanonicalHashError::LegacyScalarRequiresCatalogueHashVersionOne {
+                    identity: DefinitionIdentity::Function(FunctionId::from_bytes(id::<4>())),
+                    scalar: StandardScalar::Boolean,
+                },
+            )
         );
     }
 
@@ -2856,7 +3011,7 @@ mod tests {
         let value_type = TypeId::from_bytes(id::<95>());
         let standard = verified_standard_snapshot_with_extra_value(value_type);
         let context = CatalogueHashContext::version_two(standard);
-        let (catalogue, origins) = catalogue_with_application_types(false);
+        let (catalogue, origins) = catalogue_with_application_types_version_two(false);
         let object = &catalogue.object_types()[0];
         let field = &object.fields()[0];
         let value_object = ObjectTypeDefinition::new(
@@ -2918,7 +3073,7 @@ mod tests {
 
     #[test]
     fn version_two_function_and_catalogue_hashes_have_stable_goldens() {
-        let (catalogue, application_origins) = catalogue_with_application_types(false);
+        let (catalogue, application_origins) = catalogue_with_application_types_version_two(false);
         let references = value_type_references(standard_boolean_id());
         let revision = function_revision_v2(&catalogue, &references);
         let function = catalogue.functions().first().unwrap();
@@ -2944,15 +3099,16 @@ mod tests {
 
         assert_eq!(
             hex(semantic),
-            "2c7210cb14d9dd2524cdd2018f91f4a195c49f6f3970fcf60dac76e7920ea2f0"
+            "8ce90cad1ae586523eb512e59e3f651b13ff641d19fb5a39b02be96d684fbc8e"
         );
         assert_eq!(
             hex(catalogue_hash),
-            "61a80508f05f75cdff8a5e5e625781f178c9a5f9642d8f27881a6fccc15fff36"
+            "26afbfeff3ef374e040859c061c43220f8d87255a7fdaba51c209b28859a4d23"
         );
 
         let reversed_context = CatalogueHashContext::version_two(verified_standard_snapshot(true));
-        let (reversed_catalogue, reversed_origins) = catalogue_with_application_types(true);
+        let (reversed_catalogue, reversed_origins) =
+            catalogue_with_application_types_version_two(true);
         let reversed_revision = function_revision_v2(&reversed_catalogue, &references);
         assert_eq!(
             catalogue_digest_with_context(
@@ -3039,6 +3195,7 @@ mod tests {
         ));
 
         let catalogue = catalogue();
+        let version_two_catalogue = catalogue_with_standard_boolean_slots(&catalogue);
         let references = value_type_references(standard_boolean_id());
         let revision = function_revision_v2(&catalogue, &references);
         let function = catalogue.functions().first().unwrap();
@@ -3056,22 +3213,23 @@ mod tests {
                 fact: FunctionSemanticHashFact::ValueTypeReference(target),
             }) if rejected_function == function.id() && target == standard_boolean_id()
         ));
+        let version_two_revision = function_revision_v2(&version_two_catalogue, &references);
         let mismatched_revision = FunctionRevisionRecord::new(
-            revision.function(),
-            revision.id(),
-            revision.revision_number(),
-            revision.declaration_origin(),
-            revision.declaration_content_hash(),
+            version_two_revision.function(),
+            version_two_revision.id(),
+            version_two_revision.revision_number(),
+            version_two_revision.declaration_origin(),
+            version_two_revision.declaration_content_hash(),
             digest_bytes(b"incorrect function semantic hash"),
-            revision.language_version(),
-            revision.artifact().clone(),
+            version_two_revision.language_version(),
+            version_two_revision.artifact().clone(),
         )
         .unwrap()
-        .with_semantic_hash_version(revision.semantic_hash_version());
+        .with_semantic_hash_version(version_two_revision.semantic_hash_version());
         assert!(matches!(
             catalogue_digest_with_context(
                 &CatalogueHashContext::version_two(verified_standard_snapshot(false)),
-                &catalogue,
+                &version_two_catalogue,
                 &[mismatched_revision],
                 &[expression()],
                 &origins(),
@@ -3152,7 +3310,7 @@ mod tests {
 
     #[test]
     fn version_two_target_validation_uses_application_and_standard_catalogues() {
-        let catalogue = catalogue();
+        let catalogue = catalogue_with_standard_boolean_slots(&catalogue());
         let context = CatalogueHashContext::version_two(verified_standard_snapshot(false));
         let accepted = value_type_references(standard_boolean_id());
         let accepted_revision = function_revision_v2(&catalogue, &accepted);
@@ -3168,7 +3326,8 @@ mod tests {
             .is_ok()
         );
 
-        let (application_catalogue, application_origins) = catalogue_with_application_types(false);
+        let (application_catalogue, application_origins) =
+            catalogue_with_application_types_version_two(false);
         let accepted_application = value_type_references(TypeId::from_bytes(id::<30>()));
         let accepted_application_revision =
             function_revision_v2(&application_catalogue, &accepted_application);
