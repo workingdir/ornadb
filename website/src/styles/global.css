@@ -1,0 +1,122 @@
+@layer reset, base, components, pages;
+
+@layer reset {
+    *,
+    *::before,
+    *::after {
+        box-sizing: border-box;
+    }
+
+    html {
+        scroll-behavior: smooth;
+    }
+
+    body,
+    h1,
+    h2,
+    h3,
+    p,
+    pre,
+    ul,
+    ol {
+        margin: 0;
+    }
+
+    img,
+    svg {
+        display: block;
+        max-width: 100%;
+    }
+
+    button,
+    input {
+        font: inherit;
+    }
+}
+
+@layer base {
+    :root {
+        color-scheme: light;
+        --colour-bg: oklch(1 0 0);
+        --colour-surface: oklch(0.965 0.009 142);
+        --colour-surface-strong: oklch(0.925 0.018 142);
+        --colour-ink: oklch(0.16 0.018 145);
+        --colour-muted: oklch(0.42 0.025 145);
+        --colour-line: oklch(0.83 0.018 142);
+        --colour-brand: oklch(0.42 0.105 142);
+        --colour-brand-deep: oklch(0.29 0.075 142);
+        --colour-brand-light: oklch(0.75 0.09 140);
+        --colour-accent: oklch(0.87 0.145 98);
+        --colour-code: oklch(0.105 0.015 145);
+        --colour-code-line: oklch(0.27 0.025 145);
+        --colour-code-ink: oklch(0.94 0.015 142);
+        --font-sans: "Public Sans", Arial, sans-serif;
+        --font-mono: "Martian Mono", "Cascadia Mono", "Liberation Mono", monospace;
+        --radius-sm: 0.25rem;
+        --radius-md: 0.5rem;
+        --content-width: 76rem;
+        --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    html {
+        background: var(--colour-bg);
+        color: var(--colour-ink);
+        font-family: var(--font-sans);
+        font-synthesis: none;
+        text-rendering: optimizeLegibility;
+    }
+
+    body {
+        min-width: 20rem;
+        min-height: 100vh;
+        background: var(--colour-bg);
+        line-height: 1.6;
+    }
+
+    a {
+        color: inherit;
+        text-underline-offset: 0.2em;
+    }
+
+    :focus-visible {
+        outline: 0.2rem solid var(--colour-accent);
+        outline-offset: 0.2rem;
+    }
+
+    ::selection {
+        background: var(--colour-accent);
+        color: var(--colour-ink);
+    }
+
+    .skip-link {
+        position: fixed;
+        top: 0.75rem;
+        left: 0.75rem;
+        z-index: 20;
+        padding: 0.625rem 0.875rem;
+        background: var(--colour-bg);
+        color: var(--colour-ink);
+        font-weight: 700;
+        transform: translateY(-200%);
+        transition: transform 160ms var(--ease-out);
+    }
+
+    .skip-link:focus {
+        transform: translateY(0);
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    html {
+        scroll-behavior: auto;
+    }
+
+    *,
+    *::before,
+    *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        scroll-behavior: auto !important;
+        transition-duration: 0.01ms !important;
+    }
+}

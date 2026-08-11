@@ -1,0 +1,4 @@
+.astro/
+.yarn/
+dist/
+node_modules/
