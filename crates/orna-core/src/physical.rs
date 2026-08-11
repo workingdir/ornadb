@@ -6,7 +6,7 @@ use crate::{
     FieldId, TypeId,
     catalogue::{FieldDefinition, ObjectTypeDefinition, OnDeleteAction},
     revision::{ActiveDatabaseRevision, DeployableRevision, RevisionPair},
-    types::{ResolvedType, StandardScalar},
+    types::StandardScalar,
 };
 
 /// Plans the physical changes supported by the initial durable-object slice.
@@ -250,47 +250,62 @@ fn plan_new_field(
         });
     }
 
-    let field_type = match field.resolved_type() {
-        ResolvedType::Scalar(StandardScalar::Void) => {
+    let resolved_type = field.resolved_type();
+    let legacy_scalar = resolved_type.legacy_scalar();
+    let named_type = resolved_type.named_type();
+    let value_type = resolved_type.value_type();
+    let reference_target = resolved_type.reference_target();
+
+    let field_type = if let Some(scalar) = legacy_scalar {
+        if scalar == StandardScalar::Void {
             return Err(PhysicalPlanError::UnsupportedVoidField {
                 object_type,
                 field: field.id(),
             });
         }
-        ResolvedType::Scalar(scalar) => {
-            if field.on_delete().is_some() {
-                return Err(PhysicalPlanError::InvalidDeleteAction {
-                    object_type,
-                    field: field.id(),
-                });
-            }
-            PhysicalFieldType::Scalar(scalar)
-        }
-        ResolvedType::Named(_) => {
-            return Err(PhysicalPlanError::UnsupportedNamedFieldType {
+        if field.on_delete().is_some() {
+            return Err(PhysicalPlanError::InvalidDeleteAction {
                 object_type,
                 field: field.id(),
             });
         }
-        ResolvedType::Reference { target } => {
-            if candidate.candidate().object_type_by_id(target).is_none() {
-                return Err(PhysicalPlanError::UnknownReferenceTarget {
-                    object_type,
-                    field: field.id(),
-                    target,
-                });
-            }
-            if field.on_delete() == Some(OnDeleteAction::SetNull) && !field.nullable() {
-                return Err(PhysicalPlanError::InvalidDeleteAction {
-                    object_type,
-                    field: field.id(),
-                });
-            }
-            PhysicalFieldType::Reference {
+        PhysicalFieldType::Scalar(scalar)
+    } else if let Some(_value_type) = value_type {
+        // Value types remain fail-closed until verified physical contracts own
+        // their storage projection.
+        return Err(PhysicalPlanError::UnsupportedNamedFieldType {
+            object_type,
+            field: field.id(),
+        });
+    } else if named_type.is_some() {
+        return Err(PhysicalPlanError::UnsupportedNamedFieldType {
+            object_type,
+            field: field.id(),
+        });
+    } else if let Some(target) = reference_target {
+        if candidate.candidate().object_type_by_id(target).is_none() {
+            return Err(PhysicalPlanError::UnknownReferenceTarget {
+                object_type,
+                field: field.id(),
                 target,
-                on_delete: field.on_delete(),
-            }
+            });
         }
+        if field.on_delete() == Some(OnDeleteAction::SetNull) && !field.nullable() {
+            return Err(PhysicalPlanError::InvalidDeleteAction {
+                object_type,
+                field: field.id(),
+            });
+        }
+        PhysicalFieldType::Reference {
+            target,
+            on_delete: field.on_delete(),
+        }
+    } else {
+        // Unknown resolved-type projections must fail closed.
+        return Err(PhysicalPlanError::UnsupportedNamedFieldType {
+            object_type,
+            field: field.id(),
+        });
     };
 
     Ok(CreateField {
@@ -314,6 +329,7 @@ mod tests {
             ActiveDatabaseRevision, DefinitionIdentity, DefinitionOrigin, DeployableRevision,
             RevisionPair, Sha256Digest, SourceOrigin, StoredSourceRevision, StoredSourceUnit,
         },
+        types::ResolvedType,
     };
 
     use super::*;

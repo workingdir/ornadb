@@ -386,17 +386,18 @@ fn require_supported_runtime_type(resolved_type: ResolvedType) -> Result<(), Res
 }
 
 const fn supports_runtime_value(resolved_type: ResolvedType) -> bool {
-    matches!(
-        resolved_type,
-        ResolvedType::Scalar(
-            StandardScalar::Boolean
-                | StandardScalar::Integer
-                | StandardScalar::BigInt
-                | StandardScalar::Float
-                | StandardScalar::CharacterLargeObject
-                | StandardScalar::BinaryLargeObject
-        ) | ResolvedType::Reference { .. }
-    )
+    resolved_type.reference_target().is_some()
+        || matches!(
+            resolved_type.legacy_scalar(),
+            Some(
+                StandardScalar::Boolean
+                    | StandardScalar::Integer
+                    | StandardScalar::BigInt
+                    | StandardScalar::Float
+                    | StandardScalar::CharacterLargeObject
+                    | StandardScalar::BinaryLargeObject
+            )
+        )
 }
 
 #[cfg(test)]
