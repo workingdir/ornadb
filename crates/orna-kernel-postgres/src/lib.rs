@@ -11,6 +11,7 @@ use orna_core::{
     physical::PhysicalPlanError,
     revision::{CatalogueHashVersion, RevisionInvariantError, RevisionPair},
 };
+use orna_standard::StandardUpgradeIdentity;
 
 use tokio::task::{JoinError, JoinHandle};
 use tokio_postgres::{Client, Config, NoTls};
@@ -146,6 +147,11 @@ pub enum PostgresKernelError {
         /// The context carried by the candidate.
         candidate: Box<StandardContextIdentity>,
     },
+    /// A durable identity is reserved for the standard library upgrade.
+    ReservedStandardIdentity {
+        /// The conflicting durable identity.
+        identity: StandardUpgradeIdentity,
+    },
     /// Backend-neutral physical planning rejected the candidate.
     PhysicalPlan(PhysicalPlanError),
     /// A SERVER SELECT function cannot execute against the active revision.
@@ -228,6 +234,9 @@ impl fmt::Display for PostgresKernelError {
             Self::StandardContextMismatch { .. } => {
                 formatter.write_str("the active and candidate standard contexts do not match")
             }
+            Self::ReservedStandardIdentity { .. } => formatter.write_str(
+                "the database contains an identity reserved for the standard library",
+            ),
             Self::PhysicalPlan(error) => write!(formatter, "physical plan failed: {error}"),
             Self::ServerSelect(error) => write!(formatter, "server SELECT failed: {error}"),
             Self::ServerInsert(error) => write!(formatter, "row creation failed: {error}"),
@@ -279,6 +288,7 @@ impl Error for PostgresKernelError {
             | Self::ExpectedBaseMismatch { .. }
             | Self::StandardContextTransitionRequired { .. }
             | Self::StandardContextMismatch { .. }
+            | Self::ReservedStandardIdentity { .. }
             | Self::DurableInvariant { .. } => None,
         }
     }
@@ -392,6 +402,26 @@ mod tests {
             "the active and candidate catalogue hash versions require a standard context transition"
         );
         assert!(error.source().is_none());
+    }
+
+    #[test]
+    fn reserved_standard_identity_error_is_exact_and_source_free() {
+        let identity = orna_standard::StandardUpgradeIdentity::StandardLibraryRevision(
+            orna_core::StandardLibraryRevisionId::from_bytes([8; 16]),
+        );
+        let error = PostgresKernelError::ReservedStandardIdentity { identity };
+
+        assert_eq!(
+            error.to_string(),
+            "the database contains an identity reserved for the standard library"
+        );
+        assert!(error.source().is_none());
+        assert!(matches!(
+            error,
+            PostgresKernelError::ReservedStandardIdentity {
+                identity: orna_standard::StandardUpgradeIdentity::StandardLibraryRevision(_)
+            }
+        ));
     }
 
     #[tokio::test]

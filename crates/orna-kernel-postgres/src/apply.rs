@@ -4,24 +4,27 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use orna_core::{
     CatalogueRevisionId, ExpressionId, FieldId, FunctionId, FunctionRevisionId, ParameterId,
-    SchemaId, SourceBundleId, SourceRevisionId, StandardLibraryRevisionId, TypeId,
+    SchemaId, SourceBundleId, SourceRevisionId, StandardLibraryRevisionId, TypeBindingId, TypeId,
     canonical_hash::{
-        artifact_payload_digest, catalogue_digest, function_declaration_digest,
+        artifact_payload_digest, catalogue_digest_with_context, function_declaration_digest,
         source_bundle_digest, source_revision_digest, source_unit_content_digest,
     },
     catalogue::{
         FunctionDomain, FunctionReturn, FunctionSecurity, FunctionTransaction, FunctionVolatility,
-        OnDeleteAction, QualifiedSemanticName,
+        OnDeleteAction, QualifiedSemanticName, TypeBindingKind, TypeLookupName, ValueTypeKind,
+        ValueTypeMutability, ValueTypePersistence,
     },
     physical::plan_physical_changes,
     revision::{
-        ActiveDatabaseRevision, CatalogueHashContext, DefinitionIdentity, DefinitionOrigin,
-        DefinitionReference, DefinitionReferenceKind, DefinitionReferenceTarget,
-        DeployableRevision, FunctionRevisionRecord, RevisionPair, Sha256Digest, SourceOrigin,
+        ActiveDatabaseRevision, ActiveDatabaseRevisionInput, ActiveRevisionContent,
+        CatalogueHashContext, DefinitionIdentity, DefinitionOrigin, DefinitionReference,
+        DefinitionReferenceKind, DefinitionReferenceTarget, DeployableRevision,
+        FunctionRevisionRecord, RevisionPair, Sha256Digest, SourceOrigin,
         VerifiedStandardLibrarySnapshot, validate_persistable_catalogue,
     },
     types::{ResolvedType, StandardScalar},
 };
+use orna_standard::{StandardUpgrade, StandardUpgradeIdentity};
 use tokio_postgres::{Client, IsolationLevel, Transaction};
 
 use crate::{
@@ -114,6 +117,21 @@ impl PostgresKernel {
             (Err(error), _) | (Ok(_), Err(error)) => Err(error),
         }
     }
+
+    /// Atomically installs one compiler-prepared standard library and its
+    /// application revision.
+    pub async fn apply_standard_upgrade(
+        &self,
+        upgrade: &StandardUpgrade,
+    ) -> Result<ActiveDatabaseRevision, PostgresKernelError> {
+        let mut session = self.open().await?;
+        let apply_result = apply_standard_upgrade_client(&mut session.client, upgrade).await;
+        let shutdown_result = session.shutdown().await;
+        match (apply_result, shutdown_result) {
+            (Ok(active), Ok(())) => Ok(active),
+            (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+        }
+    }
 }
 
 async fn apply_client(
@@ -128,6 +146,31 @@ async fn apply_client(
         .await
         .map_err(PostgresKernelError::Database)?;
     let result = apply_transaction(&transaction, candidate).await;
+    match result {
+        Ok(active) => transaction
+            .commit()
+            .await
+            .map(|()| active)
+            .map_err(PostgresKernelError::Database),
+        Err(error) => match transaction.rollback().await {
+            Ok(()) => Err(error),
+            Err(rollback) => Err(PostgresKernelError::Database(rollback)),
+        },
+    }
+}
+
+async fn apply_standard_upgrade_client(
+    client: &mut Client,
+    upgrade: &StandardUpgrade,
+) -> Result<ActiveDatabaseRevision, PostgresKernelError> {
+    let transaction = client
+        .build_transaction()
+        .isolation_level(IsolationLevel::RepeatableRead)
+        .read_only(false)
+        .start()
+        .await
+        .map_err(PostgresKernelError::Database)?;
+    let result = apply_standard_upgrade_transaction(&transaction, upgrade).await;
     match result {
         Ok(active) => transaction
             .commit()
@@ -159,22 +202,87 @@ async fn apply_transaction(
 
     let materialized = materialize(candidate, &active)?;
     verify_candidate_hashes(candidate, &materialized)?;
-    validate_postgres_encodings(candidate)?;
+    let encoder = CandidateEncoder::new(candidate.catalogue_hash_context());
+    validate_postgres_encodings(candidate, &encoder)?;
 
+    apply_materialized_candidate(
+        transaction,
+        candidate,
+        &active,
+        &materialized,
+        &encoder,
+        None,
+    )
+    .await
+}
+
+async fn apply_standard_upgrade_transaction(
+    transaction: &Transaction<'_>,
+    upgrade: &StandardUpgrade,
+) -> Result<ActiveDatabaseRevision, PostgresKernelError> {
+    establish_trusted_search_path(transaction).await?;
+    let locked_pair = lock_active_pair(transaction).await?;
+    let active = recover_active_revision(transaction).await?;
+    if active.pair() != locked_pair {
+        return Err(invariant(
+            "locked active pair must recover as the same pair",
+        ));
+    }
+    let candidate = upgrade.application_revision();
+    validate_expected_base(&active, candidate)?;
+    scan_reserved_standard_identities(transaction, &active, upgrade).await?;
+
+    let materialized = materialize(candidate, &active)?;
+    let encoder = CandidateEncoder::new(candidate.catalogue_hash_context());
+    apply_materialized_candidate(
+        transaction,
+        candidate,
+        &active,
+        &materialized,
+        &encoder,
+        Some(upgrade.verified_standard_snapshot()),
+    )
+    .await
+}
+
+fn validate_expected_base(
+    active: &ActiveDatabaseRevision,
+    candidate: &DeployableRevision,
+) -> Result<(), PostgresKernelError> {
+    if candidate.expected_base() != active.pair() {
+        return Err(PostgresKernelError::ExpectedBaseMismatch {
+            expected: candidate.expected_base(),
+            active: active.pair(),
+        });
+    }
+    Ok(())
+}
+
+async fn apply_materialized_candidate(
+    transaction: &Transaction<'_>,
+    candidate: &DeployableRevision,
+    active: &ActiveDatabaseRevision,
+    materialized: &Materialized,
+    encoder: &CandidateEncoder<'_>,
+    standard: Option<&VerifiedStandardLibrarySnapshot>,
+) -> Result<ActiveDatabaseRevision, PostgresKernelError> {
     let plan =
-        plan_physical_changes(&active, candidate).map_err(PostgresKernelError::PhysicalPlan)?;
+        plan_physical_changes(active, candidate).map_err(PostgresKernelError::PhysicalPlan)?;
     install_physical_plan(transaction, &plan).await?;
     transaction
         .batch_execute("SET CONSTRAINTS ALL DEFERRED")
         .await
         .map_err(PostgresKernelError::Database)?;
-    persist_candidate(transaction, candidate).await?;
+    if let Some(standard) = standard {
+        persist_standard_library(transaction, standard).await?;
+    }
+    persist_candidate(transaction, candidate, encoder).await?;
     transaction
         .batch_execute("SET CONSTRAINTS ALL IMMEDIATE")
         .await
         .map_err(PostgresKernelError::Database)?;
-    transition_revision_statuses(transaction, candidate, &active, &materialized).await?;
-    verify_revision_statuses(transaction, &materialized).await?;
+    transition_revision_statuses(transaction, candidate, active, materialized).await?;
+    verify_revision_statuses(transaction, materialized).await?;
     update_active_pair(transaction, candidate, active.pair()).await?;
 
     let recovered = recover_active_revision(transaction).await?;
@@ -217,12 +325,7 @@ fn validate_candidate_preflight(
     active: &ActiveDatabaseRevision,
     candidate: &DeployableRevision,
 ) -> Result<(), PostgresKernelError> {
-    if candidate.expected_base() != active.pair() {
-        return Err(PostgresKernelError::ExpectedBaseMismatch {
-            expected: candidate.expected_base(),
-            active: active.pair(),
-        });
-    }
+    validate_expected_base(active, candidate)?;
     guard_standard_context_transition(
         active.catalogue_hash_context(),
         candidate.catalogue_hash_context(),
@@ -285,8 +388,267 @@ async fn lock_active_pair(
     Ok(RevisionPair::new(source, catalogue))
 }
 
+#[derive(Default)]
+struct ReservedIdentityLists {
+    standard_library_revisions: Vec<(StandardUpgradeIdentity, Vec<u8>)>,
+    catalogue_revisions: Vec<(StandardUpgradeIdentity, Vec<u8>)>,
+    source_bundles: Vec<(StandardUpgradeIdentity, Vec<u8>)>,
+    source_revisions: Vec<(StandardUpgradeIdentity, Vec<u8>)>,
+    source_units: Vec<(StandardUpgradeIdentity, Vec<u8>)>,
+    schemas: Vec<(StandardUpgradeIdentity, Vec<u8>)>,
+    types: Vec<(StandardUpgradeIdentity, Vec<u8>)>,
+    type_bindings: Vec<(StandardUpgradeIdentity, Vec<u8>)>,
+}
+
+impl ReservedIdentityLists {
+    const fn classes(&self) -> [&Vec<(StandardUpgradeIdentity, Vec<u8>)>; 8] {
+        [
+            &self.standard_library_revisions,
+            &self.catalogue_revisions,
+            &self.source_bundles,
+            &self.source_revisions,
+            &self.source_units,
+            &self.schemas,
+            &self.types,
+            &self.type_bindings,
+        ]
+    }
+}
+
+fn upgrade_reserved_identities(upgrade: &StandardUpgrade) -> ReservedIdentityLists {
+    let snapshot = upgrade.verified_standard_snapshot();
+    let catalogue = snapshot.catalogue();
+    let source = snapshot.source();
+    let mut identities = ReservedIdentityLists::default();
+    identities.standard_library_revisions.push((
+        StandardUpgradeIdentity::StandardLibraryRevision(snapshot.revision()),
+        bytes(snapshot.revision()),
+    ));
+    identities.catalogue_revisions.push((
+        StandardUpgradeIdentity::CatalogueRevision(catalogue.revision()),
+        bytes(catalogue.revision()),
+    ));
+    identities.source_bundles.push((
+        StandardUpgradeIdentity::SourceBundle(source.bundle()),
+        bytes(source.bundle()),
+    ));
+    identities.source_revisions.push((
+        StandardUpgradeIdentity::SourceRevision(source.id()),
+        bytes(source.id()),
+    ));
+    for unit in source.units() {
+        identities.source_units.push((
+            StandardUpgradeIdentity::SourceUnit(unit.id()),
+            bytes(unit.id()),
+        ));
+    }
+    for schema in catalogue.schemas() {
+        identities.schemas.push((
+            StandardUpgradeIdentity::Schema(schema.id()),
+            bytes(schema.id()),
+        ));
+    }
+    for value_type in catalogue.value_types() {
+        identities.types.push((
+            StandardUpgradeIdentity::Type(value_type.id()),
+            bytes(value_type.id()),
+        ));
+    }
+    for binding in catalogue.type_bindings() {
+        identities.type_bindings.push((
+            StandardUpgradeIdentity::TypeBinding(binding.id()),
+            bytes(binding.id()),
+        ));
+    }
+    identities
+}
+
+fn active_visible_reserved_identities(active: &ActiveDatabaseRevision) -> ReservedIdentityLists {
+    let mut identities = ReservedIdentityLists::default();
+    let source = active.source();
+    let catalogue = active.catalogue();
+    identities.catalogue_revisions.push((
+        StandardUpgradeIdentity::CatalogueRevision(catalogue.revision()),
+        bytes(catalogue.revision()),
+    ));
+    identities.source_bundles.push((
+        StandardUpgradeIdentity::SourceBundle(source.bundle()),
+        bytes(source.bundle()),
+    ));
+    identities.source_revisions.push((
+        StandardUpgradeIdentity::SourceRevision(source.id()),
+        bytes(source.id()),
+    ));
+    for unit in source.units() {
+        identities.source_units.push((
+            StandardUpgradeIdentity::SourceUnit(unit.id()),
+            bytes(unit.id()),
+        ));
+    }
+    append_catalogue_reserved_identities(catalogue, &mut identities);
+    if let Some(standard) = active.catalogue_hash_context().standard() {
+        let source = standard.source();
+        let catalogue = standard.catalogue();
+        identities.standard_library_revisions.push((
+            StandardUpgradeIdentity::StandardLibraryRevision(standard.revision()),
+            bytes(standard.revision()),
+        ));
+        identities.catalogue_revisions.push((
+            StandardUpgradeIdentity::CatalogueRevision(catalogue.revision()),
+            bytes(catalogue.revision()),
+        ));
+        identities.source_bundles.push((
+            StandardUpgradeIdentity::SourceBundle(source.bundle()),
+            bytes(source.bundle()),
+        ));
+        identities.source_revisions.push((
+            StandardUpgradeIdentity::SourceRevision(source.id()),
+            bytes(source.id()),
+        ));
+        for unit in source.units() {
+            identities.source_units.push((
+                StandardUpgradeIdentity::SourceUnit(unit.id()),
+                bytes(unit.id()),
+            ));
+        }
+        append_catalogue_reserved_identities(catalogue, &mut identities);
+    }
+    identities
+}
+
+fn append_catalogue_reserved_identities(
+    catalogue: &orna_core::catalogue::CatalogueSnapshot,
+    identities: &mut ReservedIdentityLists,
+) {
+    for schema in catalogue.schemas() {
+        identities.schemas.push((
+            StandardUpgradeIdentity::Schema(schema.id()),
+            bytes(schema.id()),
+        ));
+    }
+    for object_type in catalogue.object_types() {
+        identities.types.push((
+            StandardUpgradeIdentity::Type(object_type.id()),
+            bytes(object_type.id()),
+        ));
+    }
+    for value_type in catalogue.value_types() {
+        identities.types.push((
+            StandardUpgradeIdentity::Type(value_type.id()),
+            bytes(value_type.id()),
+        ));
+    }
+    for binding in catalogue.type_bindings() {
+        identities.type_bindings.push((
+            StandardUpgradeIdentity::TypeBinding(binding.id()),
+            bytes(binding.id()),
+        ));
+    }
+}
+
+async fn scan_reserved_standard_identities(
+    transaction: &Transaction<'_>,
+    active: &ActiveDatabaseRevision,
+    upgrade: &StandardUpgrade,
+) -> Result<(), PostgresKernelError> {
+    let upgrade = upgrade_reserved_identities(upgrade);
+    let active = active_visible_reserved_identities(active);
+    let queries = [
+        "SELECT id AS identity FROM _orna_kernel.standard_library_revisions
+         WHERE id = ANY($1) AND NOT (id = ANY($2)) ORDER BY id LIMIT 1",
+        "SELECT identity FROM (
+             SELECT id AS identity FROM _orna_kernel.catalogue_revisions
+             UNION
+             SELECT catalogue_revision_id AS identity FROM _orna_kernel.standard_library_revisions
+         ) AS identities
+         WHERE identity = ANY($1) AND NOT (identity = ANY($2)) ORDER BY identity LIMIT 1",
+        "SELECT id AS identity FROM _orna_kernel.source_bundles
+         WHERE id = ANY($1) AND NOT (id = ANY($2)) ORDER BY id LIMIT 1",
+        "SELECT id AS identity FROM _orna_kernel.source_revisions
+         WHERE id = ANY($1) AND NOT (id = ANY($2)) ORDER BY id LIMIT 1",
+        "SELECT id AS identity FROM _orna_kernel.source_units
+         WHERE id = ANY($1) AND NOT (id = ANY($2)) ORDER BY id LIMIT 1",
+        "SELECT identity FROM (
+             SELECT schema_id AS identity FROM _orna_kernel.catalogue_schemas
+             UNION
+             SELECT schema_id AS identity FROM _orna_kernel.standard_catalogue_schemas
+         ) AS identities
+         WHERE identity = ANY($1) AND NOT (identity = ANY($2)) ORDER BY identity LIMIT 1",
+        "SELECT identity FROM (
+             SELECT type_id AS identity FROM _orna_kernel.catalogue_object_types
+             UNION
+             SELECT type_id AS identity FROM _orna_kernel.standard_catalogue_value_types
+         ) AS identities
+         WHERE identity = ANY($1) AND NOT (identity = ANY($2)) ORDER BY identity LIMIT 1",
+        "SELECT type_binding_id AS identity FROM _orna_kernel.standard_catalogue_type_bindings
+         WHERE type_binding_id = ANY($1) AND NOT (type_binding_id = ANY($2))
+         ORDER BY type_binding_id LIMIT 1",
+    ];
+    for ((upgrade_class, active_class), query) in upgrade
+        .classes()
+        .into_iter()
+        .zip(active.classes())
+        .zip(queries)
+    {
+        if let Some(identity) = first_active_reserved_identity(active_class, upgrade_class) {
+            return Err(PostgresKernelError::ReservedStandardIdentity { identity });
+        }
+        let requested = upgrade_class
+            .iter()
+            .map(|(_, bytes)| bytes.clone())
+            .collect::<Vec<_>>();
+        if requested.is_empty() {
+            continue;
+        }
+        let excluded = active_class
+            .iter()
+            .map(|(_, bytes)| bytes.clone())
+            .collect::<Vec<_>>();
+        let rows = transaction
+            .query(query, &[&requested, &excluded])
+            .await
+            .map_err(PostgresKernelError::Database)?;
+        if let Some(row) = rows.first() {
+            let identity: Vec<u8> = row
+                .try_get("identity")
+                .map_err(PostgresKernelError::Database)?;
+            let Some(reserved) = first_inactive_reserved_identity(upgrade_class, &[identity])
+            else {
+                return Err(invariant(
+                    "reserved standard identity query must return one requested identity",
+                ));
+            };
+            return Err(PostgresKernelError::ReservedStandardIdentity { identity: reserved });
+        }
+    }
+    Ok(())
+}
+
+fn first_active_reserved_identity(
+    active: &[(StandardUpgradeIdentity, Vec<u8>)],
+    upgrade: &[(StandardUpgradeIdentity, Vec<u8>)],
+) -> Option<StandardUpgradeIdentity> {
+    active
+        .iter()
+        .find(|(_, bytes)| upgrade.iter().any(|(_, wanted)| wanted == bytes))
+        .map(|(identity, _)| *identity)
+}
+
+fn first_inactive_reserved_identity(
+    upgrade: &[(StandardUpgradeIdentity, Vec<u8>)],
+    inactive_raw_order: &[Vec<u8>],
+) -> Option<StandardUpgradeIdentity> {
+    inactive_raw_order.iter().find_map(|identity| {
+        upgrade
+            .iter()
+            .find(|(_, wanted)| wanted == identity)
+            .map(|(reserved, _)| *reserved)
+    })
+}
+
 struct Materialized {
     current: Vec<FunctionRevisionRecord>,
+    catalogue_hash_context: CatalogueHashContext,
 }
 
 fn materialize(
@@ -357,19 +719,27 @@ fn materialize(
         .into_values()
         .filter(|revision| !current_ids.contains(&revision.id()))
         .collect();
-    ActiveDatabaseRevision::new_with_history(
-        candidate.candidate_pair(),
-        candidate.source().clone(),
-        candidate.candidate().clone(),
-        candidate.catalogue_hash(),
-        candidate.expressions().to_vec(),
-        current.clone(),
-        historical.clone(),
-        candidate.origins().to_vec(),
-        candidate.references().to_vec(),
+    ActiveDatabaseRevision::new_with_catalogue_hash_context(
+        ActiveDatabaseRevisionInput::new(
+            candidate.candidate_pair(),
+            candidate.source().clone(),
+            candidate.candidate().clone(),
+            candidate.catalogue_hash(),
+            ActiveRevisionContent::new(
+                candidate.expressions().to_vec(),
+                current.clone(),
+                candidate.origins().to_vec(),
+                candidate.references().to_vec(),
+            )
+            .with_history(historical.clone()),
+        ),
+        candidate.catalogue_hash_context().clone(),
     )
     .map_err(PostgresKernelError::RevisionInvariant)?;
-    Ok(Materialized { current })
+    Ok(Materialized {
+        current,
+        catalogue_hash_context: candidate.catalogue_hash_context().clone(),
+    })
 }
 
 fn verify_candidate_hashes(
@@ -428,7 +798,8 @@ fn verify_candidate_hashes(
             ));
         }
     }
-    let digest = catalogue_digest(
+    let digest = catalogue_digest_with_context(
+        &materialized.catalogue_hash_context,
         candidate.candidate(),
         &materialized.current,
         candidate.expressions(),
@@ -466,7 +837,10 @@ fn declaration_bytes(
     })
 }
 
-fn validate_postgres_encodings(candidate: &DeployableRevision) -> Result<(), PostgresKernelError> {
+fn validate_postgres_encodings(
+    candidate: &DeployableRevision,
+    encoder: &CandidateEncoder<'_>,
+) -> Result<(), PostgresKernelError> {
     for expression in candidate.expressions() {
         let _ = positive_i32(expression.version(), "expression format version")?;
     }
@@ -480,7 +854,7 @@ fn validate_postgres_encodings(candidate: &DeployableRevision) -> Result<(), Pos
     for object in candidate.candidate().object_types() {
         schema_for_name(candidate.candidate(), object.name())?;
         for field in object.fields() {
-            let _ = type_columns(field.resolved_type(), false)?;
+            let _ = encoder.type_columns(field.resolved_type(), false)?;
             let _ = on_delete(field.on_delete());
         }
     }
@@ -491,15 +865,15 @@ fn validate_postgres_encodings(candidate: &DeployableRevision) -> Result<(), Pos
         let _ = function_transaction(function.transaction())?;
         let _ = function_volatility(function.volatility());
         for parameter in function.parameters() {
-            let _ = type_columns(parameter.resolved_type(), false)?;
+            let _ = encoder.type_columns(parameter.resolved_type(), false)?;
         }
         match function.return_type() {
             FunctionReturn::Single(resolved) => {
-                let _ = type_columns(*resolved, true)?;
+                let _ = encoder.type_columns(*resolved, true)?;
             }
             FunctionReturn::Rows(columns) => {
                 for column in columns {
-                    let _ = type_columns(column.resolved_type(), false)?;
+                    let _ = encoder.type_columns(column.resolved_type(), false)?;
                 }
             }
         }
@@ -509,7 +883,7 @@ fn validate_postgres_encodings(candidate: &DeployableRevision) -> Result<(), Pos
     }
     for reference in candidate.references() {
         validate_origin(reference.source_origin())?;
-        let _ = reference_target(reference.target());
+        let _ = encoder.reference_target(reference.target())?;
         let _ = reference_kind(reference.kind())?;
     }
     Ok(())
@@ -527,6 +901,14 @@ fn positive_i64(value: u64, rule: &'static str) -> Result<i64, PostgresKernelErr
         .filter(|value| *value > 0)
         .ok_or_else(|| invariant(rule))
 }
+
+fn semantic_hash_version(
+    version: orna_core::revision::FunctionSemanticHashVersion,
+) -> Result<i16, PostgresKernelError> {
+    i16::try_from(version.to_u32())
+        .map_err(|_| invariant("function semantic hash version must fit PostgreSQL smallint"))
+}
+
 fn validate_origin(origin: SourceOrigin) -> Result<(), PostgresKernelError> {
     if origin.byte_start() > origin.byte_end() {
         Err(invariant("source origin must be ordered"))
@@ -538,8 +920,37 @@ fn validate_origin(origin: SourceOrigin) -> Result<(), PostgresKernelError> {
 async fn persist_candidate(
     transaction: &Transaction<'_>,
     candidate: &DeployableRevision,
+    encoder: &CandidateEncoder<'_>,
 ) -> Result<(), PostgresKernelError> {
     let source = candidate.source();
+    persist_source(transaction, source).await?;
+    transaction
+        .execute(
+            "INSERT INTO _orna_kernel.catalogue_revisions
+                (id, source_revision_id, parent_catalogue_revision_id, content_hash,
+                 hash_algorithm, hash_contract_version, canonical_hash_version,
+                 standard_library_revision_id)
+             VALUES ($1, $2, $3, $4, 'sha256', $5, $6, $7)",
+            &[
+                &bytes(candidate.candidate().revision()),
+                &bytes(source.id()),
+                &bytes(candidate.parent_catalogue()),
+                &digest(candidate.catalogue_hash()),
+                &CONTRACT_VERSION,
+                &encoder.catalogue_hash_version()?,
+                &encoder.standard_library_revision().map(bytes),
+            ],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?;
+    persist_semantics(transaction, candidate, encoder).await?;
+    persist_revisions_and_references(transaction, candidate, encoder).await
+}
+
+async fn persist_source(
+    transaction: &Transaction<'_>,
+    source: &orna_core::revision::StoredSourceRevision,
+) -> Result<(), PostgresKernelError> {
     transaction
         .execute(
             "INSERT INTO _orna_kernel.source_bundles
@@ -589,29 +1000,185 @@ async fn persist_candidate(
         )
         .await
         .map_err(PostgresKernelError::Database)?;
+    Ok(())
+}
+
+async fn persist_standard_library(
+    transaction: &Transaction<'_>,
+    standard: &VerifiedStandardLibrarySnapshot,
+) -> Result<(), PostgresKernelError> {
+    persist_source(transaction, standard.source()).await?;
     transaction
         .execute(
-            "INSERT INTO _orna_kernel.catalogue_revisions
-                (id, source_revision_id, parent_catalogue_revision_id, content_hash,
-                 hash_algorithm, hash_contract_version)
-             VALUES ($1, $2, $3, $4, 'sha256', $5)",
+            "INSERT INTO _orna_kernel.standard_library_revisions
+                (id, source_revision_id, catalogue_revision_id, digest_version,
+                 language_version, content_hash, hash_algorithm)
+             VALUES ($1, $2, $3, $4, $5, $6, 'sha256')",
             &[
-                &bytes(candidate.candidate().revision()),
-                &bytes(source.id()),
-                &bytes(candidate.parent_catalogue()),
-                &digest(candidate.catalogue_hash()),
-                &CONTRACT_VERSION,
+                &bytes(standard.revision()),
+                &bytes(standard.source().id()),
+                &bytes(standard.catalogue().revision()),
+                &standard_digest_version(standard.digest_version())?,
+                &standard.language_version(),
+                &digest(standard.digest()),
             ],
         )
         .await
         .map_err(PostgresKernelError::Database)?;
-    persist_semantics(transaction, candidate).await?;
-    persist_revisions_and_references(transaction, candidate).await
+
+    for schema in standard.catalogue().schemas() {
+        let source = origin(standard.origins(), DefinitionIdentity::Schema(schema.id()))?;
+        transaction
+            .execute(
+                "INSERT INTO _orna_kernel.standard_catalogue_schemas
+                    (standard_library_revision_id, schema_id, name_parts, source_unit_id,
+                     source_start, source_end)
+                 VALUES ($1, $2, $3, $4, $5, $6)",
+                &[
+                    &bytes(standard.revision()),
+                    &bytes(schema.id()),
+                    &schema.name().parts(),
+                    &bytes(source.source_unit()),
+                    &i64::from(source.byte_start()),
+                    &i64::from(source.byte_end()),
+                ],
+            )
+            .await
+            .map_err(PostgresKernelError::Database)?;
+    }
+
+    for value_type in standard.catalogue().value_types() {
+        let schema = schema_for_name(standard.catalogue(), value_type.name())?;
+        let source = origin(
+            standard.origins(),
+            DefinitionIdentity::ValueType(value_type.id()),
+        )?;
+        transaction
+            .execute(
+                "INSERT INTO _orna_kernel.standard_catalogue_value_types
+                    (standard_library_revision_id, type_id, schema_id, name_parts, value_kind,
+                     mutability, persistence, representation_contract, source_unit_id,
+                     source_start, source_end)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+                &[
+                    &bytes(standard.revision()),
+                    &bytes(value_type.id()),
+                    &bytes(schema),
+                    &value_type.name().parts(),
+                    &standard_value_kind(value_type.kind())?,
+                    &standard_value_mutability(value_type.mutability())?,
+                    &standard_value_persistence(value_type.persistence())?,
+                    &value_type.representation_contract(),
+                    &bytes(source.source_unit()),
+                    &i64::from(source.byte_start()),
+                    &i64::from(source.byte_end()),
+                ],
+            )
+            .await
+            .map_err(PostgresKernelError::Database)?;
+    }
+
+    for binding in standard.catalogue().type_bindings() {
+        let source = origin(
+            standard.origins(),
+            DefinitionIdentity::TypeBinding(binding.id()),
+        )?;
+        let (kind, name_parts) = standard_type_binding_name(binding.kind(), binding.name())?;
+        transaction
+            .execute(
+                "INSERT INTO _orna_kernel.standard_catalogue_type_bindings
+                    (standard_library_revision_id, type_binding_id, kind, name_parts,
+                     target_type_id, source_unit_id, source_start, source_end)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                &[
+                    &bytes(standard.revision()),
+                    &bytes(binding.id()),
+                    &kind,
+                    &name_parts,
+                    &bytes(binding.target()),
+                    &bytes(source.source_unit()),
+                    &i64::from(source.byte_start()),
+                    &i64::from(source.byte_end()),
+                ],
+            )
+            .await
+            .map_err(PostgresKernelError::Database)?;
+    }
+    Ok(())
+}
+
+fn standard_digest_version(
+    version: orna_core::revision::StandardLibraryDigestVersion,
+) -> Result<i16, PostgresKernelError> {
+    i16::try_from(version.to_u32())
+        .map_err(|_| invariant("standard library digest version must fit PostgreSQL smallint"))
+}
+
+fn standard_value_kind(value: ValueTypeKind) -> Result<&'static str, PostgresKernelError> {
+    if matches!(value, ValueTypeKind::Primitive) {
+        Ok("primitive")
+    } else {
+        Err(invariant(
+            "standard value type kind is not supported by PostgreSQL persistence",
+        ))
+    }
+}
+
+fn standard_value_mutability(
+    value: ValueTypeMutability,
+) -> Result<&'static str, PostgresKernelError> {
+    if matches!(value, ValueTypeMutability::Immutable) {
+        Ok("immutable")
+    } else {
+        Err(invariant(
+            "standard value type mutability is not supported by PostgreSQL persistence",
+        ))
+    }
+}
+
+fn standard_value_persistence(
+    value: ValueTypePersistence,
+) -> Result<&'static str, PostgresKernelError> {
+    if matches!(value, ValueTypePersistence::Persistable) {
+        Ok("persistable")
+    } else if matches!(value, ValueTypePersistence::Transient) {
+        Ok("transient")
+    } else {
+        Err(invariant(
+            "standard value type persistence is not supported by PostgreSQL persistence",
+        ))
+    }
+}
+
+fn standard_type_binding_name(
+    kind: TypeBindingKind,
+    name: &TypeLookupName,
+) -> Result<(&'static str, Vec<String>), PostgresKernelError> {
+    if matches!(kind, TypeBindingKind::Qualified) {
+        if let TypeLookupName::Qualified(name) = name {
+            return Ok(("qualified", name.parts().to_vec()));
+        }
+        return Err(invariant(
+            "qualified standard type binding must retain a qualified name",
+        ));
+    }
+    if matches!(kind, TypeBindingKind::Prelude) {
+        if let TypeLookupName::Prelude(name) = name {
+            return Ok(("prelude", name.words().to_vec()));
+        }
+        return Err(invariant(
+            "prelude standard type binding must retain a prelude name",
+        ));
+    }
+    Err(invariant(
+        "standard type binding kind is not supported by PostgreSQL persistence",
+    ))
 }
 
 async fn persist_semantics(
     transaction: &Transaction<'_>,
     candidate: &DeployableRevision,
+    encoder: &CandidateEncoder<'_>,
 ) -> Result<(), PostgresKernelError> {
     let catalogue = candidate.candidate().revision();
     for schema in candidate.candidate().schemas() {
@@ -685,7 +1252,13 @@ async fn persist_semantics(
     }
     for object in candidate.candidate().object_types() {
         for field in object.fields() {
-            let (kind, scalar, target) = type_columns(field.resolved_type(), false)?;
+            let TypeColumns {
+                kind,
+                scalar,
+                target,
+                value_type,
+                standard_library_revision,
+            } = encoder.type_columns(field.resolved_type(), false)?;
             let delete = on_delete(field.on_delete());
             let origin = origin(
                 candidate.origins(),
@@ -698,9 +1271,10 @@ async fn persist_semantics(
                 .execute(
                     "INSERT INTO _orna_kernel.catalogue_fields
                     (catalogue_revision_id, owner_type_id, field_id, name, ordinal,
-                     type_kind, scalar_type, target_type_id, nullable, is_unique,
+                     type_kind, scalar_type, target_type_id, value_type_id,
+                     value_standard_library_revision_id, nullable, is_unique,
                      default_expression_id, on_delete, source_unit_id, source_start, source_end)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)",
                     &[
                         &bytes(catalogue),
                         &bytes(object.id()),
@@ -710,6 +1284,8 @@ async fn persist_semantics(
                         &kind,
                         &scalar,
                         &target.map(bytes),
+                        &value_type.map(bytes),
+                        &standard_library_revision.map(bytes),
                         &field.nullable(),
                         &field.unique(),
                         &field.default_expression().map(bytes),
@@ -723,12 +1299,13 @@ async fn persist_semantics(
                 .map_err(PostgresKernelError::Database)?;
         }
     }
-    persist_functions(transaction, candidate).await
+    persist_functions(transaction, candidate, encoder).await
 }
 
 async fn persist_functions(
     transaction: &Transaction<'_>,
     candidate: &DeployableRevision,
+    encoder: &CandidateEncoder<'_>,
 ) -> Result<(), PostgresKernelError> {
     let catalogue = candidate.candidate().revision();
     for function in candidate.candidate().functions() {
@@ -737,21 +1314,36 @@ async fn persist_functions(
             candidate.origins(),
             DefinitionIdentity::Function(function.id()),
         )?;
-        let (shape, kind, scalar, target) = match function.return_type() {
-            FunctionReturn::Single(value) => {
-                let (k, s, t) = type_columns(*value, true)?;
-                ("single", Some(k), s, t)
-            }
-            FunctionReturn::Rows(_) => ("rows", None, None, None),
-        };
+        let (shape, kind, scalar, target, value_type, standard_library_revision) =
+            match function.return_type() {
+                FunctionReturn::Single(value) => {
+                    let TypeColumns {
+                        kind,
+                        scalar,
+                        target,
+                        value_type,
+                        standard_library_revision,
+                    } = encoder.type_columns(*value, true)?;
+                    (
+                        "single",
+                        Some(kind),
+                        scalar,
+                        target,
+                        value_type,
+                        standard_library_revision,
+                    )
+                }
+                FunctionReturn::Rows(_) => ("rows", None, None, None, None, None),
+            };
         transaction
             .execute(
                 "INSERT INTO _orna_kernel.catalogue_functions
                 (catalogue_revision_id, function_id, schema_id, name_parts, domain,
                  security_mode, transaction_mode, volatility, return_shape,
                  return_type_kind, return_scalar_type, return_target_type_id,
+                 return_value_type_id, return_standard_library_revision_id,
                  current_function_revision_id, source_unit_id, source_start, source_end)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)",
                 &[
                     &bytes(catalogue),
                     &bytes(function.id()),
@@ -765,6 +1357,8 @@ async fn persist_functions(
                     &kind,
                     &scalar,
                     &target.map(bytes),
+                    &value_type.map(bytes),
+                    &standard_library_revision.map(bytes),
                     &bytes(function.current_revision()),
                     &bytes(function_origin.source_unit()),
                     &i64::from(function_origin.byte_start()),
@@ -774,7 +1368,13 @@ async fn persist_functions(
             .await
             .map_err(PostgresKernelError::Database)?;
         for parameter in function.parameters() {
-            let (kind, scalar, target) = type_columns(parameter.resolved_type(), false)?;
+            let TypeColumns {
+                kind,
+                scalar,
+                target,
+                value_type,
+                standard_library_revision,
+            } = encoder.type_columns(parameter.resolved_type(), false)?;
             let origin = origin(
                 candidate.origins(),
                 DefinitionIdentity::Parameter {
@@ -786,9 +1386,10 @@ async fn persist_functions(
                 .execute(
                     "INSERT INTO _orna_kernel.catalogue_function_parameters
                     (catalogue_revision_id, function_id, parameter_id, name, ordinal,
-                     type_kind, scalar_type, target_type_id, default_expression_id,
+                     type_kind, scalar_type, target_type_id, value_type_id,
+                     value_standard_library_revision_id, default_expression_id,
                      source_unit_id, source_start, source_end)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
                     &[
                         &bytes(catalogue),
                         &bytes(function.id()),
@@ -798,6 +1399,8 @@ async fn persist_functions(
                         &kind,
                         &scalar,
                         &target.map(bytes),
+                        &value_type.map(bytes),
+                        &standard_library_revision.map(bytes),
                         &parameter.default_expression().map(bytes),
                         &bytes(origin.source_unit()),
                         &i64::from(origin.byte_start()),
@@ -809,7 +1412,13 @@ async fn persist_functions(
         }
         if let FunctionReturn::Rows(columns) = function.return_type() {
             for column in columns {
-                let (kind, scalar, target) = type_columns(column.resolved_type(), false)?;
+                let TypeColumns {
+                    kind,
+                    scalar,
+                    target,
+                    value_type,
+                    standard_library_revision,
+                } = encoder.type_columns(column.resolved_type(), false)?;
                 let origin = origin(
                     candidate.origins(),
                     DefinitionIdentity::FunctionReturnColumn {
@@ -821,8 +1430,9 @@ async fn persist_functions(
                     .execute(
                         "INSERT INTO _orna_kernel.catalogue_function_return_columns
                         (catalogue_revision_id, function_id, name, ordinal, type_kind,
-                         scalar_type, target_type_id, source_unit_id, source_start, source_end)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+                         scalar_type, target_type_id, value_type_id,
+                         value_standard_library_revision_id, source_unit_id, source_start, source_end)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
                         &[
                             &bytes(catalogue),
                             &bytes(function.id()),
@@ -831,6 +1441,8 @@ async fn persist_functions(
                             &kind,
                             &scalar,
                             &target.map(bytes),
+                            &value_type.map(bytes),
+                            &standard_library_revision.map(bytes),
                             &bytes(origin.source_unit()),
                             &i64::from(origin.byte_start()),
                             &i64::from(origin.byte_end()),
@@ -847,6 +1459,7 @@ async fn persist_functions(
 async fn persist_revisions_and_references(
     transaction: &Transaction<'_>,
     candidate: &DeployableRevision,
+    encoder: &CandidateEncoder<'_>,
 ) -> Result<(), PostgresKernelError> {
     let catalogue = candidate.candidate().revision();
     for revision in candidate.new_function_revisions() {
@@ -856,8 +1469,8 @@ async fn persist_revisions_and_references(
                 "INSERT INTO _orna_kernel.function_revisions
                 (id, introduced_catalogue_revision_id, function_id, revision_number,
                  content_hash, semantic_ir_hash, hash_algorithm, language_version,
-                 status, hash_contract_version)
-             VALUES ($1, $2, $3, $4, $5, $6, 'sha256', $7, 'candidate', $8)",
+                 status, hash_contract_version, semantic_hash_version)
+             VALUES ($1, $2, $3, $4, $5, $6, 'sha256', $7, 'candidate', $8, $9)",
                 &[
                     &bytes(revision.id()),
                     &bytes(catalogue),
@@ -867,6 +1480,7 @@ async fn persist_revisions_and_references(
                     &digest(revision.semantic_hash()),
                     &revision.language_version(),
                     &CONTRACT_VERSION,
+                    &semantic_hash_version(revision.semantic_hash_version())?,
                 ],
             )
             .await
@@ -893,7 +1507,8 @@ async fn persist_revisions_and_references(
             .map_err(PostgresKernelError::Database)?;
     }
     for reference in candidate.references() {
-        let (target, kind, owner_type, owner_function) = reference_columns(reference)?;
+        let (target, kind, owner_type, owner_function, standard_library_revision) =
+            encoder.reference_columns(reference)?;
         let reference_kind = reference_kind(reference.kind())?;
         let source = reference.source_origin();
         transaction
@@ -901,9 +1516,9 @@ async fn persist_revisions_and_references(
                 "INSERT INTO _orna_kernel.definition_references
                 (catalogue_revision_id, source_function_id, source_function_revision_id,
                  ordinal, target_definition_id, target_kind, target_owner_type_id,
-                 target_owner_function_id, reference_kind, source_subobject_id,
-                 source_unit_id, source_start, source_end)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL, $10, $11, $12)",
+                 target_owner_function_id, target_standard_library_revision_id,
+                 reference_kind, source_subobject_id, source_unit_id, source_start, source_end)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, $11, $12, $13)",
                 &[
                     &bytes(catalogue),
                     &bytes(reference.source_function()),
@@ -913,6 +1528,7 @@ async fn persist_revisions_and_references(
                     &kind,
                     &owner_type,
                     &owner_function,
+                    &standard_library_revision,
                     &reference_kind,
                     &bytes(source.source_unit()),
                     &i64::from(source.byte_start()),
@@ -1108,6 +1724,8 @@ id_bytes!(
     ParameterId,
     SchemaId,
     SourceRevisionId,
+    StandardLibraryRevisionId,
+    TypeBindingId,
     TypeId,
     orna_core::SourceBundleId,
     orna_core::SourceUnitId
@@ -1162,12 +1780,153 @@ fn scalar(scalar: StandardScalar, allow_void: bool) -> Result<&'static str, Post
     }
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TypeColumns {
+    kind: &'static str,
+    scalar: Option<&'static str>,
+    target: Option<TypeId>,
+    value_type: Option<TypeId>,
+    standard_library_revision: Option<StandardLibraryRevisionId>,
+}
+
+/// The one context-aware PostgreSQL projection for candidate type and reference
+/// storage. It preserves the version-one tuple exactly and uses the selected
+/// version-two standard pin only for durable value identities.
+struct CandidateEncoder<'a> {
+    context: &'a CatalogueHashContext,
+}
+
+impl<'a> CandidateEncoder<'a> {
+    const fn new(context: &'a CatalogueHashContext) -> Self {
+        Self { context }
+    }
+
+    fn catalogue_hash_version(&self) -> Result<i16, PostgresKernelError> {
+        i16::try_from(self.context.version().to_u32())
+            .map_err(|_| invariant("catalogue hash version must fit PostgreSQL smallint"))
+    }
+
+    fn standard_library_revision(&self) -> Option<StandardLibraryRevisionId> {
+        self.context
+            .standard()
+            .map(VerifiedStandardLibrarySnapshot::revision)
+    }
+
+    fn type_columns(
+        &self,
+        value: ResolvedType,
+        allow_void: bool,
+    ) -> Result<TypeColumns, PostgresKernelError> {
+        if let Some(value) = value.legacy_scalar() {
+            return Ok(TypeColumns {
+                kind: "scalar",
+                scalar: Some(scalar(value, allow_void)?),
+                target: None,
+                value_type: None,
+                standard_library_revision: None,
+            });
+        }
+        if let Some(value) = value.named_type() {
+            return Ok(TypeColumns {
+                kind: "named",
+                scalar: None,
+                target: Some(value),
+                value_type: None,
+                standard_library_revision: None,
+            });
+        }
+        if let Some(target) = value.reference_target() {
+            return Ok(TypeColumns {
+                kind: "reference",
+                scalar: None,
+                target: Some(target),
+                value_type: None,
+                standard_library_revision: None,
+            });
+        }
+        if let Some(value_type) = value.value_type() {
+            let standard_library_revision = self.standard_library_revision().ok_or_else(|| {
+                invariant("resolved value types require version-two PostgreSQL encoding")
+            })?;
+            return Ok(TypeColumns {
+                kind: "value",
+                scalar: None,
+                target: None,
+                value_type: Some(value_type),
+                standard_library_revision: Some(standard_library_revision),
+            });
+        }
+        Err(invariant(
+            "resolved type must expose one supported PostgreSQL type shape",
+        ))
+    }
+
+    fn reference_target(
+        &self,
+        value: DefinitionReferenceTarget,
+    ) -> Result<ReferenceTargetColumns, PostgresKernelError> {
+        if let DefinitionReferenceTarget::ObjectType(id) = value {
+            return Ok(("object_type", bytes(id), None, None, None));
+        }
+        if let DefinitionReferenceTarget::ValueType(id) = value {
+            let standard_library_revision = self.standard_library_revision().ok_or_else(|| {
+                invariant("value type references require version-two PostgreSQL encoding")
+            })?;
+            return Ok((
+                "value_type",
+                bytes(id),
+                None,
+                None,
+                Some(bytes(standard_library_revision)),
+            ));
+        }
+        if let DefinitionReferenceTarget::Field { owner, field } = value {
+            return Ok(("field", bytes(field), Some(bytes(owner)), None, None));
+        }
+        if let DefinitionReferenceTarget::Function(id) = value {
+            return Ok(("function", bytes(id), None, None, None));
+        }
+        if let DefinitionReferenceTarget::Parameter { owner, parameter } = value {
+            return Ok((
+                "parameter",
+                bytes(parameter),
+                None,
+                Some(bytes(owner)),
+                None,
+            ));
+        }
+        if let DefinitionReferenceTarget::Expression(id) = value {
+            return Ok(("expression", bytes(id), None, None, None));
+        }
+        Err(invariant(
+            "definition reference target is not supported by PostgreSQL persistence",
+        ))
+    }
+
+    fn reference_columns(
+        &self,
+        reference: &DefinitionReference,
+    ) -> Result<ReferenceInsertColumns, PostgresKernelError> {
+        let (kind, target, owner_type, owner_function, standard_library_revision) =
+            self.reference_target(reference.target())?;
+        Ok((
+            target,
+            kind,
+            owner_type,
+            owner_function,
+            standard_library_revision,
+        ))
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LegacyTypeColumns {
     Scalar(&'static str),
     Named(TypeId),
     Reference(TypeId),
 }
 
+#[cfg(test)]
 impl LegacyTypeColumns {
     const fn tuple(self) -> (&'static str, Option<&'static str>, Option<TypeId>) {
         match self {
@@ -1178,6 +1937,7 @@ impl LegacyTypeColumns {
     }
 }
 
+#[cfg(test)]
 fn legacy_type_projection(
     value: ResolvedType,
     allow_void: bool,
@@ -1201,6 +1961,7 @@ fn legacy_type_projection(
     ))
 }
 
+#[cfg(test)]
 fn type_columns(
     value: ResolvedType,
     allow_void: bool,
@@ -1271,11 +2032,21 @@ const POSTGRES_REFERENCE_KINDS: &[(DefinitionReferenceKind, &str)] = &[
     (DefinitionReferenceKind::WriteObject, "write_object"),
     (DefinitionReferenceKind::WriteField, "write_field"),
 ];
-type ReferenceTargetColumns = (&'static str, Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>);
+type ReferenceTargetColumns = (
+    &'static str,
+    Vec<u8>,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+);
 
+#[cfg(test)]
+type LegacyReferenceTargetColumns = (&'static str, Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>);
+
+#[cfg(test)]
 fn reference_target(
     value: DefinitionReferenceTarget,
-) -> Result<ReferenceTargetColumns, PostgresKernelError> {
+) -> Result<LegacyReferenceTargetColumns, PostgresKernelError> {
     Ok(match value {
         DefinitionReferenceTarget::ObjectType(id) => ("object_type", bytes(id), None, None),
         DefinitionReferenceTarget::Field { owner, field } => {
@@ -1295,14 +2066,13 @@ fn reference_target(
         }
     })
 }
-type ReferenceInsertColumns = (Vec<u8>, &'static str, Option<Vec<u8>>, Option<Vec<u8>>);
-
-fn reference_columns(
-    reference: &DefinitionReference,
-) -> Result<ReferenceInsertColumns, PostgresKernelError> {
-    let (kind, target, owner_type, owner_function) = reference_target(reference.target())?;
-    Ok((target, kind, owner_type, owner_function))
-}
+type ReferenceInsertColumns = (
+    Vec<u8>,
+    &'static str,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+);
 
 #[cfg(test)]
 mod tests {
@@ -1330,10 +2100,12 @@ mod tests {
     };
 
     use super::{
-        LegacyTypeColumns, POSTGRES_REFERENCE_KINDS, StandardContextIdentity, artifact_kind,
-        function_transaction, guard_standard_context_transition, legacy_type_projection,
-        positive_i32, positive_i64, reference_kind, reference_target, scalar, type_columns,
-        validate_candidate_preflight,
+        CandidateEncoder, LegacyTypeColumns, POSTGRES_REFERENCE_KINDS, StandardContextIdentity,
+        TypeColumns, artifact_kind, first_active_reserved_identity,
+        first_inactive_reserved_identity, function_transaction, guard_standard_context_transition,
+        legacy_type_projection, materialize, positive_i32, positive_i64, reference_kind,
+        reference_target, scalar, type_columns, validate_candidate_preflight,
+        validate_expected_base,
     };
     use crate::PostgresKernelError;
 
@@ -1526,6 +2298,40 @@ mod tests {
         .unwrap()
     }
 
+    fn preflight_active_version_one() -> ActiveDatabaseRevision {
+        let bundle = SourceBundleId::from_bytes([0x50; 16]);
+        let bundle_hash = source_bundle_digest(&[]).unwrap();
+        let source = StoredSourceRevision::new(
+            bundle,
+            SourceRevisionId::from_bytes([0x51; 16]),
+            None,
+            Vec::new(),
+            bundle_hash,
+            source_revision_record_digest(bundle, None, bundle_hash).unwrap(),
+        )
+        .unwrap();
+        let catalogue = CatalogueSnapshot::new(
+            CatalogueRevisionId::from_bytes([0x52; 16]),
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        let context = CatalogueHashContext::version_one();
+        let catalogue_hash =
+            catalogue_digest_with_context(&context, &catalogue, &[], &[], &[], &[]).unwrap();
+        ActiveDatabaseRevision::new_with_catalogue_hash_context(
+            ActiveDatabaseRevisionInput::new(
+                RevisionPair::new(source.id(), catalogue.revision()),
+                source,
+                catalogue,
+                catalogue_hash,
+                ActiveRevisionContent::new(Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+            ),
+            context,
+        )
+        .unwrap()
+    }
+
     fn preflight_candidate(
         expected_base: RevisionPair,
         context: CatalogueHashContext,
@@ -1628,6 +2434,192 @@ mod tests {
                 object_type: preflight_object_type(),
                 field: preflight_field(),
             })
+        );
+    }
+
+    #[test]
+    fn candidate_encoder_projects_version_two_value_type_identity_and_pin() {
+        let standard = orna_standard::verify_standard_library_snapshot(
+            orna_standard::retained_standard_library_snapshot().unwrap(),
+        )
+        .unwrap();
+        let context = CatalogueHashContext::version_two(standard.clone());
+
+        assert_eq!(
+            CandidateEncoder::new(&context)
+                .type_columns(ResolvedType::value(preflight_value_type()), false)
+                .unwrap(),
+            TypeColumns {
+                kind: "value",
+                scalar: None,
+                target: None,
+                value_type: Some(preflight_value_type()),
+                standard_library_revision: Some(standard.revision()),
+            }
+        );
+    }
+
+    #[test]
+    fn candidate_encoder_keeps_version_one_tuples_and_value_references_explicit() {
+        let version_one = CatalogueHashContext::version_one();
+        let version_one_encoder = CandidateEncoder::new(&version_one);
+        assert_eq!(
+            version_one_encoder
+                .type_columns(ResolvedType::scalar(StandardScalar::Boolean), false)
+                .unwrap(),
+            TypeColumns {
+                kind: "scalar",
+                scalar: Some("boolean"),
+                target: None,
+                value_type: None,
+                standard_library_revision: None,
+            }
+        );
+        assert_eq!(
+            version_one_encoder
+                .reference_target(DefinitionReferenceTarget::ObjectType(
+                    preflight_object_type(),
+                ))
+                .unwrap(),
+            (
+                "object_type",
+                preflight_object_type().to_bytes().to_vec(),
+                None,
+                None,
+                None,
+            )
+        );
+
+        let standard = orna_standard::verify_standard_library_snapshot(
+            orna_standard::retained_standard_library_snapshot().unwrap(),
+        )
+        .unwrap();
+        let version_two = CatalogueHashContext::version_two(standard.clone());
+        let version_two_encoder = CandidateEncoder::new(&version_two);
+        assert_eq!(
+            version_two_encoder
+                .reference_target(DefinitionReferenceTarget::ValueType(preflight_value_type()))
+                .unwrap(),
+            (
+                "value_type",
+                preflight_value_type().to_bytes().to_vec(),
+                None,
+                None,
+                Some(standard.revision().to_bytes().to_vec()),
+            )
+        );
+    }
+
+    #[test]
+    fn materialization_retains_candidate_context_for_context_aware_hashing() {
+        let standard = orna_standard::verify_standard_library_snapshot(
+            orna_standard::retained_standard_library_snapshot().unwrap(),
+        )
+        .unwrap();
+        let active = preflight_active(standard.clone());
+        let candidate = preflight_candidate(
+            active.pair(),
+            CatalogueHashContext::version_two(standard),
+            ResolvedType::value(preflight_value_type()),
+        );
+
+        let materialized = materialize(&candidate, &active).unwrap();
+        assert_eq!(
+            materialized.catalogue_hash_context.version(),
+            candidate.catalogue_hash_context().version()
+        );
+        assert!(super::verify_candidate_hashes(&candidate, &materialized).is_ok());
+    }
+
+    #[test]
+    fn standard_upgrade_base_gate_has_no_normal_context_transition_check() {
+        let active = preflight_active_version_one();
+        let standard = orna_standard::verify_standard_library_snapshot(
+            orna_standard::retained_standard_library_snapshot().unwrap(),
+        )
+        .unwrap();
+        let candidate = preflight_candidate(
+            active.pair(),
+            CatalogueHashContext::version_two(standard),
+            ResolvedType::value(preflight_value_type()),
+        );
+
+        assert!(validate_expected_base(&active, &candidate).is_ok());
+        let stale = preflight_candidate(
+            RevisionPair::new(
+                SourceRevisionId::from_bytes([0x71; 16]),
+                CatalogueRevisionId::from_bytes([0x72; 16]),
+            ),
+            candidate.catalogue_hash_context().clone(),
+            ResolvedType::value(preflight_value_type()),
+        );
+        assert!(matches!(
+            validate_expected_base(&active, &stale),
+            Err(PostgresKernelError::ExpectedBaseMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn reserved_identity_selector_keeps_active_before_inactive_raw_order() {
+        let standard = orna_standard::StandardUpgradeIdentity::StandardLibraryRevision(
+            StandardLibraryRevisionId::from_bytes([0x80; 16]),
+        );
+        let source = orna_standard::StandardUpgradeIdentity::SourceUnit(SourceUnitId::from_bytes(
+            [0x81; 16],
+        ));
+        let inactive_earlier = orna_standard::StandardUpgradeIdentity::SourceUnit(
+            SourceUnitId::from_bytes([0x82; 16]),
+        );
+        let upgrade = vec![
+            (
+                source,
+                SourceUnitId::from_bytes([0x81; 16]).to_bytes().to_vec(),
+            ),
+            (
+                inactive_earlier,
+                SourceUnitId::from_bytes([0x82; 16]).to_bytes().to_vec(),
+            ),
+        ];
+        let active = vec![(
+            standard,
+            StandardLibraryRevisionId::from_bytes([0x80; 16])
+                .to_bytes()
+                .to_vec(),
+        )];
+
+        assert_eq!(first_active_reserved_identity(&active, &upgrade), None);
+        let standard_upgrade = vec![(
+            standard,
+            StandardLibraryRevisionId::from_bytes([0x80; 16])
+                .to_bytes()
+                .to_vec(),
+        )];
+        assert_eq!(
+            first_inactive_reserved_identity(
+                &standard_upgrade,
+                &[StandardLibraryRevisionId::from_bytes([0x80; 16])
+                    .to_bytes()
+                    .to_vec()],
+            ),
+            Some(standard)
+        );
+        assert_eq!(
+            first_inactive_reserved_identity(
+                &upgrade,
+                &[
+                    SourceUnitId::from_bytes([0x82; 16]).to_bytes().to_vec(),
+                    SourceUnitId::from_bytes([0x81; 16]).to_bytes().to_vec(),
+                ],
+            ),
+            Some(inactive_earlier)
+        );
+        let active_source = vec![(
+            source,
+            SourceUnitId::from_bytes([0x81; 16]).to_bytes().to_vec(),
+        )];
+        assert_eq!(
+            first_active_reserved_identity(&active_source, &upgrade),
+            Some(source)
         );
     }
 

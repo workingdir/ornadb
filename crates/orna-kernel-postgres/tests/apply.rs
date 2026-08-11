@@ -5,7 +5,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use orna_compiler::{check, prepare};
+use orna_compiler::{
+    PrepareStandardUpgradeError, StandardApplicationCheckContext, check,
+    check_standard_application, prepare, prepare_standard_application,
+};
 use orna_core::{
     CatalogueRevisionId, FieldId, ObjectId, SourceBundleId, SourceRevisionId, SourceUnitId,
     StandardLibraryRevisionId, TypeId,
@@ -13,7 +16,10 @@ use orna_core::{
         catalogue_digest_with_context, source_bundle_digest, source_revision_record_digest,
         source_unit_content_digest, verify_standard_library_snapshot,
     },
-    catalogue::{CatalogueSnapshot, FunctionReturn},
+    catalogue::{
+        CatalogueSnapshot, FunctionReturn, TypeLookupName, ValueTypeKind, ValueTypeMutability,
+        ValueTypePersistence,
+    },
     revision::{
         ActiveDatabaseRevision, CatalogueHashContext, CatalogueHashVersion, DefinitionIdentity,
         DefinitionReferenceKind, DefinitionReferenceTarget, DeployableRevision,
@@ -45,6 +51,18 @@ const BASIC_CHANGED_SOURCE: &str = "CREATE SCHEMA app;\n\
     CREATE SERVER FUNCTION app.list_widgets()\n\
     RETURNS ROWS (name TEXT)\n\
     AS SELECT widget.name FROM app.widget widget WHERE widget.active = TRUE;\n";
+
+const STANDARD_APPLICATION_SOURCE: &str = "CREATE SCHEMA app;\n";
+
+const STANDARD_APPLICATION_SOURCE_EDIT: &str = "CREATE SCHEMA app;\n\
+    CREATE TYPE app.item AS OBJECT (done BOOLEAN NOT NULL);\n\
+    CREATE SERVER FUNCTION app.read()\n\
+    RETURNS ROWS (visible BOOLEAN) TRANSACTION READ ONLY VOLATILITY STABLE\n\
+    AS SELECT item.done FROM app.item item;\n\
+    CREATE SERVER FUNCTION app.create(p_ref REF app.item, p_done BOOLEAN)\n\
+    RETURNS ROWS (created REF app.item) TRANSACTION ATOMIC\n\
+    AS INSERT INTO app.item AS made (done) VALUES (p_done) RETURNING REF(made);\n\
+    CREATE CLIENT FUNCTION app.enabled() RETURNS BOOLEAN RETURN FALSE;\n";
 
 const FIELD_RENAME_ORIGINAL_SOURCE: &str = "CREATE SCHEMA people;\n\
     CREATE TYPE people.person AS OBJECT (email TEXT NOT NULL);\n\
@@ -227,6 +245,205 @@ async fn checks_the_expected_base_before_standard_context_transition() -> TestRe
             }
         }
         require_baseline(&database, &before, &kernel).await
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn applies_the_standard_upgrade_then_reuses_normal_version_two_apply() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = kernel(&database)?;
+        kernel.bootstrap().await?;
+        let empty = kernel.recover().await?;
+        let version_one_candidate = candidate(STANDARD_APPLICATION_SOURCE, &empty)?;
+        let version_one = kernel.apply(&version_one_candidate).await?;
+
+        let upgrade = orna_standard::prepare_standard_upgrade(&version_one)
+            .map_err(|error| failure(format!("standard upgrade preparation failed: {error}")))?;
+        let version_two = kernel.apply_standard_upgrade(&upgrade).await?;
+        require(
+            version_two.catalogue_hash_context().version() == CatalogueHashVersion::Version2,
+            "standard upgrade did not install a version-two catalogue context",
+        )?;
+        require_standard_context(&version_two, upgrade.verified_standard_snapshot())?;
+        require_recovered_snapshot(upgrade.application_revision(), &version_two)?;
+        let replay_baseline = baseline(&database, &version_two).await?;
+        let replay = failed_apply_error(
+            kernel.apply_standard_upgrade(&upgrade).await,
+            "replaying a standard upgrade unexpectedly succeeded",
+        )?;
+        require(
+            replay.to_string() == "expected revision pair is not active"
+                && std::error::Error::source(&replay).is_none(),
+            "standard-upgrade replay changed the exact expected-base error contract",
+        )?;
+        match replay {
+            PostgresKernelError::ExpectedBaseMismatch { expected, active } => require(
+                expected == upgrade.application_revision().expected_base()
+                    && active == version_two.pair(),
+                "standard-upgrade replay did not fail before collision scanning",
+            )?,
+            error => {
+                return Err(failure(format!(
+                    "expected standard-upgrade replay to fail with ExpectedBaseMismatch, got {error}"
+                )));
+            }
+        }
+        require_baseline(&database, &replay_baseline, &kernel).await?;
+
+        let repeated = orna_standard::prepare_standard_upgrade(&version_two)
+            .expect_err("re-preparing an installed standard upgrade unexpectedly succeeded");
+        require(
+            repeated.to_string()
+                == format!(
+                    "standard library {} is already installed",
+                    upgrade.verified_standard_snapshot().revision()
+                ),
+            "re-preparing an installed standard did not preserve the exact compiler error",
+        )?;
+        match repeated {
+            orna_standard::StandardUpgradeError::Prepare {
+                source: PrepareStandardUpgradeError::StandardLibraryAlreadyInstalled {
+                    revision,
+                },
+            } => require(
+                revision == upgrade.verified_standard_snapshot().revision(),
+                "re-preparation reported the wrong installed standard revision",
+            )?,
+            error => {
+                return Err(failure(format!(
+                    "expected StandardLibraryAlreadyInstalled, got {error}"
+                )));
+            }
+        }
+
+        let second_candidate = standard_application_candidate(
+            STANDARD_APPLICATION_SOURCE_EDIT,
+            &version_two,
+            &upgrade,
+        )?;
+        let second = kernel.apply(&second_candidate).await?;
+        require(
+            second.catalogue_hash_context().version() == CatalogueHashVersion::Version2,
+            "normal same-context apply did not retain the installed standard context",
+        )?;
+        require_standard_context(&second, upgrade.verified_standard_snapshot())?;
+        require_recovered_snapshot(&second_candidate, &second)?;
+        require_standard_upgrade_storage(&database, &second, &upgrade, &second_candidate).await?;
+
+        let restarted = named_kernel(&database, "orna-standard-restart")?
+            .recover()
+            .await?;
+        require_standard_context(&restarted, upgrade.verified_standard_snapshot())?;
+        require(
+            same_recovered(&restarted, &second),
+            "reconnect changed current or historical function revision facts",
+        )?;
+        require_recovered_snapshot(&second_candidate, &restarted)
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn rejects_an_inactive_standard_revision_collision_before_standard_writes() -> TestResult<()>
+{
+    with_test_database(|database| async move {
+        let kernel = kernel(&database)?;
+        kernel.bootstrap().await?;
+        let empty = kernel.recover().await?;
+        let version_one_candidate = candidate(STANDARD_APPLICATION_SOURCE, &empty)?;
+        let version_one = kernel.apply(&version_one_candidate).await?;
+        let upgrade = orna_standard::prepare_standard_upgrade(&version_one)
+            .map_err(|error| failure(format!("standard upgrade preparation failed: {error}")))?;
+        let reserved_revision = upgrade.verified_standard_snapshot().revision();
+        let hostile_catalogue = CatalogueRevisionId::from_bytes([0xe1; 16]);
+        require(
+            hostile_catalogue != upgrade.verified_standard_snapshot().catalogue().revision(),
+            "hostile standard revision collision accidentally reused the standard catalogue ID",
+        )?;
+
+        let session = database.open().await?;
+        session
+            .client()
+            .execute(
+                "INSERT INTO _orna_kernel.standard_library_revisions
+                    (id, source_revision_id, catalogue_revision_id, digest_version,
+                     language_version, content_hash, hash_algorithm)
+                 VALUES ($1, $2, $3, 1, 'orna.test/hostile', $4, 'sha256')",
+                &[
+                    &reserved_revision.to_bytes().to_vec(),
+                    &version_one.source().id().to_bytes().to_vec(),
+                    &hostile_catalogue.to_bytes().to_vec(),
+                    &vec![0_u8; 32],
+                ],
+            )
+            .await?;
+        session.shutdown().await?;
+        let before = baseline(&database, &version_one).await?;
+
+        let error = failed_apply_error(
+            kernel.apply_standard_upgrade(&upgrade).await,
+            "inactive standard identity collision unexpectedly allowed the upgrade",
+        )?;
+        require(
+            error.to_string()
+                == "the database contains an identity reserved for the standard library"
+                && std::error::Error::source(&error).is_none(),
+            "inactive standard identity collision changed its exact source-free error contract",
+        )?;
+        match error {
+            PostgresKernelError::ReservedStandardIdentity {
+                identity: orna_standard::StandardUpgradeIdentity::StandardLibraryRevision(revision),
+            } => require(
+                revision == reserved_revision,
+                "inactive standard identity collision returned the wrong durable identity",
+            )?,
+            error => {
+                return Err(failure(format!(
+                    "expected inactive standard revision collision, got {error}"
+                )));
+            }
+        }
+        require_baseline(&database, &before, &kernel).await?;
+
+        let session = database.open().await?;
+        let hostile = session
+            .client()
+            .query_one(
+                "SELECT source_revision_id, catalogue_revision_id, digest_version,
+                        language_version, content_hash, hash_algorithm
+                 FROM _orna_kernel.standard_library_revisions WHERE id = $1",
+                &[&reserved_revision.to_bytes().to_vec()],
+            )
+            .await?;
+        require(
+            hostile.try_get::<_, Vec<u8>>(0)? == version_one.source().id().to_bytes()
+                && hostile.try_get::<_, Vec<u8>>(1)? == hostile_catalogue.to_bytes()
+                && hostile.try_get::<_, i16>(2)? == 1
+                && hostile.try_get::<_, String>(3)? == "orna.test/hostile"
+                && hostile.try_get::<_, Vec<u8>>(4)? == vec![0_u8; 32]
+                && hostile.try_get::<_, String>(5)? == "sha256",
+            "inactive standard revision collision row changed after the rejected upgrade",
+        )?;
+        let standard_rows = session
+            .client()
+            .query_one(
+                "SELECT
+                    (SELECT count(*) FROM _orna_kernel.standard_catalogue_schemas),
+                    (SELECT count(*) FROM _orna_kernel.standard_catalogue_value_types),
+                    (SELECT count(*) FROM _orna_kernel.standard_catalogue_type_bindings)",
+                &[],
+            )
+            .await?;
+        require(
+            standard_rows.try_get::<_, i64>(0)? == 0
+                && standard_rows.try_get::<_, i64>(1)? == 0
+                && standard_rows.try_get::<_, i64>(2)? == 0,
+            "rejected collision unexpectedly wrote standard catalogue rows",
+        )?;
+        session.shutdown().await
     })
     .await
 }
@@ -799,6 +1016,671 @@ async fn require_baseline(
     )
 }
 
+async fn require_standard_upgrade_storage(
+    database: &TestDatabase,
+    active: &ActiveDatabaseRevision,
+    upgrade: &orna_standard::StandardUpgrade,
+    candidate: &DeployableRevision,
+) -> TestResult<()> {
+    let session = database.open().await?;
+    let operation = async {
+        let catalogue_id = active.catalogue().revision().to_bytes().to_vec();
+        let standard = upgrade.verified_standard_snapshot();
+        let standard_revision = standard.revision().to_bytes().to_vec();
+        let object = active
+            .catalogue()
+            .object_types()
+            .first()
+            .ok_or_else(|| failure("standard application object row is missing"))?;
+        let field = object
+            .fields()
+            .first()
+            .ok_or_else(|| failure("standard application field definition is missing"))?;
+        require(
+            standard
+                .catalogue()
+                .value_types()
+                .iter()
+                .all(|value_type| value_type.id() != object.id()),
+            "application object TypeId unexpectedly overlaps a standard Value TypeId",
+        )?;
+        let boolean_type_id = field
+            .resolved_type()
+            .value_type()
+            .ok_or_else(|| failure("standard application field did not retain a Value identity"))?;
+        let boolean_definition = standard
+            .catalogue()
+            .value_type_by_id(boolean_type_id)
+            .ok_or_else(|| failure("application Boolean Value identity is not pinned"))?;
+        require(
+            boolean_definition.representation_contract() == "orna.kernel.value.boolean@1",
+            "application Boolean Value identity does not select the verified Boolean contract",
+        )?;
+        let boolean_type = boolean_type_id.to_bytes().to_vec();
+
+        let revision = session
+            .client()
+            .query_one(
+                "SELECT id, source_revision_id, catalogue_revision_id, digest_version,
+                        language_version, content_hash
+                 FROM _orna_kernel.standard_library_revisions
+                 WHERE id = $1",
+                &[&standard_revision],
+            )
+            .await?;
+        require(
+            revision.try_get::<_, Vec<u8>>(0)? == standard.revision().to_bytes()
+                && revision.try_get::<_, Vec<u8>>(1)? == standard.source().id().to_bytes()
+                && revision.try_get::<_, Vec<u8>>(2)? == standard.catalogue().revision().to_bytes()
+                && revision.try_get::<_, i16>(3)? == standard.digest_version().to_u32() as i16
+                && revision.try_get::<_, String>(4)? == standard.language_version()
+                && revision.try_get::<_, Vec<u8>>(5)? == standard.digest().to_bytes(),
+            "standard library revision rows changed during atomic installation",
+        )?;
+
+        let source_bundle_row = session
+            .client()
+            .query_one(
+                "SELECT id, content_hash, hash_algorithm, hash_contract_version
+                 FROM _orna_kernel.source_bundles WHERE id = $1",
+                &[&standard.source().bundle().to_bytes().to_vec()],
+            )
+            .await?;
+        require(
+            source_bundle_row.try_get::<_, Vec<u8>>(0)? == standard.source().bundle().to_bytes()
+                && source_bundle_row.try_get::<_, Vec<u8>>(1)?
+                    == standard.source().bundle_hash().to_bytes()
+                && source_bundle_row.try_get::<_, String>(2)? == "sha256"
+                && source_bundle_row.try_get::<_, i16>(3)? == 1,
+            "standard source bundle row differs from the verified snapshot",
+        )?;
+        let source_revision_row = session
+            .client()
+            .query_one(
+                "SELECT id, parent_source_revision_id, bundle_id, content_hash,
+                        hash_algorithm, hash_contract_version
+                 FROM _orna_kernel.source_revisions WHERE id = $1",
+                &[&standard.source().id().to_bytes().to_vec()],
+            )
+            .await?;
+        require(
+            source_revision_row.try_get::<_, Vec<u8>>(0)? == standard.source().id().to_bytes()
+                && source_revision_row.try_get::<_, Option<Vec<u8>>>(1)?
+                    == standard.source().parent().map(|id| id.to_bytes().to_vec())
+                && source_revision_row.try_get::<_, Vec<u8>>(2)?
+                    == standard.source().bundle().to_bytes()
+                && source_revision_row.try_get::<_, Vec<u8>>(3)?
+                    == standard.source().revision_hash().to_bytes()
+                && source_revision_row.try_get::<_, String>(4)? == "sha256"
+                && source_revision_row.try_get::<_, i16>(5)? == 1,
+            "standard source revision row differs from the verified snapshot",
+        )?;
+
+        let catalogue_revision_row = session
+            .client()
+            .query_one(
+                "SELECT id, source_revision_id, parent_catalogue_revision_id, content_hash,
+                        canonical_hash_version, standard_library_revision_id, hash_contract_version
+                 FROM _orna_kernel.catalogue_revisions WHERE id = $1",
+                &[&catalogue_id],
+            )
+            .await?;
+        require(
+            catalogue_revision_row.try_get::<_, Vec<u8>>(0)?
+                == active.catalogue().revision().to_bytes()
+                && catalogue_revision_row.try_get::<_, Vec<u8>>(1)?
+                    == active.source().id().to_bytes()
+                && catalogue_revision_row.try_get::<_, Option<Vec<u8>>>(2)?
+                    == Some(candidate.parent_catalogue().to_bytes().to_vec())
+                && catalogue_revision_row.try_get::<_, Vec<u8>>(3)?
+                    == candidate.catalogue_hash().to_bytes()
+                && catalogue_revision_row.try_get::<_, i16>(4)? == 2
+                && catalogue_revision_row.try_get::<_, Option<Vec<u8>>>(5)?
+                    == Some(standard.revision().to_bytes().to_vec())
+                && catalogue_revision_row.try_get::<_, i16>(6)? == 1,
+            "application catalogue revision did not retain its exact version-two context and hash",
+        )?;
+
+        let semantic_revisions = session
+            .client()
+            .query(
+                "SELECT id, function_id, semantic_hash_version
+                 FROM _orna_kernel.function_revisions
+                 WHERE status = 'active' ORDER BY function_id",
+                &[],
+            )
+            .await?;
+        require(
+            semantic_revisions.len() == active.function_revisions().len()
+                && semantic_revisions.iter().all(|row| {
+                    active.function_revisions().iter().any(|revision| {
+                        row.try_get::<_, Vec<u8>>(0).ok() == Some(revision.id().to_bytes().to_vec())
+                            && row.try_get::<_, Vec<u8>>(1).ok()
+                                == Some(revision.function().to_bytes().to_vec())
+                            && row.try_get::<_, i16>(2).ok()
+                                == Some(revision.semantic_hash_version().to_u32() as i16)
+                    })
+                }),
+            "standard application function revisions did not retain semantic hash version two",
+        )?;
+        let expected_current = candidate
+            .current_function_revisions()
+            .ok_or_else(|| failure("standard application candidate omitted current revisions"))?;
+        require(
+            same_members(active.function_revisions(), expected_current),
+            "recovered current function revisions differ from the prepared candidate",
+        )?;
+
+        let source_units = session
+            .client()
+            .query(
+                "SELECT id, bundle_id, ordinal, logical_path, content, content_hash
+                 FROM _orna_kernel.source_units
+                 WHERE bundle_id = $1 ORDER BY ordinal",
+                &[&standard.source().bundle().to_bytes().to_vec()],
+            )
+            .await?;
+        require(
+            source_units.len() == standard.source().units().len(),
+            "standard source-unit row count differs from the verified snapshot",
+        )?;
+        for unit in standard.source().units() {
+            let row = source_units
+                .iter()
+                .find(|row| {
+                    row.try_get::<_, Vec<u8>>(0).ok() == Some(unit.id().to_bytes().to_vec())
+                })
+                .ok_or_else(|| failure("verified standard source unit is missing"))?;
+            require(
+                row.try_get::<_, Vec<u8>>(1)? == standard.source().bundle().to_bytes()
+                    && row.try_get::<_, i64>(2)? == i64::from(unit.ordinal())
+                    && row.try_get::<_, String>(3)? == unit.logical_path()
+                    && row.try_get::<_, String>(4)? == unit.content()
+                    && row.try_get::<_, Vec<u8>>(5)? == unit.content_hash().to_bytes(),
+                "standard source-unit row differs from the verified snapshot",
+            )?;
+        }
+
+        let schemas = session
+            .client()
+            .query(
+                "SELECT schema_id, name_parts, source_unit_id, source_start, source_end
+                 FROM _orna_kernel.standard_catalogue_schemas
+                 WHERE standard_library_revision_id = $1 ORDER BY schema_id",
+                &[&standard_revision],
+            )
+            .await?;
+        require(
+            schemas.len() == standard.catalogue().schemas().len(),
+            "standard schema row count differs from the verified snapshot",
+        )?;
+        for schema in standard.catalogue().schemas() {
+            let row = schemas
+                .iter()
+                .find(|row| {
+                    row.try_get::<_, Vec<u8>>(0).ok() == Some(schema.id().to_bytes().to_vec())
+                })
+                .ok_or_else(|| failure("verified standard schema row is missing"))?;
+            let origin = standard
+                .origins()
+                .iter()
+                .find(|origin| origin.identity() == DefinitionIdentity::Schema(schema.id()))
+                .ok_or_else(|| failure("verified standard schema origin is missing"))?
+                .source();
+            require(
+                row.try_get::<_, Vec<String>>(1)? == schema.name().parts()
+                    && row.try_get::<_, Vec<u8>>(2)? == origin.source_unit().to_bytes()
+                    && row.try_get::<_, i64>(3)? == i64::from(origin.byte_start())
+                    && row.try_get::<_, i64>(4)? == i64::from(origin.byte_end()),
+                "standard schema row differs from the verified snapshot",
+            )?;
+        }
+
+        let value_types = session
+            .client()
+            .query(
+                "SELECT type_id, schema_id, name_parts, value_kind, mutability,
+                        persistence, representation_contract, source_unit_id,
+                        source_start, source_end
+                 FROM _orna_kernel.standard_catalogue_value_types
+                 WHERE standard_library_revision_id = $1 ORDER BY type_id",
+                &[&standard_revision],
+            )
+            .await?;
+        require(
+            value_types.len() == standard.catalogue().value_types().len(),
+            "standard value-type row count differs from the verified snapshot",
+        )?;
+        for value_type in standard.catalogue().value_types() {
+            let row = value_types
+                .iter()
+                .find(|row| {
+                    row.try_get::<_, Vec<u8>>(0).ok() == Some(value_type.id().to_bytes().to_vec())
+                })
+                .ok_or_else(|| failure("verified standard value-type row is missing"))?;
+            let schema_name = value_type
+                .name()
+                .parts()
+                .get(..value_type.name().parts().len().saturating_sub(1))
+                .filter(|parts| !parts.is_empty())
+                .ok_or_else(|| failure("standard value type name has no schema part"))?;
+            let schema = standard
+                .catalogue()
+                .schemas()
+                .iter()
+                .find(|schema| schema.name().parts() == schema_name)
+                .ok_or_else(|| failure("standard value type schema is missing"))?;
+            let origin = standard
+                .origins()
+                .iter()
+                .find(|origin| origin.identity() == DefinitionIdentity::ValueType(value_type.id()))
+                .ok_or_else(|| failure("verified standard value-type origin is missing"))?
+                .source();
+            require(
+                row.try_get::<_, Vec<u8>>(1)? == schema.id().to_bytes(),
+                "standard value-type schema differs from the verified snapshot",
+            )?;
+            require(
+                row.try_get::<_, Vec<String>>(2)? == value_type.name().parts(),
+                "standard value-type name differs from the verified snapshot",
+            )?;
+            require(
+                row.try_get::<_, String>(3)?
+                    == if matches!(value_type.kind(), ValueTypeKind::Primitive) {
+                        "primitive"
+                    } else {
+                        "unsupported"
+                    }
+                    && row.try_get::<_, String>(4)?
+                        == if matches!(value_type.mutability(), ValueTypeMutability::Immutable) {
+                            "immutable"
+                        } else {
+                            "unsupported"
+                        }
+                    && row.try_get::<_, String>(5)?
+                        == if matches!(value_type.persistence(), ValueTypePersistence::Persistable)
+                        {
+                            "persistable"
+                        } else {
+                            "transient"
+                        }
+                    && row.try_get::<_, String>(6)? == value_type.representation_contract(),
+                "standard value-type contract facts differ from the verified snapshot",
+            )?;
+            require(
+                row.try_get::<_, Vec<u8>>(7)? == origin.source_unit().to_bytes()
+                    && row.try_get::<_, i64>(8)? == i64::from(origin.byte_start())
+                    && row.try_get::<_, i64>(9)? == i64::from(origin.byte_end()),
+                "standard value-type origin differs from the verified snapshot",
+            )?;
+        }
+
+        let bindings = session
+            .client()
+            .query(
+                "SELECT type_binding_id, kind, name_parts, target_type_id,
+                        source_unit_id, source_start, source_end
+                 FROM _orna_kernel.standard_catalogue_type_bindings
+                 WHERE standard_library_revision_id = $1 ORDER BY type_binding_id",
+                &[&standard_revision],
+            )
+            .await?;
+        require(
+            bindings.len() == standard.catalogue().type_bindings().len(),
+            "standard type-binding row count differs from the verified snapshot",
+        )?;
+        for binding in standard.catalogue().type_bindings() {
+            let row = bindings
+                .iter()
+                .find(|row| {
+                    row.try_get::<_, Vec<u8>>(0).ok() == Some(binding.id().to_bytes().to_vec())
+                })
+                .ok_or_else(|| failure("verified standard type-binding row is missing"))?;
+            let (kind, parts) = match binding.name() {
+                TypeLookupName::Qualified(name) => ("qualified", name.parts().to_vec()),
+                TypeLookupName::Prelude(name) => ("prelude", name.words().to_vec()),
+                _ => return Err(failure("standard type binding has an unknown name shape")),
+            };
+            let origin = standard
+                .origins()
+                .iter()
+                .find(|origin| origin.identity() == DefinitionIdentity::TypeBinding(binding.id()))
+                .ok_or_else(|| failure("verified standard type-binding origin is missing"))?
+                .source();
+            require(
+                row.try_get::<_, String>(1)? == kind
+                    && row.try_get::<_, Vec<String>>(2)? == parts
+                    && row.try_get::<_, Vec<u8>>(3)? == binding.target().to_bytes()
+                    && row.try_get::<_, Vec<u8>>(4)? == origin.source_unit().to_bytes()
+                    && row.try_get::<_, i64>(5)? == i64::from(origin.byte_start())
+                    && row.try_get::<_, i64>(6)? == i64::from(origin.byte_end()),
+                "standard type-binding row differs from the verified snapshot",
+            )?;
+        }
+
+        let field_rows = session
+            .client()
+            .query(
+                "SELECT owner_type_id, field_id, type_kind, scalar_type, target_type_id,
+                        value_type_id, value_standard_library_revision_id
+                 FROM _orna_kernel.catalogue_fields
+                 WHERE catalogue_revision_id = $1 ORDER BY owner_type_id, ordinal",
+                &[&catalogue_id],
+            )
+            .await?;
+        require(
+            field_rows.len() == 1,
+            "standard application fixture must retain one object field row",
+        )?;
+        require(
+            field_rows[0].try_get::<_, Vec<u8>>(0)? == object.id().to_bytes()
+                && field_rows[0].try_get::<_, Vec<u8>>(1)? == field.id().to_bytes()
+                && field_rows[0].try_get::<_, String>(2)? == "value"
+                && field_rows[0].try_get::<_, Option<String>>(3)?.is_none()
+                && field_rows[0].try_get::<_, Option<Vec<u8>>>(4)?.is_none()
+                && field_rows[0].try_get::<_, Option<Vec<u8>>>(5)? == Some(boolean_type.clone())
+                && field_rows[0].try_get::<_, Option<Vec<u8>>>(6)?
+                    == Some(standard_revision.clone()),
+            "application field did not persist the exact Boolean value tuple and pin",
+        )?;
+
+        let parameter_rows = session
+            .client()
+            .query(
+                "SELECT function_id, parameter_id, ordinal, type_kind, scalar_type,
+                        target_type_id, value_type_id, value_standard_library_revision_id
+                 FROM _orna_kernel.catalogue_function_parameters
+                 WHERE catalogue_revision_id = $1 ORDER BY function_id, ordinal",
+                &[&catalogue_id],
+            )
+            .await?;
+        let value_parameters = parameter_rows
+            .iter()
+            .filter(|row| row.try_get::<_, String>(3).ok().as_deref() == Some("value"))
+            .collect::<Vec<_>>();
+        let reference_parameters = parameter_rows
+            .iter()
+            .filter(|row| row.try_get::<_, String>(3).ok().as_deref() == Some("reference"))
+            .collect::<Vec<_>>();
+        let expected_value_parameters = active
+            .catalogue()
+            .functions()
+            .iter()
+            .flat_map(|function| function.parameters())
+            .filter(|parameter| parameter.resolved_type().value_type().is_some())
+            .count();
+        let expected_reference_parameters = active
+            .catalogue()
+            .functions()
+            .iter()
+            .flat_map(|function| function.parameters())
+            .filter(|parameter| parameter.resolved_type().reference_target().is_some())
+            .count();
+        require(
+            value_parameters.len() == expected_value_parameters
+                && reference_parameters.len() == expected_reference_parameters,
+            "application parameter rows differ from the active Value and REF families",
+        )?;
+        for row in value_parameters {
+            require(
+                row.try_get::<_, Option<String>>(4)?.is_none()
+                    && row.try_get::<_, Option<Vec<u8>>>(5)?.is_none()
+                    && row.try_get::<_, Option<Vec<u8>>>(6)? == Some(boolean_type.clone())
+                    && row.try_get::<_, Option<Vec<u8>>>(7)? == Some(standard_revision.clone()),
+                "application parameter did not persist the exact Boolean value tuple and pin",
+            )?;
+        }
+        let object_id = object.id().to_bytes().to_vec();
+        for row in reference_parameters {
+            require(
+                row.try_get::<_, Option<String>>(4)?.is_none()
+                    && row.try_get::<_, Option<Vec<u8>>>(5)? == Some(object_id.clone())
+                    && row.try_get::<_, Option<Vec<u8>>>(6)?.is_none()
+                    && row.try_get::<_, Option<Vec<u8>>>(7)?.is_none(),
+                "REF parameter did not retain its exact object target and null value pin",
+            )?;
+        }
+        for function in active.catalogue().functions() {
+            for parameter in function.parameters() {
+                let row = parameter_rows
+                    .iter()
+                    .find(|row| {
+                        row.try_get::<_, Vec<u8>>(0).ok() == Some(function.id().to_bytes().to_vec())
+                            && row.try_get::<_, Vec<u8>>(1).ok()
+                                == Some(parameter.id().to_bytes().to_vec())
+                            && row.try_get::<_, i64>(2).ok() == Some(i64::from(parameter.ordinal()))
+                    })
+                    .ok_or_else(|| failure("active function parameter row is missing"))?;
+                if let Some(value_type) = parameter.resolved_type().value_type() {
+                    require(
+                        row.try_get::<_, String>(3)? == "value"
+                            && row.try_get::<_, Option<Vec<u8>>>(6)?
+                                == Some(value_type.to_bytes().to_vec())
+                            && row.try_get::<_, Option<Vec<u8>>>(7)?
+                                == Some(standard_revision.clone()),
+                        "active Value parameter does not match its exact durable row",
+                    )?;
+                } else if let Some(target) = parameter.resolved_type().reference_target() {
+                    require(
+                        row.try_get::<_, String>(3)? == "reference"
+                            && row.try_get::<_, Option<Vec<u8>>>(5)?
+                                == Some(target.to_bytes().to_vec())
+                            && row.try_get::<_, Option<Vec<u8>>>(6)?.is_none()
+                            && row.try_get::<_, Option<Vec<u8>>>(7)?.is_none(),
+                        "active REF parameter does not match its exact durable row",
+                    )?;
+                } else {
+                    return Err(failure(
+                        "active parameter has an unsupported resolved shape",
+                    ));
+                }
+            }
+        }
+
+        let return_rows = session
+            .client()
+            .query(
+                "SELECT function_id, ordinal, type_kind, scalar_type, target_type_id,
+                        value_type_id, value_standard_library_revision_id
+                 FROM _orna_kernel.catalogue_function_return_columns
+                 WHERE catalogue_revision_id = $1 ORDER BY function_id, ordinal",
+                &[&catalogue_id],
+            )
+            .await?;
+        let value_return_rows = return_rows
+            .iter()
+            .filter(|row| row.try_get::<_, String>(2).ok().as_deref() == Some("value"))
+            .collect::<Vec<_>>();
+        let reference_return_rows = return_rows
+            .iter()
+            .filter(|row| row.try_get::<_, String>(2).ok().as_deref() == Some("reference"))
+            .collect::<Vec<_>>();
+        let expected_value_returns = active
+            .catalogue()
+            .functions()
+            .iter()
+            .filter_map(|function| match function.return_type() {
+                FunctionReturn::Rows(columns) => Some(columns),
+                FunctionReturn::Single(_) => None,
+            })
+            .flatten()
+            .filter(|column| column.resolved_type().value_type().is_some())
+            .count();
+        let expected_reference_returns = active
+            .catalogue()
+            .functions()
+            .iter()
+            .filter_map(|function| match function.return_type() {
+                FunctionReturn::Rows(columns) => Some(columns),
+                FunctionReturn::Single(_) => None,
+            })
+            .flatten()
+            .filter(|column| column.resolved_type().reference_target().is_some())
+            .count();
+        require(
+            value_return_rows.len() == expected_value_returns
+                && reference_return_rows.len() == expected_reference_returns,
+            "application ROWS return rows differ from the active Value and REF families",
+        )?;
+        for function in active.catalogue().functions() {
+            if let FunctionReturn::Rows(columns) = function.return_type() {
+                for column in columns {
+                    let row = return_rows
+                        .iter()
+                        .find(|row| {
+                            row.try_get::<_, Vec<u8>>(0).ok()
+                                == Some(function.id().to_bytes().to_vec())
+                                && row.try_get::<_, i64>(1).ok()
+                                    == Some(i64::from(column.ordinal()))
+                        })
+                        .ok_or_else(|| failure("active ROWS return row is missing"))?;
+                    if let Some(value_type) = column.resolved_type().value_type() {
+                        require(
+                            row.try_get::<_, String>(2)? == "value"
+                                && row.try_get::<_, Option<Vec<u8>>>(5)?
+                                    == Some(value_type.to_bytes().to_vec())
+                                && row.try_get::<_, Option<Vec<u8>>>(6)?
+                                    == Some(standard_revision.clone()),
+                            "active Value ROWS return does not match its exact durable row",
+                        )?;
+                    } else if let Some(target) = column.resolved_type().reference_target() {
+                        require(
+                            row.try_get::<_, String>(2)? == "reference"
+                                && row.try_get::<_, Option<Vec<u8>>>(4)?
+                                    == Some(target.to_bytes().to_vec())
+                                && row.try_get::<_, Option<Vec<u8>>>(5)?.is_none()
+                                && row.try_get::<_, Option<Vec<u8>>>(6)?.is_none(),
+                            "active REF ROWS return does not match its exact durable row",
+                        )?;
+                    } else {
+                        return Err(failure(
+                            "active ROWS return has an unsupported resolved shape",
+                        ));
+                    }
+                }
+            }
+        }
+
+        let single_rows = session
+            .client()
+            .query(
+                "SELECT function_id, return_type_kind, return_scalar_type,
+                        return_target_type_id, return_value_type_id,
+                        return_standard_library_revision_id
+                 FROM _orna_kernel.catalogue_functions
+                 WHERE catalogue_revision_id = $1 AND return_shape = 'single'",
+                &[&catalogue_id],
+            )
+            .await?;
+        let expected_single_count = active
+            .catalogue()
+            .functions()
+            .iter()
+            .filter(|function| matches!(function.return_type(), FunctionReturn::Single(_)))
+            .count();
+        require(
+            single_rows.len() == expected_single_count,
+            "application SINGLE return rows differ from the active catalogue",
+        )?;
+        for function in active.catalogue().functions() {
+            if let FunctionReturn::Single(resolved) = function.return_type() {
+                let row = single_rows
+                    .iter()
+                    .find(|row| {
+                        row.try_get::<_, Vec<u8>>(0).ok() == Some(function.id().to_bytes().to_vec())
+                    })
+                    .ok_or_else(|| failure("active SINGLE return row is missing"))?;
+                if let Some(value_type) = resolved.value_type() {
+                    require(
+                        row.try_get::<_, String>(1)? == "value"
+                            && row.try_get::<_, Option<Vec<u8>>>(4)?
+                                == Some(value_type.to_bytes().to_vec())
+                            && row.try_get::<_, Option<Vec<u8>>>(5)?
+                                == Some(standard_revision.clone()),
+                        "active Value SINGLE return does not match its exact durable row",
+                    )?;
+                } else {
+                    return Err(failure(
+                        "active SINGLE return has an unsupported resolved shape",
+                    ));
+                }
+            }
+        }
+
+        let references = session
+            .client()
+            .query(
+                "SELECT source_function_id, source_function_revision_id, ordinal,
+                        target_definition_id, target_standard_library_revision_id
+                 FROM _orna_kernel.definition_references
+                 WHERE catalogue_revision_id = $1 AND target_kind = 'value_type'
+                 ORDER BY source_function_id, ordinal",
+                &[&catalogue_id],
+            )
+            .await?;
+        let expected_references = active
+            .references()
+            .iter()
+            .filter_map(|reference| match reference.target() {
+                DefinitionReferenceTarget::ValueType(target) => Some((
+                    reference.source_function().to_bytes().to_vec(),
+                    reference.source_revision().to_bytes().to_vec(),
+                    reference.ordinal() as i64,
+                    target.to_bytes().to_vec(),
+                )),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        require(
+            !expected_references.is_empty(),
+            "standard application fixture did not retain a ValueType reference",
+        )?;
+        require(
+            references.len() == expected_references.len(),
+            "ValueType reference rows differ from the recovered application evidence",
+        )?;
+        for expected in expected_references {
+            require(
+                references.iter().any(|row| {
+                    row.try_get::<_, Vec<u8>>(0).ok() == Some(expected.0.clone())
+                        && row.try_get::<_, Vec<u8>>(1).ok() == Some(expected.1.clone())
+                        && row.try_get::<_, i64>(2).ok() == Some(expected.2)
+                        && row.try_get::<_, Vec<u8>>(3).ok() == Some(expected.3.clone())
+                        && row.try_get::<_, Vec<u8>>(4).ok() == Some(standard_revision.clone())
+                }),
+                "ValueType reference row did not retain its exact target pin",
+            )?;
+        }
+        Ok(())
+    }
+    .await;
+    finish_test_session(
+        operation,
+        session.shutdown().await,
+        "standard upgrade storage inspection",
+    )
+}
+
+fn require_standard_context(
+    active: &ActiveDatabaseRevision,
+    expected: &orna_core::revision::VerifiedStandardLibrarySnapshot,
+) -> TestResult<()> {
+    let selected = active
+        .catalogue_hash_context()
+        .standard()
+        .ok_or_else(|| failure("active catalogue did not retain a standard context"))?;
+    require(
+        selected.revision() == expected.revision()
+            && selected.catalogue().revision() == expected.catalogue().revision()
+            && selected.source().bundle() == expected.source().bundle()
+            && selected.source().id() == expected.source().id()
+            && selected.source().bundle_hash() == expected.source().bundle_hash()
+            && selected.source().revision_hash() == expected.source().revision_hash()
+            && selected.digest() == expected.digest(),
+        "active catalogue standard context does not match the verified upgrade snapshot",
+    )
+}
+
 fn same_recovered(left: &ActiveDatabaseRevision, right: &ActiveDatabaseRevision) -> bool {
     left.pair() == right.pair()
         && left.source() == right.source()
@@ -1264,6 +2146,31 @@ fn candidate(source: &str, active: &ActiveDatabaseRevision) -> TestResult<Deploy
         )));
     }
     Ok(prepare(&report, active.pair(), active)?)
+}
+
+fn standard_application_candidate(
+    source: &str,
+    active: &ActiveDatabaseRevision,
+    upgrade: &orna_standard::StandardUpgrade,
+) -> TestResult<DeployableRevision> {
+    let context = StandardApplicationCheckContext::try_new(
+        active.catalogue(),
+        upgrade.checked_standard_library(),
+    )
+    .map_err(|error| failure(format!("standard application context failed: {error}")))?;
+    let bundle = SourceBundle::new([SourceUnit::new("main.orna", source)])?;
+    let report = check_standard_application(&bundle, &context);
+    if !report.diagnostics().is_empty() {
+        return Err(failure(format!(
+            "standard application diagnostics prevented candidate preparation: {:?}",
+            report.diagnostics()
+        )));
+    }
+    Ok(prepare_standard_application(
+        &report,
+        active.pair(),
+        active,
+    )?)
 }
 
 fn only_revision(active: &ActiveDatabaseRevision) -> TestResult<&FunctionRevisionRecord> {
