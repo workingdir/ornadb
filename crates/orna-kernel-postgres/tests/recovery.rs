@@ -6,22 +6,23 @@ use orna_core::{
     CatalogueRevisionId, ExpressionId, FieldId, FunctionId, FunctionRevisionId, ParameterId,
     SchemaId, SourceBundleId, SourceRevisionId, SourceUnitId, TypeId,
     canonical_hash::{
-        artifact_payload_digest, catalogue_digest, function_declaration_digest,
-        function_semantic_digest, source_bundle_digest, source_revision_record_digest,
+        artifact_payload_digest, catalogue_digest, catalogue_digest_with_context,
+        function_declaration_digest, function_semantic_digest,
+        function_semantic_digest_with_version, source_bundle_digest, source_revision_record_digest,
         source_unit_content_digest,
     },
     catalogue::{
         CatalogueSnapshot, FieldDefinition, FunctionDefinition, FunctionDomain, FunctionReturn,
         FunctionReturnColumnDefinition, FunctionSecurity, FunctionTransaction, FunctionVolatility,
         ObjectTypeDefinition, OnDeleteAction, ParameterDefinition, QualifiedSemanticName,
-        SchemaDefinition,
+        SchemaDefinition, TypeLookupName, ValueTypeMutability, ValueTypePersistence,
     },
     revision::{
-        DefinitionIdentity, DefinitionOrigin, DefinitionReference, DefinitionReferenceKind,
-        DefinitionReferenceTarget, DurableCatalogueRevisionRole,
+        CatalogueHashContext, DefinitionIdentity, DefinitionOrigin, DefinitionReference,
+        DefinitionReferenceKind, DefinitionReferenceTarget, DurableCatalogueRevisionRole,
         EMPTY_APPLICATION_CATALOGUE_REVISION_ID, ExecutableArtifact, ExecutableArtifactKind,
-        ExpressionArtifact, FunctionRevisionRecord, RevisionInvariantError, SourceOrigin,
-        StoredSourceUnit,
+        ExpressionArtifact, FunctionRevisionRecord, FunctionSemanticHashVersion,
+        RevisionInvariantError, SourceOrigin, StoredSourceUnit, VerifiedStandardLibrarySnapshot,
     },
     types::{ResolvedType, StandardScalar},
 };
@@ -123,6 +124,115 @@ async fn rejects_the_offline_application_catalogue_identity_without_repair() -> 
         require(
             snapshot_kernel_tables(&database).await? == before,
             "recovery repaired or wrote a table after the repeated sentinel rejection",
+        )
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn recovers_a_complete_raw_v2_standard_revision() -> TestResult<()> {
+    with_test_database(|database| async move {
+        kernel(&database)?.bootstrap().await?;
+        let expected = install_raw_v2_standard_revision(&database).await?;
+
+        let recovered = kernel(&database)?.recover().await?;
+        let standard = recovered
+            .catalogue_hash_context()
+            .standard()
+            .ok_or_else(|| failure("version-2 recovery returned no standard context"))?;
+        let expected_boolean = expected
+            .standard
+            .catalogue()
+            .value_types()
+            .iter()
+            .find(|value_type| {
+                value_type.representation_contract() == "orna.kernel.value.boolean@1"
+            })
+            .ok_or_else(|| failure("retained standard fixture has no Boolean value type"))?;
+        let application_origin = SourceOrigin::new(
+            expected.application.unit.id(),
+            0,
+            u32::try_from(expected.application.unit.content().len())?,
+        )?;
+
+        require_standard_snapshot(standard, &expected.standard)?;
+        require(
+            standard
+                .catalogue()
+                .value_type_by_id(expected_boolean.id())
+                .is_some_and(|value_type| {
+                    value_type.representation_contract() == "orna.kernel.value.boolean@1"
+                }),
+            "the pinned recovered standard does not contain the Boolean value type",
+        )?;
+        let recovered_standard_reference = recovered.references().iter().find(|reference| {
+            matches!(
+                reference.target(),
+                DefinitionReferenceTarget::ValueType(id) if id == expected_boolean.id()
+            )
+        });
+        require(
+            recovered_standard_reference.is_some_and(|reference| {
+                reference.source_function() == expected.application.revisions[0].function()
+                    && reference.source_revision() == expected.application.revisions[0].id()
+                    && reference.ordinal() == 5
+                    && reference.kind() == DefinitionReferenceKind::NamedType
+                    && reference.source_origin() == application_origin
+            }),
+            "version-2 recovery did not return the exact standard ValueType reference",
+        )?;
+        require(
+            recovered.pair().catalogue() == expected.application.catalogue.revision()
+                && recovered.source().units() == [expected.application.unit.clone()],
+            "version-2 recovery changed the active application pair or source",
+        )?;
+        require(
+            recovered.catalogue().revision() == expected.application.catalogue.revision()
+                && recovered.catalogue().schemas() == expected.application.catalogue.schemas()
+                && recovered.catalogue().object_types()
+                    == expected.application.catalogue.object_types()
+                && recovered.catalogue().value_types()
+                    == expected.application.catalogue.value_types()
+                && recovered.catalogue().type_bindings()
+                    == expected.application.catalogue.type_bindings()
+                && recovered.catalogue().functions() == expected.application.catalogue.functions()
+                && recovered.expressions() == [expected.application.expression.clone()]
+                && recovered.function_revisions() == expected.revisions
+                && recovered.references() == expected.application.references
+                && recovered.origins() == expected.application.origins,
+            "version-2 recovery changed application semantic facts",
+        )
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn rejects_the_raw_standard_catalogue_offline_sentinel_without_repair() -> TestResult<()> {
+    with_test_database(|database| async move {
+        kernel(&database)?.bootstrap().await?;
+        install_raw_v2_standard_revision(&database).await?;
+        run_batch(
+            &database,
+            "UPDATE _orna_kernel.standard_library_revisions
+             SET catalogue_revision_id = decode(repeat('00', 16), 'hex')",
+        )
+        .await?;
+
+        let before = snapshot_kernel_tables(&database).await?;
+        let first = recovery_error(&database).await?;
+        require_offline_standard_catalogue_error(&first)?;
+        require(
+            snapshot_kernel_tables(&database).await? == before,
+            "standard sentinel recovery changed a durable table after the first rejection",
+        )?;
+
+        let second = recovery_error(&database).await?;
+        require_offline_standard_catalogue_error(&second)?;
+        require(
+            snapshot_kernel_tables(&database).await? == before,
+            "standard sentinel recovery changed a durable table after the repeated rejection",
         )
     })
     .await
@@ -1444,6 +1554,12 @@ struct FunctionFixture {
     origins: Vec<DefinitionOrigin>,
 }
 
+struct RawV2Fixture {
+    standard: VerifiedStandardLibrarySnapshot,
+    application: FunctionFixture,
+    revisions: Vec<FunctionRevisionRecord>,
+}
+
 async fn install_function_revision(database: &TestDatabase) -> TestResult<FunctionFixture> {
     let object = install_object_revision(database, false).await?;
     let session = database.open().await?;
@@ -1757,6 +1873,427 @@ async fn install_function_revision(database: &TestDatabase) -> TestResult<Functi
         operation_result,
         session.shutdown().await,
         "function fixture",
+    )
+}
+
+async fn install_raw_v2_standard_revision(database: &TestDatabase) -> TestResult<RawV2Fixture> {
+    let mut application = install_function_revision(database).await?;
+    let standard = orna_standard::verify_standard_library_snapshot(
+        orna_standard::retained_standard_library_snapshot()?,
+    )?;
+    insert_standard_snapshot(database, &standard).await?;
+    let standard_boolean = standard
+        .catalogue()
+        .value_types()
+        .iter()
+        .find(|value_type| value_type.representation_contract() == "orna.kernel.value.boolean@1")
+        .ok_or_else(|| failure("retained standard fixture has no Boolean value type"))?;
+    let source_origin = SourceOrigin::new(
+        application.unit.id(),
+        0,
+        u32::try_from(application.unit.content().len())?,
+    )?;
+    let next_ordinal = application
+        .references
+        .iter()
+        .filter(|reference| reference.source_function() == application.revisions[0].function())
+        .map(DefinitionReference::ordinal)
+        .max()
+        .map_or(0, |ordinal| ordinal + 1);
+    let standard_reference = DefinitionReference::new(
+        application.revisions[0].function(),
+        application.revisions[0].id(),
+        next_ordinal,
+        DefinitionReferenceTarget::ValueType(standard_boolean.id()),
+        DefinitionReferenceKind::NamedType,
+        source_origin,
+    );
+    application.references.push(standard_reference.clone());
+
+    let mut revisions = Vec::with_capacity(application.revisions.len());
+    for revision in &application.revisions {
+        let function = application
+            .catalogue
+            .function_by_id(revision.function())
+            .ok_or_else(|| failure("standard fixture function revision has no function"))?;
+        let references = application
+            .references
+            .iter()
+            .filter(|reference| reference.source_function() == revision.function())
+            .cloned()
+            .collect::<Vec<_>>();
+        let semantic_hash = function_semantic_digest_with_version(
+            FunctionSemanticHashVersion::Version2,
+            function,
+            revision.language_version(),
+            revision.artifact(),
+            std::slice::from_ref(&application.expression),
+            &references,
+        )?;
+        revisions.push(
+            FunctionRevisionRecord::new(
+                revision.function(),
+                revision.id(),
+                revision.revision_number(),
+                revision.declaration_origin(),
+                revision.declaration_content_hash(),
+                semantic_hash,
+                revision.language_version(),
+                revision.artifact().clone(),
+            )?
+            .with_semantic_hash_version(FunctionSemanticHashVersion::Version2),
+        );
+    }
+
+    let context = CatalogueHashContext::version_two(standard.clone());
+    let catalogue_hash = catalogue_digest_with_context(
+        &context,
+        &application.catalogue,
+        &revisions,
+        std::slice::from_ref(&application.expression),
+        &application.origins,
+        &application.references,
+    )?;
+    let session = database.open().await?;
+    let operation_result: TestResult<()> = async {
+        session
+            .client()
+            .batch_execute("BEGIN; SET CONSTRAINTS ALL DEFERRED")
+            .await?;
+        session
+            .client()
+            .execute(
+                "UPDATE _orna_kernel.catalogue_revisions
+                 SET canonical_hash_version = 2,
+                     standard_library_revision_id = $2
+                 WHERE id = $1",
+                &[
+                    &application.catalogue.revision().to_bytes().to_vec(),
+                    &standard.revision().to_bytes().to_vec(),
+                ],
+            )
+            .await?;
+        insert_reference_record_with_standard(
+            session.client(),
+            application.catalogue.revision(),
+            &standard_reference,
+            standard.revision(),
+        )
+        .await?;
+        for revision in &revisions {
+            session
+                .client()
+                .execute(
+                    "UPDATE _orna_kernel.function_revisions
+                     SET semantic_ir_hash = $2, semantic_hash_version = 2
+                     WHERE id = $1",
+                    &[
+                        &revision.id().to_bytes().to_vec(),
+                        &revision.semantic_hash().to_bytes().to_vec(),
+                    ],
+                )
+                .await?;
+        }
+        session
+            .client()
+            .execute(
+                "UPDATE _orna_kernel.catalogue_revisions
+                 SET content_hash = $2
+                 WHERE id = $1",
+                &[
+                    &application.catalogue.revision().to_bytes().to_vec(),
+                    &catalogue_hash.to_bytes().to_vec(),
+                ],
+            )
+            .await?;
+        session.client().batch_execute("COMMIT").await?;
+        Ok(())
+    }
+    .await;
+    finish_session(
+        operation_result,
+        session.shutdown().await,
+        "version-2 application fixture",
+    )?;
+
+    Ok(RawV2Fixture {
+        standard,
+        application,
+        revisions,
+    })
+}
+
+async fn insert_standard_snapshot(
+    database: &TestDatabase,
+    standard: &VerifiedStandardLibrarySnapshot,
+) -> TestResult<()> {
+    let session = database.open().await?;
+    let operation_result: TestResult<()> = async {
+        let source = standard.source();
+        let unit = source
+            .units()
+            .first()
+            .ok_or_else(|| failure("standard source fixture has no source unit"))?;
+        session.client().batch_execute("BEGIN").await?;
+        session
+            .client()
+            .execute(
+                "INSERT INTO _orna_kernel.source_bundles (id, content_hash)
+                 VALUES ($1, $2)",
+                &[
+                    &source.bundle().to_bytes().to_vec(),
+                    &source.bundle_hash().to_bytes().to_vec(),
+                ],
+            )
+            .await?;
+        session
+            .client()
+            .execute(
+                "INSERT INTO _orna_kernel.source_units
+                    (id, bundle_id, ordinal, logical_path, content, content_hash)
+                 VALUES ($1, $2, $3, $4, $5, $6)",
+                &[
+                    &unit.id().to_bytes().to_vec(),
+                    &source.bundle().to_bytes().to_vec(),
+                    &i64::from(unit.ordinal()),
+                    &unit.logical_path(),
+                    &unit.content(),
+                    &unit.content_hash().to_bytes().to_vec(),
+                ],
+            )
+            .await?;
+        let no_parent: Option<Vec<u8>> = None;
+        session
+            .client()
+            .execute(
+                "INSERT INTO _orna_kernel.source_revisions
+                    (id, parent_source_revision_id, bundle_id, content_hash)
+                 VALUES ($1, $2, $3, $4)",
+                &[
+                    &source.id().to_bytes().to_vec(),
+                    &no_parent,
+                    &source.bundle().to_bytes().to_vec(),
+                    &source.revision_hash().to_bytes().to_vec(),
+                ],
+            )
+            .await?;
+        session
+            .client()
+            .execute(
+                "INSERT INTO _orna_kernel.standard_library_revisions
+                    (id, source_revision_id, catalogue_revision_id, digest_version,
+                     language_version, content_hash, hash_algorithm)
+                 VALUES ($1, $2, $3, 1, $4, $5, 'sha256')",
+                &[
+                    &standard.revision().to_bytes().to_vec(),
+                    &source.id().to_bytes().to_vec(),
+                    &standard.catalogue().revision().to_bytes().to_vec(),
+                    &standard.language_version(),
+                    &standard.digest().to_bytes().to_vec(),
+                ],
+            )
+            .await?;
+
+        for schema in standard.catalogue().schemas() {
+            let origin = standard_origin(standard, DefinitionIdentity::Schema(schema.id()))?;
+            insert_standard_schema(session.client(), standard.revision(), schema, origin).await?;
+        }
+        for value_type in standard.catalogue().value_types() {
+            let origin = standard_origin(standard, DefinitionIdentity::ValueType(value_type.id()))?;
+            insert_standard_value_type(
+                session.client(),
+                standard.revision(),
+                standard.catalogue(),
+                value_type,
+                origin,
+            )
+            .await?;
+        }
+        for binding in standard.catalogue().type_bindings() {
+            let origin = standard_origin(standard, DefinitionIdentity::TypeBinding(binding.id()))?;
+            insert_standard_binding(session.client(), standard.revision(), binding, origin).await?;
+        }
+        session.client().batch_execute("COMMIT").await?;
+        Ok(())
+    }
+    .await;
+    finish_session(
+        operation_result,
+        session.shutdown().await,
+        "standard snapshot fixture",
+    )
+}
+
+fn standard_origin(
+    standard: &VerifiedStandardLibrarySnapshot,
+    identity: DefinitionIdentity,
+) -> TestResult<SourceOrigin> {
+    standard
+        .origins()
+        .iter()
+        .find(|origin| origin.identity() == identity)
+        .map(DefinitionOrigin::source)
+        .ok_or_else(|| {
+            failure(format!(
+                "standard fixture origin is missing for {identity:?}"
+            ))
+        })
+}
+
+async fn insert_standard_schema(
+    client: &tokio_postgres::Client,
+    revision: orna_core::StandardLibraryRevisionId,
+    schema: &SchemaDefinition,
+    origin: SourceOrigin,
+) -> TestResult<()> {
+    client
+        .execute(
+            "INSERT INTO _orna_kernel.standard_catalogue_schemas
+                (standard_library_revision_id, schema_id, name_parts,
+                 source_unit_id, source_start, source_end)
+             VALUES ($1, $2, $3, $4, $5, $6)",
+            &[
+                &revision.to_bytes().to_vec(),
+                &schema.id().to_bytes().to_vec(),
+                &schema.name().parts(),
+                &origin.source_unit().to_bytes().to_vec(),
+                &i64::from(origin.byte_start()),
+                &i64::from(origin.byte_end()),
+            ],
+        )
+        .await?;
+    Ok(())
+}
+
+async fn insert_standard_value_type(
+    client: &tokio_postgres::Client,
+    revision: orna_core::StandardLibraryRevisionId,
+    catalogue: &CatalogueSnapshot,
+    value_type: &orna_core::catalogue::ValueTypeDefinition,
+    origin: SourceOrigin,
+) -> TestResult<()> {
+    let schema = catalogue
+        .schemas()
+        .iter()
+        .filter(|schema| value_type.name().parts().starts_with(schema.name().parts()))
+        .max_by_key(|schema| schema.name().parts().len())
+        .ok_or_else(|| failure("standard value type has no owning schema"))?;
+    let value_kind = match value_type.kind() {
+        orna_core::catalogue::ValueTypeKind::Primitive => "primitive",
+        _ => return Err(failure("standard fixture has an unsupported value kind")),
+    };
+    let mutability = match value_type.mutability() {
+        ValueTypeMutability::Immutable => "immutable",
+        _ => return Err(failure("standard fixture has an unsupported mutability")),
+    };
+    let persistence = match value_type.persistence() {
+        ValueTypePersistence::Persistable => "persistable",
+        ValueTypePersistence::Transient => "transient",
+        _ => return Err(failure("standard fixture has an unsupported persistence")),
+    };
+    client
+        .execute(
+            "INSERT INTO _orna_kernel.standard_catalogue_value_types
+                (standard_library_revision_id, type_id, schema_id, name_parts,
+                 value_kind, mutability, persistence, representation_contract,
+                 source_unit_id, source_start, source_end)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+            &[
+                &revision.to_bytes().to_vec(),
+                &value_type.id().to_bytes().to_vec(),
+                &schema.id().to_bytes().to_vec(),
+                &value_type.name().parts(),
+                &value_kind,
+                &mutability,
+                &persistence,
+                &value_type.representation_contract(),
+                &origin.source_unit().to_bytes().to_vec(),
+                &i64::from(origin.byte_start()),
+                &i64::from(origin.byte_end()),
+            ],
+        )
+        .await?;
+    Ok(())
+}
+
+async fn insert_standard_binding(
+    client: &tokio_postgres::Client,
+    revision: orna_core::StandardLibraryRevisionId,
+    binding: &orna_core::catalogue::TypeBinding,
+    origin: SourceOrigin,
+) -> TestResult<()> {
+    let (kind, name_parts) = match binding.name() {
+        TypeLookupName::Qualified(name) => ("qualified", name.parts()),
+        TypeLookupName::Prelude(name) => ("prelude", name.words()),
+        _ => {
+            return Err(failure(
+                "standard fixture has an unsupported binding namespace",
+            ));
+        }
+    };
+    client
+        .execute(
+            "INSERT INTO _orna_kernel.standard_catalogue_type_bindings
+                (standard_library_revision_id, type_binding_id, kind, name_parts,
+                 target_type_id, source_unit_id, source_start, source_end)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+            &[
+                &revision.to_bytes().to_vec(),
+                &binding.id().to_bytes().to_vec(),
+                &kind,
+                &name_parts,
+                &binding.target().to_bytes().to_vec(),
+                &origin.source_unit().to_bytes().to_vec(),
+                &i64::from(origin.byte_start()),
+                &i64::from(origin.byte_end()),
+            ],
+        )
+        .await?;
+    Ok(())
+}
+
+fn require_standard_snapshot(
+    actual: &VerifiedStandardLibrarySnapshot,
+    expected: &VerifiedStandardLibrarySnapshot,
+) -> TestResult<()> {
+    let mut actual_schemas = actual.catalogue().schemas().to_vec();
+    let mut expected_schemas = expected.catalogue().schemas().to_vec();
+    actual_schemas.sort_by_key(|schema| schema.id().to_bytes());
+    expected_schemas.sort_by_key(|schema| schema.id().to_bytes());
+    let mut actual_value_types = actual.catalogue().value_types().to_vec();
+    let mut expected_value_types = expected.catalogue().value_types().to_vec();
+    actual_value_types.sort_by_key(|value_type| value_type.id().to_bytes());
+    expected_value_types.sort_by_key(|value_type| value_type.id().to_bytes());
+    let mut actual_bindings = actual.catalogue().type_bindings().to_vec();
+    let mut expected_bindings = expected.catalogue().type_bindings().to_vec();
+    actual_bindings.sort_by_key(|binding| binding.id().to_bytes());
+    expected_bindings.sort_by_key(|binding| binding.id().to_bytes());
+    let mut actual_origins = actual
+        .origins()
+        .iter()
+        .map(|origin| (format!("{:?}", origin.identity()), origin.source()))
+        .collect::<Vec<_>>();
+    let mut expected_origins = expected
+        .origins()
+        .iter()
+        .map(|origin| (format!("{:?}", origin.identity()), origin.source()))
+        .collect::<Vec<_>>();
+    actual_origins.sort_by(|left, right| left.0.cmp(&right.0));
+    expected_origins.sort_by(|left, right| left.0.cmp(&right.0));
+    require(
+        actual.revision() == expected.revision()
+            && actual.digest_version() == expected.digest_version()
+            && actual.language_version() == expected.language_version()
+            && actual.digest() == expected.digest()
+            && actual.source() == expected.source()
+            && actual.catalogue().revision() == expected.catalogue().revision()
+            && actual_schemas == expected_schemas
+            && actual.catalogue().object_types().is_empty()
+            && actual_value_types == expected_value_types
+            && actual_bindings == expected_bindings
+            && actual.catalogue().functions().is_empty()
+            && actual_origins == expected_origins,
+        "version-2 recovery changed standard source, catalogue, origins, or digest",
     )
 }
 
@@ -2617,6 +3154,16 @@ async fn insert_reference_record(
     catalogue: CatalogueRevisionId,
     reference: &DefinitionReference,
 ) -> TestResult<()> {
+    insert_reference_record_with_standard(client, catalogue, reference, None).await
+}
+
+async fn insert_reference_record_with_standard(
+    client: &tokio_postgres::Client,
+    catalogue: CatalogueRevisionId,
+    reference: &DefinitionReference,
+    standard_revision: impl Into<Option<orna_core::StandardLibraryRevisionId>>,
+) -> TestResult<()> {
+    let standard_revision = standard_revision.into();
     let (target, target_kind, owner_type, owner_function) = match reference.target() {
         DefinitionReferenceTarget::ObjectType(id) => {
             (id.to_bytes().to_vec(), "object_type", None, None)
@@ -2634,6 +3181,9 @@ async fn insert_reference_record(
             None,
             Some(owner.to_bytes().to_vec()),
         ),
+        DefinitionReferenceTarget::ValueType(id) => {
+            (id.to_bytes().to_vec(), "value_type", None, None)
+        }
         other => {
             let DefinitionReferenceTarget::Expression(id) = other else {
                 return Err(failure(
@@ -2643,6 +3193,24 @@ async fn insert_reference_record(
             (id.to_bytes().to_vec(), "expression", None, None)
         }
     };
+    let target_standard = match reference.target() {
+        DefinitionReferenceTarget::ValueType(_) => standard_revision
+            .map(|revision| revision.to_bytes().to_vec())
+            .ok_or_else(|| failure("ValueType reference requires a standard revision"))?,
+        _ => {
+            if standard_revision.is_some() {
+                return Err(failure(
+                    "non-ValueType reference cannot carry a standard revision",
+                ));
+            }
+            Vec::new()
+        }
+    };
+    let target_standard = if target_standard.is_empty() {
+        None
+    } else {
+        Some(target_standard)
+    };
     let kind = supported_reference_kind_sql(reference.kind())?;
     let source = reference.source_origin();
     client
@@ -2650,16 +3218,18 @@ async fn insert_reference_record(
             "INSERT INTO _orna_kernel.definition_references
                 (catalogue_revision_id, source_function_id,
                  source_function_revision_id, ordinal, target_definition_id,
-                 target_kind, reference_kind, source_subobject_id,
+                 target_standard_library_revision_id, target_kind, reference_kind,
+                 source_subobject_id,
                  target_owner_type_id, target_owner_function_id,
                  source_unit_id, source_start, source_end)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, $8, $9, $10, $11, $12)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, $9, $10, $11, $12, $13)",
             &[
                 &catalogue.to_bytes().to_vec(),
                 &reference.source_function().to_bytes().to_vec(),
                 &reference.source_revision().to_bytes().to_vec(),
                 &i64::from(reference.ordinal()),
                 &target,
+                &target_standard,
                 &target_kind,
                 &kind,
                 &owner_type,
@@ -3321,6 +3891,45 @@ fn require_offline_application_catalogue_error(error: &PostgresKernelError) -> T
                     .to_owned(),
             ),
         "offline application catalogue wrapper did not retain the exact core source",
+    )
+}
+
+fn require_offline_standard_catalogue_error(error: &PostgresKernelError) -> TestResult<()> {
+    let PostgresKernelError::RevisionInvariant(core) = error else {
+        return Err(failure(format!(
+            "offline standard catalogue identity produced the wrong wrapper: {error}"
+        )));
+    };
+    require(
+        matches!(
+            core,
+            RevisionInvariantError::ReservedOfflineCheckCatalogueRevision { revision, role }
+                if *revision == EMPTY_APPLICATION_CATALOGUE_REVISION_ID
+                    && *role == DurableCatalogueRevisionRole::ActiveOrRecoveredStandard
+        ),
+        format!("offline standard catalogue identity produced the wrong core error: {core}"),
+    )?;
+    require(
+        core.to_string()
+            == "the reserved offline-check catalogue identity cannot be used in a durable revision",
+        "offline standard catalogue identity changed the core error display",
+    )?;
+    require(
+        error.to_string()
+            == "recovered revision invariant failed: the reserved offline-check catalogue identity cannot be used in a durable revision",
+        "offline standard catalogue identity changed the wrapper error display",
+    )?;
+    require(
+        Error::source(core).is_none(),
+        "offline standard catalogue core error unexpectedly has a source",
+    )?;
+    require(
+        Error::source(error).map(ToString::to_string)
+            == Some(
+                "the reserved offline-check catalogue identity cannot be used in a durable revision"
+                    .to_owned(),
+            ),
+        "offline standard catalogue wrapper did not retain the exact core source",
     )
 }
 
