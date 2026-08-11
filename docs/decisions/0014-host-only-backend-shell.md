@@ -4,299 +4,284 @@
 
 ## Decision
 
-The first operator command is exactly:
+The operator command remains exactly:
 
 ```text
 orna server backend-shell
 ```
 
-It accepts no flags, arguments, connection overrides, or command to run after
-connection. Any additional command-line token is a usage error. The command is
-available only as a local Unix process for a host operator. It is not an Orna
-source form, function, script operation, or public-protocol operation.
+It accepts no flag, argument, connection override, SQL argument, or input
+file. Any other command shape uses the exact global usage accepted by ADR
+0018 and exits `2` before another check.
 
-The command attaches the installed `psql` program to the private PostgreSQL
-backend selected by the server-host configuration. It does not implement
-PostgreSQL compatibility for public clients. It is the raw, trusted operator
-escape hatch accepted by ADR 0001.
+The command is a local, interactive, host-only escape hatch into the private
+PostgreSQL kernel. It is not an Orna source form, function, script operation,
+artefact, or public-protocol operation. It does not create a PostgreSQL
+compatibility promise.
+
+The production command is an Orna-native terminal client. It does not locate,
+load, extract, or execute `psql` or another PostgreSQL program. It connects to
+the already-running embedded engine through the private Unix socket and uses
+PostgreSQL's simple-query protocol. PostgreSQL code continues to run only from
+the installed `/usr/bin/orna` ELF.
 
 ## Host and terminal boundary
 
-The command runs with the caller's existing Unix user, group, environment, and
-process permissions. It does not call `sudo`, change user or group, request a
-capability, use a privileged helper, or otherwise elevate access. The caller
-must already possess the private server-host configuration in its process
-environment and have permission to connect to PostgreSQL. Orna does not make
-that configuration or its password secret from the caller; it only avoids
-copying those values into arguments, diagnostics, debug output, or logs.
+Standard input, standard output, and standard error must all be terminals. A
+Unix pseudo-terminal satisfies this check. If one stream is not a terminal,
+the command fails before account, package, instance, environment, or socket
+work.
 
-Before reading backend configuration, the command requires standard input,
-standard output, and standard error all to be terminals. If any one is not a
-terminal, it refuses to start `psql`. A Unix pseudo-terminal satisfies this
-terminal test; the command does not try to infer whether a human or automation
-created that terminal.
+The command runs with the caller's existing Unix identity and never calls
+`sudo`, changes user or group, requests a capability, or invokes a privileged
+helper. It requires the exact locked `orna:orna` service-account contract
+retained by ADR 0017. Account lookup or a real, effective, primary, or
+supplementary identity mismatch fails before package or instance access.
 
-For ADR 0001, "not available through scripts" means that Orna source, Orna
-functions, Orna scripts, and the public protocol cannot address the escape
-hatch, and that the host command cannot run with redirected or piped standard
-streams. No parser, catalogue definition, executable artefact, invocation
-method, or protocol message represents this operation.
+An interactive remote login can invoke this local command when the remote
+account already has the service identity and all streams are terminals. This
+does not create a remote administration endpoint.
 
-An interactive remote login may run the local process when all three standard
-streams are terminals and the remote account already has the required host
-permissions. This does not create a remote OrnaDB administration endpoint.
+The shell is absent from Orna source, functions, scripts, artefacts, and the
+public protocol. No parser, catalogue definition, executable artefact,
+invocation method, or public message can represent it.
 
-## Server-host configuration
+## Ready-host attachment
 
-`ORNA_SERVER_POSTGRES_URL` is the one required configuration input. It is a
-private server-host value rather than a public client setting. The command
-fails closed when the variable is absent, empty, or invalid.
+After the terminal and identity checks, the shell takes and retains the shared
+package lock and requires exact ready package state. It then verifies the
+fixed default configuration and an installed default instance. It accepts
+only a valid instance manifest, current generation, embedded-engine identity,
+final Orna ELF identity, ready record, live server PID, held instance lock,
+postmaster PID, and private socket.
 
-The accepted URL shape is exactly:
+The shell uses `F_GETLK` on the existing instance lock. The returned write-lock
+holder must equal the ready record's live server PID. The shell does not take
+the instance write lock. It holds its one package-lock descriptor for the
+complete session so package maintenance cannot replace the Orna ELF or engine
+while the shell is attached.
 
-```text
-postgresql://<user>[:<password>]@<host>:<port>/<database>
-```
-
-The components use standard URL escaping. The host is one TCP hostname, IPv4
-address, or bracketed IPv6 address. The port is an explicit decimal integer in
-the range `1..=65535`. The user and database are explicit and non-empty. A
-password may be present or absent.
-A URL with another scheme, multiple hosts, a Unix socket, a service
-definition, an omitted component, a query, or a fragment is invalid. The
-command does not accept URL options that select another host, user, database,
-credential source, startup command, or session behaviour.
-
-Percent escapes in the user, password, and database must be complete pairs of
-hexadecimal digits and must decode as UTF-8. A decoded user, password, or
-database containing a NUL byte is invalid because it cannot be represented in
-the Unix child environment. An empty decoded password is permitted when the
-URL explicitly contains the password separator; the resulting `PGPASSWORD` is
-present and empty.
-
-The resolved host, port, user, and database are the complete connection target,
-and the optional URL password is the only explicit credential supplied by
-Orna. Transport is one TCP connection without TLS or GSS encryption, matching
-the first PostgreSQL kernel's `NoTls` connection contract. The command does not
-read `DATABASE_URL`, inherited `PG*` variables, the default PostgreSQL password
-file, default PostgreSQL TLS material, Docker Compose configuration, files
-found from the current working directory, or a built-in development target.
-It does not guess a user, database, host, or credential. Command-line
-connection overrides are not available.
-
-The configured user is the server role used by this shell. The command neither
-selects nor falls back to a separate administration role, operating-system
-user, or PostgreSQL default role. What that configured role may do remains a
-private deployment decision enforced by PostgreSQL.
-
-This URL and its parsed, redacting value model are reserved as the first shared
-PostgreSQL configuration boundary for a future server-host process. That
-process must reuse the same parser, resolved connection facts, and non-TLS
-transport rather than create a second interpretation of
-`ORNA_SERVER_POSTGRES_URL`. This record does not otherwise define the server
-process, its lifecycle, or its remaining configuration.
-
-## Child process boundary
-
-The command parses and validates the URL before constructing the child
-environment. Formatting or reporting the parsed configuration never includes
-the password or the original URL. An invalid value is reported without echoing
-any part of it.
-
-Before starting `psql`, the command removes `ORNA_SERVER_POSTGRES_URL` and
-every inherited environment variable whose name begins with `PG` from the
-child environment. It then supplies exactly these libpq variables from the
-resolved URL:
-
-* `PGHOST` with the single resolved TCP host;
-* `PGPORT` with the resolved numeric port;
-* `PGUSER` with the explicit configured user;
-* `PGDATABASE` with the explicit configured database; and
-* `PGPASSWORD` only when the URL contains a password.
-
-The child also receives `PGPASSFILE=/dev/null`, `PGSSLMODE=disable`, and
-`PGGSSENCMODE=disable`.
-`PGPASSFILE` prevents libpq from consulting the caller's default password file;
-`PGSSLMODE` prevents libpq from loading default TLS or client-certificate
-material; and `PGGSSENCMODE` prevents GSS-encrypted transport. Together they
-fix the same non-TLS transport as the server host. These are fixed connection
-facts, not user-selectable overrides.
-
-The URL and any password initially exist in the launching Orna process
-environment and parsed memory because the caller supplied them there. The
-replacement removes the URL variable and supplies the password to `psql` only
-through `PGPASSWORD`; it is never placed in an argument, diagnostic, usage
-text, debug output, or Orna log. This is a redaction and propagation boundary,
-not protection from the host operator or operating-system process inspection.
-When the URL has no password, `PGPASSWORD` is absent rather than empty. Any
-password prompt or authentication diagnostic after replacement is owned by
-`psql`; Orna does not collect or reinterpret it.
-
-PostgreSQL still chooses the authentication exchange after `psql` connects.
-The configured server may accept trust authentication, request the supplied or
-interactively entered password, or request native GSS authentication using the
-operator's existing host credentials. Orna neither selects nor claims to
-isolate those native authentication mechanisms. They do not change the fixed
-target or introduce another Orna configuration source. A future server-host
-process must define which of those authentication exchanges it implements;
-sharing this configuration boundary does not silently grant it all of
-`psql`'s authentication capabilities.
-
-The command resolves an installed executable named `psql` through the caller's
-`PATH`. An absent or empty `PATH` fails. Empty and relative path entries are
-ignored; only absolute entries are searched, in order, so executable discovery
-never falls back to the current directory or a platform default path. It
-invokes the resolved absolute executable directly, without a command shell,
-with exactly one argument:
+It connects only to this fixed target:
 
 ```text
---no-psqlrc
+socket directory  /run/orna/default/postgres
+socket suffix     .s.PGSQL.5432
+database          orna
+role              orna_kernel
+authentication    Unix peer map from orna to orna_kernel
+transport         local Unix socket, no TLS or GSS
 ```
 
-The command does not load a user or system `psqlrc` file. It supplies no
-`--command`, `--file`, connection URI, database argument, variable assignment,
-or other PostgreSQL option. It inherits the three terminal streams unchanged.
+No environment or configuration value can change that target. The shell does
+not read `ORNA_SERVER_POSTGRES_URL`, `DATABASE_URL`, `PG*`, `HOME`, `PATH`, a
+service file, password file, TLS material, GSS material, Compose file, current
+directory, or user startup file. It stores and sends no password.
 
-After validation and environment construction, the Unix process is replaced
-with `psql`. There is no supervising Orna process. Normal exit codes, signal
-termination, terminal job control, terminal size changes, and interactive
-input therefore have the exact behaviour of the installed `psql` process.
-Failure to replace the process remains a pre-launch Orna failure.
+Before connection, the command does not start or stop a service, initialise a
+cluster, materialise support data, run a migration, inspect the active Orna
+revision through SQL, issue a query, begin a transaction, or open a filesystem
+path for writing. It only validates existing package, instance, process, and
+socket facts.
 
-## Administration boundary
+## Native terminal session
 
-The command only attaches to the configured backend. It does not start or stop
-PostgreSQL, Docker, the OrnaDB server, or another service. It does not
-bootstrap storage, run or verify a migration, inspect the active revision,
-issue a query, begin a transaction, acquire an administration lock, or write
-backend data before process replacement.
+The client sends PostgreSQL simple Query messages over the fixed private
+connection. It does not call a backend entry directly. A direct backend cannot
+join the running postmaster's shared-memory, process, signal, and connection
+state, and single-user mode cannot attach to a live cluster.
 
-Once attached, the operator has the raw PostgreSQL access granted to the
-configured server role. `psql` may read or write private state at the
-operator's direction. Orna does not parse, authorise, constrain, translate,
-record, or repair those commands. PostgreSQL syntax and results used in this
-shell remain private administration behaviour and do not become Orna language
-or protocol semantics.
+The line protocol is exact:
 
-The shell may be opened while the OrnaDB server is running. It provides no
-coordination with active reads or writes and does not make a repair safe.
-Before changing private state, the operator must stop all other application
-and operator writes and establish the maintenance conditions required for that
-repair. This record does not define or pretend to enforce a maintenance mode.
-A later guarded repair workflow requires its own accepted concurrency,
-validation, rollback, and recovery rules.
+* `orna=> ` is the prompt when the local query buffer is empty;
+* `orna-> ` is the prompt when the buffer is non-empty;
+* ordinary UTF-8 terminal lines are appended to the buffer with one line feed;
+* a line containing only `\g` sends the complete buffer as one simple Query
+  message and clears the buffer after PostgreSQL returns `ReadyForQuery`;
+* `\g` with an empty buffer does nothing and prints the empty prompt again;
+* a line containing only `\q` discards any unsent buffer, sends Terminate, and
+  exits `0`; and
+* no other backslash command exists in the normal query prompt.
 
-Opening or closing the shell creates no Orna identity, definition reference,
+There is no shell escape, `\!`, `\copy`, include, editor, pager, history file,
+variable substitution, connection command, role shortcut, startup SQL, or
+client-side SQL parser. A backslash sequence other than the two control lines
+is ordinary SQL input.
+
+`Ctrl-C` clears an unsent buffer and returns to the empty prompt. During an
+active query it sends a PostgreSQL CancelRequest to the same fixed endpoint,
+waits for the query error and `ReadyForQuery`, then returns to the empty
+prompt. A failed cancellation is a session failure. `SIGHUP`, `SIGQUIT`, and
+`SIGTERM` retain normal signal termination. Connection loss lets PostgreSQL
+clean up the backend through normal disconnect handling.
+
+End-of-file with an empty buffer sends Terminate and exits `0`. End-of-file
+with a non-empty buffer discards it, writes the exact session-failure line,
+and exits `1` without sending the incomplete SQL.
+
+PostgreSQL statement errors render and the session continues after
+`ReadyForQuery`. They do not set the eventual clean exit status. The renderer
+accepts only text-format fields. A `RowDescription` that selects binary format
+for any field causes the client to send Terminate and fail the session before
+it renders a `DataRow`. The renderer preserves column names, text values, the
+distinction between NULL and text, notices, SQLSTATE, primary message, detail,
+hint, command tag, and transaction status. This rendering is private operator
+presentation, not an Orna language or public protocol format.
+
+The renderer is terminal-safe. It writes printable UTF-8 unchanged and escapes
+backslash, tab, carriage return, line feed, escape, DEL, and every other
+control byte. NULL uses a distinct `<NULL>` token which cannot be confused
+with escaped text. Column names, row values, notices, errors, and COPY output
+all use the same escaping authority, so database bytes cannot inject terminal
+control sequences.
+
+For `COPY FROM STDIN`, the client enters a `copy=> ` prompt, sends each
+ordinary line as CopyData with one line feed, and treats a line containing
+only `\.` as CopyDone. This is the one additional control line and exists only
+at the copy prompt. `\q`, `\g`, and every other line are ordinary CopyData.
+`Ctrl-C` sends CopyFail and drains responses through `ReadyForQuery` before
+returning to the empty normal prompt. End-of-file sends CopyFail with the fixed
+reason `Orna COPY input ended before \.`, drains through `ReadyForQuery`,
+writes the session-failure line, and exits `1`. For text `COPY TO STDOUT`, the
+client writes terminal-safe escaped CopyData and drains through
+`ReadyForQuery`. A binary COPY response, COPY BOTH response, terminal write
+failure, or protocol violation cancels where possible and is a session
+failure. `COPY PROGRAM` never reaches a COPY subprotocol because the embedded
+backend rejects it.
+
+## Administration and executable boundary
+
+The session has the raw PostgreSQL authority of `orna_kernel`. A trusted
+operator can read or damage private state, including protected Orna relations.
+Orna does not translate an accepted SQL statement into an Orna operation,
+record an Orna audit identity, or repair the operator's changes. Normal
+recovery remains fail-closed on the next start.
+
+Raw administration does not grant executable authority. ADR 0019's
+PostgreSQL-owned guard applies equally to the shell and Orna's kernel sessions.
+It rejects program execution, external and internal function definitions,
+procedural languages, anonymous procedural blocks, extension management, and
+dynamic loading before their side effects. The inherited engine process
+filter independently prevents another executable or executable mapping.
+
+The shell does not filter SQL text. Client-side filtering would be bypassable
+through prepared, nested, or multi-statement SQL and would create a second
+policy authority.
+
+The command can run while the server is ready. It provides no write-quiescence
+or repair-safety claim. Before a destructive repair, the operator must
+establish the maintenance conditions required for that repair. A guarded
+repair workflow needs its own accepted concurrency, validation, rollback, and
+audit contract.
+
+Opening and closing the shell creates no Orna identity, definition reference,
 source revision, catalogue revision, function revision, executable artefact,
-or active-revision change. It emits no Orna audit record. Unix and PostgreSQL
-process, connection, and statement auditing are deployment concerns outside
-this command.
-
-When the product command lands, the existing `just backend-shell` development
-shortcut is removed in the same implementation slice. It must not remain as a
-second Compose-specific configuration and credential path.
+or active-revision change. SQL entered by the operator can change private
+PostgreSQL state, but shell attachment itself does not.
 
 ## Diagnostics and exit status
 
-Command-line shape is checked before the terminal and configuration checks.
-An incorrect command shape writes this exact text to standard error and exits
-with status `2`:
+After global command-shape validation, checks occur in this exact order:
 
-```text
-Usage: orna server backend-shell
-```
+1. all three terminal streams;
+2. service-account identity;
+3. shared package lock and exact ready state;
+4. installed instance presence;
+5. instance paths, manifest, ready record, live PID, instance lock, and socket;
+6. running embedded-engine and final Orna ELF identity; and
+7. private Unix-socket connection.
 
-Pre-launch failures write exactly one of these lines to standard error and
-exit with status `1`:
+Failures write exactly one of these lines to standard error and exit `1`:
 
 ```text
 orna: backend-shell must be run in an interactive terminal
-orna: backend-shell needs ORNA_SERVER_POSTGRES_URL
-orna: ORNA_SERVER_POSTGRES_URL must use postgresql://user[:password]@host:port/database
-orna: could not start psql from PATH
+orna: backend-shell must run as the orna service account
+orna: package maintenance is incomplete
+orna: the default Orna instance is not installed
+orna: the default Orna instance is invalid
+orna: the embedded PostgreSQL engine is not valid
+orna: could not attach the backend shell
+orna: backend-shell session failed
 ```
 
-The terminal diagnostic has precedence over both configuration diagnostics.
-For an interactive command, a missing or empty variable uses the `needs`
-diagnostic. Any other parse, host-count, transport, user, database, port, or
-unsupported-option failure uses the `must use` diagnostic. Failure to
-find, execute, or replace the process uses the `could not start` diagnostic.
-These messages do not append operating-system errors or configuration values.
+An absent fixed configuration or absent default state root uses the `not
+installed` line. An unsafe or inconsistent configuration, path, manifest,
+generation, ready record, PID, lock, or socket uses the `instance is invalid`
+line. An unsupported embedded identity, changed final ELF identity, or
+instance-to-engine mismatch uses the engine line. Connection or peer
+authentication failure uses the attach line. Connection loss, protocol
+failure, terminal I/O failure, incomplete EOF, unsupported COPY mode, binary
+result field, or failed cancellation after attachment uses the session line.
 
-After successful process replacement, Orna emits no further diagnostic and
-does not translate `psql` output, exit status, or signal termination.
+The lines do not include an operating-system error, path, PID, SQL text,
+environment value, or PostgreSQL credential. PostgreSQL notices and statement
+errors after successful attachment use the private row renderer instead.
+
+Normal `\q` and empty-buffer EOF exit `0`. Global usage exits `2`. A
+pre-attachment or session failure exits `1`. Statement errors followed by a
+later clean quit do not change exit `0`. Normal signal termination is not
+translated to an Orna exit code or diagnostic.
 
 ## Required proof matrix
 
 | Boundary | Required cases | Required result |
 | --- | --- | --- |
-| Command shape | exact three-part command; missing part; extra flag; extra argument; attempted SQL command | Only the exact command continues. Every other shape prints the exact usage line and exits `2`. |
-| Terminal | all three streams are terminals; each stream separately redirected; piped input and output | All three terminals are required. A failure prints only the exact terminal diagnostic, exits `1`, and does not read configuration or start a process. |
-| Required configuration | variable absent, empty, valid without password, valid with password | Missing and empty values use the exact `needs` diagnostic. Both valid forms resolve one complete connection target. |
-| URL validation | one TCP host; multiple hosts; Unix socket; missing user; missing database; port `0`, port above `65535`, non-decimal port; unsupported target or credential option; malformed escaping; invalid UTF-8; decoded NUL | Only the accepted single-host form reaches process construction. Every rejection uses the same redacted accepted-shape diagnostic. |
-| No fallback | conflicting `DATABASE_URL`; hostile inherited `PGHOST`, `PGPORT`, `PGUSER`, `PGDATABASE`, `PGPASSWORD`, `PGSERVICE`, `PGPASSFILE`, and `PGOPTIONS`; Compose files; changed working directory | No alternate configuration changes the resolved target or explicit URL password. No default development connection is attempted. Native authentication selected by PostgreSQL remains outside this configuration claim. |
-| Child environment | URL with absent, empty, and non-empty password; unrelated inherited environment | The child receives exact `PGHOST`, `PGPORT`, `PGUSER`, `PGDATABASE`, `PGPASSFILE=/dev/null`, `PGSSLMODE=disable`, and `PGGSSENCMODE=disable`; it receives `PGPASSWORD` only when the URL contains one. The URL variable and every other inherited `PG*` variable are absent. Unrelated variables, including `PATH`, remain inherited. |
-| Ambient connection inputs | hostile `$HOME/.pgpass`; default TLS/client-certificate files; hostile inherited libpq variables | None changes the target, explicit password, or transport. Password-file lookup, TLS material, TLS, and GSS encryption are disabled by fixed child values. PostgreSQL-selected native authentication after connection remains `psql` behaviour. |
-| Secret handling | successful launch; invalid URL; debug formatting; executable not found; executable denied | The original URL and password appear in no argument, Orna diagnostic, formatted value, or captured Orna output. Tests acknowledge that the launching process environment and replacement `psql` environment hold the caller-supplied secret. |
-| Executable discovery | absent or empty `PATH`; empty, relative, nonexistent, non-executable, and absolute entries; changed working directory | Only the first executable `psql` in an absolute `PATH` entry is selected. No current-directory or platform-default fallback occurs. |
-| Process invocation | fake `psql` first in an absolute `PATH`; paths and values containing shell metacharacters; user `psqlrc` present | The executable is invoked directly with only `--no-psqlrc`. No command shell, startup file, injected option, connection argument, or preliminary query runs. |
-| Process result | fake `psql` exits `0`, exits non-zero, and terminates under `SIGHUP`, `SIGINT`, `SIGQUIT`, and `SIGTERM` | Successful replacement preserves the exact child exit and signal behaviour, with no Orna wrapper output. Process identity plus direct `exec` establishes native behaviour for other Unix signals without claiming that every signal terminates. |
-| Attach-only behaviour | PostgreSQL and OrnaDB stopped; PostgreSQL available; OrnaDB serving; fresh and existing storage | The command starts no service and performs no bootstrap, migration, revision, lock, query, or write operation. Availability is determined only by `psql` after replacement. |
-| Public boundary | crate dependency direction and the existing public syntax, checked-body, artefact, and execution enums | Only the host binary depends on the shell entry point, and no public-language or durable-execution representation contains it. When script or protocol dispatch is introduced, its first tests must prove that no request can name this operation. |
-| Durable evidence | successful and failed launch against existing storage | No Orna identity, evidence row, revision, artefact, or audit record is created or changed by launch. |
-| Development tooling | product command present in the workspace | The old `just backend-shell` Compose shortcut is removed so it cannot remain a second configuration or credential path. |
+| Command | exact command; missing part; extra flag; SQL argument; hostile package-maintenance variable | Only the exact public shape continues. Other public shapes use the exact global usage and exit `2`. The private package entry cannot intercept this command. |
+| Terminal | all terminal; each stream redirected separately; piped input and output | All three terminals are required before account, package, instance, environment, socket, or write work. |
+| Identity and package | exact service account; wrong real, effective, primary, and supplementary identities; ready, missing, incomplete, and writer-locked package state | Only the accepted identity and shared ready package state reach instance inspection. The package descriptor remains held for the session. |
+| Ready host | absent instance; unsafe path; changed manifest; stale ready record; dead or wrong PID; unlocked or replaced lock; wrong engine or ELF; missing or hostile socket | Only the exact live host reaches connection, and every failure uses the correct precedence line without writing state. |
+| Fixed target | hostile URL, `PG*`, `HOME`, `PATH`, password, service, TLS, GSS, Compose, current-directory, and startup-file inputs | The client connects only to the fixed private socket, database, and peer role and reads none of the hostile inputs. |
+| Framing | empty and multi-line buffers; empty `\g`; `\q` with buffered text; other backslash lines; empty and buffered EOF | Buffering, dispatch, discard, and exit follow the exact terminal protocol without local SQL parsing. |
+| Results | zero, one, and many rows; multiple statements; NULL and text `NULL`; tabs, line feeds, and non-ASCII text; notices; command tags; transactions; text and binary cursor results | Private rendering preserves every named text fact and waits for `ReadyForQuery`. A binary field fails before any row bytes reach the terminal. |
+| Errors | syntax, permission, constraint, and failed-transaction errors followed by valid SQL | Each PostgreSQL error renders with its fields, the connection stays synchronised, and a later clean quit exits `0`. |
+| Cancellation | unsent buffer; active query; cancellation race; cancellation failure | Unsent text clears locally. Active work uses CancelRequest and drains. Failure uses the session line and exit `1`. |
+| COPY | text FROM STDIN completed with `\.`; `\q` and other backslash data; cancellation; EOF; text TO STDOUT; binary; COPY BOTH; PROGRAM in both directions | Text copy follows the exact subprotocol. EOF fails and cannot commit partial input. Unsupported modes fail the session. PROGRAM is rejected by the backend before process or COPY effects. |
+| Executable closure | every ADR 0019 forbidden SQL form through direct, prepared, nested, role-changed, and multi-statement input | The PostgreSQL-owned guard, not the shell, rejects every path with exact SQLSTATE and message before side effects. |
+| Attach only | stopped server; fresh and existing storage; successful and failed attachment | The shell starts no service and performs no bootstrap, migration, revision work, support materialisation, query, transaction, or filesystem write before connection. |
+| Public boundary | source, checked-body, artefact, execution, script, and protocol representations | No public representation can name the shell, its SQL, or a control line. |
+| Durable evidence | successful and failed attachment with complete instance snapshots | Attachment alone changes no Orna durable fact or audit record. |
 
-The normal workspace formatting, build, lint, unit-test, and live PostgreSQL
-gates remain required. Process-boundary tests must use Unix terminals and a
-fake `psql`; they must not depend on a developer's installed program or alter a
-real backend.
+Normal workspace formatting, build, lint, unit-test, live embedded-engine, and
+clean-package gates remain required. Pseudo-terminal tests must use the native
+Orna client and an embedded ready host. They cannot use a fake or installed
+`psql`.
 
 ## Deferred surface
 
 This record does not accept:
 
-* a flag, command argument, connection override, SQL argument, file input, or
+* a flag, command argument, connection override, SQL argument, input file, or
   non-interactive mode;
-* a public pgwire endpoint, PostgreSQL client compatibility, Orna source form,
-  Orna function, Orna script operation, or public-protocol administration
-  method;
-* Windows or another non-Unix process and terminal contract;
-* multiple hosts, failover, a Unix socket, PostgreSQL service files, passfiles,
-  TLS, GSS encryption, client certificates, inherited libpq configuration, or
-  another backend URL source;
-* a separate shell role, privilege elevation, role switching, or a default
-  administration account;
-* starting or stopping services, Docker or Compose discovery, backend
-  bootstrap, migrations, revision inspection, automatic repair, or an Orna
-  query before attachment;
-* a maintenance lock, write quiescence check, server-liveness check, guarded
-  repair transaction, rollback policy, or validation of an operator's raw
-  PostgreSQL changes;
-* an Orna audit identity, audit record, source revision, catalogue revision,
-  function revision, or artefact for host administration;
-* packaging or installing `psql`, selecting its version, or changing its
-  native interactive diagnostics and authentication prompts; or
-* the future server process, protocol listener, service manager, broader
-  server configuration, secret rotation, or deployment-specific Unix and
-  PostgreSQL auditing.
-
-Those surfaces require their own accepted security, lifecycle, concurrency,
-configuration, and recovery rules rather than being inferred from this trusted
-escape hatch.
+* public pgwire, PostgreSQL client compatibility, Orna source, function,
+  script, or public-protocol administration;
+* another instance, database, role, socket, TCP, TLS, GSS, password, or
+  configuration source;
+* psql startup files, general psql meta-commands, pager, editor, history, shell
+  escape, or client-side variable language;
+* privilege elevation, role switching by the host command, or another
+  executable;
+* automatic service start, bootstrap, migration, support materialisation,
+  recovery, or repair before attachment;
+* a write-quiescence gate, guarded repair transaction, rollback policy, or
+  Orna audit record; or
+* Windows or another non-Unix terminal and process contract.
 
 ## Precedence
 
-This record makes the server-side backend shell accepted by ADR 0001 concrete.
-It preserves ADR 0001's private-PostgreSQL and no-public-pgwire boundary and
-ADR 0004's protected-schema and sole-escape-hatch boundary. It does not weaken
-ADR 0003's source authority or ADR 0004's recovery validation for normal Orna
-apply and restart paths; raw operator actions remain explicitly outside those
-source and execution paths.
+This record keeps ADR 0001's private PostgreSQL and no-public-pgwire boundary
+and ADR 0004's sole raw escape hatch. ADR 0019 supplies the embedded engine,
+executable-load, process, package, and upgrade authority.
 
-This record narrows the operator-access direction in
-`spec/docs/35-security.md`, `spec/docs/36-storage-transactions.md`,
-`spec/docs/38-implementation-roadmap.md`, and `spec/docs/41-open-questions.md`.
-It does not make PostgreSQL behaviour part of the public OrnaDB contract.
+This amendment supersedes this record's earlier installed-`psql`, URL,
+`PATH`, child environment, process replacement, native psql, and exit
+contracts. It retains the exact command shape, terminal requirement, local
+host identity, raw administration, no elevation, no public representation,
+and no write before attachment.
 
-For the host-only `orna server backend-shell` command, this accepted record has
-precedence.
+For `orna server backend-shell`, this complete amended record has precedence.
+
+## References
+
+* [PostgreSQL 18 message flow](https://www.postgresql.org/docs/18/protocol-flow.html)
+* [PostgreSQL 18 message formats](https://www.postgresql.org/docs/18/protocol-message-formats.html)
+* [PostgreSQL 18 cancellation](https://www.postgresql.org/docs/18/protocol-flow.html#PROTOCOL-FLOW-CANCELING-REQUESTS)
+* [PostgreSQL 18 COPY protocol](https://www.postgresql.org/docs/18/protocol-flow.html#PROTOCOL-COPY)
