@@ -6,7 +6,7 @@ source_date_epoch = 1778528675
 builder_image = "docker.io/library/debian@sha256:a1363ada3b45cb3ebc74c78943558f8b0c2b59aaa194d8224e1b02cfd5d78583"
 snapshot_timestamp = "20251229T000000Z"
 patch = "embedded-postgresql-18.4.patch"
-patch_sha256 = "8b3c9c37dcfccece1724183a30508a2e8ff039b4937c615bc22b6f859230a9fc"
+patch_sha256 = "c1c4191e1405cb9f108d9371686e866fc36f9d353393eeb28639f07f85a6a562"
 
 [postgresql]
 version = "18.4"
@@ -88,8 +88,118 @@ flattened_inputs = [
     "/build/zlib/lib/libz.a",
 ]
 
+[initializer_archive]
+path = "liborna_postgres18_initdb.a"
+member = "liborna_postgres18_initdb.o"
+entry_symbol = "orna_postgres18_initdb_entry"
+symbol_prefix = "orna_postgres18_initdb_"
+rename_map_path = "initdb-redefine-symbols.txt"
+defined_symbols_path = "initdb-defined-symbols.txt"
+undefined_symbols_path = "initdb-undefined-symbols.txt"
+allowed_undefined_bridge_symbols = [
+    "orna_postgres18_entry",
+    "orna_postgres18_install_exec_filter",
+    "orna_postgres18_set_system_functions_initialisation_capability",
+    "orna_postgres18_set_initialisation_child_capability",
+    "orna_postgres18_support_root",
+]
+
+[lifecycle]
+backend_entry_symbol = "orna_postgres18_entry"
+initializer_entry_symbol = "orna_postgres18_initdb_entry"
+support_root_setter_symbol = "orna_postgres18_set_support_root"
+system_functions_capability_setter_symbol = "orna_postgres18_set_system_functions_initialisation_capability"
+initialisation_child_capability_setter_symbol = "orna_postgres18_set_initialisation_child_capability"
+seccomp_entry_symbol = "orna_postgres18_install_exec_filter"
+
+[sql_guard]
+sqlstate = "0A000"
+messages = [
+    "Orna does not permit SQL LOAD",
+    "Orna does not permit COPY PROGRAM",
+    "Orna does not permit PostgreSQL extension management",
+    "Orna does not permit procedural language creation",
+    "Orna does not permit anonymous procedural blocks",
+    "Orna does not permit C or internal language function or procedure definitions",
+    "Orna does not permit PostgreSQL dynamic loading",
+]
+
 [resources]
-embedded_support_assets = []
+bundle_path = "embedded-postgresql-support.tar"
+bundle_sha256 = "cf6df2b987553a50409bc77af817f90c6ac3ee94fd23abdd5cdeb11d9668fb25"
+manifest_path = "embedded-postgresql-support-manifest.json"
+manifest_sha256 = "5b3119588b6c36b2d85e1ea9b34282f1762598cab04cf42b53fd2b4f94a27a22"
+
+[[resources.generation_rules]]
+name = "top_level"
+source_paths = [
+    "src/include/catalog/postgres.bki",
+    "src/backend/libpq/pg_hba.conf.sample",
+    "src/backend/libpq/pg_ident.conf.sample",
+    "src/backend/utils/misc/postgresql.conf.sample",
+    "src/backend/snowball/snowball_create.sql",
+    "src/backend/catalog/information_schema.sql",
+    "src/backend/catalog/sql_features.txt",
+    "src/include/catalog/system_constraints.sql",
+    "src/backend/catalog/system_functions.sql",
+    "src/backend/catalog/system_views.sql",
+]
+output_prefix = ""
+mode = "0600"
+
+[[resources.generation_rules]]
+name = "timezone_tree"
+source_paths = [
+    "src/timezone/data/tzdata.zi",
+]
+output_prefix = "timezone"
+mode = "0600"
+
+[[resources.generation_rules]]
+name = "timezonesets"
+source_paths = [
+    "src/timezone/tznames/Africa.txt",
+    "src/timezone/tznames/America.txt",
+    "src/timezone/tznames/Antarctica.txt",
+    "src/timezone/tznames/Asia.txt",
+    "src/timezone/tznames/Atlantic.txt",
+    "src/timezone/tznames/Australia",
+    "src/timezone/tznames/Australia.txt",
+    "src/timezone/tznames/Default",
+    "src/timezone/tznames/Etc.txt",
+    "src/timezone/tznames/Europe.txt",
+    "src/timezone/tznames/India",
+    "src/timezone/tznames/Indian.txt",
+    "src/timezone/tznames/Pacific.txt",
+]
+output_prefix = "timezonesets"
+mode = "0600"
+
+[[resources.generation_rules]]
+name = "snowball_stopwords"
+source_paths = [
+    "src/backend/snowball/stopwords/danish.stop",
+    "src/backend/snowball/stopwords/dutch.stop",
+    "src/backend/snowball/stopwords/english.stop",
+    "src/backend/snowball/stopwords/finnish.stop",
+    "src/backend/snowball/stopwords/french.stop",
+    "src/backend/snowball/stopwords/german.stop",
+    "src/backend/snowball/stopwords/hungarian.stop",
+    "src/backend/snowball/stopwords/italian.stop",
+    "src/backend/snowball/stopwords/nepali.stop",
+    "src/backend/snowball/stopwords/norwegian.stop",
+    "src/backend/snowball/stopwords/portuguese.stop",
+    "src/backend/snowball/stopwords/russian.stop",
+    "src/backend/snowball/stopwords/spanish.stop",
+    "src/backend/snowball/stopwords/swedish.stop",
+    "src/backend/snowball/stopwords/turkish.stop",
+]
+output_prefix = "tsearch_data"
+mode = "0600"
+
+[output]
+caller_owned_root = true
+forbidden_implicit_root = "target/postgresql-embedded/current"
 
 [proof]
 frozen_inputs_directory = "inputs"
@@ -99,10 +209,19 @@ stdout_path = "orna-engine-entry-probe.stdout"
 deterministic_outputs = [
     "embedded-engine-manifest.json",
     "liborna_postgres18_backend.a",
+    "liborna_postgres18_initdb.a",
     "defined-symbols.txt",
     "undefined-symbols.txt",
+    "initdb-redefine-symbols.txt",
+    "initdb-defined-symbols.txt",
+    "initdb-undefined-symbols.txt",
+    "embedded-postgresql-support.tar",
+    "embedded-postgresql-support-manifest.json",
     "orna-engine-entry-probe.stdout",
     "POSTGRESQL-LICENSE",
+    "inputs/embedded-build.toml",
+    "inputs/build-embedded.sh",
+    "inputs/embedded-postgresql-18.4.patch",
 ]
 
 [apt]
