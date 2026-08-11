@@ -16,97 +16,93 @@ ALTER TABLE _orna_kernel.catalogue_revisions
     ADD COLUMN hash_algorithm text NOT NULL DEFAULT 'sha256'
         CHECK (hash_algorithm = 'sha256');
 
-DO $$
-DECLARE
-    bundle_count bigint;
-    source_revision_count bigint;
-    catalogue_revision_count bigint;
-    source_unit_count bigint;
-    active_revision_count bigint;
-    schema_count bigint;
-    object_type_count bigint;
-    field_count bigint;
-    expression_count bigint;
-    function_count bigint;
-    parameter_count bigint;
-    return_column_count bigint;
-    function_revision_count bigint;
-    function_artifact_count bigint;
-    data_relation_count bigint;
-BEGIN
-    SELECT count(*) INTO bundle_count FROM _orna_kernel.source_bundles;
-    SELECT count(*) INTO source_revision_count FROM _orna_kernel.source_revisions;
-    SELECT count(*) INTO catalogue_revision_count FROM _orna_kernel.catalogue_revisions;
-    SELECT count(*) INTO source_unit_count FROM _orna_kernel.source_units;
-    SELECT count(*) INTO active_revision_count FROM _orna_kernel.active_revision;
-    SELECT count(*) INTO schema_count FROM _orna_kernel.catalogue_schemas;
-    SELECT count(*) INTO object_type_count FROM _orna_kernel.catalogue_object_types;
-    SELECT count(*) INTO field_count FROM _orna_kernel.catalogue_fields;
-    SELECT count(*) INTO expression_count FROM _orna_kernel.catalogue_expressions;
-    SELECT count(*) INTO function_count FROM _orna_kernel.catalogue_functions;
-    SELECT count(*) INTO parameter_count FROM _orna_kernel.catalogue_function_parameters;
-    SELECT count(*) INTO return_column_count
-    FROM _orna_kernel.catalogue_function_return_columns;
-    SELECT count(*) INTO function_revision_count FROM _orna_kernel.function_revisions;
-    SELECT count(*) INTO function_artifact_count FROM _orna_kernel.function_artifacts;
-    SELECT count(*) INTO data_relation_count
-    FROM pg_class AS relation
-    JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
-    WHERE namespace.nspname = '_orna_data'
-      AND relation.relkind IN ('r', 'p');
+CREATE TEMP TABLE migration_0002_legacy_state (
+    is_valid boolean NOT NULL,
+    is_seed boolean NOT NULL,
+    CONSTRAINT migration_0002_legacy_state_valid_check CHECK (is_valid)
+) ON COMMIT DROP;
 
-    IF bundle_count = 0
-        AND source_revision_count = 0
-        AND catalogue_revision_count = 0
-        AND source_unit_count = 0
-        AND active_revision_count = 0
-        AND schema_count = 0
-        AND object_type_count = 0
-        AND field_count = 0
-        AND expression_count = 0
-        AND function_count = 0
-        AND parameter_count = 0
-        AND return_column_count = 0
-        AND function_revision_count = 0
-        AND function_artifact_count = 0
-        AND data_relation_count = 0 THEN
-        NULL;
-    ELSIF bundle_count = 1
-        AND source_revision_count = 1
-        AND catalogue_revision_count = 1
-        AND source_unit_count = 0
-        AND active_revision_count = 1
-        AND schema_count = 0
-        AND object_type_count = 0
-        AND field_count = 0
-        AND expression_count = 0
-        AND function_count = 0
-        AND parameter_count = 0
-        AND return_column_count = 0
-        AND function_revision_count = 0
-        AND function_artifact_count = 0
-        AND data_relation_count = 0 THEN
-        UPDATE _orna_kernel.source_bundles
-        SET content_hash = decode(
-            'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
-            'hex'
-        );
-        UPDATE _orna_kernel.source_revisions
-        SET content_hash = decode(
-            'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
-            'hex'
-        );
-        UPDATE _orna_kernel.catalogue_revisions
-        SET content_hash = decode(
-            'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
-            'hex'
-        );
-    ELSE
-        RAISE EXCEPTION
-            'cannot derive aggregate hashes for a non-empty migration 0001 catalogue';
-    END IF;
-END;
-$$;
+INSERT INTO migration_0002_legacy_state (is_valid, is_seed)
+WITH legacy_counts AS (
+    SELECT
+        (SELECT count(*) FROM _orna_kernel.source_bundles) AS bundle_count,
+        (SELECT count(*) FROM _orna_kernel.source_revisions) AS source_revision_count,
+        (SELECT count(*) FROM _orna_kernel.catalogue_revisions) AS catalogue_revision_count,
+        (SELECT count(*) FROM _orna_kernel.source_units) AS source_unit_count,
+        (SELECT count(*) FROM _orna_kernel.active_revision) AS active_revision_count,
+        (SELECT count(*) FROM _orna_kernel.catalogue_schemas) AS schema_count,
+        (SELECT count(*) FROM _orna_kernel.catalogue_object_types) AS object_type_count,
+        (SELECT count(*) FROM _orna_kernel.catalogue_fields) AS field_count,
+        (SELECT count(*) FROM _orna_kernel.catalogue_expressions) AS expression_count,
+        (SELECT count(*) FROM _orna_kernel.catalogue_functions) AS function_count,
+        (SELECT count(*) FROM _orna_kernel.catalogue_function_parameters) AS parameter_count,
+        (SELECT count(*) FROM _orna_kernel.catalogue_function_return_columns) AS return_column_count,
+        (SELECT count(*) FROM _orna_kernel.function_revisions) AS function_revision_count,
+        (SELECT count(*) FROM _orna_kernel.function_artifacts) AS function_artifact_count,
+        (
+            SELECT count(*)
+            FROM pg_class AS relation
+            JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+            WHERE namespace.nspname = '_orna_data'
+              AND relation.relkind IN ('r', 'p')
+        ) AS data_relation_count
+), states AS (
+    SELECT
+        bundle_count = 0
+            AND source_revision_count = 0
+            AND catalogue_revision_count = 0
+            AND source_unit_count = 0
+            AND active_revision_count = 0
+            AND schema_count = 0
+            AND object_type_count = 0
+            AND field_count = 0
+            AND expression_count = 0
+            AND function_count = 0
+            AND parameter_count = 0
+            AND return_column_count = 0
+            AND function_revision_count = 0
+            AND function_artifact_count = 0
+            AND data_relation_count = 0 AS is_empty,
+        bundle_count = 1
+            AND source_revision_count = 1
+            AND catalogue_revision_count = 1
+            AND source_unit_count = 0
+            AND active_revision_count = 1
+            AND schema_count = 0
+            AND object_type_count = 0
+            AND field_count = 0
+            AND expression_count = 0
+            AND function_count = 0
+            AND parameter_count = 0
+            AND return_column_count = 0
+            AND function_revision_count = 0
+            AND function_artifact_count = 0
+            AND data_relation_count = 0 AS is_seed
+    FROM legacy_counts
+)
+SELECT is_empty OR is_seed, is_seed
+FROM states;
+
+UPDATE _orna_kernel.source_bundles
+SET content_hash = decode(
+    'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+    'hex'
+)
+WHERE (SELECT is_seed FROM migration_0002_legacy_state);
+
+UPDATE _orna_kernel.source_revisions
+SET content_hash = decode(
+    'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+    'hex'
+)
+WHERE (SELECT is_seed FROM migration_0002_legacy_state);
+
+UPDATE _orna_kernel.catalogue_revisions
+SET content_hash = decode(
+    'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+    'hex'
+)
+WHERE (SELECT is_seed FROM migration_0002_legacy_state);
 
 ALTER TABLE _orna_kernel.source_bundles
     ADD CONSTRAINT source_bundles_content_hash_length
