@@ -1,0 +1,68 @@
+---
+interface Props {
+    inverse?: boolean;
+}
+
+const { inverse = false } = Astro.props;
+---
+
+<span class:list={["brand-lockup", { "brand-lockup--inverse": inverse }]} translate="no">
+    <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
+        <rect class="brand-mark__field" width="32" height="32" rx="4"></rect>
+        <circle class="brand-mark__ring" cx="13" cy="16" r="7"></circle>
+        <path class="brand-mark__arrow" d="M20 8h7v7M27 8l-8 8"></path>
+    </svg>
+    <span class="brand-name">OrnaDB</span>
+</span>
+
+<style>
+    .brand-lockup {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.625rem;
+        color: var(--colour-ink);
+        font-size: 1rem;
+        font-weight: 800;
+        letter-spacing: -0.02em;
+        line-height: 1;
+    }
+
+    .brand-mark {
+        width: 2rem;
+        height: 2rem;
+        flex: 0 0 auto;
+    }
+
+    .brand-mark__field {
+        fill: var(--colour-brand-deep);
+    }
+
+    .brand-mark__ring {
+        fill: none;
+        stroke: var(--colour-bg);
+        stroke-width: 3.5;
+    }
+
+    .brand-mark__arrow {
+        fill: none;
+        stroke: var(--colour-accent);
+        stroke-linecap: square;
+        stroke-width: 3;
+    }
+
+    .brand-lockup--inverse {
+        color: var(--colour-bg);
+    }
+
+    .brand-lockup--inverse .brand-mark__field {
+        fill: var(--colour-bg);
+    }
+
+    .brand-lockup--inverse .brand-mark__ring {
+        stroke: var(--colour-brand-deep);
+    }
+
+    .brand-lockup--inverse .brand-mark__arrow {
+        stroke: var(--colour-accent);
+    }
+</style>
