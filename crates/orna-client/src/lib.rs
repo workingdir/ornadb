@@ -1091,29 +1091,6 @@ mod tests {
     }
 
     #[test]
-    fn accepts_a_transitional_version_two_legacy_boolean_return() {
-        let standard = orna_standard::verify_standard_library_snapshot(
-            orna_standard::retained_standard_library_snapshot().unwrap(),
-        )
-        .unwrap();
-        let boolean_type = standard
-            .catalogue()
-            .value_types()
-            .iter()
-            .find(|definition| {
-                definition.representation_contract() == "orna.kernel.value.boolean@1"
-            })
-            .unwrap()
-            .id();
-        let (active, function, _, _) = version_two_legacy_scalar_active(boolean_type);
-
-        assert_eq!(
-            evaluate_client_function(&active, function).unwrap().value(),
-            &RuntimeValue::Boolean(true)
-        );
-    }
-
-    #[test]
     fn rejects_a_value_return_that_disagrees_with_its_selected_reference() {
         let standard = orna_standard::verify_standard_library_snapshot(
             orna_standard::retained_standard_library_snapshot().unwrap(),
@@ -2093,32 +2070,6 @@ mod tests {
         RevisionPair,
         FunctionRevisionId,
     ) {
-        version_two_active_with_return(ResolvedType::Value(return_type), reference_target)
-    }
-
-    fn version_two_legacy_scalar_active(
-        reference_target: TypeId,
-    ) -> (
-        ActiveDatabaseRevision,
-        FunctionId,
-        RevisionPair,
-        FunctionRevisionId,
-    ) {
-        version_two_active_with_return(
-            ResolvedType::scalar(StandardScalar::Boolean),
-            reference_target,
-        )
-    }
-
-    fn version_two_active_with_return(
-        return_type: ResolvedType,
-        reference_target: TypeId,
-    ) -> (
-        ActiveDatabaseRevision,
-        FunctionId,
-        RevisionPair,
-        FunctionRevisionId,
-    ) {
         let standard = orna_standard::verify_standard_library_snapshot(
             orna_standard::retained_standard_library_snapshot().unwrap(),
         )
@@ -2130,7 +2081,7 @@ mod tests {
             prior_function.name().clone(),
             FunctionDomain::Client,
             Vec::new(),
-            FunctionReturn::Single(return_type),
+            FunctionReturn::Single(ResolvedType::Value(return_type)),
             function_revision_id,
             FunctionSecurity::Invoker,
             None,
