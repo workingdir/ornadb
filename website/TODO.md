@@ -26,7 +26,18 @@
 
 ## Review
 
-- [ ] Run formatting, type checks, build, link checks, and similarity checks.
-- [ ] Inspect the built site at desktop and mobile sizes.
-- [ ] Run accessibility and performance checks where local tools permit.
-- [ ] Update this checklist and the design record to match the shipped code.
+- [x] Run formatting, type checks, build, link checks, and similarity checks.
+- [x] Inspect the built site at desktop and mobile sizes.
+- [x] Run accessibility and performance checks where local tools permit.
+- [x] Update this checklist and the design record to match the shipped code.
+
+## Validation record
+
+- Astro diagnostics: 0 errors, 0 warnings, and 0 hints across 9 files.
+- Production build: 1 frontpage, 11 Sourcey pages, and 12 normalised documentation routes.
+- Nu HTML Checker: 0 errors and 0 warnings on the frontpage and documentation entry.
+- Internal navigation: 532 local links and fragments checked across 13 HTML files.
+- Generated discovery: 94 search entries, 11 `llms.txt` links, and a 47,624-byte `llms-full.txt`.
+- Browser checks: no page-level overflow at 320, 390, 768, or 1,440 pixels; named controls, landmarks, reduced motion, first-tab skip navigation, search, and theme switching verified.
+- Contrast: sampled text pairs range from 5.70:1 to 19.36:1.
+- Security and duplication: Yarn reported no audit suggestions; `similarity-ts` found no duplicate functions or types.
