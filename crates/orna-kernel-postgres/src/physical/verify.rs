@@ -1579,9 +1579,9 @@ mod tests {
     }
 
     #[test]
-    fn expected_builder_keeps_scalar_table_facts_equal_for_version_one_and_two() {
+    fn expected_builder_equates_version_one_scalar_and_version_two_value_integer_facts() {
         let (version_one, object) = scalar_active_revision();
-        let version_two = transitional_scalar_active_revision();
+        let (version_two, version_two_object, value_type) = value_active_revision();
 
         let version_one_expected =
             ExpectedCatalogue::from_active(&version_one).expect("version one expected catalogue");
@@ -1596,12 +1596,23 @@ mod tests {
             version_two.catalogue_hash_context().version(),
             CatalogueHashVersion::Version2
         );
+        assert_eq!(object, version_two_object);
+        assert_eq!(
+            version_two
+                .catalogue()
+                .object_type_by_id(version_two_object)
+                .expect("version two object")
+                .fields()[0]
+                .resolved_type()
+                .value_type(),
+            Some(value_type)
+        );
         assert_eq!(version_one_expected, version_two_expected);
         assert_eq!(
             version_two_expected
                 .tables
                 .get(&relation_name(object))
-                .expect("transitional scalar table")
+                .expect("version two value table")
                 .columns[1]
                 .type_name,
             "int4"
@@ -1982,15 +1993,6 @@ mod tests {
 
     fn scalar_active_revision() -> (ActiveDatabaseRevision, TypeId) {
         scalar_active_revision_with_context(CatalogueHashContext::version_one())
-    }
-
-    fn transitional_scalar_active_revision() -> ActiveDatabaseRevision {
-        let standard = orna_standard::verify_standard_library_snapshot(
-            orna_standard::retained_standard_library_snapshot()
-                .expect("retained standard-library snapshot"),
-        )
-        .expect("verified standard-library snapshot");
-        scalar_active_revision_with_context(CatalogueHashContext::version_two(standard)).0
     }
 
     fn scalar_active_revision_with_context(
