@@ -32,8 +32,8 @@ use tokio_postgres::{
 use crate::{
     PostgresKernel, PostgresKernelError,
     server_runtime::{
-        ExpectedDefinitionReference, ReferenceReplayMismatch, configure_and_recover, postgres_type,
-        validate_function_reference_replay,
+        ExpectedDefinitionReference, ReferenceReplayMismatch, ResolvedRuntimeType,
+        configure_and_recover, postgres_type, validate_function_reference_replay,
     },
     storage::{DATA_SCHEMA, OBJECT_ID_COLUMN, field_name, relation_name, unique_constraint_name},
 };
@@ -1515,9 +1515,8 @@ impl UniqueReferenceConstraints {
                     "UNIQUE target fields must be required typed references",
                 ));
             }
-            let ResolvedType::Reference {
-                target: referenced_type,
-            } = field.resolved_type()
+            let ResolvedRuntimeType::Reference(referenced_type) =
+                ResolvedRuntimeType::from_resolved_type(field.resolved_type())
             else {
                 return Err(plan_invariant(
                     "UNIQUE target fields must be required typed references",
@@ -1771,7 +1770,9 @@ fn validate_function_signature_for_operation(
             }
         }));
     };
-    let ResolvedType::Reference { target } = column.resolved_type() else {
+    let ResolvedRuntimeType::Reference(target) =
+        ResolvedRuntimeType::from_resolved_type(column.resolved_type())
+    else {
         return Err(reject(
             "the sole result column must be a non-null object reference",
         ));
@@ -1804,7 +1805,9 @@ fn validate_delete_function_signature(
             "a DELETE SERVER function must return exactly one BOOLEAN column",
         ));
     };
-    if column.resolved_type() != ResolvedType::Scalar(orna_core::types::StandardScalar::Boolean) {
+    if ResolvedRuntimeType::from_resolved_type(column.resolved_type())
+        != ResolvedRuntimeType::LegacyScalar(orna_core::types::StandardScalar::Boolean)
+    {
         return Err(function_signature_error(
             function.id(),
             "the sole DELETE result column must be BOOLEAN",
@@ -1897,11 +1900,14 @@ fn function_signature_error(function: FunctionId, rule: &'static str) -> Postgre
 }
 
 fn runtime_type_is_active(catalogue: &CatalogueSnapshot, resolved_type: ResolvedType) -> bool {
-    postgres_type(resolved_type).is_some()
-        && !matches!(
-            resolved_type,
-            ResolvedType::Reference { target } if catalogue.object_type_by_id(target).is_none()
-        )
+    if postgres_type(resolved_type).is_none() {
+        return false;
+    }
+    match ResolvedRuntimeType::from_resolved_type(resolved_type) {
+        ResolvedRuntimeType::Reference(target) => catalogue.object_type_by_id(target).is_some(),
+        ResolvedRuntimeType::LegacyScalar(_) => true,
+        ResolvedRuntimeType::Unsupported => false,
+    }
 }
 
 fn validate_active_runtime_type(
@@ -1912,12 +1918,14 @@ fn validate_active_runtime_type(
     if postgres_type(resolved_type).is_none() {
         return Err(plan_invariant(rule));
     }
-    if let ResolvedType::Reference { target } = resolved_type
-        && catalogue.object_type_by_id(target).is_none()
-    {
-        return Err(plan_invariant(
-            "every referenced object type must be active",
-        ));
+    match ResolvedRuntimeType::from_resolved_type(resolved_type) {
+        ResolvedRuntimeType::Reference(target) if catalogue.object_type_by_id(target).is_none() => {
+            return Err(plan_invariant(
+                "every referenced object type must be active",
+            ));
+        }
+        ResolvedRuntimeType::LegacyScalar(_) | ResolvedRuntimeType::Reference(_) => {}
+        ResolvedRuntimeType::Unsupported => return Err(plan_invariant(rule)),
     }
     Ok(())
 }
@@ -1976,12 +1984,17 @@ fn validate_plan_for_operation<'a>(
                 "mutation targets cannot contain field default expressions",
             ));
         }
-        if let ResolvedType::Reference { target } = field.resolved_type()
-            && catalogue.object_type_by_id(target).is_none()
-        {
-            return Err(plan_invariant(
-                "every target-field REF type must name an active object type",
-            ));
+        match ResolvedRuntimeType::from_resolved_type(field.resolved_type()) {
+            ResolvedRuntimeType::Reference(target)
+                if catalogue.object_type_by_id(target).is_none() =>
+            {
+                return Err(plan_invariant(
+                    "every target-field REF type must name an active object type",
+                ));
+            }
+            ResolvedRuntimeType::LegacyScalar(_)
+            | ResolvedRuntimeType::Reference(_)
+            | ResolvedRuntimeType::Unsupported => {}
         }
     }
 
