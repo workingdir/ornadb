@@ -6,12 +6,22 @@ implemented, reviewed, committed, and pushed.
 
 ## Current focus
 
-- [ ] Build the pinned PostgreSQL 18.4 backend objects and native C entry
-  probe without producing a PostgreSQL executable or shared object.
-- [ ] Prove the linked PostgreSQL entry twice with identical static link inputs
-  and probe bytes.
-- [ ] Select the embedded process, resource, shell, upgrade, error, command,
+- [x] Build and reproduce the pinned PostgreSQL 18.4 backend and initialiser
+  archive inputs without producing a PostgreSQL executable or shared object.
+- [x] Select the embedded process, resource, shell, upgrade, error, command,
   lifecycle, and complete proof contracts.
+- [ ] Create the public Orna-owned PostgreSQL fork and add its official 18.4
+  base as an inactive `third_party/postgresql` submodule.
+- [ ] Import every accepted PostgreSQL change as one signed linear fork commit
+  touching at most three files, advancing only the superproject gitlink after
+  each green commit.
+- [ ] Add the native Make-based, read-only submodule build beside the selected
+  legacy proof and bind its toolchain, signer, source tree, support data,
+  lifecycle probe, and verifier.
+- [ ] Prove exact legacy/native archive, support, symbol, licence, and entry
+  evidence parity while independently running the native lifecycle twice.
+- [ ] Cut over atomically to the native build, delete the legacy builder entry
+  point, then remove the inert recipe and patch files in small commits.
 - [x] Accept the offline `orna source check <file.orna>` contract.
 - [ ] Add the Orna-owned instance model, cluster initialisation, private Unix
   socket authentication, and foreground PostgreSQL supervision.
