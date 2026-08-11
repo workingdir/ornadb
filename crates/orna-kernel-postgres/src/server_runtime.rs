@@ -4,7 +4,7 @@ use orna_core::{
     TypeId,
     catalogue::{FunctionDefinition, FunctionReturn},
     revision::{
-        ActiveDatabaseRevision, DefinitionReference, DefinitionReferenceKind,
+        ActiveDatabaseRevision, CatalogueHashContext, DefinitionReference, DefinitionReferenceKind,
         DefinitionReferenceTarget,
     },
     types::{ResolvedType, StandardScalar},
@@ -22,26 +22,115 @@ const LOCK_TIMEOUT: &str = "SET LOCAL lock_timeout = '5s'";
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ResolvedRuntimeType {
     LegacyScalar(StandardScalar),
+    VerifiedValue {
+        value_type: TypeId,
+        compatibility: StandardScalar,
+    },
     Reference(TypeId),
     Unsupported,
 }
 
 impl ResolvedRuntimeType {
-    /// Classifies one resolved type without assigning scalar or value identity.
-    pub(crate) fn from_resolved_type(resolved_type: ResolvedType) -> Self {
-        if let Some(scalar) = resolved_type.legacy_scalar() {
-            return Self::LegacyScalar(scalar);
+    /// Returns the resolved representation without assigning identity.
+    pub(crate) const fn compatibility_scalar(self) -> Option<StandardScalar> {
+        match self {
+            Self::LegacyScalar(scalar)
+            | Self::VerifiedValue {
+                compatibility: scalar,
+                ..
+            } => Some(scalar),
+            Self::Reference(_) | Self::Unsupported => None,
         }
-        if let Some(target) = resolved_type.reference_target() {
-            return Self::Reference(target);
-        }
-        if resolved_type.named_type().is_some() {
-            return Self::Unsupported;
-        }
-        if resolved_type.value_type().is_some() {
-            return Self::Unsupported;
-        }
-        Self::Unsupported
+    }
+}
+
+/// Projects a resolved type through the selected catalogue hash context.
+///
+/// Legacy scalar tags remain executable-plan compatibility data. Durable value
+/// identities resolve only through the selected pinned standard snapshot. The
+/// downstream operation allow-lists decide which recognised representations
+/// this initial runtime can execute.
+pub(crate) fn resolve_runtime_type(
+    context: &CatalogueHashContext,
+    resolved_type: ResolvedType,
+) -> ResolvedRuntimeType {
+    if let Some(scalar) = resolved_type.legacy_scalar() {
+        return runtime_type_from_legacy_scalar(scalar);
+    }
+    if let Some(target) = resolved_type.reference_target() {
+        return ResolvedRuntimeType::Reference(target);
+    }
+    if resolved_type.named_type().is_some() {
+        return ResolvedRuntimeType::Unsupported;
+    }
+    if let Some(value_type) = resolved_type.value_type() {
+        return context
+            .standard()
+            .and_then(|standard| standard.catalogue().value_type_by_id(value_type))
+            .and_then(|definition| {
+                runtime_compatibility_from_contract(definition.representation_contract())
+            })
+            .map_or(ResolvedRuntimeType::Unsupported, |compatibility| {
+                ResolvedRuntimeType::VerifiedValue {
+                    value_type,
+                    compatibility,
+                }
+            });
+    }
+    ResolvedRuntimeType::Unsupported
+}
+
+fn runtime_type_from_legacy_scalar(scalar: StandardScalar) -> ResolvedRuntimeType {
+    ResolvedRuntimeType::LegacyScalar(scalar)
+}
+
+fn runtime_compatibility_from_contract(contract: &str) -> Option<StandardScalar> {
+    match contract {
+        "orna.kernel.value.boolean@1" => Some(StandardScalar::Boolean),
+        "orna.kernel.value.integer@1" => Some(StandardScalar::Integer),
+        "orna.kernel.value.bigint@1" => Some(StandardScalar::BigInt),
+        "orna.kernel.value.float@1" => Some(StandardScalar::Float),
+        "orna.kernel.value.character-large-object@1" => Some(StandardScalar::CharacterLargeObject),
+        "orna.kernel.value.binary-large-object@1" => Some(StandardScalar::BinaryLargeObject),
+        "orna.kernel.value.decimal@1" => Some(StandardScalar::Decimal),
+        "orna.kernel.value.uuid@1" => Some(StandardScalar::Uuid),
+        "orna.kernel.value.date@1" => Some(StandardScalar::Date),
+        "orna.kernel.value.time@1" => Some(StandardScalar::Time),
+        "orna.kernel.value.timestamp@1" => Some(StandardScalar::Timestamp),
+        "orna.kernel.value.duration@1" => Some(StandardScalar::Duration),
+        "orna.kernel.value.void@1" => Some(StandardScalar::Void),
+        _ => None,
+    }
+}
+
+/// Checks runtime compatibility while retaining a verified value identity.
+pub(crate) fn runtime_types_match(
+    context: &CatalogueHashContext,
+    left: ResolvedType,
+    right: ResolvedType,
+) -> bool {
+    if left == right {
+        return true;
+    }
+    match (
+        resolve_runtime_type(context, left),
+        resolve_runtime_type(context, right),
+    ) {
+        (
+            ResolvedRuntimeType::LegacyScalar(left),
+            ResolvedRuntimeType::VerifiedValue {
+                compatibility: right,
+                ..
+            },
+        )
+        | (
+            ResolvedRuntimeType::VerifiedValue {
+                compatibility: left,
+                ..
+            },
+            ResolvedRuntimeType::LegacyScalar(right),
+        ) => left == right,
+        _ => false,
     }
 }
 
@@ -60,16 +149,42 @@ pub(crate) async fn configure_and_recover(
     recover_active_revision(transaction).await
 }
 
-pub(crate) fn postgres_type(resolved_type: ResolvedType) -> Option<Type> {
-    match ResolvedRuntimeType::from_resolved_type(resolved_type) {
-        ResolvedRuntimeType::LegacyScalar(StandardScalar::Boolean) => Some(Type::BOOL),
-        ResolvedRuntimeType::LegacyScalar(StandardScalar::Integer) => Some(Type::INT4),
-        ResolvedRuntimeType::LegacyScalar(StandardScalar::BigInt) => Some(Type::INT8),
-        ResolvedRuntimeType::LegacyScalar(StandardScalar::Float) => Some(Type::FLOAT8),
-        ResolvedRuntimeType::LegacyScalar(StandardScalar::CharacterLargeObject) => Some(Type::TEXT),
+pub(crate) fn postgres_type(runtime_type: ResolvedRuntimeType) -> Option<Type> {
+    match runtime_type {
+        ResolvedRuntimeType::LegacyScalar(StandardScalar::Boolean)
+        | ResolvedRuntimeType::VerifiedValue {
+            compatibility: StandardScalar::Boolean,
+            ..
+        } => Some(Type::BOOL),
+        ResolvedRuntimeType::LegacyScalar(StandardScalar::Integer)
+        | ResolvedRuntimeType::VerifiedValue {
+            compatibility: StandardScalar::Integer,
+            ..
+        } => Some(Type::INT4),
+        ResolvedRuntimeType::LegacyScalar(StandardScalar::BigInt)
+        | ResolvedRuntimeType::VerifiedValue {
+            compatibility: StandardScalar::BigInt,
+            ..
+        } => Some(Type::INT8),
+        ResolvedRuntimeType::LegacyScalar(StandardScalar::Float)
+        | ResolvedRuntimeType::VerifiedValue {
+            compatibility: StandardScalar::Float,
+            ..
+        } => Some(Type::FLOAT8),
+        ResolvedRuntimeType::LegacyScalar(StandardScalar::CharacterLargeObject)
+        | ResolvedRuntimeType::VerifiedValue {
+            compatibility: StandardScalar::CharacterLargeObject,
+            ..
+        } => Some(Type::TEXT),
         ResolvedRuntimeType::LegacyScalar(StandardScalar::BinaryLargeObject)
+        | ResolvedRuntimeType::VerifiedValue {
+            compatibility: StandardScalar::BinaryLargeObject,
+            ..
+        }
         | ResolvedRuntimeType::Reference(_) => Some(Type::BYTEA),
-        ResolvedRuntimeType::LegacyScalar(_) | ResolvedRuntimeType::Unsupported => None,
+        ResolvedRuntimeType::LegacyScalar(_)
+        | ResolvedRuntimeType::VerifiedValue { .. }
+        | ResolvedRuntimeType::Unsupported => None,
     }
 }
 
@@ -132,9 +247,12 @@ fn add_signature_reference(
     expected: &mut Vec<ExpectedDefinitionReference>,
     resolved_type: ResolvedType,
 ) {
-    if let ResolvedRuntimeType::Reference(target) =
-        ResolvedRuntimeType::from_resolved_type(resolved_type)
-    {
+    if let Some(value_type) = resolved_type.value_type() {
+        expected.push(ExpectedDefinitionReference::new(
+            DefinitionReferenceKind::NamedType,
+            DefinitionReferenceTarget::ValueType(value_type),
+        ));
+    } else if let Some(target) = resolved_type.reference_target() {
         expected.push(ExpectedDefinitionReference::new(
             DefinitionReferenceKind::ObjectReference,
             DefinitionReferenceTarget::ObjectType(target),
@@ -168,56 +286,110 @@ mod tests {
             FunctionDomain, FunctionReturnColumnDefinition, FunctionSecurity, FunctionVolatility,
             ParameterDefinition, QualifiedSemanticName,
         },
-        revision::{DefinitionReference, SourceOrigin},
+        revision::{CatalogueHashContext, DefinitionReference, SourceOrigin},
     };
 
     use super::*;
 
     #[test]
-    fn resolved_runtime_type_classifies_every_current_shape_fail_closed() {
+    fn resolved_runtime_type_classifies_legacy_shapes_and_postgres_types() {
+        let context = CatalogueHashContext::version_one();
         let scalar_cases = [
-            (StandardScalar::Boolean, Some(Type::BOOL)),
-            (StandardScalar::Integer, Some(Type::INT4)),
-            (StandardScalar::BigInt, Some(Type::INT8)),
-            (StandardScalar::Float, Some(Type::FLOAT8)),
-            (StandardScalar::Decimal, None),
-            (StandardScalar::CharacterLargeObject, Some(Type::TEXT)),
-            (StandardScalar::BinaryLargeObject, Some(Type::BYTEA)),
-            (StandardScalar::Uuid, None),
-            (StandardScalar::Date, None),
-            (StandardScalar::Time, None),
-            (StandardScalar::Timestamp, None),
-            (StandardScalar::Duration, None),
-            (StandardScalar::Void, None),
+            (
+                StandardScalar::Boolean,
+                ResolvedRuntimeType::LegacyScalar(StandardScalar::Boolean),
+                Some(Type::BOOL),
+            ),
+            (
+                StandardScalar::Integer,
+                ResolvedRuntimeType::LegacyScalar(StandardScalar::Integer),
+                Some(Type::INT4),
+            ),
+            (
+                StandardScalar::BigInt,
+                ResolvedRuntimeType::LegacyScalar(StandardScalar::BigInt),
+                Some(Type::INT8),
+            ),
+            (
+                StandardScalar::Float,
+                ResolvedRuntimeType::LegacyScalar(StandardScalar::Float),
+                Some(Type::FLOAT8),
+            ),
+            (
+                StandardScalar::Decimal,
+                ResolvedRuntimeType::LegacyScalar(StandardScalar::Decimal),
+                None,
+            ),
+            (
+                StandardScalar::CharacterLargeObject,
+                ResolvedRuntimeType::LegacyScalar(StandardScalar::CharacterLargeObject),
+                Some(Type::TEXT),
+            ),
+            (
+                StandardScalar::BinaryLargeObject,
+                ResolvedRuntimeType::LegacyScalar(StandardScalar::BinaryLargeObject),
+                Some(Type::BYTEA),
+            ),
+            (
+                StandardScalar::Uuid,
+                ResolvedRuntimeType::LegacyScalar(StandardScalar::Uuid),
+                None,
+            ),
+            (
+                StandardScalar::Date,
+                ResolvedRuntimeType::LegacyScalar(StandardScalar::Date),
+                None,
+            ),
+            (
+                StandardScalar::Time,
+                ResolvedRuntimeType::LegacyScalar(StandardScalar::Time),
+                None,
+            ),
+            (
+                StandardScalar::Timestamp,
+                ResolvedRuntimeType::LegacyScalar(StandardScalar::Timestamp),
+                None,
+            ),
+            (
+                StandardScalar::Duration,
+                ResolvedRuntimeType::LegacyScalar(StandardScalar::Duration),
+                None,
+            ),
+            (
+                StandardScalar::Void,
+                ResolvedRuntimeType::LegacyScalar(StandardScalar::Void),
+                None,
+            ),
         ];
         assert_eq!(scalar_cases.len(), StandardScalar::ALL.len());
-        for (scalar, postgres) in scalar_cases {
+        for (scalar, runtime, postgres) in scalar_cases {
             let resolved = ResolvedType::scalar(scalar);
-            assert_eq!(
-                ResolvedRuntimeType::from_resolved_type(resolved),
-                ResolvedRuntimeType::LegacyScalar(scalar)
-            );
-            assert_eq!(postgres_type(resolved), postgres);
+            assert_eq!(resolve_runtime_type(&context, resolved), runtime);
+            assert_eq!(postgres_type(runtime), postgres);
         }
 
         let named = ResolvedType::named(TypeId::from_bytes([0x51; 16]));
         assert_eq!(
-            ResolvedRuntimeType::from_resolved_type(named),
+            resolve_runtime_type(&context, named),
             ResolvedRuntimeType::Unsupported
         );
-        assert_eq!(postgres_type(named), None);
+        assert_eq!(postgres_type(resolve_runtime_type(&context, named)), None);
 
         let target = TypeId::from_bytes([0x52; 16]);
         let reference = ResolvedType::reference(target);
         assert_eq!(
-            ResolvedRuntimeType::from_resolved_type(reference),
+            resolve_runtime_type(&context, reference),
             ResolvedRuntimeType::Reference(target)
         );
-        assert_eq!(postgres_type(reference), Some(Type::BYTEA));
+        assert_eq!(
+            postgres_type(resolve_runtime_type(&context, reference)),
+            Some(Type::BYTEA)
+        );
     }
 
     #[test]
     fn postgres_types_cover_the_exact_runtime_subset() {
+        let context = CatalogueHashContext::version_one();
         let supported = [
             (ResolvedType::scalar(StandardScalar::Boolean), Type::BOOL),
             (ResolvedType::scalar(StandardScalar::Integer), Type::INT4),
@@ -237,7 +409,10 @@ mod tests {
             ),
         ];
         for (resolved_type, expected) in supported {
-            assert_eq!(postgres_type(resolved_type), Some(expected));
+            assert_eq!(
+                postgres_type(resolve_runtime_type(&context, resolved_type)),
+                Some(expected)
+            );
         }
         for scalar in [
             StandardScalar::Decimal,
@@ -248,19 +423,156 @@ mod tests {
             StandardScalar::Duration,
             StandardScalar::Void,
         ] {
-            assert_eq!(postgres_type(ResolvedType::scalar(scalar)), None);
+            assert_eq!(
+                postgres_type(resolve_runtime_type(&context, ResolvedType::scalar(scalar))),
+                None
+            );
         }
         assert_eq!(
-            postgres_type(ResolvedType::named(TypeId::from_bytes([0x56; 16]))),
+            postgres_type(resolve_runtime_type(
+                &context,
+                ResolvedType::named(TypeId::from_bytes([0x56; 16]))
+            )),
             None
         );
     }
 
     #[test]
+    fn retained_version_two_value_contracts_match_legacy_runtime_capabilities() {
+        let standard = orna_standard::verify_standard_library_snapshot(
+            orna_standard::retained_standard_library_snapshot()
+                .expect("retained standard-library snapshot"),
+        )
+        .expect("verified standard-library snapshot");
+        let context = CatalogueHashContext::version_two(standard);
+        let cases = [
+            (
+                "orna.kernel.value.boolean@1",
+                StandardScalar::Boolean,
+                Some(Type::BOOL),
+            ),
+            (
+                "orna.kernel.value.integer@1",
+                StandardScalar::Integer,
+                Some(Type::INT4),
+            ),
+            (
+                "orna.kernel.value.bigint@1",
+                StandardScalar::BigInt,
+                Some(Type::INT8),
+            ),
+            (
+                "orna.kernel.value.float@1",
+                StandardScalar::Float,
+                Some(Type::FLOAT8),
+            ),
+            (
+                "orna.kernel.value.character-large-object@1",
+                StandardScalar::CharacterLargeObject,
+                Some(Type::TEXT),
+            ),
+            (
+                "orna.kernel.value.binary-large-object@1",
+                StandardScalar::BinaryLargeObject,
+                Some(Type::BYTEA),
+            ),
+            ("orna.kernel.value.decimal@1", StandardScalar::Decimal, None),
+            ("orna.kernel.value.uuid@1", StandardScalar::Uuid, None),
+            ("orna.kernel.value.date@1", StandardScalar::Date, None),
+            ("orna.kernel.value.time@1", StandardScalar::Time, None),
+            (
+                "orna.kernel.value.timestamp@1",
+                StandardScalar::Timestamp,
+                None,
+            ),
+            (
+                "orna.kernel.value.duration@1",
+                StandardScalar::Duration,
+                None,
+            ),
+            ("orna.kernel.value.void@1", StandardScalar::Void, None),
+        ];
+        assert_eq!(cases.len(), StandardScalar::ALL.len());
+        for (contract, expected_compatibility, expected_postgres) in cases {
+            let value_type = context
+                .standard()
+                .expect("version-two standard")
+                .catalogue()
+                .value_types()
+                .iter()
+                .find(|definition| definition.representation_contract() == contract)
+                .expect("retained value type")
+                .id();
+            let runtime = resolve_runtime_type(&context, ResolvedType::value(value_type));
+            assert_eq!(
+                runtime,
+                ResolvedRuntimeType::VerifiedValue {
+                    value_type,
+                    compatibility: expected_compatibility,
+                },
+                "{contract}"
+            );
+            assert!(runtime_types_match(
+                &context,
+                ResolvedType::scalar(expected_compatibility),
+                ResolvedType::value(value_type),
+            ));
+            assert_eq!(postgres_type(runtime), expected_postgres, "{contract}");
+        }
+    }
+
+    #[test]
+    fn values_require_the_selected_pinned_standard_identity() {
+        let standard = orna_standard::verify_standard_library_snapshot(
+            orna_standard::retained_standard_library_snapshot()
+                .expect("retained standard-library snapshot"),
+        )
+        .expect("verified standard-library snapshot");
+        let integer = standard
+            .catalogue()
+            .value_types()
+            .iter()
+            .find(|definition| {
+                definition.representation_contract() == "orna.kernel.value.integer@1"
+            })
+            .expect("retained integer value type")
+            .id();
+        let missing = TypeId::from_bytes([0x5a; 16]);
+
+        assert_eq!(
+            resolve_runtime_type(
+                &CatalogueHashContext::version_one(),
+                ResolvedType::value(integer)
+            ),
+            ResolvedRuntimeType::Unsupported
+        );
+        assert_eq!(
+            resolve_runtime_type(
+                &CatalogueHashContext::version_two(standard),
+                ResolvedType::value(missing)
+            ),
+            ResolvedRuntimeType::Unsupported
+        );
+        assert!(!runtime_types_match(
+            &CatalogueHashContext::version_two(
+                orna_standard::verify_standard_library_snapshot(
+                    orna_standard::retained_standard_library_snapshot()
+                        .expect("retained standard-library snapshot"),
+                )
+                .expect("verified standard-library snapshot"),
+            ),
+            ResolvedType::scalar(StandardScalar::Integer),
+            ResolvedType::value(missing),
+        ));
+    }
+
+    #[test]
     fn reference_replay_puts_signature_references_before_body_evidence() {
+        let parameter_value = TypeId::from_bytes([0x60; 16]);
         let parameter_target = TypeId::from_bytes([0x61; 16]);
         let result_target = TypeId::from_bytes([0x62; 16]);
         let body_target = TypeId::from_bytes([0x63; 16]);
+        let result_value = TypeId::from_bytes([0x68; 16]);
         let function = FunctionDefinition::new(
             FunctionId::from_bytes([0x64; 16]),
             QualifiedSemanticName::new(["test", "function"]).unwrap(),
@@ -274,22 +586,30 @@ mod tests {
                     None,
                 ),
                 ParameterDefinition::new(
+                    ParameterId::from_bytes([0x69; 16]),
+                    "value",
+                    1,
+                    ResolvedType::value(parameter_value),
+                    None,
+                ),
+                ParameterDefinition::new(
                     ParameterId::from_bytes([0x66; 16]),
                     "reference",
-                    1,
+                    2,
                     ResolvedType::reference(parameter_target),
                     None,
                 ),
             ],
             FunctionReturn::Rows(vec![
+                FunctionReturnColumnDefinition::new("value", 0, ResolvedType::value(result_value)),
                 FunctionReturnColumnDefinition::new(
                     "reference",
-                    0,
+                    1,
                     ResolvedType::reference(result_target),
                 ),
                 FunctionReturnColumnDefinition::new(
                     "ignored_scalar",
-                    1,
+                    2,
                     ResolvedType::scalar(StandardScalar::Integer),
                 ),
             ]),
@@ -307,8 +627,16 @@ mod tests {
             expected_function_references(&function, &body),
             vec![
                 ExpectedDefinitionReference::new(
+                    DefinitionReferenceKind::NamedType,
+                    DefinitionReferenceTarget::ValueType(parameter_value),
+                ),
+                ExpectedDefinitionReference::new(
                     DefinitionReferenceKind::ObjectReference,
                     DefinitionReferenceTarget::ObjectType(parameter_target),
+                ),
+                ExpectedDefinitionReference::new(
+                    DefinitionReferenceKind::NamedType,
+                    DefinitionReferenceTarget::ValueType(result_value),
                 ),
                 ExpectedDefinitionReference::new(
                     DefinitionReferenceKind::ObjectReference,

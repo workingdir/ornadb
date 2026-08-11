@@ -33,7 +33,8 @@ use crate::{
     PostgresKernel, PostgresKernelError,
     server_runtime::{
         ExpectedDefinitionReference, ReferenceReplayMismatch, ResolvedRuntimeType,
-        configure_and_recover, postgres_type, validate_function_reference_replay,
+        configure_and_recover, postgres_type, resolve_runtime_type, runtime_types_match,
+        validate_function_reference_replay,
     },
     storage::{DATA_SCHEMA, OBJECT_ID_COLUMN, field_name, relation_name, unique_constraint_name},
 };
@@ -1340,7 +1341,11 @@ async fn execute_active_update(
     let validated =
         validate_active_mutation(active, function, arguments, MutationExecutionKind::Update)?;
     let selector = selector_object(&validated.plan, arguments)?;
-    let lowered = lower_update(&validated.plan, &validated.arguments)?;
+    let lowered = lower_update_with_context(
+        active.catalogue_hash_context(),
+        &validated.plan,
+        &validated.arguments,
+    )?;
     let statement = transaction
         .prepare_typed(&lowered.sql, &lowered.bind_types)
         .await
@@ -1425,7 +1430,11 @@ async fn execute_active_insert(
 ) -> Result<(ServerInsertResult, UniqueReferenceConstraints), PostgresKernelError> {
     let validated =
         validate_active_mutation(active, function, arguments, MutationExecutionKind::Insert)?;
-    let lowered = lower_insert(&validated.plan, &validated.arguments)?;
+    let lowered = lower_insert_with_context(
+        active.catalogue_hash_context(),
+        &validated.plan,
+        &validated.arguments,
+    )?;
     let statement = transaction
         .prepare_typed(&lowered.sql, &lowered.bind_types)
         .await
@@ -1515,9 +1524,7 @@ impl UniqueReferenceConstraints {
                     "UNIQUE target fields must be required typed references",
                 ));
             }
-            let ResolvedRuntimeType::Reference(referenced_type) =
-                ResolvedRuntimeType::from_resolved_type(field.resolved_type())
-            else {
+            let Some(referenced_type) = field.resolved_type().reference_target() else {
                 return Err(plan_invariant(
                     "UNIQUE target fields must be required typed references",
                 ));
@@ -1587,8 +1594,9 @@ fn validate_active_mutation<'a>(
     arguments: &[FunctionArgument],
     operation: MutationExecutionKind,
 ) -> Result<ValidatedActiveMutation<'a>, PostgresKernelError> {
+    let context = active.catalogue_hash_context();
     let returned =
-        validate_function_signature_for_operation(active.catalogue(), function, operation)?;
+        validate_function_signature_for_context(context, active.catalogue(), function, operation)?;
     let revision = active
         .function_revisions()
         .iter()
@@ -1613,7 +1621,8 @@ fn validate_active_mutation<'a>(
     let plan = ServerMutationPlan::decode(artifact.payload())
         .map_err(ServerMutationError::PlanDecode)
         .map_err(server_error)?;
-    let target = validate_plan_for_operation(
+    let target = validate_plan_for_context(
+        context,
         active.catalogue(),
         function,
         returned.target,
@@ -1621,7 +1630,8 @@ fn validate_active_mutation<'a>(
         operation,
     )?;
     validate_reference_evidence(active, function, &plan)?;
-    let arguments = validate_arguments(active.catalogue(), function, arguments)?;
+    let arguments =
+        validate_arguments_with_context(context, active.catalogue(), function, arguments)?;
     Ok(ValidatedActiveMutation {
         returned,
         plan,
@@ -1636,7 +1646,9 @@ fn validate_active_delete<'a>(
     function: &FunctionDefinition,
     arguments: &[FunctionArgument],
 ) -> Result<ValidatedActiveDelete<'a>, PostgresKernelError> {
-    let column = validate_delete_function_signature(active.catalogue(), function)?;
+    let context = active.catalogue_hash_context();
+    let column =
+        validate_delete_function_signature_with_context(context, active.catalogue(), function)?;
     let revision = active
         .function_revisions()
         .iter()
@@ -1663,7 +1675,8 @@ fn validate_active_delete<'a>(
         .map_err(server_error)?;
     let target = validate_delete_plan(active.catalogue(), function, &plan)?;
     validate_delete_reference_evidence(active, function, &plan)?;
-    let arguments = validate_arguments(active.catalogue(), function, arguments)?;
+    let arguments =
+        validate_arguments_with_context(context, active.catalogue(), function, arguments)?;
     Ok(ValidatedActiveDelete {
         column,
         plan,
@@ -1737,12 +1750,27 @@ fn validate_function_signature(
     validate_function_signature_for_operation(catalogue, function, MutationExecutionKind::Insert)
 }
 
+#[cfg(test)]
 fn validate_function_signature_for_operation(
     catalogue: &CatalogueSnapshot,
     function: &FunctionDefinition,
     operation: MutationExecutionKind,
 ) -> Result<ValidatedReturn, PostgresKernelError> {
-    validate_mutation_function_header(catalogue, function, operation)?;
+    validate_function_signature_for_context(
+        &orna_core::revision::CatalogueHashContext::version_one(),
+        catalogue,
+        function,
+        operation,
+    )
+}
+
+fn validate_function_signature_for_context(
+    context: &orna_core::revision::CatalogueHashContext,
+    catalogue: &CatalogueSnapshot,
+    function: &FunctionDefinition,
+    operation: MutationExecutionKind,
+) -> Result<ValidatedReturn, PostgresKernelError> {
+    validate_mutation_function_header(context, catalogue, function, operation)?;
     let reject = |rule| function_signature_error(function.id(), rule);
     let FunctionReturn::Rows(columns) = function.return_type() else {
         return Err(reject(match operation {
@@ -1771,7 +1799,7 @@ fn validate_function_signature_for_operation(
         }));
     };
     let ResolvedRuntimeType::Reference(target) =
-        ResolvedRuntimeType::from_resolved_type(column.resolved_type())
+        resolve_runtime_type(context, column.resolved_type())
     else {
         return Err(reject(
             "the sole result column must be a non-null object reference",
@@ -1788,11 +1816,24 @@ fn validate_function_signature_for_operation(
     Ok(ValidatedReturn { target, column })
 }
 
+#[cfg(test)]
 fn validate_delete_function_signature(
     catalogue: &CatalogueSnapshot,
     function: &FunctionDefinition,
 ) -> Result<ResultColumn, PostgresKernelError> {
-    validate_mutation_function_header(catalogue, function, MutationExecutionKind::Delete)?;
+    validate_delete_function_signature_with_context(
+        &orna_core::revision::CatalogueHashContext::version_one(),
+        catalogue,
+        function,
+    )
+}
+
+fn validate_delete_function_signature_with_context(
+    context: &orna_core::revision::CatalogueHashContext,
+    catalogue: &CatalogueSnapshot,
+    function: &FunctionDefinition,
+) -> Result<ResultColumn, PostgresKernelError> {
+    validate_mutation_function_header(context, catalogue, function, MutationExecutionKind::Delete)?;
     let FunctionReturn::Rows(columns) = function.return_type() else {
         return Err(function_signature_error(
             function.id(),
@@ -1805,9 +1846,11 @@ fn validate_delete_function_signature(
             "a DELETE SERVER function must return exactly one BOOLEAN column",
         ));
     };
-    if ResolvedRuntimeType::from_resolved_type(column.resolved_type())
-        != ResolvedRuntimeType::LegacyScalar(orna_core::types::StandardScalar::Boolean)
-    {
+    if !runtime_types_match(
+        context,
+        column.resolved_type(),
+        ResolvedType::scalar(orna_core::types::StandardScalar::Boolean),
+    ) {
         return Err(function_signature_error(
             function.id(),
             "the sole DELETE result column must be BOOLEAN",
@@ -1823,6 +1866,7 @@ fn validate_delete_function_signature(
 }
 
 fn validate_mutation_function_header(
+    context: &orna_core::revision::CatalogueHashContext,
     catalogue: &CatalogueSnapshot,
     function: &FunctionDefinition,
     operation: MutationExecutionKind,
@@ -1878,7 +1922,7 @@ fn validate_mutation_function_header(
                 }
             }));
         }
-        if !runtime_type_is_active(catalogue, parameter.resolved_type()) {
+        if !runtime_type_is_active(context, catalogue, parameter.resolved_type()) {
             return Err(reject(match operation {
                 MutationExecutionKind::Insert => {
                     "every INSERT SERVER function parameter must use a supported active type"
@@ -1899,32 +1943,39 @@ fn function_signature_error(function: FunctionId, rule: &'static str) -> Postgre
     server_error(ServerMutationError::FunctionSignature { function, rule })
 }
 
-fn runtime_type_is_active(catalogue: &CatalogueSnapshot, resolved_type: ResolvedType) -> bool {
-    if postgres_type(resolved_type).is_none() {
+fn runtime_type_is_active(
+    context: &orna_core::revision::CatalogueHashContext,
+    catalogue: &CatalogueSnapshot,
+    resolved_type: ResolvedType,
+) -> bool {
+    if postgres_type(resolve_runtime_type(context, resolved_type)).is_none() {
         return false;
     }
-    match ResolvedRuntimeType::from_resolved_type(resolved_type) {
+    match resolve_runtime_type(context, resolved_type) {
         ResolvedRuntimeType::Reference(target) => catalogue.object_type_by_id(target).is_some(),
-        ResolvedRuntimeType::LegacyScalar(_) => true,
+        ResolvedRuntimeType::LegacyScalar(_) | ResolvedRuntimeType::VerifiedValue { .. } => true,
         ResolvedRuntimeType::Unsupported => false,
     }
 }
 
 fn validate_active_runtime_type(
+    context: &orna_core::revision::CatalogueHashContext,
     catalogue: &CatalogueSnapshot,
     resolved_type: ResolvedType,
     rule: &'static str,
 ) -> Result<(), PostgresKernelError> {
-    if postgres_type(resolved_type).is_none() {
+    if postgres_type(resolve_runtime_type(context, resolved_type)).is_none() {
         return Err(plan_invariant(rule));
     }
-    match ResolvedRuntimeType::from_resolved_type(resolved_type) {
+    match resolve_runtime_type(context, resolved_type) {
         ResolvedRuntimeType::Reference(target) if catalogue.object_type_by_id(target).is_none() => {
             return Err(plan_invariant(
                 "every referenced object type must be active",
             ));
         }
-        ResolvedRuntimeType::LegacyScalar(_) | ResolvedRuntimeType::Reference(_) => {}
+        ResolvedRuntimeType::LegacyScalar(_)
+        | ResolvedRuntimeType::VerifiedValue { .. }
+        | ResolvedRuntimeType::Reference(_) => {}
         ResolvedRuntimeType::Unsupported => return Err(plan_invariant(rule)),
     }
     Ok(())
@@ -1947,7 +1998,8 @@ fn validate_plan<'a>(
     .target)
 }
 
-fn validate_plan_for_operation<'a>(
+fn validate_plan_for_context<'a>(
+    context: &orna_core::revision::CatalogueHashContext,
     catalogue: &'a CatalogueSnapshot,
     function: &FunctionDefinition,
     returned_target: TypeId,
@@ -1984,7 +2036,7 @@ fn validate_plan_for_operation<'a>(
                 "mutation targets cannot contain field default expressions",
             ));
         }
-        match ResolvedRuntimeType::from_resolved_type(field.resolved_type()) {
+        match resolve_runtime_type(context, field.resolved_type()) {
             ResolvedRuntimeType::Reference(target)
                 if catalogue.object_type_by_id(target).is_none() =>
             {
@@ -1993,6 +2045,7 @@ fn validate_plan_for_operation<'a>(
                 ));
             }
             ResolvedRuntimeType::LegacyScalar(_)
+            | ResolvedRuntimeType::VerifiedValue { .. }
             | ResolvedRuntimeType::Reference(_)
             | ResolvedRuntimeType::Unsupported => {}
         }
@@ -2015,11 +2068,12 @@ fn validate_plan_for_operation<'a>(
         }
         let expression = assignment.expression();
         validate_active_runtime_type(
+            context,
             catalogue,
             expression.resolved_type(),
             "every assignment expression must use the active runtime subset",
         )?;
-        if expression.resolved_type() != field.resolved_type() {
+        if !runtime_types_match(context, expression.resolved_type(), field.resolved_type()) {
             return Err(plan_invariant(
                 "assignment expression type must exactly equal its target field type",
             ));
@@ -2039,7 +2093,11 @@ fn validate_plan_for_operation<'a>(
                 plan_invariant("parameter expression must name an active declared parameter")
             })?;
             if parameter.default_expression().is_some()
-                || parameter.resolved_type() != expression.resolved_type()
+                || !runtime_types_match(
+                    context,
+                    parameter.resolved_type(),
+                    expression.resolved_type(),
+                )
             {
                 return Err(plan_invariant(
                     "parameter expression must exactly match a required active parameter",
@@ -2078,6 +2136,24 @@ fn validate_plan_for_operation<'a>(
         target,
         unique_references,
     })
+}
+
+#[cfg(test)]
+fn validate_plan_for_operation<'a>(
+    catalogue: &'a CatalogueSnapshot,
+    function: &FunctionDefinition,
+    returned_target: TypeId,
+    plan: &ServerMutationPlan,
+    operation: MutationExecutionKind,
+) -> Result<ValidatedMutationTarget<'a>, PostgresKernelError> {
+    validate_plan_for_context(
+        &orna_core::revision::CatalogueHashContext::version_one(),
+        catalogue,
+        function,
+        returned_target,
+        plan,
+        operation,
+    )
 }
 
 fn validate_delete_plan<'a>(
@@ -2222,7 +2298,8 @@ fn expected_body_references(plan: &ServerMutationPlan) -> Vec<ExpectedDefinition
     expected
 }
 
-fn validate_arguments(
+fn validate_arguments_with_context(
+    context: &orna_core::revision::CatalogueHashContext,
     catalogue: &CatalogueSnapshot,
     function: &FunctionDefinition,
     arguments: &[FunctionArgument],
@@ -2250,13 +2327,13 @@ fn validate_arguments(
                 "function arguments cannot be NULL",
             ));
         }
-        if !runtime_type_is_active(catalogue, value.resolved_type()) {
+        if !runtime_type_is_active(context, catalogue, value.resolved_type()) {
             return Err(argument_error(
                 Some(parameter_id),
                 "the argument type is unsupported or its referenced object type is inactive",
             ));
         }
-        if value.resolved_type() != parameter.resolved_type() {
+        if !runtime_types_match(context, value.resolved_type(), parameter.resolved_type()) {
             return Err(argument_error(
                 Some(parameter_id),
                 "the argument type does not match the declared parameter type",
@@ -2279,6 +2356,20 @@ fn validate_arguments(
         }
     }
     Ok(validated)
+}
+
+#[cfg(test)]
+fn validate_arguments(
+    catalogue: &CatalogueSnapshot,
+    function: &FunctionDefinition,
+    arguments: &[FunctionArgument],
+) -> Result<BTreeMap<ParameterId, BindValue>, PostgresKernelError> {
+    validate_arguments_with_context(
+        &orna_core::revision::CatalogueHashContext::version_one(),
+        catalogue,
+        function,
+        arguments,
+    )
 }
 
 fn selector_object(
@@ -2384,7 +2475,8 @@ struct LoweredMutation {
     binds: Vec<BindValue>,
 }
 
-fn lower_insert(
+fn lower_insert_with_context(
+    context: &orna_core::revision::CatalogueHashContext,
     plan: &ServerMutationPlan,
     arguments: &BTreeMap<ParameterId, BindValue>,
 ) -> Result<LoweredMutation, PostgresKernelError> {
@@ -2396,6 +2488,7 @@ fn lower_insert(
     for assignment in plan.assignments() {
         columns.push(field_name(assignment.field()));
         values.push(lower_assignment_expression(
+            context,
             assignment.expression(),
             arguments,
             &mut bind_types,
@@ -2422,16 +2515,30 @@ fn lower_insert(
     })
 }
 
+#[cfg(test)]
+fn lower_insert(
+    plan: &ServerMutationPlan,
+    arguments: &BTreeMap<ParameterId, BindValue>,
+) -> Result<LoweredMutation, PostgresKernelError> {
+    lower_insert_with_context(
+        &orna_core::revision::CatalogueHashContext::version_one(),
+        plan,
+        arguments,
+    )
+}
+
 fn lower_assignment_expression(
+    context: &orna_core::revision::CatalogueHashContext,
     expression: &server_mutation_plan::MutationExpression,
     arguments: &BTreeMap<ParameterId, BindValue>,
     bind_types: &mut Vec<Type>,
     binds: &mut Vec<BindValue>,
     parameter_placeholders: &mut BTreeMap<ParameterId, usize>,
 ) -> Result<String, PostgresKernelError> {
-    let value_type = postgres_type(expression.resolved_type()).ok_or_else(|| {
-        plan_invariant("the assignment type cannot be stored by the initial runtime")
-    })?;
+    let value_type = postgres_type(resolve_runtime_type(context, expression.resolved_type()))
+        .ok_or_else(|| {
+            plan_invariant("the assignment type cannot be stored by the initial runtime")
+        })?;
     match expression.kind() {
         MutationExpressionKind::Parameter { parameter, .. } => parameter_placeholder(
             *parameter,
@@ -2474,7 +2581,8 @@ fn parameter_placeholder(
     Ok(format!("${placeholder}"))
 }
 
-fn lower_update(
+fn lower_update_with_context(
+    context: &orna_core::revision::CatalogueHashContext,
     plan: &ServerMutationPlan,
     arguments: &BTreeMap<ParameterId, BindValue>,
 ) -> Result<LoweredMutation, PostgresKernelError> {
@@ -2487,6 +2595,7 @@ fn lower_update(
     let mut parameter_placeholders = BTreeMap::new();
     for assignment in plan.assignments() {
         let value = lower_assignment_expression(
+            context,
             assignment.expression(),
             arguments,
             &mut bind_types,
@@ -2519,6 +2628,18 @@ fn lower_update(
         bind_types,
         binds,
     })
+}
+
+#[cfg(test)]
+fn lower_update(
+    plan: &ServerMutationPlan,
+    arguments: &BTreeMap<ParameterId, BindValue>,
+) -> Result<LoweredMutation, PostgresKernelError> {
+    lower_update_with_context(
+        &orna_core::revision::CatalogueHashContext::version_one(),
+        plan,
+        arguments,
+    )
 }
 
 fn lower_delete(
@@ -3181,6 +3302,268 @@ mod tests {
             )
             .unwrap(),
         ]
+    }
+
+    fn retained_standard_context() -> orna_core::revision::CatalogueHashContext {
+        orna_core::revision::CatalogueHashContext::version_two(
+            orna_standard::verify_standard_library_snapshot(
+                orna_standard::retained_standard_library_snapshot().unwrap(),
+            )
+            .unwrap(),
+        )
+    }
+
+    fn value_target_fields(reference_target: TypeId) -> Vec<FieldDefinition> {
+        let mut fields = target_fields(reference_target);
+        fields[0] = field(
+            FIELD_TITLE,
+            "semantic_title",
+            0,
+            ResolvedType::value(orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID),
+            false,
+        );
+        fields[1] = field(
+            FIELD_ENABLED,
+            "semantic_enabled",
+            1,
+            ResolvedType::value(orna_standard::BOOLEAN_TYPE_ID),
+            false,
+        );
+        fields
+    }
+
+    fn value_insert_function() -> FunctionDefinition {
+        let mut declared_parameters = parameters(OTHER);
+        declared_parameters[0] = ParameterDefinition::new(
+            PARAMETER_TITLE,
+            "semantic_title_parameter",
+            0,
+            ResolvedType::value(orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID),
+            None,
+        );
+        function(
+            FunctionDomain::Server,
+            declared_parameters,
+            rows_reference(TARGET),
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::Atomic),
+            FunctionVolatility::Volatile,
+        )
+    }
+
+    fn value_insert_plan() -> ServerMutationPlan {
+        ServerMutationPlan::new_insert(
+            TARGET,
+            [
+                FieldAssignment::new(
+                    TARGET,
+                    FIELD_TITLE,
+                    MutationExpression::parameter(
+                        FUNCTION,
+                        PARAMETER_TITLE,
+                        ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+                    )
+                    .unwrap(),
+                ),
+                FieldAssignment::new(
+                    TARGET,
+                    FIELD_ENABLED,
+                    MutationExpression::boolean_literal(true),
+                ),
+                FieldAssignment::new(
+                    TARGET,
+                    FIELD_COUNT,
+                    MutationExpression::typed_null(ResolvedType::scalar(StandardScalar::Integer))
+                        .unwrap(),
+                ),
+                FieldAssignment::new(
+                    TARGET,
+                    FIELD_OWNER,
+                    MutationExpression::parameter(
+                        FUNCTION,
+                        PARAMETER_OWNER,
+                        ResolvedType::reference(OTHER),
+                    )
+                    .unwrap(),
+                ),
+            ],
+            TARGET,
+        )
+        .unwrap()
+    }
+
+    fn value_delete_function() -> FunctionDefinition {
+        function(
+            FunctionDomain::Server,
+            vec![ParameterDefinition::new(
+                PARAMETER_SELECTOR,
+                "semantic_selector_parameter",
+                0,
+                ResolvedType::reference(TARGET),
+                None,
+            )],
+            FunctionReturn::Rows(vec![FunctionReturnColumnDefinition::new(
+                "semantic_deleted",
+                0,
+                ResolvedType::value(orna_standard::BOOLEAN_TYPE_ID),
+            )]),
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::Atomic),
+            FunctionVolatility::Volatile,
+        )
+    }
+
+    #[test]
+    fn verified_value_insert_preserves_legacy_bind_shapes_and_sql() {
+        let legacy_catalogue = catalogue(target_fields(OTHER), true, Vec::new());
+        let legacy_function = valid_function();
+        let legacy_plan = valid_plan();
+        validate_plan(&legacy_catalogue, &legacy_function, TARGET, &legacy_plan).unwrap();
+        let legacy_arguments =
+            validate_arguments(&legacy_catalogue, &legacy_function, &valid_arguments()).unwrap();
+        let legacy_lowered = lower_insert(&legacy_plan, &legacy_arguments).unwrap();
+
+        let context = retained_standard_context();
+        let value_catalogue = catalogue(value_target_fields(OTHER), true, Vec::new());
+        let value_function = value_insert_function();
+        let value_plan = value_insert_plan();
+        validate_function_signature_for_context(
+            &context,
+            &value_catalogue,
+            &value_function,
+            MutationExecutionKind::Insert,
+        )
+        .unwrap();
+        validate_plan_for_context(
+            &context,
+            &value_catalogue,
+            &value_function,
+            TARGET,
+            &value_plan,
+            MutationExecutionKind::Insert,
+        )
+        .unwrap();
+        let value_arguments = validate_arguments_with_context(
+            &context,
+            &value_catalogue,
+            &value_function,
+            &valid_arguments(),
+        )
+        .unwrap();
+        let value_lowered =
+            lower_insert_with_context(&context, &value_plan, &value_arguments).unwrap();
+
+        assert_eq!(value_lowered.sql, legacy_lowered.sql);
+        assert_eq!(value_lowered.bind_types, legacy_lowered.bind_types);
+        assert_eq!(value_lowered.binds, legacy_lowered.binds);
+    }
+
+    #[test]
+    fn verified_value_update_preserves_bind_shapes_and_exact_selector_sql() {
+        let legacy_catalogue = catalogue(target_fields(OTHER), true, Vec::new());
+        let legacy_function = valid_update_function();
+        let legacy_plan = valid_update_plan();
+        validate_plan_for_operation(
+            &legacy_catalogue,
+            &legacy_function,
+            TARGET,
+            &legacy_plan,
+            MutationExecutionKind::Update,
+        )
+        .unwrap();
+        let legacy_arguments = validate_arguments(
+            &legacy_catalogue,
+            &legacy_function,
+            &valid_update_arguments(),
+        )
+        .unwrap();
+        let legacy_lowered = lower_update(&legacy_plan, &legacy_arguments).unwrap();
+
+        let context = retained_standard_context();
+        let value_catalogue = catalogue(value_target_fields(OTHER), true, Vec::new());
+        let value_function = valid_update_function();
+        let value_plan = valid_update_plan();
+        validate_plan_for_context(
+            &context,
+            &value_catalogue,
+            &value_function,
+            TARGET,
+            &value_plan,
+            MutationExecutionKind::Update,
+        )
+        .unwrap();
+        let value_arguments = validate_arguments_with_context(
+            &context,
+            &value_catalogue,
+            &value_function,
+            &valid_update_arguments(),
+        )
+        .unwrap();
+        let value_lowered =
+            lower_update_with_context(&context, &value_plan, &value_arguments).unwrap();
+
+        assert_eq!(value_lowered.sql, legacy_lowered.sql);
+        assert_eq!(value_lowered.bind_types, legacy_lowered.bind_types);
+        assert_eq!(value_lowered.binds, legacy_lowered.binds);
+    }
+
+    #[test]
+    fn verified_value_delete_boolean_return_keeps_the_legacy_result_shape() {
+        let catalogue = catalogue(target_fields(OTHER), true, Vec::new());
+        let legacy =
+            validate_delete_function_signature(&catalogue, &valid_delete_function()).unwrap();
+        let context = retained_standard_context();
+        let value = validate_delete_function_signature_with_context(
+            &context,
+            &catalogue,
+            &value_delete_function(),
+        )
+        .unwrap();
+
+        assert_eq!(value, legacy);
+        assert_eq!(
+            value.resolved_type(),
+            ResolvedType::scalar(StandardScalar::Boolean)
+        );
+    }
+
+    #[test]
+    fn verified_value_with_unsupported_contract_keeps_the_existing_signature_rule() {
+        let mut declared_parameters = parameters(OTHER);
+        declared_parameters[0] = ParameterDefinition::new(
+            PARAMETER_TITLE,
+            "semantic_title_parameter",
+            0,
+            ResolvedType::value(orna_standard::DECIMAL_TYPE_ID),
+            None,
+        );
+        let function = function(
+            FunctionDomain::Server,
+            declared_parameters,
+            rows_reference(TARGET),
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::Atomic),
+            FunctionVolatility::Volatile,
+        );
+        let catalogue = catalogue(target_fields(OTHER), true, Vec::new());
+        let error = validate_function_signature_for_context(
+            &retained_standard_context(),
+            &catalogue,
+            &function,
+            MutationExecutionKind::Insert,
+        )
+        .unwrap_err();
+
+        match expect_insert_error(error) {
+            ServerInsertError::FunctionSignature { function, rule } => {
+                assert_eq!(function, FUNCTION);
+                assert_eq!(
+                    rule,
+                    "every INSERT SERVER function parameter must use a supported active type"
+                );
+            }
+            other => panic!("unexpected mutation error: {other:?}"),
+        }
     }
 
     fn expect_insert_error(error: PostgresKernelError) -> ServerInsertError {
