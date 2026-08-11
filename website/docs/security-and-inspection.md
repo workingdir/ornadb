@@ -212,8 +212,8 @@ The introspection plane publishes immutable snapshot epochs. An Inspector render
 
 ## Next steps
 
-- Read the executable domains in [functions](/docs/functions/).
-- Read the process topology in [architecture](/docs/architecture/).
-- Check what exists today on the [status page](/docs/status/).
+- Read the executable domains in [functions](/functions/).
+- Read the process topology in [architecture](/architecture/).
+- Check what exists today on the [status page](/status/).
 
-Return to the [OrnaDB frontpage](/) or inspect the [source repository](https://github.com/workingdir/ornadb).
+Return to the [OrnaDB overview](/) or inspect the [source repository](https://github.com/workingdir/ornadb).

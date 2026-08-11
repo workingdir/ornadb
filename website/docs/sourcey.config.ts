@@ -59,13 +59,13 @@ export default defineConfig({
     },
     navbar: {
         links: [
-            { type: "link", label: "Frontpage", href: "/" },
+            { type: "link", label: "Status", href: "/status/" },
             { type: "github", href: "https://github.com/workingdir/ornadb" },
         ],
     },
     footer: {
         links: [
-            { type: "link", label: "OrnaDB", href: "/" },
+            { type: "link", label: "Getting started", href: "/getting-started/" },
             { type: "github", href: "https://github.com/workingdir/ornadb" },
         ],
     },

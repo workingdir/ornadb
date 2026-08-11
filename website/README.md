@@ -2,10 +2,10 @@
 
 This directory is an isolated static website project.
 
-- Astro builds the marketing frontpage at `/`.
-- Sourcey builds the Markdown documentation at `/docs`.
-- `docs/sourcey.config.ts` defines the documentation order and theme.
-- `scripts/postprocess-sourcey.mjs` adds the production skip link and normalises known Sourcey 3.6 HTML issues.
+- Sourcey builds the Markdown documentation as the complete website at `/`.
+- Astro hosts the Sourcey integration and static build lifecycle; there is no separate marketing frontpage.
+- `docs/sourcey.config.ts` defines the page order, navigation, and theme.
+- `scripts/postprocess-sourcey.mjs` normalises known Sourcey 3.6 HTML issues and preserves old `/docs` URLs as redirects.
 
 ## Develop
 
@@ -16,7 +16,7 @@ yarn install --immutable
 yarn dev
 ```
 
-Astro serves the frontpage and the Sourcey integration serves the documentation from the same development server.
+The Sourcey integration serves the complete documentation website from the Astro development server.
 
 ## Build
 
@@ -24,17 +24,19 @@ Astro serves the frontpage and the Sourcey integration serves the documentation 
 yarn build
 ```
 
-The command runs Astro diagnostics, builds the static site into `dist/`, builds the Sourcey documentation, and post-processes the generated documentation HTML.
+The command runs Astro diagnostics, writes the Sourcey site directly into `dist/`, normalises the generated HTML, and adds redirects for the former `/docs` routes.
 
-Generated documentation includes:
+Generated output includes:
 
 ```text
-dist/docs/
+dist/
     index.html
+    getting-started/index.html
     search-index.json
     llms.txt
     llms-full.txt
     sitemap.xml
+    docs/index.html              # compatibility redirect
 ```
 
 ## Content rules
