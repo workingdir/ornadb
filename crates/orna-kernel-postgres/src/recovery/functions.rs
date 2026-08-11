@@ -38,10 +38,10 @@ use crate::{
 };
 
 use super::{
-    LegacyResolvedTypeTupleMember, catalogue_hash_context_for, decode_catalogue_hash_version,
-    decode_durable_version, decode_legacy_resolved_type_tuple,
-    decode_legacy_resolved_type_tuple_kind, decode_origin, load_catalogue_semantics,
-    load_source_units, require_hash_contract,
+    LegacyResolvedTypeTupleMember, ResolvedTypeTuple, catalogue_hash_context_for,
+    decode_catalogue_hash_version, decode_durable_version, decode_legacy_resolved_type_tuple,
+    decode_legacy_resolved_type_tuple_kind, decode_origin, decode_resolved_type_tuple,
+    load_catalogue_semantics, load_source_units, require_hash_contract,
 };
 
 const FUNCTION_RELATION: &str = "_orna_kernel.catalogue_functions";
@@ -137,7 +137,8 @@ pub(super) async fn load_function_state(
     active_ancestry: &BTreeSet<(CatalogueRevisionId, SourceRevisionId)>,
     catalogue_hash_context: &CatalogueHashContext,
 ) -> Result<RecoveredFunctionState, PostgresKernelError> {
-    let (functions, origins) = load_catalogue_functions(transaction, catalogue).await?;
+    let (functions, origins) =
+        load_catalogue_functions(transaction, catalogue, catalogue_hash_context).await?;
 
     let mut artifacts = load_artifacts(transaction).await?;
     let pending = load_revisions(transaction, &mut artifacts).await?;
@@ -181,10 +182,18 @@ pub(super) async fn load_function_state(
 async fn load_catalogue_functions(
     transaction: &Transaction<'_>,
     catalogue: CatalogueRevisionId,
+    catalogue_hash_context: &CatalogueHashContext,
 ) -> Result<(Vec<RecoveredFunction>, Vec<DefinitionOrigin>), PostgresKernelError> {
-    let mut parameters = load_parameters(transaction, catalogue).await?;
-    let mut returns = load_return_columns(transaction, catalogue).await?;
-    let result = load_functions(transaction, catalogue, &mut parameters, &mut returns).await?;
+    let mut parameters = load_parameters(transaction, catalogue, catalogue_hash_context).await?;
+    let mut returns = load_return_columns(transaction, catalogue, catalogue_hash_context).await?;
+    let result = load_functions(
+        transaction,
+        catalogue,
+        &mut parameters,
+        &mut returns,
+        catalogue_hash_context,
+    )
+    .await?;
     reject_leftover_members(&parameters, PARAMETER_RELATION, "parameter")?;
     reject_leftover_members(&returns, RETURN_RELATION, "return column")?;
     Ok(result)
@@ -193,22 +202,39 @@ async fn load_catalogue_functions(
 async fn load_parameters(
     transaction: &Transaction<'_>,
     catalogue: CatalogueRevisionId,
+    catalogue_hash_context: &CatalogueHashContext,
 ) -> Result<BTreeMap<FunctionId, Vec<RecoveredParameter>>, PostgresKernelError> {
-    let rows = transaction
-        .query(
-            "SELECT catalogue_revision_id, function_id, parameter_id, name, ordinal,
-                    type_kind, scalar_type, target_type_id, default_expression_id,
-                    source_unit_id, source_start, source_end
-             FROM _orna_kernel.catalogue_function_parameters
-             WHERE catalogue_revision_id = $1
-             ORDER BY function_id, ordinal, parameter_id",
-            &[&catalogue.to_bytes().to_vec()],
-        )
-        .await
-        .map_err(PostgresKernelError::Database)?;
+    let rows = if catalogue_hash_context.standard().is_some() {
+        transaction
+            .query(
+                "SELECT catalogue_revision_id, function_id, parameter_id, name, ordinal,
+                        type_kind, scalar_type, target_type_id,
+                        value_type_id, value_standard_library_revision_id,
+                        default_expression_id, source_unit_id, source_start, source_end
+                 FROM _orna_kernel.catalogue_function_parameters
+                 WHERE catalogue_revision_id = $1
+                 ORDER BY function_id, ordinal, parameter_id",
+                &[&catalogue.to_bytes().to_vec()],
+            )
+            .await
+            .map_err(PostgresKernelError::Database)?
+    } else {
+        transaction
+            .query(
+                "SELECT catalogue_revision_id, function_id, parameter_id, name, ordinal,
+                        type_kind, scalar_type, target_type_id, default_expression_id,
+                        source_unit_id, source_start, source_end
+                 FROM _orna_kernel.catalogue_function_parameters
+                 WHERE catalogue_revision_id = $1
+                 ORDER BY function_id, ordinal, parameter_id",
+                &[&catalogue.to_bytes().to_vec()],
+            )
+            .await
+            .map_err(PostgresKernelError::Database)?
+    };
     let mut parameters = BTreeMap::<FunctionId, Vec<RecoveredParameter>>::new();
     for (index, row) in rows.iter().enumerate() {
-        let parameter = decode_parameter(row, index, catalogue)?;
+        let parameter = decode_parameter(row, index, catalogue, catalogue_hash_context)?;
         parameters
             .entry(parameter.function)
             .or_default()
@@ -221,6 +247,7 @@ fn decode_parameter(
     row: &Row,
     index: usize,
     catalogue: CatalogueRevisionId,
+    catalogue_hash_context: &CatalogueHashContext,
 ) -> Result<RecoveredParameter, PostgresKernelError> {
     let row_record = DurableRecord::new(PARAMETER_RELATION, format!("row={index}"));
     require_catalogue(row, &row_record, catalogue, "parameter")?;
@@ -248,8 +275,12 @@ fn decode_parameter(
         &record,
         "parameter ordinal must fit u32",
     )?;
-    let resolved_type =
-        decode_type_columns(row, &record, LegacyResolvedTypeTupleMember::Parameter)?;
+    let resolved_type = decode_type_columns(
+        row,
+        &record,
+        LegacyResolvedTypeTupleMember::Parameter,
+        catalogue_hash_context,
+    )?;
     let default_expression = optional_identity_bytes(
         record.column(
             row,
@@ -278,22 +309,39 @@ fn decode_parameter(
 async fn load_return_columns(
     transaction: &Transaction<'_>,
     catalogue: CatalogueRevisionId,
+    catalogue_hash_context: &CatalogueHashContext,
 ) -> Result<BTreeMap<FunctionId, Vec<RecoveredReturnColumn>>, PostgresKernelError> {
-    let rows = transaction
-        .query(
-            "SELECT catalogue_revision_id, function_id, name, ordinal,
-                    type_kind, scalar_type, target_type_id,
-                    source_unit_id, source_start, source_end
-             FROM _orna_kernel.catalogue_function_return_columns
-             WHERE catalogue_revision_id = $1
-             ORDER BY function_id, ordinal",
-            &[&catalogue.to_bytes().to_vec()],
-        )
-        .await
-        .map_err(PostgresKernelError::Database)?;
+    let rows = if catalogue_hash_context.standard().is_some() {
+        transaction
+            .query(
+                "SELECT catalogue_revision_id, function_id, name, ordinal,
+                        type_kind, scalar_type, target_type_id,
+                        value_type_id, value_standard_library_revision_id,
+                        source_unit_id, source_start, source_end
+                 FROM _orna_kernel.catalogue_function_return_columns
+                 WHERE catalogue_revision_id = $1
+                 ORDER BY function_id, ordinal",
+                &[&catalogue.to_bytes().to_vec()],
+            )
+            .await
+            .map_err(PostgresKernelError::Database)?
+    } else {
+        transaction
+            .query(
+                "SELECT catalogue_revision_id, function_id, name, ordinal,
+                        type_kind, scalar_type, target_type_id,
+                        source_unit_id, source_start, source_end
+                 FROM _orna_kernel.catalogue_function_return_columns
+                 WHERE catalogue_revision_id = $1
+                 ORDER BY function_id, ordinal",
+                &[&catalogue.to_bytes().to_vec()],
+            )
+            .await
+            .map_err(PostgresKernelError::Database)?
+    };
     let mut columns = BTreeMap::<FunctionId, Vec<RecoveredReturnColumn>>::new();
     for (index, row) in rows.iter().enumerate() {
-        let column = decode_return_column(row, index, catalogue)?;
+        let column = decode_return_column(row, index, catalogue, catalogue_hash_context)?;
         columns.entry(column.function).or_default().push(column);
     }
     Ok(columns)
@@ -303,6 +351,7 @@ fn decode_return_column(
     row: &Row,
     index: usize,
     catalogue: CatalogueRevisionId,
+    catalogue_hash_context: &CatalogueHashContext,
 ) -> Result<RecoveredReturnColumn, PostgresKernelError> {
     let row_record = DurableRecord::new(RETURN_RELATION, format!("row={index}"));
     require_catalogue(row, &row_record, catalogue, "return column")?;
@@ -328,8 +377,12 @@ fn decode_return_column(
     if name.is_empty() {
         return Err(record.invariant("return column name must not be empty"));
     }
-    let resolved_type =
-        decode_type_columns(row, &record, LegacyResolvedTypeTupleMember::ReturnColumn)?;
+    let resolved_type = decode_type_columns(
+        row,
+        &record,
+        LegacyResolvedTypeTupleMember::ReturnColumn,
+        catalogue_hash_context,
+    )?;
     let origin = decode_origin(
         row,
         &record,
@@ -350,28 +403,56 @@ async fn load_functions(
     catalogue: CatalogueRevisionId,
     parameters: &mut BTreeMap<FunctionId, Vec<RecoveredParameter>>,
     returns: &mut BTreeMap<FunctionId, Vec<RecoveredReturnColumn>>,
+    catalogue_hash_context: &CatalogueHashContext,
 ) -> Result<(Vec<RecoveredFunction>, Vec<DefinitionOrigin>), PostgresKernelError> {
-    let rows = transaction
-        .query(
-            "SELECT catalogue_revision_id, function_id, schema_id, name_parts,
-                    domain, security_mode, transaction_mode, volatility,
-                    return_shape, return_type_kind AS type_kind,
-                    return_scalar_type AS scalar_type,
-                    return_target_type_id AS target_type_id,
-                    current_function_revision_id,
-                    source_unit_id, source_start, source_end
-             FROM _orna_kernel.catalogue_functions
-             WHERE catalogue_revision_id = $1
-             ORDER BY function_id",
-            &[&catalogue.to_bytes().to_vec()],
-        )
-        .await
-        .map_err(PostgresKernelError::Database)?;
+    let rows = if catalogue_hash_context.standard().is_some() {
+        transaction
+            .query(
+                "SELECT catalogue_revision_id, function_id, schema_id, name_parts,
+                        domain, security_mode, transaction_mode, volatility,
+                        return_shape, return_type_kind AS type_kind,
+                        return_scalar_type AS scalar_type,
+                        return_target_type_id AS target_type_id,
+                        return_value_type_id AS value_type_id,
+                        return_standard_library_revision_id AS value_standard_library_revision_id,
+                        current_function_revision_id,
+                        source_unit_id, source_start, source_end
+                 FROM _orna_kernel.catalogue_functions
+                 WHERE catalogue_revision_id = $1
+                 ORDER BY function_id",
+                &[&catalogue.to_bytes().to_vec()],
+            )
+            .await
+            .map_err(PostgresKernelError::Database)?
+    } else {
+        transaction
+            .query(
+                "SELECT catalogue_revision_id, function_id, schema_id, name_parts,
+                        domain, security_mode, transaction_mode, volatility,
+                        return_shape, return_type_kind AS type_kind,
+                        return_scalar_type AS scalar_type,
+                        return_target_type_id AS target_type_id,
+                        current_function_revision_id,
+                        source_unit_id, source_start, source_end
+                 FROM _orna_kernel.catalogue_functions
+                 WHERE catalogue_revision_id = $1
+                 ORDER BY function_id",
+                &[&catalogue.to_bytes().to_vec()],
+            )
+            .await
+            .map_err(PostgresKernelError::Database)?
+    };
     let mut functions = Vec::with_capacity(rows.len());
     let mut origins = Vec::new();
     for (index, row) in rows.iter().enumerate() {
-        let (function, mut function_origins) =
-            decode_function(row, index, catalogue, parameters, returns)?;
+        let (function, mut function_origins) = decode_function(
+            row,
+            index,
+            catalogue,
+            parameters,
+            returns,
+            catalogue_hash_context,
+        )?;
         origins.append(&mut function_origins);
         functions.push(function);
     }
@@ -384,6 +465,7 @@ fn decode_function(
     catalogue: CatalogueRevisionId,
     parameters: &mut BTreeMap<FunctionId, Vec<RecoveredParameter>>,
     returns: &mut BTreeMap<FunctionId, Vec<RecoveredReturnColumn>>,
+    catalogue_hash_context: &CatalogueHashContext,
 ) -> Result<(RecoveredFunction, Vec<DefinitionOrigin>), PostgresKernelError> {
     let row_record = DurableRecord::new(FUNCTION_RELATION, format!("row={index}"));
     require_catalogue(row, &row_record, catalogue, "function")?;
@@ -481,26 +563,28 @@ fn decode_function(
     let recovered_returns = returns.remove(&id).unwrap_or_default();
     let return_shape: String =
         record.column(row, "return_shape", "function return shape must decode")?;
-    let return_type =
-        match return_shape.as_str() {
-            "single" if recovered_returns.is_empty() => FunctionReturn::Single(
-                decode_type_columns(row, &record, LegacyResolvedTypeTupleMember::SingleReturn)?,
-            ),
-            "rows" => {
-                require_null_type_columns(row, &record)?;
-                member_origins.extend(recovered_returns.iter().map(|column| column.origin.clone()));
-                FunctionReturn::Rows(
-                    recovered_returns
-                        .into_iter()
-                        .map(|column| column.definition)
-                        .collect(),
-                )
-            }
-            "single" => {
-                return Err(record.invariant("SINGLE functions must not have ROWS return columns"));
-            }
-            _ => return Err(record.invariant("function return shape must be single or rows")),
-        };
+    let return_type = match return_shape.as_str() {
+        "single" if recovered_returns.is_empty() => FunctionReturn::Single(decode_type_columns(
+            row,
+            &record,
+            LegacyResolvedTypeTupleMember::SingleReturn,
+            catalogue_hash_context,
+        )?),
+        "rows" => {
+            require_null_type_columns(row, &record, catalogue_hash_context)?;
+            member_origins.extend(recovered_returns.iter().map(|column| column.origin.clone()));
+            FunctionReturn::Rows(
+                recovered_returns
+                    .into_iter()
+                    .map(|column| column.definition)
+                    .collect(),
+            )
+        }
+        "single" => {
+            return Err(record.invariant("SINGLE functions must not have ROWS return columns"));
+        }
+        _ => return Err(record.invariant("function return shape must be single or rows")),
+    };
     let origin = decode_origin(row, &record, DefinitionIdentity::Function(id))?;
     member_origins.push(origin);
     Ok((
@@ -544,7 +628,11 @@ fn decode_type_columns(
     row: &Row,
     record: &DurableRecord,
     member: LegacyResolvedTypeTupleMember,
+    catalogue_hash_context: &CatalogueHashContext,
 ) -> Result<ResolvedType, PostgresKernelError> {
+    if catalogue_hash_context.standard().is_some() {
+        return decode_version_two_type_columns(row, record, member, catalogue_hash_context);
+    }
     let kind: Option<String> = record.column(
         row,
         "type_kind",
@@ -569,13 +657,101 @@ fn decode_type_columns(
     decode_legacy_resolved_type_tuple(kind, scalar.as_deref(), target, record, member)
 }
 
-fn require_null_type_columns(row: &Row, record: &DurableRecord) -> Result<(), PostgresKernelError> {
+fn decode_version_two_type_columns(
+    row: &Row,
+    record: &DurableRecord,
+    member: LegacyResolvedTypeTupleMember,
+    catalogue_hash_context: &CatalogueHashContext,
+) -> Result<ResolvedType, PostgresKernelError> {
+    let kind: Option<String> = record.column(
+        row,
+        "type_kind",
+        "resolved type kind must be scalar, named, reference, or value",
+    )?;
+    let scalar: Option<String> = record.column(
+        row,
+        "scalar_type",
+        "resolved scalar type must be null or an exact standard scalar name",
+    )?;
+    let target = optional_identity_bytes(
+        record.column(
+            row,
+            "target_type_id",
+            "resolved target identity must be null or 16 bytes",
+        )?,
+        record,
+        "resolved target identity must be null or 16 bytes",
+    )?
+    .map(TypeId::from_bytes);
+    let value_type = optional_identity_bytes(
+        record.column(
+            row,
+            "value_type_id",
+            "resolved value type identity must be null or 16 bytes",
+        )?,
+        record,
+        "resolved value type identity must be null or 16 bytes",
+    )?
+    .map(TypeId::from_bytes);
+    let standard_library_revision = optional_identity_bytes(
+        record.column(
+            row,
+            "value_standard_library_revision_id",
+            "resolved value type standard library revision identity must be null or 16 bytes",
+        )?,
+        record,
+        "resolved value type standard library revision identity must be null or 16 bytes",
+    )?
+    .map(StandardLibraryRevisionId::from_bytes);
+    decode_resolved_type_tuple(
+        ResolvedTypeTuple {
+            kind,
+            scalar,
+            target,
+            value_type,
+            standard_library_revision,
+        },
+        catalogue_hash_context,
+        record,
+        member,
+    )
+}
+
+fn require_null_type_columns(
+    row: &Row,
+    record: &DurableRecord,
+    catalogue_hash_context: &CatalogueHashContext,
+) -> Result<(), PostgresKernelError> {
     let kind: Option<String> = record.column(row, "type_kind", "ROWS type kind must be null")?;
     let scalar: Option<String> =
         record.column(row, "scalar_type", "ROWS scalar type must be null")?;
     let target: Option<Vec<u8>> =
         record.column(row, "target_type_id", "ROWS target type must be null")?;
-    if kind.is_some() || scalar.is_some() || target.is_some() {
+    let value_type: Option<Vec<u8>> = if catalogue_hash_context.standard().is_some() {
+        record.column(
+            row,
+            "value_type_id",
+            "ROWS value type identity must be null",
+        )?
+    } else {
+        None
+    };
+    let standard_library_revision: Option<Vec<u8>> = if catalogue_hash_context.standard().is_some()
+    {
+        record.column(
+            row,
+            "value_standard_library_revision_id",
+            "ROWS value type standard library revision identity must be null",
+        )?
+    } else {
+        None
+    };
+    if kind.is_some()
+        || scalar.is_some()
+        || target.is_some()
+        || value_type.is_some()
+        || standard_library_revision.is_some()
+    {
         return Err(record.invariant("ROWS functions must not store one SINGLE return type tuple"));
     }
     Ok(())
@@ -1229,7 +1405,7 @@ async fn verify_historical_introductions(
         )?;
 
         let (functions, function_origins) =
-            load_catalogue_functions(transaction, *catalogue_id).await?;
+            load_catalogue_functions(transaction, *catalogue_id, &catalogue_hash_context).await?;
         let references = load_references(
             transaction,
             *catalogue_id,
@@ -1239,9 +1415,14 @@ async fn verify_historical_introductions(
         )
         .await?;
         validate_reference_sources(&functions, &references)?;
-        let semantics =
-            load_catalogue_semantics(transaction, *catalogue_id, functions, function_origins)
-                .await?;
+        let semantics = load_catalogue_semantics(
+            transaction,
+            *catalogue_id,
+            functions,
+            function_origins,
+            &catalogue_hash_context,
+        )
+        .await?;
         let mut current_revisions = Vec::with_capacity(semantics.catalogue.functions().len());
         for function in semantics.catalogue.functions() {
             let revision = revisions
