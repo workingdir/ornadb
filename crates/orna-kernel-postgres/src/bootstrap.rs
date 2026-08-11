@@ -63,6 +63,12 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../migrations/0007_catalogue_types.sql"),
         data_step: None,
     },
+    Migration {
+        version: 8,
+        name: "resolved value type storage",
+        sql: include_str!("../migrations/0008_resolved_value_types.sql"),
+        data_step: None,
+    },
 ];
 const MIGRATION_DATA_STEP_SEPARATOR: &[u8] = b"\0orna.kernel.migration-step\0";
 const CANONICAL_HASH_V1_EMPTY_SEED_STEP: &[u8] = b"canonical-hash-v1-empty-seed/v1";
@@ -741,7 +747,7 @@ mod tests {
             validated_migration_registry()
                 .expect("registry is valid")
                 .len(),
-            7
+            8
         );
         assert_eq!(MIGRATIONS[0].version, 1);
         assert_eq!(MIGRATIONS[1].version, 2);
@@ -750,9 +756,12 @@ mod tests {
         assert_eq!(MIGRATIONS[4].version, 5);
         assert_eq!(MIGRATIONS[5].version, 6);
         assert_eq!(MIGRATIONS[6].version, 7);
+        assert_eq!(MIGRATIONS[7].version, 8);
         assert_eq!(MIGRATIONS[5].name, "definition reference write evidence");
         assert_eq!(MIGRATIONS[6].name, "standard catalogue type storage");
+        assert_eq!(MIGRATIONS[7].name, "resolved value type storage");
         assert!(MIGRATIONS[6].data_step.is_none());
+        assert!(MIGRATIONS[7].data_step.is_none());
     }
 
     #[tokio::test]

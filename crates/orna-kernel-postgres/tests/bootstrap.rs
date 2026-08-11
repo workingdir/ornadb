@@ -12,8 +12,8 @@ use orna_core::{
     },
     catalogue::{
         CatalogueSnapshot, FieldDefinition, FunctionDefinition, FunctionDomain, FunctionReturn,
-        FunctionSecurity, FunctionTransaction, FunctionVolatility, ObjectTypeDefinition,
-        ParameterDefinition, QualifiedSemanticName, SchemaDefinition,
+        FunctionReturnColumnDefinition, FunctionSecurity, FunctionTransaction, FunctionVolatility,
+        ObjectTypeDefinition, ParameterDefinition, QualifiedSemanticName, SchemaDefinition,
     },
     revision::{
         ActiveDatabaseRevision, DefinitionIdentity, DefinitionOrigin, DefinitionReference,
@@ -87,6 +87,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "standard catalogue type storage",
         include_str!("../migrations/0007_catalogue_types.sql"),
     ),
+    (
+        8,
+        "resolved value type storage",
+        include_str!("../migrations/0008_resolved_value_types.sql"),
+    ),
 ];
 const MIGRATION_DATA_STEP_SEPARATOR: &[u8] = b"\0orna.kernel.migration-step\0";
 const CANONICAL_HASH_V1_EMPTY_SEED_STEP: &[u8] = b"canonical-hash-v1-empty-seed/v1";
@@ -157,6 +162,17 @@ struct UpgradeSnapshot {
     function_hashes: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
+#[derive(Debug, Eq, PartialEq)]
+struct CatalogueSurfaceSnapshot {
+    relations_and_indexes: Vec<(String, String, String)>,
+    triggers: Vec<(String, String, String, bool)>,
+    relation_acls: Vec<(String, String, String)>,
+    schema_acls: Vec<(String, String)>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct TargetForeignKeySnapshot(Vec<(String, String, String, bool, bool)>);
+
 #[test]
 fn registered_v4_semantic_fixture_is_a_valid_active_database_revision() -> TestResult<()> {
     let fixture = registered_v4_semantic_fixture()?;
@@ -203,6 +219,14 @@ fn standard_catalogue_migration_checksum_binds_exact_sql_bytes() {
     assert_eq!(
         hex_bytes(expected_migration_checksum(7, MIGRATIONS[6].2)),
         "da58e39fb08edf1c214f6c041c792adb1446a6acb2939560d9091759a218c90f"
+    );
+}
+
+#[test]
+fn resolved_value_type_migration_checksum_binds_exact_sql_bytes() {
+    assert_eq!(
+        hex_bytes(expected_migration_checksum(8, MIGRATIONS[7].2)),
+        "2ef8d844814dafd7d70d40fb39ce7e5e6c52dea3cfc668e84c74c2c5c1dd06e7"
     );
 }
 
@@ -303,7 +327,7 @@ async fn bootstrap_upgrades_v5_write_reference_evidence_without_mutating_semanti
 
         let after = snapshot_upgrade_state(&database).await?;
         require(
-            after.migrations.len() == 7 && after.migrations[..5] == before.migrations[..],
+            after.migrations.len() == 8 && after.migrations[..5] == before.migrations[..],
             format!("v6/v7 changed prior migration records: {:?}", after.migrations),
         )?;
         require(
@@ -323,6 +347,15 @@ async fn bootstrap_upgrades_v5_write_reference_evidence_without_mutating_semanti
                     expected_migration_checksum(7, MIGRATIONS[6].2),
                 ),
             format!("v7 migration record is not exact: {:?}", after.migrations[6]),
+        )?;
+        require(
+            after.migrations[7]
+                == (
+                    8,
+                    "resolved value type storage".to_owned(),
+                    expected_migration_checksum(8, MIGRATIONS[7].2),
+                ),
+            format!("v8 migration record is not exact: {:?}", after.migrations[7]),
         )?;
         require(
             after.active_pair == before.active_pair,
@@ -410,7 +443,7 @@ async fn bootstrap_upgrades_registered_v6_without_standard_rows() -> TestResult<
 
         let after = snapshot_upgrade_state(&database).await?;
         require(
-            after.migrations.len() == 7
+            after.migrations.len() == 8
                 && after.migrations[..6] == before.migrations[..]
                 && after.migrations[6]
                     == (
@@ -418,10 +451,16 @@ async fn bootstrap_upgrades_registered_v6_without_standard_rows() -> TestResult<
                         "standard catalogue type storage".to_owned(),
                         expected_migration_checksum(7, MIGRATIONS[6].2),
                     ),
-            format!(
-                "v6 upgrade produced unexpected migrations: {:?}",
-                after.migrations
-            ),
+            format!("v6 upgrade produced unexpected migrations: {:?}", after.migrations),
+        )?;
+        require(
+            after.migrations[7]
+                == (
+                    8,
+                    "resolved value type storage".to_owned(),
+                    expected_migration_checksum(8, MIGRATIONS[7].2),
+                ),
+            format!("v8 migration record is not exact: {:?}", after.migrations[7]),
         )?;
         require(
             after.active_pair == before.active_pair
@@ -456,6 +495,112 @@ async fn bootstrap_upgrades_registered_v6_without_standard_rows() -> TestResult<
             (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
             (Err(inspection_error), Err(shutdown_error)) => Err(failure(format!(
                 "v6 standard schema inspection failed: {inspection_error}; shutdown failed: {shutdown_error}"
+            ))),
+        }
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn bootstrap_upgrades_registered_v7_without_resolved_value_rows() -> TestResult<()> {
+    with_test_database(|database| async move {
+        seed_registered_v7_catalogue(&database).await?;
+        let expected_revision = registered_v7_rows_fixture()?;
+        let before = snapshot_upgrade_state(&database).await?;
+        let before_surface = snapshot_catalogue_surface(&database).await?;
+        let before_target_fks = snapshot_application_target_foreign_keys(&database).await?;
+        let expected_target_fks = expected_application_target_foreign_keys();
+        require(
+            before_target_fks == expected_target_fks,
+            format!("v7 application target foreign keys are not exact: {before_target_fks:?}"),
+        )?;
+        require(
+            before.migrations.len() == 7
+                && before.migrations.last().map(|migration| migration.0) == Some(7),
+            format!("manual v7 setup produced unexpected migrations: {:?}", before.migrations),
+        )?;
+        require(
+            before.active_pair
+                == (
+                    expected_revision.pair().source().to_bytes().to_vec(),
+                    expected_revision.pair().catalogue().to_bytes().to_vec(),
+                ),
+            format!("manual v7 setup changed the active pair: {:?}", before.active_pair),
+        )?;
+
+        let kernel = PostgresKernel::from_str(&database.connection_string())?;
+        kernel.bootstrap().await?;
+
+        let after = snapshot_upgrade_state(&database).await?;
+        let after_surface = snapshot_catalogue_surface(&database).await?;
+        let after_target_fks = snapshot_application_target_foreign_keys(&database).await?;
+        require(
+            after.migrations.len() == 8
+                && after.migrations[..7] == before.migrations[..]
+                && after.migrations[7]
+                    == (
+                        8,
+                        "resolved value type storage".to_owned(),
+                        expected_migration_checksum(8, MIGRATIONS[7].2),
+                    ),
+            format!("v7 upgrade produced unexpected migrations: {:?}", after.migrations),
+        )?;
+        require(
+            after.active_pair == before.active_pair
+                && after.source_unit_count == before.source_unit_count
+                && after.references == before.references
+                && after.catalogue_hashes == before.catalogue_hashes
+                && after.function_hashes == before.function_hashes,
+            "migration 0008 changed the active pair, references, or semantic hashes",
+        )?;
+        require(
+            before_surface == after_surface,
+            format!(
+                "migration 0008 changed a relation, index, trigger, or ACL: before={before_surface:?}, after={after_surface:?}"
+            ),
+        )?;
+        require(
+            before_target_fks == after_target_fks,
+            format!(
+                "migration 0008 changed application target foreign keys: before={before_target_fks:?}, after={after_target_fks:?}"
+            ),
+        )?;
+        require(
+            after_target_fks == expected_target_fks,
+            format!("v8 application target foreign keys are not exact: {after_target_fks:?}"),
+        )?;
+
+        let recovered = kernel.recover().await?;
+        let catalogue_matches = recovered.catalogue().revision()
+            == expected_revision.catalogue().revision()
+            && recovered.catalogue().schemas() == expected_revision.catalogue().schemas()
+            && recovered.catalogue().object_types() == expected_revision.catalogue().object_types()
+            && recovered.catalogue().functions() == expected_revision.catalogue().functions();
+        require(
+            recovered.pair() == expected_revision.pair()
+                && recovered.source() == expected_revision.source()
+                && recovered.catalogue_hash() == expected_revision.catalogue_hash()
+                && catalogue_matches
+                && recovered.expressions() == expected_revision.expressions()
+                && recovered.function_revisions() == expected_revision.function_revisions()
+                && same_members(recovered.origins(), expected_revision.origins())
+                && recovered.references() == expected_revision.references(),
+            "migration 0008 changed recoverable application revision facts",
+        )?;
+
+        let session = database.open().await?;
+        let inspection_result = async {
+            inspect_resolved_value_storage(session.client(), true).await?;
+            inspect_standard_catalogue_schema(session.client()).await
+        }
+        .await;
+        let shutdown_result = session.shutdown().await;
+        match (inspection_result, shutdown_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+            (Err(inspection_error), Err(shutdown_error)) => Err(failure(format!(
+                "v7 resolved-value inspection failed: {inspection_error}; shutdown failed: {shutdown_error}"
             ))),
         }
     })
@@ -700,7 +845,7 @@ async fn bootstrap_rejects_tampered_gapped_and_newer_migration_history() -> Test
         Sha256::digest(MIGRATIONS[1].2.as_bytes()).to_vec(),
     )
     .await?;
-    reject_migration_history(8, "future migration", vec![0; 32]).await
+    reject_migration_history(9, "future migration", vec![0; 32]).await
 }
 
 async fn inspect_bootstrap_state(database: &TestDatabase) -> TestResult<()> {
@@ -762,6 +907,7 @@ async fn inspect_client(client: &Client) -> TestResult<()> {
     inspect_definition_references(client).await?;
     inspect_function_revision_constraints(client).await?;
     inspect_standard_catalogue_schema(client).await?;
+    inspect_resolved_value_storage(client, true).await?;
 
     for schema in ["_orna_kernel", "_orna_data"] {
         let role = "public";
@@ -976,6 +1122,283 @@ async fn inspect_standard_catalogue_schema(client: &Client) -> TestResult<()> {
     inspect_standard_catalogue_constraints(client).await?;
     inspect_standard_catalogue_indexes(client).await?;
     inspect_standard_catalogue_privileges(client).await
+}
+
+async fn inspect_resolved_value_storage(
+    client: &Client,
+    require_null_values: bool,
+) -> TestResult<()> {
+    for (table, columns) in [
+        (
+            "catalogue_fields",
+            ["value_type_id", "value_standard_library_revision_id"],
+        ),
+        (
+            "catalogue_function_parameters",
+            ["value_type_id", "value_standard_library_revision_id"],
+        ),
+        (
+            "catalogue_function_return_columns",
+            ["value_type_id", "value_standard_library_revision_id"],
+        ),
+        (
+            "catalogue_functions",
+            [
+                "return_value_type_id",
+                "return_standard_library_revision_id",
+            ],
+        ),
+    ] {
+        for column in columns {
+            inspect_column_contract(
+                client,
+                table,
+                &[(column, "bytea", "bytea", "YES", Some(""))],
+            )
+            .await?;
+        }
+        if require_null_values {
+            let row = client
+                .query_one(
+                    &format!(
+                        "SELECT count(*) FROM _orna_kernel.{table}
+                         WHERE {} IS NOT NULL OR {} IS NOT NULL",
+                        columns[0], columns[1]
+                    ),
+                    &[],
+                )
+                .await?;
+            let non_null_rows: i64 = value(&row, 0)?;
+            require(
+                non_null_rows == 0,
+                format!("{table} contains {non_null_rows} resolved value rows"),
+            )?;
+        }
+    }
+
+    for (table, constraint, expected_deferrable, expected_deferred) in [
+        ("catalogue_fields", "cat_fields_val_pin_fk", true, true),
+        (
+            "catalogue_fields",
+            "cat_fields_val_std_rev_len",
+            false,
+            false,
+        ),
+        ("catalogue_fields", "cat_fields_val_type_fk", true, true),
+        ("catalogue_fields", "cat_fields_val_type_len", false, false),
+        ("catalogue_fields", "catalogue_fields_check", false, false),
+        (
+            "catalogue_fields",
+            "catalogue_fields_type_kind_check",
+            false,
+            false,
+        ),
+        (
+            "catalogue_function_parameters",
+            "cat_fn_params_val_pin_fk",
+            true,
+            true,
+        ),
+        (
+            "catalogue_function_parameters",
+            "cat_fn_params_val_std_rev_len",
+            false,
+            false,
+        ),
+        (
+            "catalogue_function_parameters",
+            "cat_fn_params_val_type_fk",
+            true,
+            true,
+        ),
+        (
+            "catalogue_function_parameters",
+            "cat_fn_params_val_type_len",
+            false,
+            false,
+        ),
+        (
+            "catalogue_function_parameters",
+            "catalogue_function_parameters_check",
+            false,
+            false,
+        ),
+        (
+            "catalogue_function_parameters",
+            "catalogue_function_parameters_type_kind_check",
+            false,
+            false,
+        ),
+        (
+            "catalogue_function_return_columns",
+            "cat_fn_ret_cols_val_pin_fk",
+            true,
+            true,
+        ),
+        (
+            "catalogue_function_return_columns",
+            "cat_fn_ret_cols_val_std_rev_len",
+            false,
+            false,
+        ),
+        (
+            "catalogue_function_return_columns",
+            "cat_fn_ret_cols_val_type_fk",
+            true,
+            true,
+        ),
+        (
+            "catalogue_function_return_columns",
+            "cat_fn_ret_cols_val_type_len",
+            false,
+            false,
+        ),
+        (
+            "catalogue_function_return_columns",
+            "catalogue_function_return_columns_check",
+            false,
+            false,
+        ),
+        (
+            "catalogue_function_return_columns",
+            "catalogue_function_return_columns_type_kind_check",
+            false,
+            false,
+        ),
+        (
+            "catalogue_functions",
+            "cat_funcs_ret_val_pin_fk",
+            true,
+            true,
+        ),
+        (
+            "catalogue_functions",
+            "cat_funcs_ret_val_std_rev_len",
+            false,
+            false,
+        ),
+        (
+            "catalogue_functions",
+            "cat_funcs_ret_val_type_fk",
+            true,
+            true,
+        ),
+        (
+            "catalogue_functions",
+            "cat_funcs_ret_val_type_len",
+            false,
+            false,
+        ),
+        (
+            "catalogue_functions",
+            "catalogue_functions_check1",
+            false,
+            false,
+        ),
+        (
+            "catalogue_functions",
+            "catalogue_functions_return_type_kind_check",
+            false,
+            false,
+        ),
+    ] {
+        let definition = exact_0008_constraint_definition(constraint)
+            .ok_or_else(|| failure(format!("missing exact 0008 contract for {constraint}")))?;
+        require_exact_constraint(
+            client,
+            table,
+            constraint,
+            definition,
+            expected_deferrable,
+            expected_deferred,
+        )
+        .await?;
+    }
+    inspect_resolved_value_public_privileges(client).await
+}
+
+fn exact_0008_constraint_definition(constraint: &str) -> Option<&'static str> {
+    Some(match constraint {
+        "catalogue_fields_type_kind_check"
+        | "catalogue_function_parameters_type_kind_check"
+        | "catalogue_function_return_columns_type_kind_check" => {
+            "CHECK ((type_kind = ANY (ARRAY['scalar'::text, 'named'::text, 'reference'::text, 'value'::text])))"
+        }
+        "catalogue_fields_check"
+        | "catalogue_function_parameters_check"
+        | "catalogue_function_return_columns_check" => {
+            "CHECK ((((type_kind = 'scalar'::text) AND (scalar_type IS NOT NULL) AND (target_type_id IS NULL) AND (value_type_id IS NULL) AND (value_standard_library_revision_id IS NULL)) OR ((type_kind = ANY (ARRAY['named'::text, 'reference'::text])) AND (scalar_type IS NULL) AND (target_type_id IS NOT NULL) AND (value_type_id IS NULL) AND (value_standard_library_revision_id IS NULL)) OR ((type_kind = 'value'::text) AND (scalar_type IS NULL) AND (target_type_id IS NULL) AND (value_type_id IS NOT NULL) AND (value_standard_library_revision_id IS NOT NULL))))"
+        }
+        "catalogue_functions_return_type_kind_check" => {
+            "CHECK ((return_type_kind = ANY (ARRAY['scalar'::text, 'named'::text, 'reference'::text, 'value'::text])))"
+        }
+        "catalogue_functions_check1" => {
+            "CHECK ((((return_shape = 'rows'::text) AND (return_type_kind IS NULL) AND (return_scalar_type IS NULL) AND (return_target_type_id IS NULL) AND (return_value_type_id IS NULL) AND (return_standard_library_revision_id IS NULL)) OR ((return_shape = 'single'::text) AND (((return_type_kind = 'scalar'::text) AND (return_scalar_type IS NOT NULL) AND (return_target_type_id IS NULL) AND (return_value_type_id IS NULL) AND (return_standard_library_revision_id IS NULL)) OR ((return_type_kind = ANY (ARRAY['named'::text, 'reference'::text])) AND (return_scalar_type IS NULL) AND (return_target_type_id IS NOT NULL) AND (return_value_type_id IS NULL) AND (return_standard_library_revision_id IS NULL)) OR ((return_type_kind = 'value'::text) AND (return_scalar_type IS NULL) AND (return_target_type_id IS NULL) AND (return_value_type_id IS NOT NULL) AND (return_standard_library_revision_id IS NOT NULL))))))"
+        }
+        "cat_fields_val_type_len"
+        | "cat_fn_params_val_type_len"
+        | "cat_fn_ret_cols_val_type_len" => {
+            "CHECK (((value_type_id IS NULL) OR (octet_length(value_type_id) = 16)))"
+        }
+        "cat_fields_val_std_rev_len"
+        | "cat_fn_params_val_std_rev_len"
+        | "cat_fn_ret_cols_val_std_rev_len" => {
+            "CHECK (((value_standard_library_revision_id IS NULL) OR (octet_length(value_standard_library_revision_id) = 16)))"
+        }
+        "cat_funcs_ret_val_type_len" => {
+            "CHECK (((return_value_type_id IS NULL) OR (octet_length(return_value_type_id) = 16)))"
+        }
+        "cat_funcs_ret_val_std_rev_len" => {
+            "CHECK (((return_standard_library_revision_id IS NULL) OR (octet_length(return_standard_library_revision_id) = 16)))"
+        }
+        "cat_fields_val_pin_fk" | "cat_fn_params_val_pin_fk" | "cat_fn_ret_cols_val_pin_fk" => {
+            "FOREIGN KEY (catalogue_revision_id, value_standard_library_revision_id) REFERENCES _orna_kernel.catalogue_revisions(id, standard_library_revision_id) DEFERRABLE INITIALLY DEFERRED"
+        }
+        "cat_fields_val_type_fk" | "cat_fn_params_val_type_fk" | "cat_fn_ret_cols_val_type_fk" => {
+            "FOREIGN KEY (value_standard_library_revision_id, value_type_id) REFERENCES _orna_kernel.standard_catalogue_value_types(standard_library_revision_id, type_id) DEFERRABLE INITIALLY DEFERRED"
+        }
+        "cat_funcs_ret_val_type_fk" => {
+            "FOREIGN KEY (return_standard_library_revision_id, return_value_type_id) REFERENCES _orna_kernel.standard_catalogue_value_types(standard_library_revision_id, type_id) DEFERRABLE INITIALLY DEFERRED"
+        }
+        "cat_funcs_ret_val_pin_fk" => {
+            "FOREIGN KEY (catalogue_revision_id, return_standard_library_revision_id) REFERENCES _orna_kernel.catalogue_revisions(id, standard_library_revision_id) DEFERRABLE INITIALLY DEFERRED"
+        }
+        _ => return None,
+    })
+}
+
+async fn inspect_resolved_value_public_privileges(client: &Client) -> TestResult<()> {
+    for table in [
+        "catalogue_fields",
+        "catalogue_function_parameters",
+        "catalogue_function_return_columns",
+        "catalogue_functions",
+    ] {
+        for privilege in [
+            "SELECT",
+            "INSERT",
+            "UPDATE",
+            "DELETE",
+            "TRUNCATE",
+            "REFERENCES",
+            "TRIGGER",
+            "MAINTAIN",
+        ] {
+            let relation = format!("_orna_kernel.{table}");
+            let row = client
+                .query_one(
+                    "SELECT has_table_privilege('public', $1, $2)",
+                    &[&relation, &privilege],
+                )
+                .await?;
+            let granted: bool = value(&row, 0)?;
+            require(
+                !granted,
+                format!("PUBLIC has {privilege} on protected table {relation}"),
+            )?;
+        }
+    }
+    Ok(())
 }
 
 async fn inspect_columns(
@@ -1721,6 +2144,182 @@ async fn snapshot_upgrade_state(database: &TestDatabase) -> TestResult<UpgradeSn
     }
 }
 
+async fn snapshot_catalogue_surface(
+    database: &TestDatabase,
+) -> TestResult<CatalogueSurfaceSnapshot> {
+    let session = database.open().await?;
+    let snapshot_result = async {
+        let relations_and_indexes = session
+            .client()
+            .query(
+                "SELECT namespace.nspname, relation.relname, relation.relkind::text
+                 FROM pg_class AS relation
+                 JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+                 WHERE namespace.nspname IN ('_orna_kernel', '_orna_data')
+                 ORDER BY namespace.nspname, relation.relname, relation.relkind",
+                &[],
+            )
+            .await?
+            .iter()
+            .map(|row| Ok((value(row, 0)?, value(row, 1)?, value(row, 2)?)))
+            .collect::<TestResult<Vec<(String, String, String)>>>()?;
+        let triggers = session
+            .client()
+            .query(
+                "SELECT namespace.nspname, relation.relname, trigger_row.tgname,
+                        trigger_row.tgisinternal
+                 FROM pg_trigger AS trigger_row
+                 JOIN pg_class AS relation ON relation.oid = trigger_row.tgrelid
+                 JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+                 WHERE namespace.nspname IN ('_orna_kernel', '_orna_data')
+                   AND NOT trigger_row.tgisinternal
+                 ORDER BY namespace.nspname, relation.relname, trigger_row.tgname",
+                &[],
+            )
+            .await?
+            .iter()
+            .map(|row| {
+                Ok((
+                    value(row, 0)?,
+                    value(row, 1)?,
+                    value(row, 2)?,
+                    value(row, 3)?,
+                ))
+            })
+            .collect::<TestResult<Vec<(String, String, String, bool)>>>()?;
+        let relation_acls = session
+            .client()
+            .query(
+                "SELECT namespace.nspname, relation.relname,
+                        COALESCE(relation.relacl::text, '')
+                 FROM pg_class AS relation
+                 JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+                 WHERE namespace.nspname IN ('_orna_kernel', '_orna_data')
+                 ORDER BY namespace.nspname, relation.relname",
+                &[],
+            )
+            .await?
+            .iter()
+            .map(|row| Ok((value(row, 0)?, value(row, 1)?, value(row, 2)?)))
+            .collect::<TestResult<Vec<(String, String, String)>>>()?;
+        let schema_acls = session
+            .client()
+            .query(
+                "SELECT namespace.nspname, COALESCE(namespace.nspacl::text, '')
+                 FROM pg_namespace AS namespace
+                 WHERE namespace.nspname IN ('_orna_kernel', '_orna_data')
+                 ORDER BY namespace.nspname",
+                &[],
+            )
+            .await?
+            .iter()
+            .map(|row| Ok((value(row, 0)?, value(row, 1)?)))
+            .collect::<TestResult<Vec<(String, String)>>>()?;
+        Ok(CatalogueSurfaceSnapshot {
+            relations_and_indexes,
+            triggers,
+            relation_acls,
+            schema_acls,
+        })
+    }
+    .await;
+    let shutdown_result = session.shutdown().await;
+    match (snapshot_result, shutdown_result) {
+        (Ok(snapshot), Ok(())) => Ok(snapshot),
+        (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+        (Err(snapshot_error), Err(shutdown_error)) => Err(failure(format!(
+            "catalogue surface snapshot failed: {snapshot_error}; snapshot driver shutdown failed: {shutdown_error}"
+        ))),
+    }
+}
+
+async fn snapshot_application_target_foreign_keys(
+    database: &TestDatabase,
+) -> TestResult<TargetForeignKeySnapshot> {
+    let session = database.open().await?;
+    let snapshot_result = session
+        .client()
+        .query(
+            "SELECT relation.relname, constraint_row.conname,
+                    pg_get_constraintdef(constraint_row.oid),
+                    constraint_row.condeferrable,
+                    constraint_row.condeferred
+             FROM pg_constraint AS constraint_row
+             JOIN pg_class AS relation ON relation.oid = constraint_row.conrelid
+             JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+             WHERE namespace.nspname = '_orna_kernel'
+               AND constraint_row.contype = 'f'
+               AND (
+                   (relation.relname = 'catalogue_fields'
+                    AND constraint_row.conname = 'catalogue_fields_catalogue_revision_id_target_type_id_fkey')
+                   OR (relation.relname = 'catalogue_function_parameters'
+                    AND constraint_row.conname = 'catalogue_function_parameters_catalogue_revision_id_target_fkey')
+                   OR (relation.relname = 'catalogue_function_return_columns'
+                    AND constraint_row.conname = 'catalogue_function_return_col_catalogue_revision_id_target_fkey')
+                   OR (relation.relname = 'catalogue_functions'
+                    AND constraint_row.conname = 'catalogue_functions_catalogue_revision_id_return_target_ty_fkey')
+               )
+             ORDER BY relation.relname, constraint_row.conname",
+            &[],
+        )
+        .await
+        .map(|rows| {
+            rows.iter()
+                .map(|row| {
+                    Ok((
+                        value(row, 0)?,
+                        value(row, 1)?,
+                        value(row, 2)?,
+                        value(row, 3)?,
+                        value(row, 4)?,
+                    ))
+                })
+                .collect::<TestResult<Vec<(String, String, String, bool, bool)>>>()
+                .map(TargetForeignKeySnapshot)
+        })?;
+    let shutdown_result = session.shutdown().await;
+    match (snapshot_result, shutdown_result) {
+        (Ok(snapshot), Ok(())) => Ok(snapshot),
+        (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+        (Err(snapshot_error), Err(shutdown_error)) => Err(failure(format!(
+            "target foreign-key snapshot failed: {snapshot_error}; snapshot driver shutdown failed: {shutdown_error}"
+        ))),
+    }
+}
+
+fn expected_application_target_foreign_keys() -> TargetForeignKeySnapshot {
+    TargetForeignKeySnapshot(vec![
+        (
+            "catalogue_fields".to_owned(),
+            "catalogue_fields_catalogue_revision_id_target_type_id_fkey".to_owned(),
+            "FOREIGN KEY (catalogue_revision_id, target_type_id) REFERENCES _orna_kernel.catalogue_object_types(catalogue_revision_id, type_id) DEFERRABLE INITIALLY DEFERRED".to_owned(),
+            true,
+            true,
+        ),
+        (
+            "catalogue_function_parameters".to_owned(),
+            "catalogue_function_parameters_catalogue_revision_id_target_fkey".to_owned(),
+            "FOREIGN KEY (catalogue_revision_id, target_type_id) REFERENCES _orna_kernel.catalogue_object_types(catalogue_revision_id, type_id) DEFERRABLE INITIALLY DEFERRED".to_owned(),
+            true,
+            true,
+        ),
+        (
+            "catalogue_function_return_columns".to_owned(),
+            "catalogue_function_return_col_catalogue_revision_id_target_fkey".to_owned(),
+            "FOREIGN KEY (catalogue_revision_id, target_type_id) REFERENCES _orna_kernel.catalogue_object_types(catalogue_revision_id, type_id) DEFERRABLE INITIALLY DEFERRED".to_owned(),
+            true,
+            true,
+        ),
+        (
+            "catalogue_functions".to_owned(),
+            "catalogue_functions_catalogue_revision_id_return_target_ty_fkey".to_owned(),
+            "FOREIGN KEY (catalogue_revision_id, return_target_type_id) REFERENCES _orna_kernel.catalogue_object_types(catalogue_revision_id, type_id) DEFERRABLE INITIALLY DEFERRED".to_owned(),
+            true,
+            true,
+        ),
+    ])
+}
+
 async fn inspect_empty_aggregate_hashes(client: &Client) -> TestResult<()> {
     let row = client
         .query_one(
@@ -2451,6 +3050,124 @@ async fn seed_registered_v6_catalogue(database: &TestDatabase) -> TestResult<()>
     }
 }
 
+async fn seed_registered_v7_catalogue(database: &TestDatabase) -> TestResult<()> {
+    seed_registered_v6_catalogue(database).await?;
+    let fixture = registered_v7_rows_fixture()?;
+    let function = fixture
+        .catalogue()
+        .functions()
+        .get(1)
+        .ok_or_else(|| failure("registered v7 fixture has no rows function"))?;
+    let revision = fixture
+        .function_revisions()
+        .iter()
+        .find(|revision| revision.function() == function.id())
+        .ok_or_else(|| failure("registered v7 fixture has no rows revision"))?;
+    let return_origin = fixture_origin(
+        &fixture,
+        DefinitionIdentity::FunctionReturnColumn {
+            owner: function.id(),
+            ordinal: 0,
+        },
+    )?;
+    let session = database.open().await?;
+    let migration = &MIGRATIONS[6];
+    let seed_result = async {
+        session
+            .client()
+            .batch_execute("BEGIN; SET CONSTRAINTS ALL DEFERRED;")
+            .await?;
+        let update_result: TestResult<()> = async {
+            session
+                .client()
+                .execute(
+                    "UPDATE _orna_kernel.catalogue_functions
+                     SET return_shape = 'rows',
+                         return_type_kind = NULL,
+                         return_scalar_type = NULL,
+                         return_target_type_id = NULL
+                     WHERE catalogue_revision_id = $1 AND function_id = $2",
+                    &[
+                        &fixture.catalogue().revision().to_bytes().to_vec(),
+                        &function.id().to_bytes().to_vec(),
+                    ],
+                )
+                .await?;
+            session
+                .client()
+                .execute(
+                    "INSERT INTO _orna_kernel.catalogue_function_return_columns
+                        (catalogue_revision_id, function_id, name, ordinal,
+                         type_kind, scalar_type, target_type_id,
+                         source_unit_id, source_start, source_end)
+                     VALUES ($1, $2, 'result', 0, 'scalar', 'boolean', NULL, $3, $4, $5)",
+                    &[
+                        &fixture.catalogue().revision().to_bytes().to_vec(),
+                        &function.id().to_bytes().to_vec(),
+                        &return_origin.source_unit().to_bytes().to_vec(),
+                        &i64::from(return_origin.byte_start()),
+                        &i64::from(return_origin.byte_end()),
+                    ],
+                )
+                .await?;
+            session
+                .client()
+                .execute(
+                    "UPDATE _orna_kernel.function_revisions
+                     SET semantic_ir_hash = $2
+                     WHERE id = $1",
+                    &[
+                        &revision.id().to_bytes().to_vec(),
+                        &revision.semantic_hash().to_bytes().to_vec(),
+                    ],
+                )
+                .await?;
+            session
+                .client()
+                .execute(
+                    "UPDATE _orna_kernel.catalogue_revisions
+                     SET content_hash = $2
+                     WHERE id = $1",
+                    &[
+                        &fixture.catalogue().revision().to_bytes().to_vec(),
+                        &fixture.catalogue_hash().to_bytes().to_vec(),
+                    ],
+                )
+                .await?;
+            Ok(())
+        }
+        .await;
+        match update_result {
+            Ok(()) => session.client().batch_execute("COMMIT").await?,
+            Err(error) => {
+                session.client().batch_execute("ROLLBACK").await?;
+                return Err(error);
+            }
+        }
+        session.client().batch_execute(migration.2).await?;
+        let checksum = expected_migration_checksum(migration.0, migration.2);
+        session
+            .client()
+            .execute(
+                "INSERT INTO _orna_kernel.schema_migrations (version, name, checksum)
+                 VALUES ($1, $2, $3)",
+                &[&migration.0, &migration.1, &checksum],
+            )
+            .await?;
+        Ok(())
+    }
+    .await;
+    let shutdown_result = session.shutdown().await;
+
+    match (seed_result, shutdown_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(seed_error), Err(shutdown_error)) => Err(failure(format!(
+            "registered v7 catalogue seed failed: {seed_error}; seed driver shutdown failed: {shutdown_error}"
+        ))),
+    }
+}
+
 async fn seed_registered_v4_physical_catalogue(database: &TestDatabase) -> TestResult<()> {
     let session = database.open().await?;
     let result = session
@@ -2740,6 +3457,95 @@ fn registered_v4_semantic_fixture() -> TestResult<ActiveDatabaseRevision> {
         Vec::new(),
         origins,
         references,
+    )?)
+}
+
+fn registered_v7_rows_fixture() -> TestResult<ActiveDatabaseRevision> {
+    let base = registered_v4_semantic_fixture()?;
+    let first_function = base
+        .catalogue()
+        .functions()
+        .first()
+        .ok_or_else(|| failure("registered v4 fixture has no first function"))?
+        .clone();
+    let second_function = base
+        .catalogue()
+        .functions()
+        .get(1)
+        .ok_or_else(|| failure("registered v4 fixture has no second function"))?;
+    let second_rows_function = FunctionDefinition::new(
+        second_function.id(),
+        second_function.name().clone(),
+        second_function.domain(),
+        second_function.parameters().to_vec(),
+        FunctionReturn::Rows(vec![FunctionReturnColumnDefinition::new(
+            "result",
+            0,
+            ResolvedType::scalar(StandardScalar::Boolean),
+        )]),
+        second_function.current_revision(),
+        second_function.security(),
+        second_function.transaction(),
+        second_function.volatility(),
+    );
+    let catalogue = CatalogueSnapshot::new_with_functions(
+        base.catalogue().revision(),
+        base.catalogue().schemas().to_vec(),
+        base.catalogue().object_types().to_vec(),
+        vec![first_function, second_rows_function.clone()],
+    )?;
+    let mut origins = base.origins().to_vec();
+    origins.push(DefinitionOrigin::new(
+        DefinitionIdentity::FunctionReturnColumn {
+            owner: second_rows_function.id(),
+            ordinal: 0,
+        },
+        fixture_source_origin(REGISTERED_V4_SECOND_FUNCTION_DECLARATION)?,
+    ));
+    let function_revisions = base
+        .function_revisions()
+        .iter()
+        .map(|revision| {
+            if revision.function() == second_rows_function.id() {
+                let semantic_hash = function_semantic_digest(
+                    &second_rows_function,
+                    revision.language_version(),
+                    revision.artifact(),
+                    &[],
+                    &[],
+                )?;
+                Ok(FunctionRevisionRecord::new(
+                    revision.function(),
+                    revision.id(),
+                    revision.revision_number(),
+                    revision.declaration_origin(),
+                    revision.declaration_content_hash(),
+                    semantic_hash,
+                    revision.language_version(),
+                    revision.artifact().clone(),
+                )?)
+            } else {
+                Ok(revision.clone())
+            }
+        })
+        .collect::<TestResult<Vec<_>>>()?;
+    let catalogue_hash = catalogue_digest(
+        &catalogue,
+        &function_revisions,
+        &[],
+        &origins,
+        base.references(),
+    )?;
+    Ok(ActiveDatabaseRevision::new_with_history(
+        base.pair(),
+        base.source().clone(),
+        catalogue,
+        catalogue_hash,
+        base.expressions().to_vec(),
+        function_revisions,
+        base.historical_function_revisions().to_vec(),
+        origins,
+        base.references().to_vec(),
     )?)
 }
 
