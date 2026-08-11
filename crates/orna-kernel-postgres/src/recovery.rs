@@ -188,7 +188,7 @@ pub(crate) async fn recover_active_revision(
         function_state,
         catalogue_hash_context,
     )?;
-    verify_physical_catalogue(transaction, active.catalogue()).await?;
+    verify_physical_catalogue(transaction, &active).await?;
 
     Ok(active)
 }
