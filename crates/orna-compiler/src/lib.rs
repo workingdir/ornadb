@@ -2777,6 +2777,66 @@ mod tests {
             ],
             "CLIENT and SERVER lowering follows canonical declaration-evidence owner order"
         );
+        let candidate_object = &prepared.candidate().object_types()[0];
+        let candidate_item = candidate_object.id();
+        assert_eq!(
+            candidate_object.fields()[0].resolved_type(),
+            ResolvedType::scalar(StandardScalar::Boolean)
+        );
+        let candidate_functions = prepared.candidate().functions();
+        let create = &candidate_functions[0];
+        assert!(matches!(
+            create.parameters()[0].resolved_type(),
+            ResolvedType::Reference { target } if target == candidate_item
+        ));
+        assert_eq!(
+            create.parameters()[1].resolved_type(),
+            ResolvedType::scalar(StandardScalar::Boolean)
+        );
+        assert_eq!(
+            create.parameters()[2].resolved_type(),
+            ResolvedType::scalar(StandardScalar::Boolean)
+        );
+        let FunctionReturn::Rows(create_columns) = create.return_type() else {
+            panic!("the mutation fixture must retain a ROWS return")
+        };
+        assert!(matches!(
+            create_columns[0].resolved_type(),
+            ResolvedType::Reference { target } if target == candidate_item
+        ));
+        assert_eq!(
+            candidate_functions[1].return_type(),
+            &FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Boolean))
+        );
+        let by_ref = &candidate_functions[2];
+        assert!(matches!(
+            by_ref.parameters()[0].resolved_type(),
+            ResolvedType::Reference { target } if target == candidate_item
+        ));
+        let FunctionReturn::Rows(by_ref_columns) = by_ref.return_type() else {
+            panic!("the SERVER fixture must retain a ROWS return")
+        };
+        assert_eq!(
+            by_ref_columns[0].resolved_type(),
+            ResolvedType::scalar(StandardScalar::Boolean)
+        );
+        let value_reference_targets = prepared
+            .references()
+            .iter()
+            .filter_map(|reference| {
+                if let DefinitionReferenceTarget::ValueType(type_id) = reference.target() {
+                    Some(type_id)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(value_reference_targets.len(), 4);
+        assert!(
+            value_reference_targets
+                .iter()
+                .all(|type_id| *type_id == TypeId::from_bytes([3; 16]))
+        );
         let candidate_function_ids = prepared
             .candidate()
             .functions()
@@ -5897,6 +5957,40 @@ mod tests {
         let version_one = prepare(&report, empty.pair(), &empty).unwrap();
         let active = active_from_prepared_version_one_candidate(&version_one);
 
+        let public_prepared = prepare_checked_standard_upgrade(&standard, &active).unwrap();
+        assert_eq!(
+            public_prepared
+                .application_revision()
+                .candidate()
+                .object_types()[0]
+                .fields()[0]
+                .resolved_type(),
+            ResolvedType::scalar(StandardScalar::Boolean)
+        );
+        let public_function = &public_prepared
+            .application_revision()
+            .candidate()
+            .functions()[0];
+        let FunctionReturn::Rows(public_columns) = public_function.return_type() else {
+            panic!("server fixture must retain a ROWS return")
+        };
+        assert_eq!(public_columns.len(), 1);
+        assert_eq!(
+            public_columns[0].resolved_type(),
+            ResolvedType::scalar(StandardScalar::Boolean)
+        );
+        assert!(
+            public_prepared
+                .application_revision()
+                .references()
+                .iter()
+                .any(|reference| {
+                    reference.target()
+                        == DefinitionReferenceTarget::ValueType(TypeId::from_bytes([3; 16]))
+                        && reference.kind() == DefinitionReferenceKind::NamedType
+                })
+        );
+
         let prepared = prepare_checked_standard_upgrade_with_allocator(
             &standard,
             &active,
@@ -5936,6 +6030,57 @@ mod tests {
                 .to_bytes(),
             [0x90; 16]
         );
+    }
+
+    #[test]
+    fn prepares_version_two_mutation_parameter_and_reference_return_with_legacy_shapes() {
+        let verified = verified_standard_source_fixture();
+        let standard = check_standard_library_source(&verified).unwrap();
+        let empty = empty_version_one_active();
+        let source = "CREATE SCHEMA app;\
+            CREATE TYPE app.item AS OBJECT (done BOOLEAN NOT NULL);\
+            CREATE SERVER FUNCTION app.create(p_done BOOLEAN) RETURNS ROWS (created REF app.item)\
+            TRANSACTION ATOMIC AS INSERT INTO app.item AS made (done) VALUES (p_done) RETURNING REF(made);";
+        let bundle = SourceBundle::new([SourceUnit::new("application.orna", source)]).unwrap();
+        let version_one =
+            prepare(&check(&bundle, empty.catalogue()), empty.pair(), &empty).unwrap();
+        let active = active_from_prepared_version_one_candidate(&version_one);
+
+        let prepared = prepare_checked_standard_upgrade(&standard, &active).unwrap();
+        let candidate = prepared.application_revision().candidate();
+        assert_eq!(
+            candidate.object_types()[0].fields()[0].resolved_type(),
+            ResolvedType::scalar(StandardScalar::Boolean)
+        );
+        let function = &candidate.functions()[0];
+        assert_eq!(
+            function.parameters()[0].resolved_type(),
+            ResolvedType::scalar(StandardScalar::Boolean)
+        );
+        let item = candidate.object_types()[0].id();
+        let FunctionReturn::Rows(columns) = function.return_type() else {
+            panic!("the mutation fixture must retain a ROWS return")
+        };
+        assert!(matches!(
+            columns[0].resolved_type(),
+            ResolvedType::Reference { target } if target == item
+        ));
+        assert!(
+            prepared
+                .application_revision()
+                .references()
+                .iter()
+                .any(|reference| {
+                    reference.target()
+                        == DefinitionReferenceTarget::ValueType(TypeId::from_bytes([3; 16]))
+                })
+        );
+        let revision = &prepared.application_revision().new_function_revisions()[0];
+        assert_eq!(
+            revision.semantic_hash_version(),
+            FunctionSemanticHashVersion::Version2
+        );
+        assert_eq!(revision.artifact().kind(), ExecutableArtifactKind::Server);
     }
 
     #[test]
@@ -6023,10 +6168,18 @@ mod tests {
         let revision = &prepared.application_revision().new_function_revisions()[0];
         assert_eq!(function.domain(), FunctionDomain::Client);
         assert_eq!(
+            function.return_type(),
+            &FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Boolean))
+        );
+        assert_eq!(
             revision.semantic_hash_version(),
             FunctionSemanticHashVersion::Version2
         );
         assert_eq!(revision.artifact().kind(), ExecutableArtifactKind::Client);
+        assert_eq!(
+            revision.artifact().payload(),
+            b"ORNACP\0\0\0\0\0\x01\x01\x01"
+        );
         assert_eq!(prepared.application_revision().references().len(), 1);
         assert_eq!(
             prepared.application_revision().references()[0].target(),
