@@ -2,12 +2,17 @@ mod support;
 
 use std::{error::Error, str::FromStr};
 
+use orna_client::evaluate_client_function;
+use orna_compiler::{
+    StandardApplicationCheckContext, check, check_standard_application, prepare,
+    prepare_standard_application,
+};
 use orna_core::{
     CatalogueRevisionId, ExpressionId, FieldId, FunctionId, FunctionRevisionId, ParameterId,
     SchemaId, SourceBundleId, SourceRevisionId, SourceUnitId, TypeId,
     canonical_hash::{
-        artifact_payload_digest, catalogue_digest, catalogue_digest_with_context,
-        function_declaration_digest, function_semantic_digest,
+        CanonicalHashError, artifact_payload_digest, catalogue_digest,
+        catalogue_digest_with_context, function_declaration_digest, function_semantic_digest,
         function_semantic_digest_with_version, source_bundle_digest, source_revision_record_digest,
         source_unit_content_digest,
     },
@@ -22,14 +27,25 @@ use orna_core::{
         DefinitionReferenceKind, DefinitionReferenceTarget, DurableCatalogueRevisionRole,
         EMPTY_APPLICATION_CATALOGUE_REVISION_ID, ExecutableArtifact, ExecutableArtifactKind,
         ExpressionArtifact, FunctionRevisionRecord, FunctionSemanticHashVersion,
-        RevisionInvariantError, SourceOrigin, StoredSourceUnit, VerifiedStandardLibrarySnapshot,
+        RevisionInvariantError, RevisionPair, SourceOrigin, StoredSourceUnit,
+        VerifiedStandardLibrarySnapshot,
     },
     types::{ResolvedType, StandardScalar},
+    value::RuntimeValue,
 };
 use orna_kernel_postgres::{PostgresKernel, PostgresKernelError};
 use support::{TestDatabase, TestResult, failure, with_test_database};
 
 const SCHEMA_SOURCE: &str = "schema café;\n";
+const STANDARD_CLIENT_SCHEMA_SOURCE: &str = "CREATE SCHEMA app;\n";
+const STANDARD_CLIENT_TRUE_SOURCE: &str =
+    "CREATE SCHEMA app;\nCREATE CLIENT FUNCTION app.enabled() RETURNS BOOLEAN RETURN TRUE;\n";
+const STANDARD_CLIENT_TRUE_SOURCE_ONLY_EDIT: &str = "-- source-only formatting edit\n\
+    CREATE SCHEMA app;\n\n\
+    CREATE CLIENT FUNCTION app.enabled() RETURNS BOOLEAN RETURN TRUE;\n";
+const STANDARD_CLIENT_FALSE_SOURCE: &str =
+    "CREATE SCHEMA app;\nCREATE CLIENT FUNCTION app.enabled() RETURNS BOOLEAN RETURN FALSE;\n";
+const TAMPERED_BOOLEAN_CONTRACT: &str = "orna.kernel.value.boolean@tampered";
 const OBJECT_SOURCE: &str = "schema café;\nobject Α and object 世界;\nconstant π = 3;\n";
 const UNSUPPORTED_FUNCTION_SQL: &str =
     "ALTER TABLE _orna_kernel.catalogue_functions DISABLE TRIGGER ALL;
@@ -87,6 +103,107 @@ async fn recovers_the_exact_bootstrapped_revision_after_reconnecting() -> TestRe
                 && recovered.historical_function_revisions().is_empty(),
             "the bootstrapped empty revision recovered invented members",
         )
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn recovers_and_evaluates_a_standard_boolean_client_function() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = kernel(&database)?;
+        kernel.bootstrap().await?;
+        let empty = kernel.recover().await?;
+
+        let schema_bundle =
+            orna_core::source::SourceBundle::new([orna_core::source::SourceUnit::new(
+                "main.orna",
+                STANDARD_CLIENT_SCHEMA_SOURCE,
+            )])?;
+        let schema_report = check(&schema_bundle, empty.catalogue());
+        require(
+            schema_report.diagnostics().is_empty(),
+            format!(
+                "schema-only compiler diagnostics: {:?}",
+                schema_report.diagnostics()
+            ),
+        )?;
+        let schema_candidate = prepare(&schema_report, empty.pair(), &empty)?;
+        let version_one = kernel.apply(&schema_candidate).await?;
+
+        let upgrade = orna_standard::prepare_standard_upgrade(&version_one)?;
+        let version_two = kernel.apply_standard_upgrade(&upgrade).await?;
+        let candidate =
+            standard_client_candidate(STANDARD_CLIENT_TRUE_SOURCE, &version_two, &upgrade)?;
+        let active = kernel.apply(&candidate).await?;
+        let first = require_standard_client_execution(&active, &upgrade, true)?;
+
+        let source_only_candidate =
+            standard_client_candidate(STANDARD_CLIENT_TRUE_SOURCE_ONLY_EDIT, &active, &upgrade)?;
+        require(
+            source_only_candidate.new_function_revisions().is_empty(),
+            "source-only standard CLIENT preparation allocated an immutable function revision",
+        )?;
+        let source_only = kernel.apply(&source_only_candidate).await?;
+        let reused = require_standard_client_execution(&source_only, &upgrade, true)?;
+        require(
+            source_only.pair().source() != active.pair().source()
+                && source_only.source() == source_only_candidate.source()
+                && reused.function == first.function
+                && reused.revision == first.revision,
+            "source-only standard CLIENT apply changed source or immutable function facts",
+        )?;
+
+        let false_candidate =
+            standard_client_candidate(STANDARD_CLIENT_FALSE_SOURCE, &source_only, &upgrade)?;
+        require(
+            false_candidate.new_function_revisions().len() == 1,
+            "Boolean FALSE preparation did not allocate one immutable function revision",
+        )?;
+        let changed = kernel.apply(&false_candidate).await?;
+        let false_result = require_standard_client_execution(&changed, &upgrade, false)?;
+        require(
+            false_result.function == first.function
+                && false_result.revision.id() != first.revision.id()
+                && first.revision.revision_number() == 1
+                && false_result.revision.revision_number() == 2
+                && false_result.revision.semantic_hash() != first.revision.semantic_hash()
+                && changed.historical_function_revisions() == [first.revision.clone()],
+            "Boolean FALSE standard CLIENT apply did not retain exact immutable history",
+        )?;
+
+        let restarted = PostgresKernel::new(database.config()?).recover().await?;
+        let restarted_result = require_standard_client_execution(&restarted, &upgrade, false)?;
+        require(
+            restarted_result.pair == false_result.pair
+                && restarted_result.function == false_result.function
+                && restarted_result.revision == false_result.revision
+                && restarted.historical_function_revisions()
+                    == changed.historical_function_revisions(),
+            "reconnect changed standard CLIENT active or historical facts",
+        )?;
+
+        let pointer = active_revision_pair(&database).await?;
+        require(
+            standard_boolean_contract(&database, &upgrade, Some(TAMPERED_BOOLEAN_CONTRACT)).await?
+                == TAMPERED_BOOLEAN_CONTRACT,
+            "Boolean standard contract tamper did not retain its exact database fact",
+        )?;
+        let tampered = snapshot_kernel_tables(&database).await?;
+        let error = recovery_error(&database).await?;
+        require_standard_library_digest_mismatch(
+            &error,
+            upgrade.verified_standard_snapshot().revision().to_bytes(),
+        )?;
+        require(
+            active_revision_pair(&database).await? == pointer
+                && snapshot_kernel_tables(&database).await? == tampered
+                && standard_boolean_contract(&database, &upgrade, None).await?
+                    == TAMPERED_BOOLEAN_CONTRACT,
+            "rejected standard digest tamper repaired durable state",
+        )?;
+        require_no_session_leaks(&database).await?;
+        Ok(())
     })
     .await
 }
@@ -4564,6 +4681,269 @@ fn exact_identity(value: Vec<u8>, description: &str) -> TestResult<[u8; 16]> {
 
 fn kernel(database: &TestDatabase) -> TestResult<PostgresKernel> {
     Ok(PostgresKernel::from_str(&database.connection_string())?)
+}
+
+fn standard_client_candidate(
+    source: &str,
+    active: &orna_core::revision::ActiveDatabaseRevision,
+    upgrade: &orna_standard::StandardUpgrade,
+) -> TestResult<orna_core::revision::DeployableRevision> {
+    let context = StandardApplicationCheckContext::try_new(
+        active.catalogue(),
+        upgrade.checked_standard_library(),
+    )?;
+    let bundle = orna_core::source::SourceBundle::new([orna_core::source::SourceUnit::new(
+        "main.orna",
+        source,
+    )])?;
+    let report = check_standard_application(&bundle, &context);
+    require(
+        report.diagnostics().is_empty(),
+        format!(
+            "standard CLIENT compiler diagnostics: {:?}",
+            report.diagnostics()
+        ),
+    )?;
+    Ok(prepare_standard_application(
+        &report,
+        active.pair(),
+        active,
+    )?)
+}
+
+#[derive(Clone)]
+struct StandardClientExecutionFacts {
+    pair: RevisionPair,
+    function: FunctionId,
+    revision: FunctionRevisionRecord,
+}
+
+fn require_standard_client_execution(
+    active: &orna_core::revision::ActiveDatabaseRevision,
+    upgrade: &orna_standard::StandardUpgrade,
+    expected_value: bool,
+) -> TestResult<StandardClientExecutionFacts> {
+    let expected_standard = upgrade.verified_standard_snapshot();
+    let selected_standard = active
+        .catalogue_hash_context()
+        .standard()
+        .ok_or_else(|| failure("standard CLIENT active revision has no selected standard"))?;
+    require(
+        matches!(
+            active.catalogue_hash_context(),
+            CatalogueHashContext::Version2 { .. }
+        ) && selected_standard.revision() == expected_standard.revision()
+            && selected_standard.catalogue().revision() == expected_standard.catalogue().revision()
+            && selected_standard.digest() == expected_standard.digest()
+            && selected_standard.digest_version() == expected_standard.digest_version()
+            && selected_standard.language_version() == expected_standard.language_version()
+            && selected_standard.source().bundle() == expected_standard.source().bundle()
+            && selected_standard.source().id() == expected_standard.source().id()
+            && selected_standard.source().bundle_hash() == expected_standard.source().bundle_hash()
+            && selected_standard.source().revision_hash()
+                == expected_standard.source().revision_hash(),
+        "standard CLIENT active revision changed the selected standard identity",
+    )?;
+    require(
+        selected_standard
+            .catalogue()
+            .value_type_by_id(orna_standard::BOOLEAN_TYPE_ID)
+            .is_some_and(|value_type| {
+                value_type.representation_contract() == "orna.kernel.value.boolean@1"
+            }),
+        "selected standard does not retain the exact Boolean value contract",
+    )?;
+
+    let function = active
+        .catalogue()
+        .functions()
+        .iter()
+        .find(|function| function.name().parts() == ["app".to_owned(), "enabled".to_owned()])
+        .ok_or_else(|| failure("standard CLIENT Boolean function was not recovered"))?;
+    require(
+        matches!(
+            function.return_type(),
+            orna_core::catalogue::FunctionReturn::Single(ResolvedType::Value(id))
+                if *id == orna_standard::BOOLEAN_TYPE_ID
+        ),
+        "standard CLIENT return did not retain the Boolean Value identity",
+    )?;
+    let revision = active
+        .function_revisions()
+        .iter()
+        .find(|revision| {
+            revision.function() == function.id() && revision.id() == function.current_revision()
+        })
+        .ok_or_else(|| failure("standard CLIENT function has no current immutable revision"))?
+        .clone();
+    require(
+        revision.semantic_hash_version() == FunctionSemanticHashVersion::Version2,
+        "standard CLIENT function did not retain the version-two semantic hash contract",
+    )?;
+    let references = active
+        .references()
+        .iter()
+        .filter(|reference| {
+            reference.source_function() == function.id()
+                && reference.source_revision() == revision.id()
+        })
+        .collect::<Vec<_>>();
+    require(
+        references.len() == 1
+            && references[0].ordinal() == 0
+            && references[0].kind() == DefinitionReferenceKind::NamedType
+            && matches!(
+                references[0].target(),
+                DefinitionReferenceTarget::ValueType(id) if id == orna_standard::BOOLEAN_TYPE_ID
+            ),
+        "standard CLIENT function changed its exact NamedType ValueType reference",
+    )?;
+
+    let result = evaluate_client_function(active, function.id())?;
+    require(
+        result.context().pair() == active.pair()
+            && result.context().function() == function.id()
+            && result.context().function_revision() == revision.id()
+            && result.value() == &RuntimeValue::Boolean(expected_value),
+        "recovered standard CLIENT evaluation returned the wrong context or value",
+    )?;
+    Ok(StandardClientExecutionFacts {
+        pair: active.pair(),
+        function: function.id(),
+        revision,
+    })
+}
+
+async fn active_revision_pair(database: &TestDatabase) -> TestResult<RevisionPair> {
+    let session = database.open().await?;
+    let operation = async {
+        let row = session
+            .client()
+            .query_one(
+                "SELECT source_revision_id, catalogue_revision_id
+                 FROM _orna_kernel.active_revision
+                 WHERE singleton = true",
+                &[],
+            )
+            .await?;
+        Ok(RevisionPair::new(
+            SourceRevisionId::from_bytes(exact_identity(
+                row.try_get("source_revision_id")?,
+                "active source revision identity",
+            )?),
+            CatalogueRevisionId::from_bytes(exact_identity(
+                row.try_get("catalogue_revision_id")?,
+                "active catalogue revision identity",
+            )?),
+        ))
+    }
+    .await;
+    finish_session(
+        operation,
+        session.shutdown().await,
+        "active revision pointer inspection",
+    )
+}
+
+async fn standard_boolean_contract(
+    database: &TestDatabase,
+    upgrade: &orna_standard::StandardUpgrade,
+    replacement: Option<&str>,
+) -> TestResult<String> {
+    let standard = upgrade.verified_standard_snapshot();
+    let revision = standard.revision().to_bytes().to_vec();
+    let boolean = orna_standard::BOOLEAN_TYPE_ID.to_bytes().to_vec();
+    let replacement = replacement.map(str::to_owned);
+    let session = database.open().await?;
+    let operation = async {
+        if let Some(replacement) = replacement.as_deref() {
+            let affected = session
+                .client()
+                .execute(
+                    "UPDATE _orna_kernel.standard_catalogue_value_types
+                     SET representation_contract = $1
+                     WHERE standard_library_revision_id = $2 AND type_id = $3",
+                    &[&replacement, &revision, &boolean],
+                )
+                .await?;
+            require(
+                affected == 1,
+                format!("Boolean standard contract update changed {affected} rows"),
+            )?;
+        }
+        let row = session
+            .client()
+            .query_one(
+                "SELECT representation_contract
+                 FROM _orna_kernel.standard_catalogue_value_types
+                 WHERE standard_library_revision_id = $1 AND type_id = $2",
+                &[&revision, &boolean],
+            )
+            .await?;
+        Ok(row.try_get("representation_contract")?)
+    }
+    .await;
+    finish_session(
+        operation,
+        session.shutdown().await,
+        "Boolean standard contract inspection or update",
+    )
+}
+
+fn require_standard_library_digest_mismatch(
+    error: &PostgresKernelError,
+    expected_revision: [u8; 16],
+) -> TestResult<()> {
+    let PostgresKernelError::CanonicalHash(CanonicalHashError::StandardLibraryDigestMismatch {
+        revision,
+    }) = error
+    else {
+        return Err(failure(format!(
+            "Boolean standard contract tamper produced the wrong recovery error: {error}"
+        )));
+    };
+    require(
+        revision.to_bytes() == expected_revision,
+        "Boolean standard contract tamper reported the wrong standard revision",
+    )?;
+    require(
+        error.to_string()
+            == "canonical durable hash failed: stored standard library digest differs from canonical facts",
+        "Boolean standard contract tamper changed the kernel error display",
+    )?;
+    let source = Error::source(error).ok_or_else(|| {
+        failure("Boolean standard contract tamper lost the canonical error source")
+    })?;
+    require(
+        source.to_string() == "stored standard library digest differs from canonical facts"
+            && Error::source(source).is_none(),
+        "Boolean standard contract tamper changed the canonical error source chain",
+    )
+}
+
+async fn require_no_session_leaks(database: &TestDatabase) -> TestResult<()> {
+    let session = database.open().await?;
+    let operation: TestResult<(i64, i64)> = async {
+        let row = session
+            .client()
+            .query_one(
+                "SELECT count(*) FILTER (WHERE state = 'idle in transaction'),
+                        count(*) FILTER (WHERE pid <> pg_catalog.pg_backend_pid())
+                 FROM pg_catalog.pg_stat_activity
+                 WHERE datname = pg_catalog.current_database()",
+                &[],
+            )
+            .await?;
+        Ok((row.try_get(0)?, row.try_get(1)?))
+    }
+    .await;
+    let (idle, others) = finish_session(
+        operation,
+        session.shutdown().await,
+        "session leak inspection",
+    )?;
+    require(idle == 0, format!("found {idle} idle transaction(s)"))?;
+    require(others == 0, format!("found {others} leaked session(s)"))
 }
 
 fn require(condition: bool, message: impl Into<String>) -> TestResult<()> {
