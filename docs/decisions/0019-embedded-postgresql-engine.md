@@ -424,6 +424,12 @@ diagnostics. Both dynamic-loader functions fail with SQLSTATE `0A000` and the
 last primary message above, without a detail or hint, before resolving or
 opening a file name.
 
+On Debian 12 amd64, the filter checks `__X32_SYSCALL_BIT` immediately after it
+validates `AUDIT_ARCH_X86_64` and loads the syscall number. It returns `EPERM`
+for every x32-numbered syscall before any native x86-64 syscall comparison.
+Orna does not use the x32 ABI. An x32 syscall number cannot select an alias of
+`execve`, `execveat`, `memfd_create`, or an executable mapping operation.
+
 Preload lists, JIT, injection points, output plugins, archive libraries,
 archive commands, restore commands, recovery-end commands, and SSL remain
 disabled. `allow_alter_system=off` and an exact empty
@@ -706,7 +712,9 @@ fresh network-disabled Debian 12 amd64 machine:
   thread exists before every direct linked-entry fork;
 * every linked role inherits the executable-load filter, and process tracing
   observes no `execve`, `execveat`, executable memory-backed file, or later
-  executable mapping;
+  executable mapping; the proof invokes one harmless x32-numbered syscall
+  after filter installation and requires `EPERM`, treating `ENOSYS`, success,
+  a signal, or any other error as failure;
 * support materialisation accepts only the manifest inventory and exact
   data-only modes and rejects missing, changed, extra, linked, executable, and
   raced members before engine entry;
@@ -744,7 +752,7 @@ than three files.
 | Conventional Commit | Exact PostgreSQL files | Required result |
 | --- | --- | --- |
 | `build(embedded): add linked backend archive` | `src/backend/Makefile`; `src/backend/main/main.c`; `src/include/orna_embedded.h` | Add the private backend entry and deterministic flattened backend archive without changing the ordinary PostgreSQL executable. |
-| `feat(embedded): add runtime capabilities` | `src/backend/main/orna_embedded.c`; `src/include/orna_embedded.h` | Add the one-shot support root, initialisation capabilities, and executable-load filter implementation without activating it. |
+| `feat(embedded): add runtime capabilities` | `src/backend/main/orna_embedded.c`; `src/include/orna_embedded.h` | Add the one-shot support root, initialisation capabilities, and executable-load filter implementation without activating it. Reject every x32-numbered syscall with `EPERM` before native syscall dispatch and fail compilation when the accepted x86-64 syscall definitions are absent. |
 | `build(embedded): link runtime capabilities` | `src/backend/Makefile`; `src/backend/main/main.c` | Link the runtime object and require the fixed support root and filter before private backend dispatch. |
 | `fix(embedded): use fixed postmaster support paths` | `src/backend/postmaster/postmaster.c`; `src/port/path.c` | Remove executable-relative postmaster, share, and `pkglib` path discovery from linked roles. |
 | `feat(embedded): reject executable SQL utilities` | `src/backend/tcop/utility.c`; `src/include/tcop/utility.h` | Reject executable utility statements before hooks, privilege checks, mutation, or file access. |
@@ -816,6 +824,7 @@ prototype history and are not current source or build authority.
 | `docs(plan): sequence PostgreSQL source migration` | `TODO.md` | Put the inactive submodule import, fork pointer advances, parallel native build, parity gate, atomic cut-over, and legacy removal before further lifecycle work. |
 | `build(postgres): pin PostgreSQL 18.4 source` | `.gitmodules`; `third_party/postgresql` | Add `https://github.com/workingdir/postgresql.git` at the exact official base without activating it as a build input. |
 | `chore(postgres): advance linked backend archive` | `third_party/postgresql` | Advance the gitlink by only `build(embedded): add linked backend archive` after its ordinary and private-target gates pass. |
+| `fix(postgres): reject x32 syscall aliases` | `packaging/postgresql/embedded-postgresql-18.4/0002-embedded-runtime-capabilities-and-seccomp.patch`; `packaging/postgresql/embedded-build.toml`; `packaging/postgresql/build-embedded.sh` | Apply the same x32-first denial to the still-selected legacy patch authority, update its digest, advance the embedded identity to `.2`, and prove in a fresh filtered child that an x32-numbered harmless syscall returns `EPERM` before the legacy build is reproduced twice. |
 | `chore(postgres): advance runtime capabilities` | `third_party/postgresql` | Advance the gitlink by only `feat(embedded): add runtime capabilities` after its ordinary build gate passes. |
 | `chore(postgres): advance runtime linkage` | `third_party/postgresql` | Advance the gitlink by only `build(embedded): link runtime capabilities` after its ordinary and private-target gates pass. |
 | `chore(postgres): advance fixed postmaster paths` | `third_party/postgresql` | Advance the gitlink by only `fix(embedded): use fixed postmaster support paths` after its ordinary build gate passes. |
