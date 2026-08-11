@@ -4,7 +4,7 @@
   "type": "module",
   "packageManager": "yarn@4.17.1",
   "scripts": {
-    "build": "astro check && astro build",
+    "build": "astro check && astro build && node scripts/postprocess-sourcey.mjs",
     "check": "astro check",
     "dev": "astro dev",
     "preview": "astro preview"
