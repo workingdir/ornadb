@@ -974,7 +974,7 @@ fn encode_catalogue_object_types(
             encoder.field_id(field.id());
             encoder.text(field.name(), "field name")?;
             encoder.u32(field.ordinal());
-            encoder.resolved_type(field.resolved_type());
+            encode_version_one_resolved_type(encoder, field.resolved_type());
             encoder.boolean(field.nullable());
             encoder.boolean(field.unique());
             encoder.option_expression_id(field.default_expression());
@@ -1005,7 +1005,7 @@ fn encode_catalogue_functions(
             encoder.parameter_id(parameter.id());
             encoder.text(parameter.name(), "parameter name")?;
             encoder.u32(parameter.ordinal());
-            encoder.resolved_type(parameter.resolved_type());
+            encode_version_one_resolved_type(encoder, parameter.resolved_type());
             encoder.option_expression_id(parameter.default_expression());
         }
 
@@ -1108,7 +1108,7 @@ fn encode_parameter_semantics(
 ) -> Result<(), CanonicalHashError> {
     encoder.parameter_id(parameter.id());
     encoder.u32(parameter.ordinal());
-    encoder.resolved_type(parameter.resolved_type());
+    encode_version_one_resolved_type(encoder, parameter.resolved_type());
     encode_optional_expression_artifact_descriptor(
         encoder,
         parameter.default_expression(),
@@ -1137,7 +1137,7 @@ fn encode_function_return(
     match function_return {
         FunctionReturn::Single(resolved_type) => {
             encoder.u8(1);
-            encoder.resolved_type(*resolved_type);
+            encode_version_one_resolved_type(encoder, *resolved_type);
         }
         FunctionReturn::Rows(columns) => {
             encoder.u8(2);
@@ -1148,7 +1148,7 @@ fn encode_function_return(
                     encoder.text(column.name(), "function return column name")?;
                 }
                 encoder.u32(column.ordinal());
-                encoder.resolved_type(column.resolved_type());
+                encode_version_one_resolved_type(encoder, column.resolved_type());
             }
         }
     }
@@ -1556,6 +1556,29 @@ fn reference_sort_key(reference: &DefinitionReference) -> Vec<u8> {
     encoder.bytes
 }
 
+/// Encodes every current resolved type with the durable version-1 bytes.
+///
+/// This deliberate exhaustive match prevents a future `ResolvedType` variant
+/// from silently reusing or omitting a legacy byte representation. It remains
+/// the sole version-1 policy. The later value-type/version-2 row owns that
+/// variant's encoding.
+fn encode_version_one_resolved_type(encoder: &mut Encoder, resolved_type: ResolvedType) {
+    match resolved_type {
+        ResolvedType::Scalar(scalar) => {
+            encoder.u8(1);
+            encoder.standard_scalar(scalar);
+        }
+        ResolvedType::Named(id) => {
+            encoder.u8(2);
+            encoder.type_id(id);
+        }
+        ResolvedType::Reference { target } => {
+            encoder.u8(3);
+            encoder.type_id(target);
+        }
+    }
+}
+
 struct Encoder {
     bytes: Vec<u8>,
 }
@@ -1706,23 +1729,6 @@ impl Encoder {
             Some(id) => {
                 self.option_some();
                 self.expression_id(id);
-            }
-        }
-    }
-
-    fn resolved_type(&mut self, resolved_type: ResolvedType) {
-        match resolved_type {
-            ResolvedType::Scalar(scalar) => {
-                self.u8(1);
-                self.standard_scalar(scalar);
-            }
-            ResolvedType::Named(id) => {
-                self.u8(2);
-                self.type_id(id);
-            }
-            ResolvedType::Reference { target } => {
-                self.u8(3);
-                self.type_id(target);
             }
         }
     }
@@ -2453,6 +2459,24 @@ mod tests {
             hex(catalogue_digest(&empty_catalogue, &[], &[], &[], &[]).unwrap()),
             "02dc700934a603ff73b56e1f63e8051a103922aa267cbf1e984ed3cf7964160b"
         );
+    }
+
+    #[test]
+    fn version_one_resolved_type_encoding_has_exact_tags_and_payloads() {
+        for (scalar, tag) in StandardScalar::ALL.into_iter().zip(1_u8..=13) {
+            let mut encoder = Encoder::new(&[]);
+            encode_version_one_resolved_type(&mut encoder, ResolvedType::scalar(scalar));
+            assert_eq!(encoder.bytes, vec![1, tag]);
+        }
+
+        let type_id = TypeId::from_bytes(id::<44>());
+        let mut named = Encoder::new(&[]);
+        encode_version_one_resolved_type(&mut named, ResolvedType::named(type_id));
+        assert_eq!(named.bytes, [vec![2], id::<44>().to_vec()].concat());
+
+        let mut reference = Encoder::new(&[]);
+        encode_version_one_resolved_type(&mut reference, ResolvedType::reference(type_id));
+        assert_eq!(reference.bytes, [vec![3], id::<44>().to_vec()].concat());
     }
 
     #[test]
