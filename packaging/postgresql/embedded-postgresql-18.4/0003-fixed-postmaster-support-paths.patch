@@ -1,0 +1,44 @@
+diff -U0 -Nr a/src/backend/postmaster/postmaster.c b/src/backend/postmaster/postmaster.c
+--- a/src/backend/postmaster/postmaster.c
++++ b/src/backend/postmaster/postmaster.c
+@@ -99,0 +100 @@
++#include "orna_embedded.h"
+@@ -1463,0 +1465 @@
++	const char *support_root;
+@@ -1466,2 +1468,3 @@
+-	/* Locate the postgres executable itself */
+-	if (find_my_exec(argv0, my_exec_path) < 0)
++	(void) argv0;
++	support_root = orna_postgres18_support_root();
++	if (support_root == NULL)
+@@ -1469 +1472,3 @@
+-				(errmsg("%s: could not locate my own executable path", argv0)));
++				(errmsg("Orna PostgreSQL support root is not set")));
++
++	strlcpy(my_exec_path, "/usr/bin/orna", MAXPGPATH);
+@@ -1484 +1489 @@
+-	get_pkglib_path(my_exec_path, pkglib_path);
++	strlcpy(pkglib_path, support_root, MAXPGPATH);
+diff -U0 -Nr a/src/port/path.c b/src/port/path.c
+--- a/src/port/path.c
++++ b/src/port/path.c
+@@ -39,0 +40 @@
++#include "orna_embedded.h"
+@@ -920,0 +922,8 @@
++	const char *support_root = orna_postgres18_support_root();
++
++	if (support_root != NULL)
++	{
++		strlcpy(ret_path, support_root, MAXPGPATH);
++		return;
++	}
++
+@@ -974,0 +984,8 @@
++	const char *support_root = orna_postgres18_support_root();
++
++	if (support_root != NULL)
++	{
++		strlcpy(ret_path, support_root, MAXPGPATH);
++		return;
++	}
++
