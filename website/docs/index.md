@@ -36,14 +36,15 @@ A CLIENT function can return `std.ui.UI`. The local `orna` process then selects 
 
 ## Read the system from its source
 
-The full guide covers:
-
-- object types, value types, and typed `REF<T>` references;
-- SERVER and CLIENT function domains;
-- `sys.invoke` and automatic presentation planning;
-- terminal, JSON, and native UI result paths;
-- principals, grants, capabilities, and per-user state;
-- the dogfooded Inspector and Studio model;
-- current implementation status and open design work.
+- [Getting started](/docs/getting-started/) follows one type and function from source to output.
+- [Object model](/docs/object-model/) covers object identity, value types, and typed `REF<T>` references.
+- [Functions](/docs/functions/) defines the SERVER and CLIENT execution domains.
+- [Invocation](/docs/invocation/) explains `sys.invoke`, presenters, sinks, and automatic runtime planning.
+- [UI and runtimes](/docs/ui-and-runtimes/) defines `std.ui.UI`, state, resources, and the local runtime boundary.
+- [Architecture](/docs/architecture/) shows the process topology, compiler, bootstrap rings, and trust boundaries.
+- [Security and inspection](/docs/security-and-inspection/) covers principals, capabilities, audit, and the Inspector.
+- [Examples](/docs/examples/) traces the connected source set.
+- [Status](/docs/status/) separates implemented work from design and open questions.
+- [Glossary](/docs/glossary/) defines the terms used across the guide.
 
 Return to the [OrnaDB frontpage](/) or inspect the [source repository](https://github.com/workingdir/ornadb).

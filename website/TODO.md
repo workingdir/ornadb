@@ -20,9 +20,9 @@
 
 ## Documentation
 
-- [ ] Write the documentation pages as Markdown in this `docs/` directory.
-- [ ] Keep locked decisions, current proposals, open details, and implementation status distinct.
-- [ ] Verify internal links, search output, and `llms.txt`.
+- [x] Write the documentation pages as Markdown in this `docs/` directory.
+- [x] Keep locked decisions, current proposals, open details, and implementation status distinct.
+- [x] Verify internal links, search output, and `llms.txt`.
 
 ## Review
 

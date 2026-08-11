@@ -34,7 +34,23 @@ export default defineConfig({
                     groups: [
                         {
                             group: "Start here",
-                            pages: ["index"],
+                            pages: ["index", "getting-started", "status"],
+                        },
+                        {
+                            group: "Language",
+                            pages: ["object-model", "functions"],
+                        },
+                        {
+                            group: "Execution",
+                            pages: ["invocation", "ui-and-runtimes", "architecture"],
+                        },
+                        {
+                            group: "Trust and tools",
+                            pages: ["security-and-inspection"],
+                        },
+                        {
+                            group: "Reference",
+                            pages: ["examples", "glossary"],
                         },
                     ],
                 }),
