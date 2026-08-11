@@ -1,0 +1,69 @@
+diff -U0 -Nr a/src/bin/initdb/initdb.c b/src/bin/initdb/initdb.c
+--- a/src/bin/initdb/initdb.c
++++ b/src/bin/initdb/initdb.c
+@@ -301 +300,0 @@
+-static void load_plpgsql(FILE *cmdfd);
+@@ -1939,9 +1938,41 @@
+-	/*
+-	 * Set the collation version for collations defined in pg_collation.dat,
+-	 * but not the ones where we know that the collation behavior will never
+-	 * change.
+-	 */
+-	PG_CMD_PUTS("UPDATE pg_collation SET collversion = pg_collation_actual_version(oid) WHERE collname = 'unicode';\n\n");
+-
+-	/* Import all collations we can find in the operating system */
+-	PG_CMD_PUTS("SELECT pg_import_system_collations('pg_catalog');\n\n");
++	PG_CMD_PUTS("CREATE TEMP TABLE pg_temp.orna_collation_facts "
++				"(valid boolean NOT NULL CONSTRAINT "
++				"orna_collation_facts_valid CHECK (valid)) ON COMMIT DROP; "
++				"INSERT INTO pg_temp.orna_collation_facts VALUES ((SELECT count(*) = 7 FROM pg_collation) AND "
++				"(SELECT count(*) = 1 FROM pg_collation WHERE oid = 100 "
++				"AND collname = 'default' AND collnamespace = 11 AND collowner = 10 "
++				"AND collprovider = 'd' AND collisdeterministic AND collencoding = -1 "
++				"AND collcollate IS NULL AND collctype IS NULL AND colllocale IS NULL "
++				"AND collicurules IS NULL AND collversion IS NULL) AND "
++				"(SELECT count(*) = 1 FROM pg_collation WHERE oid = 950 "
++				"AND collname = 'C' AND collnamespace = 11 AND collowner = 10 "
++				"AND collprovider = 'c' AND collisdeterministic AND collencoding = -1 "
++				"AND collcollate = 'C' AND collctype = 'C' AND colllocale IS NULL "
++				"AND collicurules IS NULL AND collversion IS NULL) AND "
++				"(SELECT count(*) = 1 FROM pg_collation WHERE oid = 951 "
++				"AND collname = 'POSIX' AND collnamespace = 11 AND collowner = 10 "
++				"AND collprovider = 'c' AND collisdeterministic AND collencoding = -1 "
++				"AND collcollate = 'POSIX' AND collctype = 'POSIX' "
++				"AND colllocale IS NULL AND collicurules IS NULL AND collversion IS NULL) AND "
++				"(SELECT count(*) = 1 FROM pg_collation WHERE oid = 962 "
++				"AND collname = 'ucs_basic' AND collnamespace = 11 AND collowner = 10 "
++				"AND collprovider = 'b' AND collisdeterministic AND collencoding = 6 "
++				"AND collcollate IS NULL AND collctype IS NULL AND colllocale = 'C' "
++				"AND collicurules IS NULL AND collversion = '1') AND "
++				"(SELECT count(*) = 1 FROM pg_collation WHERE oid = 963 "
++				"AND collname = 'unicode' AND collnamespace = 11 AND collowner = 10 "
++				"AND collprovider = 'i' AND collisdeterministic AND collencoding = -1 "
++				"AND collcollate IS NULL AND collctype IS NULL AND colllocale = 'und' "
++				"AND collicurules IS NULL AND collversion IS NULL) AND "
++				"(SELECT count(*) = 1 FROM pg_collation WHERE oid = 811 "
++				"AND collname = 'pg_c_utf8' AND collnamespace = 11 AND collowner = 10 "
++				"AND collprovider = 'b' AND collisdeterministic AND collencoding = 6 "
++				"AND collcollate IS NULL AND collctype IS NULL AND colllocale = 'C.UTF-8' "
++				"AND collicurules IS NULL AND collversion = '1') AND "
++				"(SELECT count(*) = 1 FROM pg_collation WHERE oid = 6411 "
++				"AND collname = 'pg_unicode_fast' AND collnamespace = 11 AND collowner = 10 "
++				"AND collprovider = 'b' AND collisdeterministic AND collencoding = 6 "
++				"AND collcollate IS NULL AND collctype IS NULL "
++				"AND colllocale = 'PG_UNICODE_FAST' AND collicurules IS NULL "
++				"AND collversion = '1')); "
++				"DROP TABLE pg_temp.orna_collation_facts;\n\n");
+@@ -2155,9 +2185,0 @@
+- * load PL/pgSQL server-side language
+- */
+-static void
+-load_plpgsql(FILE *cmdfd)
+-{
+-	PG_CMD_PUTS("CREATE EXTENSION plpgsql;\n\n");
+-}
+-
+-/*
+@@ -3307,2 +3328,0 @@
+-
+-	load_plpgsql(cmdfd);
