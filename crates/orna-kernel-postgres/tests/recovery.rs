@@ -2995,7 +2995,7 @@ async fn insert_function_record(
     };
     let (return_shape, return_kind, return_scalar, return_target) = match function.return_type() {
         FunctionReturn::Single(resolved) => {
-            let (kind, scalar, target) = resolved_type_columns(*resolved);
+            let (kind, scalar, target) = resolved_type_columns(*resolved)?;
             ("single", Some(kind), scalar, target)
         }
         FunctionReturn::Rows(_) => ("rows", None, None, None),
@@ -3040,7 +3040,7 @@ async fn insert_parameter_record(
     parameter: &ParameterDefinition,
     source: SourceOrigin,
 ) -> TestResult<()> {
-    let (kind, scalar, target) = resolved_type_columns(parameter.resolved_type());
+    let (kind, scalar, target) = resolved_type_columns(parameter.resolved_type())?;
     let default_expression = parameter
         .default_expression()
         .map(|expression| expression.to_bytes().to_vec());
@@ -3077,7 +3077,7 @@ async fn insert_return_record(
     column: &FunctionReturnColumnDefinition,
     source: SourceOrigin,
 ) -> TestResult<()> {
-    let (kind, scalar, target) = resolved_type_columns(column.resolved_type());
+    let (kind, scalar, target) = resolved_type_columns(column.resolved_type())?;
     client
         .execute(
             "INSERT INTO _orna_kernel.catalogue_function_return_columns
@@ -3263,14 +3263,26 @@ fn supported_reference_kind_sql(kind: DefinitionReferenceKind) -> TestResult<&'s
         .ok_or_else(|| failure("unsupported definition reference kind in recovery fixture"))
 }
 
-fn resolved_type_columns(
-    resolved: ResolvedType,
-) -> (&'static str, Option<String>, Option<Vec<u8>>) {
-    match resolved {
-        ResolvedType::Scalar(scalar) => ("scalar", Some(scalar_storage(scalar).0.to_owned()), None),
-        ResolvedType::Named(target) => ("named", None, Some(target.to_bytes().to_vec())),
-        ResolvedType::Reference { target } => ("reference", None, Some(target.to_bytes().to_vec())),
+type ResolvedTypeColumns = (&'static str, Option<String>, Option<Vec<u8>>);
+
+fn resolved_type_columns(resolved: ResolvedType) -> TestResult<ResolvedTypeColumns> {
+    if let Some(scalar) = resolved.legacy_scalar() {
+        return Ok(("scalar", Some(scalar_storage(scalar).0.to_owned()), None));
     }
+    if let Some(target) = resolved.named_type() {
+        return Ok(("named", None, Some(target.to_bytes().to_vec())));
+    }
+    if let Some(target) = resolved.reference_target() {
+        return Ok(("reference", None, Some(target.to_bytes().to_vec())));
+    }
+    if resolved.value_type().is_some() {
+        return Err(failure(
+            "resolved value types are not supported by legacy recovery fixture encoding",
+        ));
+    }
+    Err(failure(
+        "resolved type must expose one supported legacy recovery shape",
+    ))
 }
 
 async fn install_object_revision(
@@ -3484,7 +3496,7 @@ async fn install_object_revision(
             .await?;
         session
             .client()
-            .batch_execute(&physical_catalogue_sql(&objects))
+            .batch_execute(&physical_catalogue_sql(&objects)?)
             .await?;
         session.client().batch_execute("COMMIT").await?;
 
@@ -3531,11 +3543,7 @@ async fn insert_field_record(
     field: &FieldDefinition,
     source: SourceOrigin,
 ) -> TestResult<()> {
-    let (kind, scalar, target) = match field.resolved_type() {
-        ResolvedType::Scalar(scalar) => ("scalar", Some(scalar_storage(scalar).0.to_owned()), None),
-        ResolvedType::Named(target) => ("named", None, Some(target.to_bytes().to_vec())),
-        ResolvedType::Reference { target } => ("reference", None, Some(target.to_bytes().to_vec())),
-    };
+    let (kind, scalar, target) = resolved_type_columns(field.resolved_type())?;
     let default_expression = field
         .default_expression()
         .map(|expression| expression.to_bytes().to_vec());
@@ -3593,7 +3601,7 @@ fn scalar_storage(scalar: StandardScalar) -> (&'static str, &'static str) {
     }
 }
 
-fn physical_catalogue_sql(objects: &[ObjectTypeDefinition]) -> String {
+fn physical_catalogue_sql(objects: &[ObjectTypeDefinition]) -> TestResult<String> {
     let mut statements = Vec::new();
     let mut references = Vec::new();
     for object in objects {
@@ -3609,14 +3617,23 @@ fn physical_catalogue_sql(objects: &[ObjectTypeDefinition]) -> String {
         for field in object.fields() {
             let field_hex = raw_id_hex(field.id().to_bytes());
             let column = format!("f_{field_hex}");
-            let sql_type = match field.resolved_type() {
-                ResolvedType::Scalar(scalar) => scalar_storage(scalar).1,
-                ResolvedType::Reference { .. } => "bytea",
-                ResolvedType::Named(_) => "bytea",
+            let resolved = field.resolved_type();
+            let sql_type = if let Some(scalar) = resolved.legacy_scalar() {
+                scalar_storage(scalar).1
+            } else if resolved.named_type().is_some() || resolved.reference_target().is_some() {
+                "bytea"
+            } else if resolved.value_type().is_some() {
+                return Err(failure(
+                    "resolved value types are not supported by legacy physical fixture encoding",
+                ));
+            } else {
+                return Err(failure(
+                    "resolved type must expose one supported legacy physical shape",
+                ));
             };
             let nullability = if field.nullable() { "" } else { " NOT NULL" };
             definitions.push(format!("{column} {sql_type}{nullability}"));
-            if let ResolvedType::Reference { target } = field.resolved_type() {
+            if let Some(target) = resolved.reference_target() {
                 definitions.push(format!(
                     "CONSTRAINT ck_{field_hex}_object_id CHECK (octet_length({column}) = 16)"
                 ));
@@ -3646,7 +3663,7 @@ fn physical_catalogue_sql(objects: &[ObjectTypeDefinition]) -> String {
         ));
     }
     statements.extend(references);
-    statements.join("\n")
+    Ok(statements.join("\n"))
 }
 
 fn raw_id_hex(bytes: [u8; 16]) -> String {
