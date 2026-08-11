@@ -34,8 +34,8 @@ use tokio_postgres::{
 use crate::{
     PostgresKernel, PostgresKernelError,
     server_runtime::{
-        ExpectedDefinitionReference, ReferenceReplayMismatch, configure_and_recover, postgres_type,
-        validate_function_reference_replay,
+        ExpectedDefinitionReference, ReferenceReplayMismatch, ResolvedRuntimeType,
+        configure_and_recover, postgres_type, validate_function_reference_replay,
     },
     storage::{DATA_SCHEMA, OBJECT_ID_COLUMN, field_name, relation_name},
 };
@@ -841,7 +841,9 @@ fn validate_identity_selected_function_signature(
             "the identity selector parameter cannot have a default expression",
         ));
     }
-    let ResolvedType::Reference { target } = parameter.resolved_type() else {
+    let ResolvedRuntimeType::Reference(target) =
+        ResolvedRuntimeType::from_resolved_type(parameter.resolved_type())
+    else {
         return Err(function_signature_error(
             function.id(),
             "the selector parameter must use REF to an available object type",
@@ -1111,8 +1113,13 @@ fn runtime_type_is_active(
     catalogue: &orna_core::catalogue::CatalogueSnapshot,
     resolved_type: ResolvedType,
 ) -> bool {
-    postgres_type(resolved_type).is_some()
-        && !matches!(resolved_type, ResolvedType::Reference { target } if catalogue.object_type_by_id(target).is_none())
+    match ResolvedRuntimeType::from_resolved_type(resolved_type) {
+        ResolvedRuntimeType::LegacyScalar(scalar) => {
+            postgres_type(ResolvedType::scalar(scalar)).is_some()
+        }
+        ResolvedRuntimeType::Reference(target) => catalogue.object_type_by_id(target).is_some(),
+        ResolvedRuntimeType::Unsupported => false,
+    }
 }
 
 fn function_signature_error(function: FunctionId, rule: &'static str) -> PostgresKernelError {
@@ -1247,48 +1254,48 @@ fn validate_expression_with_equality_rule(
     Ok(())
 }
 
-const fn supports_ordering_type(resolved_type: ResolvedType) -> bool {
+fn supports_ordering_type(resolved_type: ResolvedType) -> bool {
     matches!(
-        resolved_type,
-        ResolvedType::Scalar(StandardScalar::Integer | StandardScalar::BigInt)
+        ResolvedRuntimeType::from_resolved_type(resolved_type),
+        ResolvedRuntimeType::LegacyScalar(StandardScalar::Integer | StandardScalar::BigInt)
     )
 }
 
 fn supports_equality_type(resolved_type: ResolvedType) -> bool {
     matches!(
-        resolved_type,
-        ResolvedType::Scalar(
+        ResolvedRuntimeType::from_resolved_type(resolved_type),
+        ResolvedRuntimeType::LegacyScalar(
             StandardScalar::Boolean
                 | StandardScalar::Integer
                 | StandardScalar::BigInt
                 | StandardScalar::BinaryLargeObject
-        ) | ResolvedType::Reference { .. }
+        ) | ResolvedRuntimeType::Reference(_)
     )
 }
 
 fn supports_distinct_projection_type(resolved_type: ResolvedType) -> bool {
     matches!(
-        resolved_type,
-        ResolvedType::Scalar(
+        ResolvedRuntimeType::from_resolved_type(resolved_type),
+        ResolvedRuntimeType::LegacyScalar(
             StandardScalar::Boolean
                 | StandardScalar::Integer
                 | StandardScalar::BigInt
                 | StandardScalar::BinaryLargeObject
-        ) | ResolvedType::Reference { .. }
+        ) | ResolvedRuntimeType::Reference(_)
     )
 }
 
 fn supports_result_type(resolved_type: ResolvedType) -> bool {
     matches!(
-        resolved_type,
-        ResolvedType::Scalar(
+        ResolvedRuntimeType::from_resolved_type(resolved_type),
+        ResolvedRuntimeType::LegacyScalar(
             StandardScalar::Boolean
                 | StandardScalar::Integer
                 | StandardScalar::BigInt
                 | StandardScalar::Float
                 | StandardScalar::CharacterLargeObject
                 | StandardScalar::BinaryLargeObject
-        ) | ResolvedType::Reference { .. }
+        ) | ResolvedRuntimeType::Reference(_)
     )
 }
 
@@ -1386,7 +1393,8 @@ fn field_path_type(
             .ok_or_else(|| plan_invariant("field path field must exist on its active owner"))?;
         nullable |= field.nullable();
         if index + 1 == steps.len() {
-            if let ResolvedType::Reference { target } = field.resolved_type()
+            if let ResolvedRuntimeType::Reference(target) =
+                ResolvedRuntimeType::from_resolved_type(field.resolved_type())
                 && catalogue.object_type_by_id(target).is_none()
             {
                 return Err(plan_invariant(
@@ -1395,7 +1403,9 @@ fn field_path_type(
             }
             return Ok((field.resolved_type(), nullable));
         }
-        let ResolvedType::Reference { target } = field.resolved_type() else {
+        let ResolvedRuntimeType::Reference(target) =
+            ResolvedRuntimeType::from_resolved_type(field.resolved_type())
+        else {
             return Err(plan_invariant(
                 "each non-final field path hop must be an object reference",
             ));
@@ -1813,8 +1823,8 @@ const fn ordering_sql(direction: SortDirection) -> &'static str {
 
 fn is_variable_type(resolved_type: ResolvedType) -> bool {
     matches!(
-        resolved_type,
-        ResolvedType::Scalar(
+        ResolvedRuntimeType::from_resolved_type(resolved_type),
+        ResolvedRuntimeType::LegacyScalar(
             StandardScalar::CharacterLargeObject | StandardScalar::BinaryLargeObject
         )
     )
@@ -1852,13 +1862,13 @@ fn variable_payload_limit(columns: &[ResultColumn]) -> Result<usize, PostgresKer
     Ok(available / variable_count)
 }
 
-const fn maximum_fixed_payload_len(resolved_type: ResolvedType) -> usize {
-    match resolved_type {
-        ResolvedType::Scalar(StandardScalar::Boolean) => 1,
-        ResolvedType::Scalar(StandardScalar::Integer) => 4,
-        ResolvedType::Scalar(StandardScalar::BigInt | StandardScalar::Float) => 8,
-        ResolvedType::Reference { .. } => 16,
-        ResolvedType::Scalar(_) | ResolvedType::Named(_) => 0,
+fn maximum_fixed_payload_len(resolved_type: ResolvedType) -> usize {
+    match ResolvedRuntimeType::from_resolved_type(resolved_type) {
+        ResolvedRuntimeType::LegacyScalar(StandardScalar::Boolean) => 1,
+        ResolvedRuntimeType::LegacyScalar(StandardScalar::Integer) => 4,
+        ResolvedRuntimeType::LegacyScalar(StandardScalar::BigInt | StandardScalar::Float) => 8,
+        ResolvedRuntimeType::Reference(_) => 16,
+        ResolvedRuntimeType::LegacyScalar(_) | ResolvedRuntimeType::Unsupported => 0,
     }
 }
 
@@ -1930,7 +1940,9 @@ impl Lowerer<'_> {
             if index + 1 == steps.len() {
                 return Ok(format!("{alias}.{}", field_name(step.field)));
             }
-            let ResolvedType::Reference { target } = field.resolved_type() else {
+            let ResolvedRuntimeType::Reference(target) =
+                ResolvedRuntimeType::from_resolved_type(field.resolved_type())
+            else {
                 return Err(plan_invariant(
                     "non-final lowered field path hop must be a reference",
                 ));
@@ -2142,29 +2154,29 @@ fn decode_value(
         };
     }
     let resolved_type = column.resolved_type();
-    let value = match resolved_type {
-        ResolvedType::Scalar(StandardScalar::Boolean) => {
+    let value = match ResolvedRuntimeType::from_resolved_type(resolved_type) {
+        ResolvedRuntimeType::LegacyScalar(StandardScalar::Boolean) => {
             decode!(bool, |value| Ok(RuntimeValue::Boolean(value)))
         }
-        ResolvedType::Scalar(StandardScalar::Integer) => {
+        ResolvedRuntimeType::LegacyScalar(StandardScalar::Integer) => {
             decode!(i32, |value| Ok(RuntimeValue::Integer(value)))
         }
-        ResolvedType::Scalar(StandardScalar::BigInt) => {
+        ResolvedRuntimeType::LegacyScalar(StandardScalar::BigInt) => {
             decode!(i64, |value| Ok(RuntimeValue::BigInt(value)))
         }
-        ResolvedType::Scalar(StandardScalar::Float) => decode!(f64, |value| {
+        ResolvedRuntimeType::LegacyScalar(StandardScalar::Float) => decode!(f64, |value| {
             RuntimeFloat::new(value)
                 .map(RuntimeValue::Float)
                 .map_err(ServerSelectError::ResultRows)
                 .map_err(server_error)
         }),
-        ResolvedType::Scalar(StandardScalar::CharacterLargeObject) => {
+        ResolvedRuntimeType::LegacyScalar(StandardScalar::CharacterLargeObject) => {
             decode!(String, |value| Ok(RuntimeValue::Text(value)))
         }
-        ResolvedType::Scalar(StandardScalar::BinaryLargeObject) => {
+        ResolvedRuntimeType::LegacyScalar(StandardScalar::BinaryLargeObject) => {
             decode!(Vec<u8>, |value| Ok(RuntimeValue::Bytes(value)))
         }
-        ResolvedType::Reference { target } => decode!(Vec<u8>, |value| {
+        ResolvedRuntimeType::Reference(target) => decode!(Vec<u8>, |value| {
             let object = value.try_into().map(ObjectId::from_bytes).map_err(|_| {
                 server_error(ServerSelectError::ValueInvariant {
                     row: row_index,
@@ -2174,7 +2186,7 @@ fn decode_value(
             })?;
             Ok(RuntimeValue::Reference { target, object })
         }),
-        ResolvedType::Scalar(_) | ResolvedType::Named(_) => {
+        ResolvedRuntimeType::LegacyScalar(_) | ResolvedRuntimeType::Unsupported => {
             return Err(server_error(ServerSelectError::PreparedResult {
                 rule: "result value type is outside the initial runtime subset",
             }));
