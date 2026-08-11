@@ -64,6 +64,27 @@ const PRIMARY_INPUT: u32 = 0;
 const EXACT_INPUT_COUNT: u32 = 1;
 const IDENTITY_SELECTION_EXPRESSION_NODES: u32 = 3;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LegacyResolvedType {
+    Scalar(StandardScalar),
+    Named(TypeId),
+    Reference(TypeId),
+}
+
+const fn project_legacy_resolved_type(resolved_type: ResolvedType) -> Option<LegacyResolvedType> {
+    match (
+        resolved_type.legacy_scalar(),
+        resolved_type.named_type(),
+        resolved_type.value_type(),
+        resolved_type.reference_target(),
+    ) {
+        (Some(scalar), None, None, None) => Some(LegacyResolvedType::Scalar(scalar)),
+        (None, Some(type_id), None, None) => Some(LegacyResolvedType::Named(type_id)),
+        (None, None, None, Some(target)) => Some(LegacyResolvedType::Reference(target)),
+        _ => None,
+    }
+}
+
 /// A backend-neutral checked SERVER query plan.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ServerPlan {
@@ -676,7 +697,10 @@ fn validate_optional_selection(
         return Ok(());
     };
     validate_expression(selection, scan, 0, remaining_expression_nodes)?;
-    if selection.value_type.resolved_type != ResolvedType::scalar(StandardScalar::Boolean) {
+    if !matches!(
+        project_legacy_resolved_type(selection.value_type.resolved_type),
+        Some(LegacyResolvedType::Scalar(StandardScalar::Boolean))
+    ) {
         return Err(ServerPlanError::InvalidModel(
             "a selection must have resolved BOOLEAN type",
         ));
@@ -686,13 +710,13 @@ fn validate_optional_selection(
 
 const fn supports_distinct_projection(resolved_type: ResolvedType) -> bool {
     matches!(
-        resolved_type,
-        ResolvedType::Scalar(
+        project_legacy_resolved_type(resolved_type),
+        Some(LegacyResolvedType::Scalar(
             StandardScalar::Boolean
                 | StandardScalar::Integer
                 | StandardScalar::BigInt
                 | StandardScalar::BinaryLargeObject
-        ) | ResolvedType::Reference { .. }
+        )) | Some(LegacyResolvedType::Reference(_))
     )
 }
 
@@ -884,12 +908,12 @@ fn encode_identity_selection(
             resolved_type: ResolvedType::scalar(StandardScalar::Boolean),
             nullable: false,
         },
-    );
+    )?;
     writer.u8(1);
-    encode_value_type(writer, identity_selector_value_type(scan));
+    encode_value_type(writer, identity_selector_value_type(scan))?;
     writer.u32(PRIMARY_INPUT);
     writer.u8(5);
-    encode_value_type(writer, identity_selector_value_type(scan));
+    encode_value_type(writer, identity_selector_value_type(scan))?;
     writer.function_id(selector.owner);
     writer.parameter_id(selector.parameter);
     Ok(())
@@ -947,12 +971,12 @@ fn encode_expression(
     match &expression.kind {
         ExpressionKind::ObjectReference { input } => {
             writer.u8(1);
-            encode_value_type(writer, expression.value_type);
+            encode_value_type(writer, expression.value_type)?;
             writer.u32(*input);
         }
         ExpressionKind::FieldPath { input, steps } => {
             writer.u8(2);
-            encode_value_type(writer, expression.value_type);
+            encode_value_type(writer, expression.value_type)?;
             writer.u32(*input);
             writer.count("field path steps", steps.len(), MAX_FIELD_PATH_STEPS)?;
             for step in steps {
@@ -962,12 +986,12 @@ fn encode_expression(
         }
         ExpressionKind::BooleanLiteral { value } => {
             writer.u8(3);
-            encode_value_type(writer, expression.value_type);
+            encode_value_type(writer, expression.value_type)?;
             writer.boolean("literal", *value);
         }
         ExpressionKind::Equality { left, right } => {
             writer.u8(4);
-            encode_value_type(writer, expression.value_type);
+            encode_value_type(writer, expression.value_type)?;
             encode_expression(writer, left, depth + 1)?;
             encode_expression(writer, right, depth + 1)?;
         }
@@ -1026,9 +1050,10 @@ fn decode_expression(
     Ok(Expression { kind, value_type })
 }
 
-fn encode_value_type(writer: &mut Writer, value_type: ValueType) {
-    encode_resolved_type(writer, value_type.resolved_type);
+fn encode_value_type(writer: &mut Writer, value_type: ValueType) -> Result<(), ServerPlanError> {
+    encode_resolved_type(writer, value_type.resolved_type)?;
     writer.boolean("expression nullability", value_type.nullable);
+    Ok(())
 }
 
 fn decode_value_type(reader: &mut Reader<'_>) -> Result<ValueType, ServerPlanError> {
@@ -1038,21 +1063,30 @@ fn decode_value_type(reader: &mut Reader<'_>) -> Result<ValueType, ServerPlanErr
     })
 }
 
-fn encode_resolved_type(writer: &mut Writer, resolved_type: ResolvedType) {
-    match resolved_type {
-        ResolvedType::Scalar(scalar) => {
+fn encode_resolved_type(
+    writer: &mut Writer,
+    resolved_type: ResolvedType,
+) -> Result<(), ServerPlanError> {
+    match project_legacy_resolved_type(resolved_type) {
+        Some(LegacyResolvedType::Scalar(scalar)) => {
             writer.u8(1);
             writer.u8(encode_standard_scalar(scalar));
         }
-        ResolvedType::Named(type_id) => {
+        Some(LegacyResolvedType::Named(type_id)) => {
             writer.u8(2);
             writer.type_id(type_id);
         }
-        ResolvedType::Reference { target } => {
+        Some(LegacyResolvedType::Reference(target)) => {
             writer.u8(3);
             writer.type_id(target);
         }
+        None => {
+            return Err(ServerPlanError::InvalidModel(
+                "a server plan value type must use a supported legacy resolved type",
+            ));
+        }
     }
+    Ok(())
 }
 
 fn decode_resolved_type(reader: &mut Reader<'_>) -> Result<ResolvedType, ServerPlanError> {
@@ -2070,6 +2104,49 @@ mod tests {
 
         assert_eq!(ServerPlan::decode(&encoded), Ok(plan));
         assert_eq!(ServerPlan::decode(&encoded).unwrap().encode(), Ok(encoded));
+    }
+
+    #[test]
+    fn resolved_type_wire_tags_remain_legacy_and_closed() {
+        for (index, scalar) in StandardScalar::ALL.into_iter().enumerate() {
+            let resolved_type = ResolvedType::scalar(scalar);
+            let mut writer = Writer::new();
+
+            assert_eq!(encode_resolved_type(&mut writer, resolved_type), Ok(()));
+            let encoded = writer.finish();
+            assert_eq!(encoded, vec![1, index as u8 + 1]);
+
+            let mut reader = Reader::new(&encoded);
+            assert_eq!(decode_resolved_type(&mut reader), Ok(resolved_type));
+            assert_eq!(reader.require_finished(), Ok(()));
+        }
+
+        for (resolved_type, type_tag, type_id_bytes) in [
+            (ResolvedType::named(PERSON), 2, [2; 16]),
+            (ResolvedType::reference(TASK), 3, [1; 16]),
+        ] {
+            let mut writer = Writer::new();
+            assert_eq!(encode_resolved_type(&mut writer, resolved_type), Ok(()));
+
+            let mut expected = vec![type_tag];
+            expected.extend_from_slice(&type_id_bytes);
+            let encoded = writer.finish();
+            assert_eq!(encoded, expected);
+
+            let mut reader = Reader::new(&encoded);
+            assert_eq!(decode_resolved_type(&mut reader), Ok(resolved_type));
+            assert_eq!(reader.require_finished(), Ok(()));
+        }
+
+        for tag in [0, 4] {
+            assert_eq!(
+                decode_resolved_type(&mut Reader::new(&[tag])),
+                Err(ServerPlanError::InvalidEnumTag {
+                    kind: "resolved type",
+                    tag,
+                })
+            );
+        }
     }
 
     #[test]
