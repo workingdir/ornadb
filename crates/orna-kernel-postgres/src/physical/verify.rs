@@ -6,7 +6,7 @@ use orna_core::{
     FieldId, TypeId,
     catalogue::{FieldDefinition, ObjectTypeDefinition, OnDeleteAction},
     revision::ActiveDatabaseRevision,
-    types::{ResolvedType, StandardScalar},
+    types::StandardScalar,
 };
 use tokio_postgres::{Row, Transaction};
 
@@ -214,34 +214,41 @@ impl ExpectedColumn {
             return Err(record.invariant("physical storage does not support field defaults"));
         }
 
-        let (type_name, reference) = match field.resolved_type() {
-            ResolvedType::Scalar(StandardScalar::Void) => {
+        let unsupported = || {
+            record.invariant(
+                "named field types do not have a supported physical PostgreSQL storage mapping",
+            )
+        };
+        let resolved_type = field.resolved_type();
+        let (type_name, reference) = if let Some(scalar) = resolved_type.legacy_scalar() {
+            if scalar == StandardScalar::Void {
                 return Err(record.invariant("VOID cannot lower to a physical PostgreSQL column"));
             }
-            ResolvedType::Scalar(scalar) => {
-                if field.on_delete().is_some() {
-                    return Err(record
-                        .invariant("a scalar field must not declare a reference delete action"));
-                }
-                (postgres_catalogue_type(scalar, &record)?, None)
+            if field.on_delete().is_some() {
+                return Err(
+                    record.invariant("a scalar field must not declare a reference delete action")
+                );
             }
-            ResolvedType::Named(_) => {
-                return Err(record.invariant(
-                    "named field types do not have a supported physical PostgreSQL storage mapping",
-                ));
+            (postgres_catalogue_type(scalar, &record)?, None)
+        } else if let Some(target) = resolved_type.reference_target() {
+            if field.on_delete() == Some(OnDeleteAction::SetNull) && !field.nullable() {
+                return Err(record.invariant("SET NULL reference fields must be nullable"));
             }
-            ResolvedType::Reference { target } => {
-                if field.on_delete() == Some(OnDeleteAction::SetNull) && !field.nullable() {
-                    return Err(record.invariant("SET NULL reference fields must be nullable"));
-                }
-                (
-                    "bytea",
-                    Some(ExpectedReference {
-                        target,
-                        on_delete: field.on_delete(),
-                    }),
-                )
+            (
+                "bytea",
+                Some(ExpectedReference {
+                    target,
+                    on_delete: field.on_delete(),
+                }),
+            )
+        } else {
+            if resolved_type.named_type().is_some() {
+                return Err(unsupported());
             }
+            if resolved_type.value_type().is_some() {
+                return Err(unsupported());
+            }
+            return Err(unsupported());
         };
 
         Ok(Self {
