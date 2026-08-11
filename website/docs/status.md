@@ -116,6 +116,6 @@ These are the strongest concrete designs for implementation experiments. They ar
 
 ## Sources of truth
 
-The design bundle holds the canonical handbook, the ADRs, the grammar draft, and the logical catalog. The [getting started](/docs/getting-started/) guide is the entry point. The [source repository](https://github.com/workingdir/ornadb) is the authoritative location for the implementation.
+The design bundle holds the canonical handbook, the ADRs, the grammar draft, and the logical catalog. The [getting started](/getting-started/) guide is the entry point. The [source repository](https://github.com/workingdir/ornadb) is the authoritative location for the implementation.
 
-Return to the [OrnaDB frontpage](/) or inspect the [source repository](https://github.com/workingdir/ornadb).
+Return to the [OrnaDB overview](/) or inspect the [source repository](https://github.com/workingdir/ornadb).

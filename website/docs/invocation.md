@@ -180,8 +180,8 @@ It requests canonical typed events and works even if `sys.invoke` or the standar
 
 ## Next steps
 
-- Read the SERVER and CLIENT domains in [functions](/docs/functions/).
-- Read how `std.ui.UI` reaches a runtime in [UI and runtimes](/docs/ui-and-runtimes/).
-- Read the trust model in [security and inspection](/docs/security-and-inspection/).
+- Read the SERVER and CLIENT domains in [functions](/functions/).
+- Read how `std.ui.UI` reaches a runtime in [UI and runtimes](/ui-and-runtimes/).
+- Read the trust model in [security and inspection](/security-and-inspection/).
 
-Return to the [OrnaDB frontpage](/) or inspect the [source repository](https://github.com/workingdir/ornadb).
+Return to the [OrnaDB overview](/) or inspect the [source repository](https://github.com/workingdir/ornadb).
