@@ -68,7 +68,7 @@ if set(recipe) != expected_top_level:
     raise SystemExit("embedded recipe has unexpected top-level keys")
 if recipe["format"] != 1:
     raise SystemExit("embedded recipe format must be 1")
-if recipe["identity"] != "postgresql-18.4-debian12-amd64-orna-embedded.1":
+if recipe["identity"] != "postgresql-18.4-debian12-amd64-orna-embedded.2":
     raise SystemExit("embedded recipe identity is not accepted")
 if recipe["target"] != "debian12-amd64" or recipe["platform"] != "linux/amd64":
     raise SystemExit("embedded recipe target must be Debian 12 amd64")
@@ -1042,13 +1042,46 @@ import pathlib
 import sys
 
 pathlib.Path(sys.argv[1]).write_text(
+    "#include <errno.h>\n"
+    "#include <sys/syscall.h>\n"
+    "#include <sys/types.h>\n"
+    "#include <sys/wait.h>\n"
+    "#include <unistd.h>\n"
+    "#ifndef __X32_SYSCALL_BIT\n"
+    "#error \"the embedded PostgreSQL entry probe requires x86-64 syscall definitions\"\n"
+    "#endif\n"
     "extern int orna_postgres18_entry(int argc, char *argv[]);\n"
     "extern int orna_postgres18_initdb_entry(const char *data_directory);\n"
     "extern int orna_postgres18_set_support_root(const char *absolute_root);\n"
+    "extern int orna_postgres18_install_exec_filter(void);\n"
     "static int (* volatile initializer_entry)(const char *) =\n"
     "    orna_postgres18_initdb_entry;\n"
     "int main(int argc, char *argv[])\n"
     "{\n"
+    "    pid_t child_pid;\n"
+    "    pid_t waited_pid;\n"
+    "    int child_status;\n"
+    "\n"
+    "    child_pid = fork();\n"
+    "    if (child_pid < 0)\n"
+    "        return 120;\n"
+    "    if (child_pid == 0)\n"
+    "    {\n"
+    "        if (orna_postgres18_install_exec_filter() != 0)\n"
+    "            _exit(121);\n"
+    "        errno = 0;\n"
+    "        if (syscall(__X32_SYSCALL_BIT | __NR_getpid) != -1 ||\n"
+    "            errno != EPERM)\n"
+    "            _exit(122);\n"
+    "        _exit(0);\n"
+    "    }\n"
+    "    do\n"
+    "    {\n"
+    "        waited_pid = waitpid(child_pid, &child_status, 0);\n"
+    "    } while (waited_pid < 0 && errno == EINTR);\n"
+    "    if (waited_pid != child_pid || !WIFEXITED(child_status) ||\n"
+    "        WEXITSTATUS(child_status) != 0)\n"
+    "        return 123;\n"
     "    if (initializer_entry == 0)\n"
     "        return 124;\n"
     "    if (orna_postgres18_set_support_root(\"/build/entry-probe-support\") != 0)\n"
