@@ -573,6 +573,7 @@ pub(crate) fn prepare_checked_standard_upgrade_with_allocator(
         PreparedSource::from_active(active.source())
             .map_err(|_| PrepareStandardUpgradeError::ActiveSourceMismatch)?,
         PreparationMode::StandardV2Plan {
+            declaration_evidence: matched.declaration_evidence.clone(),
             signature_evidence: matched.signature_evidence.clone(),
             standard_preflight: Box::new(matched.standard_preflight.clone()),
         },
@@ -682,6 +683,7 @@ fn allocate_standard_upgrade_plan(
 /// together until the V2 candidate consumes them.
 struct MatchedActiveStandardSource {
     report: StandardApplicationCheckReport,
+    declaration_evidence: DeclarationEvidence,
     signature_evidence: SignatureEvidence,
     standard_preflight: StandardPreflight,
     identities: IdentityMap,
@@ -747,6 +749,7 @@ fn match_active_standard_source(
     }
     Ok(MatchedActiveStandardSource {
         report,
+        declaration_evidence,
         signature_evidence,
         standard_preflight,
         identities,
@@ -1096,6 +1099,7 @@ enum PreparationMode<'a> {
         standard_preflight: Box<StandardPreflight>,
     },
     StandardV2Plan {
+        declaration_evidence: DeclarationEvidence,
         signature_evidence: SignatureEvidence,
         standard_preflight: Box<StandardPreflight>,
     },
@@ -1107,7 +1111,166 @@ enum PreparationMode<'a> {
     },
 }
 
+/// One declaration type selected for candidate lowering.
+///
+/// A standard value keeps the checked durable identity separate from its
+/// current compatibility type. The compatibility type remains the sole output
+/// until the later core resolved-value form exists.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CandidateResolvedType {
+    LegacyScalar(StandardScalar),
+    StandardValue {
+        type_id: TypeId,
+        compatibility: StandardScalar,
+    },
+    Named(TypeId),
+    Reference(TypeId),
+}
+
+impl CandidateResolvedType {
+    fn from_compatibility(compatibility: ResolvedType) -> Result<Self, PrepareError> {
+        if let Some(scalar) = compatibility.legacy_scalar() {
+            return Ok(Self::LegacyScalar(scalar));
+        }
+        if let Some(type_id) = compatibility.named_type() {
+            return Ok(Self::Named(type_id));
+        }
+        if let Some(target) = compatibility.reference_target() {
+            return Ok(Self::Reference(target));
+        }
+        if compatibility.value_type().is_some() {
+            return Err(invalid_checked_declaration_type_evidence());
+        }
+        Err(invalid_checked_declaration_type_evidence())
+    }
+
+    fn compatibility_type(self) -> ResolvedType {
+        match self {
+            Self::LegacyScalar(scalar) => ResolvedType::Scalar(scalar),
+            Self::StandardValue { compatibility, .. } => ResolvedType::Scalar(compatibility),
+            Self::Named(type_id) => ResolvedType::Named(type_id),
+            Self::Reference(target) => ResolvedType::Reference { target },
+        }
+    }
+}
+
+/// Evidence mapped through the candidate identity map before type lowering.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MappedEvidenceTarget {
+    Value(TypeId),
+    ObjectReference(TypeId),
+    Unknown,
+}
+
+fn invalid_checked_declaration_type_evidence() -> PrepareError {
+    PrepareError::InvalidCheckedBundle {
+        reason: "checked standard declaration type evidence disagrees with its semantic type",
+    }
+}
+
+/// Selects one closed candidate type from checked compatibility and evidence.
+fn candidate_from_mapped_evidence(
+    compatibility: ResolvedType,
+    evidence: Option<MappedEvidenceTarget>,
+) -> Result<CandidateResolvedType, PrepareError> {
+    let candidate = CandidateResolvedType::from_compatibility(compatibility)?;
+    let Some(evidence) = evidence else {
+        return Ok(candidate);
+    };
+    if let CandidateResolvedType::LegacyScalar(compatibility) = candidate
+        && let MappedEvidenceTarget::Value(type_id) = evidence
+    {
+        return Ok(CandidateResolvedType::StandardValue {
+            type_id,
+            compatibility,
+        });
+    }
+    if let CandidateResolvedType::Reference(target) = candidate
+        && let MappedEvidenceTarget::ObjectReference(actual) = evidence
+        && target == actual
+    {
+        return Ok(CandidateResolvedType::Reference(target));
+    }
+    Err(invalid_checked_declaration_type_evidence())
+}
+
+/// The purpose of one selected candidate type.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CandidateTypeProjection {
+    Compatibility,
+    Durable,
+}
+
+/// The candidate lowering policy selected by preparation mode.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CandidateLoweringMode {
+    LegacyV1,
+    StandardV1Match,
+    StandardV2Plan,
+    StandardV2,
+}
+
+impl CandidateLoweringMode {
+    fn lower(
+        self,
+        candidate: CandidateResolvedType,
+        projection: CandidateTypeProjection,
+    ) -> ResolvedType {
+        match projection {
+            CandidateTypeProjection::Compatibility => candidate.compatibility_type(),
+            CandidateTypeProjection::Durable => match candidate {
+                CandidateResolvedType::StandardValue {
+                    type_id,
+                    compatibility,
+                } => self.lower_durable_standard_value(type_id, compatibility),
+                candidate => candidate.compatibility_type(),
+            },
+        }
+    }
+
+    fn lower_durable_standard_value(
+        self,
+        _type_id: TypeId,
+        compatibility: StandardScalar,
+    ) -> ResolvedType {
+        match self {
+            Self::LegacyV1 | Self::StandardV1Match | Self::StandardV2Plan | Self::StandardV2 => {
+                ResolvedType::Scalar(compatibility)
+            }
+        }
+    }
+}
+
+/// The two catalogue views selected from one checked declaration stream.
+struct ObjectTypeProjections {
+    compatibility: Vec<ObjectTypeDefinition>,
+    durable: Vec<ObjectTypeDefinition>,
+}
+
 impl PreparationMode<'_> {
+    /// Selects one current declaration type from one checked carrier.
+    ///
+    /// Compatibility serves current artefact validators. Durable serves the
+    /// candidate catalogue and semantic hashing. Every current mode emits the
+    /// compatibility type for both purposes. The later emission row changes
+    /// only durable StandardV2 and StandardV2Plan standard values.
+    fn lower_candidate_type(
+        &self,
+        candidate: CandidateResolvedType,
+        projection: CandidateTypeProjection,
+    ) -> ResolvedType {
+        self.candidate_lowering_mode().lower(candidate, projection)
+    }
+
+    fn candidate_lowering_mode(&self) -> CandidateLoweringMode {
+        match self {
+            Self::LegacyV1 => CandidateLoweringMode::LegacyV1,
+            Self::StandardV1Match { .. } => CandidateLoweringMode::StandardV1Match,
+            Self::StandardV2Plan { .. } => CandidateLoweringMode::StandardV2Plan,
+            Self::StandardV2 { .. } => CandidateLoweringMode::StandardV2,
+        }
+    }
+
     fn catalogue_hash_context(&self) -> CatalogueHashContext {
         match self {
             Self::LegacyV1 | Self::StandardV1Match { .. } => CatalogueHashContext::version_one(),
@@ -1251,6 +1414,16 @@ impl DeclarationEvidence {
         let evidence = self.remaining.remove(index);
         self.consumed.push(evidence.clone());
         Ok(evidence)
+    }
+
+    fn lookup(&self, kind: crate::CheckedTypeUseKind) -> Result<EvidenceUse, PrepareError> {
+        self.ordered
+            .iter()
+            .find(|evidence| evidence.kind == kind)
+            .cloned()
+            .ok_or(PrepareError::InvalidCheckedBundle {
+                reason: "checked standard declaration has no validated type evidence",
+            })
     }
 
     fn is_empty(&self) -> bool {
@@ -2472,30 +2645,47 @@ fn validate_mutation_parameters(
                 reason: "mutation parameter has an unsupported default expression",
             });
         }
-        match parameter.resolved_type() {
-            ResolvedType::Scalar(
+        let resolved_type = parameter.resolved_type();
+        if let Some(scalar) = resolved_type.legacy_scalar() {
+            if matches!(
+                scalar,
                 StandardScalar::Boolean
-                | StandardScalar::Integer
-                | StandardScalar::BigInt
-                | StandardScalar::Float
-                | StandardScalar::CharacterLargeObject
-                | StandardScalar::BinaryLargeObject,
-            ) => {}
-            ResolvedType::Reference { target }
-                if object_types
-                    .iter()
-                    .any(|object_type| object_type.id() == target) => {}
-            ResolvedType::Reference { .. } => {
-                return Err(PrepareError::InvalidCheckedBundle {
-                    reason: "mutation parameter REF target is absent from the candidate catalogue",
-                });
+                    | StandardScalar::Integer
+                    | StandardScalar::BigInt
+                    | StandardScalar::Float
+                    | StandardScalar::CharacterLargeObject
+                    | StandardScalar::BinaryLargeObject
+            ) {
+                continue;
             }
-            ResolvedType::Scalar(_) | ResolvedType::Named(_) => {
-                return Err(PrepareError::InvalidCheckedBundle {
-                    reason: "mutation parameter has an unsupported runtime type",
-                });
-            }
+            return Err(PrepareError::InvalidCheckedBundle {
+                reason: "mutation parameter has an unsupported runtime type",
+            });
         }
+        if let Some(target) = resolved_type.reference_target() {
+            if object_types
+                .iter()
+                .any(|object_type| object_type.id() == target)
+            {
+                continue;
+            }
+            return Err(PrepareError::InvalidCheckedBundle {
+                reason: "mutation parameter REF target is absent from the candidate catalogue",
+            });
+        }
+        if resolved_type.named_type().is_some() {
+            return Err(PrepareError::InvalidCheckedBundle {
+                reason: "mutation parameter has an unsupported runtime type",
+            });
+        }
+        if resolved_type.value_type().is_some() {
+            return Err(PrepareError::InvalidCheckedBundle {
+                reason: "mutation parameter has an unsupported runtime type",
+            });
+        }
+        return Err(PrepareError::InvalidCheckedBundle {
+            reason: "mutation parameter has an unsupported runtime type",
+        });
     }
     Ok(())
 }
@@ -4415,8 +4605,11 @@ impl<'a> CandidateBuilder<'a> {
     ) -> Self {
         let declaration_evidence = match &mode {
             PreparationMode::LegacyV1 => None,
-            PreparationMode::StandardV2Plan { .. } => None,
             PreparationMode::StandardV1Match {
+                declaration_evidence,
+                ..
+            }
+            | PreparationMode::StandardV2Plan {
                 declaration_evidence,
                 ..
             }
@@ -4452,7 +4645,7 @@ impl<'a> CandidateBuilder<'a> {
     fn materialise(mut self) -> Result<CandidateMaterial, PrepareError> {
         let schemas = self.build_schemas()?;
         let object_types = self.build_object_types()?;
-        self.build_functions(&object_types)?;
+        self.build_functions(&object_types.compatibility)?;
         if self
             .declaration_evidence
             .as_ref()
@@ -4466,7 +4659,7 @@ impl<'a> CandidateBuilder<'a> {
         let catalogue = CatalogueSnapshot::new_with_functions(
             self.catalogue_revision,
             schemas,
-            object_types,
+            object_types.durable,
             self.functions,
         )?;
         Ok(CandidateMaterial {
@@ -4480,42 +4673,55 @@ impl<'a> CandidateBuilder<'a> {
         })
     }
 
-    fn resolved_type(
-        &self,
-        semantic_type: SemanticType<CheckedTypeId>,
-        kind: crate::CheckedTypeUseKind,
-    ) -> Result<ResolvedType, PrepareError> {
-        if let Some(evidence) = &self.declaration_evidence {
-            let evidence = evidence.borrow_mut().consume(kind)?;
-            let target_matches = match (&semantic_type, &evidence.target) {
-                (SemanticType::Scalar(_) | SemanticType::Named(_), EvidenceTarget::Value(_)) => {
-                    true
-                }
-                (SemanticType::Reference { target }, EvidenceTarget::ObjectReference(actual)) => {
-                    target == actual
-                }
-                _ => false,
-            };
-            if !target_matches {
-                return Err(PrepareError::InvalidCheckedBundle {
-                    reason: "checked standard declaration type evidence disagrees with its semantic type",
-                });
-            }
-        }
-        self.identities.resolved_type(semantic_type)
-    }
-
-    fn resolved_declaration_type(
+    fn candidate_resolved_type(
         &self,
         semantic_type: SemanticType<CheckedTypeId>,
         kind: crate::CheckedTypeUseKind,
         consume_evidence: bool,
-    ) -> Result<ResolvedType, PrepareError> {
-        if consume_evidence {
-            self.resolved_type(semantic_type, kind)
-        } else {
-            self.identities.resolved_type(semantic_type)
+    ) -> Result<CandidateResolvedType, PrepareError> {
+        let compatibility = self.identities.resolved_type(semantic_type)?;
+        let evidence = self
+            .declaration_evidence
+            .as_ref()
+            .map(|declaration_evidence| {
+                if consume_evidence {
+                    declaration_evidence.borrow_mut().consume(kind)
+                } else {
+                    declaration_evidence.borrow().lookup(kind)
+                }
+            })
+            .transpose()?;
+        let evidence = evidence
+            .map(|evidence| self.mapped_evidence_target(evidence.target))
+            .transpose()?;
+        candidate_from_mapped_evidence(compatibility, evidence)
+    }
+
+    fn mapped_evidence_target(
+        &self,
+        evidence: EvidenceTarget,
+    ) -> Result<MappedEvidenceTarget, PrepareError> {
+        match evidence {
+            EvidenceTarget::Value(type_id) => Ok(MappedEvidenceTarget::Value(type_id)),
+            EvidenceTarget::ObjectReference(target) => self
+                .identities
+                .type_id(target)
+                .map(MappedEvidenceTarget::ObjectReference),
+            EvidenceTarget::Unknown => Ok(MappedEvidenceTarget::Unknown),
         }
+    }
+
+    fn declaration_type(
+        &self,
+        semantic_type: SemanticType<CheckedTypeId>,
+        kind: crate::CheckedTypeUseKind,
+        consume_evidence: bool,
+        projection: CandidateTypeProjection,
+    ) -> Result<ResolvedType, PrepareError> {
+        Ok(self.mode.lower_candidate_type(
+            self.candidate_resolved_type(semantic_type, kind, consume_evidence)?,
+            projection,
+        ))
     }
 
     fn build_schemas(&mut self) -> Result<Vec<SchemaDefinition>, PrepareError> {
@@ -4538,48 +4744,72 @@ impl<'a> CandidateBuilder<'a> {
         Ok(schemas)
     }
 
-    fn build_object_types(&mut self) -> Result<Vec<ObjectTypeDefinition>, PrepareError> {
-        let object_types = self.catalogue_object_types()?;
-        self.record_object_type_metadata()?;
-        Ok(object_types)
-    }
-
-    fn catalogue_object_types(&self) -> Result<Vec<ObjectTypeDefinition>, PrepareError> {
-        let mut object_types = Vec::with_capacity(self.checked.object_types().len());
+    fn build_object_types(&mut self) -> Result<ObjectTypeProjections, PrepareError> {
+        let mut compatibility = Vec::with_capacity(self.checked.object_types().len());
+        let mut durable = Vec::with_capacity(self.checked.object_types().len());
         for checked_type in self.checked.object_types() {
             let type_id = self.identities.type_id(checked_type.id())?;
-            let mut fields = Vec::with_capacity(checked_type.fields().len());
+            let mut compatibility_fields = Vec::with_capacity(checked_type.fields().len());
+            let mut durable_fields = Vec::with_capacity(checked_type.fields().len());
             for checked_field in checked_type.fields() {
                 let field_id = self.identities.field(checked_field.id())?;
                 let default_expression = checked_field
                     .default()
                     .map(|default| self.identities.expression(default.id()))
                     .transpose()?;
-
-                fields.push(FieldDefinition::new(
+                let kind = crate::CheckedTypeUseKind::Field {
+                    owner: checked_type.id(),
+                    field: checked_field.id(),
+                };
+                let compatibility_type = self.declaration_type(
+                    checked_field.semantic_type(),
+                    kind,
+                    false,
+                    CandidateTypeProjection::Compatibility,
+                )?;
+                let durable_type = self.declaration_type(
+                    checked_field.semantic_type(),
+                    kind,
+                    true,
+                    CandidateTypeProjection::Durable,
+                )?;
+                compatibility_fields.push(FieldDefinition::new(
                     field_id,
                     checked_field.name(),
                     checked_field.ordinal(),
-                    self.resolved_type(
-                        checked_field.semantic_type(),
-                        crate::CheckedTypeUseKind::Field {
-                            owner: checked_type.id(),
-                            field: checked_field.id(),
-                        },
-                    )?,
+                    compatibility_type,
+                    checked_field.nullable(),
+                    checked_field.unique(),
+                    default_expression,
+                    checked_field.on_delete(),
+                ));
+                durable_fields.push(FieldDefinition::new(
+                    field_id,
+                    checked_field.name(),
+                    checked_field.ordinal(),
+                    durable_type,
                     checked_field.nullable(),
                     checked_field.unique(),
                     default_expression,
                     checked_field.on_delete(),
                 ));
             }
-            object_types.push(ObjectTypeDefinition::new(
+            compatibility.push(ObjectTypeDefinition::new(
                 type_id,
                 checked_type.name().clone(),
-                fields,
+                compatibility_fields,
+            ));
+            durable.push(ObjectTypeDefinition::new(
+                type_id,
+                checked_type.name().clone(),
+                durable_fields,
             ));
         }
-        Ok(object_types)
+        self.record_object_type_metadata()?;
+        Ok(ObjectTypeProjections {
+            compatibility,
+            durable,
+        })
     }
 
     fn record_object_type_metadata(&mut self) -> Result<(), PrepareError> {
@@ -4726,8 +4956,23 @@ impl<'a> CandidateBuilder<'a> {
                         .clone();
                     let function = self.identities.function(checked.id())?;
                     let revision = self.initial_function_revision(checked.id(), function)?;
-                    let definition = self.function_definition(&checked, revision, true)?;
-                    let artifact = self.server_artifact(&checked, &definition, &object_types)?;
+                    let compatibility_definition = self.function_definition(
+                        &checked,
+                        revision,
+                        false,
+                        CandidateTypeProjection::Compatibility,
+                    )?;
+                    let artifact = self.server_artifact(
+                        &checked,
+                        &compatibility_definition,
+                        &object_types.compatibility,
+                    )?;
+                    let definition = self.function_definition(
+                        &checked,
+                        revision,
+                        true,
+                        CandidateTypeProjection::Durable,
+                    )?;
                     let references = self.function_references(&checked, function, revision)?;
                     let semantic_hash_version = self.mode.semantic_hash_version(&references);
                     let plan = FunctionRevisionPlan::new(
@@ -4762,7 +5007,12 @@ impl<'a> CandidateBuilder<'a> {
                     let client = self.validated_client(owner)?.clone();
                     let function = self.identities.function(client.id)?;
                     let revision = self.initial_function_revision(client.id, function)?;
-                    let definition = self.client_function_definition(&client, revision, true)?;
+                    let definition = self.client_function_definition(
+                        &client,
+                        revision,
+                        true,
+                        CandidateTypeProjection::Durable,
+                    )?;
                     let artifact = self.client_artifact(&client)?;
                     let references =
                         self.client_function_references(function, revision, &client)?;
@@ -4830,7 +5080,7 @@ impl<'a> CandidateBuilder<'a> {
         Ok(StandardUpgradeLoweringPlan {
             source_template: self.source.revision,
             schemas,
-            object_types,
+            object_types: object_types.durable,
             expressions: self.expressions,
             origin_templates: self.origins,
             functions,
@@ -4844,8 +5094,20 @@ impl<'a> CandidateBuilder<'a> {
     ) -> Result<(), PrepareError> {
         let function_id = self.identities.function(checked.id())?;
         let initial_revision = self.initial_function_revision(checked.id(), function_id)?;
-        let initial_definition = self.function_definition(checked, initial_revision, false)?;
-        let prepared_artifact = self.server_artifact(checked, &initial_definition, object_types)?;
+        let compatibility_definition = self.function_definition(
+            checked,
+            initial_revision,
+            false,
+            CandidateTypeProjection::Compatibility,
+        )?;
+        let initial_definition = self.function_definition(
+            checked,
+            initial_revision,
+            false,
+            CandidateTypeProjection::Durable,
+        )?;
+        let prepared_artifact =
+            self.server_artifact(checked, &compatibility_definition, object_types)?;
         let initial_references =
             self.function_references(checked, function_id, initial_revision)?;
         let (revision_id, current_revision) =
@@ -4858,7 +5120,8 @@ impl<'a> CandidateBuilder<'a> {
                 prepared_artifact,
                 references: &initial_references,
             })?;
-        let definition = self.function_definition(checked, revision_id, true)?;
+        let definition =
+            self.function_definition(checked, revision_id, true, CandidateTypeProjection::Durable)?;
         let references =
             self.rebind_function_references(function_id, revision_id, &initial_references);
         self.push_function_origins(checked, function_id)?;
@@ -4871,8 +5134,12 @@ impl<'a> CandidateBuilder<'a> {
     fn build_client_function(&mut self, validated: &ValidatedClient) -> Result<(), PrepareError> {
         let function_id = self.identities.function(validated.id)?;
         let initial_revision = self.initial_function_revision(validated.id, function_id)?;
-        let initial_definition =
-            self.client_function_definition(validated, initial_revision, false)?;
+        let initial_definition = self.client_function_definition(
+            validated,
+            initial_revision,
+            false,
+            CandidateTypeProjection::Durable,
+        )?;
         let prepared_artifact = self.client_artifact(validated)?;
         let initial_references = if self.mode.signature_evidence().is_some() {
             self.client_function_references(function_id, initial_revision, validated)?
@@ -4890,7 +5157,12 @@ impl<'a> CandidateBuilder<'a> {
                 references: &initial_references,
             })?;
 
-        let definition = self.client_function_definition(validated, revision_id, true)?;
+        let definition = self.client_function_definition(
+            validated,
+            revision_id,
+            true,
+            CandidateTypeProjection::Durable,
+        )?;
         let references =
             self.rebind_function_references(function_id, revision_id, &initial_references);
         self.push_origin(
@@ -4908,13 +5180,18 @@ impl<'a> CandidateBuilder<'a> {
         validated: &ValidatedClient,
         current_revision: FunctionRevisionId,
         consume_evidence: bool,
+        projection: CandidateTypeProjection,
     ) -> Result<FunctionDefinition, PrepareError> {
         Ok(FunctionDefinition::new(
             self.identities.function(validated.id)?,
             validated.name.clone(),
             FunctionDomain::Client,
             Vec::new(),
-            FunctionReturn::Single(self.client_return_type(validated, consume_evidence)?),
+            FunctionReturn::Single(self.client_return_type(
+                validated,
+                consume_evidence,
+                projection,
+            )?),
             current_revision,
             validated.security,
             validated.transaction,
@@ -5099,23 +5376,42 @@ impl<'a> CandidateBuilder<'a> {
         &self,
         validated: &ValidatedClient,
         consume_evidence: bool,
+        projection: CandidateTypeProjection,
     ) -> Result<ResolvedType, PrepareError> {
-        if consume_evidence && let Some(evidence) = &self.declaration_evidence {
-            let evidence = evidence
-                .borrow_mut()
-                .consume(crate::CheckedTypeUseKind::Return {
-                    owner: validated.id,
-                    ordinal: 0,
-                })?;
-            if evidence.target != EvidenceTarget::Value(validated.return_type)
-                || evidence.location != validated.return_location
-            {
-                return Err(PrepareError::InvalidCheckedBundle {
-                    reason: "checked CLIENT function return evidence does not match its validated slot",
-                });
-            }
+        Ok(self.mode.lower_candidate_type(
+            self.client_candidate_return_type(validated, consume_evidence)?,
+            projection,
+        ))
+    }
+
+    fn client_candidate_return_type(
+        &self,
+        validated: &ValidatedClient,
+        consume_evidence: bool,
+    ) -> Result<CandidateResolvedType, PrepareError> {
+        let Some(declaration_evidence) = &self.declaration_evidence else {
+            return Ok(CandidateResolvedType::LegacyScalar(validated.return_scalar));
+        };
+        let kind = crate::CheckedTypeUseKind::Return {
+            owner: validated.id,
+            ordinal: 0,
+        };
+        let evidence = if consume_evidence {
+            declaration_evidence.borrow_mut().consume(kind)?
+        } else {
+            declaration_evidence.borrow().lookup(kind)?
+        };
+        if evidence.target != EvidenceTarget::Value(validated.return_type)
+            || evidence.location != validated.return_location
+        {
+            return Err(PrepareError::InvalidCheckedBundle {
+                reason: "checked CLIENT function return evidence does not match its validated slot",
+            });
         }
-        Ok(ResolvedType::Scalar(validated.return_scalar))
+        Ok(CandidateResolvedType::StandardValue {
+            type_id: validated.return_type,
+            compatibility: validated.return_scalar,
+        })
     }
 
     fn function_definition(
@@ -5123,6 +5419,7 @@ impl<'a> CandidateBuilder<'a> {
         checked: &crate::CheckedServerFunction,
         current_revision: FunctionRevisionId,
         consume_evidence: bool,
+        projection: CandidateTypeProjection,
     ) -> Result<FunctionDefinition, PrepareError> {
         let function_id = self.identities.function(checked.id())?;
         let parameters = checked
@@ -5133,13 +5430,14 @@ impl<'a> CandidateBuilder<'a> {
                     self.identities.parameter(parameter.id())?,
                     parameter.name(),
                     parameter.ordinal(),
-                    self.resolved_declaration_type(
+                    self.declaration_type(
                         parameter.semantic_type(),
                         crate::CheckedTypeUseKind::Parameter {
                             owner: checked.id(),
                             parameter: parameter.id(),
                         },
                         consume_evidence,
+                        projection,
                     )?,
                     None,
                 ))
@@ -5152,13 +5450,14 @@ impl<'a> CandidateBuilder<'a> {
                 Ok(FunctionReturnColumnDefinition::new(
                     column.name(),
                     column.ordinal(),
-                    self.resolved_declaration_type(
+                    self.declaration_type(
                         column.semantic_type(),
                         crate::CheckedTypeUseKind::Return {
                             owner: checked.id(),
                             ordinal: column.ordinal(),
                         },
                         consume_evidence,
+                        projection,
                     )?,
                 ))
             })
@@ -5532,6 +5831,158 @@ mod tests {
     static UNIT_ALLOCATION: AtomicUsize = AtomicUsize::new(0);
     static SCHEMA_ALLOCATION: AtomicUsize = AtomicUsize::new(0);
     static TYPE_ALLOCATION: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn mapped_candidate_type_selection_is_closed_and_retains_standard_identity() {
+        let standard_id = TypeId::from_bytes([0x91; 16]);
+        let reference_id = TypeId::from_bytes([0x92; 16]);
+
+        assert_eq!(
+            CandidateResolvedType::from_compatibility(ResolvedType::scalar(
+                StandardScalar::Integer,
+            ))
+            .unwrap(),
+            CandidateResolvedType::LegacyScalar(StandardScalar::Integer)
+        );
+        assert_eq!(
+            candidate_from_mapped_evidence(
+                ResolvedType::scalar(StandardScalar::Boolean),
+                Some(MappedEvidenceTarget::Value(standard_id)),
+            )
+            .unwrap(),
+            CandidateResolvedType::StandardValue {
+                type_id: standard_id,
+                compatibility: StandardScalar::Boolean,
+            }
+        );
+        assert_eq!(
+            candidate_from_mapped_evidence(
+                ResolvedType::reference(reference_id),
+                Some(MappedEvidenceTarget::ObjectReference(reference_id)),
+            )
+            .unwrap(),
+            CandidateResolvedType::Reference(reference_id)
+        );
+
+        for (compatibility, expected) in [
+            (
+                ResolvedType::scalar(StandardScalar::Integer),
+                CandidateResolvedType::LegacyScalar(StandardScalar::Integer),
+            ),
+            (
+                ResolvedType::Named(TypeId::from_bytes([0x94; 16])),
+                CandidateResolvedType::Named(TypeId::from_bytes([0x94; 16])),
+            ),
+            (
+                ResolvedType::reference(TypeId::from_bytes([0x95; 16])),
+                CandidateResolvedType::Reference(TypeId::from_bytes([0x95; 16])),
+            ),
+        ] {
+            assert_eq!(
+                candidate_from_mapped_evidence(compatibility, None).unwrap(),
+                expected
+            );
+        }
+
+        for (compatibility, evidence) in [
+            (
+                ResolvedType::Named(TypeId::from_bytes([0x96; 16])),
+                MappedEvidenceTarget::Value(standard_id),
+            ),
+            (
+                ResolvedType::Named(TypeId::from_bytes([0x96; 16])),
+                MappedEvidenceTarget::ObjectReference(reference_id),
+            ),
+            (
+                ResolvedType::reference(reference_id),
+                MappedEvidenceTarget::Value(standard_id),
+            ),
+            (
+                ResolvedType::scalar(StandardScalar::Boolean),
+                MappedEvidenceTarget::ObjectReference(reference_id),
+            ),
+            (
+                ResolvedType::reference(reference_id),
+                MappedEvidenceTarget::ObjectReference(TypeId::from_bytes([0x97; 16])),
+            ),
+            (
+                ResolvedType::scalar(StandardScalar::Boolean),
+                MappedEvidenceTarget::Unknown,
+            ),
+            (
+                ResolvedType::Named(TypeId::from_bytes([0x96; 16])),
+                MappedEvidenceTarget::Unknown,
+            ),
+            (
+                ResolvedType::reference(reference_id),
+                MappedEvidenceTarget::Unknown,
+            ),
+        ] {
+            let error = candidate_from_mapped_evidence(compatibility, Some(evidence)).unwrap_err();
+            assert!(matches!(
+                error,
+                PrepareError::InvalidCheckedBundle {
+                    reason: "checked standard declaration type evidence disagrees with its semantic type",
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn current_candidate_projections_are_distinct_policy_inputs_and_identical_for_every_mode() {
+        let candidate = CandidateResolvedType::StandardValue {
+            type_id: TypeId::from_bytes([0x98; 16]),
+            compatibility: StandardScalar::Boolean,
+        };
+        let expected = ResolvedType::scalar(StandardScalar::Boolean);
+
+        assert_ne!(
+            CandidateTypeProjection::Compatibility,
+            CandidateTypeProjection::Durable
+        );
+        for mode in [
+            CandidateLoweringMode::LegacyV1,
+            CandidateLoweringMode::StandardV1Match,
+            CandidateLoweringMode::StandardV2Plan,
+            CandidateLoweringMode::StandardV2,
+        ] {
+            assert_eq!(
+                mode.lower(candidate, CandidateTypeProjection::Compatibility),
+                expected
+            );
+            assert_eq!(
+                mode.lower(candidate, CandidateTypeProjection::Durable),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn declaration_evidence_lookup_preserves_the_slot_for_final_consumption() {
+        let kind = crate::CheckedTypeUseKind::Return {
+            owner: CheckedFunctionId::Existing(FunctionId::from_bytes([0x92; 16])),
+            ordinal: 0,
+        };
+        let evidence = EvidenceUse {
+            kind,
+            target: EvidenceTarget::Value(TypeId::from_bytes([0x93; 16])),
+            location: SourceLocation::from_syntax(
+                "prepared.orna",
+                &orna_syntax::SourceSpan { start: 4, end: 9 },
+            ),
+        };
+        let mut declarations = DeclarationEvidence {
+            ordered: vec![evidence.clone()],
+            remaining: vec![evidence.clone()],
+            consumed: Vec::new(),
+        };
+
+        assert_eq!(declarations.lookup(kind).unwrap(), evidence);
+        assert_eq!(declarations.remaining.len(), 1);
+        assert_eq!(declarations.consume(kind).unwrap(), evidence);
+        assert!(declarations.is_empty());
+        assert_eq!(declarations.consumed, vec![evidence]);
+    }
 
     fn allocation_byte(counter: &AtomicUsize) -> u8 {
         if counter.fetch_add(1, Ordering::SeqCst) == 0 {
