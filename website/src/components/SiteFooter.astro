@@ -1,0 +1,78 @@
+---
+import Brand from "./Brand.astro";
+---
+
+<footer class="site-footer">
+    <div class="site-footer__inner">
+        <div>
+            <a class="site-footer__brand" href="/" aria-label="OrnaDB frontpage">
+                <Brand inverse />
+            </a>
+            <p>Object-Relational Native Applications.</p>
+        </div>
+        <nav aria-label="Footer navigation">
+            <a href="/docs/">Documentation</a>
+            <a href="https://github.com/workingdir/ornadb">Source</a>
+            <a href="https://github.com/workingdir/ornadb/issues">Issues</a>
+        </nav>
+        <p class="site-footer__note">
+            Under active development. Apache-2.0 licensed. Built as static HTML with Astro and Sourcey.
+        </p>
+    </div>
+</footer>
+
+<style>
+    .site-footer {
+        background: var(--colour-brand-deep);
+        color: oklch(0.91 0.025 142);
+    }
+
+    .site-footer__inner {
+        display: grid;
+        width: min(100% - 2rem, var(--content-width));
+        grid-template-columns: minmax(14rem, 1fr) auto minmax(16rem, 1fr);
+        align-items: start;
+        gap: 2rem;
+        margin-inline: auto;
+        padding-block: 3rem;
+    }
+
+    .site-footer__brand {
+        display: inline-flex;
+        margin-bottom: 0.75rem;
+        text-decoration: none;
+    }
+
+    .site-footer p,
+    .site-footer nav {
+        font-family: var(--font-mono);
+        font-size: 0.6875rem;
+        line-height: 1.7;
+    }
+
+    .site-footer nav {
+        display: flex;
+        align-items: flex-start;
+        flex-direction: column;
+        gap: 0.375rem;
+    }
+
+    .site-footer a:hover {
+        color: var(--colour-bg);
+    }
+
+    .site-footer__note {
+        max-width: 40ch;
+        justify-self: end;
+    }
+
+    @media (max-width: 48rem) {
+        .site-footer__inner {
+            grid-template-columns: 1fr;
+        }
+
+        .site-footer__note {
+            justify-self: start;
+        }
+    }
+</style>
