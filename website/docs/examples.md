@@ -98,12 +98,12 @@ orna invoke studio.main --inspect
 
 The files build on each other. Start with `01_people_tasks.orna` for the type system, then read `02_server_functions.orna` for the SERVER domain. Read the CLIENT and UI examples only after the data model is clear.
 
-Every example file carries the same status rule as this site: the syntax is the intended language, not a claim about what is released. The [status page](/docs/status/) lists what actually exists.
+Every example file carries the same status rule as this site: the syntax is the intended language, not a claim about what is released. The [status page](/status/) lists what actually exists.
 
 ## Next steps
 
-- Read the [getting started](/docs/getting-started/) guide for the model in five minutes.
-- Read [object model](/docs/object-model/) for the type system.
-- Read [invocation](/docs/invocation/) for the presentation path.
+- Read the [getting started](/getting-started/) guide for the model in five minutes.
+- Read [object model](/object-model/) for the type system.
+- Read [invocation](/invocation/) for the presentation path.
 
-Return to the [OrnaDB frontpage](/) or inspect the [source repository](https://github.com/workingdir/ornadb).
+Return to the [OrnaDB overview](/) or inspect the [source repository](https://github.com/workingdir/ornadb).

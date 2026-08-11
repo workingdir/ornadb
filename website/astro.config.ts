@@ -5,7 +5,8 @@ export default defineConfig({
     integrations: [
         sourcey({
             config: "./docs/sourcey.config.ts",
-            routeBase: "/docs",
+            routeBase: "/",
+            allowRootOutput: true,
             build: { generateOgImages: false },
             dev: { generateOgImages: false },
         }),

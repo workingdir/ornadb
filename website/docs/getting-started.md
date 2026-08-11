@@ -8,7 +8,7 @@ description: The object-relational program model in five minutes. Types, functio
 OrnaDB is an object-relational database that stores and runs the programs which work with its data. Types describe values and durable objects. Functions describe all executable behaviour. Invocations create running programs.
 
 :::warning Development status
-OrnaDB is under active development. There is no released executable yet. Examples on this site show the intended language. The [status page](/docs/status/) separates implemented work from locked design, current proposals, and open questions.
+OrnaDB is under active development. There is no released executable yet. Examples on this site show the intended language. The [status page](/status/) separates implemented work from locked design, current proposals, and open questions.
 :::
 
 ## The model
@@ -36,7 +36,7 @@ CREATE TYPE tasks.task AS OBJECT (
 );
 ```
 
-`REF people.person` is a typed reference to an object identity. It is not an untyped foreign key. The [object model](/docs/object-model/) page explains the full type system.
+`REF people.person` is a typed reference to an object identity. It is not an untyped foreign key. The [object model](/object-model/) page explains the full type system.
 
 ## Step 2. Define a function
 
@@ -64,7 +64,7 @@ An interactive terminal normally receives a table. Automation can require a mach
 orna invoke tasks.overdue --output json
 ```
 
-The target function does not change. Presentation is planned separately from execution. See [invocation](/docs/invocation/).
+The target function does not change. Presentation is planned separately from execution. See [invocation](/invocation/).
 
 ## Step 4. Return a UI value
 
@@ -86,7 +86,7 @@ AS
 orna invoke tasks.overdue_window
 ```
 
-The same data function now reaches a native window. See [UI and runtimes](/docs/ui-and-runtimes/).
+The same data function now reaches a native window. See [UI and runtimes](/ui-and-runtimes/).
 
 ## What runs where
 
@@ -100,10 +100,10 @@ The same data function now reaches a native window. See [UI and runtimes](/docs/
 
 ## Next steps
 
-- Read the [object model](/docs/object-model/).
-- Read the [function language](/docs/functions/).
-- Read the [invocation system](/docs/invocation/).
-- Run through the [examples](/docs/examples/).
-- Check what exists today on the [status page](/docs/status/).
+- Read the [object model](/object-model/).
+- Read the [function language](/functions/).
+- Read the [invocation system](/invocation/).
+- Run through the [examples](/examples/).
+- Check what exists today on the [status page](/status/).
 
-Return to the [OrnaDB frontpage](/) or inspect the [source repository](https://github.com/workingdir/ornadb).
+Return to the [OrnaDB overview](/) or inspect the [source repository](https://github.com/workingdir/ornadb).

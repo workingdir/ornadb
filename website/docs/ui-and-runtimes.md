@@ -170,8 +170,8 @@ Actions may update state, call a CLIENT function, call a SERVER function asynchr
 
 ## Next steps
 
-- Read the CLIENT domain in [functions](/docs/functions/).
-- Read how results are planned in [invocation](/docs/invocation/).
-- Read the process topology in [architecture](/docs/architecture/).
+- Read the CLIENT domain in [functions](/functions/).
+- Read how results are planned in [invocation](/invocation/).
+- Read the process topology in [architecture](/architecture/).
 
-Return to the [OrnaDB frontpage](/) or inspect the [source repository](https://github.com/workingdir/ornadb).
+Return to the [OrnaDB overview](/) or inspect the [source repository](https://github.com/workingdir/ornadb).

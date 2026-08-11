@@ -148,8 +148,8 @@ The official Inspector is an ordinary CLIENT function returning `std.ui.UI`. It 
 
 ## Next steps
 
-- Read the executable model in [functions](/docs/functions/).
-- Read the invocation flow in [invocation](/docs/invocation/).
-- Read the trust and inspection model in [security and inspection](/docs/security-and-inspection/).
+- Read the executable model in [functions](/functions/).
+- Read the invocation flow in [invocation](/invocation/).
+- Read the trust and inspection model in [security and inspection](/security-and-inspection/).
 
-Return to the [OrnaDB frontpage](/) or inspect the [source repository](https://github.com/workingdir/ornadb).
+Return to the [OrnaDB overview](/) or inspect the [source repository](https://github.com/workingdir/ornadb).

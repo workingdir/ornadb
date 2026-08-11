@@ -117,7 +117,7 @@ SECURITY INVOKER    -- default
 SECURITY DEFINER
 ```
 
-`SECURITY DEFINER` is security-sensitive. It is audited and subject to restrictions on dynamic name resolution and dependencies. See [security and inspection](/docs/security-and-inspection/).
+`SECURITY DEFINER` is security-sensitive. It is audited and subject to restrictions on dynamic name resolution and dependencies. See [security and inspection](/security-and-inspection/).
 
 ## External CLIENT functions and runtime contracts
 
@@ -179,8 +179,8 @@ Each of these was rejected because a function plus ordinary metadata covers the 
 
 ## Next steps
 
-- Read how functions are invoked in [invocation](/docs/invocation/).
-- Read how CLIENT functions reach a UI in [UI and runtimes](/docs/ui-and-runtimes/).
-- Read the security model in [security and inspection](/docs/security-and-inspection/).
+- Read how functions are invoked in [invocation](/invocation/).
+- Read how CLIENT functions reach a UI in [UI and runtimes](/ui-and-runtimes/).
+- Read the security model in [security and inspection](/security-and-inspection/).
 
-Return to the [OrnaDB frontpage](/) or inspect the [source repository](https://github.com/workingdir/ornadb).
+Return to the [OrnaDB overview](/) or inspect the [source repository](https://github.com/workingdir/ornadb).

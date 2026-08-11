@@ -46,6 +46,21 @@ body#sourcey .prose :where(p, li) {
     max-width: 72ch;
 }
 
+body#sourcey .prose :not(pre) > code {
+    padding: 0.1em 0.25em;
+    border: 1px solid var(--orna-line);
+    border-radius: 0.25rem;
+    background: oklch(0.965 0.009 142);
+    color: var(--orna-brand-deep);
+    font-size: 0.875em;
+    font-weight: 600;
+}
+
+body#sourcey .prose :not(pre) > code::before,
+body#sourcey .prose :not(pre) > code::after {
+    content: none;
+}
+
 body#sourcey .nav-group-link,
 body#sourcey .nav-link,
 body#sourcey .prose-code-block,
@@ -121,6 +136,12 @@ body#sourcey :focus-visible {
 
 .dark body#sourcey .page-description {
     color: oklch(0.75 0.02 142);
+}
+
+.dark body#sourcey .prose :not(pre) > code {
+    border-color: oklch(0.36 0.025 142);
+    background: oklch(0.18 0.018 145);
+    color: oklch(0.82 0.07 142);
 }
 
 .dark body#sourcey .callout {

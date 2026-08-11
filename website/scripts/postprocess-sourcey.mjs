@@ -1,10 +1,11 @@
-import { readdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { dirname, join, resolve } from "node:path";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const outputRoot = resolve(projectRoot, "dist");
-const sourceyRoot = resolve(outputRoot, "docs");
+const legacyDocsRoot = resolve(outputRoot, "docs");
+const legacyDocsAlias = resolve(outputRoot, "docs.html");
 const bodyMarker = '<body id="sourcey">';
 const skipLink = '<a class="orna-skip-link" href="#docs">Skip to content</a>';
 
@@ -35,8 +36,38 @@ function normaliseSearchButton(html, file) {
     );
 }
 
-const files = await findHtmlFiles(sourceyRoot);
-files.push(resolve(outputRoot, "docs.html"));
+function publicPathFor(file) {
+    const outputPath = relative(outputRoot, file).split(sep).join("/");
+    if (outputPath === "index.html") {
+        return "/";
+    }
+    if (outputPath.endsWith("/index.html")) {
+        return `/${outputPath.slice(0, -"index.html".length)}`;
+    }
+    return `/${outputPath}`;
+}
+
+function renderRedirect(target) {
+    return `<!doctype html>
+<html lang="en-GB">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta http-equiv="refresh" content="0; url=${target}">
+    <link rel="canonical" href="${target}">
+    <title>Moved - OrnaDB</title>
+</head>
+<body>
+    <p>This page moved to <a href="${target}">${target}</a>.</p>
+</body>
+</html>
+`;
+}
+
+await rm(legacyDocsRoot, { recursive: true, force: true });
+await rm(legacyDocsAlias, { force: true });
+
+const files = await findHtmlFiles(outputRoot);
 
 for (const file of files) {
     const html = await readFile(file, "utf8");
@@ -61,4 +92,15 @@ for (const file of files) {
     await writeFile(file, updated, "utf8");
 }
 
-console.log(`[website] Normalised ${files.length} Sourcey HTML pages.`);
+for (const file of files) {
+    const target = publicPathFor(file);
+    const legacyPath = resolve(legacyDocsRoot, relative(outputRoot, file));
+    await mkdir(dirname(legacyPath), { recursive: true });
+    await writeFile(legacyPath, renderRedirect(target), "utf8");
+}
+
+await writeFile(legacyDocsAlias, renderRedirect("/"), "utf8");
+
+console.log(
+    `[website] Normalised ${files.length} Sourcey pages and wrote ${files.length + 1} legacy redirects.`,
+);

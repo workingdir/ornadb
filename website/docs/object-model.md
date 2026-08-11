@@ -142,8 +142,8 @@ OPEN. The recommendation is to prototype over PostgreSQL tables and columns or a
 
 ## Next steps
 
-- Read how types are used by the [function language](/docs/functions/).
-- Read how results travel through [invocation](/docs/invocation/).
-- Check the [glossary](/docs/glossary/) for term definitions.
+- Read how types are used by the [function language](/functions/).
+- Read how results travel through [invocation](/invocation/).
+- Check the [glossary](/glossary/) for term definitions.
 
-Return to the [OrnaDB frontpage](/) or inspect the [source repository](https://github.com/workingdir/ornadb).
+Return to the [OrnaDB overview](/) or inspect the [source repository](https://github.com/workingdir/ornadb).
