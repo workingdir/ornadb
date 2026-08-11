@@ -178,9 +178,14 @@ pub(crate) async fn recover_active_revision(
     .await?;
     let functions = std::mem::take(&mut function_state.functions);
     let function_origins = std::mem::take(&mut function_state.origins);
-    let semantics =
-        load_catalogue_semantics(transaction, header.catalogue, functions, function_origins)
-            .await?;
+    let semantics = load_catalogue_semantics(
+        transaction,
+        header.catalogue,
+        functions,
+        function_origins,
+        &catalogue_hash_context,
+    )
+    .await?;
     let active = assemble_revision(
         header,
         units,
@@ -1461,24 +1466,42 @@ fn decode_object_type(
 async fn load_fields(
     transaction: &Transaction<'_>,
     catalogue: CatalogueRevisionId,
+    catalogue_hash_context: &CatalogueHashContext,
 ) -> Result<BTreeMap<TypeId, Vec<RecoveredField>>, PostgresKernelError> {
-    let rows = transaction
-        .query(
-            "SELECT catalogue_revision_id, owner_type_id, field_id, name, ordinal,
-                    type_kind, scalar_type, target_type_id, nullable, is_unique,
-                    default_expression_id, on_delete,
-                    source_unit_id, source_start, source_end
-             FROM _orna_kernel.catalogue_fields
-             WHERE catalogue_revision_id = $1
-             ORDER BY owner_type_id, ordinal, field_id",
-            &[&catalogue.to_bytes().to_vec()],
-        )
-        .await
-        .map_err(PostgresKernelError::Database)?;
+    let rows = if catalogue_hash_context.standard().is_some() {
+        transaction
+            .query(
+                "SELECT catalogue_revision_id, owner_type_id, field_id, name, ordinal,
+                        type_kind, scalar_type, target_type_id,
+                        value_type_id, value_standard_library_revision_id,
+                        nullable, is_unique, default_expression_id, on_delete,
+                        source_unit_id, source_start, source_end
+                 FROM _orna_kernel.catalogue_fields
+                 WHERE catalogue_revision_id = $1
+                 ORDER BY owner_type_id, ordinal, field_id",
+                &[&catalogue.to_bytes().to_vec()],
+            )
+            .await
+            .map_err(PostgresKernelError::Database)?
+    } else {
+        transaction
+            .query(
+                "SELECT catalogue_revision_id, owner_type_id, field_id, name, ordinal,
+                        type_kind, scalar_type, target_type_id, nullable, is_unique,
+                        default_expression_id, on_delete,
+                        source_unit_id, source_start, source_end
+                 FROM _orna_kernel.catalogue_fields
+                 WHERE catalogue_revision_id = $1
+                 ORDER BY owner_type_id, ordinal, field_id",
+                &[&catalogue.to_bytes().to_vec()],
+            )
+            .await
+            .map_err(PostgresKernelError::Database)?
+    };
 
     let mut fields = BTreeMap::<TypeId, Vec<RecoveredField>>::new();
     for (index, row) in rows.iter().enumerate() {
-        let field = decode_field(row, index, catalogue)?;
+        let field = decode_field(row, index, catalogue, catalogue_hash_context)?;
         fields.entry(field.owner).or_default().push(field);
     }
     Ok(fields)
@@ -1509,6 +1532,23 @@ impl LegacyResolvedTypeTupleMember {
         }
     }
 
+    const fn value_tuple_rule(self) -> &'static str {
+        match self {
+            Self::Field => {
+                "field type kind, scalar type, target identity, value type identity, and standard library revision must form one exact supported tuple"
+            }
+            Self::Parameter => {
+                "parameter type columns, value type identity, and standard library revision must form one exact resolved type tuple"
+            }
+            Self::ReturnColumn => {
+                "return column type columns, value type identity, and standard library revision must form one exact resolved type tuple"
+            }
+            Self::SingleReturn => {
+                "function return type columns, value type identity, and standard library revision must form one exact resolved type tuple"
+            }
+        }
+    }
+
     const fn scalar_rule(self) -> &'static str {
         match self {
             Self::Field => "field scalar type must be an exact standard scalar name",
@@ -1528,6 +1568,18 @@ pub(super) enum LegacyResolvedTypeTupleKind {
     Scalar,
     Named,
     Reference,
+}
+
+/// The five stored columns that describe one version-2 resolved type.
+///
+/// This is the only recovery projection that combines legacy type columns with
+/// a standard value identity and its standard-library revision pin.
+pub(super) struct ResolvedTypeTuple {
+    pub(super) kind: Option<String>,
+    pub(super) scalar: Option<String>,
+    pub(super) target: Option<TypeId>,
+    pub(super) value_type: Option<TypeId>,
+    pub(super) standard_library_revision: Option<StandardLibraryRevisionId>,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -1608,6 +1660,49 @@ pub(super) fn decode_legacy_resolved_type_tuple(
     Err(record.invariant(member.tuple_rule()))
 }
 
+/// Decodes one complete version-2 stored resolved-type tuple.
+///
+/// The selected catalogue context provides the one verified standard snapshot.
+/// This function does not query or verify a second standard snapshot.
+pub(super) fn decode_resolved_type_tuple(
+    tuple: ResolvedTypeTuple,
+    catalogue_hash_context: &CatalogueHashContext,
+    record: &DurableRecord,
+    member: LegacyResolvedTypeTupleMember,
+) -> Result<ResolvedType, PostgresKernelError> {
+    let standard = catalogue_hash_context.standard().ok_or_else(|| {
+        record.invariant("resolved value type tuple requires a version 2 catalogue context")
+    })?;
+
+    if tuple.kind.as_deref() == Some("value") {
+        let (Some(value_type), Some(standard_library_revision)) =
+            (tuple.value_type, tuple.standard_library_revision)
+        else {
+            return Err(record.invariant(member.value_tuple_rule()));
+        };
+        if tuple.scalar.is_some() || tuple.target.is_some() {
+            return Err(record.invariant(member.value_tuple_rule()));
+        }
+        if standard_library_revision != standard.revision() {
+            return Err(record.invariant(
+                "resolved value type standard library revision must equal the selected catalogue pin",
+            ));
+        }
+        if standard.catalogue().value_type_by_id(value_type).is_none() {
+            return Err(record.invariant(
+                "resolved value type must identify one value type in the selected pinned standard library",
+            ));
+        }
+        return Ok(ResolvedType::value(value_type));
+    }
+
+    if tuple.value_type.is_some() || tuple.standard_library_revision.is_some() {
+        return Err(record.invariant(member.value_tuple_rule()));
+    }
+    let kind = decode_legacy_resolved_type_tuple_kind(tuple.kind.as_deref(), record, member)?;
+    decode_legacy_resolved_type_tuple(kind, tuple.scalar.as_deref(), tuple.target, record, member)
+}
+
 fn decode_legacy_scalar(
     name: &str,
     record: &DurableRecord,
@@ -1648,6 +1743,7 @@ fn decode_field(
     row: &Row,
     row_index: usize,
     expected_catalogue: CatalogueRevisionId,
+    catalogue_hash_context: &CatalogueHashContext,
 ) -> Result<RecoveredField, PostgresKernelError> {
     const RELATION: &str = "_orna_kernel.catalogue_fields";
     let row_record = DurableRecord::new(RELATION, format!("row={row_index}"));
@@ -1679,38 +1775,11 @@ fn decode_field(
         &record,
         "field ordinal must fit u32",
     )?;
-    let kind_name: String = record.column(
-        row,
-        "type_kind",
-        "field type kind must be scalar, named, or reference",
-    )?;
-    let kind = decode_legacy_resolved_type_tuple_kind(
-        Some(&kind_name),
-        &record,
-        LegacyResolvedTypeTupleMember::Field,
-    )?;
-    let scalar_name: Option<String> = record.column(
-        row,
-        "scalar_type",
-        "field scalar type must be null or an exact standard scalar name",
-    )?;
-    let target = optional_identity_bytes(
-        record.column(
-            row,
-            "target_type_id",
-            "field target identity must be null or 16 bytes",
-        )?,
-        &record,
-        "field target identity must be null or 16 bytes",
-    )?
-    .map(TypeId::from_bytes);
-    let resolved_type = decode_legacy_resolved_type_tuple(
-        kind,
-        scalar_name.as_deref(),
-        target,
-        &record,
-        LegacyResolvedTypeTupleMember::Field,
-    )?;
+    let resolved_type = if catalogue_hash_context.standard().is_some() {
+        decode_version_two_field_type_columns(row, &record, catalogue_hash_context)?
+    } else {
+        decode_legacy_field_type_columns(row, &record)?
+    };
     let nullable: bool = record.column(row, "nullable", "field nullability must be boolean")?;
     let unique: bool = record.column(row, "is_unique", "field uniqueness must be boolean")?;
     let default_expression = optional_identity_bytes(
@@ -1745,6 +1814,103 @@ fn decode_field(
         ),
         origin,
     })
+}
+
+fn decode_legacy_field_type_columns(
+    row: &Row,
+    record: &DurableRecord,
+) -> Result<ResolvedType, PostgresKernelError> {
+    let kind_name: String = record.column(
+        row,
+        "type_kind",
+        "field type kind must be scalar, named, or reference",
+    )?;
+    let kind = decode_legacy_resolved_type_tuple_kind(
+        Some(&kind_name),
+        record,
+        LegacyResolvedTypeTupleMember::Field,
+    )?;
+    let scalar_name: Option<String> = record.column(
+        row,
+        "scalar_type",
+        "field scalar type must be null or an exact standard scalar name",
+    )?;
+    let target = optional_identity_bytes(
+        record.column(
+            row,
+            "target_type_id",
+            "field target identity must be null or 16 bytes",
+        )?,
+        record,
+        "field target identity must be null or 16 bytes",
+    )?
+    .map(TypeId::from_bytes);
+    decode_legacy_resolved_type_tuple(
+        kind,
+        scalar_name.as_deref(),
+        target,
+        record,
+        LegacyResolvedTypeTupleMember::Field,
+    )
+}
+
+fn decode_version_two_field_type_columns(
+    row: &Row,
+    record: &DurableRecord,
+    catalogue_hash_context: &CatalogueHashContext,
+) -> Result<ResolvedType, PostgresKernelError> {
+    let kind: Option<String> = record.column(
+        row,
+        "type_kind",
+        "field type kind must be scalar, named, reference, or value",
+    )?;
+    let scalar: Option<String> = record.column(
+        row,
+        "scalar_type",
+        "field scalar type must be null or an exact standard scalar name",
+    )?;
+    let target = optional_identity_bytes(
+        record.column(
+            row,
+            "target_type_id",
+            "field target identity must be null or 16 bytes",
+        )?,
+        record,
+        "field target identity must be null or 16 bytes",
+    )?
+    .map(TypeId::from_bytes);
+    let value_type = optional_identity_bytes(
+        record.column(
+            row,
+            "value_type_id",
+            "field value type identity must be null or 16 bytes",
+        )?,
+        record,
+        "field value type identity must be null or 16 bytes",
+    )?
+    .map(TypeId::from_bytes);
+    let standard_library_revision = optional_identity_bytes(
+        record.column(
+            row,
+            "value_standard_library_revision_id",
+            "field value type standard library revision identity must be null or 16 bytes",
+        )?,
+        record,
+        "field value type standard library revision identity must be null or 16 bytes",
+    )?
+    .map(StandardLibraryRevisionId::from_bytes);
+    decode_resolved_type_tuple(
+        ResolvedTypeTuple {
+            kind,
+            scalar,
+            target,
+            value_type,
+            standard_library_revision,
+        },
+        catalogue_hash_context,
+        record,
+        LegacyResolvedTypeTupleMember::Field,
+    )
 }
 
 fn decode_on_delete(
@@ -2033,12 +2199,13 @@ async fn load_catalogue_semantics(
     catalogue: CatalogueRevisionId,
     functions: Vec<functions::RecoveredFunction>,
     function_origins: Vec<DefinitionOrigin>,
+    catalogue_hash_context: &CatalogueHashContext,
 ) -> Result<RecoveredCatalogueSemantics, PostgresKernelError> {
     assemble_catalogue_semantics(
         catalogue,
         load_schemas(transaction, catalogue).await?,
         load_object_types(transaction, catalogue).await?,
-        load_fields(transaction, catalogue).await?,
+        load_fields(transaction, catalogue, catalogue_hash_context).await?,
         load_expressions(transaction, catalogue).await?,
         functions,
         function_origins,
@@ -2317,9 +2484,7 @@ fn validate_function_type(
         return Ok(());
     }
     if resolved_type.value_type().is_some() {
-        return Err(
-            record.invariant("function resolved value types are not supported by active recovery")
-        );
+        return Ok(());
     }
     Err(record.invariant("function resolved types are not supported by active recovery"))
 }
@@ -2349,10 +2514,6 @@ fn validate_field_links(
                     record.invariant("every reference field target must be an active object type")
                 );
             }
-            if field.resolved_type().value_type().is_some() {
-                return Err(record
-                    .invariant("field resolved value types are not supported by active recovery"));
-            }
             if let Some(expression) = field.default_expression()
                 && !expression_ids.contains(&expression)
             {
@@ -2368,14 +2529,15 @@ fn validate_field_links(
 #[cfg(test)]
 mod tests {
     use orna_core::{
-        CatalogueRevisionId, SourceBundleId, SourceRevisionId, SourceUnitId, TypeId,
+        CatalogueRevisionId, SourceBundleId, SourceRevisionId, SourceUnitId,
+        StandardLibraryRevisionId, TypeId,
         canonical_hash::{
             catalogue_digest, source_bundle_digest, source_revision_record_digest,
             source_unit_content_digest,
         },
         catalogue::CatalogueSnapshot,
-        revision::CatalogueHashVersion,
         revision::StoredSourceUnit,
+        revision::{CatalogueHashContext, CatalogueHashVersion},
         types::{ResolvedType, StandardScalar},
     };
 
@@ -2383,8 +2545,9 @@ mod tests {
 
     use super::{
         LegacyResolvedTypeTupleMember, RecoveredCatalogueSemantics, RecoveredFunctionState,
-        RecoveredRevisionHeader, assemble_revision, decode_catalogue_hash_version,
-        decode_legacy_resolved_type_tuple, decode_legacy_resolved_type_tuple_kind,
+        RecoveredRevisionHeader, ResolvedTypeTuple, assemble_revision,
+        decode_catalogue_hash_version, decode_legacy_resolved_type_tuple,
+        decode_legacy_resolved_type_tuple_kind, decode_resolved_type_tuple,
     };
 
     #[test]
@@ -2422,6 +2585,217 @@ mod tests {
             )
             .expect("scalar field tuple"),
             ResolvedType::scalar(StandardScalar::Boolean)
+        );
+    }
+
+    #[test]
+    fn resolved_value_tuple_uses_the_recovered_standard_identity() {
+        let standard = orna_standard::verify_standard_library_snapshot(
+            orna_standard::retained_standard_library_snapshot()
+                .expect("retained standard snapshot"),
+        )
+        .expect("verified retained standard snapshot");
+        let value_type = standard
+            .catalogue()
+            .value_types()
+            .first()
+            .expect("retained standard value type")
+            .id();
+        let context = CatalogueHashContext::version_two(standard.clone());
+        let record = DurableRecord::new("_orna_kernel.catalogue_fields", "value-tuple");
+
+        for member in [
+            LegacyResolvedTypeTupleMember::Field,
+            LegacyResolvedTypeTupleMember::Parameter,
+            LegacyResolvedTypeTupleMember::ReturnColumn,
+            LegacyResolvedTypeTupleMember::SingleReturn,
+        ] {
+            let resolved_type = decode_resolved_type_tuple(
+                ResolvedTypeTuple {
+                    kind: Some("value".to_owned()),
+                    scalar: None,
+                    target: None,
+                    value_type: Some(value_type),
+                    standard_library_revision: Some(standard.revision()),
+                },
+                &context,
+                &record,
+                member,
+            )
+            .expect("value tuple");
+
+            assert_eq!(resolved_type, ResolvedType::value(value_type));
+        }
+    }
+
+    #[test]
+    fn resolved_value_tuple_checks_shape_then_pin_then_pinned_membership() {
+        let standard = orna_standard::verify_standard_library_snapshot(
+            orna_standard::retained_standard_library_snapshot()
+                .expect("retained standard snapshot"),
+        )
+        .expect("verified retained standard snapshot");
+        let value_type = standard
+            .catalogue()
+            .value_types()
+            .first()
+            .expect("retained standard value type")
+            .id();
+        let context = CatalogueHashContext::version_two(standard.clone());
+        let record = DurableRecord::new("_orna_kernel.catalogue_fields", "value-tuple-order");
+
+        let malformed = decode_resolved_type_tuple(
+            ResolvedTypeTuple {
+                kind: Some("value".to_owned()),
+                scalar: Some("boolean".to_owned()),
+                target: None,
+                value_type: Some(value_type),
+                standard_library_revision: None,
+            },
+            &context,
+            &record,
+            LegacyResolvedTypeTupleMember::Field,
+        );
+        assert!(matches!(
+            malformed,
+            Err(PostgresKernelError::DurableInvariant {
+                relation: "_orna_kernel.catalogue_fields",
+                record: failed_record,
+                rule: "field type kind, scalar type, target identity, value type identity, and standard library revision must form one exact supported tuple",
+            }) if failed_record == "value-tuple-order"
+        ));
+
+        let wrong_pin = StandardLibraryRevisionId::from_bytes([0xa4; 16]);
+        assert_ne!(wrong_pin, standard.revision());
+        let mismatched_pin = decode_resolved_type_tuple(
+            ResolvedTypeTuple {
+                kind: Some("value".to_owned()),
+                scalar: None,
+                target: None,
+                value_type: Some(value_type),
+                standard_library_revision: Some(wrong_pin),
+            },
+            &context,
+            &record,
+            LegacyResolvedTypeTupleMember::Field,
+        );
+        assert!(matches!(
+            mismatched_pin,
+            Err(PostgresKernelError::DurableInvariant {
+                relation: "_orna_kernel.catalogue_fields",
+                record: failed_record,
+                rule: "resolved value type standard library revision must equal the selected catalogue pin",
+            }) if failed_record == "value-tuple-order"
+        ));
+
+        let missing_value_type = TypeId::from_bytes([0xa5; 16]);
+        assert!(
+            standard
+                .catalogue()
+                .value_type_by_id(missing_value_type)
+                .is_none()
+        );
+        let missing_definition = decode_resolved_type_tuple(
+            ResolvedTypeTuple {
+                kind: Some("value".to_owned()),
+                scalar: None,
+                target: None,
+                value_type: Some(missing_value_type),
+                standard_library_revision: Some(standard.revision()),
+            },
+            &context,
+            &record,
+            LegacyResolvedTypeTupleMember::Field,
+        );
+        assert!(matches!(
+            missing_definition,
+            Err(PostgresKernelError::DurableInvariant {
+                relation: "_orna_kernel.catalogue_fields",
+                record: failed_record,
+                rule: "resolved value type must identify one value type in the selected pinned standard library",
+            }) if failed_record == "value-tuple-order"
+        ));
+    }
+
+    #[test]
+    fn version_two_legacy_resolved_type_tuples_keep_current_shapes() {
+        let standard = orna_standard::verify_standard_library_snapshot(
+            orna_standard::retained_standard_library_snapshot()
+                .expect("retained standard snapshot"),
+        )
+        .expect("verified retained standard snapshot");
+        let context = CatalogueHashContext::version_two(standard);
+        let record = DurableRecord::new("_orna_kernel.catalogue_fields", "legacy-v2-tuple");
+        let scalars = [
+            ("boolean", StandardScalar::Boolean),
+            ("integer", StandardScalar::Integer),
+            ("bigint", StandardScalar::BigInt),
+            ("float", StandardScalar::Float),
+            ("decimal", StandardScalar::Decimal),
+            (
+                "character_large_object",
+                StandardScalar::CharacterLargeObject,
+            ),
+            ("binary_large_object", StandardScalar::BinaryLargeObject),
+            ("uuid", StandardScalar::Uuid),
+            ("date", StandardScalar::Date),
+            ("time", StandardScalar::Time),
+            ("timestamp", StandardScalar::Timestamp),
+            ("duration", StandardScalar::Duration),
+            ("void", StandardScalar::Void),
+        ];
+
+        for (scalar, expected) in scalars {
+            assert_eq!(
+                decode_resolved_type_tuple(
+                    ResolvedTypeTuple {
+                        kind: Some("scalar".to_owned()),
+                        scalar: Some(scalar.to_owned()),
+                        target: None,
+                        value_type: None,
+                        standard_library_revision: None,
+                    },
+                    &context,
+                    &record,
+                    LegacyResolvedTypeTupleMember::Field,
+                )
+                .expect("transitional scalar tuple"),
+                ResolvedType::scalar(expected)
+            );
+        }
+
+        let target = TypeId::from_bytes([0xa6; 16]);
+        assert_eq!(
+            decode_resolved_type_tuple(
+                ResolvedTypeTuple {
+                    kind: Some("named".to_owned()),
+                    scalar: None,
+                    target: Some(target),
+                    value_type: None,
+                    standard_library_revision: None,
+                },
+                &context,
+                &record,
+                LegacyResolvedTypeTupleMember::Parameter,
+            )
+            .expect("transitional named tuple"),
+            ResolvedType::named(target)
+        );
+        assert_eq!(
+            decode_resolved_type_tuple(
+                ResolvedTypeTuple {
+                    kind: Some("reference".to_owned()),
+                    scalar: None,
+                    target: Some(target),
+                    value_type: None,
+                    standard_library_revision: None,
+                },
+                &context,
+                &record,
+                LegacyResolvedTypeTupleMember::Field,
+            )
+            .expect("transitional reference tuple"),
+            ResolvedType::reference(target)
         );
     }
 
