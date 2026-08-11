@@ -6,13 +6,13 @@ on:
       - ".github/workflows/postgresql-embedded.yml"
       - "packaging/postgresql/build-embedded.sh"
       - "packaging/postgresql/embedded-build.toml"
-      - "packaging/postgresql/embedded-postgresql-18.4.patch"
+      - "packaging/postgresql/embedded-postgresql-18.4/**"
   pull_request:
     paths:
       - ".github/workflows/postgresql-embedded.yml"
       - "packaging/postgresql/build-embedded.sh"
       - "packaging/postgresql/embedded-build.toml"
-      - "packaging/postgresql/embedded-postgresql-18.4.patch"
+      - "packaging/postgresql/embedded-postgresql-18.4/**"
 
 permissions:
   contents: read
@@ -24,12 +24,15 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - name: Build and compare two isolated embedded entries
-        run: packaging/postgresql/build-embedded.sh
+        run: |
+          mkdir -p "${GITHUB_WORKSPACE}/target/postgresql-embedded"
+          packaging/postgresql/build-embedded.sh \
+            "${GITHUB_WORKSPACE}/target/postgresql-embedded/legacy-ci-proof"
       - name: Upload embedded PostgreSQL entry evidence and static input
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: postgresql-embedded-entry-evidence-static-input
-          path: target/postgresql-embedded/current/*
+          path: target/postgresql-embedded/legacy-ci-proof/*
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
