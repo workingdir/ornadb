@@ -126,7 +126,7 @@ const fn adapt_field_step(step: ResolvedFieldStep<TypeId, FieldId>) -> FieldStep
 
 const fn adapt_value_type(value_type: CompilerValueType<TypeId>) -> ValueType {
     ValueType {
-        resolved_type: value_type.semantic_type().into_core(),
+        resolved_type: value_type.legacy_artifact_type(),
         nullable: value_type.nullable,
     }
 }
@@ -167,7 +167,9 @@ mod tests {
     use crate::{CheckedFieldId, CheckedTypeId};
 
     use super::super::{
-        DistinctQueryIr, QueryParameter, RelationalQueryIr, check_identity_selected_query_in,
+        DistinctQueryIr, ExpressionIr, ExpressionKind as CompilerExpressionKind, InputSlot,
+        QueryParameter, RelationalQueryIr, ResolvedFieldStep, ScanIr, ValueType,
+        check_identity_selected_query_in,
     };
 
     const TASK_TYPE: TypeId = TypeId::from_bytes([1; 16]);
@@ -177,6 +179,7 @@ mod tests {
     const TITLE_FIELD: FieldId = FieldId::from_bytes([13; 16]);
     const PERSON_NAME_FIELD: FieldId = FieldId::from_bytes([21; 16]);
     const ACTIVE_FIELD: FieldId = FieldId::from_bytes([22; 16]);
+    const NON_GOLDEN_BOOLEAN_TYPE: TypeId = TypeId::from_bytes([0x71; 16]);
     const SELECTOR_OWNER: FunctionId = FunctionId::from_bytes([31; 16]);
     const SELECTOR_PARAMETER: ParameterId = ParameterId::from_bytes([32; 16]);
 
@@ -236,6 +239,55 @@ mod tests {
             t_alias_marker.completed_marker \
         FROM distinct_schema_marker.task_type_marker t_alias_marker \
         WHERE t_alias_marker.completed_marker = TRUE;";
+
+    #[test]
+    fn lowers_standard_value_provenance_to_identical_legacy_field_bytes() {
+        let standard_value =
+            ValueType::standard_value(NON_GOLDEN_BOOLEAN_TYPE, StandardScalar::Boolean, false);
+        let legacy_value = ValueType::legacy_scalar(StandardScalar::Boolean, false);
+        assert_eq!(standard_value.semantic_type(), legacy_value.semantic_type());
+        assert_eq!(
+            standard_value.standard_value_type(),
+            Some(NON_GOLDEN_BOOLEAN_TYPE)
+        );
+        assert_eq!(legacy_value.standard_value_type(), None);
+
+        let field_path = |value_type| ExpressionIr {
+            kind: CompilerExpressionKind::FieldPath {
+                input: InputSlot(0),
+                steps: vec![ResolvedFieldStep {
+                    owner: TASK_TYPE,
+                    field: COMPLETED_FIELD,
+                }],
+            },
+            value_type,
+        };
+        let standard = RelationalQueryIr {
+            scan: ScanIr {
+                input: InputSlot(0),
+                object_type: TASK_TYPE,
+            },
+            projections: vec![field_path(standard_value)],
+            selection: None,
+            ordering: Vec::new(),
+        };
+        let legacy = RelationalQueryIr {
+            scan: standard.scan,
+            projections: vec![field_path(legacy_value)],
+            selection: None,
+            ordering: Vec::new(),
+        };
+
+        let standard_bytes = standard.encode_server_plan().unwrap();
+        let legacy_bytes = legacy.encode_server_plan().unwrap();
+        assert_eq!(standard_bytes, legacy_bytes);
+
+        let decoded = ServerPlan::decode(&standard_bytes).unwrap();
+        assert_eq!(
+            decoded.projections[0].value_type.resolved_type,
+            ResolvedType::scalar(StandardScalar::Boolean)
+        );
+    }
 
     #[test]
     fn encodes_a_checked_server_function_without_source_semantics() {

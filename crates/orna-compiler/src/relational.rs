@@ -7,9 +7,12 @@
 
 use std::fmt;
 
-use orna_core::{FieldId, FunctionId, ParameterId, TypeId, types::StandardScalar};
 #[cfg(test)]
-use orna_core::{catalogue::CatalogueSnapshot, types::ResolvedType};
+use orna_core::catalogue::CatalogueSnapshot;
+use orna_core::{
+    FieldId, FunctionId, ParameterId, TypeId,
+    types::{ResolvedType, StandardScalar},
+};
 use orna_syntax::{NamePart, QueryExpression, SelectQuantifier, SelectQuery, SourceSpan};
 
 use crate::resolver::{QueryCatalogue, SemanticType};
@@ -524,21 +527,13 @@ impl RelationalQueryIr<TypeId, FieldId> {
                 else {
                     panic!("test fixture selection must be an equality");
                 };
-                right.value_type = ValueType {
-                    semantic_type: SemanticType::scalar(StandardScalar::Integer),
-                    standard_value_type: None,
-                    nullable: false,
-                };
+                right.value_type = ValueType::legacy_scalar(StandardScalar::Integer, false);
             }
             RelationalQueryTestMutation::InvalidEqualityType => {
                 let Some(selection) = query.selection.as_mut() else {
                     panic!("test fixture must have a selection");
                 };
-                selection.value_type = ValueType {
-                    semantic_type: SemanticType::scalar(StandardScalar::Integer),
-                    standard_value_type: None,
-                    nullable: false,
-                };
+                selection.value_type = ValueType::legacy_scalar(StandardScalar::Integer, false);
             }
             RelationalQueryTestMutation::InvalidOrderingFieldPathInput => {
                 let ExpressionKind::FieldPath { input, .. } =
@@ -602,11 +597,8 @@ impl DistinctQueryIr<TypeId, FieldId> {
                 *input = InputSlot(1);
             }
             DistinctQueryTestMutation::InvalidObjectReferenceType => {
-                query.projections[0].value_type = ValueType {
-                    semantic_type: SemanticType::scalar(StandardScalar::Boolean),
-                    standard_value_type: None,
-                    nullable: false,
-                };
+                query.projections[0].value_type =
+                    ValueType::legacy_scalar(StandardScalar::Boolean, false);
             }
             DistinctQueryTestMutation::InvalidBooleanLiteralType => {
                 let Some(ExpressionIr {
@@ -616,21 +608,13 @@ impl DistinctQueryIr<TypeId, FieldId> {
                 else {
                     panic!("test fixture selection must be an equality");
                 };
-                right.value_type = ValueType {
-                    semantic_type: SemanticType::scalar(StandardScalar::Integer),
-                    standard_value_type: None,
-                    nullable: false,
-                };
+                right.value_type = ValueType::legacy_scalar(StandardScalar::Integer, false);
             }
             DistinctQueryTestMutation::InvalidEqualityType => {
                 let Some(selection) = query.selection.as_mut() else {
                     panic!("test fixture must have a selection");
                 };
-                selection.value_type = ValueType {
-                    semantic_type: SemanticType::scalar(StandardScalar::Integer),
-                    standard_value_type: None,
-                    nullable: false,
-                };
+                selection.value_type = ValueType::legacy_scalar(StandardScalar::Integer, false);
             }
             DistinctQueryTestMutation::ClearSelection => {
                 query.selection = None;
@@ -639,11 +623,8 @@ impl DistinctQueryIr<TypeId, FieldId> {
                 semantic_type,
                 nullable,
             } => {
-                query.projections[2].value_type = ValueType {
-                    semantic_type,
-                    standard_value_type: None,
-                    nullable,
-                };
+                query.projections[2].value_type =
+                    ValueType::from_legacy_semantic_type(semantic_type, nullable);
             }
             DistinctQueryTestMutation::SelectionObjectReference => {
                 query.selection = Some(query.projections[0].clone());
@@ -685,24 +666,7 @@ fn try_map_expression<T: Copy, F: Copy, T2, F2, E>(
 
     Ok(ExpressionIr {
         kind,
-        value_type: ValueType {
-            semantic_type: try_map_semantic_type(expression.value_type.semantic_type, map_type)?,
-            standard_value_type: expression.value_type.standard_value_type,
-            nullable: expression.value_type.nullable,
-        },
-    })
-}
-
-fn try_map_semantic_type<T: Copy, T2, E>(
-    semantic_type: SemanticType<T>,
-    map_type: &mut impl FnMut(T) -> Result<T2, E>,
-) -> Result<SemanticType<T2>, E> {
-    Ok(match semantic_type {
-        SemanticType::Scalar(scalar) => SemanticType::Scalar(scalar),
-        SemanticType::Named(type_id) => SemanticType::Named(map_type(type_id)?),
-        SemanticType::Reference { target } => SemanticType::Reference {
-            target: map_type(target)?,
-        },
+        value_type: expression.value_type.try_map_identities(map_type)?,
     })
 }
 
@@ -831,19 +795,107 @@ impl<T, F> ResolvedFieldStep<T, F> {
 /// The resolved type and nullability of a relational expression.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ValueType<T = TypeId> {
-    semantic_type: SemanticType<T>,
-    standard_value_type: Option<TypeId>,
+    resolved_value: ResolvedValueType<T>,
     nullable: bool,
+}
+
+/// The complete resolved-value inspection result for a relational expression.
+///
+/// A standard value retains both its supplied identity and its version-1
+/// compatibility representation. The latter supports relational allowlists
+/// and legacy artifact representation, but not equality identity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ResolvedValueType<T> {
+    LegacyScalar(StandardScalar),
+    StandardValue {
+        type_id: TypeId,
+        compatibility: StandardScalar,
+    },
+    Named(T),
+    Reference {
+        target: T,
+    },
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
 impl<T> ValueType<T> {
+    const fn legacy_scalar(scalar: StandardScalar, nullable: bool) -> Self {
+        Self {
+            resolved_value: ResolvedValueType::LegacyScalar(scalar),
+            nullable,
+        }
+    }
+
+    const fn standard_value(
+        type_id: TypeId,
+        compatibility: StandardScalar,
+        nullable: bool,
+    ) -> Self {
+        Self {
+            resolved_value: ResolvedValueType::StandardValue {
+                type_id,
+                compatibility,
+            },
+            nullable,
+        }
+    }
+
+    const fn named(type_id: T, nullable: bool) -> Self {
+        Self {
+            resolved_value: ResolvedValueType::Named(type_id),
+            nullable,
+        }
+    }
+
+    const fn reference(target: T, nullable: bool) -> Self {
+        Self {
+            resolved_value: ResolvedValueType::Reference { target },
+            nullable,
+        }
+    }
+
+    fn from_legacy_semantic_type(semantic_type: SemanticType<T>, nullable: bool) -> Self {
+        match semantic_type {
+            SemanticType::Scalar(scalar) => Self::legacy_scalar(scalar, nullable),
+            SemanticType::Named(type_id) => Self::named(type_id, nullable),
+            SemanticType::Reference { target } => Self::reference(target, nullable),
+        }
+    }
+
+    fn from_semantic_type(
+        semantic_type: SemanticType<T>,
+        standard_value_type: Option<TypeId>,
+        nullable: bool,
+    ) -> Option<Self> {
+        match (semantic_type, standard_value_type) {
+            (SemanticType::Scalar(scalar), None) => Some(Self::legacy_scalar(scalar, nullable)),
+            (SemanticType::Scalar(compatibility), Some(type_id)) => {
+                Some(Self::standard_value(type_id, compatibility, nullable))
+            }
+            (SemanticType::Named(type_id), None) => Some(Self::named(type_id, nullable)),
+            (SemanticType::Reference { target }, None) => Some(Self::reference(target, nullable)),
+            (SemanticType::Named(_) | SemanticType::Reference { .. }, Some(_)) => None,
+        }
+    }
+
+    const fn resolved_value(&self) -> &ResolvedValueType<T> {
+        &self.resolved_value
+    }
+
     /// Returns the semantic type in this query's identity domain.
     pub(crate) const fn semantic_type(&self) -> SemanticType<T>
     where
         T: Copy,
     {
-        self.semantic_type
+        match self.resolved_value {
+            ResolvedValueType::LegacyScalar(scalar)
+            | ResolvedValueType::StandardValue {
+                compatibility: scalar,
+                ..
+            } => SemanticType::Scalar(scalar),
+            ResolvedValueType::Named(type_id) => SemanticType::Named(type_id),
+            ResolvedValueType::Reference { target } => SemanticType::Reference { target },
+        }
     }
 
     pub(crate) const fn nullable(&self) -> bool {
@@ -852,15 +904,59 @@ impl<T> ValueType<T> {
 
     /// Returns the supplied standard value-type identity when one exists.
     pub(crate) const fn standard_value_type(&self) -> Option<TypeId> {
-        self.standard_value_type
+        match self.resolved_value {
+            ResolvedValueType::StandardValue { type_id, .. } => Some(type_id),
+            ResolvedValueType::LegacyScalar(_)
+            | ResolvedValueType::Named(_)
+            | ResolvedValueType::Reference { .. } => None,
+        }
+    }
+
+    fn try_map_identities<T2, E>(
+        &self,
+        map_type: &mut impl FnMut(T) -> Result<T2, E>,
+    ) -> Result<ValueType<T2>, E>
+    where
+        T: Copy,
+    {
+        Ok(ValueType {
+            resolved_value: match self.resolved_value {
+                ResolvedValueType::LegacyScalar(scalar) => ResolvedValueType::LegacyScalar(scalar),
+                ResolvedValueType::StandardValue {
+                    type_id,
+                    compatibility,
+                } => ResolvedValueType::StandardValue {
+                    type_id,
+                    compatibility,
+                },
+                ResolvedValueType::Named(type_id) => ResolvedValueType::Named(map_type(type_id)?),
+                ResolvedValueType::Reference { target } => ResolvedValueType::Reference {
+                    target: map_type(target)?,
+                },
+            },
+            nullable: self.nullable,
+        })
     }
 }
 
-#[cfg(test)]
 impl ValueType<TypeId> {
+    /// Returns the exact legacy type emitted into a version-1 server artifact.
+    pub(super) const fn legacy_artifact_type(&self) -> ResolvedType {
+        match self.resolved_value {
+            ResolvedValueType::LegacyScalar(scalar) => ResolvedType::scalar(scalar),
+            ResolvedValueType::StandardValue {
+                compatibility: scalar,
+                ..
+            } => ResolvedType::scalar(scalar),
+            ResolvedValueType::Named(type_id) => ResolvedType::Named(type_id),
+            ResolvedValueType::Reference { target } => ResolvedType::reference(target),
+        }
+    }
+
+    #[cfg(test)]
     /// Returns the durable core type for compatibility with existing callers.
     pub(crate) const fn resolved_type(&self) -> ResolvedType {
-        self.semantic_type.into_core()
+        self.legacy_artifact_type()
     }
 }
 
@@ -1080,7 +1176,7 @@ where
     }
 
     for (source, projection) in query.projections.iter().zip(&projections) {
-        if !supports_server_select_distinct(projection.value_type.semantic_type) {
+        if !supports_server_select_distinct_value(projection.value_type) {
             diagnostics.push(diagnostic(
                 DiagnosticCode::DomainIncompatible,
                 "SELECT DISTINCT projections support only BOOLEAN, INTEGER, BIGINT, BYTES, and REF values",
@@ -1131,7 +1227,7 @@ where
             diagnostics,
             references,
         )?;
-        if expression.value_type.semantic_type != SemanticType::scalar(StandardScalar::Boolean) {
+        if !is_boolean_value(expression.value_type.resolved_value()) {
             diagnostics.push(diagnostic(
                 DiagnosticCode::TypeMismatch,
                 "WHERE requires a BOOLEAN expression",
@@ -1482,11 +1578,7 @@ where
                 kind: ExpressionKind::ObjectReference {
                     input: context.input,
                 },
-                value_type: ValueType {
-                    semantic_type: SemanticType::reference(context.object_type),
-                    standard_value_type: None,
-                    nullable: false,
-                },
+                value_type: ValueType::reference(context.object_type, false),
             })
         }
         QueryExpression::FieldPath { root, members, .. } => {
@@ -1546,9 +1638,10 @@ where
                 return None;
             };
 
-            if left.value_type.semantic_type != right.value_type.semantic_type
-                || left.value_type.standard_value_type != right.value_type.standard_value_type
-            {
+            if !resolved_values_match(
+                left.value_type.resolved_value(),
+                right.value_type.resolved_value(),
+            ) {
                 diagnostics.push(diagnostic(
                     DiagnosticCode::TypeMismatch,
                     "equality requires expressions with compatible types",
@@ -1557,7 +1650,7 @@ where
                 ));
                 return None;
             }
-            if !supports_server_select_equality(left.value_type.semantic_type) {
+            if !supports_server_select_equality_value(left.value_type) {
                 diagnostics.push(diagnostic(
                     DiagnosticCode::DomainIncompatible,
                     "SERVER SELECT equality supports only BOOLEAN, INTEGER, BIGINT, BYTES, and REF values",
@@ -1597,35 +1690,92 @@ fn intrinsic_boolean_value_type<T>(
             return None;
         }
     };
-    Some(ValueType {
-        semantic_type: SemanticType::scalar(StandardScalar::Boolean),
-        standard_value_type,
-        nullable: false,
+    Some(match standard_value_type {
+        Some(type_id) => ValueType::standard_value(type_id, StandardScalar::Boolean, false),
+        None => ValueType::legacy_scalar(StandardScalar::Boolean, false),
     })
 }
 
 pub(crate) fn supports_server_select_equality<T>(semantic_type: SemanticType<T>) -> bool {
-    matches!(
+    supports_server_select_equality_value(ValueType::from_legacy_semantic_type(
         semantic_type,
-        SemanticType::Scalar(
-            StandardScalar::Boolean
-                | StandardScalar::Integer
-                | StandardScalar::BigInt
-                | StandardScalar::BinaryLargeObject
-        ) | SemanticType::Reference { .. }
-    )
+        false,
+    ))
 }
 
 /// Returns whether one projection type has accepted Orna DISTINCT semantics.
 pub(crate) fn supports_server_select_distinct<T>(semantic_type: SemanticType<T>) -> bool {
-    matches!(
+    supports_server_select_distinct_value(ValueType::from_legacy_semantic_type(
         semantic_type,
-        SemanticType::Scalar(
+        false,
+    ))
+}
+
+fn supports_server_select_equality_value<T>(value_type: ValueType<T>) -> bool {
+    supports_resolved_value(value_type.resolved_value())
+}
+
+fn supports_server_select_distinct_value<T>(value_type: ValueType<T>) -> bool {
+    supports_resolved_value(value_type.resolved_value())
+}
+
+fn resolved_values_match<T: Eq>(left: &ResolvedValueType<T>, right: &ResolvedValueType<T>) -> bool {
+    match (left, right) {
+        (
+            ResolvedValueType::StandardValue {
+                type_id: left_type_id,
+                ..
+            },
+            ResolvedValueType::StandardValue {
+                type_id: right_type_id,
+                ..
+            },
+        ) => left_type_id == right_type_id,
+        (
+            ResolvedValueType::LegacyScalar(left_scalar),
+            ResolvedValueType::LegacyScalar(right_scalar),
+        ) => left_scalar == right_scalar,
+        (ResolvedValueType::Named(left_type_id), ResolvedValueType::Named(right_type_id)) => {
+            left_type_id == right_type_id
+        }
+        (
+            ResolvedValueType::Reference {
+                target: left_target,
+            },
+            ResolvedValueType::Reference {
+                target: right_target,
+            },
+        ) => left_target == right_target,
+        _ => false,
+    }
+}
+
+fn supports_resolved_value<T>(value_type: &ResolvedValueType<T>) -> bool {
+    matches!(
+        value_type,
+        ResolvedValueType::LegacyScalar(
             StandardScalar::Boolean
                 | StandardScalar::Integer
                 | StandardScalar::BigInt
                 | StandardScalar::BinaryLargeObject
-        ) | SemanticType::Reference { .. }
+        ) | ResolvedValueType::StandardValue {
+            compatibility: StandardScalar::Boolean
+                | StandardScalar::Integer
+                | StandardScalar::BigInt
+                | StandardScalar::BinaryLargeObject,
+            ..
+        } | ResolvedValueType::Reference { .. }
+    )
+}
+
+fn is_boolean_value<T>(value_type: &ResolvedValueType<T>) -> bool {
+    matches!(
+        value_type,
+        ResolvedValueType::LegacyScalar(StandardScalar::Boolean)
+            | ResolvedValueType::StandardValue {
+                compatibility: StandardScalar::Boolean,
+                ..
+            }
     )
 }
 
@@ -1666,6 +1816,20 @@ where
             return None;
         };
 
+        let Some(value_type) = ValueType::from_semantic_type(
+            field.semantic_type(),
+            field.standard_value_type(),
+            nullable | field.nullable(),
+        ) else {
+            diagnostics.push(diagnostic(
+                DiagnosticCode::TypeMismatch,
+                format!("field {member_name} has inconsistent standard value-type evidence"),
+                logical_path,
+                &member.span,
+            ));
+            return None;
+        };
+
         references.push(QueryReference {
             kind: QueryReferenceKind::QueryField,
             target: QueryReferenceTarget::Field {
@@ -1686,15 +1850,11 @@ where
                     input: context.input,
                     steps,
                 },
-                value_type: ValueType {
-                    semantic_type: field.semantic_type(),
-                    standard_value_type: field.standard_value_type(),
-                    nullable,
-                },
+                value_type,
             });
         }
 
-        let SemanticType::Reference { target } = field.semantic_type() else {
+        let SemanticType::Reference { target } = value_type.semantic_type() else {
             diagnostics.push(diagnostic(
                 DiagnosticCode::InvalidReferenceTarget,
                 format!("field {member_name} is not a REF and cannot be traversed"),
@@ -1752,11 +1912,12 @@ mod tests {
 
     use super::{
         ExpressionKind, IdentitySelectedQueryReference, IntrinsicBooleanType, NullOrder,
-        QueryParameter, QueryReferenceKind, QueryReferenceTarget, SortDirection,
+        QueryParameter, QueryReferenceKind, QueryReferenceTarget, SortDirection, ValueType,
         check_distinct_query_in, check_identity_selected_query_in,
         check_identity_selected_query_with_intrinsic_boolean_in, check_query, check_query_in,
-        check_query_with_intrinsic_boolean_in, supports_server_select_distinct,
-        supports_server_select_equality,
+        check_query_with_intrinsic_boolean_in, resolved_values_match,
+        supports_server_select_distinct, supports_server_select_distinct_value,
+        supports_server_select_equality, supports_server_select_equality_value,
     };
     use crate::DiagnosticCode;
     use crate::resolver::{
@@ -1889,38 +2050,28 @@ mod tests {
         left: Option<TypeId>,
         right: Option<TypeId>,
     ) -> ResolutionCatalogue<TypeId, FieldId> {
-        let left = left.map_or_else(
-            || {
-                QueryField::new(
-                    COMPLETED_FIELD,
-                    SemanticType::scalar(StandardScalar::Boolean),
-                    false,
-                )
-            },
+        provenance_catalogue_with_compatibility(
+            (StandardScalar::Boolean, left),
+            (StandardScalar::Boolean, right),
+        )
+    }
+
+    fn provenance_catalogue_with_compatibility(
+        left: (StandardScalar, Option<TypeId>),
+        right: (StandardScalar, Option<TypeId>),
+    ) -> ResolutionCatalogue<TypeId, FieldId> {
+        let left = left.1.map_or_else(
+            || QueryField::new(COMPLETED_FIELD, SemanticType::scalar(left.0), false),
             |type_id| {
-                QueryField::new(
-                    COMPLETED_FIELD,
-                    SemanticType::scalar(StandardScalar::Boolean),
-                    false,
-                )
-                .with_standard_value_type(type_id)
+                QueryField::new(COMPLETED_FIELD, SemanticType::scalar(left.0), false)
+                    .with_standard_value_type(type_id)
             },
         );
-        let right = right.map_or_else(
-            || {
-                QueryField::new(
-                    SCORE_FIELD,
-                    SemanticType::scalar(StandardScalar::Boolean),
-                    false,
-                )
-            },
+        let right = right.1.map_or_else(
+            || QueryField::new(SCORE_FIELD, SemanticType::scalar(right.0), false),
             |type_id| {
-                QueryField::new(
-                    SCORE_FIELD,
-                    SemanticType::scalar(StandardScalar::Boolean),
-                    false,
-                )
-                .with_standard_value_type(type_id)
+                QueryField::new(SCORE_FIELD, SemanticType::scalar(right.0), false)
+                    .with_standard_value_type(type_id)
             },
         );
         ResolutionCatalogue::new(vec![QueryObjectType::new(
@@ -1946,6 +2097,23 @@ mod tests {
                         false,
                     ),
                 )],
+            ),
+            QueryObjectType::new(PERSON_TYPE, name(&["people", "person"]), Vec::new()),
+        ])
+        .unwrap()
+    }
+
+    fn inconsistent_provenance_catalogue(
+        semantic_type: SemanticType<TypeId>,
+    ) -> ResolutionCatalogue<TypeId, FieldId> {
+        ResolutionCatalogue::new(vec![
+            QueryObjectType::new(
+                TASK_TYPE,
+                name(&["tasks", "task"]),
+                vec![(("value").to_owned(), {
+                    QueryField::new(COMPLETED_FIELD, semantic_type, false)
+                        .with_standard_value_type(TypeId::from_bytes([0x61; 16]))
+                })],
             ),
             QueryObjectType::new(PERSON_TYPE, name(&["people", "person"]), Vec::new()),
         ])
@@ -2079,6 +2247,50 @@ mod tests {
     }
 
     #[test]
+    fn rejects_inconsistent_standard_evidence_at_the_final_field() {
+        let query = query("SELECT t.value FROM tasks.task t");
+
+        let diagnostics = check_query_in(
+            &query,
+            &inconsistent_provenance_catalogue(SemanticType::Named(PERSON_TYPE)),
+            "tasks.orna",
+        )
+        .unwrap_err();
+
+        assert_one_diagnostic(
+            &diagnostics,
+            DiagnosticCode::TypeMismatch,
+            "field value has inconsistent standard value-type evidence",
+            match &query.projections[0] {
+                QueryExpression::FieldPath { members, .. } => &members[0].span,
+                _ => unreachable!(),
+            },
+        );
+    }
+
+    #[test]
+    fn rejects_inconsistent_standard_evidence_at_the_intermediate_field() {
+        let query = query("SELECT t.value.next FROM tasks.task t");
+
+        let diagnostics = check_query_in(
+            &query,
+            &inconsistent_provenance_catalogue(SemanticType::reference(PERSON_TYPE)),
+            "tasks.orna",
+        )
+        .unwrap_err();
+
+        assert_one_diagnostic(
+            &diagnostics,
+            DiagnosticCode::TypeMismatch,
+            "field value has inconsistent standard value-type evidence",
+            match &query.projections[0] {
+                QueryExpression::FieldPath { members, .. } => &members[0].span,
+                _ => unreachable!(),
+            },
+        );
+    }
+
+    #[test]
     fn standard_value_equality_requires_matching_supplied_type_ids() {
         let query_source = "SELECT t.left = t.right FROM tasks.task t";
         let query = query(query_source);
@@ -2108,6 +2320,23 @@ mod tests {
         .unwrap();
         assert_eq!(
             checked.plan().projections()[0]
+                .value_type()
+                .standard_value_type(),
+            Some(boolean)
+        );
+
+        let compatibility_mismatch = check_query_with_intrinsic_boolean_in(
+            &query,
+            &provenance_catalogue_with_compatibility(
+                (StandardScalar::Boolean, Some(boolean)),
+                (StandardScalar::Integer, Some(boolean)),
+            ),
+            "tasks.orna",
+            IntrinsicBooleanType::Standard(boolean),
+        )
+        .unwrap();
+        assert_eq!(
+            compatibility_mismatch.plan().projections()[0]
                 .value_type()
                 .standard_value_type(),
             Some(boolean)
@@ -2673,6 +2902,70 @@ mod tests {
         assert!(!supports_server_select_distinct(SemanticType::Named(
             TASK_TYPE
         )));
+    }
+
+    #[test]
+    fn resolved_value_projection_preserves_identity_and_legacy_artifact_types() {
+        let supplied = TypeId::from_bytes([0x51; 16]);
+        let other = TypeId::from_bytes([0x52; 16]);
+        let standard = ValueType::standard_value(supplied, StandardScalar::Boolean, false);
+        let same = ValueType::standard_value(supplied, StandardScalar::Boolean, false);
+        let different = ValueType::standard_value(other, StandardScalar::Boolean, false);
+        let legacy = ValueType::legacy_scalar(StandardScalar::Boolean, false);
+
+        assert_eq!(standard.resolved_value(), same.resolved_value());
+        assert_ne!(standard.resolved_value(), different.resolved_value());
+        assert_ne!(standard.resolved_value(), legacy.resolved_value());
+        assert!(resolved_values_match(
+            standard.resolved_value(),
+            ValueType::standard_value(supplied, StandardScalar::Integer, false).resolved_value(),
+        ));
+        assert!(!resolved_values_match(
+            standard.resolved_value(),
+            different.resolved_value(),
+        ));
+        assert!(!resolved_values_match(
+            standard.resolved_value(),
+            legacy.resolved_value(),
+        ));
+        assert_eq!(
+            standard.legacy_artifact_type(),
+            ResolvedType::scalar(StandardScalar::Boolean)
+        );
+        assert_eq!(
+            ValueType::named(TASK_TYPE, false).legacy_artifact_type(),
+            ResolvedType::Named(TASK_TYPE)
+        );
+        assert_eq!(
+            ValueType::reference(PERSON_TYPE, true).legacy_artifact_type(),
+            ResolvedType::reference(PERSON_TYPE)
+        );
+    }
+
+    #[test]
+    fn standard_and_legacy_value_allowlists_are_exact() {
+        let standard_id = TypeId::from_bytes([0x53; 16]);
+        for scalar in StandardScalar::ALL {
+            let expected = matches!(
+                scalar,
+                StandardScalar::Boolean
+                    | StandardScalar::Integer
+                    | StandardScalar::BigInt
+                    | StandardScalar::BinaryLargeObject
+            );
+            let legacy = ValueType::<TypeId>::legacy_scalar(scalar, false);
+            let standard = ValueType::<TypeId>::standard_value(standard_id, scalar, false);
+            assert_eq!(supports_server_select_equality_value(legacy), expected);
+            assert_eq!(supports_server_select_distinct_value(legacy), expected);
+            assert_eq!(supports_server_select_equality_value(standard), expected);
+            assert_eq!(supports_server_select_distinct_value(standard), expected);
+        }
+        let reference = ValueType::reference(TASK_TYPE, false);
+        assert!(supports_server_select_equality_value(reference));
+        assert!(supports_server_select_distinct_value(reference));
+        let named = ValueType::named(TASK_TYPE, false);
+        assert!(!supports_server_select_equality_value(named));
+        assert!(!supports_server_select_distinct_value(named));
     }
 
     #[test]

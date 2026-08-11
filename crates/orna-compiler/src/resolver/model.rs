@@ -66,6 +66,7 @@ impl SemanticType<TypeId> {
     }
 
     /// Converts a durable compiler type back into the core representation.
+    #[cfg(test)]
     pub(crate) const fn into_core(self) -> ResolvedType {
         match self {
             Self::Scalar(scalar) => ResolvedType::Scalar(scalar),
