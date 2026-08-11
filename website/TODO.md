@@ -8,9 +8,9 @@
 
 ## Foundation
 
-- [ ] Configure the Astro static build and Sourcey integration.
-- [ ] Add the initial Sourcey documentation index and theme override.
-- [ ] Validate a minimal production build.
+- [x] Configure the Astro static build and Sourcey integration.
+- [x] Add the initial Sourcey documentation index and theme override.
+- [x] Validate a minimal production build.
 
 ## Frontpage
 
