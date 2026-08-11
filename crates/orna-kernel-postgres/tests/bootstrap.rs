@@ -207,6 +207,28 @@ fn supported_reference_kind_sql_maps_every_legacy_fixture_kind() -> TestResult<(
 }
 
 #[test]
+fn registered_migration_sql_has_no_procedural_language_dependency() -> TestResult<()> {
+    require(!MIGRATIONS.is_empty(), "migration registry is empty")?;
+
+    for (version, name, sql) in MIGRATIONS {
+        let has_do_statement = sql.lines().map(str::trim_start).any(|line| {
+            let line = line.to_ascii_lowercase();
+            line == "do" || line.starts_with("do ") || line.starts_with("do\t")
+        });
+        require(
+            !has_do_statement,
+            format!("migration {version} ({name}) contains a DO statement"),
+        )?;
+        require(
+            !sql.to_ascii_lowercase().contains("plpgsql"),
+            format!("migration {version} ({name}) depends on PL/pgSQL"),
+        )?;
+    }
+
+    Ok(())
+}
+
+#[test]
 fn write_reference_migration_checksum_binds_exact_sql_bytes() {
     assert_eq!(
         hex_bytes(expected_migration_checksum(6, MIGRATIONS[5].2)),
@@ -264,6 +286,19 @@ async fn bootstrap_creates_one_recoverable_empty_revision() -> TestResult<()> {
 async fn bootstrap_upgrades_the_seeded_initial_catalogue() -> TestResult<()> {
     with_test_database(|database| async move {
         seed_initial_catalogue(&database).await?;
+        let kernel = PostgresKernel::from_str(&database.connection_string())?;
+
+        kernel.bootstrap().await?;
+        inspect_bootstrap_state(&database).await
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn bootstrap_upgrades_the_registered_v2_empty_catalogue() -> TestResult<()> {
+    with_test_database(|database| async move {
+        seed_registered_v2_empty_catalogue(&database).await?;
         let kernel = PostgresKernel::from_str(&database.connection_string())?;
 
         kernel.bootstrap().await?;
@@ -707,21 +742,30 @@ async fn bootstrap_rolls_back_v5_for_a_dangling_legacy_reference() -> TestResult
             .bootstrap()
             .await
             .expect_err("v5 must reject a dangling legacy field reference");
-        require(
-            matches!(error, PostgresKernelError::Database(_)),
-            format!("dangling legacy reference produced the wrong failure: {error}"),
+        require_database_constraint(
+            &error,
+            "23514",
+            Some("definition_references_target_owner_shape_check"),
+            "dangling legacy field reference",
         )?;
-        let database_message = match &error {
-            PostgresKernelError::Database(error) => error
-                .as_db_error()
-                .map(tokio_postgres::error::DbError::message),
-            _ => None,
-        };
-        require(
-            database_message
-                == Some("cannot owner-qualify a dangling or ambiguous legacy field reference"),
-            format!("dangling legacy reference produced an unexpected error: {error}"),
-        )?;
+        inspect_v5_rollback(&database).await
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn bootstrap_rolls_back_v5_for_an_ambiguous_legacy_reference() -> TestResult<()> {
+    with_test_database(|database| async move {
+        seed_registered_v4_semantic_catalogue(&database, false).await?;
+        insert_ambiguous_legacy_field_target(&database).await?;
+        let kernel = PostgresKernel::from_str(&database.connection_string())?;
+
+        let error = kernel
+            .bootstrap()
+            .await
+            .expect_err("v5 must reject an ambiguous legacy field reference");
+        require_database_constraint(&error, "21000", None, "ambiguous legacy field reference")?;
         inspect_v5_rollback(&database).await
     })
     .await
@@ -821,10 +865,13 @@ async fn bootstrap_rejects_a_seeded_initial_catalogue_with_semantic_rows() -> Te
             .bootstrap()
             .await
             .expect_err("migration 0002 must reject an unhashable initial catalogue");
-        require(
-            matches!(error, PostgresKernelError::Database(_)),
-            format!("unexpected error for an unhashable initial catalogue: {error}"),
-        )
+        require_database_constraint(
+            &error,
+            "23514",
+            Some("migration_0002_legacy_state_valid_check"),
+            "non-empty migration 0001 catalogue",
+        )?;
+        inspect_v2_rollback(&database).await
     })
     .await
 }
@@ -2027,6 +2074,31 @@ fn expected_migration_checksum(version: i64, sql: &str) -> Vec<u8> {
     hash.finalize().to_vec()
 }
 
+fn require_database_constraint(
+    error: &PostgresKernelError,
+    expected_sqlstate: &str,
+    expected_constraint: Option<&str>,
+    context: &str,
+) -> TestResult<()> {
+    let PostgresKernelError::Database(error) = error else {
+        return Err(failure(format!(
+            "{context} produced a non-database failure: {error}"
+        )));
+    };
+    let database_error = error
+        .as_db_error()
+        .ok_or_else(|| failure(format!("{context} has no PostgreSQL error fields: {error}")))?;
+    require(
+        database_error.code().code() == expected_sqlstate
+            && database_error.constraint() == expected_constraint,
+        format!(
+            "{context} failed with SQLSTATE {} and constraint {:?}; expected {expected_sqlstate} and {expected_constraint:?}",
+            database_error.code().code(),
+            database_error.constraint(),
+        ),
+    )
+}
+
 fn hex_bytes(bytes: impl AsRef<[u8]>) -> String {
     bytes
         .as_ref()
@@ -2927,23 +2999,29 @@ async fn seed_initial_catalogue(database: &TestDatabase) -> TestResult<()> {
     }
 }
 
+async fn seed_registered_v2_empty_catalogue(database: &TestDatabase) -> TestResult<()> {
+    let session = database.open().await?;
+    let seed_result = async {
+        seed_initial_catalogue_client(session.client()).await?;
+        apply_and_register_migrations(session.client(), &MIGRATIONS[1..2]).await
+    }
+    .await;
+    let shutdown_result = session.shutdown().await;
+
+    match (seed_result, shutdown_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(seed_error), Err(shutdown_error)) => Err(failure(format!(
+            "registered v2 catalogue seed failed: {seed_error}; seed driver shutdown failed: {shutdown_error}"
+        ))),
+    }
+}
+
 async fn seed_registered_v3_empty_catalogue(database: &TestDatabase) -> TestResult<()> {
     let session = database.open().await?;
     let seed_result = async {
         seed_initial_catalogue_client(session.client()).await?;
-        for (version, name, sql) in &MIGRATIONS[1..3] {
-            session.client().batch_execute(sql).await?;
-            let checksum = expected_migration_checksum(*version, sql);
-            session
-                .client()
-                .execute(
-                    "INSERT INTO _orna_kernel.schema_migrations (version, name, checksum)
-                     VALUES ($1, $2, $3)",
-                    &[version, name, &checksum],
-                )
-                .await?;
-        }
-        Ok(())
+        apply_and_register_migrations(session.client(), &MIGRATIONS[1..3]).await
     }
     .await;
     let shutdown_result = session.shutdown().await;
@@ -3206,21 +3284,45 @@ async fn seed_registered_v4_physical_catalogue(database: &TestDatabase) -> TestR
 
 async fn seed_registered_v4_empty_catalogue_client(client: &Client) -> TestResult<()> {
     seed_initial_catalogue_client(client).await?;
-    for (version, name, sql) in &MIGRATIONS[1..4] {
-        client.batch_execute(sql).await?;
-        if *version == 4 {
-            rewrite_registered_v4_empty_hashes(client).await?;
+    apply_and_register_migrations(client, &MIGRATIONS[1..4]).await
+}
+
+async fn apply_and_register_migrations(
+    client: &Client,
+    migrations: &[(i64, &str, &str)],
+) -> TestResult<()> {
+    client.batch_execute("BEGIN").await?;
+    let apply_result: TestResult<()> = async {
+        for (version, name, sql) in migrations {
+            client.batch_execute(sql).await?;
+            if *version == 4 {
+                rewrite_registered_v4_empty_hashes(client).await?;
+            }
+            let checksum = expected_migration_checksum(*version, sql);
+            client
+                .execute(
+                    "INSERT INTO _orna_kernel.schema_migrations (version, name, checksum)
+                     VALUES ($1, $2, $3)",
+                    &[version, name, &checksum],
+                )
+                .await?;
         }
-        let checksum = expected_migration_checksum(*version, sql);
-        client
-            .execute(
-                "INSERT INTO _orna_kernel.schema_migrations (version, name, checksum)
-                 VALUES ($1, $2, $3)",
-                &[version, name, &checksum],
-            )
-            .await?;
+        Ok(())
     }
-    Ok(())
+    .await;
+
+    match apply_result {
+        Ok(()) => client.batch_execute("COMMIT").await.map_err(Into::into),
+        Err(error) => {
+            let rollback_result = client.batch_execute("ROLLBACK").await;
+            match rollback_result {
+                Ok(()) => Err(error),
+                Err(rollback_error) => Err(failure(format!(
+                    "registered migration setup failed: {error}; rollback failed: {rollback_error}"
+                ))),
+            }
+        }
+    }
 }
 
 async fn rewrite_registered_v4_empty_hashes(client: &Client) -> TestResult<()> {
@@ -4246,6 +4348,37 @@ async fn insert_unsupported_initial_schema(database: &TestDatabase) -> TestResul
     }
 }
 
+async fn insert_ambiguous_legacy_field_target(database: &TestDatabase) -> TestResult<()> {
+    let session = database.open().await?;
+    let insert_result = session
+        .client()
+        .batch_execute(
+            "CREATE TABLE _orna_kernel.ambiguous_catalogue_fields ()
+                 INHERITS (_orna_kernel.catalogue_fields);
+             REVOKE ALL ON TABLE _orna_kernel.ambiguous_catalogue_fields FROM PUBLIC;
+             INSERT INTO _orna_kernel.ambiguous_catalogue_fields
+                 (catalogue_revision_id, owner_type_id, field_id, name, ordinal,
+                  type_kind, scalar_type, nullable, is_unique)
+             VALUES (
+                 decode(repeat('03', 16), 'hex'),
+                 decode(repeat('07', 16), 'hex'),
+                 decode(repeat('08', 16), 'hex'),
+                 'ambiguous_field', 0, 'scalar', 'boolean', false, false
+             );",
+        )
+        .await
+        .map_err(|error| Box::new(error) as _);
+    let shutdown_result = session.shutdown().await;
+
+    match (insert_result, shutdown_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(insert_error), Err(shutdown_error)) => Err(failure(format!(
+            "ambiguous legacy field setup failed: {insert_error}; setup driver shutdown failed: {shutdown_error}"
+        ))),
+    }
+}
+
 async fn seed_initial_catalogue_client(client: &Client) -> TestResult<()> {
     create_migration_registry(client).await?;
     client.batch_execute(MIGRATIONS[0].2).await?;
@@ -4366,6 +4499,67 @@ async fn create_migration_registry(client: &Client) -> TestResult<()> {
         )
         .await?;
     Ok(())
+}
+
+async fn inspect_v2_rollback(database: &TestDatabase) -> TestResult<()> {
+    let session = database.open().await?;
+    let inspection_result = async {
+        let state = session
+            .client()
+            .query_one(
+                "SELECT
+                    (SELECT count(*) FROM _orna_kernel.schema_migrations),
+                    (SELECT count(*) FROM _orna_kernel.source_bundles),
+                    (SELECT count(*) FROM _orna_kernel.source_revisions),
+                    (SELECT count(*) FROM _orna_kernel.catalogue_revisions),
+                    (SELECT count(*) FROM _orna_kernel.active_revision),
+                    (SELECT count(*) FROM _orna_kernel.catalogue_schemas)",
+                &[],
+            )
+            .await?;
+        let counts = (
+            value::<i64>(&state, 0)?,
+            value::<i64>(&state, 1)?,
+            value::<i64>(&state, 2)?,
+            value::<i64>(&state, 3)?,
+            value::<i64>(&state, 4)?,
+            value::<i64>(&state, 5)?,
+        );
+        require(
+            counts == (1, 1, 1, 1, 1, 1),
+            format!("v2 failure changed legacy row counts: {counts:?}"),
+        )?;
+
+        let columns = session
+            .client()
+            .query_one(
+                "SELECT count(*)
+                 FROM information_schema.columns
+                 WHERE table_schema = '_orna_kernel'
+                   AND table_name IN (
+                       'source_bundles',
+                       'source_revisions',
+                       'catalogue_revisions'
+                   )
+                   AND column_name IN ('content_hash', 'hash_algorithm')",
+                &[],
+            )
+            .await?;
+        require(
+            value::<i64>(&columns, 0)? == 0,
+            "v2 schema changes survived a rejected legacy state",
+        )
+    }
+    .await;
+    let shutdown_result = session.shutdown().await;
+
+    match (inspection_result, shutdown_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(inspection_error), Err(shutdown_error)) => Err(failure(format!(
+            "v2 rollback inspection failed: {inspection_error}; inspection driver shutdown failed: {shutdown_error}"
+        ))),
+    }
 }
 
 async fn inspect_v4_rollback(database: &TestDatabase) -> TestResult<()> {

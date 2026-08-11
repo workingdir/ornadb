@@ -14,53 +14,23 @@ ALTER TABLE _orna_kernel.definition_references
             OR octet_length(target_owner_function_id) = 16
         );
 
-DO $$
-BEGIN
-    IF EXISTS (
-        SELECT 1
-        FROM _orna_kernel.definition_references AS reference
-        WHERE reference.target_kind = 'field'
-          AND (
-              SELECT count(*)
-              FROM _orna_kernel.catalogue_fields AS field
-              WHERE field.catalogue_revision_id = reference.catalogue_revision_id
-                AND field.field_id = reference.target_definition_id
-          ) <> 1
-    ) THEN
-        RAISE EXCEPTION
-            'cannot owner-qualify a dangling or ambiguous legacy field reference';
-    END IF;
-
-    IF EXISTS (
-        SELECT 1
-        FROM _orna_kernel.definition_references AS reference
-        WHERE reference.target_kind = 'parameter'
-          AND (
-              SELECT count(*)
-              FROM _orna_kernel.catalogue_function_parameters AS parameter
-              WHERE parameter.catalogue_revision_id = reference.catalogue_revision_id
-                AND parameter.parameter_id = reference.target_definition_id
-          ) <> 1
-    ) THEN
-        RAISE EXCEPTION
-            'cannot owner-qualify a dangling or ambiguous legacy parameter reference';
-    END IF;
-END;
-$$;
+UPDATE _orna_kernel.definition_references AS reference
+SET target_owner_type_id = (
+    SELECT field.owner_type_id
+    FROM _orna_kernel.catalogue_fields AS field
+    WHERE field.catalogue_revision_id = reference.catalogue_revision_id
+      AND field.field_id = reference.target_definition_id
+)
+WHERE reference.target_kind = 'field';
 
 UPDATE _orna_kernel.definition_references AS reference
-SET target_owner_type_id = field.owner_type_id
-FROM _orna_kernel.catalogue_fields AS field
-WHERE reference.target_kind = 'field'
-  AND field.catalogue_revision_id = reference.catalogue_revision_id
-  AND field.field_id = reference.target_definition_id;
-
-UPDATE _orna_kernel.definition_references AS reference
-SET target_owner_function_id = parameter.function_id
-FROM _orna_kernel.catalogue_function_parameters AS parameter
-WHERE reference.target_kind = 'parameter'
-  AND parameter.catalogue_revision_id = reference.catalogue_revision_id
-  AND parameter.parameter_id = reference.target_definition_id;
+SET target_owner_function_id = (
+    SELECT parameter.function_id
+    FROM _orna_kernel.catalogue_function_parameters AS parameter
+    WHERE parameter.catalogue_revision_id = reference.catalogue_revision_id
+      AND parameter.parameter_id = reference.target_definition_id
+)
+WHERE reference.target_kind = 'parameter';
 
 ALTER TABLE _orna_kernel.catalogue_fields
     DROP CONSTRAINT catalogue_fields_pkey,
