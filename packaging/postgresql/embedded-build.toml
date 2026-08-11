@@ -38,6 +38,10 @@ sha256 = "ea5c27cf2c549447a2ecb811c1f4ed5dc5d9d6af3c3a94a556cca9c6625f05a8"
 path = "embedded-postgresql-18.4/0008-initdb-single-user-entry-and-archive.patch"
 sha256 = "425713cf275b52ee1cceb4fbf10bcae166a59f39806386dcc57dc738c681afbd"
 
+[[patches]]
+path = "embedded-postgresql-18.4/0009-remove-argv0-locale-and-service-authority.patch"
+sha256 = "e0c5cbee7fb150a39a2aac024142e214f307caf85368d7e1b5c605046374720a"
+
 [postgresql]
 version = "18.4"
 url = "https://ftp.postgresql.org/pub/source/v18.4/postgresql-18.4.tar.bz2"
