@@ -738,6 +738,23 @@ pub(super) struct CheckedEnumType {
     pub(super) location: SourceLocation,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct CheckedRecordValueField {
+    pub(super) id: CheckedFieldId,
+    pub(super) name: String,
+    pub(super) ordinal: u32,
+    pub(super) semantic_type: SemanticType<CheckedTypeId>,
+    pub(super) location: SourceLocation,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct CheckedRecordValueType {
+    pub(super) id: CheckedTypeId,
+    pub(super) name: QualifiedSemanticName,
+    pub(super) fields: Vec<CheckedRecordValueField>,
+    pub(super) location: SourceLocation,
+}
+
 /// One accepted field-name transition bound to a stable checked identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CheckedFieldRename {
@@ -773,6 +790,7 @@ pub struct CheckedBundle {
     pub(super) schemas: Vec<CheckedSchema>,
     pub(super) object_types: Vec<CheckedObjectType>,
     pub(super) enum_types: Vec<CheckedEnumType>,
+    pub(super) record_value_types: Vec<CheckedRecordValueType>,
     pub(super) server_functions: Vec<CheckedServerFunction>,
     pub(super) client_functions: Vec<CheckedClientFunction>,
     pub(super) field_renames: Vec<CheckedFieldRename>,
@@ -1524,9 +1542,9 @@ impl Error for StandardApplicationContextError {}
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum CheckedTypeUseKind {
-    /// A direct type written on one object field.
+    /// A direct type written on one object or record value field.
     Field {
-        /// The checked object type that owns the field.
+        /// The checked object or record value type that owns the field.
         owner: CheckedTypeId,
         /// The checked field identity.
         field: CheckedFieldId,
@@ -1759,10 +1777,12 @@ impl StandardApplicationCheckReport {
     /// Returns the crate-private data required for durable standard preparation.
     ///
     /// This deliberately exposes neither a legacy report nor a checked bundle
-    /// outside the compiler crate.
+    /// outside the compiler crate. Record definitions keep this view closed
+    /// until their separate preparation step is installed.
     pub(crate) fn preparation_view(&self) -> Option<StandardApplicationPreparationView<'_>> {
         self.checked_bundle
             .as_ref()
+            .filter(|bundle| bundle.inner.record_value_types.is_empty())
             .map(StandardApplicationPreparationView::new)
     }
 
@@ -2634,6 +2654,7 @@ pub struct CheckedStandardApplicationBundle {
 impl fmt::Debug for CheckedStandardApplicationBundle {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let object_types = self.object_types().collect::<Vec<_>>();
+        let record_value_types = self.record_value_types().collect::<Vec<_>>();
         let server_functions = self.server_functions().collect::<Vec<_>>();
         let client_functions = self.client_functions().collect::<Vec<_>>();
 
@@ -2651,6 +2672,7 @@ impl fmt::Debug for CheckedStandardApplicationBundle {
             .field("standard_library_digest", &self.standard_library_digest)
             .field("schemas", &self.inner.schemas)
             .field("object_types", &object_types)
+            .field("record_value_types", &record_value_types)
             .field("server_functions", &server_functions)
             .field("client_functions", &client_functions)
             .field("uses", &self.uses)
@@ -2721,6 +2743,22 @@ impl CheckedStandardApplicationBundle {
             })
     }
 
+    /// Returns scalar-free borrowed record value definitions in source order.
+    pub fn record_value_types(
+        &self,
+    ) -> impl std::iter::ExactSizeIterator<Item = CheckedStandardApplicationRecordValueType<'_>> + '_
+    {
+        self.inner
+            .record_value_types
+            .iter()
+            .map(
+                move |record_value_type| CheckedStandardApplicationRecordValueType {
+                    bundle: self,
+                    record_value_type,
+                },
+            )
+    }
+
     /// Returns scalar-free borrowed SERVER function views in source order.
     pub fn server_functions(
         &self,
@@ -2750,6 +2788,105 @@ impl CheckedStandardApplicationBundle {
     fn type_use(&self, kind: CheckedTypeUseKind) -> &CheckedApplicationTypeUse {
         let index = self.use_indices[&kind];
         &self.uses[index]
+    }
+}
+
+/// A scalar-free borrowed record value definition.
+#[derive(Clone, Copy)]
+pub struct CheckedStandardApplicationRecordValueType<'a> {
+    bundle: &'a CheckedStandardApplicationBundle,
+    record_value_type: &'a CheckedRecordValueType,
+}
+
+impl fmt::Debug for CheckedStandardApplicationRecordValueType<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CheckedStandardApplicationRecordValueType")
+            .field("id", &self.record_value_type.id)
+            .field("name", &self.record_value_type.name)
+            .field("location", &self.record_value_type.location)
+            .finish()
+    }
+}
+
+impl CheckedStandardApplicationRecordValueType<'_> {
+    /// Returns the checked record value identity.
+    pub const fn id(&self) -> CheckedTypeId {
+        self.record_value_type.id
+    }
+
+    /// Returns the record value semantic name.
+    pub fn name(&self) -> &QualifiedSemanticName {
+        &self.record_value_type.name
+    }
+
+    /// Returns scalar-free record field views in declaration order.
+    pub fn fields(
+        &self,
+    ) -> impl std::iter::ExactSizeIterator<Item = CheckedStandardApplicationRecordValueField<'_>> + '_
+    {
+        self.record_value_type.fields.iter().map(move |field| {
+            CheckedStandardApplicationRecordValueField {
+                bundle: self.bundle,
+                owner: self.record_value_type.id,
+                field,
+            }
+        })
+    }
+
+    /// Returns the complete record value declaration location.
+    pub fn location(&self) -> &SourceLocation {
+        &self.record_value_type.location
+    }
+}
+
+/// A scalar-free borrowed record value field.
+#[derive(Clone, Copy)]
+pub struct CheckedStandardApplicationRecordValueField<'a> {
+    bundle: &'a CheckedStandardApplicationBundle,
+    owner: CheckedTypeId,
+    field: &'a CheckedRecordValueField,
+}
+
+impl fmt::Debug for CheckedStandardApplicationRecordValueField<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CheckedStandardApplicationRecordValueField")
+            .field("id", &self.field.id)
+            .field("name", &self.field.name)
+            .field("ordinal", &self.field.ordinal)
+            .field("location", &self.field.location)
+            .finish()
+    }
+}
+
+impl CheckedStandardApplicationRecordValueField<'_> {
+    /// Returns the checked record field identity.
+    pub const fn id(&self) -> CheckedFieldId {
+        self.field.id
+    }
+
+    /// Returns the record field name.
+    pub fn name(&self) -> &str {
+        &self.field.name
+    }
+
+    /// Returns the declaration ordinal.
+    pub const fn ordinal(&self) -> u32 {
+        self.field.ordinal
+    }
+
+    /// Returns the canonical public type use for this record field.
+    pub fn resolved_type(&self) -> &CheckedApplicationTypeUse {
+        self.bundle.type_use(CheckedTypeUseKind::Field {
+            owner: self.owner,
+            field: self.field.id,
+        })
+    }
+
+    /// Returns the complete record field declaration location.
+    pub fn location(&self) -> &SourceLocation {
+        &self.field.location
     }
 }
 
