@@ -295,6 +295,47 @@ async fn persists_recovers_revokes_and_disables_execute_authority() -> TestResul
             ),
             "recovered direct or selected-role EXECUTE authority changed",
         )?;
+        let unselected_role_session = recovered.bind_authenticated_session(USER, vec![])?;
+        let missing_error = kernel
+            .evaluate_client_function(&unselected_role_session, function)
+            .await
+            .expect_err("never-granted session must not enter the evaluator");
+        require(
+            matches!(
+                missing_error,
+                PostgresKernelError::ClientExecuteDenied {
+                    pair,
+                    function: denied,
+                    reason: ExecuteDenial::MissingExecuteGrant,
+                } if pair == active.pair() && denied == function
+            ),
+            "kernel CLIENT gate returned the wrong never-granted denial",
+        )?;
+        let evaluated = kernel
+            .evaluate_client_function(&user_session, function)
+            .await?;
+        require(
+            evaluated.context().pair() == active.pair()
+                && evaluated.context().function() == function
+                && evaluated.value() == &RuntimeValue::Boolean(true),
+            "kernel CLIENT gate returned the wrong authorised result",
+        )?;
+        let unknown = FunctionId::from_bytes([0x38; 16]);
+        let unknown_error = kernel
+            .evaluate_client_function(&user_session, unknown)
+            .await
+            .expect_err("unknown function must be denied before evaluation");
+        require(
+            matches!(
+                unknown_error,
+                PostgresKernelError::ClientExecuteDenied {
+                    pair,
+                    function: denied,
+                    reason: ExecuteDenial::UnknownFunction,
+                } if pair == active.pair() && denied == unknown
+            ),
+            "kernel CLIENT gate returned the wrong unknown-function denial",
+        )?;
 
         let stale_pair = RevisionPair::new(
             SourceRevisionId::from_bytes([0x35; 16]),
@@ -351,6 +392,51 @@ async fn persists_recovers_revokes_and_disables_execute_authority() -> TestResul
                 == ExecuteDecision::Denied(ExecuteDenial::MissingExecuteGrant),
             "reconnected snapshot retained a revoked EXECUTE grant",
         )?;
+        let revoked_error = kernel
+            .evaluate_client_function(&user_session, function)
+            .await
+            .expect_err("revoked EXECUTE grant must block the evaluator");
+        require(
+            matches!(
+                revoked_error,
+                PostgresKernelError::ClientExecuteDenied {
+                    pair,
+                    function: denied,
+                    reason: ExecuteDenial::MissingExecuteGrant,
+                } if pair == active.pair() && denied == function
+            ),
+            "kernel CLIENT gate returned the wrong revoked-grant denial",
+        )?;
+
+        let stale_session_snapshot = SecuritySnapshot::new(
+            active.pair(),
+            functions.clone(),
+            vec![
+                Principal::new(USER, PrincipalKind::User, PrincipalStatus::Active),
+                Principal::new(ROLE, PrincipalKind::Role, PrincipalStatus::Active),
+                Principal::new(SERVICE, PrincipalKind::Service, PrincipalStatus::Active),
+            ],
+            vec![],
+            vec![ExecuteGrant::new(ROLE, function)],
+        )?;
+        kernel
+            .replace_security_snapshot(&stale_session_snapshot)
+            .await?;
+        let stale_session_error = kernel
+            .evaluate_client_function(&user_session, function)
+            .await
+            .expect_err("stale selected role must block the evaluator");
+        require(
+            matches!(
+                stale_session_error,
+                PostgresKernelError::ClientExecuteDenied {
+                    pair,
+                    function: denied,
+                    reason: ExecuteDenial::InvalidSession,
+                } if pair == active.pair() && denied == function
+            ),
+            "kernel CLIENT gate returned the wrong stale-session denial",
+        )?;
 
         let disabled = SecuritySnapshot::new(
             active.pair(),
@@ -371,6 +457,21 @@ async fn persists_recovers_revokes_and_disables_execute_authority() -> TestResul
             final_snapshot.bind_authenticated_session(USER, vec![ROLE])
                 == Err(SessionBindingError::DisabledSessionPrincipal),
             "reconnected snapshot re-enabled a disabled principal",
+        )?;
+        let disabled_error = kernel
+            .evaluate_client_function(&user_session, function)
+            .await
+            .expect_err("disabled session must block the evaluator");
+        require(
+            matches!(
+                disabled_error,
+                PostgresKernelError::ClientExecuteDenied {
+                    pair,
+                    function: denied,
+                    reason: ExecuteDenial::InvalidSession,
+                } if pair == active.pair() && denied == function
+            ),
+            "kernel CLIENT gate returned the wrong disabled-session denial",
         )?;
 
         let session = database.open().await?;
