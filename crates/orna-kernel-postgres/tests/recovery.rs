@@ -56,6 +56,11 @@ const STANDARD_CLIENT_TRUE_SOURCE_ONLY_EDIT: &str = "-- source-only formatting e
     CREATE CLIENT FUNCTION app.enabled() RETURNS BOOLEAN RETURN TRUE;\n";
 const STANDARD_CLIENT_FALSE_SOURCE: &str =
     "CREATE SCHEMA app;\nCREATE CLIENT FUNCTION app.enabled() RETURNS BOOLEAN RETURN FALSE;\n";
+const STANDARD_SECURITY_SOURCE: &str = "CREATE SCHEMA app;\n\
+    CREATE TYPE app.flag AS OBJECT (value BOOLEAN NOT NULL);\n\
+    CREATE SERVER FUNCTION app.read() RETURNS ROWS (value BOOLEAN)\n\
+    TRANSACTION READ ONLY VOLATILITY STABLE AS SELECT f.value FROM app.flag f;\n\
+    CREATE CLIENT FUNCTION app.enabled() RETURNS BOOLEAN RETURN TRUE;\n";
 const TAMPERED_BOOLEAN_CONTRACT: &str = "orna.kernel.value.boolean@tampered";
 const OBJECT_SOURCE: &str = "schema café;\nobject Α and object 世界;\nconstant π = 3;\n";
 const UNSUPPORTED_FUNCTION_SQL: &str =
@@ -255,12 +260,19 @@ async fn persists_recovers_revokes_and_disables_execute_authority() -> TestResul
         let version_two = kernel.apply_standard_upgrade(&upgrade).await?;
         let active = kernel
             .apply(&standard_client_candidate(
-                STANDARD_CLIENT_TRUE_SOURCE,
+                STANDARD_SECURITY_SOURCE,
                 &version_two,
                 &upgrade,
             )?)
             .await?;
         let function = require_standard_client_execution(&active, &upgrade, true)?.function;
+        let server_function = active
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|definition| definition.name().parts() == ["app", "read"])
+            .ok_or_else(|| failure("security fixture SERVER function was not recovered"))?
+            .id();
         let functions = active
             .catalogue()
             .functions()
@@ -280,6 +292,7 @@ async fn persists_recovers_revokes_and_disables_execute_authority() -> TestResul
             vec![
                 ExecuteGrant::new(ROLE, function),
                 ExecuteGrant::new(SERVICE, function),
+                ExecuteGrant::new(SERVICE, server_function),
             ],
             vec![LocalPeerCredential::new(USER_UID, USER)],
         )?;
@@ -352,6 +365,21 @@ async fn persists_recovers_revokes_and_disables_execute_authority() -> TestResul
                 && evaluated.context().function() == function
                 && evaluated.value() == &RuntimeValue::Boolean(true),
             "kernel CLIENT gate returned the wrong authorised result",
+        )?;
+        let directly_evaluated = kernel
+            .evaluate_client_function(&service_session, function)
+            .await?;
+        require(
+            directly_evaluated.value() == &RuntimeValue::Boolean(true),
+            "directly authorised CLIENT evaluation returned the wrong value",
+        )?;
+        let evaluator_error = kernel
+            .evaluate_client_function(&service_session, server_function)
+            .await
+            .expect_err("SERVER function must be rejected by the CLIENT evaluator");
+        require(
+            matches!(evaluator_error, PostgresKernelError::ClientExecution(_)),
+            "allowed SERVER target returned the wrong CLIENT evaluator error",
         )?;
         let unknown = FunctionId::from_bytes([0x38; 16]);
         let unknown_error = kernel
@@ -540,6 +568,124 @@ async fn persists_recovers_revokes_and_disables_execute_authority() -> TestResul
                 } if pair == active.pair() && denied == function
             ),
             "kernel CLIENT gate returned the wrong disabled-session denial",
+        )?;
+
+        let audit = kernel.recover_security_audit_events().await?;
+        let execute = audit
+            .iter()
+            .filter(|event| event.decision().kind() == SecurityAuditKind::Execute)
+            .collect::<Vec<_>>();
+        require(
+            execute.len() == 8,
+            format!(
+                "security lifecycle appended {} EXECUTE audit records instead of 8",
+                execute.len()
+            ),
+        )?;
+        require_execute_audit(
+            execute[0],
+            SecurityAuditOutcome::Denied,
+            USER,
+            None,
+            None,
+            InvocationTarget::new(function, active.pair()),
+            Some(ExecuteDenial::MissingExecuteGrant),
+        )?;
+        require_execute_audit(
+            execute[1],
+            SecurityAuditOutcome::Allowed,
+            USER,
+            Some(USER),
+            Some(ROLE),
+            InvocationTarget::new(function, active.pair()),
+            None,
+        )?;
+        require_execute_audit(
+            execute[2],
+            SecurityAuditOutcome::Allowed,
+            SERVICE,
+            Some(SERVICE),
+            Some(SERVICE),
+            InvocationTarget::new(function, active.pair()),
+            None,
+        )?;
+        require_execute_audit(
+            execute[3],
+            SecurityAuditOutcome::Allowed,
+            SERVICE,
+            Some(SERVICE),
+            Some(SERVICE),
+            InvocationTarget::new(server_function, active.pair()),
+            None,
+        )?;
+        require_execute_audit(
+            execute[4],
+            SecurityAuditOutcome::Denied,
+            USER,
+            None,
+            None,
+            InvocationTarget::new(unknown, active.pair()),
+            Some(ExecuteDenial::UnknownFunction),
+        )?;
+        for (event, expected) in [
+            (execute[5], ExecuteDenial::MissingExecuteGrant),
+            (execute[6], ExecuteDenial::InvalidSession),
+            (execute[7], ExecuteDenial::InvalidSession),
+        ] {
+            require_execute_audit(
+                event,
+                SecurityAuditOutcome::Denied,
+                USER,
+                None,
+                None,
+                InvocationTarget::new(function, active.pair()),
+                Some(expected),
+            )?;
+        }
+
+        kernel.replace_security_snapshot(&granted).await?;
+        let session = database.open().await?;
+        let constraint = session
+            .client()
+            .batch_execute(
+                "ALTER TABLE _orna_kernel.security_audit_events
+                 ADD CONSTRAINT security_audit_events_test_reject_execute
+                 CHECK (false) NOT VALID;",
+            )
+            .await
+            .map_err(Into::into);
+        finish_session(
+            constraint,
+            session.shutdown().await,
+            "EXECUTE audit insert failure fixture",
+        )?;
+        for (session, target) in [(&service_session, function), (&user_session, unknown)] {
+            let audit_failure = kernel
+                .evaluate_client_function(session, target)
+                .await
+                .expect_err("EXECUTE audit insertion failure must fail the operation");
+            require(
+                matches!(audit_failure, PostgresKernelError::Database(_)),
+                "EXECUTE audit insertion failure returned the operation result",
+            )?;
+        }
+        require(
+            kernel.recover_security_audit_events().await? == audit,
+            "failed EXECUTE audit insertion changed prior history",
+        )?;
+        let session = database.open().await?;
+        let removal = session
+            .client()
+            .batch_execute(
+                "ALTER TABLE _orna_kernel.security_audit_events
+                 DROP CONSTRAINT security_audit_events_test_reject_execute;",
+            )
+            .await
+            .map_err(Into::into);
+        finish_session(
+            removal,
+            session.shutdown().await,
+            "EXECUTE audit insert failure fixture cleanup",
         )?;
 
         let session = database.open().await?;
@@ -1059,6 +1205,27 @@ fn require_authentication_audit(
             && event.decision().target().is_none()
             && event.decision().denial() == denial.map(SecurityAuditDenial::Authentication),
         "authentication audit record changed its closed decision evidence",
+    )
+}
+
+fn require_execute_audit(
+    event: &SecurityAuditEvent,
+    outcome: SecurityAuditOutcome,
+    session: PrincipalId,
+    effective: Option<PrincipalId>,
+    authorising: Option<PrincipalId>,
+    target: InvocationTarget,
+    denial: Option<ExecuteDenial>,
+) -> TestResult<()> {
+    require(
+        event.decision().kind() == SecurityAuditKind::Execute
+            && event.decision().outcome() == outcome
+            && event.decision().session_principal() == Some(session)
+            && event.decision().effective_principal() == effective
+            && event.decision().authorising_principal() == authorising
+            && event.decision().target() == Some(target)
+            && event.decision().denial() == denial.map(SecurityAuditDenial::Execute),
+        "EXECUTE audit record changed its closed decision evidence",
     )
 }
 
