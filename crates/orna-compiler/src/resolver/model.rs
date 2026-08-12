@@ -730,6 +730,14 @@ pub struct CheckedObjectType {
     pub(super) location: SourceLocation,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct CheckedEnumType {
+    pub(super) id: CheckedTypeId,
+    pub(super) name: QualifiedSemanticName,
+    pub(super) labels: Vec<String>,
+    pub(super) location: SourceLocation,
+}
+
 /// One accepted field-name transition bound to a stable checked identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CheckedFieldRename {
@@ -764,6 +772,7 @@ pub struct CheckedBundle {
     pub(super) base_catalogue_revision: CatalogueRevisionId,
     pub(super) schemas: Vec<CheckedSchema>,
     pub(super) object_types: Vec<CheckedObjectType>,
+    pub(super) enum_types: Vec<CheckedEnumType>,
     pub(super) server_functions: Vec<CheckedServerFunction>,
     pub(super) client_functions: Vec<CheckedClientFunction>,
     pub(super) field_renames: Vec<CheckedFieldRename>,
@@ -783,6 +792,27 @@ impl CheckedBundle {
     /// Returns submitted object declarations in source order.
     pub fn object_types(&self) -> &[CheckedObjectType] {
         &self.object_types
+    }
+
+    /// Returns submitted enum definitions in source order.
+    pub fn enum_types(
+        &self,
+    ) -> impl ExactSizeIterator<
+        Item = (
+            CheckedTypeId,
+            &QualifiedSemanticName,
+            &[String],
+            &SourceLocation,
+        ),
+    > {
+        self.enum_types.iter().map(|enum_type| {
+            (
+                enum_type.id,
+                &enum_type.name,
+                enum_type.labels.as_slice(),
+                &enum_type.location,
+            )
+        })
     }
 
     /// Returns submitted checked SERVER functions in source order.
