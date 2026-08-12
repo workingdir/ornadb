@@ -58,9 +58,22 @@ runtime value, so a value created under an older catalogue cannot cross the
 boundary after its label is removed or changed. Decoding never constructs an
 unchecked enum value.
 
-The version-1 raw-call frames remain unchanged until their authenticated
-execution path supplies the active catalogue to a version-2 frame boundary.
-An unauthenticated or catalogue-free decoder cannot accept enum bytes.
+The version-1 raw-call frames and protocol 1.0 handshake remain unchanged.
+Protocol 2.0 uses the same twelve-byte ADR 0028 hello and ACK shapes with major
+version `2`, minor version `0`. After the ACK, every frame uses the `ORF2`
+marker and retains all ADR 0026 frame tags, fields, ordering rules, limits,
+state transitions, and error policy. Canonical value fields contain `ORV2`
+bytes and use the active-catalogue codec. `ORF1` accepts only `ORV1`; `ORF2`
+accepts only `ORV2`.
+
+The local adapter accepts protocol 1.0 and 2.0 explicitly. It authenticates
+the operating-system peer before it recovers the complete active catalogue
+for a 2.0 connection. Recovery failure produces no ACK. The recovered
+catalogue is immutable connection-local decoding and encoding context; it is
+not invocation revision authority. Protected dispatch still recovers and
+pins the transactional active revision and must reject an argument that is
+stale against that revision before execution. An unauthenticated or
+catalogue-free decoder cannot accept enum bytes.
 
 ## Syntax boundary
 
@@ -110,7 +123,11 @@ Tests must prove:
 * version-2 golden bytes and typed nulls retain the exact enum `TypeId`;
 * version 1 rejects version-2 bytes and enum runtime values; and
 * version-2 encoding and decoding reject a label whose type or active
-  declaration does not match.
+  declaration does not match;
+* protocol 1.0 remains exact and rejects version-2 values; and
+* authenticated protocol 2.0 frames carry exact enum values through the
+  bounded raw-call state machine without making the connection catalogue the
+  dispatch revision authority.
 
 Normal format, strict Clippy, rustdoc, diff, similarity, workspace, and focused
 live PostgreSQL gates remain required.
