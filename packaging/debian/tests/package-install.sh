@@ -19,22 +19,8 @@ cleanup() {
 trap cleanup EXIT
 
 docker build --platform linux/amd64 --provenance=false --tag "${image}" \
-    --file - "${scratch}" <<'CONTAINERFILE'
-FROM debian@sha256:a1363ada3b45cb3ebc74c78943558f8b0c2b59aaa194d8224e1b02cfd5d78583
-RUN printf '%s\n' \
-        'deb http://snapshot.debian.org/archive/debian/20251229T000000Z bookworm main' \
-        'deb http://snapshot.debian.org/archive/debian/20251229T000000Z bookworm-updates main' \
-        'deb http://snapshot.debian.org/archive/debian-security/20251229T000000Z bookworm-security main' \
-        > /etc/apt/sources.list \
-    && find /etc/apt/sources.list.d -mindepth 1 -maxdepth 1 -type f -delete \
-    && apt-get update -o Acquire::Check-Valid-Until=false \
-    && DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
-        python3 systemd \
-    && apt-get clean \
-    && find /var/lib/apt/lists -mindepth 1 -delete
-CONTAINERFILE
-
-docker run --rm --network=none --platform linux/amd64 \
+    --file "${repository_root}/packaging/debian/test-Containerfile" "${scratch}"
+docker run --rm --interactive --network=none --platform linux/amd64 \
     --volume "${package}:/proof/orna.deb:ro" \
     "${image}" /bin/bash -euo pipefail -s <<'TEST'
 package=/proof/orna.deb
