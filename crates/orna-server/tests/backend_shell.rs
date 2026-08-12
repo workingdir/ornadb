@@ -24,7 +24,7 @@ mod postgres_test_support;
 
 use postgres_test_support::{TestDatabase, TestResult, failure, with_test_database};
 
-const USAGE: &[u8] = b"Usage: orna server backend-shell\n";
+const USAGE: &[u8] = b"Usage: orna server <run|backend-shell>\n";
 const TERMINAL_REQUIRED: &[u8] = b"orna: backend-shell must be run in an interactive terminal\n";
 const MISSING_CONFIGURATION: &[u8] = b"orna: backend-shell needs ORNA_SERVER_POSTGRES_URL\n";
 const INVALID_CONFIGURATION: &[u8] =
