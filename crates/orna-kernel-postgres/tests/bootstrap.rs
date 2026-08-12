@@ -118,6 +118,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "catalogue enum type storage",
         include_str!("../migrations/0012_catalogue_enum_types.sql"),
     ),
+    (
+        13,
+        "resolved enum type storage",
+        include_str!("../migrations/0013_resolved_enum_types.sql"),
+    ),
 ];
 const MIGRATION_DATA_STEP_SEPARATOR: &[u8] = b"\0orna.kernel.migration-step\0";
 const CANONICAL_HASH_V1_EMPTY_SEED_STEP: &[u8] = b"canonical-hash-v1-empty-seed/v1";
@@ -340,6 +345,14 @@ fn catalogue_enum_type_migration_checksum_binds_exact_sql_bytes() {
 }
 
 #[test]
+fn resolved_enum_type_migration_checksum_binds_exact_sql_bytes() {
+    assert_eq!(
+        hex_bytes(expected_migration_checksum(13, MIGRATIONS[12].2)),
+        "850a85e034cc7548c4d70f35763356492af4d2c227506bb79aca0c346b4a3f75"
+    );
+}
+
+#[test]
 fn security_snapshot_migration_is_the_registered_version_nine() -> TestResult<()> {
     let (version, name, sql) = MIGRATIONS[8];
 
@@ -395,17 +408,15 @@ fn protected_security_audit_is_the_registered_version_eleven() -> TestResult<()>
 
 #[test]
 fn catalogue_enum_type_storage_is_the_registered_version_twelve() -> TestResult<()> {
-    let Some((version, name, sql)) = MIGRATIONS.last() else {
-        return Err(failure("migration registry is empty"));
-    };
+    let (version, name, sql) = MIGRATIONS[11];
 
     require(
-        *version == 12,
-        format!("last migration is version {version}"),
+        version == 12,
+        format!("catalogue enum migration is version {version}"),
     )?;
     require(
-        *name == "catalogue enum type storage",
-        format!("last migration has unexpected name {name:?}"),
+        name == "catalogue enum type storage",
+        format!("catalogue enum migration has unexpected name {name:?}"),
     )?;
     require(
         sql.contains("CREATE TABLE _orna_kernel.catalogue_enum_types")
@@ -413,6 +424,34 @@ fn catalogue_enum_type_storage_is_the_registered_version_twelve() -> TestResult<
             && sql.contains("cardinality(labels) > 0")
             && sql.contains("REVOKE ALL ON TABLE _orna_kernel.catalogue_enum_types FROM PUBLIC"),
         "catalogue enum migration does not preserve protected ordered label storage",
+    )
+}
+
+#[test]
+fn resolved_enum_type_storage_is_the_registered_version_thirteen() -> TestResult<()> {
+    let Some((version, name, sql)) = MIGRATIONS.last() else {
+        return Err(failure("migration registry is empty"));
+    };
+
+    require(
+        *version == 13,
+        format!("last migration is version {version}"),
+    )?;
+    require(
+        *name == "resolved enum type storage",
+        format!("last migration has unexpected name {name:?}"),
+    )?;
+    for column in ["enum_type_id", "return_enum_type_id"] {
+        require(
+            sql.contains(column),
+            format!("resolved enum migration omits {column}"),
+        )?;
+    }
+    require(
+        sql.matches("REFERENCES _orna_kernel.catalogue_enum_types")
+            .count()
+            == 4,
+        "resolved enum migration does not bind every type position to the enum catalogue",
     )
 }
 
@@ -526,8 +565,8 @@ async fn bootstrap_upgrades_v5_write_reference_evidence_without_mutating_semanti
 
         let after = snapshot_upgrade_state(&database).await?;
         require(
-            after.migrations.len() == 12 && after.migrations[..5] == before.migrations[..],
-            format!("v6-v12 changed prior migration records: {:?}", after.migrations),
+            after.migrations.len() == 13 && after.migrations[..5] == before.migrations[..],
+            format!("v6-v13 changed prior migration records: {:?}", after.migrations),
         )?;
         require(
             after.migrations[5]
@@ -591,6 +630,15 @@ async fn bootstrap_upgrades_v5_write_reference_evidence_without_mutating_semanti
                     expected_migration_checksum(12, MIGRATIONS[11].2),
                 ),
             format!("v12 migration record is not exact: {:?}", after.migrations[11]),
+        )?;
+        require(
+            after.migrations[12]
+                == (
+                    13,
+                    "resolved enum type storage".to_owned(),
+                    expected_migration_checksum(13, MIGRATIONS[12].2),
+                ),
+            format!("v13 migration record is not exact: {:?}", after.migrations[12]),
         )?;
         require(
             after.active_pair == before.active_pair,
@@ -678,7 +726,7 @@ async fn bootstrap_upgrades_registered_v6_without_standard_rows() -> TestResult<
 
         let after = snapshot_upgrade_state(&database).await?;
         require(
-            after.migrations.len() == 12
+            after.migrations.len() == 13
                 && after.migrations[..6] == before.migrations[..]
                 && after.migrations[6]
                     == (
@@ -732,6 +780,15 @@ async fn bootstrap_upgrades_registered_v6_without_standard_rows() -> TestResult<
                     expected_migration_checksum(12, MIGRATIONS[11].2),
                 ),
             format!("v12 migration record is not exact: {:?}", after.migrations[11]),
+        )?;
+        require(
+            after.migrations[12]
+                == (
+                    13,
+                    "resolved enum type storage".to_owned(),
+                    expected_migration_checksum(13, MIGRATIONS[12].2),
+                ),
+            format!("v13 migration record is not exact: {:?}", after.migrations[12]),
         )?;
         require(
             after.active_pair == before.active_pair
@@ -807,7 +864,7 @@ async fn bootstrap_upgrades_registered_v7_without_resolved_value_rows() -> TestR
         let after_surface = snapshot_catalogue_surface(&database).await?;
         let after_target_fks = snapshot_application_target_foreign_keys(&database).await?;
         require(
-            after.migrations.len() == 12
+            after.migrations.len() == 13
                 && after.migrations[..7] == before.migrations[..]
                 && after.migrations[7]
                     == (
@@ -838,6 +895,12 @@ async fn bootstrap_upgrades_registered_v7_without_resolved_value_rows() -> TestR
                         12,
                         "catalogue enum type storage".to_owned(),
                         expected_migration_checksum(12, MIGRATIONS[11].2),
+                    )
+                && after.migrations[12]
+                    == (
+                        13,
+                        "resolved enum type storage".to_owned(),
+                        expected_migration_checksum(13, MIGRATIONS[12].2),
                     ),
             format!("v7 upgrade produced unexpected migrations: {:?}", after.migrations),
         )?;
@@ -887,6 +950,7 @@ async fn bootstrap_upgrades_registered_v7_without_resolved_value_rows() -> TestR
         let session = database.open().await?;
         let inspection_result = async {
             inspect_resolved_value_storage(session.client(), true).await?;
+            inspect_resolved_enum_storage(session.client(), true).await?;
             inspect_standard_catalogue_schema(session.client()).await
         }
         .await;
@@ -1152,7 +1216,7 @@ async fn bootstrap_rejects_tampered_gapped_and_newer_migration_history() -> Test
         Sha256::digest(MIGRATIONS[1].2.as_bytes()).to_vec(),
     )
     .await?;
-    reject_migration_history(12, "future migration", vec![0; 32]).await
+    reject_migration_history(13, "future migration", vec![0; 32]).await
 }
 
 async fn inspect_bootstrap_state(database: &TestDatabase) -> TestResult<()> {
@@ -1215,6 +1279,7 @@ async fn inspect_client(client: &Client) -> TestResult<()> {
     inspect_function_revision_constraints(client).await?;
     inspect_standard_catalogue_schema(client).await?;
     inspect_resolved_value_storage(client, true).await?;
+    inspect_resolved_enum_storage(client, true).await?;
     inspect_security_snapshot_schema(client).await?;
 
     for schema in ["_orna_kernel", "_orna_data"] {
@@ -1866,8 +1931,12 @@ async fn inspect_resolved_value_storage(
             false,
         ),
     ] {
-        let definition = exact_0008_constraint_definition(constraint)
-            .ok_or_else(|| failure(format!("missing exact 0008 contract for {constraint}")))?;
+        let definition =
+            exact_resolved_type_constraint_definition(constraint).ok_or_else(|| {
+                failure(format!(
+                    "missing exact resolved-type contract for {constraint}"
+                ))
+            })?;
         require_exact_constraint(
             client,
             table,
@@ -1881,23 +1950,23 @@ async fn inspect_resolved_value_storage(
     inspect_resolved_value_public_privileges(client).await
 }
 
-fn exact_0008_constraint_definition(constraint: &str) -> Option<&'static str> {
+fn exact_resolved_type_constraint_definition(constraint: &str) -> Option<&'static str> {
     Some(match constraint {
         "catalogue_fields_type_kind_check"
         | "catalogue_function_parameters_type_kind_check"
         | "catalogue_function_return_columns_type_kind_check" => {
-            "CHECK ((type_kind = ANY (ARRAY['scalar'::text, 'named'::text, 'reference'::text, 'value'::text])))"
+            "CHECK ((type_kind = ANY (ARRAY['scalar'::text, 'named'::text, 'reference'::text, 'value'::text, 'enum'::text])))"
         }
         "catalogue_fields_check"
         | "catalogue_function_parameters_check"
         | "catalogue_function_return_columns_check" => {
-            "CHECK ((((type_kind = 'scalar'::text) AND (scalar_type IS NOT NULL) AND (target_type_id IS NULL) AND (value_type_id IS NULL) AND (value_standard_library_revision_id IS NULL)) OR ((type_kind = ANY (ARRAY['named'::text, 'reference'::text])) AND (scalar_type IS NULL) AND (target_type_id IS NOT NULL) AND (value_type_id IS NULL) AND (value_standard_library_revision_id IS NULL)) OR ((type_kind = 'value'::text) AND (scalar_type IS NULL) AND (target_type_id IS NULL) AND (value_type_id IS NOT NULL) AND (value_standard_library_revision_id IS NOT NULL))))"
+            "CHECK ((((type_kind = 'scalar'::text) AND (scalar_type IS NOT NULL) AND (target_type_id IS NULL) AND (value_type_id IS NULL) AND (value_standard_library_revision_id IS NULL) AND (enum_type_id IS NULL)) OR ((type_kind = ANY (ARRAY['named'::text, 'reference'::text])) AND (scalar_type IS NULL) AND (target_type_id IS NOT NULL) AND (value_type_id IS NULL) AND (value_standard_library_revision_id IS NULL) AND (enum_type_id IS NULL)) OR ((type_kind = 'value'::text) AND (scalar_type IS NULL) AND (target_type_id IS NULL) AND (value_type_id IS NOT NULL) AND (value_standard_library_revision_id IS NOT NULL) AND (enum_type_id IS NULL)) OR ((type_kind = 'enum'::text) AND (scalar_type IS NULL) AND (target_type_id IS NULL) AND (value_type_id IS NULL) AND (value_standard_library_revision_id IS NULL) AND (enum_type_id IS NOT NULL))))"
         }
         "catalogue_functions_return_type_kind_check" => {
-            "CHECK ((return_type_kind = ANY (ARRAY['scalar'::text, 'named'::text, 'reference'::text, 'value'::text])))"
+            "CHECK ((return_type_kind = ANY (ARRAY['scalar'::text, 'named'::text, 'reference'::text, 'value'::text, 'enum'::text])))"
         }
         "catalogue_functions_check1" => {
-            "CHECK ((((return_shape = 'rows'::text) AND (return_type_kind IS NULL) AND (return_scalar_type IS NULL) AND (return_target_type_id IS NULL) AND (return_value_type_id IS NULL) AND (return_standard_library_revision_id IS NULL)) OR ((return_shape = 'single'::text) AND (((return_type_kind = 'scalar'::text) AND (return_scalar_type IS NOT NULL) AND (return_target_type_id IS NULL) AND (return_value_type_id IS NULL) AND (return_standard_library_revision_id IS NULL)) OR ((return_type_kind = ANY (ARRAY['named'::text, 'reference'::text])) AND (return_scalar_type IS NULL) AND (return_target_type_id IS NOT NULL) AND (return_value_type_id IS NULL) AND (return_standard_library_revision_id IS NULL)) OR ((return_type_kind = 'value'::text) AND (return_scalar_type IS NULL) AND (return_target_type_id IS NULL) AND (return_value_type_id IS NOT NULL) AND (return_standard_library_revision_id IS NOT NULL))))))"
+            "CHECK ((((return_shape = 'rows'::text) AND (return_type_kind IS NULL) AND (return_scalar_type IS NULL) AND (return_target_type_id IS NULL) AND (return_value_type_id IS NULL) AND (return_standard_library_revision_id IS NULL) AND (return_enum_type_id IS NULL)) OR ((return_shape = 'single'::text) AND (((return_type_kind = 'scalar'::text) AND (return_scalar_type IS NOT NULL) AND (return_target_type_id IS NULL) AND (return_value_type_id IS NULL) AND (return_standard_library_revision_id IS NULL) AND (return_enum_type_id IS NULL)) OR ((return_type_kind = ANY (ARRAY['named'::text, 'reference'::text])) AND (return_scalar_type IS NULL) AND (return_target_type_id IS NOT NULL) AND (return_value_type_id IS NULL) AND (return_standard_library_revision_id IS NULL) AND (return_enum_type_id IS NULL)) OR ((return_type_kind = 'value'::text) AND (return_scalar_type IS NULL) AND (return_target_type_id IS NULL) AND (return_value_type_id IS NOT NULL) AND (return_standard_library_revision_id IS NOT NULL) AND (return_enum_type_id IS NULL)) OR ((return_type_kind = 'enum'::text) AND (return_scalar_type IS NULL) AND (return_target_type_id IS NULL) AND (return_value_type_id IS NULL) AND (return_standard_library_revision_id IS NULL) AND (return_enum_type_id IS NOT NULL))))))"
         }
         "cat_fields_val_type_len"
         | "cat_fn_params_val_type_len"
@@ -1929,6 +1998,80 @@ fn exact_0008_constraint_definition(constraint: &str) -> Option<&'static str> {
         }
         _ => return None,
     })
+}
+
+async fn inspect_resolved_enum_storage(
+    client: &Client,
+    require_null_values: bool,
+) -> TestResult<()> {
+    for (table, column, length_constraint, foreign_key) in [
+        (
+            "catalogue_fields",
+            "enum_type_id",
+            "cat_fields_enum_type_len",
+            "cat_fields_enum_type_fk",
+        ),
+        (
+            "catalogue_function_parameters",
+            "enum_type_id",
+            "cat_fn_params_enum_type_len",
+            "cat_fn_params_enum_type_fk",
+        ),
+        (
+            "catalogue_function_return_columns",
+            "enum_type_id",
+            "cat_fn_ret_cols_enum_type_len",
+            "cat_fn_ret_cols_enum_type_fk",
+        ),
+        (
+            "catalogue_functions",
+            "return_enum_type_id",
+            "cat_funcs_ret_enum_type_len",
+            "cat_funcs_ret_enum_type_fk",
+        ),
+    ] {
+        inspect_column_contract(
+            client,
+            table,
+            &[(column, "bytea", "bytea", "YES", Some(""))],
+        )
+        .await?;
+        if require_null_values {
+            let row = client
+                .query_one(
+                    &format!(
+                        "SELECT count(*) FROM _orna_kernel.{table} WHERE {column} IS NOT NULL"
+                    ),
+                    &[],
+                )
+                .await?;
+            require(
+                value::<i64>(&row, 0)? == 0,
+                format!("{table} contains a resolved enum tuple"),
+            )?;
+        }
+        require_exact_constraint(
+            client,
+            table,
+            length_constraint,
+            &format!("CHECK ((({column} IS NULL) OR (octet_length({column}) = 16)))"),
+            false,
+            false,
+        )
+        .await?;
+        require_exact_constraint(
+            client,
+            table,
+            foreign_key,
+            &format!(
+                "FOREIGN KEY (catalogue_revision_id, {column}) REFERENCES _orna_kernel.catalogue_enum_types(catalogue_revision_id, type_id) DEFERRABLE INITIALLY DEFERRED"
+            ),
+            true,
+            true,
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 async fn inspect_resolved_value_public_privileges(client: &Client) -> TestResult<()> {
