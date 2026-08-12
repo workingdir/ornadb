@@ -12,17 +12,21 @@ use orna_compiler::{
     prepare_standard_application,
 };
 use orna_core::{
-    FieldId, FunctionId, FunctionRevisionId, ObjectId, ParameterId, PrincipalId, TypeId,
+    FieldId, FunctionId, FunctionRevisionId, ObjectId, ParameterId, TypeId,
     catalogue::FunctionReturn,
     revision::{ActiveDatabaseRevision, DeployableRevision, RevisionPair},
+    source::{SourceBundle, SourceUnit},
+    types::{ResolvedType, StandardScalar},
+    value::{FunctionArgument, RuntimeFloat, RuntimeValue},
+};
+#[cfg(feature = "test-hooks")]
+use orna_core::{
+    PrincipalId,
     security::{
         ExecuteDenial, ExecuteGrant, InvocationTarget, Principal, PrincipalKind, PrincipalStatus,
         RoleMembership, SecurityAuditDenial, SecurityAuditEvent, SecurityAuditKind,
         SecurityAuditOutcome, SecuritySnapshot,
     },
-    source::{SourceBundle, SourceUnit},
-    types::{ResolvedType, StandardScalar},
-    value::{FunctionArgument, RuntimeFloat, RuntimeValue},
 };
 use orna_kernel_postgres::{
     PostgresKernel, PostgresKernelError, ServerSelectError, ServerSelectResult,
@@ -666,6 +670,7 @@ async fn authenticated_server_select_commits_allowed_and_denied_execute_decision
     .await
 }
 
+#[cfg(feature = "test-hooks")]
 fn require_server_execute_denial(
     error: &PostgresKernelError,
     pair: RevisionPair,
@@ -685,6 +690,7 @@ fn require_server_execute_denial(
     )
 }
 
+#[cfg(feature = "test-hooks")]
 fn require_server_execute_audit(
     event: &SecurityAuditEvent,
     outcome: SecurityAuditOutcome,
