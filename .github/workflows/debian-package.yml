@@ -1,0 +1,61 @@
+name: Debian one-executable package
+
+on:
+  push:
+    paths:
+      - ".github/workflows/debian-package.yml"
+      - ".gitmodules"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "crates/**"
+      - "packaging/debian/**"
+      - "postgresql/**"
+      - "third_party/postgresql"
+  pull_request:
+    paths:
+      - ".github/workflows/debian-package.yml"
+      - ".gitmodules"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "crates/**"
+      - "packaging/debian/**"
+      - "postgresql/**"
+      - "third_party/postgresql"
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Build and prove the Debian package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - name: Provision the offline Rust dependency cache
+        run: cargo fetch --locked
+      - name: Reproduce the package twice
+        run: make --file packaging/debian/rules package
+      - name: Prove package transaction exclusion
+        run: >-
+          packaging/debian/tests/package-install.sh
+          "${GITHUB_WORKSPACE}/target/debian-package/orna_0.1.0-1_amd64.deb"
+      - name: Prove the installed one-executable lifecycle
+        run: >-
+          packaging/debian/clean-machine-test.sh
+          "${GITHUB_WORKSPACE}/target/debian-package/orna_0.1.0-1_amd64.deb"
+      - name: Upload the reproduced package and manifests
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: orna-debian-one-executable
+          path: |
+            target/debian-package/orna_0.1.0-1_amd64.deb
+            target/debian-package/payload/usr/share/orna/distribution-manifest.toml
+            target/debian-package/payload/usr/share/orna/embedded-engine-manifest.json
+            target/debian-package/orna.dynamic
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
