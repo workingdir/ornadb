@@ -510,11 +510,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "orna-postgres-engine"
+version = "0.1.0"
+
+[[package]]
 name = "orna-server"
 version = "0.1.0"
 dependencies = [
  "nix",
  "orna-kernel-postgres",
+ "orna-postgres-engine",
  "orna-standard",
  "tokio",
  "tokio-postgres",
