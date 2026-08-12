@@ -329,10 +329,9 @@ lifecycle: archives
 
 verify-lifecycle:
 	@target_root='$(TARGET_ROOT)'; \
-	[[ "$${target_root}" == "$(REPOSITORY_ROOT)/target/"* ]] || { \
-		printf '%s\n' '[postgresql] error: TARGET_ROOT must be an absolute path below the repository target directory' >&2; exit 1; }; \
-	mkdir -p -- "$${target_root}"; \
-	one="$${target_root}/build-one"; two="$${target_root}/build-two"; \
+	[[ "$${target_root%/*}" == "$(REPOSITORY_ROOT)/target" && "$${target_root##*/}" != "" ]] || { \
+		printf '%s\n' '[postgresql] error: TARGET_ROOT must be one direct child of the repository target directory' >&2; exit 1; }; \
+	one="$${target_root}-one"; two="$${target_root}-two"; \
 	$(MAKE) lifecycle TARGET_ROOT="$${one}"; \
 	$(MAKE) lifecycle TARGET_ROOT="$${two}"; \
 	cmp <(find "$${one}/output" -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort) \
@@ -341,6 +340,7 @@ verify-lifecycle:
 		cmp "$${one}/output/$${name}" "$${two}/output/$${name}"; \
 	done < <(find "$${one}/output" -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort); \
 	cmp "$${one}/tmp/lifecycle-probe" "$${two}/tmp/lifecycle-probe"; \
+	python3 "$(MANIFEST_BUILDER)" "$(REPOSITORY_ROOT)" "$${one}" "$(IMAGE)"; \
 	printf '%s\n' "[postgresql] linked lifecycle reproduced twice below $${target_root}"
 
 manifest: lifecycle
