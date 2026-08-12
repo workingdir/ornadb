@@ -86,6 +86,44 @@ unchecked names. Equality is nominal: record `TypeId`, active field sequence,
 and each field value must match. This decision does not define a general
 language hash operation.
 
+### First compiler host
+
+The first source position that constructs a record is one value in the
+single-row `VALUES` tuple of the accepted `SERVER INSERT` function body. The
+constructor must target a non-null record-valued object field. It is not
+accepted in `UPDATE`, `SELECT`, a function argument or default, a CLIENT body,
+or a standalone expression parser.
+
+Each constructor field accepts only one of these source expressions:
+
+* a non-null declared parameter of the enclosing SERVER function whose exact
+  resolved type equals the record field type; or
+* `TRUE` or `FALSE` when the record field is the accepted Boolean type.
+
+The parameter form accepts the six scalar record field types and an active
+catalogue enum type. It does not accept a record-valued parameter. `NULL`,
+field paths, function calls, operators, enum-label literals, other scalar
+literals, nested record constructors, collections, and general expressions
+remain unavailable in this host.
+
+The compiler resolves the constructor name and each field name through the
+same immutable candidate catalogue used for the enclosing INSERT. It records
+the record type and field identities as definition references. It stores the
+checked fields in declaration order. Source order cannot change the prepared
+value. The prepared mutation plan retains the constructor's record `TypeId`,
+each declaration-order `FieldId`, and each checked child expression. At
+execution, the server evaluates the child expressions, constructs one checked
+`RecordValue` against the transaction's active revision, encodes it as one
+complete `ORV3` value, and binds those bytes to the target PostgreSQL `bytea`
+column. It does not generate a PostgreSQL composite, JSON value, or SQL record
+constructor.
+
+Existing INSERT, UPDATE, and DELETE mutation artifact versions and bytes stay
+closed. The first record-constructor INSERT uses a new artifact version. Its
+exact bytes must be accepted in the artifact commit before the compiler can
+emit it. A decoder for an earlier version must reject the new version and
+record expression tag.
+
 ## Identity, evolution, and catalogue hash
 
 Record types share the existing qualified type namespace with object,
@@ -286,6 +324,11 @@ Tests must prove:
 * the accepted constructor and its exact field-name and expression spans;
 * constructors reject missing, duplicate, unknown, null, and wrong-type
   fields, while caller field order cannot change the checked value;
+* the constructor is accepted only in the single-row SERVER INSERT host, and
+  every deferred source position and child expression fails closed;
+* record-constructor INSERT artifacts preserve declaration-order record and
+  field identities, while every earlier mutation artifact version and byte
+  sequence remains exact;
 * type names collide with every other member of the shared type namespace;
 * duplicate field names are rejected before candidate allocation;
 * exact-name replay preserves type and field identities, while type or field
@@ -336,8 +379,9 @@ live PostgreSQL gates remain required.
    separate compiler commits of at most three files.
 5. Before accepting record construction in source, amend this ADR to name the
    first compiler-supported expression host and its closed expression subset.
-   Then add the lossless constructor to that real host in a separate two-file
-   syntax commit. A standalone fragment parser is not accepted.
+   The accepted host is the single-row SERVER INSERT value expression defined
+   above. Add its lossless constructor in a separate two-file syntax commit. A
+   standalone fragment parser is not accepted.
 6. Register protected record-definition storage, then add apply and recovery
    in separate migration, source, and focused-test commits.
 7. Add checked runtime record values and compiler construction in separate
@@ -349,7 +393,11 @@ live PostgreSQL gates remain required.
    socket negotiation in a later adapter commit.
 10. Add canonical by-value storage and one SERVER result proof only after the
     codec and recovery paths are green.
-11. Index this ADR and mark the record checklist row complete only after all
+11. Add the record-constructor mutation artifact, compiler preparation, and
+    active-revision execution in separate commits. The live proof must insert
+    canonical record bytes through the accepted SERVER INSERT source and read
+    the same nominal value through the accepted SERVER result path.
+12. Index this ADR and mark the record checklist row complete only after all
     required proof passes.
 
 Each implementation commit changes one to three files, uses a signed
@@ -357,8 +405,8 @@ conventional commit, and keeps the repository buildable.
 
 This decision does not broaden ADR 0015's closed Boolean-literal CLIENT body
 (`RETURN TRUE` or `RETURN FALSE`). The current relational SQL expression
-parser is not a general Orna expression host. Until the required host
-amendment, no accepted source position constructs a record value.
+parser is not a general Orna expression host. Only the SERVER INSERT position
+and child expressions specified above construct a record value.
 
 ## `sys.invoke` boundary
 
