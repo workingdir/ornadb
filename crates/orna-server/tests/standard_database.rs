@@ -15,12 +15,12 @@ use orna_core::{
         SecurityAuditKind, SecurityAuditOutcome, SecuritySnapshot,
     },
     source::{SourceBundle, SourceUnit},
-    value::RuntimeValue,
+    value::{EnumValue, RecordValue, RuntimeValue},
 };
 use orna_kernel_postgres::{PostgresKernel, PostgresKernelError};
 use orna_protocol::{
     CallFailure, Channel, ClientFrame, Event, RawCall, ServerAction, ServerFrame,
-    decode_catalogue_server_frame, encode_catalogue_client_frame,
+    decode_active_server_frame, encode_active_client_frame,
 };
 use orna_server::{
     LocalAuthenticationError, LocalRawSocketError, LocalRawSocketResources,
@@ -41,6 +41,8 @@ use postgres_test_support::{TestDatabase, TestResult, failure, with_test_databas
 
 const RAW_CLIENT_SCHEMA_SOURCE: &str = "CREATE SCHEMA app;\n";
 const RAW_CLIENT_FUNCTION_SOURCE: &str = "CREATE SCHEMA app;\n\
+    CREATE TYPE app.stage AS ENUM ('lead', 'qualified');\n\
+    CREATE TYPE app.request AS VALUE (stage app.stage) IMMUTABLE PERSISTABLE;\n\
     CREATE TYPE app.flag AS OBJECT (value BOOLEAN NOT NULL);\n\
     CREATE SERVER FUNCTION app.read() RETURNS ROWS (value BOOLEAN)\n\
     TRANSACTION READ ONLY VOLATILITY STABLE AS SELECT f.value FROM app.flag f;\n\
@@ -463,8 +465,6 @@ async fn serves_the_actual_local_peer_through_the_raw_socket_protocol() -> TestR
             vec![LocalPeerCredential::new(uid, RAW_CLIENT_USER)],
         )?;
         kernel.replace_security_snapshot(&granted).await?;
-        let catalogue = active.catalogue().clone();
-
         let (server, client) = StandardUnixStream::pair()?;
         client.set_nonblocking(true)?;
         let mut client = UnixStream::from_std(client)?;
@@ -473,7 +473,7 @@ async fn serves_the_actual_local_peer_through_the_raw_socket_protocol() -> TestR
             server,
             LocalRawSocketResources::new(),
         ));
-        let operation = async {
+        let version_two_operation = async {
             client
                 .write_all(b"ORNA\x01\x00\x00\x02\x00\x00\x00\x00")
                 .await?;
@@ -486,7 +486,7 @@ async fn serves_the_actual_local_peer_through_the_raw_socket_protocol() -> TestR
 
             send_catalogue_protocol_frame(
                 &mut client,
-                &catalogue,
+                active.catalogue(),
                 &ClientFrame::CallRawStart {
                     stream: 1,
                     function: client_function,
@@ -495,7 +495,7 @@ async fn serves_the_actual_local_peer_through_the_raw_socket_protocol() -> TestR
             .await?;
             send_catalogue_protocol_frame(
                 &mut client,
-                &catalogue,
+                active.catalogue(),
                 &ClientFrame::WindowUpdate {
                     stream: 1,
                     channel: Channel::ResultValues,
@@ -505,20 +505,20 @@ async fn serves_the_actual_local_peer_through_the_raw_socket_protocol() -> TestR
             .await?;
             send_catalogue_protocol_frame(
                 &mut client,
-                &catalogue,
+                active.catalogue(),
                 &ClientFrame::CallArgumentsComplete { stream: 1 },
             )
             .await?;
             require(
                 matches!(
-                    read_catalogue_protocol_frame(&mut client, &catalogue).await?,
+                    read_catalogue_protocol_frame(&mut client, active.catalogue()).await?,
                     ServerFrame::CallAccepted { stream: 1, .. }
                 ),
                 "local raw socket did not accept the catalogue CLIENT call",
             )?;
             require(
                 matches!(
-                    read_catalogue_protocol_frame(&mut client, &catalogue).await?,
+                    read_catalogue_protocol_frame(&mut client, active.catalogue()).await?,
                     ServerFrame::EventBatch {
                         stream: 1,
                         channel: Channel::ResultValues,
@@ -530,7 +530,7 @@ async fn serves_the_actual_local_peer_through_the_raw_socket_protocol() -> TestR
                 "local raw socket returned the wrong catalogue CLIENT value",
             )?;
             require(
-                read_catalogue_protocol_frame(&mut client, &catalogue).await?
+                read_catalogue_protocol_frame(&mut client, active.catalogue()).await?
                     == ServerFrame::CallCompleted { stream: 1 },
                 "local raw socket did not complete the catalogue CLIENT call",
             )
@@ -541,18 +541,107 @@ async fn serves_the_actual_local_peer_through_the_raw_socket_protocol() -> TestR
             result.map_err(|error| -> Box<dyn Error + Send + Sync> { Box::new(error) })
         });
         let cleanup = finish_session(shutdown, connection, "local raw socket connection cleanup");
-        finish_session(operation, cleanup, "local raw socket protocol operation")?;
+        finish_session(
+            version_two_operation,
+            cleanup,
+            "local raw socket protocol-2 operation",
+        )?;
+
+        let record_type = active
+            .catalogue()
+            .record_value_types()
+            .first()
+            .ok_or_else(|| failure("raw CLIENT fixture is missing its record value type"))?;
+        let enum_type = active
+            .catalogue()
+            .enum_types()
+            .first()
+            .ok_or_else(|| failure("raw CLIENT fixture is missing its enum type"))?;
+        let record = RuntimeValue::Record(RecordValue::new(
+            &active,
+            record_type.id(),
+            [(
+                "stage".to_owned(),
+                RuntimeValue::Enum(EnumValue::new(
+                    active.catalogue(),
+                    enum_type.id(),
+                    "qualified",
+                )?),
+            )],
+        )?);
+        let (server, client) = StandardUnixStream::pair()?;
+        client.set_nonblocking(true)?;
+        let mut client = UnixStream::from_std(client)?;
+        let connection = tokio::spawn(serve_local_raw_stream(
+            kernel.clone(),
+            server,
+            LocalRawSocketResources::new(),
+        ));
+        let version_three_operation = async {
+            client
+                .write_all(b"ORNA\x01\x00\x00\x03\x00\x00\x00\x00")
+                .await?;
+            let mut acknowledgement = [0_u8; 12];
+            client.read_exact(&mut acknowledgement).await?;
+            require(
+                acknowledgement == *b"ORNA\x81\x00\x00\x03\x00\x00\x00\x00",
+                "local raw socket returned the wrong active-revision acknowledgement",
+            )?;
+            for frame in [
+                ClientFrame::CallRawStart {
+                    stream: 2,
+                    function: client_function,
+                },
+                ClientFrame::CallArgument {
+                    stream: 2,
+                    parameter: orna_core::ParameterId::from_bytes([0x74; 16]),
+                    value: record,
+                },
+                ClientFrame::CallArgumentsComplete { stream: 2 },
+            ] {
+                send_active_protocol_frame(&mut client, &active, &frame).await?;
+            }
+            require(
+                matches!(
+                    read_active_protocol_frame(&mut client, &active).await?,
+                    ServerFrame::CallAccepted { stream: 2, .. }
+                ),
+                "local raw socket did not accept the active-revision record call",
+            )?;
+            require(
+                read_active_protocol_frame(&mut client, &active).await?
+                    == ServerFrame::CallFailed {
+                        stream: 2,
+                        failure: CallFailure::TargetUnavailable,
+                    },
+                "local raw socket did not retain the closed record-call dispatch boundary",
+            )
+        }
+        .await;
+        let shutdown = client.shutdown().await.map_err(Into::into);
+        let connection = connection.await.map_err(Into::into).and_then(|result| {
+            result.map_err(|error| -> Box<dyn Error + Send + Sync> { Box::new(error) })
+        });
+        let cleanup = finish_session(shutdown, connection, "protocol-3 connection cleanup");
+        finish_session(
+            version_three_operation,
+            cleanup,
+            "local raw socket protocol-3 operation",
+        )?;
 
         let events = kernel.recover_security_audit_events().await?;
         require(
-            events.len() == 2
+            events.len() == 3
                 && events[0].decision().outcome() == SecurityAuditOutcome::Allowed
                 && events[0].decision().session_principal() == Some(RAW_CLIENT_USER)
                 && events[0].decision().target().is_none()
                 && events[1].decision().outcome() == SecurityAuditOutcome::Allowed
                 && events[1].decision().session_principal() == Some(RAW_CLIENT_USER)
                 && events[1].decision().target()
-                    == Some(InvocationTarget::new(client_function, active.pair())),
+                    == Some(InvocationTarget::new(client_function, active.pair()))
+                && events[2].decision().outcome() == SecurityAuditOutcome::Allowed
+                && events[2].decision().session_principal() == Some(RAW_CLIENT_USER)
+                && events[2].decision().target().is_none(),
             "local raw socket changed the exact authentication and execute audit sequence",
         )?;
 
@@ -601,12 +690,12 @@ async fn serves_the_actual_local_peer_through_the_raw_socket_protocol() -> TestR
         )?;
         let events = kernel.recover_security_audit_events().await?;
         require(
-            events.len() == 3
-                && events[2].decision().kind() == SecurityAuditKind::Authentication
-                && events[2].decision().outcome() == SecurityAuditOutcome::Denied
-                && events[2].decision().session_principal().is_none()
-                && events[2].decision().target().is_none()
-                && events[2].decision().denial()
+            events.len() == 4
+                && events[3].decision().kind() == SecurityAuditKind::Authentication
+                && events[3].decision().outcome() == SecurityAuditOutcome::Denied
+                && events[3].decision().session_principal().is_none()
+                && events[3].decision().target().is_none()
+                && events[3].decision().denial()
                     == Some(SecurityAuditDenial::Authentication(
                         LocalPeerAuthenticationError::UnknownUid,
                     )),
@@ -624,15 +713,36 @@ fn raw_call(function: FunctionId) -> RawCall {
     }
 }
 
+async fn send_active_protocol_frame(
+    stream: &mut UnixStream,
+    active: &orna_core::revision::ActiveDatabaseRevision,
+    frame: &ClientFrame,
+) -> TestResult<()> {
+    stream
+        .write_all(&encode_active_client_frame(active, frame)?)
+        .await?;
+    Ok(())
+}
+
 async fn send_catalogue_protocol_frame(
     stream: &mut UnixStream,
     catalogue: &orna_core::catalogue::CatalogueSnapshot,
     frame: &ClientFrame,
 ) -> TestResult<()> {
     stream
-        .write_all(&encode_catalogue_client_frame(catalogue, frame)?)
+        .write_all(&orna_protocol::encode_catalogue_client_frame(
+            catalogue, frame,
+        )?)
         .await?;
     Ok(())
+}
+
+async fn read_active_protocol_frame(
+    stream: &mut UnixStream,
+    active: &orna_core::revision::ActiveDatabaseRevision,
+) -> TestResult<ServerFrame> {
+    let encoded = read_encoded_protocol_frame(stream).await?;
+    Ok(decode_active_server_frame(active, &encoded)?)
 }
 
 async fn read_catalogue_protocol_frame(
@@ -640,7 +750,9 @@ async fn read_catalogue_protocol_frame(
     catalogue: &orna_core::catalogue::CatalogueSnapshot,
 ) -> TestResult<ServerFrame> {
     let encoded = read_encoded_protocol_frame(stream).await?;
-    Ok(decode_catalogue_server_frame(catalogue, &encoded)?)
+    Ok(orna_protocol::decode_catalogue_server_frame(
+        catalogue, &encoded,
+    )?)
 }
 
 async fn read_encoded_protocol_frame(stream: &mut UnixStream) -> TestResult<Vec<u8>> {

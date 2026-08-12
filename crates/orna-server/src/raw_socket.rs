@@ -21,12 +21,15 @@ use std::{
     time::Duration,
 };
 
-use orna_core::{catalogue::CatalogueSnapshot, security::AuthenticatedSession};
+use orna_core::{
+    catalogue::CatalogueSnapshot, revision::ActiveDatabaseRevision, security::AuthenticatedSession,
+};
 use orna_kernel_postgres::{PostgresKernel, PostgresKernelError};
 use orna_protocol::{
     ClientAction, ClientFrame, ConnectionError, FrameCodecError, MAX_FRAME_PAYLOAD_LENGTH,
-    ProtocolConnection, RawCall, ServerAction, ServerFrame, decode_catalogue_client_frame,
-    decode_client_frame, encode_catalogue_server_frame, encode_server_frame,
+    ProtocolConnection, RawCall, ServerAction, ServerFrame, decode_active_client_frame,
+    decode_catalogue_client_frame, decode_client_frame, encode_active_server_frame,
+    encode_catalogue_server_frame, encode_server_frame,
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
@@ -43,8 +46,10 @@ use crate::{RawClientDispatch, authenticate_local_stream};
 
 const CLIENT_HELLO: [u8; 12] = *b"ORNA\x01\x00\x00\x01\x00\x00\x00\x00";
 const CLIENT_CATALOGUE_HELLO: [u8; 12] = *b"ORNA\x01\x00\x00\x02\x00\x00\x00\x00";
+const CLIENT_ACTIVE_HELLO: [u8; 12] = *b"ORNA\x01\x00\x00\x03\x00\x00\x00\x00";
 const SERVER_ACK: [u8; 12] = *b"ORNA\x81\x00\x00\x01\x00\x00\x00\x00";
 const SERVER_CATALOGUE_ACK: [u8; 12] = *b"ORNA\x81\x00\x00\x02\x00\x00\x00\x00";
+const SERVER_ACTIVE_ACK: [u8; 12] = *b"ORNA\x81\x00\x00\x03\x00\x00\x00\x00";
 const FRAME_HEADER_LENGTH: usize = 18;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const FRAME_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -57,6 +62,7 @@ const SOCKET_NAME: &str = "orna.sock";
 enum RawProtocolVersion {
     One,
     Catalogue(Arc<CatalogueSnapshot>),
+    Active(Arc<ActiveDatabaseRevision>),
 }
 
 impl RawProtocolVersion {
@@ -64,6 +70,7 @@ impl RawProtocolVersion {
         match self {
             Self::One => decode_client_frame(encoded),
             Self::Catalogue(catalogue) => decode_catalogue_client_frame(catalogue, encoded),
+            Self::Active(active) => decode_active_client_frame(active, encoded),
         }
     }
 
@@ -71,6 +78,7 @@ impl RawProtocolVersion {
         match self {
             Self::One => encode_server_frame(frame),
             Self::Catalogue(catalogue) => encode_catalogue_server_frame(catalogue, frame),
+            Self::Active(active) => encode_active_server_frame(active, frame),
         }
     }
 
@@ -82,6 +90,7 @@ impl RawProtocolVersion {
         match self {
             Self::One => connection.receive(frame),
             Self::Catalogue(catalogue) => connection.receive_catalogue(catalogue, frame),
+            Self::Active(active) => connection.receive_active(active, frame),
         }
     }
 
@@ -93,7 +102,34 @@ impl RawProtocolVersion {
         match self {
             Self::One => connection.apply(action),
             Self::Catalogue(catalogue) => connection.apply_catalogue(catalogue, action),
+            Self::Active(active) => connection.apply_active(active, action),
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RequestedProtocol {
+    One,
+    Catalogue,
+    Active,
+}
+
+impl RequestedProtocol {
+    const fn acknowledgement(self) -> &'static [u8; 12] {
+        match self {
+            Self::One => &SERVER_ACK,
+            Self::Catalogue => &SERVER_CATALOGUE_ACK,
+            Self::Active => &SERVER_ACTIVE_ACK,
+        }
+    }
+}
+
+fn requested_protocol(hello: &[u8; 12]) -> Option<RequestedProtocol> {
+    match *hello {
+        CLIENT_HELLO => Some(RequestedProtocol::One),
+        CLIENT_CATALOGUE_HELLO => Some(RequestedProtocol::Catalogue),
+        CLIENT_ACTIVE_HELLO => Some(RequestedProtocol::Active),
+        _ => None,
     }
 }
 
@@ -164,6 +200,11 @@ pub enum LocalRawSocketError {
         /// The protected catalogue recovery failure.
         source: Box<PostgresKernelError>,
     },
+    /// The authenticated version-3 connection could not recover its active revision.
+    ActiveRevision {
+        /// The protected active-revision recovery failure.
+        source: Box<PostgresKernelError>,
+    },
     /// Socket I/O failed or ended within a required envelope.
     Io {
         /// The socket failure.
@@ -201,6 +242,7 @@ impl fmt::Display for LocalRawSocketError {
             Self::KernelCapacity => "local raw socket kernel capacity is exhausted",
             Self::Authentication { .. } => "local raw socket authentication failed",
             Self::Catalogue { .. } => "local raw socket catalogue recovery failed",
+            Self::ActiveRevision { .. } => "local raw socket active revision recovery failed",
             Self::Io { .. } => "local raw socket I/O failed",
             Self::Frame { .. } => "local raw socket frame is invalid",
             Self::Connection { .. } => "local raw socket state is invalid",
@@ -215,6 +257,7 @@ impl Error for LocalRawSocketError {
         match self {
             Self::Authentication { source } => Some(source),
             Self::Catalogue { source } => Some(source),
+            Self::ActiveRevision { source } => Some(source),
             Self::Io { source } => Some(source),
             Self::Frame { source } => Some(source),
             Self::Connection { source } => Some(source),
@@ -579,9 +622,9 @@ fn sync_directory(path: &Path) -> Result<(), LocalRawSocketServerError> {
 ///
 /// # Errors
 ///
-/// Returns [`LocalRawSocketError`] for handshake, authentication, capacity,
-/// I/O, codec, state-machine, or protected task failures. No error text is
-/// written to the client.
+/// Returns [`LocalRawSocketError`] for handshake, authentication, active-state
+/// recovery, capacity, I/O, codec, state-machine, or protected task failures.
+/// No error text is written to the client.
 pub async fn serve_local_raw_stream(
     kernel: PostgresKernel,
     stream: StandardUnixStream,
@@ -679,36 +722,39 @@ async fn negotiate_and_drive(
         ) => result?,
         _ = wait_for_shutdown(&mut shutdown) => return Ok(()),
     }
-    let catalogue_protocol = match hello {
-        CLIENT_HELLO => false,
-        CLIENT_CATALOGUE_HELLO => true,
-        _ => return Err(LocalRawSocketError::InvalidHello),
-    };
+    let requested = requested_protocol(&hello).ok_or(LocalRawSocketError::InvalidHello)?;
 
     let authentication_permit = resources.reserve_kernel_operation()?;
     let session = authenticate_local_stream(&kernel, &peer_stream)
         .await
         .map_err(|source| LocalRawSocketError::Authentication { source })?;
-    let version = if catalogue_protocol {
-        let active = kernel
-            .recover()
-            .await
-            .map_err(|source| LocalRawSocketError::Catalogue {
-                source: Box::new(source),
-            })?;
-        RawProtocolVersion::Catalogue(Arc::new(active.catalogue().clone()))
-    } else {
-        RawProtocolVersion::One
-    };
+    let version =
+        match requested {
+            RequestedProtocol::One => RawProtocolVersion::One,
+            RequestedProtocol::Catalogue => {
+                let active =
+                    kernel
+                        .recover()
+                        .await
+                        .map_err(|source| LocalRawSocketError::Catalogue {
+                            source: Box::new(source),
+                        })?;
+                RawProtocolVersion::Catalogue(Arc::new(active.catalogue().clone()))
+            }
+            RequestedProtocol::Active => {
+                let active = kernel.recover().await.map_err(|source| {
+                    LocalRawSocketError::ActiveRevision {
+                        source: Box::new(source),
+                    }
+                })?;
+                RawProtocolVersion::Active(Arc::new(active))
+            }
+        };
     drop(authentication_permit);
     if *shutdown.borrow() {
         return Ok(());
     }
-    let acknowledgement = if catalogue_protocol {
-        &SERVER_CATALOGUE_ACK
-    } else {
-        &SERVER_ACK
-    };
+    let acknowledgement = requested.acknowledgement();
     if !write_all_until_shutdown(&mut stream, acknowledgement, &mut shutdown).await? {
         return Ok(());
     }
@@ -1406,10 +1452,23 @@ mod tests {
             CLIENT_CATALOGUE_HELLO,
             *b"ORNA\x01\x00\x00\x02\x00\x00\x00\x00"
         );
+        assert_eq!(
+            CLIENT_ACTIVE_HELLO,
+            *b"ORNA\x01\x00\x00\x03\x00\x00\x00\x00"
+        );
         assert_eq!(SERVER_ACK, *b"ORNA\x81\x00\x00\x01\x00\x00\x00\x00");
         assert_eq!(
             SERVER_CATALOGUE_ACK,
             *b"ORNA\x81\x00\x00\x02\x00\x00\x00\x00"
+        );
+        assert_eq!(SERVER_ACTIVE_ACK, *b"ORNA\x81\x00\x00\x03\x00\x00\x00\x00");
+        assert_eq!(
+            requested_protocol(&CLIENT_ACTIVE_HELLO),
+            Some(RequestedProtocol::Active)
+        );
+        assert_eq!(
+            requested_protocol(b"ORNA\x01\x00\x00\x04\x00\x00\x00\x00"),
+            None
         );
 
         let resources = LocalRawSocketResources::new();
