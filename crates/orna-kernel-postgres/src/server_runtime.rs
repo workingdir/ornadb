@@ -2,7 +2,7 @@
 
 use orna_core::{
     TypeId,
-    catalogue::{FunctionDefinition, FunctionReturn},
+    catalogue::{CatalogueSnapshot, FunctionDefinition, FunctionReturn},
     revision::{
         ActiveDatabaseRevision, CatalogueHashContext, DefinitionReference, DefinitionReferenceKind,
         DefinitionReferenceTarget,
@@ -26,6 +26,7 @@ pub(crate) enum ResolvedRuntimeType {
         value_type: TypeId,
         compatibility: StandardScalar,
     },
+    CatalogueEnum(TypeId),
     Reference(TypeId),
     Unsupported,
 }
@@ -39,7 +40,7 @@ impl ResolvedRuntimeType {
                 compatibility: scalar,
                 ..
             } => Some(scalar),
-            Self::Reference(_) | Self::Unsupported => None,
+            Self::CatalogueEnum(_) | Self::Reference(_) | Self::Unsupported => None,
         }
     }
 }
@@ -78,6 +79,20 @@ pub(crate) fn resolve_runtime_type(
             });
     }
     ResolvedRuntimeType::Unsupported
+}
+
+/// Resolves application enum identities through the active catalogue.
+pub(crate) fn resolve_catalogue_runtime_type(
+    catalogue: &CatalogueSnapshot,
+    context: &CatalogueHashContext,
+    resolved_type: ResolvedType,
+) -> ResolvedRuntimeType {
+    if let Some(enum_type) = resolved_type.named_type()
+        && catalogue.enum_type_by_id(enum_type).is_some()
+    {
+        return ResolvedRuntimeType::CatalogueEnum(enum_type);
+    }
+    resolve_runtime_type(context, resolved_type)
 }
 
 fn runtime_type_from_legacy_scalar(scalar: StandardScalar) -> ResolvedRuntimeType {
@@ -182,6 +197,7 @@ pub(crate) fn postgres_type(runtime_type: ResolvedRuntimeType) -> Option<Type> {
             ..
         }
         | ResolvedRuntimeType::Reference(_) => Some(Type::BYTEA),
+        ResolvedRuntimeType::CatalogueEnum(_) => Some(Type::TEXT),
         ResolvedRuntimeType::LegacyScalar(_)
         | ResolvedRuntimeType::VerifiedValue { .. }
         | ResolvedRuntimeType::Unsupported => None,
@@ -252,6 +268,11 @@ fn add_signature_reference(
             DefinitionReferenceKind::NamedType,
             DefinitionReferenceTarget::ValueType(value_type),
         ));
+    } else if let Some(enum_type) = resolved_type.named_type() {
+        expected.push(ExpectedDefinitionReference::new(
+            DefinitionReferenceKind::NamedType,
+            DefinitionReferenceTarget::ValueType(enum_type),
+        ));
     } else if let Some(target) = resolved_type.reference_target() {
         expected.push(ExpectedDefinitionReference::new(
             DefinitionReferenceKind::ObjectReference,
@@ -281,10 +302,11 @@ fn validate_reference_sequence(
 #[cfg(test)]
 mod tests {
     use orna_core::{
-        FieldId, FunctionId, FunctionRevisionId, ParameterId, SourceUnitId, TypeId,
+        CatalogueRevisionId, FieldId, FunctionId, FunctionRevisionId, ParameterId, SchemaId,
+        SourceUnitId, TypeId,
         catalogue::{
-            FunctionDomain, FunctionReturnColumnDefinition, FunctionSecurity, FunctionVolatility,
-            ParameterDefinition, QualifiedSemanticName,
+            EnumTypeDefinition, FunctionDomain, FunctionReturnColumnDefinition, FunctionSecurity,
+            FunctionVolatility, ParameterDefinition, QualifiedSemanticName, SchemaDefinition,
         },
         revision::{CatalogueHashContext, DefinitionReference, SourceOrigin},
     };
@@ -384,6 +406,45 @@ mod tests {
         assert_eq!(
             postgres_type(resolve_runtime_type(&context, reference)),
             Some(Type::BYTEA)
+        );
+    }
+
+    #[test]
+    fn active_catalogue_classifies_only_declared_enums_as_text() {
+        let enum_type = TypeId::from_bytes([0x53; 16]);
+        let catalogue = CatalogueSnapshot::new_with_enum_types(
+            CatalogueRevisionId::from_bytes([0x54; 16]),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes([0x55; 16]),
+                QualifiedSemanticName::new(["app"]).unwrap(),
+            )],
+            Vec::new(),
+            Vec::new(),
+            vec![EnumTypeDefinition::new(
+                enum_type,
+                QualifiedSemanticName::new(["app", "stage"]).unwrap(),
+                ["lead"],
+            )],
+            Vec::new(),
+        )
+        .unwrap();
+        let context = CatalogueHashContext::version_one();
+
+        assert_eq!(
+            resolve_catalogue_runtime_type(&catalogue, &context, ResolvedType::named(enum_type)),
+            ResolvedRuntimeType::CatalogueEnum(enum_type)
+        );
+        assert_eq!(
+            postgres_type(ResolvedRuntimeType::CatalogueEnum(enum_type)),
+            Some(Type::TEXT)
+        );
+        assert_eq!(
+            resolve_catalogue_runtime_type(
+                &catalogue,
+                &context,
+                ResolvedType::named(TypeId::from_bytes([0x56; 16])),
+            ),
+            ResolvedRuntimeType::Unsupported
         );
     }
 
@@ -573,6 +634,7 @@ mod tests {
         let result_target = TypeId::from_bytes([0x62; 16]);
         let body_target = TypeId::from_bytes([0x63; 16]);
         let result_value = TypeId::from_bytes([0x68; 16]);
+        let enum_type = TypeId::from_bytes([0x6a; 16]);
         let function = FunctionDefinition::new(
             FunctionId::from_bytes([0x64; 16]),
             QualifiedSemanticName::new(["test", "function"]).unwrap(),
@@ -612,6 +674,11 @@ mod tests {
                     2,
                     ResolvedType::scalar(StandardScalar::Integer),
                 ),
+                FunctionReturnColumnDefinition::new(
+                    "enum_value",
+                    3,
+                    ResolvedType::named(enum_type),
+                ),
             ]),
             FunctionRevisionId::from_bytes([0x67; 16]),
             FunctionSecurity::Invoker,
@@ -641,6 +708,10 @@ mod tests {
                 ExpectedDefinitionReference::new(
                     DefinitionReferenceKind::ObjectReference,
                     DefinitionReferenceTarget::ObjectType(result_target),
+                ),
+                ExpectedDefinitionReference::new(
+                    DefinitionReferenceKind::NamedType,
+                    DefinitionReferenceTarget::ValueType(enum_type),
                 ),
                 body[0],
             ]
