@@ -145,6 +145,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "record value field reference targets",
         include_str!("../migrations/0017_record_field_reference_targets.sql"),
     ),
+    (
+        18,
+        "disjoint field reference targets",
+        include_str!("../migrations/0018_disjoint_field_reference_targets.sql"),
+    ),
 ];
 const MIGRATION_DATA_STEP_SEPARATOR: &[u8] = b"\0orna.kernel.migration-step\0";
 const CANONICAL_HASH_V1_EMPTY_SEED_STEP: &[u8] = b"canonical-hash-v1-empty-seed/v1";
@@ -565,6 +570,25 @@ fn record_field_reference_targets_are_the_registered_version_seventeen() -> Test
     )
 }
 
+#[test]
+fn disjoint_field_reference_targets_are_the_registered_version_eighteen() -> TestResult<()> {
+    let (version, name, sql) = MIGRATIONS[17];
+    require(version == 18, format!("migration is version {version}"))?;
+    require(
+        name == "disjoint field reference targets",
+        format!("migration has unexpected name {name:?}"),
+    )?;
+    require(
+        sql.contains("target_record_field_owner_type_id")
+            && sql.contains("WHERE target_kind = 'record_field'")
+            && sql.contains("definition_references_record_field_target_fk")
+            && sql.contains("REFERENCES _orna_kernel.catalogue_record_value_fields")
+            && sql.contains("DEFERRABLE INITIALLY DEFERRED")
+            && !sql.contains("LANGUAGE plpgsql"),
+        "disjoint field-reference migration does not preserve exact relational integrity",
+    )
+}
+
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
 async fn bootstrap_creates_one_recoverable_empty_revision() -> TestResult<()> {
@@ -675,8 +699,8 @@ async fn bootstrap_upgrades_v5_write_reference_evidence_without_mutating_semanti
 
         let after = snapshot_upgrade_state(&database).await?;
         require(
-            after.migrations.len() == 17 && after.migrations[..5] == before.migrations[..],
-            format!("v6-v17 changed prior migration records: {:?}", after.migrations),
+            after.migrations.len() == 18 && after.migrations[..5] == before.migrations[..],
+            format!("v6-v18 changed prior migration records: {:?}", after.migrations),
         )?;
         require(
             after.migrations[5]
@@ -787,6 +811,15 @@ async fn bootstrap_upgrades_v5_write_reference_evidence_without_mutating_semanti
             format!("v17 migration record is not exact: {:?}", after.migrations[16]),
         )?;
         require(
+            after.migrations[17]
+                == (
+                    18,
+                    "disjoint field reference targets".to_owned(),
+                    expected_migration_checksum(18, MIGRATIONS[17].2),
+                ),
+            format!("v18 migration record is not exact: {:?}", after.migrations[17]),
+        )?;
+        require(
             after.active_pair == before.active_pair,
             "v6 changed the active revision pair",
         )?;
@@ -872,7 +905,7 @@ async fn bootstrap_upgrades_registered_v6_without_standard_rows() -> TestResult<
 
         let after = snapshot_upgrade_state(&database).await?;
         require(
-            after.migrations.len() == 17
+            after.migrations.len() == 18
                 && after.migrations[..6] == before.migrations[..]
                 && after.migrations[6]
                     == (
@@ -973,6 +1006,15 @@ async fn bootstrap_upgrades_registered_v6_without_standard_rows() -> TestResult<
             format!("v17 migration record is not exact: {:?}", after.migrations[16]),
         )?;
         require(
+            after.migrations[17]
+                == (
+                    18,
+                    "disjoint field reference targets".to_owned(),
+                    expected_migration_checksum(18, MIGRATIONS[17].2),
+                ),
+            format!("v18 migration record is not exact: {:?}", after.migrations[17]),
+        )?;
+        require(
             after.active_pair == before.active_pair
                 && after.source_unit_count == before.source_unit_count
                 && after.references == before.references
@@ -1046,7 +1088,7 @@ async fn bootstrap_upgrades_registered_v7_without_resolved_value_rows() -> TestR
         let after_surface = snapshot_catalogue_surface(&database).await?;
         let after_target_fks = snapshot_application_target_foreign_keys(&database).await?;
         require(
-            after.migrations.len() == 17
+            after.migrations.len() == 18
                 && after.migrations[..7] == before.migrations[..]
                 && after.migrations[7]
                     == (
@@ -1107,6 +1149,12 @@ async fn bootstrap_upgrades_registered_v7_without_resolved_value_rows() -> TestR
                         17,
                         "record value field reference targets".to_owned(),
                         expected_migration_checksum(17, MIGRATIONS[16].2),
+                    )
+                && after.migrations[17]
+                    == (
+                        18,
+                        "disjoint field reference targets".to_owned(),
+                        expected_migration_checksum(18, MIGRATIONS[17].2),
                     ),
             format!("v7 upgrade produced unexpected migrations: {:?}", after.migrations),
         )?;
@@ -3591,6 +3639,10 @@ async fn inspect_definition_references(client: &Client) -> TestResult<()> {
             "target_record_field_catalogue_revision_id".to_owned(),
             "YES".to_owned(),
         ),
+        (
+            "target_record_field_owner_type_id".to_owned(),
+            "YES".to_owned(),
+        ),
     ];
     require(
         actual_columns == expected_columns,
@@ -3670,7 +3722,7 @@ async fn inspect_definition_references(client: &Client) -> TestResult<()> {
         client,
         "definition_references",
         "definition_references_target_owner_shape_check",
-        "target_kind = ANY (ARRAY['field'::text, 'record_field'::text])",
+        "(target_kind = 'record_field'::text) AND (target_owner_type_id IS NULL) AND (target_record_field_owner_type_id IS NOT NULL)",
     )
     .await?;
     require_constraint(
@@ -3691,7 +3743,7 @@ async fn inspect_definition_references(client: &Client) -> TestResult<()> {
         client,
         "definition_references",
         "definition_references_record_field_target_fk",
-        "FOREIGN KEY (target_record_field_catalogue_revision_id, target_owner_type_id, target_definition_id) REFERENCES _orna_kernel.catalogue_record_value_fields(catalogue_revision_id, owner_type_id, field_id) DEFERRABLE INITIALLY DEFERRED",
+        "FOREIGN KEY (target_record_field_catalogue_revision_id, target_record_field_owner_type_id, target_definition_id) REFERENCES _orna_kernel.catalogue_record_value_fields(catalogue_revision_id, owner_type_id, field_id) DEFERRABLE INITIALLY DEFERRED",
     )
     .await?;
     require_constraint(
@@ -3795,6 +3847,13 @@ async fn inspect_definition_references(client: &Client) -> TestResult<()> {
     require_constraint(
         client,
         "definition_references",
+        "definition_references_target_record_field_owner_type_id_check",
+        "octet_length(target_record_field_owner_type_id) = 16",
+    )
+    .await?;
+    require_constraint(
+        client,
+        "definition_references",
         "definition_references_target_field_revision_shape",
         "target_kind = 'record_field'::text",
     )
@@ -3808,7 +3867,7 @@ async fn inspect_definition_references(client: &Client) -> TestResult<()> {
     require_index(
         client,
         "definition_references_record_field_target_index",
-        "(target_record_field_catalogue_revision_id, target_owner_type_id, target_definition_id) WHERE (target_kind = 'record_field'::text)",
+        "(target_record_field_catalogue_revision_id, target_record_field_owner_type_id, target_definition_id) WHERE (target_kind = 'record_field'::text)",
     )
     .await?;
     require_index(
