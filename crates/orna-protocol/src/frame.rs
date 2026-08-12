@@ -2,11 +2,16 @@
 
 use std::{collections::BTreeMap, error::Error, fmt};
 
-use orna_core::{FunctionId, InvocationId, ParameterId, value::RuntimeValue};
+use orna_core::{
+    FunctionId, InvocationId, ParameterId, catalogue::CatalogueSnapshot, value::RuntimeValue,
+};
 
-use crate::{ValueCodecError, decode_value, encode_value};
+use crate::{
+    ValueCodecError, decode_catalogue_value, decode_value, encode_catalogue_value, encode_value,
+};
 
 const MARKER: &[u8; 4] = b"ORF1";
+const CATALOGUE_MARKER: &[u8; 4] = b"ORF2";
 const HEADER_LENGTH: usize = 18;
 const PING_TAG: u8 = 0x06;
 const PONG_TAG: u8 = 0x86;
@@ -425,6 +430,35 @@ const MAX_ARGUMENTS: usize = 256;
 const MAX_ARGUMENT_BYTES: usize = MAX_FRAME_PAYLOAD_LENGTH;
 const MAX_WINDOW: u64 = 1024 * 1024 * 1024;
 
+#[derive(Clone, Copy)]
+enum FrameVersion<'a> {
+    One,
+    Catalogue(&'a CatalogueSnapshot),
+}
+
+impl FrameVersion<'_> {
+    const fn marker(self) -> &'static [u8; 4] {
+        match self {
+            Self::One => MARKER,
+            Self::Catalogue(_) => CATALOGUE_MARKER,
+        }
+    }
+
+    fn encode_value(self, value: &RuntimeValue) -> Result<Vec<u8>, ValueCodecError> {
+        match self {
+            Self::One => encode_value(value),
+            Self::Catalogue(catalogue) => encode_catalogue_value(catalogue, value),
+        }
+    }
+
+    fn decode_value(self, encoded: &[u8]) -> Result<RuntimeValue, ValueCodecError> {
+        match self {
+            Self::One => decode_value(encoded),
+            Self::Catalogue(catalogue) => decode_catalogue_value(catalogue, encoded),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 enum Phase {
     Receiving {
@@ -494,13 +528,36 @@ impl ProtocolConnection {
     /// Returns a [`ConnectionError`] when the frame violates a state transition
     /// or bounded connection limit. An error leaves all prior state unchanged.
     pub fn receive(&mut self, frame: ClientFrame) -> Result<Option<ClientAction>, ConnectionError> {
+        self.receive_with_version(FrameVersion::One, frame)
+    }
+
+    /// Receives one catalogue-bound version-2 client frame.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ConnectionError`] when the frame violates a state transition,
+    /// bounded connection limit, or active-catalogue value rule. An error leaves
+    /// all prior state unchanged.
+    pub fn receive_catalogue(
+        &mut self,
+        catalogue: &CatalogueSnapshot,
+        frame: ClientFrame,
+    ) -> Result<Option<ClientAction>, ConnectionError> {
+        self.receive_with_version(FrameVersion::Catalogue(catalogue), frame)
+    }
+
+    fn receive_with_version(
+        &mut self,
+        version: FrameVersion<'_>,
+        frame: ClientFrame,
+    ) -> Result<Option<ClientAction>, ConnectionError> {
         match frame {
             ClientFrame::CallRawStart { stream, function } => self.start(stream, function),
             ClientFrame::CallArgument {
                 stream,
                 parameter,
                 value,
-            } => self.argument(stream, parameter, value),
+            } => self.argument(version, stream, parameter, value),
             ClientFrame::CallArgumentsComplete { stream } => self.complete_arguments(stream),
             ClientFrame::WindowUpdate {
                 stream,
@@ -522,9 +579,32 @@ impl ProtocolConnection {
     /// state, sequence, frame, or flow-control contract. An error leaves all
     /// prior state and window credit unchanged.
     pub fn apply(&mut self, action: ServerAction) -> Result<ServerFrame, ConnectionError> {
+        self.apply_with_version(FrameVersion::One, action)
+    }
+
+    /// Applies one catalogue-bound version-2 server-adapter result.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ConnectionError`] when the action violates the current call
+    /// state, sequence, frame, flow-control, or active-catalogue value contract.
+    /// An error leaves all prior state and window credit unchanged.
+    pub fn apply_catalogue(
+        &mut self,
+        catalogue: &CatalogueSnapshot,
+        action: ServerAction,
+    ) -> Result<ServerFrame, ConnectionError> {
+        self.apply_with_version(FrameVersion::Catalogue(catalogue), action)
+    }
+
+    fn apply_with_version(
+        &mut self,
+        version: FrameVersion<'_>,
+        action: ServerAction,
+    ) -> Result<ServerFrame, ConnectionError> {
         match action {
             ServerAction::Accepted { stream, invocation } => self.accept(stream, invocation),
-            ServerAction::Events { stream, events } => self.events(stream, events),
+            ServerAction::Events { stream, events } => self.events(version, stream, events),
             ServerAction::Completed { stream } => self.complete(stream),
             ServerAction::Failed { stream, failure } => self.fail(stream, failure),
             ServerAction::Cancelled { stream } => self.cancelled(stream),
@@ -561,11 +641,13 @@ impl ProtocolConnection {
 
     fn argument(
         &mut self,
+        version: FrameVersion<'_>,
         stream: u64,
         parameter: ParameterId,
         value: RuntimeValue,
     ) -> Result<Option<ClientAction>, ConnectionError> {
-        let value_length = encode_value(&value)
+        let value_length = version
+            .encode_value(&value)
             .map_err(|source| ConnectionError::InvalidFrame {
                 source: FrameCodecError::Value { source },
             })?
@@ -720,7 +802,12 @@ impl ProtocolConnection {
         Ok(ServerFrame::CallAccepted { stream, invocation })
     }
 
-    fn events(&mut self, stream: u64, events: Vec<Event>) -> Result<ServerFrame, ConnectionError> {
+    fn events(
+        &mut self,
+        version: FrameVersion<'_>,
+        stream: u64,
+        events: Vec<Event>,
+    ) -> Result<ServerFrame, ConnectionError> {
         let state = self
             .streams
             .get(&stream)
@@ -771,7 +858,7 @@ impl ProtocolConnection {
             channel,
             events: records,
         };
-        let payload_length = encode_server_frame(&frame)
+        let payload_length = encode_server_frame_with_version(version, &frame)
             .map_err(|source| ConnectionError::InvalidFrame { source })?
             .len()
             - HEADER_LENGTH;
@@ -1035,10 +1122,30 @@ impl Error for FrameCodecError {
 /// Returns a [`FrameCodecError`] when the frame cannot satisfy the version-1
 /// envelope or payload contract.
 pub fn encode_client_frame(frame: &ClientFrame) -> Result<Vec<u8>, FrameCodecError> {
+    encode_client_frame_with_version(FrameVersion::One, frame)
+}
+
+/// Encodes one complete catalogue-bound version-2 client frame.
+///
+/// # Errors
+///
+/// Returns a [`FrameCodecError`] when the frame cannot satisfy the version-2
+/// envelope, payload, or active-catalogue value contract.
+pub fn encode_catalogue_client_frame(
+    catalogue: &CatalogueSnapshot,
+    frame: &ClientFrame,
+) -> Result<Vec<u8>, FrameCodecError> {
+    encode_client_frame_with_version(FrameVersion::Catalogue(catalogue), frame)
+}
+
+fn encode_client_frame_with_version(
+    version: FrameVersion<'_>,
+    frame: &ClientFrame,
+) -> Result<Vec<u8>, FrameCodecError> {
     match frame {
         ClientFrame::CallRawStart { stream, function } => {
             require_stream(CALL_RAW_START_TAG, *stream, false)?;
-            encode(CALL_RAW_START_TAG, *stream, &function.to_bytes())
+            encode(version, CALL_RAW_START_TAG, *stream, &function.to_bytes())
         }
         ClientFrame::CallArgument {
             stream,
@@ -1046,15 +1153,17 @@ pub fn encode_client_frame(frame: &ClientFrame) -> Result<Vec<u8>, FrameCodecErr
             value,
         } => {
             require_stream(CALL_ARGUMENT_TAG, *stream, false)?;
-            let value = encode_value(value).map_err(|source| FrameCodecError::Value { source })?;
+            let value = version
+                .encode_value(value)
+                .map_err(|source| FrameCodecError::Value { source })?;
             let mut payload = Vec::with_capacity(16 + value.len());
             payload.extend_from_slice(&parameter.to_bytes());
             payload.extend_from_slice(&value);
-            encode(CALL_ARGUMENT_TAG, *stream, &payload)
+            encode(version, CALL_ARGUMENT_TAG, *stream, &payload)
         }
         ClientFrame::CallArgumentsComplete { stream } => {
             require_stream(CALL_ARGUMENTS_COMPLETE_TAG, *stream, false)?;
-            encode(CALL_ARGUMENTS_COMPLETE_TAG, *stream, &[])
+            encode(version, CALL_ARGUMENTS_COMPLETE_TAG, *stream, &[])
         }
         ClientFrame::WindowUpdate {
             stream,
@@ -1068,13 +1177,13 @@ pub fn encode_client_frame(frame: &ClientFrame) -> Result<Vec<u8>, FrameCodecErr
             let mut payload = Vec::with_capacity(9);
             payload.push(channel.wire());
             payload.extend_from_slice(&credit.to_be_bytes());
-            encode(WINDOW_UPDATE_TAG, *stream, &payload)
+            encode(version, WINDOW_UPDATE_TAG, *stream, &payload)
         }
         ClientFrame::CallCancel { stream } => {
             require_stream(CALL_CANCEL_TAG, *stream, false)?;
-            encode(CALL_CANCEL_TAG, *stream, &[])
+            encode(version, CALL_CANCEL_TAG, *stream, &[])
         }
-        ClientFrame::Ping { token } => encode(PING_TAG, 0, token),
+        ClientFrame::Ping { token } => encode(version, PING_TAG, 0, token),
     }
 }
 
@@ -1085,7 +1194,28 @@ pub fn encode_client_frame(frame: &ClientFrame) -> Result<Vec<u8>, FrameCodecErr
 /// Returns a [`FrameCodecError`] for an invalid envelope, wrong-direction tag,
 /// unknown tag, or invalid tag-specific payload.
 pub fn decode_client_frame(encoded: &[u8]) -> Result<ClientFrame, FrameCodecError> {
-    let (tag, stream, payload) = decode_envelope(encoded)?;
+    decode_client_frame_with_version(FrameVersion::One, encoded)
+}
+
+/// Decodes one complete catalogue-bound version-2 client frame.
+///
+/// # Errors
+///
+/// Returns a [`FrameCodecError`] for an invalid version-2 envelope,
+/// wrong-direction tag, unknown tag, invalid payload, or enum value rejected
+/// by the active catalogue.
+pub fn decode_catalogue_client_frame(
+    catalogue: &CatalogueSnapshot,
+    encoded: &[u8],
+) -> Result<ClientFrame, FrameCodecError> {
+    decode_client_frame_with_version(FrameVersion::Catalogue(catalogue), encoded)
+}
+
+fn decode_client_frame_with_version(
+    version: FrameVersion<'_>,
+    encoded: &[u8],
+) -> Result<ClientFrame, FrameCodecError> {
+    let (tag, stream, payload) = decode_envelope(version, encoded)?;
     match tag {
         CALL_RAW_START_TAG => {
             require_stream(tag, stream, false)?;
@@ -1106,8 +1236,9 @@ pub fn decode_client_frame(encoded: &[u8]) -> Result<ClientFrame, FrameCodecErro
                     .try_into()
                     .expect("argument prefix length checked"),
             );
-            let value =
-                decode_value(&payload[16..]).map_err(|source| FrameCodecError::Value { source })?;
+            let value = version
+                .decode_value(&payload[16..])
+                .map_err(|source| FrameCodecError::Value { source })?;
             Ok(ClientFrame::CallArgument {
                 stream,
                 parameter,
@@ -1157,10 +1288,30 @@ pub fn decode_client_frame(encoded: &[u8]) -> Result<ClientFrame, FrameCodecErro
 /// Returns a [`FrameCodecError`] when the frame cannot satisfy the version-1
 /// envelope or payload contract.
 pub fn encode_server_frame(frame: &ServerFrame) -> Result<Vec<u8>, FrameCodecError> {
+    encode_server_frame_with_version(FrameVersion::One, frame)
+}
+
+/// Encodes one complete catalogue-bound version-2 server frame.
+///
+/// # Errors
+///
+/// Returns a [`FrameCodecError`] when the frame cannot satisfy the version-2
+/// envelope, payload, or active-catalogue value contract.
+pub fn encode_catalogue_server_frame(
+    catalogue: &CatalogueSnapshot,
+    frame: &ServerFrame,
+) -> Result<Vec<u8>, FrameCodecError> {
+    encode_server_frame_with_version(FrameVersion::Catalogue(catalogue), frame)
+}
+
+fn encode_server_frame_with_version(
+    version: FrameVersion<'_>,
+    frame: &ServerFrame,
+) -> Result<Vec<u8>, FrameCodecError> {
     match frame {
         ServerFrame::CallAccepted { stream, invocation } => {
             require_stream(CALL_ACCEPTED_TAG, *stream, false)?;
-            encode(CALL_ACCEPTED_TAG, *stream, &invocation.to_bytes())
+            encode(version, CALL_ACCEPTED_TAG, *stream, &invocation.to_bytes())
         }
         ServerFrame::EventBatch {
             stream,
@@ -1168,22 +1319,22 @@ pub fn encode_server_frame(frame: &ServerFrame) -> Result<Vec<u8>, FrameCodecErr
             events,
         } => {
             require_stream(EVENT_BATCH_TAG, *stream, false)?;
-            let payload = encode_event_batch(*channel, events)?;
-            encode(EVENT_BATCH_TAG, *stream, &payload)
+            let payload = encode_event_batch(version, *channel, events)?;
+            encode(version, EVENT_BATCH_TAG, *stream, &payload)
         }
         ServerFrame::CallCompleted { stream } => {
             require_stream(CALL_COMPLETED_TAG, *stream, false)?;
-            encode(CALL_COMPLETED_TAG, *stream, &[])
+            encode(version, CALL_COMPLETED_TAG, *stream, &[])
         }
         ServerFrame::CallFailed { stream, failure } => {
             require_stream(CALL_FAILED_TAG, *stream, false)?;
-            encode(CALL_FAILED_TAG, *stream, &failure.wire())
+            encode(version, CALL_FAILED_TAG, *stream, &failure.wire())
         }
         ServerFrame::CallCancelled { stream } => {
             require_stream(CALL_CANCELLED_TAG, *stream, false)?;
-            encode(CALL_CANCELLED_TAG, *stream, &[])
+            encode(version, CALL_CANCELLED_TAG, *stream, &[])
         }
-        ServerFrame::Pong { token } => encode(PONG_TAG, 0, token),
+        ServerFrame::Pong { token } => encode(version, PONG_TAG, 0, token),
     }
 }
 
@@ -1194,7 +1345,28 @@ pub fn encode_server_frame(frame: &ServerFrame) -> Result<Vec<u8>, FrameCodecErr
 /// Returns a [`FrameCodecError`] for an invalid envelope, wrong-direction tag,
 /// unknown tag, or invalid tag-specific payload.
 pub fn decode_server_frame(encoded: &[u8]) -> Result<ServerFrame, FrameCodecError> {
-    let (tag, stream, payload) = decode_envelope(encoded)?;
+    decode_server_frame_with_version(FrameVersion::One, encoded)
+}
+
+/// Decodes one complete catalogue-bound version-2 server frame.
+///
+/// # Errors
+///
+/// Returns a [`FrameCodecError`] for an invalid version-2 envelope,
+/// wrong-direction tag, unknown tag, invalid payload, or enum value rejected
+/// by the active catalogue.
+pub fn decode_catalogue_server_frame(
+    catalogue: &CatalogueSnapshot,
+    encoded: &[u8],
+) -> Result<ServerFrame, FrameCodecError> {
+    decode_server_frame_with_version(FrameVersion::Catalogue(catalogue), encoded)
+}
+
+fn decode_server_frame_with_version(
+    version: FrameVersion<'_>,
+    encoded: &[u8],
+) -> Result<ServerFrame, FrameCodecError> {
+    let (tag, stream, payload) = decode_envelope(version, encoded)?;
     match tag {
         CALL_ACCEPTED_TAG => {
             require_stream(tag, stream, false)?;
@@ -1205,7 +1377,7 @@ pub fn decode_server_frame(encoded: &[u8]) -> Result<ServerFrame, FrameCodecErro
         }
         EVENT_BATCH_TAG => {
             require_stream(tag, stream, false)?;
-            let (channel, events) = decode_event_batch(payload)?;
+            let (channel, events) = decode_event_batch(version, payload)?;
             Ok(ServerFrame::EventBatch {
                 stream,
                 channel,
@@ -1240,10 +1412,15 @@ pub fn decode_server_frame(encoded: &[u8]) -> Result<ServerFrame, FrameCodecErro
     }
 }
 
-fn encode(tag: u8, stream: u64, payload: &[u8]) -> Result<Vec<u8>, FrameCodecError> {
+fn encode(
+    version: FrameVersion<'_>,
+    tag: u8,
+    stream: u64,
+    payload: &[u8],
+) -> Result<Vec<u8>, FrameCodecError> {
     require_payload_limit(payload.len())?;
     let mut encoded = Vec::with_capacity(HEADER_LENGTH + payload.len());
-    encoded.extend_from_slice(MARKER);
+    encoded.extend_from_slice(version.marker());
     encoded.push(tag);
     encoded.push(0);
     encoded.extend_from_slice(&stream.to_be_bytes());
@@ -1252,13 +1429,16 @@ fn encode(tag: u8, stream: u64, payload: &[u8]) -> Result<Vec<u8>, FrameCodecErr
     Ok(encoded)
 }
 
-fn decode_envelope(encoded: &[u8]) -> Result<(u8, u64, &[u8]), FrameCodecError> {
+fn decode_envelope<'a>(
+    version: FrameVersion<'_>,
+    encoded: &'a [u8],
+) -> Result<(u8, u64, &'a [u8]), FrameCodecError> {
     if encoded.len() < HEADER_LENGTH {
         return Err(FrameCodecError::TruncatedHeader {
             actual: encoded.len(),
         });
     }
-    if &encoded[..MARKER.len()] != MARKER {
+    if &encoded[..version.marker().len()] != version.marker() {
         return Err(FrameCodecError::InvalidMarker);
     }
     let tag = encoded[4];
@@ -1325,6 +1505,7 @@ fn require_empty_payload(tag: u8, payload: &[u8]) -> Result<(), FrameCodecError>
 }
 
 fn encode_event_batch(
+    version: FrameVersion<'_>,
     channel: Channel,
     events: &[EventRecord],
 ) -> Result<Vec<u8>, FrameCodecError> {
@@ -1351,7 +1532,7 @@ fn encode_event_batch(
                 kind: record.event.kind(),
             });
         }
-        let content = encode_event(&record.event)?;
+        let content = encode_event(version, &record.event)?;
         payload.extend_from_slice(&record.sequence.to_be_bytes());
         payload.push(record.event.kind());
         payload.extend_from_slice(&(content.len() as u32).to_be_bytes());
@@ -1361,11 +1542,11 @@ fn encode_event_batch(
     Ok(payload)
 }
 
-fn encode_event(event: &Event) -> Result<Vec<u8>, FrameCodecError> {
+fn encode_event(version: FrameVersion<'_>, event: &Event) -> Result<Vec<u8>, FrameCodecError> {
     match event {
-        Event::Value(value) => {
-            encode_value(value).map_err(|source| FrameCodecError::Value { source })
-        }
+        Event::Value(value) => version
+            .encode_value(value)
+            .map_err(|source| FrameCodecError::Value { source }),
         Event::Bytes(bytes) if bytes.is_empty() => Err(FrameCodecError::EmptyByteChunk),
         Event::Bytes(bytes) => {
             require_payload_limit(bytes.len())?;
@@ -1375,7 +1556,10 @@ fn encode_event(event: &Event) -> Result<Vec<u8>, FrameCodecError> {
     }
 }
 
-fn decode_event_batch(payload: &[u8]) -> Result<(Channel, Vec<EventRecord>), FrameCodecError> {
+fn decode_event_batch(
+    version: FrameVersion<'_>,
+    payload: &[u8],
+) -> Result<(Channel, Vec<EventRecord>), FrameCodecError> {
     if payload.len() < 3 {
         return Err(FrameCodecError::TruncatedEventBatch);
     }
@@ -1418,7 +1602,7 @@ fn decode_event_batch(payload: &[u8]) -> Result<(Channel, Vec<EventRecord>), Fra
         remaining = &remaining[length..];
         events.push(EventRecord {
             sequence,
-            event: decode_event(channel, kind, content)?,
+            event: decode_event(version, channel, kind, content)?,
         });
     }
     if !remaining.is_empty() {
@@ -1427,9 +1611,15 @@ fn decode_event_batch(payload: &[u8]) -> Result<(Channel, Vec<EventRecord>), Fra
     Ok((channel, events))
 }
 
-fn decode_event(channel: Channel, kind: u8, content: &[u8]) -> Result<Event, FrameCodecError> {
+fn decode_event(
+    version: FrameVersion<'_>,
+    channel: Channel,
+    kind: u8,
+    content: &[u8],
+) -> Result<Event, FrameCodecError> {
     match (channel, kind) {
-        (Channel::ResultValues, 0x01) => decode_value(content)
+        (Channel::ResultValues, 0x01) => version
+            .decode_value(content)
             .map(Event::Value)
             .map_err(|source| FrameCodecError::Value { source }),
         (Channel::ResultBytes, 0x02) if content.is_empty() => Err(FrameCodecError::EmptyByteChunk),
@@ -1449,10 +1639,37 @@ fn decode_event(channel: Channel, kind: u8, content: &[u8]) -> Result<Event, Fra
 
 #[cfg(test)]
 mod tests {
-    use orna_core::{FunctionId, ParameterId};
+    use orna_core::{
+        CatalogueRevisionId, FunctionId, ParameterId, SchemaId, TypeId,
+        catalogue::{
+            CatalogueSnapshot, EnumTypeDefinition, QualifiedSemanticName, SchemaDefinition,
+        },
+        value::EnumValue,
+    };
     use proptest::prelude::*;
 
     use super::*;
+
+    const ENUM_TYPE: TypeId = TypeId::from_bytes([0x51; 16]);
+
+    fn enum_catalogue(labels: &[&str]) -> CatalogueSnapshot {
+        CatalogueSnapshot::new_with_enum_types(
+            CatalogueRevisionId::from_bytes([0x52; 16]),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes([0x53; 16]),
+                QualifiedSemanticName::new(["crm"]).unwrap(),
+            )],
+            vec![],
+            vec![],
+            vec![EnumTypeDefinition::new(
+                ENUM_TYPE,
+                QualifiedSemanticName::new(["crm", "stage"]).unwrap(),
+                labels.iter().copied(),
+            )],
+            vec![],
+        )
+        .unwrap()
+    }
 
     #[test]
     fn ping_and_pong_have_exact_golden_bytes_and_round_trip() {
@@ -1481,6 +1698,159 @@ mod tests {
         assert_eq!(
             decode_client_frame(&pong),
             Err(FrameCodecError::WrongDirection { tag: PONG_TAG })
+        );
+    }
+
+    #[test]
+    fn catalogue_frames_have_exact_markers_and_enum_value_bytes() {
+        let catalogue = enum_catalogue(&["lead", "qualified"]);
+        let parameter = ParameterId::from_bytes([0x54; 16]);
+        let value = RuntimeValue::Enum(EnumValue::new(&catalogue, ENUM_TYPE, "qualified").unwrap());
+        let frame = ClientFrame::CallArgument {
+            stream: 1,
+            parameter,
+            value: value.clone(),
+        };
+        let encoded = encode_catalogue_client_frame(&catalogue, &frame).unwrap();
+
+        assert_eq!(&encoded[..4], b"ORF2");
+        assert_eq!(&encoded[34..38], b"ORV2");
+        assert_eq!(
+            decode_catalogue_client_frame(&catalogue, &encoded),
+            Ok(frame)
+        );
+        assert_eq!(
+            decode_client_frame(&encoded),
+            Err(FrameCodecError::InvalidMarker)
+        );
+
+        let server = ServerFrame::EventBatch {
+            stream: 1,
+            channel: Channel::ResultValues,
+            events: vec![EventRecord {
+                sequence: 1,
+                event: Event::Value(value),
+            }],
+        };
+        let encoded = encode_catalogue_server_frame(&catalogue, &server).unwrap();
+        assert_eq!(&encoded[..4], b"ORF2");
+        assert!(encoded.windows(4).any(|bytes| bytes == b"ORV2"));
+        assert_eq!(
+            decode_catalogue_server_frame(&catalogue, &encoded),
+            Ok(server)
+        );
+        assert_eq!(
+            decode_server_frame(&encoded),
+            Err(FrameCodecError::InvalidMarker)
+        );
+    }
+
+    #[test]
+    fn catalogue_connection_carries_enum_arguments_and_results_fail_closed() {
+        let original = enum_catalogue(&["lead", "qualified"]);
+        let active = enum_catalogue(&["lead", "customer"]);
+        let function = FunctionId::from_bytes([0x55; 16]);
+        let parameter = ParameterId::from_bytes([0x56; 16]);
+        let stale = RuntimeValue::Enum(EnumValue::new(&original, ENUM_TYPE, "qualified").unwrap());
+        let mut connection = ProtocolConnection::new();
+        connection
+            .receive_catalogue(
+                &active,
+                ClientFrame::CallRawStart {
+                    stream: 1,
+                    function,
+                },
+            )
+            .unwrap();
+        let before = connection.clone();
+        assert_eq!(
+            connection.receive_catalogue(
+                &active,
+                ClientFrame::CallArgument {
+                    stream: 1,
+                    parameter,
+                    value: stale,
+                }
+            ),
+            Err(ConnectionError::InvalidFrame {
+                source: FrameCodecError::Value {
+                    source: ValueCodecError::UndeclaredEnumLabel {
+                        enum_type: ENUM_TYPE,
+                        label: String::from("qualified"),
+                    },
+                },
+            })
+        );
+        assert_eq!(connection, before);
+
+        let value = RuntimeValue::Enum(EnumValue::new(&active, ENUM_TYPE, "customer").unwrap());
+        connection
+            .receive_catalogue(
+                &active,
+                ClientFrame::CallArgument {
+                    stream: 1,
+                    parameter,
+                    value: value.clone(),
+                },
+            )
+            .unwrap();
+        connection
+            .receive_catalogue(
+                &active,
+                ClientFrame::WindowUpdate {
+                    stream: 1,
+                    channel: Channel::ResultValues,
+                    credit: 1024,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            connection
+                .receive_catalogue(&active, ClientFrame::CallArgumentsComplete { stream: 1 })
+                .unwrap(),
+            Some(ClientAction::Dispatch {
+                stream: 1,
+                call: RawCall {
+                    function,
+                    arguments: vec![CallArgument {
+                        parameter,
+                        value: value.clone(),
+                    }],
+                },
+            })
+        );
+        let invocation = InvocationId::from_bytes([0x57; 16]);
+        assert_eq!(
+            connection
+                .apply_catalogue(
+                    &active,
+                    ServerAction::Accepted {
+                        stream: 1,
+                        invocation,
+                    },
+                )
+                .unwrap(),
+            ServerFrame::CallAccepted {
+                stream: 1,
+                invocation,
+            }
+        );
+        let event = Event::Value(value);
+        assert_eq!(
+            connection
+                .apply_catalogue(
+                    &active,
+                    ServerAction::Events {
+                        stream: 1,
+                        events: vec![event.clone()],
+                    },
+                )
+                .unwrap(),
+            ServerFrame::EventBatch {
+                stream: 1,
+                channel: Channel::ResultValues,
+                events: vec![EventRecord { sequence: 1, event }],
+            }
         );
     }
 
