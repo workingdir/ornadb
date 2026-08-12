@@ -9,8 +9,8 @@ use orna_core::{
     types::StandardScalar,
 };
 use orna_syntax::{
-    DeleteStatement, InsertStatement, MutationValue, NamePart, QualifiedName, SourceSpan,
-    UpdateStatement,
+    DeleteStatement, InsertStatement, MutationValue, NamePart, QualifiedName, RecordConstructor,
+    RecordConstructorFieldValue, SourceSpan, UpdateStatement,
 };
 
 use crate::{
@@ -94,6 +94,7 @@ where
                     expression: map_expression(
                         &assignment.expression,
                         &mut map_type,
+                        &mut map_field,
                         &mut map_function,
                         &mut map_parameter,
                     )?,
@@ -186,28 +187,58 @@ pub(crate) enum MutationOperation<G = FunctionId, P = ParameterId> {
     },
 }
 
-fn map_expression<T, G, P, T2, G2, P2, E>(
-    expression: &MutationExpression<T, G, P>,
+fn map_expression<T, F, G, P, T2, F2, G2, P2, E>(
+    expression: &MutationExpression<T, G, P, F>,
     map_type: &mut impl FnMut(T) -> Result<T2, E>,
+    map_field: &mut impl FnMut(F) -> Result<F2, E>,
     map_function: &mut impl FnMut(G) -> Result<G2, E>,
     map_parameter: &mut impl FnMut(P) -> Result<P2, E>,
-) -> Result<MutationExpression<T2, G2, P2>, E>
+) -> Result<MutationExpression<T2, G2, P2, F2>, E>
 where
     T: Copy,
+    F: Copy,
     G: Copy,
     P: Copy,
 {
-    let kind = match expression.kind {
+    let kind = match &expression.kind {
         MutationExpressionKind::ParameterRead { owner, parameter } => {
             MutationExpressionKind::ParameterRead {
-                owner: map_function(owner)?,
-                parameter: map_parameter(parameter)?,
+                owner: map_function(*owner)?,
+                parameter: map_parameter(*parameter)?,
             }
         }
         MutationExpressionKind::BooleanLiteral { value } => {
-            MutationExpressionKind::BooleanLiteral { value }
+            MutationExpressionKind::BooleanLiteral { value: *value }
         }
         MutationExpressionKind::TypedNull => MutationExpressionKind::TypedNull,
+        MutationExpressionKind::RecordConstructor {
+            record_type,
+            fields,
+        } => MutationExpressionKind::RecordConstructor {
+            record_type: map_type(*record_type)?,
+            fields: fields
+                .iter()
+                .map(|field| {
+                    Ok(MutationRecordFieldExpression {
+                        owner: map_type(field.owner)?,
+                        field: map_field(field.field)?,
+                        kind: match field.kind {
+                            MutationRecordFieldExpressionKind::ParameterRead {
+                                owner,
+                                parameter,
+                            } => MutationRecordFieldExpressionKind::ParameterRead {
+                                owner: map_function(owner)?,
+                                parameter: map_parameter(parameter)?,
+                            },
+                            MutationRecordFieldExpressionKind::BooleanLiteral { value } => {
+                                MutationRecordFieldExpressionKind::BooleanLiteral { value }
+                            }
+                        },
+                        value_type: map_value_type(field.value_type, map_type)?,
+                    })
+                })
+                .collect::<Result<Vec<_>, E>>()?,
+        },
     };
 
     Ok(MutationExpression {
@@ -248,12 +279,16 @@ fn map_semantic_type<T, T2, E>(
 pub(crate) struct MutationAssignment<T = TypeId, F = FieldId, G = FunctionId, P = ParameterId> {
     owner: T,
     field: F,
-    expression: MutationExpression<T, G, P>,
+    expression: MutationExpression<T, G, P, F>,
 }
 
 impl<T, F, G, P> MutationAssignment<T, F, G, P> {
     /// Creates one source-free assignment.
-    pub(crate) const fn new(owner: T, field: F, expression: MutationExpression<T, G, P>) -> Self {
+    pub(crate) const fn new(
+        owner: T,
+        field: F,
+        expression: MutationExpression<T, G, P, F>,
+    ) -> Self {
         Self {
             owner,
             field,
@@ -278,29 +313,29 @@ impl<T, F, G, P> MutationAssignment<T, F, G, P> {
     }
 
     /// Returns the assigned expression.
-    pub(crate) fn expression(&self) -> &MutationExpression<T, G, P> {
+    pub(crate) fn expression(&self) -> &MutationExpression<T, G, P, F> {
         &self.expression
     }
 }
 
 /// A checked mutation expression and its semantic value facts.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct MutationExpression<T = TypeId, G = FunctionId, P = ParameterId> {
-    kind: MutationExpressionKind<G, P>,
+pub(crate) struct MutationExpression<T = TypeId, G = FunctionId, P = ParameterId, F = FieldId> {
+    kind: MutationExpressionKind<T, G, P, F>,
     value_type: MutationValueType<T>,
 }
 
-impl<T, G, P> MutationExpression<T, G, P> {
+impl<T, G, P, F> MutationExpression<T, G, P, F> {
     /// Creates an expression with its already-resolved semantic value facts.
     pub(crate) const fn new(
-        kind: MutationExpressionKind<G, P>,
+        kind: MutationExpressionKind<T, G, P, F>,
         value_type: MutationValueType<T>,
     ) -> Self {
         Self { kind, value_type }
     }
 
     /// Returns the source expression kind.
-    pub(crate) const fn kind(&self) -> &MutationExpressionKind<G, P> {
+    pub(crate) const fn kind(&self) -> &MutationExpressionKind<T, G, P, F> {
         &self.kind
     }
 
@@ -311,14 +346,77 @@ impl<T, G, P> MutationExpression<T, G, P> {
 }
 
 /// The closed expression forms supported by SERVER mutations.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum MutationExpressionKind<G = FunctionId, P = ParameterId> {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum MutationExpressionKind<T = TypeId, G = FunctionId, P = ParameterId, F = FieldId> {
     /// Reads one declared parameter of the enclosing function.
     ParameterRead { owner: G, parameter: P },
     /// A boolean literal.
     BooleanLiteral { value: bool },
     /// A typed NULL contextualized by its target field.
     TypedNull,
+    /// One nominal record value with fields in declaration order.
+    RecordConstructor {
+        /// The resolved nominal record value type.
+        record_type: T,
+        /// Checked fields in record declaration order.
+        fields: Vec<MutationRecordFieldExpression<T, F, G, P>>,
+    },
+}
+
+/// One checked field expression within a nominal record constructor.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct MutationRecordFieldExpression<T, F, G, P> {
+    owner: T,
+    field: F,
+    kind: MutationRecordFieldExpressionKind<G, P>,
+    value_type: MutationValueType<T>,
+}
+
+impl<T: Copy, F: Copy, G, P> MutationRecordFieldExpression<T, F, G, P> {
+    /// Returns the nominal record value type that owns this field.
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "artifact lowering is the next slice")
+    )]
+    pub(crate) const fn owner(&self) -> T {
+        self.owner
+    }
+
+    /// Returns the stable record field identity.
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "artifact lowering is the next slice")
+    )]
+    pub(crate) const fn field(&self) -> F {
+        self.field
+    }
+
+    /// Returns the checked child expression kind.
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "artifact lowering is the next slice")
+    )]
+    pub(crate) const fn kind(&self) -> &MutationRecordFieldExpressionKind<G, P> {
+        &self.kind
+    }
+
+    /// Returns the checked child semantic value facts.
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "artifact lowering is the next slice")
+    )]
+    pub(crate) const fn value_type(&self) -> &MutationValueType<T> {
+        &self.value_type
+    }
+}
+
+/// The closed expression forms accepted inside a record constructor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MutationRecordFieldExpressionKind<G, P> {
+    /// Reads one declared parameter of the enclosing function.
+    ParameterRead { owner: G, parameter: P },
+    /// A Boolean literal.
+    BooleanLiteral { value: bool },
 }
 
 /// A semantic type together with its nullability.
@@ -495,6 +593,24 @@ pub(crate) trait MutationCatalogue<T, F> {
 
     /// Visits fields in deterministic declaration order.
     fn visit_fields(&self, owner: T, visitor: &mut dyn FnMut(&str, MutationField<T, F>));
+
+    /// Finds a record value type identity by its normalized qualified name.
+    fn record_type_id_by_name(&self, _name: &QualifiedSemanticName) -> Option<T> {
+        None
+    }
+
+    /// Finds an exact field by normalized name on one record value type.
+    fn record_field_by_name(&self, _owner: T, _name: &str) -> Option<MutationField<T, F>> {
+        None
+    }
+
+    /// Visits record fields in deterministic declaration order.
+    fn visit_record_fields(&self, _owner: T, _visitor: &mut dyn FnMut(&str, MutationField<T, F>)) {}
+
+    /// Reports whether one named type identity is an active enum.
+    fn named_type_is_enum(&self, _id: T) -> bool {
+        false
+    }
 }
 
 /// Evidence retained for every identity touched by a checked mutation.
@@ -509,6 +625,11 @@ pub(crate) enum MutationReference<T = TypeId, F = FieldId, G = FunctionId, P = P
     WriteField {
         owner: T,
         field: F,
+        location: SourceLocation,
+    },
+    /// The nominal record value type named by one constructor.
+    NamedValueType {
+        value_type: T,
         location: SourceLocation,
     },
     /// A declared function parameter read by one assignment.
@@ -530,6 +651,7 @@ impl<T, F, G, P> MutationReference<T, F, G, P> {
         match self {
             Self::WriteObject { location, .. }
             | Self::WriteField { location, .. }
+            | Self::NamedValueType { location, .. }
             | Self::ParameterRead { location, .. }
             | Self::ObjectReference { location, .. } => location,
         }
@@ -541,6 +663,7 @@ impl<T, F, G, P> MutationReference<T, F, G, P> {
 pub(crate) struct MutationCheck<T = TypeId, F = FieldId, G = FunctionId, P = ParameterId> {
     plan: MutationPlanIr<T, F, G, P>,
     references: Vec<MutationReference<T, F, G, P>>,
+    expression_uses: Vec<MutationExpressionUse<T>>,
 }
 
 impl<T, F, G, P> MutationCheck<T, F, G, P> {
@@ -552,6 +675,30 @@ impl<T, F, G, P> MutationCheck<T, F, G, P> {
     /// Returns identity evidence in deterministic source order.
     pub(crate) fn references(&self) -> &[MutationReference<T, F, G, P>] {
         &self.references
+    }
+
+    /// Returns standard-backed expression uses in deterministic semantic order.
+    pub(crate) fn expression_uses(&self) -> &[MutationExpressionUse<T>] {
+        &self.expression_uses
+    }
+}
+
+/// One value-producing expression and its exact source evidence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct MutationExpressionUse<T> {
+    value_type: MutationValueType<T>,
+    location: SourceLocation,
+}
+
+impl<T: Copy> MutationExpressionUse<T> {
+    /// Returns the checked semantic value facts.
+    pub(crate) const fn value_type(&self) -> &MutationValueType<T> {
+        &self.value_type
+    }
+
+    /// Returns the exact child-expression source location.
+    pub(crate) const fn location(&self) -> &SourceLocation {
+        &self.location
     }
 }
 
@@ -621,7 +768,26 @@ where
     {
         return Err(diagnostics);
     }
-    validate_parameter_types("INSERT", parameters, logical_path)?;
+    let enum_parameter_names = insert
+        .values
+        .iter()
+        .filter_map(|value| match value {
+            MutationValue::RecordConstructor(constructor) => Some(&constructor.fields),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|field| match &field.value {
+            RecordConstructorFieldValue::Parameter(name) => Some(normalise_name_part(name)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    validate_parameter_types(
+        "INSERT",
+        parameters,
+        logical_path,
+        catalogue,
+        &enum_parameter_names,
+    )?;
 
     if insert.target_fields.is_empty() || insert.values.is_empty() {
         return Err(vec![semantic_diagnostic(
@@ -700,6 +866,7 @@ where
             returned_object: target_object,
         },
         references,
+        expression_uses: checked_assignments.expression_uses,
     })
 }
 
@@ -747,7 +914,7 @@ where
     {
         return Err(diagnostics);
     }
-    validate_parameter_types("UPDATE", parameters, logical_path)?;
+    validate_parameter_types("UPDATE", parameters, logical_path, catalogue, &[])?;
     if update.assignments.is_empty() {
         return Err(vec![semantic_diagnostic(
             DiagnosticCode::DomainIncompatible,
@@ -833,6 +1000,7 @@ where
             returned_object: target_object,
         },
         references,
+        expression_uses: checked_assignments.expression_uses,
     })
 }
 
@@ -880,7 +1048,7 @@ where
     {
         return Err(diagnostics);
     }
-    validate_parameter_types("DELETE", parameters, logical_path)?;
+    validate_parameter_types("DELETE", parameters, logical_path, catalogue, &[])?;
     let (target_name, target_object) =
         resolve_mutation_target(&delete.target_object, logical_path, catalogue)?;
     let selector_parameter = resolve_identity_selector(
@@ -922,6 +1090,7 @@ where
 struct CheckedAssignments<T, F, G, P> {
     assignments: Vec<MutationAssignment<T, F, G, P>>,
     references: Vec<MutationReference<T, F, G, P>>,
+    expression_uses: Vec<MutationExpressionUse<T>>,
 }
 
 fn resolve_mutation_target<T, F>(
@@ -1022,6 +1191,7 @@ where
         location: SourceLocation::from_syntax(context.logical_path, &target_source.span),
     }];
     let mut assignments = Vec::new();
+    let mut expression_uses = Vec::new();
     let mut assigned_names = Vec::<String>::new();
     for (field_name, value) in assignment_sources {
         let normalized_field_name = normalise_name_part(field_name);
@@ -1048,7 +1218,12 @@ where
                 &field_name.span,
             )]);
         };
-        if !supported_semantic_type(field.semantic_type()) {
+        if !supported_semantic_type(field.semantic_type())
+            && !matches!(
+                (field.semantic_type(), value),
+                (SemanticType::Named(_), MutationValue::RecordConstructor(_))
+            )
+        {
             return Err(vec![semantic_diagnostic(
                 DiagnosticCode::DomainIncompatible,
                 format!(
@@ -1070,6 +1245,8 @@ where
             field,
             value,
             &mut references,
+            &mut expression_uses,
+            catalogue,
         )?;
         assignments.push(MutationAssignment::new(
             target_object,
@@ -1104,6 +1281,7 @@ where
     Ok(CheckedAssignments {
         assignments,
         references,
+        expression_uses,
     })
 }
 
@@ -1121,10 +1299,12 @@ fn check_assignment_expression<T, F, G, P>(
     field: MutationField<T, F>,
     value: &MutationValue,
     references: &mut Vec<MutationReference<T, F, G, P>>,
-) -> Result<MutationExpression<T, G, P>, Vec<CompilerDiagnostic>>
+    expression_uses: &mut Vec<MutationExpressionUse<T>>,
+    catalogue: &impl MutationCatalogue<T, F>,
+) -> Result<MutationExpression<T, G, P, F>, Vec<CompilerDiagnostic>>
 where
     T: Copy + Eq,
-    F: Copy,
+    F: Copy + Eq,
     G: Copy,
     P: Copy,
 {
@@ -1176,6 +1356,28 @@ where
                 value_type,
             )
         }
+        MutationValue::RecordConstructor(constructor) => {
+            if context.operation != "INSERT" {
+                return Err(vec![semantic_diagnostic(
+                    DiagnosticCode::DomainIncompatible,
+                    format!(
+                        "{} does not support record constructors; they are only accepted by INSERT",
+                        context.operation
+                    ),
+                    context.logical_path,
+                    &constructor.span,
+                )]);
+            }
+            check_record_constructor(
+                context,
+                field_name,
+                field,
+                constructor,
+                references,
+                expression_uses,
+                catalogue,
+            )?
+        }
         MutationValue::BooleanLiteral { value, source } => {
             let expected = SemanticType::scalar(StandardScalar::Boolean);
             if field.semantic_type() != expected {
@@ -1221,7 +1423,243 @@ where
             )]);
         }
     };
+    if !matches!(value, MutationValue::RecordConstructor(_)) {
+        expression_uses.push(MutationExpressionUse {
+            value_type: *expression.value_type(),
+            location: SourceLocation::from_syntax(context.logical_path, value.span()),
+        });
+    }
     Ok(expression)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn check_record_constructor<T, F, G, P>(
+    context: &AssignmentCheckContext<'_, T, G, P>,
+    target_field_name: &str,
+    target_field: MutationField<T, F>,
+    constructor: &RecordConstructor,
+    references: &mut Vec<MutationReference<T, F, G, P>>,
+    expression_uses: &mut Vec<MutationExpressionUse<T>>,
+    catalogue: &impl MutationCatalogue<T, F>,
+) -> Result<MutationExpression<T, G, P, F>, Vec<CompilerDiagnostic>>
+where
+    T: Copy + Eq,
+    F: Copy + Eq,
+    G: Copy,
+    P: Copy,
+{
+    let record_name = normalise_qualified_name(&constructor.record_type);
+    let Some(record_type) = catalogue.record_type_id_by_name(&record_name) else {
+        return Err(vec![semantic_diagnostic(
+            DiagnosticCode::UnknownQualifiedName,
+            format!("unknown record value type {record_name}"),
+            context.logical_path,
+            &constructor.record_type.span,
+        )]);
+    };
+    if target_field.semantic_type() != SemanticType::Named(record_type) || target_field.nullable() {
+        return Err(vec![semantic_diagnostic(
+            DiagnosticCode::TypeMismatch,
+            format!(
+                "record constructor {record_name} requires a non-null field of that exact record type, but field {target_field_name} does not match"
+            ),
+            context.logical_path,
+            &constructor.record_type.span,
+        )]);
+    }
+    references.push(MutationReference::NamedValueType {
+        value_type: record_type,
+        location: SourceLocation::from_syntax(context.logical_path, &constructor.record_type.span),
+    });
+    expression_uses.push(MutationExpressionUse {
+        value_type: MutationValueType::new(SemanticType::Named(record_type), false),
+        location: SourceLocation::from_syntax(context.logical_path, &constructor.span),
+    });
+
+    let mut supplied = Vec::with_capacity(constructor.fields.len());
+    for source_field in &constructor.fields {
+        let name = normalise_name_part(&source_field.name);
+        if supplied
+            .iter()
+            .any(|(existing, _): &(String, _)| existing == &name)
+        {
+            return Err(vec![semantic_diagnostic(
+                DiagnosticCode::DuplicateDefinition,
+                format!("record field {name} appears more than once in this constructor"),
+                context.logical_path,
+                &source_field.name.span,
+            )]);
+        }
+        if catalogue.record_field_by_name(record_type, &name).is_none() {
+            return Err(vec![semantic_diagnostic(
+                DiagnosticCode::UnknownQualifiedName,
+                format!("record value type {record_name} has no field named {name}"),
+                context.logical_path,
+                &source_field.name.span,
+            )]);
+        }
+        supplied.push((name, source_field));
+    }
+
+    let mut checked_fields = Vec::with_capacity(constructor.fields.len());
+    let mut diagnostics = Vec::new();
+    catalogue.visit_record_fields(record_type, &mut |name, record_field| {
+        let Some((_, source_field)) = supplied.iter().find(|(supplied, _)| supplied == name) else {
+            diagnostics.push(semantic_diagnostic(
+                DiagnosticCode::TypeMismatch,
+                format!("record field {name} is required, but this constructor does not provide it"),
+                context.logical_path,
+                &constructor.span,
+            ));
+            return;
+        };
+        let (child_kind, child_value_type) = match &source_field.value {
+            RecordConstructorFieldValue::Parameter(parameter_name) => {
+                let parameter_name_normalized = normalise_name_part(parameter_name);
+                let Some(parameter) = context
+                    .parameters
+                    .iter()
+                    .find(|parameter| parameter.name() == parameter_name_normalized)
+                else {
+                    diagnostics.push(semantic_diagnostic(
+                        DiagnosticCode::UnknownQualifiedName,
+                        format!(
+                            "this function has no parameter named {parameter_name_normalized}"
+                        ),
+                        context.logical_path,
+                        &parameter_name.span,
+                    ));
+                    return;
+                };
+                if parameter.semantic_type() != record_field.semantic_type()
+                    || parameter.standard_value_type() != record_field.standard_value_type()
+                    || matches!(parameter.semantic_type(), SemanticType::Named(id) if !catalogue.named_type_is_enum(id))
+                {
+                    diagnostics.push(semantic_diagnostic(
+                        DiagnosticCode::TypeMismatch,
+                        format!(
+                            "parameter {parameter_name_normalized} cannot initialise record field {name} because their types do not match"
+                        ),
+                        context.logical_path,
+                        &parameter_name.span,
+                    ));
+                    return;
+                }
+                (
+                    MutationRecordFieldExpressionKind::ParameterRead {
+                        owner: context.function,
+                        parameter: parameter.id(),
+                    },
+                    mutation_value_type(
+                        parameter.semantic_type(),
+                        parameter.standard_value_type(),
+                        false,
+                    ),
+                )
+            }
+            RecordConstructorFieldValue::BooleanLiteral { value, source } => {
+                if record_field.semantic_type()
+                    != SemanticType::scalar(StandardScalar::Boolean)
+                {
+                    diagnostics.push(semantic_diagnostic(
+                        DiagnosticCode::TypeMismatch,
+                        format!(
+                            "record field {name} is not BOOLEAN, so it cannot accept TRUE or FALSE"
+                        ),
+                        context.logical_path,
+                        &source.span,
+                    ));
+                    return;
+                }
+                let Ok(value_type) = intrinsic_boolean_value_type(
+                    context.intrinsic_boolean,
+                    context.logical_path,
+                    &source.span,
+                ) else {
+                    diagnostics.push(semantic_diagnostic(
+                        DiagnosticCode::DomainIncompatible,
+                        MISSING_BOOLEAN_MESSAGE,
+                        context.logical_path,
+                        &source.span,
+                    ));
+                    return;
+                };
+                if value_type.standard_value_type() != record_field.standard_value_type() {
+                    diagnostics.push(semantic_diagnostic(
+                        DiagnosticCode::TypeMismatch,
+                        format!("record field {name} does not use the active Boolean type"),
+                        context.logical_path,
+                        &source.span,
+                    ));
+                    return;
+                }
+                (
+                    MutationRecordFieldExpressionKind::BooleanLiteral { value: *value },
+                    value_type,
+                )
+            }
+            _ => {
+                diagnostics.push(semantic_diagnostic(
+                    DiagnosticCode::DomainIncompatible,
+                    "record constructor fields only accept declared parameters, TRUE, or FALSE",
+                    context.logical_path,
+                    source_field.value.span(),
+                ));
+                return;
+            }
+        };
+        references.push(MutationReference::WriteField {
+            owner: record_type,
+            field: record_field.id(),
+            location: SourceLocation::from_syntax(
+                context.logical_path,
+                &source_field.name.span,
+            ),
+        });
+        if let MutationRecordFieldExpressionKind::ParameterRead { owner, parameter } = child_kind {
+            references.push(MutationReference::ParameterRead {
+                owner,
+                parameter,
+                location: SourceLocation::from_syntax(
+                    context.logical_path,
+                    source_field.value.span(),
+                ),
+            });
+        }
+        expression_uses.push(MutationExpressionUse {
+            value_type: child_value_type,
+            location: SourceLocation::from_syntax(
+                context.logical_path,
+                source_field.value.span(),
+            ),
+        });
+        checked_fields.push(MutationRecordFieldExpression {
+            owner: record_type,
+            field: record_field.id(),
+            kind: child_kind,
+            value_type: child_value_type,
+        });
+    });
+    if !diagnostics.is_empty() {
+        return Err(diagnostics);
+    }
+    if checked_fields.len() != constructor.fields.len() {
+        return Err(vec![semantic_diagnostic(
+            DiagnosticCode::TypeMismatch,
+            format!(
+                "record constructor {record_name} does not provide the exact declared field set"
+            ),
+            context.logical_path,
+            &constructor.span,
+        )]);
+    }
+    Ok(MutationExpression::new(
+        MutationExpressionKind::RecordConstructor {
+            record_type,
+            fields: checked_fields,
+        },
+        MutationValueType::new(SemanticType::Named(record_type), false),
+    ))
 }
 
 const MISSING_BOOLEAN_MESSAGE: &str =
@@ -1232,11 +1670,25 @@ fn missing_insert_boolean_diagnostics(
     logical_path: &str,
     intrinsic_boolean: IntrinsicBooleanType,
 ) -> Option<Vec<CompilerDiagnostic>> {
-    missing_boolean_diagnostics(
-        intrinsic_boolean,
-        logical_path,
-        insert.values.iter().filter_map(boolean_literal_span),
-    )
+    let spans = insert
+        .values
+        .iter()
+        .flat_map(|value| match value {
+            MutationValue::BooleanLiteral { source, .. } => vec![&source.span],
+            MutationValue::RecordConstructor(constructor) => constructor
+                .fields
+                .iter()
+                .filter_map(|field| match &field.value {
+                    RecordConstructorFieldValue::BooleanLiteral { source, .. } => {
+                        Some(&source.span)
+                    }
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        })
+        .collect::<Vec<_>>();
+    missing_boolean_diagnostics(intrinsic_boolean, logical_path, spans)
 }
 
 fn missing_update_boolean_diagnostics(
@@ -1270,6 +1722,18 @@ fn missing_delete_boolean_diagnostics(
 fn boolean_literal_span(value: &MutationValue) -> Option<&SourceSpan> {
     match value {
         MutationValue::BooleanLiteral { source, .. } => Some(&source.span),
+        MutationValue::RecordConstructor(constructor) => {
+            constructor
+                .fields
+                .iter()
+                .find_map(|field| match &field.value {
+                    RecordConstructorFieldValue::BooleanLiteral { source, .. } => {
+                        Some(&source.span)
+                    }
+                    RecordConstructorFieldValue::Parameter(_) => None,
+                    _ => None,
+                })
+        }
         MutationValue::Parameter(_) | MutationValue::NullLiteral { .. } => None,
         _ => None,
     }
@@ -1333,10 +1797,12 @@ fn mutation_value_type<T>(
     }
 }
 
-fn validate_parameter_types<T, P>(
+fn validate_parameter_types<T, F, P>(
     operation: &str,
     parameters: &[MutationParameter<T, P>],
     logical_path: &str,
+    catalogue: &impl MutationCatalogue<T, F>,
+    enum_parameter_names: &[String],
 ) -> Result<(), Vec<CompilerDiagnostic>>
 where
     T: Copy,
@@ -1346,7 +1812,9 @@ where
     let diagnostics = parameters
         .iter()
         .filter_map(|parameter| {
-            if supported_semantic_type(parameter.semantic_type()) {
+            if supported_semantic_type(parameter.semantic_type())
+                || matches!(parameter.semantic_type(), SemanticType::Named(id) if enum_parameter_names.iter().any(|name| name == parameter.name()) && catalogue.named_type_is_enum(id))
+            {
                 None
             } else {
                 Some(semantic_diagnostic(
@@ -1388,8 +1856,8 @@ mod tests {
     use super::*;
     use orna_core::{FieldId, FunctionId, ParameterId, TypeId};
     use orna_syntax::{
-        DeleteStatement, InsertValue, QualifiedName, SourceSlice, SourceSpan, UpdateAssignment,
-        UpdateStatement,
+        DeleteStatement, InsertValue, QualifiedName, RecordConstructorField, SourceSlice,
+        SourceSpan, UpdateAssignment, UpdateStatement,
     };
 
     #[derive(Clone)]
@@ -1710,6 +2178,67 @@ mod tests {
         );
         assert_eq!(update_mismatch[0].location().span().start(), 37);
         assert_eq!(update_mismatch[0].location().span().end(), 43);
+    }
+
+    #[test]
+    fn update_rejects_a_record_constructor_before_record_catalogue_lookup() {
+        let record_type = TypeId::from_bytes([9; 16]);
+        let mut catalogue = catalogue();
+        catalogue.fields.push((
+            "flags".to_owned(),
+            MutationField::new(
+                FieldId::from_bytes([10; 16]),
+                SemanticType::Named(record_type),
+                false,
+            ),
+        ));
+        let constructor = InsertValue::RecordConstructor(RecordConstructor {
+            record_type: QualifiedName {
+                parts: vec![name("app", 37), name("flags", 41)],
+                span: span(37, 50),
+            },
+            fields: vec![RecordConstructorField {
+                name: name("active", 51),
+                value: RecordConstructorFieldValue::BooleanLiteral {
+                    value: true,
+                    source: SourceSlice {
+                        text: "TRUE".to_owned(),
+                        span: span(59, 63),
+                    },
+                },
+                span: span(51, 63),
+            }],
+            span: span(37, 64),
+        });
+        let statement = update(
+            vec![update_assignment("flags", 29, constructor)],
+            "p",
+            "p_person",
+            "p",
+        );
+
+        let diagnostics = check_update_in(
+            &statement,
+            &catalogue,
+            FunctionId::from_bytes([5; 16]),
+            &[MutationParameter::new(
+                "p_person",
+                ParameterId::from_bytes([6; 16]),
+                SemanticType::reference(catalogue.target),
+                span(100, 108),
+            )],
+            "mutation.orna",
+        )
+        .unwrap_err();
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code(), DiagnosticCode::DomainIncompatible);
+        assert_eq!(
+            diagnostics[0].message(),
+            "UPDATE does not support record constructors; they are only accepted by INSERT"
+        );
+        assert_eq!(diagnostics[0].location().span().start(), 37);
+        assert_eq!(diagnostics[0].location().span().end(), 64);
     }
 
     #[test]

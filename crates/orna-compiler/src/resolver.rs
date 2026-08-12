@@ -66,7 +66,7 @@ use orna_syntax::{
 };
 
 use crate::mutation::{
-    MutationParameter, MutationReference, MutationValueType, check_delete_in,
+    MutationCatalogue, MutationField, MutationParameter, MutationReference, check_delete_in,
     check_delete_with_intrinsic_boolean_in, check_insert_in,
     check_insert_with_intrinsic_boolean_in, check_update_in,
     check_update_with_intrinsic_boolean_in,
@@ -1395,6 +1395,8 @@ fn check_application_parsed(
         check_server_functions(
             &function_inputs,
             &query_catalogue,
+            &checked_record_value_types,
+            &checked_enum_types,
             &mut diagnostics,
             standard,
             &mut uses,
@@ -2392,6 +2394,8 @@ fn resolve_server_function_return(
 fn check_server_functions(
     inputs: &[ResolvedServerFunctionInput<'_>],
     catalogue: &ResolutionCatalogue<CheckedTypeId, CheckedFieldId>,
+    record_value_types: &[CheckedRecordValueType],
+    enum_types: &[CheckedEnumType],
     diagnostics: &mut Vec<CompilerDiagnostic>,
     standard: Option<&CheckedStandardLibrary>,
     uses: &mut Vec<CheckedApplicationTypeUse>,
@@ -2399,6 +2403,22 @@ fn check_server_functions(
     let diagnostics_before = diagnostics.len();
     let mut functions = Vec::with_capacity(inputs.len());
     let intrinsic_boolean = intrinsic_boolean_type(standard);
+    let mutation_catalogue = RecordAwareMutationCatalogue {
+        objects: catalogue,
+        record_value_types,
+        enum_types,
+        standard_field_types: uses
+            .iter()
+            .filter_map(|type_use| {
+                let CheckedTypeUseKind::Field { owner, field } = type_use.kind() else {
+                    return None;
+                };
+                type_use
+                    .value()
+                    .map(|value| ((owner, field), value.type_id()))
+            })
+            .collect(),
+    };
 
     for input in inputs {
         let body_name = if input.body.as_sql_query().is_some() {
@@ -2715,7 +2735,7 @@ fn check_server_functions(
                 if standard.is_some() {
                     check_insert_with_intrinsic_boolean_in(
                         &insert_body.insert,
-                        catalogue,
+                        &mutation_catalogue,
                         input.id,
                         &parameters,
                         input.location.logical_path(),
@@ -2724,7 +2744,7 @@ fn check_server_functions(
                 } else {
                     check_insert_in(
                         &insert_body.insert,
-                        catalogue,
+                        &mutation_catalogue,
                         input.id,
                         &parameters,
                         input.location.logical_path(),
@@ -2786,14 +2806,8 @@ fn check_server_functions(
                 next_expression_ordinal: 0,
             };
             if let Some(insert_body) = input.body.as_sql_insert() {
-                for (source, assignment) in insert_body
-                    .insert
-                    .values
-                    .iter()
-                    .zip(mutation_plan.assignments())
-                {
-                    mutation_recorder
-                        .record_value(source.span(), assignment.expression().value_type());
+                for expression_use in mutation_check.expression_uses() {
+                    mutation_recorder.record_checked_value(expression_use);
                 }
                 mutation_recorder.record_object_reference(
                     &insert_body.insert.returning_ref_span,
@@ -2805,14 +2819,8 @@ fn check_server_functions(
                     0,
                 );
             } else if let Some(update_body) = input.body.as_sql_update() {
-                for (source, assignment) in update_body
-                    .update
-                    .assignments
-                    .iter()
-                    .zip(mutation_plan.assignments())
-                {
-                    mutation_recorder
-                        .record_value(source.value.span(), assignment.expression().value_type());
+                for expression_use in mutation_check.expression_uses() {
+                    mutation_recorder.record_checked_value(expression_use);
                 }
                 mutation_recorder.record_boolean(
                     &update_body.update.selector_equality_span,
@@ -3095,6 +3103,89 @@ fn checked_server_function(
     }
 }
 
+struct RecordAwareMutationCatalogue<'a> {
+    objects: &'a ResolutionCatalogue<CheckedTypeId, CheckedFieldId>,
+    record_value_types: &'a [CheckedRecordValueType],
+    enum_types: &'a [CheckedEnumType],
+    standard_field_types: HashMap<(CheckedTypeId, CheckedFieldId), TypeId>,
+}
+
+impl MutationCatalogue<CheckedTypeId, CheckedFieldId> for RecordAwareMutationCatalogue<'_> {
+    fn object_type_id_by_name(&self, name: &QualifiedSemanticName) -> Option<CheckedTypeId> {
+        QueryCatalogue::object_type_id_by_name(self.objects, name)
+    }
+
+    fn field_by_name(
+        &self,
+        owner: CheckedTypeId,
+        name: &str,
+    ) -> Option<MutationField<CheckedTypeId, CheckedFieldId>> {
+        MutationCatalogue::field_by_name(self.objects, owner, name)
+    }
+
+    fn visit_fields(
+        &self,
+        owner: CheckedTypeId,
+        visitor: &mut dyn FnMut(&str, MutationField<CheckedTypeId, CheckedFieldId>),
+    ) {
+        MutationCatalogue::visit_fields(self.objects, owner, visitor);
+    }
+
+    fn record_type_id_by_name(&self, name: &QualifiedSemanticName) -> Option<CheckedTypeId> {
+        self.record_value_types
+            .iter()
+            .find(|record| record.name() == name)
+            .map(CheckedRecordValueType::id)
+    }
+
+    fn record_field_by_name(
+        &self,
+        owner: CheckedTypeId,
+        name: &str,
+    ) -> Option<MutationField<CheckedTypeId, CheckedFieldId>> {
+        self.record_value_types
+            .iter()
+            .find(|record| record.id() == owner)
+            .and_then(|record| record.fields().iter().find(|field| field.name() == name))
+            .map(|field| self.record_field(owner, field))
+    }
+
+    fn visit_record_fields(
+        &self,
+        owner: CheckedTypeId,
+        visitor: &mut dyn FnMut(&str, MutationField<CheckedTypeId, CheckedFieldId>),
+    ) {
+        let Some(record) = self
+            .record_value_types
+            .iter()
+            .find(|record| record.id() == owner)
+        else {
+            return;
+        };
+        for field in record.fields() {
+            visitor(field.name(), self.record_field(owner, field));
+        }
+    }
+
+    fn named_type_is_enum(&self, id: CheckedTypeId) -> bool {
+        self.enum_types.iter().any(|enum_type| enum_type.id == id)
+    }
+}
+
+impl RecordAwareMutationCatalogue<'_> {
+    fn record_field(
+        &self,
+        owner: CheckedTypeId,
+        field: &CheckedRecordValueField,
+    ) -> MutationField<CheckedTypeId, CheckedFieldId> {
+        let result = MutationField::new(field.id(), field.semantic_type(), false);
+        self.standard_field_types
+            .get(&(owner, field.id()))
+            .copied()
+            .map_or(result, |type_id| result.with_standard_value_type(type_id))
+    }
+}
+
 fn checked_query_catalogue(
     object_types: &[CheckedObjectType],
     uses: &[CheckedApplicationTypeUse],
@@ -3272,6 +3363,10 @@ fn mutation_reference(
                 field: *field,
             },
             DefinitionReferenceKind::WriteField,
+        ),
+        MutationReference::NamedValueType { value_type, .. } => (
+            CheckedDefinitionReferenceTarget::ValueType(*value_type),
+            DefinitionReferenceKind::NamedType,
         ),
         MutationReference::ParameterRead {
             owner, parameter, ..
@@ -3870,27 +3965,30 @@ struct StandardMutationTypeUseRecorder<'a, 'b> {
 }
 
 impl StandardMutationTypeUseRecorder<'_, '_> {
-    fn record_value(&mut self, span: &SourceSpan, value_type: &MutationValueType<CheckedTypeId>) {
+    fn record_checked_value(
+        &mut self,
+        expression: &crate::mutation::MutationExpressionUse<CheckedTypeId>,
+    ) {
         let kind = CheckedTypeUseKind::Expression {
             owner: self.owner,
             ordinal: self.next_expression_ordinal,
         };
         self.next_expression_ordinal += 1;
-        if let Some(type_id) = value_type.standard_value_type() {
+        if let Some(type_id) = expression.value_type().standard_value_type() {
             record_standard_value_type_use(
                 self.uses,
                 self.standard,
                 kind,
                 Some(type_id),
-                location(self.logical_path, span),
+                expression.location().clone(),
             );
-        } else if let SemanticType::Reference { target } = value_type.semantic_type() {
+        } else if let SemanticType::Reference { target } = expression.value_type().semantic_type() {
             record_standard_object_reference_use(
                 self.uses,
                 self.standard,
                 kind,
                 target,
-                location(self.logical_path, span),
+                expression.location().clone(),
             );
         }
     }
@@ -4296,6 +4394,7 @@ mod tests {
         check_standard_library_source, checked_standard_library_with_contract_overrides_for_test,
         location, reconcile_standard_source, sort_standard_type_uses, supports_record_value_scalar,
     };
+    use crate::mutation::{MutationExpressionKind, MutationRecordFieldExpressionKind};
     use crate::{
         ParsedSourceUnit, PrepareError, PrepareStandardApplicationError, parse_bundle,
         prepare_standard_application,
@@ -4826,6 +4925,348 @@ mod tests {
         );
         assert!(fields.iter().all(|field| field.id().is_provisional()));
         assert_eq!(checked.uses().len(), 2);
+    }
+
+    #[test]
+    fn checks_record_constructor_identities_in_declaration_order_and_stops_before_artifact() {
+        let verified = verified_standard_library_for_relational_test();
+        let standard = check_standard_library_source(&verified).unwrap();
+        let active = empty_version_two_active(&verified);
+        let source = "CREATE SCHEMA app;\n\
+            CREATE TYPE app.flags AS VALUE (active BOOLEAN, visible BOOLEAN) IMMUTABLE PERSISTABLE;\n\
+            CREATE TYPE app.item AS OBJECT (flags app.flags NOT NULL);\n\
+            CREATE SERVER FUNCTION app.create(p_visible BOOLEAN)\n\
+            RETURNS ROWS (item REF app.item) SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE\n\
+            AS INSERT INTO app.item AS made (flags)\n\
+            VALUES (app.flags{visible: p_visible, active: TRUE}) RETURNING REF(made);";
+        let context =
+            StandardApplicationCheckContext::try_new(active.catalogue(), &standard).unwrap();
+        let report = check_standard_application(&bundle([("constructor.orna", source)]), &context);
+
+        assert_eq!(report.diagnostics(), &[]);
+        let checked = report.checked_bundle().unwrap();
+        let preparation = report.preparation_view().unwrap();
+        let raw = preparation.checked();
+        let record = &raw.record_value_types()[0];
+        let record_fields = record.fields();
+        let object = &raw.object_types()[0];
+        let function = &raw.server_functions()[0];
+        let plan = function.mutation_plan().unwrap();
+        let MutationExpressionKind::RecordConstructor {
+            record_type,
+            fields,
+        } = plan.assignments()[0].expression().kind()
+        else {
+            panic!("checked INSERT value must be a record constructor");
+        };
+        assert_eq!(*record_type, record.id());
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].owner(), record.id());
+        assert_eq!(fields[0].field(), record_fields[0].id());
+        assert!(matches!(
+            fields[0].kind(),
+            MutationRecordFieldExpressionKind::BooleanLiteral { value: true }
+        ));
+        assert_eq!(fields[1].field(), record_fields[1].id());
+        assert!(matches!(
+            fields[1].kind(),
+            MutationRecordFieldExpressionKind::ParameterRead { parameter, .. }
+                if *parameter == function.parameters()[0].id()
+        ));
+        assert_eq!(
+            function
+                .references()
+                .iter()
+                .map(|reference| (reference.kind(), reference.target()))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    DefinitionReferenceKind::ObjectReference,
+                    CheckedDefinitionReferenceTarget::ObjectType(object.id()),
+                ),
+                (
+                    DefinitionReferenceKind::WriteObject,
+                    CheckedDefinitionReferenceTarget::ObjectType(object.id()),
+                ),
+                (
+                    DefinitionReferenceKind::WriteField,
+                    CheckedDefinitionReferenceTarget::Field {
+                        owner: object.id(),
+                        field: object.fields()[0].id(),
+                    },
+                ),
+                (
+                    DefinitionReferenceKind::NamedType,
+                    CheckedDefinitionReferenceTarget::ValueType(record.id()),
+                ),
+                (
+                    DefinitionReferenceKind::WriteField,
+                    CheckedDefinitionReferenceTarget::Field {
+                        owner: record.id(),
+                        field: record_fields[0].id(),
+                    },
+                ),
+                (
+                    DefinitionReferenceKind::WriteField,
+                    CheckedDefinitionReferenceTarget::Field {
+                        owner: record.id(),
+                        field: record_fields[1].id(),
+                    },
+                ),
+                (
+                    DefinitionReferenceKind::ParameterRead,
+                    CheckedDefinitionReferenceTarget::Parameter {
+                        owner: function.id(),
+                        parameter: function.parameters()[0].id(),
+                    },
+                ),
+                (
+                    DefinitionReferenceKind::ObjectReference,
+                    CheckedDefinitionReferenceTarget::ObjectType(object.id()),
+                ),
+            ]
+        );
+        let expression_ordinals = checked
+            .uses()
+            .iter()
+            .filter_map(|type_use| match type_use.kind() {
+                CheckedTypeUseKind::Expression { ordinal, .. } => Some(ordinal),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(expression_ordinals, vec![2, 1, 3]);
+        let constructor_value_uses = checked
+            .uses()
+            .iter()
+            .filter_map(|type_use| {
+                let value = type_use.value()?;
+                let CheckedTypeUseKind::Expression { ordinal, .. } = value.kind() else {
+                    return None;
+                };
+                Some((
+                    ordinal,
+                    value.type_id(),
+                    value.location().span().start(),
+                    value.location().span().end(),
+                ))
+            })
+            .collect::<Vec<_>>();
+        let parameter_start = source.rfind("p_visible").unwrap();
+        let literal_start = source.rfind("TRUE").unwrap();
+        assert_eq!(
+            constructor_value_uses,
+            vec![
+                (
+                    2,
+                    TypeId::from_bytes([3; 16]),
+                    parameter_start,
+                    parameter_start + "p_visible".len(),
+                ),
+                (
+                    1,
+                    TypeId::from_bytes([3; 16]),
+                    literal_start,
+                    literal_start + "TRUE".len(),
+                ),
+            ]
+        );
+
+        assert!(matches!(
+            prepare_standard_application(&report, active.pair(), &active),
+            Err(PrepareStandardApplicationError::Prepare {
+                source: PrepareError::InvalidCheckedBundle {
+                    reason: "record constructor mutation artifact encoding is not implemented"
+                }
+            })
+        ));
+    }
+
+    #[test]
+    fn record_constructor_source_order_does_not_change_checked_plan() {
+        let standard =
+            check_standard_library_source(&verified_standard_library_for_relational_test())
+                .unwrap();
+        let source = |fields: &str| {
+            format!(
+                "CREATE SCHEMA app;\n\
+                 CREATE TYPE app.flags AS VALUE (active BOOLEAN, visible BOOLEAN) IMMUTABLE PERSISTABLE;\n\
+                 CREATE TYPE app.item AS OBJECT (flags app.flags NOT NULL);\n\
+                 CREATE SERVER FUNCTION app.create(p_visible BOOLEAN)\n\
+                 RETURNS ROWS (item REF app.item) TRANSACTION ATOMIC\n\
+                 AS INSERT INTO app.item AS made (flags) VALUES (app.flags{{{fields}}}) RETURNING REF(made);"
+            )
+        };
+        let first_bundle = SourceBundle::new([SourceUnit::new(
+            "first.orna",
+            source("active: TRUE, visible: p_visible"),
+        )])
+        .unwrap();
+        let second_bundle = SourceBundle::new([SourceUnit::new(
+            "second.orna",
+            source("visible: p_visible, active: TRUE"),
+        )])
+        .unwrap();
+        let first = check_new_application(&first_bundle, &standard).unwrap();
+        let second = check_new_application(&second_bundle, &standard).unwrap();
+
+        assert_eq!(first.diagnostics(), &[]);
+        assert_eq!(second.diagnostics(), &[]);
+        assert_eq!(
+            first
+                .preparation_view()
+                .unwrap()
+                .checked()
+                .server_functions()[0]
+                .mutation_plan(),
+            second
+                .preparation_view()
+                .unwrap()
+                .checked()
+                .server_functions()[0]
+                .mutation_plan()
+        );
+    }
+
+    #[test]
+    fn record_constructor_accepts_an_exact_active_enum_parameter() {
+        let standard =
+            check_standard_library_source(&verified_standard_library_for_relational_test())
+                .unwrap();
+        let source = "CREATE SCHEMA app;\n\
+            CREATE TYPE app.phase AS ENUM ('new', 'done');\n\
+            CREATE TYPE app.status AS VALUE (phase app.phase) IMMUTABLE PERSISTABLE;\n\
+            CREATE TYPE app.item AS OBJECT (status app.status NOT NULL);\n\
+            CREATE SERVER FUNCTION app.create(p_phase app.phase) RETURNS ROWS (item REF app.item)\n\
+            TRANSACTION ATOMIC AS INSERT INTO app.item AS made (status)\n\
+            VALUES (app.status{phase: p_phase}) RETURNING REF(made);";
+        let report =
+            check_new_application(&bundle([("enum_constructor.orna", source)]), &standard).unwrap();
+
+        assert_eq!(report.diagnostics(), &[]);
+        let raw = report.preparation_view().unwrap();
+        let checked = raw.checked();
+        let enum_type = checked.enum_types().next().unwrap().0;
+        let plan = checked.server_functions()[0].mutation_plan().unwrap();
+        let MutationExpressionKind::RecordConstructor { fields, .. } =
+            plan.assignments()[0].expression().kind()
+        else {
+            panic!("checked INSERT value must be a record constructor");
+        };
+        assert_eq!(
+            fields[0].value_type().semantic_type(),
+            SemanticType::Named(enum_type)
+        );
+    }
+
+    #[test]
+    fn record_constructor_rejects_scalar_values_for_enum_fields() {
+        let standard =
+            check_standard_library_source(&verified_standard_library_for_relational_test())
+                .unwrap();
+        for (value, expected) in [
+            (
+                "p_active",
+                "parameter p_active cannot initialise record field phase because their types do not match",
+            ),
+            (
+                "TRUE",
+                "record field phase is not BOOLEAN, so it cannot accept TRUE or FALSE",
+            ),
+        ] {
+            let source = format!(
+                "CREATE SCHEMA app;\n\
+                 CREATE TYPE app.phase AS ENUM ('new', 'done');\n\
+                 CREATE TYPE app.status AS VALUE (phase app.phase) IMMUTABLE PERSISTABLE;\n\
+                 CREATE TYPE app.item AS OBJECT (status app.status NOT NULL);\n\
+                 CREATE SERVER FUNCTION app.create(p_active BOOLEAN) RETURNS ROWS (item REF app.item)\n\
+                 TRANSACTION ATOMIC AS INSERT INTO app.item AS made (status)\n\
+                 VALUES (app.status{{phase: {value}}}) RETURNING REF(made);"
+            );
+            let value_start = source.rfind(value).unwrap();
+            let source_bundle =
+                SourceBundle::new([SourceUnit::new("enum_mismatch.orna", source)]).unwrap();
+            let report = check_new_application(&source_bundle, &standard).unwrap();
+
+            assert_eq!(report.diagnostics().len(), 1);
+            assert_eq!(report.diagnostics()[0].message(), expected);
+            assert_eq!(
+                report.diagnostics()[0].location().span().start(),
+                value_start
+            );
+            assert_eq!(
+                report.diagnostics()[0].location().span().end(),
+                value_start + value.len()
+            );
+            assert!(report.checked_bundle().is_none());
+        }
+    }
+
+    #[test]
+    fn record_constructor_semantics_reject_incomplete_or_incompatible_values() {
+        let standard =
+            check_standard_library_source(&verified_standard_library_for_relational_test())
+                .unwrap();
+        for (object_field, parameter, constructor, expected) in [
+            (
+                "flags app.flags NOT NULL",
+                "p_visible BOOLEAN",
+                "app.flags{active: TRUE}",
+                "record field visible is required, but this constructor does not provide it",
+            ),
+            (
+                "flags app.flags NOT NULL",
+                "p_visible BOOLEAN",
+                "app.flags{active: TRUE, visible: p_visible, extra: TRUE}",
+                "record value type app.flags has no field named extra",
+            ),
+            (
+                "flags app.flags",
+                "p_visible BOOLEAN",
+                "app.flags{active: TRUE, visible: p_visible}",
+                "record constructor app.flags requires a non-null field of that exact record type, but field flags does not match",
+            ),
+            (
+                "flags app.flags NOT NULL",
+                "p_visible BOOLEAN",
+                "app.missing{active: TRUE, visible: p_visible}",
+                "unknown record value type app.missing",
+            ),
+            (
+                "flags app.flags NOT NULL",
+                "p_visible BOOLEAN",
+                "app.other{active: TRUE, visible: p_visible}",
+                "record constructor app.other requires a non-null field of that exact record type, but field flags does not match",
+            ),
+            (
+                "flags app.flags NOT NULL",
+                "p_flags app.flags",
+                "app.flags{active: TRUE, visible: p_flags}",
+                "INSERT does not yet support the type of parameter p_flags",
+            ),
+        ] {
+            let source = format!(
+                "CREATE SCHEMA app;\n\
+                 CREATE TYPE app.flags AS VALUE (active BOOLEAN, visible BOOLEAN) IMMUTABLE PERSISTABLE;\n\
+                 CREATE TYPE app.other AS VALUE (active BOOLEAN, visible BOOLEAN) IMMUTABLE PERSISTABLE;\n\
+                 CREATE TYPE app.item AS OBJECT ({object_field});\n\
+                 CREATE SERVER FUNCTION app.create({parameter}) RETURNS ROWS (item REF app.item)\n\
+                 TRANSACTION ATOMIC AS INSERT INTO app.item AS made (flags)\n\
+                 VALUES ({constructor}) RETURNING REF(made);"
+            );
+            let source_bundle =
+                SourceBundle::new([SourceUnit::new("invalid_constructor.orna", source)]).unwrap();
+            let report = check_new_application(&source_bundle, &standard).unwrap();
+
+            assert!(
+                report
+                    .diagnostics()
+                    .iter()
+                    .any(|diagnostic| diagnostic.message().contains(expected)),
+                "expected {expected:?}, got {:?}",
+                report.diagnostics()
+            );
+            assert!(report.checked_bundle().is_none());
+        }
     }
 
     #[test]
