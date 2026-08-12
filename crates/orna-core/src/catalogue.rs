@@ -18,9 +18,10 @@ use crate::{
 mod types;
 
 pub use types::{
-    EnumTypeDefinition, PreludeTypeName, PreludeTypeNameError, TypeBinding, TypeBindingError,
-    TypeBindingKind, TypeDefinition, TypeDefinitionKind, TypeLookupName, ValueTypeDefinition,
-    ValueTypeKind, ValueTypeMutability, ValueTypePersistence,
+    EnumTypeDefinition, PreludeTypeName, PreludeTypeNameError, RecordValueFieldDefinition,
+    RecordValueTypeDefinition, TypeBinding, TypeBindingError, TypeBindingKind, TypeDefinition,
+    TypeDefinitionKind, TypeLookupName, ValueTypeDefinition, ValueTypeKind, ValueTypeMutability,
+    ValueTypePersistence,
 };
 
 /// A resolved, qualified semantic name.

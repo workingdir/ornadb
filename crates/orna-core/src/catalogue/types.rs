@@ -4,7 +4,7 @@ use std::fmt;
 
 use sha2::{Digest, Sha256};
 
-use crate::{TypeBindingId, TypeId};
+use crate::{FieldId, TypeBindingId, TypeId, types::ResolvedType};
 
 use super::{ObjectTypeDefinition, QualifiedSemanticName};
 
@@ -16,7 +16,7 @@ const TYPE_BINDING_ID_DOMAIN: &[u8] = b"ornadb.id/type-binding/v1\0";
 pub enum TypeDefinitionKind {
     /// A type with durable object identities and fields.
     Object,
-    /// A value type backed by a kernel representation contract.
+    /// A by-value type without durable object identity.
     Value,
     /// An ordered set of declared labels.
     Enum,
@@ -86,6 +86,106 @@ impl EnumTypeDefinition {
     }
 }
 
+/// One resolved field of a named immutable record value type.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecordValueFieldDefinition {
+    id: FieldId,
+    name: String,
+    ordinal: u32,
+    resolved_type: ResolvedType,
+}
+
+impl RecordValueFieldDefinition {
+    /// Creates a record value field from resolved semantic data.
+    pub fn new(
+        id: FieldId,
+        name: impl Into<String>,
+        ordinal: u32,
+        resolved_type: ResolvedType,
+    ) -> Self {
+        Self {
+            id,
+            name: name.into(),
+            ordinal,
+            resolved_type,
+        }
+    }
+
+    /// Returns this field's stable identity.
+    pub const fn id(&self) -> FieldId {
+        self.id
+    }
+
+    /// Returns this field's resolved semantic name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Returns this field's zero-based declaration ordinal.
+    pub const fn ordinal(&self) -> u32 {
+        self.ordinal
+    }
+
+    /// Returns this field's resolved type descriptor.
+    pub const fn resolved_type(&self) -> ResolvedType {
+        self.resolved_type
+    }
+}
+
+/// One named immutable, persistable record value type.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecordValueTypeDefinition {
+    id: TypeId,
+    name: QualifiedSemanticName,
+    fields: Vec<RecordValueFieldDefinition>,
+}
+
+impl RecordValueTypeDefinition {
+    /// Creates a record value type with fields in declaration order.
+    pub fn new(
+        id: TypeId,
+        name: QualifiedSemanticName,
+        fields: Vec<RecordValueFieldDefinition>,
+    ) -> Self {
+        Self { id, name, fields }
+    }
+
+    /// Returns this type's stable identity.
+    pub const fn id(&self) -> TypeId {
+        self.id
+    }
+
+    /// Returns this type's canonical qualified name.
+    pub fn name(&self) -> &QualifiedSemanticName {
+        &self.name
+    }
+
+    /// Returns this type's fixed immutable value contract.
+    pub const fn mutability(&self) -> ValueTypeMutability {
+        ValueTypeMutability::Immutable
+    }
+
+    /// Returns this type's fixed durable storage contract.
+    pub const fn persistence(&self) -> ValueTypePersistence {
+        ValueTypePersistence::Persistable
+    }
+
+    /// Returns fields in declaration ordinal order.
+    pub fn fields(&self) -> &[RecordValueFieldDefinition] {
+        &self.fields
+    }
+
+    /// Finds a field by its exact resolved semantic name.
+    pub fn field_by_name(&self, name: &str) -> Option<&RecordValueFieldDefinition> {
+        self.fields.iter().find(|field| field.name == name)
+    }
+
+    /// Finds a field by its stable identity.
+    pub fn field_by_id(&self, id: FieldId) -> Option<&RecordValueFieldDefinition> {
+        self.fields.iter().find(|field| field.id == id)
+    }
+}
+
 /// One resolved catalogue value type.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ValueTypeDefinition {
@@ -150,14 +250,16 @@ impl ValueTypeDefinition {
 /// A definition in the public catalogue type family.
 ///
 /// A catalogue snapshot owns definitions. This view preserves that ownership
-/// and provides one common interface for object, value, and enum categories.
+/// and provides one common interface for object and value categories.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TypeDefinition<'a> {
     /// A durable object type.
     Object(&'a ObjectTypeDefinition),
-    /// A value type.
+    /// A primitive value type.
     Value(&'a ValueTypeDefinition),
+    /// A named immutable record value type.
+    RecordValue(&'a RecordValueTypeDefinition),
     /// An enum value type.
     Enum(&'a EnumTypeDefinition),
 }
@@ -168,6 +270,7 @@ impl<'a> TypeDefinition<'a> {
         match self {
             Self::Object(definition) => definition.id(),
             Self::Value(definition) => definition.id(),
+            Self::RecordValue(definition) => definition.id(),
             Self::Enum(definition) => definition.id(),
         }
     }
@@ -177,6 +280,7 @@ impl<'a> TypeDefinition<'a> {
         match self {
             Self::Object(definition) => definition.name(),
             Self::Value(definition) => definition.name(),
+            Self::RecordValue(definition) => definition.name(),
             Self::Enum(definition) => definition.name(),
         }
     }
@@ -186,6 +290,7 @@ impl<'a> TypeDefinition<'a> {
         match self {
             Self::Object(_) => TypeDefinitionKind::Object,
             Self::Value(_) => TypeDefinitionKind::Value,
+            Self::RecordValue(_) => TypeDefinitionKind::Value,
             Self::Enum(_) => TypeDefinitionKind::Enum,
         }
     }
@@ -194,22 +299,35 @@ impl<'a> TypeDefinition<'a> {
     pub const fn as_object(self) -> Option<&'a ObjectTypeDefinition> {
         match self {
             Self::Object(definition) => Some(definition),
-            Self::Value(_) | Self::Enum(_) => None,
+            Self::Value(_) | Self::RecordValue(_) | Self::Enum(_) => None,
         }
     }
 
-    /// Returns this definition as a value type, when it is one.
+    /// Returns this definition as a primitive value type, when it is one.
     pub const fn as_value(self) -> Option<&'a ValueTypeDefinition> {
         match self {
-            Self::Object(_) | Self::Enum(_) => None,
+            Self::Object(_) | Self::RecordValue(_) | Self::Enum(_) => None,
             Self::Value(definition) => Some(definition),
+        }
+    }
+
+    /// Returns this definition as a primitive value type, when it is one.
+    pub const fn as_primitive_value(self) -> Option<&'a ValueTypeDefinition> {
+        self.as_value()
+    }
+
+    /// Returns this definition as a record value type, when it is one.
+    pub const fn as_record_value(self) -> Option<&'a RecordValueTypeDefinition> {
+        match self {
+            Self::Object(_) | Self::Value(_) | Self::Enum(_) => None,
+            Self::RecordValue(definition) => Some(definition),
         }
     }
 
     /// Returns this definition as an enum type, when it is one.
     pub const fn as_enum(self) -> Option<&'a EnumTypeDefinition> {
         match self {
-            Self::Object(_) | Self::Value(_) => None,
+            Self::Object(_) | Self::Value(_) | Self::RecordValue(_) => None,
             Self::Enum(definition) => Some(definition),
         }
     }
