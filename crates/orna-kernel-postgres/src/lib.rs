@@ -5,12 +5,14 @@
 
 use std::{error::Error, fmt, str::FromStr};
 
+use orna_client::ClientExecutionError;
 use orna_core::{
+    FunctionId,
     canonical_hash::CanonicalHashError,
     catalogue::CatalogueSnapshotError,
     physical::PhysicalPlanError,
     revision::{CatalogueHashVersion, RevisionInvariantError, RevisionPair},
-    security::SecuritySnapshotError,
+    security::{ExecuteDenial, SecuritySnapshotError},
 };
 use orna_standard::StandardUpgradeIdentity;
 
@@ -139,6 +141,17 @@ pub enum PostgresKernelError {
     },
     /// A security replacement does not bind the complete active function set.
     SecurityFunctionSetMismatch,
+    /// The active security snapshot denied a CLIENT function invocation.
+    ClientExecuteDenied {
+        /// The active revision pair used for the decision.
+        pair: RevisionPair,
+        /// The requested function identity.
+        function: FunctionId,
+        /// The fail-closed reason for denying execution.
+        reason: ExecuteDenial,
+    },
+    /// An authorised CLIENT function could not be evaluated.
+    ClientExecution(ClientExecutionError),
     /// The candidate was prepared against a revision pair that is no longer active.
     ExpectedBaseMismatch {
         /// The base pair carried by the candidate.
@@ -247,6 +260,12 @@ impl fmt::Display for PostgresKernelError {
             Self::SecurityFunctionSetMismatch => {
                 formatter.write_str("security snapshot does not contain the active function set")
             }
+            Self::ClientExecuteDenied { .. } => {
+                formatter.write_str("CLIENT function execution was denied")
+            }
+            Self::ClientExecution(error) => {
+                write!(formatter, "CLIENT function execution failed: {error}")
+            }
             Self::ExpectedBaseMismatch { .. } => {
                 formatter.write_str("expected revision pair is not active")
             }
@@ -300,6 +319,7 @@ impl Error for PostgresKernelError {
             Self::CandidateRevisionInvariant(error) => Some(error),
             Self::CatalogueSnapshot(error) => Some(error),
             Self::SecuritySnapshot(error) => Some(error),
+            Self::ClientExecution(error) => Some(error),
             Self::PhysicalPlan(error) => Some(error),
             Self::ServerSelect(error) => Some(error),
             Self::ServerInsert(error) => Some(error),
@@ -314,6 +334,7 @@ impl Error for PostgresKernelError {
             | Self::ReservedStandardIdentity { .. }
             | Self::SecurityRevisionMismatch { .. }
             | Self::SecurityFunctionSetMismatch
+            | Self::ClientExecuteDenied { .. }
             | Self::DurableInvariant { .. } => None,
         }
     }
@@ -324,11 +345,12 @@ mod tests {
     use std::{error::Error, str::FromStr};
 
     use orna_core::{
-        CatalogueRevisionId, SourceRevisionId,
+        CatalogueRevisionId, FunctionId, SourceRevisionId,
         canonical_hash::CanonicalHashError,
         catalogue::CatalogueSnapshotError,
         physical::PhysicalPlanError,
-        revision::{CatalogueHashVersion, RevisionInvariantError},
+        revision::{CatalogueHashVersion, RevisionInvariantError, RevisionPair},
+        security::ExecuteDenial,
     };
 
     use super::{PostgresKernel, PostgresKernelError};
@@ -427,6 +449,31 @@ mod tests {
             "the active and candidate catalogue hash versions require a standard context transition"
         );
         assert!(error.source().is_none());
+    }
+
+    #[test]
+    fn client_execute_denial_preserves_the_pinned_target() {
+        let pair = RevisionPair::new(
+            SourceRevisionId::from_bytes([9; 16]),
+            CatalogueRevisionId::from_bytes([10; 16]),
+        );
+        let function = FunctionId::from_bytes([11; 16]);
+        let error = PostgresKernelError::ClientExecuteDenied {
+            pair,
+            function,
+            reason: ExecuteDenial::MissingExecuteGrant,
+        };
+
+        assert_eq!(error.to_string(), "CLIENT function execution was denied");
+        assert!(error.source().is_none());
+        assert!(matches!(
+            error,
+            PostgresKernelError::ClientExecuteDenied {
+                pair: actual_pair,
+                function: actual_function,
+                reason: ExecuteDenial::MissingExecuteGrant,
+            } if actual_pair == pair && actual_function == function
+        ));
     }
 
     #[test]
