@@ -1954,7 +1954,7 @@ fn runtime_type_is_active(
     match resolve_runtime_type(context, resolved_type) {
         ResolvedRuntimeType::Reference(target) => catalogue.object_type_by_id(target).is_some(),
         ResolvedRuntimeType::LegacyScalar(_) | ResolvedRuntimeType::VerifiedValue { .. } => true,
-        ResolvedRuntimeType::Unsupported => false,
+        ResolvedRuntimeType::CatalogueEnum(_) | ResolvedRuntimeType::Unsupported => false,
     }
 }
 
@@ -1976,7 +1976,9 @@ fn validate_active_runtime_type(
         ResolvedRuntimeType::LegacyScalar(_)
         | ResolvedRuntimeType::VerifiedValue { .. }
         | ResolvedRuntimeType::Reference(_) => {}
-        ResolvedRuntimeType::Unsupported => return Err(plan_invariant(rule)),
+        ResolvedRuntimeType::CatalogueEnum(_) | ResolvedRuntimeType::Unsupported => {
+            return Err(plan_invariant(rule));
+        }
     }
     Ok(())
 }
@@ -2047,6 +2049,7 @@ fn validate_plan_for_context<'a>(
             ResolvedRuntimeType::LegacyScalar(_)
             | ResolvedRuntimeType::VerifiedValue { .. }
             | ResolvedRuntimeType::Reference(_)
+            | ResolvedRuntimeType::CatalogueEnum(_)
             | ResolvedRuntimeType::Unsupported => {}
         }
     }
