@@ -58,6 +58,11 @@ const ENUM_APPLICATION_SOURCE: &str = "CREATE SCHEMA app;\n\
     CREATE TYPE app.stage AS ENUM ('lead', 'owner''s', 'customer');\n\
     CREATE TYPE app.case AS OBJECT (stage app.stage NOT NULL);\n";
 
+const RECORD_APPLICATION_SOURCE: &str = "CREATE SCHEMA app;\n\
+    CREATE TYPE app.stage AS ENUM ('lead', 'customer');\n\
+    CREATE TYPE app.status AS VALUE (enabled BOOLEAN, stage app.stage)\n\
+    IMMUTABLE PERSISTABLE;\n";
+
 const STANDARD_UPGRADE_V1_SOURCE: &str = "CREATE SCHEMA app;\n\
     CREATE TYPE app.item AS OBJECT (done BOOLEAN NOT NULL);\n\
     CREATE SERVER FUNCTION app.read()\n\
@@ -471,6 +476,180 @@ async fn applies_and_recovers_ordered_catalogue_enum_labels() -> TestResult<()> 
         session.shutdown().await?;
 
         let restarted = named_kernel(&database, "orna-enum-restart")?
+            .recover()
+            .await?;
+        require_recovered_snapshot(&candidate, &restarted)
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn applies_and_recovers_named_record_definitions() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = kernel(&database)?;
+        kernel.bootstrap().await?;
+        let empty = kernel.recover().await?;
+        let version_one = kernel
+            .apply(&candidate(STANDARD_APPLICATION_SOURCE, &empty)?)
+            .await?;
+        let upgrade = orna_standard::prepare_standard_upgrade(&version_one)
+            .map_err(|error| failure(format!("standard upgrade preparation failed: {error}")))?;
+        let version_two = kernel.apply_standard_upgrade(&upgrade).await?;
+        let candidate =
+            standard_application_candidate(RECORD_APPLICATION_SOURCE, &version_two, &upgrade)?;
+        let expected = candidate
+            .candidate()
+            .record_value_types()
+            .first()
+            .ok_or_else(|| failure("record candidate did not contain its declaration"))?;
+        let expected_type_origin = candidate
+            .origins()
+            .iter()
+            .find(|origin| origin.identity() == DefinitionIdentity::ValueType(expected.id()))
+            .ok_or_else(|| failure("record candidate did not contain its type origin"))?;
+        let expected_field_origins = expected
+            .fields()
+            .iter()
+            .map(|field| {
+                candidate
+                    .origins()
+                    .iter()
+                    .find(|origin| {
+                        origin.identity()
+                            == DefinitionIdentity::Field {
+                                owner: expected.id(),
+                                field: field.id(),
+                            }
+                    })
+                    .ok_or_else(|| failure("record candidate did not contain a field origin"))
+            })
+            .collect::<TestResult<Vec<_>>>()?;
+
+        let applied = kernel.apply(&candidate).await?;
+        require_recovered_snapshot(&candidate, &applied)?;
+
+        let session = database.open().await?;
+        let type_row = session
+            .client()
+            .query_one(
+                "SELECT type_id, name_parts, value_kind, mutability, persistence,
+                        source_unit_id, source_start, source_end
+                 FROM _orna_kernel.catalogue_record_value_types
+                 WHERE catalogue_revision_id = $1 AND type_id = $2",
+                &[
+                    &candidate.candidate().revision().to_bytes().to_vec(),
+                    &expected.id().to_bytes().to_vec(),
+                ],
+            )
+            .await?;
+        let field_rows = session
+            .client()
+            .query(
+                "SELECT field_id, name, ordinal, type_kind, value_type_id,
+                        value_standard_library_revision_id, enum_type_id,
+                        source_unit_id, source_start, source_end
+                 FROM _orna_kernel.catalogue_record_value_fields
+                 WHERE catalogue_revision_id = $1 AND owner_type_id = $2
+                 ORDER BY ordinal",
+                &[
+                    &candidate.candidate().revision().to_bytes().to_vec(),
+                    &expected.id().to_bytes().to_vec(),
+                ],
+            )
+            .await?;
+        let postgres_composite_count: i64 = session
+            .client()
+            .query_one(
+                "SELECT count(*)
+                 FROM pg_catalog.pg_type AS type
+                 JOIN pg_catalog.pg_namespace AS namespace
+                   ON namespace.oid = type.typnamespace
+                 WHERE type.typtype = 'c'
+                   AND namespace.nspname IN ('_orna_kernel', '_orna_data')
+                   AND type.typname = $1",
+                &[&expected
+                    .name()
+                    .parts()
+                    .last()
+                    .ok_or_else(|| failure("record name has no local part"))?],
+            )
+            .await?
+            .try_get(0)?;
+        require(
+            type_row.try_get::<_, Vec<u8>>(0)? == expected.id().to_bytes().to_vec()
+                && type_row.try_get::<_, Vec<String>>(1)? == expected.name().parts()
+                && type_row.try_get::<_, String>(2)? == "record"
+                && type_row.try_get::<_, String>(3)? == "immutable"
+                && type_row.try_get::<_, String>(4)? == "persistable"
+                && type_row.try_get::<_, Vec<u8>>(5)?
+                    == expected_type_origin
+                        .source()
+                        .source_unit()
+                        .to_bytes()
+                        .to_vec()
+                && type_row.try_get::<_, i64>(6)?
+                    == i64::from(expected_type_origin.source().byte_start())
+                && type_row.try_get::<_, i64>(7)?
+                    == i64::from(expected_type_origin.source().byte_end())
+                && field_rows.len() == 2
+                && field_rows[0].try_get::<_, Vec<u8>>(0)?
+                    == expected.fields()[0].id().to_bytes().to_vec()
+                && field_rows[0].try_get::<_, String>(1)? == "enabled"
+                && field_rows[0].try_get::<_, i64>(2)? == 0
+                && field_rows[0].try_get::<_, String>(3)? == "value"
+                && field_rows[0].try_get::<_, Option<Vec<u8>>>(4)?
+                    == expected.fields()[0]
+                        .resolved_type()
+                        .value_type()
+                        .map(|id| id.to_bytes().to_vec())
+                && field_rows[0].try_get::<_, Option<Vec<u8>>>(5)?
+                    == Some(
+                        upgrade
+                            .verified_standard_snapshot()
+                            .revision()
+                            .to_bytes()
+                            .to_vec(),
+                    )
+                && field_rows[0].try_get::<_, Option<Vec<u8>>>(6)?.is_none()
+                && field_rows[0].try_get::<_, Vec<u8>>(7)?
+                    == expected_field_origins[0]
+                        .source()
+                        .source_unit()
+                        .to_bytes()
+                        .to_vec()
+                && field_rows[0].try_get::<_, i64>(8)?
+                    == i64::from(expected_field_origins[0].source().byte_start())
+                && field_rows[0].try_get::<_, i64>(9)?
+                    == i64::from(expected_field_origins[0].source().byte_end())
+                && field_rows[1].try_get::<_, Vec<u8>>(0)?
+                    == expected.fields()[1].id().to_bytes().to_vec()
+                && field_rows[1].try_get::<_, String>(1)? == "stage"
+                && field_rows[1].try_get::<_, i64>(2)? == 1
+                && field_rows[1].try_get::<_, String>(3)? == "enum"
+                && field_rows[1].try_get::<_, Option<Vec<u8>>>(4)?.is_none()
+                && field_rows[1].try_get::<_, Option<Vec<u8>>>(5)?.is_none()
+                && field_rows[1].try_get::<_, Option<Vec<u8>>>(6)?
+                    == expected.fields()[1]
+                        .resolved_type()
+                        .named_type()
+                        .map(|id| id.to_bytes().to_vec())
+                && field_rows[1].try_get::<_, Vec<u8>>(7)?
+                    == expected_field_origins[1]
+                        .source()
+                        .source_unit()
+                        .to_bytes()
+                        .to_vec()
+                && field_rows[1].try_get::<_, i64>(8)?
+                    == i64::from(expected_field_origins[1].source().byte_start())
+                && field_rows[1].try_get::<_, i64>(9)?
+                    == i64::from(expected_field_origins[1].source().byte_end())
+                && postgres_composite_count == 0,
+            "record apply did not preserve its exact protected definition rows",
+        )?;
+        session.shutdown().await?;
+
+        let restarted = named_kernel(&database, "orna-record-restart")?
             .recover()
             .await?;
         require_recovered_snapshot(&candidate, &restarted)
@@ -1851,6 +2030,7 @@ fn same_recovered(left: &ActiveDatabaseRevision, right: &ActiveDatabaseRevision)
         && left.catalogue().schemas() == right.catalogue().schemas()
         && left.catalogue().object_types() == right.catalogue().object_types()
         && left.catalogue().enum_types() == right.catalogue().enum_types()
+        && left.catalogue().record_value_types() == right.catalogue().record_value_types()
         && left.catalogue().functions() == right.catalogue().functions()
         && left.catalogue_hash() == right.catalogue_hash()
         && left.expressions() == right.expressions()
@@ -2971,6 +3151,10 @@ fn require_recovered_snapshot(
             && same_members(
                 active.catalogue().enum_types(),
                 candidate.candidate().enum_types(),
+            )
+            && same_members(
+                active.catalogue().record_value_types(),
+                candidate.candidate().record_value_types(),
             )
             && same_members(
                 active.catalogue().functions(),
