@@ -124,6 +124,35 @@ set -e
 orna_uid=$(id -u orna)
 orna_gid=$(id -g orna)
 [[ "${orna_uid}" -ne 0 && "${orna_gid}" -ne 0 ]] || fail 'service account is root'
+distribution=/usr/share/orna/distribution-manifest.toml
+cp --preserve=all "${distribution}" /work/distribution-manifest.toml
+sed -i 's/^executable_sha256 = ".*"$/executable_sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"/' \
+    "${distribution}"
+set +e
+run_as_orna /usr/bin/orna server run >/work/distribution.stdout \
+    2>/work/distribution.stderr
+distribution_status=$?
+set -e
+[[ "${distribution_status}" -eq 1 && ! -s /work/distribution.stdout ]] ||
+    fail 'changed distribution manifest did not fail closed'
+[[ "$(cat /work/distribution.stderr)" == 'Orna distribution manifest is invalid' ]] ||
+    fail 'distribution-manifest diagnostic changed'
+[[ ! -e /var/lib/orna/instances/default ]] ||
+    fail 'invalid distribution manifest reached instance creation'
+install -o root -g root -m 0644 /work/distribution-manifest.toml "${distribution}"
+chmod 0666 "${distribution}"
+set +e
+run_as_orna /usr/bin/orna server run >/work/distribution-mode.stdout \
+    2>/work/distribution-mode.stderr
+distribution_mode_status=$?
+set -e
+[[ "${distribution_mode_status}" -eq 1 && ! -s /work/distribution-mode.stdout ]] ||
+    fail 'writable distribution manifest did not fail closed'
+[[ "$(cat /work/distribution-mode.stderr)" == 'Orna distribution manifest is invalid' ]] ||
+    fail 'distribution-manifest mode diagnostic changed'
+[[ ! -e /var/lib/orna/instances/default ]] ||
+    fail 'writable distribution manifest reached instance creation'
+install -o root -g root -m 0644 /work/distribution-manifest.toml "${distribution}"
 set +e
 run_as_orna /usr/bin/orna server upgrade >/work/absent-upgrade.stdout \
     2>/work/absent-upgrade.stderr

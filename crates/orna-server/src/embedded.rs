@@ -36,8 +36,12 @@ use tokio_postgres::{Config, NoTls};
 
 use crate::{EmbeddedUpgradeError, OpenStandardDatabaseError, open_standard_database};
 
+#[path = "distribution.rs"]
+mod distribution;
 #[path = "support_fs.rs"]
 mod support_fs;
+
+use distribution::verify_current_distribution;
 
 const INSTANCE_NAME: &str = "default";
 const STATE_ROOT: &str = "/var/lib/orna/instances/default";
@@ -193,6 +197,7 @@ impl fmt::Debug for ReadyEmbeddedHost {
 }
 
 fn prepare_instance() -> Result<PreparedInstance, EmbeddedHostError> {
+    verify_current_distribution().map_err(|_| EmbeddedHostError::InvalidDistributionManifest)?;
     validate_embedded_engine_manifest()?;
     let service = require_service_identity()?;
     require_file_bytes(
@@ -326,6 +331,7 @@ pub(crate) fn upgrade_default_instance() -> Result<(), EmbeddedUpgradeError> {
         Err(_) => return Err(EmbeddedUpgradeError::InvalidInstance),
     }
 
+    verify_current_distribution().map_err(|_| EmbeddedUpgradeError::InvalidInstance)?;
     validate_embedded_engine_manifest().map_err(|_| EmbeddedUpgradeError::InvalidInstance)?;
     require_file_bytes(
         Path::new(CONFIGURATION_PATH),
@@ -467,6 +473,7 @@ fn parse_installed_instance_manifest(
 
 /// Verifies and retains the package and instance facts for a private host client.
 pub fn inspect_ready_embedded_host() -> Result<ReadyEmbeddedHost, EmbeddedHostError> {
+    verify_current_distribution().map_err(|_| EmbeddedHostError::InvalidDistributionManifest)?;
     validate_embedded_engine_manifest()?;
     let service = require_service_identity()?;
     require_file_bytes(
@@ -1188,6 +1195,8 @@ pub enum EmbeddedHostError {
     InvalidSupportManifest,
     /// The embedded engine manifest is malformed or does not bind its embedded data.
     InvalidEngineManifest,
+    /// The installed distribution manifest does not bind this executable and engine.
+    InvalidDistributionManifest,
     /// A support member path is not a safe relative path.
     InvalidSupportPath,
     /// A linked PostgreSQL entry was requested after another thread existed.
@@ -1239,6 +1248,9 @@ impl fmt::Display for EmbeddedHostError {
             }
             Self::InvalidEngineManifest => {
                 formatter.write_str("embedded PostgreSQL engine manifest is invalid")
+            }
+            Self::InvalidDistributionManifest => {
+                formatter.write_str("Orna distribution manifest is invalid")
             }
             Self::InvalidSupportPath => {
                 formatter.write_str("embedded PostgreSQL support path is invalid")
