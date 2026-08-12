@@ -6,9 +6,10 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
     error::Error,
     fmt,
+    time::SystemTime,
 };
 
-use crate::{FunctionId, PrincipalId, revision::RevisionPair};
+use crate::{FunctionId, PrincipalId, SecurityAuditEventId, revision::RevisionPair};
 
 /// The security-relevant kind of an Orna principal.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -357,6 +358,256 @@ pub enum ExecuteDecision {
     Allowed(AuthorisedInvocation),
     /// Execution is denied without entering an evaluator or executor.
     Denied(ExecuteDenial),
+}
+
+/// The closed family of protected security audit events.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SecurityAuditKind {
+    /// A local connection attempted to establish an authenticated session.
+    Authentication,
+    /// An authenticated session requested permission to execute a function.
+    Execute,
+}
+
+/// Whether a protected security decision allowed or denied its operation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SecurityAuditOutcome {
+    /// The protected decision allowed the operation.
+    Allowed,
+    /// The protected decision denied the operation.
+    Denied,
+}
+
+/// The closed reason carried by a denied security audit decision.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SecurityAuditDenial {
+    /// Local peer authentication failed for the recorded reason.
+    Authentication(LocalPeerAuthenticationError),
+    /// Function execution was denied for the recorded reason.
+    Execute(ExecuteDenial),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SecurityAuditDecisionShape {
+    AuthenticationAllowed {
+        session_principal: PrincipalId,
+    },
+    AuthenticationDenied {
+        session_principal: Option<PrincipalId>,
+        reason: LocalPeerAuthenticationError,
+    },
+    ExecuteAllowed {
+        session_principal: PrincipalId,
+        effective_principal: PrincipalId,
+        authorising_principal: PrincipalId,
+        target: InvocationTarget,
+    },
+    ExecuteDenied {
+        session_principal: PrincipalId,
+        target: InvocationTarget,
+        reason: ExecuteDenial,
+    },
+}
+
+/// An immutable authentication or `EXECUTE` decision prepared for auditing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SecurityAuditDecision(SecurityAuditDecisionShape);
+
+impl SecurityAuditDecision {
+    /// Records an allowed authentication decision for one bound session.
+    pub fn authentication_allowed(session: &AuthenticatedSession) -> Self {
+        Self(SecurityAuditDecisionShape::AuthenticationAllowed {
+            session_principal: session.principal,
+        })
+    }
+
+    /// Records a denied local authentication decision.
+    ///
+    /// An unknown UID has no principal. A mapping that selects an invalid
+    /// principal must retain that principal as evidence.
+    pub fn authentication_denied(
+        session_principal: Option<PrincipalId>,
+        reason: LocalPeerAuthenticationError,
+    ) -> Result<Self, SecurityAuditDecisionError> {
+        let valid_shape = matches!(
+            (session_principal, reason),
+            (None, LocalPeerAuthenticationError::UnknownUid)
+                | (Some(_), LocalPeerAuthenticationError::InvalidPrincipal(_))
+        );
+        if !valid_shape {
+            return Err(SecurityAuditDecisionError::AuthenticationPrincipalShape);
+        }
+        Ok(Self(SecurityAuditDecisionShape::AuthenticationDenied {
+            session_principal,
+            reason,
+        }))
+    }
+
+    /// Records an allowed `EXECUTE` decision from its immutable evidence.
+    pub fn execute_allowed(authorised: &AuthorisedInvocation) -> Self {
+        Self(SecurityAuditDecisionShape::ExecuteAllowed {
+            session_principal: authorised.session_principal,
+            effective_principal: authorised.effective_principal,
+            authorising_principal: authorised.authorising_principal,
+            target: authorised.target,
+        })
+    }
+
+    /// Records a denied `EXECUTE` decision for a trusted session and target.
+    pub fn execute_denied(
+        session: &AuthenticatedSession,
+        target: InvocationTarget,
+        reason: ExecuteDenial,
+    ) -> Self {
+        Self(SecurityAuditDecisionShape::ExecuteDenied {
+            session_principal: session.principal,
+            target,
+            reason,
+        })
+    }
+
+    /// Returns the closed event kind.
+    pub const fn kind(&self) -> SecurityAuditKind {
+        match self.0 {
+            SecurityAuditDecisionShape::AuthenticationAllowed { .. }
+            | SecurityAuditDecisionShape::AuthenticationDenied { .. } => {
+                SecurityAuditKind::Authentication
+            }
+            SecurityAuditDecisionShape::ExecuteAllowed { .. }
+            | SecurityAuditDecisionShape::ExecuteDenied { .. } => SecurityAuditKind::Execute,
+        }
+    }
+
+    /// Returns whether the decision allowed or denied the operation.
+    pub const fn outcome(&self) -> SecurityAuditOutcome {
+        match self.0 {
+            SecurityAuditDecisionShape::AuthenticationAllowed { .. }
+            | SecurityAuditDecisionShape::ExecuteAllowed { .. } => SecurityAuditOutcome::Allowed,
+            SecurityAuditDecisionShape::AuthenticationDenied { .. }
+            | SecurityAuditDecisionShape::ExecuteDenied { .. } => SecurityAuditOutcome::Denied,
+        }
+    }
+
+    /// Returns the authenticated or mapped principal when it is known.
+    pub const fn session_principal(&self) -> Option<PrincipalId> {
+        match self.0 {
+            SecurityAuditDecisionShape::AuthenticationAllowed { session_principal }
+            | SecurityAuditDecisionShape::ExecuteAllowed {
+                session_principal, ..
+            }
+            | SecurityAuditDecisionShape::ExecuteDenied {
+                session_principal, ..
+            } => Some(session_principal),
+            SecurityAuditDecisionShape::AuthenticationDenied {
+                session_principal, ..
+            } => session_principal,
+        }
+    }
+
+    /// Returns the effective principal for an allowed `EXECUTE` decision.
+    pub const fn effective_principal(&self) -> Option<PrincipalId> {
+        match self.0 {
+            SecurityAuditDecisionShape::ExecuteAllowed {
+                effective_principal,
+                ..
+            } => Some(effective_principal),
+            _ => None,
+        }
+    }
+
+    /// Returns the authorising principal for an allowed `EXECUTE` decision.
+    pub const fn authorising_principal(&self) -> Option<PrincipalId> {
+        match self.0 {
+            SecurityAuditDecisionShape::ExecuteAllowed {
+                authorising_principal,
+                ..
+            } => Some(authorising_principal),
+            _ => None,
+        }
+    }
+
+    /// Returns the pinned function target for an `EXECUTE` decision.
+    pub const fn target(&self) -> Option<InvocationTarget> {
+        match self.0 {
+            SecurityAuditDecisionShape::ExecuteAllowed { target, .. }
+            | SecurityAuditDecisionShape::ExecuteDenied { target, .. } => Some(target),
+            _ => None,
+        }
+    }
+
+    /// Returns the closed denial reason when the decision was denied.
+    pub const fn denial(&self) -> Option<SecurityAuditDenial> {
+        match self.0 {
+            SecurityAuditDecisionShape::AuthenticationDenied { reason, .. } => {
+                Some(SecurityAuditDenial::Authentication(reason))
+            }
+            SecurityAuditDecisionShape::ExecuteDenied { reason, .. } => {
+                Some(SecurityAuditDenial::Execute(reason))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// An invalid protected security audit decision.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SecurityAuditDecisionError {
+    /// Authentication principal evidence does not match its typed denial.
+    AuthenticationPrincipalShape,
+}
+
+impl fmt::Display for SecurityAuditDecisionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("security audit authentication principal shape is invalid")
+    }
+}
+
+impl Error for SecurityAuditDecisionError {}
+
+/// One recovered protected security audit record.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SecurityAuditEvent {
+    id: SecurityAuditEventId,
+    sequence: i64,
+    recorded_at: SystemTime,
+    decision: SecurityAuditDecision,
+}
+
+impl SecurityAuditEvent {
+    /// Recovers one audit record from its exact durable facts.
+    pub const fn new(
+        id: SecurityAuditEventId,
+        sequence: i64,
+        recorded_at: SystemTime,
+        decision: SecurityAuditDecision,
+    ) -> Self {
+        Self {
+            id,
+            sequence,
+            recorded_at,
+            decision,
+        }
+    }
+
+    /// Returns the stable opaque event identity.
+    pub const fn id(&self) -> SecurityAuditEventId {
+        self.id
+    }
+
+    /// Returns the database ordering sequence.
+    pub const fn sequence(&self) -> i64 {
+        self.sequence
+    }
+
+    /// Returns the database recording time.
+    pub const fn recorded_at(&self) -> SystemTime {
+        self.recorded_at
+    }
+
+    /// Returns the immutable protected decision evidence.
+    pub const fn decision(&self) -> &SecurityAuditDecision {
+        &self.decision
+    }
 }
 
 /// An immutable, validated view of security and function identities.
@@ -1281,5 +1532,124 @@ mod tests {
             ),
             Err(SecuritySnapshotError::UnknownLocalPeerPrincipal)
         ));
+    }
+
+    #[test]
+    fn security_audit_decisions_expose_only_closed_decision_evidence() {
+        let snapshot = SecuritySnapshot::new(
+            REVISION,
+            vec![FUNCTION],
+            vec![active(USER, PrincipalKind::User)],
+            vec![],
+            vec![ExecuteGrant::new(USER, FUNCTION)],
+        )
+        .expect("valid audit decision snapshot");
+        let session = snapshot
+            .bind_authenticated_session(USER, vec![])
+            .expect("valid audit session");
+        let target = InvocationTarget::new(FUNCTION, REVISION);
+        let ExecuteDecision::Allowed(authorised) = snapshot.authorise_execute(&session, target)
+        else {
+            panic!("direct grant should create allowed evidence");
+        };
+
+        let authenticated = SecurityAuditDecision::authentication_allowed(&session);
+        assert_eq!(authenticated.kind(), SecurityAuditKind::Authentication);
+        assert_eq!(authenticated.outcome(), SecurityAuditOutcome::Allowed);
+        assert_eq!(authenticated.session_principal(), Some(USER));
+        assert_eq!(authenticated.effective_principal(), None);
+        assert_eq!(authenticated.authorising_principal(), None);
+        assert_eq!(authenticated.target(), None);
+        assert_eq!(authenticated.denial(), None);
+
+        let allowed = SecurityAuditDecision::execute_allowed(&authorised);
+        assert_eq!(allowed.kind(), SecurityAuditKind::Execute);
+        assert_eq!(allowed.outcome(), SecurityAuditOutcome::Allowed);
+        assert_eq!(allowed.session_principal(), Some(USER));
+        assert_eq!(allowed.effective_principal(), Some(USER));
+        assert_eq!(allowed.authorising_principal(), Some(USER));
+        assert_eq!(allowed.target(), Some(target));
+        assert_eq!(allowed.denial(), None);
+
+        let denied = SecurityAuditDecision::execute_denied(
+            &session,
+            target,
+            ExecuteDenial::MissingExecuteGrant,
+        );
+        assert_eq!(denied.kind(), SecurityAuditKind::Execute);
+        assert_eq!(denied.outcome(), SecurityAuditOutcome::Denied);
+        assert_eq!(denied.session_principal(), Some(USER));
+        assert_eq!(denied.effective_principal(), None);
+        assert_eq!(denied.authorising_principal(), None);
+        assert_eq!(denied.target(), Some(target));
+        assert_eq!(
+            denied.denial(),
+            Some(SecurityAuditDenial::Execute(
+                ExecuteDenial::MissingExecuteGrant
+            ))
+        );
+    }
+
+    #[test]
+    fn authentication_audit_denials_require_exact_principal_shape() {
+        let unknown = SecurityAuditDecision::authentication_denied(
+            None,
+            LocalPeerAuthenticationError::UnknownUid,
+        )
+        .expect("unknown UID has no principal evidence");
+        assert_eq!(unknown.session_principal(), None);
+        assert_eq!(unknown.outcome(), SecurityAuditOutcome::Denied);
+        assert_eq!(
+            unknown.denial(),
+            Some(SecurityAuditDenial::Authentication(
+                LocalPeerAuthenticationError::UnknownUid
+            ))
+        );
+
+        let invalid = SecurityAuditDecision::authentication_denied(
+            Some(USER),
+            LocalPeerAuthenticationError::InvalidPrincipal(
+                SessionBindingError::DisabledSessionPrincipal,
+            ),
+        )
+        .expect("invalid mapped principal is retained");
+        assert_eq!(invalid.session_principal(), Some(USER));
+        assert_eq!(invalid.kind(), SecurityAuditKind::Authentication);
+
+        assert_eq!(
+            SecurityAuditDecision::authentication_denied(
+                Some(USER),
+                LocalPeerAuthenticationError::UnknownUid,
+            ),
+            Err(SecurityAuditDecisionError::AuthenticationPrincipalShape)
+        );
+        assert_eq!(
+            SecurityAuditDecision::authentication_denied(
+                None,
+                LocalPeerAuthenticationError::InvalidPrincipal(
+                    SessionBindingError::RoleCannotAuthenticate,
+                ),
+            ),
+            Err(SecurityAuditDecisionError::AuthenticationPrincipalShape)
+        );
+    }
+
+    #[test]
+    fn audit_events_preserve_exact_signed_order_and_recording_time() {
+        use std::time::{Duration, UNIX_EPOCH};
+
+        let decision = SecurityAuditDecision::authentication_denied(
+            None,
+            LocalPeerAuthenticationError::UnknownUid,
+        )
+        .expect("valid unknown-peer audit decision");
+        let id = SecurityAuditEventId::from_bytes([0x42; 16]);
+        let recorded_at = UNIX_EPOCH - Duration::from_secs(1);
+        let event = SecurityAuditEvent::new(id, -7, recorded_at, decision);
+
+        assert_eq!(event.id(), id);
+        assert_eq!(event.sequence(), -7);
+        assert_eq!(event.recorded_at(), recorded_at);
+        assert_eq!(event.decision(), &decision);
     }
 }
