@@ -8,7 +8,14 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use orna_postgres_engine::{ENGINE_MANIFEST, SUPPORT_ARCHIVE, SUPPORT_MANIFEST};
+use nix::{
+    errno::Errno,
+    sys::wait::{WaitStatus, waitpid},
+    unistd::{ForkResult, Pid, fork},
+};
+use orna_postgres_engine::{
+    AbsolutePath, ENGINE_MANIFEST, EmbeddedEngine, EngineError, SUPPORT_ARCHIVE, SUPPORT_MANIFEST,
+};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
@@ -97,8 +104,13 @@ impl MaterialisedSupport {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum EmbeddedHostError {
+    Engine(EngineError),
     InvalidSupportManifest,
     InvalidSupportPath,
+    MultipleThreads,
+    InitialiserExited(i32),
+    InitialiserSignalled(i32),
+    InitialiserWait,
     SupportMismatch(&'static str),
     Io(io::Error),
 }
@@ -106,11 +118,28 @@ pub enum EmbeddedHostError {
 impl fmt::Display for EmbeddedHostError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Engine(source) => source.fmt(formatter),
             Self::InvalidSupportManifest => {
                 formatter.write_str("embedded PostgreSQL support manifest is invalid")
             }
             Self::InvalidSupportPath => {
                 formatter.write_str("embedded PostgreSQL support path is invalid")
+            }
+            Self::MultipleThreads => formatter.write_str(
+                "embedded PostgreSQL cannot fork while the Orna supervisor has another thread",
+            ),
+            Self::InitialiserExited(status) => {
+                write!(
+                    formatter,
+                    "embedded PostgreSQL initialisation exited with status {status}"
+                )
+            }
+            Self::InitialiserSignalled(signal) => write!(
+                formatter,
+                "embedded PostgreSQL initialisation was stopped by signal {signal}"
+            ),
+            Self::InitialiserWait => {
+                formatter.write_str("embedded PostgreSQL initialisation could not be reaped")
             }
             Self::SupportMismatch(reason) => {
                 write!(
@@ -129,6 +158,7 @@ impl fmt::Display for EmbeddedHostError {
 impl std::error::Error for EmbeddedHostError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Self::Engine(source) => Some(source),
             Self::Io(source) => Some(source),
             _ => None,
         }
@@ -138,6 +168,12 @@ impl std::error::Error for EmbeddedHostError {
 impl From<io::Error> for EmbeddedHostError {
     fn from(source: io::Error) -> Self {
         Self::Io(source)
+    }
+}
+
+impl From<EngineError> for EmbeddedHostError {
+    fn from(source: EngineError) -> Self {
+        Self::Engine(source)
     }
 }
 
@@ -178,6 +214,106 @@ pub fn materialise_support_data(root: &Path) -> Result<MaterialisedSupport, Embe
         root: root.to_owned(),
         member_count: manifest.members.len(),
     })
+}
+
+/// Initialises one new, empty PostgreSQL data directory through the linked engine entry.
+///
+/// The caller must own the instance lock and must call this before it creates an asynchronous
+/// runtime or another operating-system thread.
+pub fn initialise_embedded_cluster(
+    support_root: &Path,
+    data_directory: &Path,
+) -> Result<(), EmbeddedHostError> {
+    require_single_thread()?;
+    let support_root = AbsolutePath::new(support_root)?;
+    let data_directory = AbsolutePath::new(data_directory)?;
+
+    // SAFETY: the thread gate ran immediately before this call. The child uses only prepared
+    // values, resets its signal state, and enters process-global PostgreSQL code. The parent does
+    // not call PostgreSQL and waits for the exact child.
+    match unsafe { fork() }.map_err(|_| EmbeddedHostError::InitialiserWait)? {
+        ForkResult::Child => {
+            if reset_child_signals().is_err() {
+                process_exit(126);
+            }
+            // SAFETY: this is the fresh, single-threaded child selected above.
+            let engine = match unsafe { EmbeddedEngine::configure_process(&support_root) } {
+                Ok(engine) => engine,
+                Err(_) => process_exit(124),
+            };
+            // SAFETY: the child owns PostgreSQL process-global state and exits after this call.
+            let status = unsafe { engine.initialise_process(&data_directory) };
+            process_exit(status);
+        }
+        ForkResult::Parent { child } => wait_for_initialiser(child),
+    }
+}
+
+fn require_single_thread() -> Result<(), EmbeddedHostError> {
+    let mut count = 0_usize;
+    for task in fs::read_dir("/proc/self/task")? {
+        task?;
+        count += 1;
+        if count > 1 {
+            return Err(EmbeddedHostError::MultipleThreads);
+        }
+    }
+    if count == 1 {
+        Ok(())
+    } else {
+        Err(EmbeddedHostError::MultipleThreads)
+    }
+}
+
+fn wait_for_initialiser(child: Pid) -> Result<(), EmbeddedHostError> {
+    loop {
+        match waitpid(child, None) {
+            Ok(WaitStatus::Exited(waited, 0)) if waited == child => return Ok(()),
+            Ok(WaitStatus::Exited(waited, status)) if waited == child => {
+                return Err(EmbeddedHostError::InitialiserExited(status));
+            }
+            Ok(WaitStatus::Signaled(waited, signal, _)) if waited == child => {
+                return Err(EmbeddedHostError::InitialiserSignalled(signal as i32));
+            }
+            Ok(
+                WaitStatus::Continued(_)
+                | WaitStatus::Stopped(_, _)
+                | WaitStatus::PtraceEvent(_, _, _)
+                | WaitStatus::PtraceSyscall(_),
+            ) => continue,
+            Ok(_) => return Err(EmbeddedHostError::InitialiserWait),
+            Err(Errno::EINTR) => continue,
+            Err(_) => return Err(EmbeddedHostError::InitialiserWait),
+        }
+    }
+}
+
+fn reset_child_signals() -> Result<(), ()> {
+    // SAFETY: all pointers refer to live local values. The caller is the fresh child process.
+    unsafe {
+        let mut action: nix::libc::sigaction = std::mem::zeroed();
+        action.sa_sigaction = nix::libc::SIG_DFL;
+        if nix::libc::sigemptyset(&mut action.sa_mask) != 0 {
+            return Err(());
+        }
+        for signal in 1..=nix::libc::SIGRTMAX() {
+            if signal != nix::libc::SIGKILL && signal != nix::libc::SIGSTOP {
+                let _ = nix::libc::sigaction(signal, &action, std::ptr::null_mut());
+            }
+        }
+        let mut mask: nix::libc::sigset_t = std::mem::zeroed();
+        if nix::libc::sigemptyset(&mut mask) != 0
+            || nix::libc::sigprocmask(nix::libc::SIG_SETMASK, &mask, std::ptr::null_mut()) != 0
+        {
+            return Err(());
+        }
+    }
+    Ok(())
+}
+
+fn process_exit(status: i32) -> ! {
+    // SAFETY: `_exit` terminates only this forked child and does not run inherited Rust destructors.
+    unsafe { nix::libc::_exit(status) }
 }
 
 fn parse_support_manifest() -> Result<SupportManifest, EmbeddedHostError> {
