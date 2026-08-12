@@ -3,15 +3,18 @@
 use std::{collections::BTreeMap, error::Error, fmt};
 
 use orna_core::{
-    FunctionId, InvocationId, ParameterId, catalogue::CatalogueSnapshot, value::RuntimeValue,
+    FunctionId, InvocationId, ParameterId, catalogue::CatalogueSnapshot,
+    revision::ActiveDatabaseRevision, value::RuntimeValue,
 };
 
 use crate::{
-    ValueCodecError, decode_catalogue_value, decode_value, encode_catalogue_value, encode_value,
+    ValueCodecError, decode_active_value, decode_catalogue_value, decode_value,
+    encode_active_value, encode_catalogue_value, encode_value,
 };
 
 const MARKER: &[u8; 4] = b"ORF1";
 const CATALOGUE_MARKER: &[u8; 4] = b"ORF2";
+const ACTIVE_MARKER: &[u8; 4] = b"ORF3";
 const HEADER_LENGTH: usize = 18;
 const PING_TAG: u8 = 0x06;
 const PONG_TAG: u8 = 0x86;
@@ -25,7 +28,7 @@ const EVENT_BATCH_TAG: u8 = 0x82;
 const CALL_COMPLETED_TAG: u8 = 0x83;
 const CALL_FAILED_TAG: u8 = 0x84;
 const CALL_CANCELLED_TAG: u8 = 0x85;
-/// The largest payload accepted by one version-1 raw-call frame.
+/// The largest payload accepted by one raw-call frame.
 pub const MAX_FRAME_PAYLOAD_LENGTH: usize = 16 * 1024 * 1024 + 64;
 
 /// A separately flow-controlled raw-call output channel.
@@ -104,7 +107,7 @@ impl CallFailure {
     }
 }
 
-/// One version-1 event value.
+/// One raw-call event value.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
     /// One canonical typed result value.
@@ -434,6 +437,7 @@ const MAX_WINDOW: u64 = 1024 * 1024 * 1024;
 enum FrameVersion<'a> {
     One,
     Catalogue(&'a CatalogueSnapshot),
+    Active(&'a ActiveDatabaseRevision),
 }
 
 impl FrameVersion<'_> {
@@ -441,6 +445,7 @@ impl FrameVersion<'_> {
         match self {
             Self::One => MARKER,
             Self::Catalogue(_) => CATALOGUE_MARKER,
+            Self::Active(_) => ACTIVE_MARKER,
         }
     }
 
@@ -448,6 +453,7 @@ impl FrameVersion<'_> {
         match self {
             Self::One => encode_value(value),
             Self::Catalogue(catalogue) => encode_catalogue_value(catalogue, value),
+            Self::Active(active) => encode_active_value(active, value),
         }
     }
 
@@ -455,6 +461,7 @@ impl FrameVersion<'_> {
         match self {
             Self::One => decode_value(encoded),
             Self::Catalogue(catalogue) => decode_catalogue_value(catalogue, encoded),
+            Self::Active(active) => decode_active_value(active, encoded),
         }
     }
 }
@@ -546,6 +553,21 @@ impl ProtocolConnection {
         self.receive_with_version(FrameVersion::Catalogue(catalogue), frame)
     }
 
+    /// Receives one active-revision version-3 client frame.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ConnectionError`] when the frame violates a state transition,
+    /// bounded connection limit, or active-revision value rule. An error leaves
+    /// all prior state unchanged.
+    pub fn receive_active(
+        &mut self,
+        active: &ActiveDatabaseRevision,
+        frame: ClientFrame,
+    ) -> Result<Option<ClientAction>, ConnectionError> {
+        self.receive_with_version(FrameVersion::Active(active), frame)
+    }
+
     fn receive_with_version(
         &mut self,
         version: FrameVersion<'_>,
@@ -595,6 +617,21 @@ impl ProtocolConnection {
         action: ServerAction,
     ) -> Result<ServerFrame, ConnectionError> {
         self.apply_with_version(FrameVersion::Catalogue(catalogue), action)
+    }
+
+    /// Applies one active-revision version-3 server-adapter result.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ConnectionError`] when the action violates the current call
+    /// state, sequence, frame, flow-control, or active-revision value contract.
+    /// An error leaves all prior state and window credit unchanged.
+    pub fn apply_active(
+        &mut self,
+        active: &ActiveDatabaseRevision,
+        action: ServerAction,
+    ) -> Result<ServerFrame, ConnectionError> {
+        self.apply_with_version(FrameVersion::Active(active), action)
     }
 
     fn apply_with_version(
@@ -941,19 +978,19 @@ pub enum FrameCodecError {
         /// The total number of available bytes.
         actual: usize,
     },
-    /// The encoded frame does not start with the version-1 marker.
+    /// The encoded frame does not start with the selected protocol marker.
     InvalidMarker,
     /// The frame tag belongs to the opposite direction.
     WrongDirection {
         /// The recognised tag from the opposite direction.
         tag: u8,
     },
-    /// The frame tag is not defined by protocol version 1.
+    /// The frame tag is not defined by the selected protocol version.
     UnknownTag {
         /// The unrecognised frame tag.
         tag: u8,
     },
-    /// Version 1 requires the flags byte to be zero.
+    /// The selected protocol version requires the flags byte to be zero.
     NonZeroFlags {
         /// The unsupported flags byte.
         flags: u8,
@@ -965,11 +1002,11 @@ pub enum FrameCodecError {
         /// The supplied stream number.
         stream: u64,
     },
-    /// A supplied or declared payload exceeds the version-1 limit.
+    /// A supplied or declared payload exceeds the shared frame limit.
     PayloadTooLarge {
         /// The supplied or declared payload length.
         actual: usize,
-        /// The maximum version-1 payload length.
+        /// The shared raw-call frame payload limit.
         maximum: usize,
     },
     /// The encoded payload is shorter than its declared length.
@@ -1012,7 +1049,7 @@ pub enum FrameCodecError {
         /// The canonical value codec failure.
         source: ValueCodecError,
     },
-    /// A failure payload is not one of the four version-1 values.
+    /// A failure payload is not one of the four closed values.
     InvalidFailure {
         /// The invalid four-byte failure value.
         bytes: [u8; 4],
@@ -1138,6 +1175,19 @@ pub fn encode_catalogue_client_frame(
     encode_client_frame_with_version(FrameVersion::Catalogue(catalogue), frame)
 }
 
+/// Encodes one complete active-revision version-3 client frame.
+///
+/// # Errors
+///
+/// Returns a [`FrameCodecError`] when the frame cannot satisfy the version-3
+/// envelope, payload, or active-revision value contract.
+pub fn encode_active_client_frame(
+    active: &ActiveDatabaseRevision,
+    frame: &ClientFrame,
+) -> Result<Vec<u8>, FrameCodecError> {
+    encode_client_frame_with_version(FrameVersion::Active(active), frame)
+}
+
 fn encode_client_frame_with_version(
     version: FrameVersion<'_>,
     frame: &ClientFrame,
@@ -1209,6 +1259,20 @@ pub fn decode_catalogue_client_frame(
     encoded: &[u8],
 ) -> Result<ClientFrame, FrameCodecError> {
     decode_client_frame_with_version(FrameVersion::Catalogue(catalogue), encoded)
+}
+
+/// Decodes one complete active-revision version-3 client frame.
+///
+/// # Errors
+///
+/// Returns a [`FrameCodecError`] for an invalid version-3 envelope,
+/// wrong-direction tag, unknown tag, invalid payload, or value rejected by the
+/// active revision.
+pub fn decode_active_client_frame(
+    active: &ActiveDatabaseRevision,
+    encoded: &[u8],
+) -> Result<ClientFrame, FrameCodecError> {
+    decode_client_frame_with_version(FrameVersion::Active(active), encoded)
 }
 
 fn decode_client_frame_with_version(
@@ -1304,6 +1368,19 @@ pub fn encode_catalogue_server_frame(
     encode_server_frame_with_version(FrameVersion::Catalogue(catalogue), frame)
 }
 
+/// Encodes one complete active-revision version-3 server frame.
+///
+/// # Errors
+///
+/// Returns a [`FrameCodecError`] when the frame cannot satisfy the version-3
+/// envelope, payload, or active-revision value contract.
+pub fn encode_active_server_frame(
+    active: &ActiveDatabaseRevision,
+    frame: &ServerFrame,
+) -> Result<Vec<u8>, FrameCodecError> {
+    encode_server_frame_with_version(FrameVersion::Active(active), frame)
+}
+
 fn encode_server_frame_with_version(
     version: FrameVersion<'_>,
     frame: &ServerFrame,
@@ -1360,6 +1437,20 @@ pub fn decode_catalogue_server_frame(
     encoded: &[u8],
 ) -> Result<ServerFrame, FrameCodecError> {
     decode_server_frame_with_version(FrameVersion::Catalogue(catalogue), encoded)
+}
+
+/// Decodes one complete active-revision version-3 server frame.
+///
+/// # Errors
+///
+/// Returns a [`FrameCodecError`] for an invalid version-3 envelope,
+/// wrong-direction tag, unknown tag, invalid payload, or value rejected by the
+/// active revision.
+pub fn decode_active_server_frame(
+    active: &ActiveDatabaseRevision,
+    encoded: &[u8],
+) -> Result<ServerFrame, FrameCodecError> {
+    decode_server_frame_with_version(FrameVersion::Active(active), encoded)
 }
 
 fn decode_server_frame_with_version(
