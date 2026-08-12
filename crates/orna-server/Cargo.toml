@@ -14,6 +14,10 @@ nix = { version = "0.31.3", features = ["fs", "process", "signal", "term"] }
 orna-kernel-postgres = { path = "../orna-kernel-postgres" }
 orna-postgres-engine = { path = "../orna-postgres-engine", features = ["embedded"] }
 orna-standard = { path = "../orna-standard" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+tar = "0.4"
 tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread"] }
 tokio-postgres = "0.7.18"
 url = "2.5.8"
