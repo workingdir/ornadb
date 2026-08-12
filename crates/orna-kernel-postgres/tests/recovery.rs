@@ -56,6 +56,8 @@ const STANDARD_CLIENT_TRUE_SOURCE_ONLY_EDIT: &str = "-- source-only formatting e
     CREATE CLIENT FUNCTION app.enabled() RETURNS BOOLEAN RETURN TRUE;\n";
 const STANDARD_CLIENT_FALSE_SOURCE: &str =
     "CREATE SCHEMA app;\nCREATE CLIENT FUNCTION app.enabled() RETURNS BOOLEAN RETURN FALSE;\n";
+const STANDARD_ENUM_SOURCE: &str =
+    "CREATE SCHEMA app;\nCREATE TYPE app.stage AS ENUM ('lead', 'owner''s', 'customer');\n";
 const STANDARD_SECURITY_SOURCE: &str = "CREATE SCHEMA app;\n\
     CREATE TYPE app.flag AS OBJECT (value BOOLEAN NOT NULL);\n\
     CREATE SERVER FUNCTION app.read() RETURNS ROWS (value BOOLEAN)\n\
@@ -2256,6 +2258,35 @@ async fn rejects_tampered_schema_catalogue_hash() -> TestResult<()> {
 
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
+async fn rejects_enum_label_name_and_origin_tampering() -> TestResult<()> {
+    reject_enum_tamper(
+        "UPDATE _orna_kernel.catalogue_enum_types
+         SET labels = ARRAY['customer', 'owner''s', 'lead']",
+        ExpectedRecoveryError::Durable("_orna_kernel.catalogue_revisions"),
+    )
+    .await?;
+    reject_enum_tamper(
+        "UPDATE _orna_kernel.catalogue_enum_types
+         SET labels = ARRAY['lead', 'lead', 'customer']",
+        ExpectedRecoveryError::Catalogue,
+    )
+    .await?;
+    reject_enum_tamper(
+        "UPDATE _orna_kernel.catalogue_enum_types
+         SET name_parts = ARRAY['wrong', 'stage']",
+        ExpectedRecoveryError::Durable("_orna_kernel.catalogue_enum_types"),
+    )
+    .await?;
+    reject_enum_tamper(
+        "UPDATE _orna_kernel.catalogue_enum_types
+         SET source_start = source_start + 1",
+        ExpectedRecoveryError::Durable("_orna_kernel.catalogue_revisions"),
+    )
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
 async fn rejects_object_field_expression_and_origin_tampering() -> TestResult<()> {
     for (statement, expected) in [
         (
@@ -2742,6 +2773,45 @@ async fn reject_schema_tamper(
         install_schema_revision(&database).await?;
         run_batch(&database, statement).await?;
 
+        require_expected_error(recovery_error(&database).await?, expected)
+    })
+    .await
+}
+
+async fn reject_enum_tamper(
+    statement: &'static str,
+    expected: ExpectedRecoveryError,
+) -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = kernel(&database)?;
+        kernel.bootstrap().await?;
+        let empty = kernel.recover().await?;
+        let schema_bundle =
+            orna_core::source::SourceBundle::new([orna_core::source::SourceUnit::new(
+                "main.orna",
+                STANDARD_CLIENT_SCHEMA_SOURCE,
+            )])?;
+        let schema_report = check(&schema_bundle, empty.catalogue());
+        require(
+            schema_report.diagnostics().is_empty(),
+            format!(
+                "enum schema compiler diagnostics: {:?}",
+                schema_report.diagnostics()
+            ),
+        )?;
+        let schema_candidate = prepare(&schema_report, empty.pair(), &empty)?;
+        let version_one = kernel.apply(&schema_candidate).await?;
+        let upgrade = orna_standard::prepare_standard_upgrade(&version_one)?;
+        let version_two = kernel.apply_standard_upgrade(&upgrade).await?;
+        let enum_candidate =
+            standard_client_candidate(STANDARD_ENUM_SOURCE, &version_two, &upgrade)?;
+        let installed = kernel.apply(&enum_candidate).await?;
+        require(
+            installed.catalogue().enum_types() == enum_candidate.candidate().enum_types(),
+            "enum tamper fixture did not install its exact semantic enum",
+        )?;
+
+        run_batch(&database, statement).await?;
         require_expected_error(recovery_error(&database).await?, expected)
     })
     .await
