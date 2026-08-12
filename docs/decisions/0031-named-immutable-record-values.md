@@ -119,10 +119,55 @@ column. It does not generate a PostgreSQL composite, JSON value, or SQL record
 constructor.
 
 Existing INSERT, UPDATE, and DELETE mutation artifact versions and bytes stay
-closed. The first record-constructor INSERT uses a new artifact version. Its
-exact bytes must be accepted in the artifact commit before the compiler can
-emit it. A decoder for an earlier version must reject the new version and
-record expression tag.
+closed. The first record-constructor INSERT uses
+`orna.server-mutation-plan` version 4. Version 4 retains the existing header,
+INSERT operation tag, target, assignment sequence, and returned-object bytes.
+It is selected if and only if an INSERT contains at least one record
+constructor. A record-free INSERT remains version 1. UPDATE remains version 2
+and rejects record constructors. DELETE remains the separate version-3 plan.
+
+Version 4 retains expression tags 1 through 3 and adds record-constructor tag
+4. The record expression bytes are:
+
+```text
+offset  size  field
+0       1     expression tag, exactly 4
+1       1     resolved-type tag, exactly 2 for a named value type
+2       16    record TypeId
+18      1     nullable, exactly 0
+19      4     field count, unsigned big-endian, 1 through 1024
+23      ...   declaration-order field entries
+```
+
+Each field entry is:
+
+```text
+offset  size  field
+0       16    owning record TypeId, equal to the outer record TypeId
+16      16    record FieldId
+32      ...   one child expression
+```
+
+A child expression reuses the existing complete expression encoding. It is
+limited to parameter tag 1 or Boolean-literal tag 2 and is always non-null.
+A parameter child uses one of the six accepted scalar type encodings or named
+type tag 2 followed by an enum `TypeId`. A Boolean child uses the existing
+Boolean scalar encoding. Typed NULL, reference types, and record-constructor
+children are invalid. Field owner and `FieldId` pairs are unique, and every
+parameter read in the complete plan has the same function owner. The active
+catalogue later proves that a named child type is the exact declared enum,
+that every owner-qualified field exists in declaration order, and that the
+complete field set matches the record definition.
+
+Version 4 permits the existing non-record expressions beside a record
+constructor without changing their bytes. A version-4 artifact with no record
+constructor is non-canonical and rejected. Version 1 and version 2 reject
+version 4, expression tag 4, and named resolved-type tag 2. Version 3 remains
+accepted only by the DELETE decoder. The existing 16 MiB artifact limit and
+1,024-assignment limit apply; the record field count has its own 1,024 limit.
+The artifact implementation must pin one exact mixed scalar-and-enum record
+golden, round-trip version 4, reject every structural and version mismatch,
+and retain every existing version-1, version-2, and version-3 golden byte.
 
 ## Identity, evolution, and catalogue hash
 
