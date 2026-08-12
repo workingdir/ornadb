@@ -13,6 +13,7 @@ use orna_core::{
         ActiveDatabaseRevision, DefinitionReferenceKind, DefinitionReferenceTarget,
         FunctionSemanticHashVersion, RevisionPair,
     },
+    security::{AuthorisedInvocation, InvocationTarget},
     types::StandardScalar,
     value::RuntimeValue,
 };
@@ -148,6 +149,13 @@ impl Error for ClientExecutionRule {}
 #[non_exhaustive]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ClientExecutionError {
+    /// The allow evidence targets another active revision.
+    AuthorisationMismatch {
+        /// The function and revision authorised by the security decision.
+        authorised: InvocationTarget,
+        /// The active revision supplied for local evaluation.
+        active: RevisionPair,
+    },
     /// The active revision cannot form trusted canonical semantics.
     InvalidActiveRevision {
         /// The active revision pair.
@@ -184,6 +192,7 @@ impl ClientExecutionError {
     /// Returns the active revision pair associated with this error.
     pub const fn pair(&self) -> RevisionPair {
         match self {
+            Self::AuthorisationMismatch { active, .. } => *active,
             Self::InvalidActiveRevision { pair, .. } | Self::FunctionNotFound { pair, .. } => *pair,
             Self::InvalidFunction { context, .. } | Self::InvalidArtifact { context, .. } => {
                 context.pair()
@@ -194,6 +203,7 @@ impl ClientExecutionError {
     /// Returns the requested or resolved function identity associated with this error.
     pub const fn function(&self) -> FunctionId {
         match self {
+            Self::AuthorisationMismatch { authorised, .. } => authorised.function(),
             Self::InvalidActiveRevision { function, .. }
             | Self::FunctionNotFound { function, .. } => *function,
             Self::InvalidFunction { context, .. } | Self::InvalidArtifact { context, .. } => {
@@ -205,7 +215,9 @@ impl ClientExecutionError {
     /// Returns the resolved context after function resolution.
     pub const fn context(&self) -> Option<&ClientExecutionContext> {
         match self {
-            Self::InvalidActiveRevision { .. } | Self::FunctionNotFound { .. } => None,
+            Self::AuthorisationMismatch { .. }
+            | Self::InvalidActiveRevision { .. }
+            | Self::FunctionNotFound { .. } => None,
             Self::InvalidFunction { context, .. } | Self::InvalidArtifact { context, .. } => {
                 Some(context)
             }
@@ -216,6 +228,9 @@ impl ClientExecutionError {
 impl fmt::Display for ClientExecutionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::AuthorisationMismatch { .. } => {
+                formatter.write_str("the CLIENT authorisation does not match the active revision")
+            }
             Self::InvalidActiveRevision { .. } => {
                 formatter.write_str("the active revision cannot be trusted")
             }
@@ -235,20 +250,30 @@ impl Error for ClientExecutionError {
         match self {
             Self::InvalidActiveRevision { source, .. } => Some(source),
             Self::InvalidArtifact { source, .. } => Some(source),
-            Self::FunctionNotFound { .. } | Self::InvalidFunction { .. } => None,
+            Self::AuthorisationMismatch { .. }
+            | Self::FunctionNotFound { .. }
+            | Self::InvalidFunction { .. } => None,
         }
     }
 }
 
 /// Evaluates one closed Boolean CLIENT function from one active revision.
 ///
-/// This is a low-level, post-authorisation and post-trust-policy boundary. It
-/// performs no database, protocol, filesystem, process, environment, clock,
-/// random, network, or runtime-library operation.
+/// The allow evidence selects the only function and revision that may run. The
+/// evaluator performs no database, protocol, filesystem, process, environment,
+/// clock, random, network, or runtime-library operation.
 pub fn evaluate_client_function(
     active: &ActiveDatabaseRevision,
-    function: FunctionId,
+    authorisation: &AuthorisedInvocation,
 ) -> Result<ClientExecutionResult, ClientExecutionError> {
+    let target = authorisation.target();
+    if target.revision() != active.pair() {
+        return Err(ClientExecutionError::AuthorisationMismatch {
+            authorised: target,
+            active: active.pair(),
+        });
+    }
+    let function = target.function();
     validate_active_catalogue(active, function)?;
 
     let pair = active.pair();
@@ -472,8 +497,8 @@ fn invalid_function(
 #[cfg(test)]
 mod tests {
     use orna_core::{
-        CatalogueRevisionId, FunctionId, FunctionRevisionId, ParameterId, SchemaId, SourceBundleId,
-        SourceRevisionId, SourceUnitId, TypeId,
+        CatalogueRevisionId, FunctionId, FunctionRevisionId, ParameterId, PrincipalId, SchemaId,
+        SourceBundleId, SourceRevisionId, SourceUnitId, TypeId,
         canonical_hash::{
             artifact_payload_digest, catalogue_digest, catalogue_digest_with_context,
             function_declaration_digest, function_semantic_digest,
@@ -493,12 +518,46 @@ mod tests {
             RevisionInvariantError, RevisionPair, SourceOrigin, StoredSourceRevision,
             StoredSourceUnit,
         },
+        security::{
+            AuthorisedInvocation, ExecuteDecision, ExecuteGrant, InvocationTarget, Principal,
+            PrincipalKind, PrincipalStatus, SecuritySnapshot,
+        },
         source::{SourceBundle, SourceUnit},
         types::{ResolvedType, StandardScalar},
         value::RuntimeValue,
     };
 
-    use super::evaluate_client_function;
+    fn authorise(pair: RevisionPair, function: FunctionId) -> AuthorisedInvocation {
+        let principal = PrincipalId::from_bytes([0x7a; 16]);
+        let snapshot = SecuritySnapshot::new(
+            pair,
+            vec![function],
+            vec![Principal::new(
+                principal,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            vec![],
+            vec![ExecuteGrant::new(principal, function)],
+        )
+        .expect("test security snapshot should validate");
+        let session = snapshot
+            .bind_authenticated_session(principal, vec![])
+            .expect("test security session should bind");
+        let ExecuteDecision::Allowed(authorisation) =
+            snapshot.authorise_execute(&session, InvocationTarget::new(function, pair))
+        else {
+            panic!("test security grant should allow the function");
+        };
+        authorisation
+    }
+
+    fn evaluate_client_function(
+        active: &ActiveDatabaseRevision,
+        function: FunctionId,
+    ) -> Result<super::ClientExecutionResult, super::ClientExecutionError> {
+        super::evaluate_client_function(active, &authorise(active.pair(), function))
+    }
 
     #[test]
     fn evaluates_version_one_client_constants() {
@@ -512,6 +571,45 @@ mod tests {
             assert_eq!(result.context().function_revision(), function_revision);
             assert_eq!(result.value(), &RuntimeValue::Boolean(value));
         }
+    }
+
+    #[test]
+    fn rejects_mismatched_authorisation_before_active_revision_validation() {
+        let (active, function, pair, _) = version_one_active(true);
+        let other_pair = RevisionPair::new(
+            SourceRevisionId::from_bytes([0x7b; 16]),
+            CatalogueRevisionId::from_bytes([0x7c; 16]),
+        );
+        let untrusted = ActiveDatabaseRevision::new(
+            active.pair(),
+            active.source().clone(),
+            active.catalogue().clone(),
+            orna_core::revision::Sha256Digest::from_bytes([0x7d; 32]),
+            active.expressions().to_vec(),
+            active.function_revisions().to_vec(),
+            active.origins().to_vec(),
+            active.references().to_vec(),
+        )
+        .expect("tampered hash remains structurally valid");
+
+        let error = super::evaluate_client_function(&untrusted, &authorise(other_pair, function))
+            .expect_err("mismatched authorisation must fail");
+
+        assert_eq!(error.pair(), pair);
+        assert_eq!(error.function(), function);
+        assert_eq!(error.context(), None);
+        assert_eq!(
+            error.to_string(),
+            "the CLIENT authorisation does not match the active revision"
+        );
+        assert!(matches!(
+            error,
+            super::ClientExecutionError::AuthorisationMismatch {
+                authorised,
+                active,
+            } if authorised == InvocationTarget::new(function, other_pair) && active == pair
+        ));
+        assert!(std::error::Error::source(&error).is_none());
     }
 
     #[test]

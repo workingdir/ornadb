@@ -5060,7 +5060,29 @@ fn require_standard_client_execution(
         "standard CLIENT function changed its exact NamedType ValueType reference",
     )?;
 
-    let result = evaluate_client_function(active, function.id())?;
+    let evaluator_principal = PrincipalId::from_bytes([0x79; 16]);
+    let evaluator_security = SecuritySnapshot::new(
+        active.pair(),
+        vec![function.id()],
+        vec![Principal::new(
+            evaluator_principal,
+            PrincipalKind::User,
+            PrincipalStatus::Active,
+        )],
+        vec![],
+        vec![ExecuteGrant::new(evaluator_principal, function.id())],
+    )?;
+    let evaluator_session =
+        evaluator_security.bind_authenticated_session(evaluator_principal, vec![])?;
+    let ExecuteDecision::Allowed(authorisation) = evaluator_security.authorise_execute(
+        &evaluator_session,
+        InvocationTarget::new(function.id(), active.pair()),
+    ) else {
+        return Err(failure(
+            "standard CLIENT test grant did not authorise evaluation",
+        ));
+    };
+    let result = evaluate_client_function(active, &authorisation)?;
     require(
         result.context().pair() == active.pair()
             && result.context().function() == function.id()
