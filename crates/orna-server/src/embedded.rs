@@ -2,21 +2,25 @@
 
 use std::{
     collections::BTreeSet,
-    ffi::CString,
+    ffi::{CString, OsString},
     fmt, fs,
-    io::{self, Cursor, Read, Write},
-    os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+    io::{self, Cursor, Read, Seek, SeekFrom, Write},
+    os::{
+        fd::AsRawFd,
+        unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+    },
     path::{Component, Path, PathBuf},
+    sync::atomic::{AtomicI32, Ordering},
     time::Duration,
 };
 
 use nix::{
     errno::Errno,
     sys::{
-        signal::{Signal, kill},
+        signal::{SaFlags, SigAction, SigHandler, SigSet, Signal, kill, sigaction},
         wait::{WaitPidFlag, WaitStatus, waitpid},
     },
-    unistd::{ForkResult, Pid, fork},
+    unistd::{ForkResult, Group, Pid, User, fork, getegid, geteuid, getgroups},
 };
 use orna_postgres_engine::{
     AbsolutePath, ENGINE_MANIFEST, EmbeddedEngine, EngineError, LinkedArguments, SUPPORT_ARCHIVE,
@@ -26,15 +30,33 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio_postgres::{Config, NoTls};
 
+use crate::{OpenStandardDatabaseError, open_standard_database};
+
 const INSTANCE_NAME: &str = "default";
 const STATE_ROOT: &str = "/var/lib/orna/instances/default";
 const RUNTIME_ROOT: &str = "/run/orna/default";
 const SUPPORT_DIRECTORY: &str = "embedded-postgresql";
+const CONFIGURATION_PATH: &str = "/etc/orna/instances/default.toml";
+const PACKAGE_LOCK_PATH: &str = "/var/lib/orna/package.lock";
+const PACKAGE_STATE_PATH: &str = "/var/lib/orna/package-state.toml";
+const INSTANCE_PARENT: &str = "/var/lib/orna/instances";
+const INSTANCE_LOCK_NAME: &str = "lock";
+const INSTANCE_MANIFEST_NAME: &str = "instance.toml";
+const READY_NAME: &str = "ready";
+const GENERATION_NAME: &str = "0000000000000001";
+const CONFIGURATION_BYTES: &[u8] = b"format = 1\ninstance = \"default\"\n";
+const PACKAGE_STATE_BYTES: &[u8] = b"format = 1\nstate = \"ready\"\n";
+const BOOTSTRAP_HBA_BYTES: &[u8] =
+    b"local postgres orna_kernel peer map=orna_default\nlocal all all reject\n";
+const NORMAL_HBA_BYTES: &[u8] =
+    b"local orna orna_kernel peer map=orna_default\nlocal all all reject\n";
+const IDENT_BYTES: &[u8] = b"orna_default orna orna_kernel\n";
 const POSTGRES_PORT: u16 = 5432;
 const STARTUP_ATTEMPTS: usize = 600;
 const STARTUP_INTERVAL: Duration = Duration::from_millis(50);
 const FAST_STOP_ATTEMPTS: usize = 600;
 const IMMEDIATE_STOP_ATTEMPTS: usize = 300;
+static SHUTDOWN_SIGNAL: AtomicI32 = AtomicI32::new(0);
 
 /// The immutable identity of the PostgreSQL engine embedded in this executable.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -95,6 +117,531 @@ impl EmbeddedHostPaths {
     }
 }
 
+struct ServiceIdentity {
+    uid: u32,
+    gid: u32,
+}
+
+#[derive(Clone, Copy)]
+enum LockKind {
+    Package,
+    Instance,
+}
+
+impl LockKind {
+    fn error(self) -> EmbeddedHostError {
+        match self {
+            Self::Package => EmbeddedHostError::InvalidPackageState,
+            Self::Instance => EmbeddedHostError::InvalidInstanceState,
+        }
+    }
+}
+
+struct PreparedInstance {
+    paths: EmbeddedHostPaths,
+    identity: EmbeddedEngineIdentity,
+    data_directory: PathBuf,
+    is_new: bool,
+    _package_lock: fs::File,
+    _instance_lock: fs::File,
+    _support: MaterialisedSupport,
+}
+
+fn prepare_instance() -> Result<PreparedInstance, EmbeddedHostError> {
+    let service = require_service_identity()?;
+    require_file_bytes(
+        Path::new(CONFIGURATION_PATH),
+        0,
+        0,
+        0o644,
+        CONFIGURATION_BYTES,
+    )?;
+    let package_lock = open_verified_lock(
+        Path::new(PACKAGE_LOCK_PATH),
+        0,
+        service.gid,
+        0o640,
+        nix::libc::F_RDLCK as i16,
+        LockKind::Package,
+    )?;
+    require_file_bytes(
+        Path::new(PACKAGE_STATE_PATH),
+        0,
+        service.gid,
+        0o640,
+        PACKAGE_STATE_BYTES,
+    )
+    .map_err(|_| EmbeddedHostError::InvalidPackageState)?;
+
+    let paths = EmbeddedHostPaths::production();
+    require_directory(Path::new(INSTANCE_PARENT), service.uid, service.gid, 0o700)?;
+    require_directory(paths.runtime_root(), service.uid, service.gid, 0o700)?;
+    let state_metadata = fs::symlink_metadata(paths.state_root());
+    let is_new = match state_metadata {
+        Ok(_) => {
+            require_directory(paths.state_root(), service.uid, service.gid, 0o700)?;
+            false
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            create_owned_directory(paths.state_root(), 0o700)?;
+            sync_directory(Path::new(INSTANCE_PARENT))?;
+            true
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let lock_path = paths.state_root().join(INSTANCE_LOCK_NAME);
+    if is_new {
+        create_lock_file(&lock_path)?;
+    }
+    let instance_lock = open_verified_lock(
+        &lock_path,
+        service.uid,
+        service.gid,
+        0o600,
+        nix::libc::F_WRLCK as i16,
+        LockKind::Instance,
+    )?;
+
+    let generation = paths.state_root().join("generations").join(GENERATION_NAME);
+    let data_directory = generation.join("data");
+    let identity = EmbeddedEngineIdentity::current();
+    if is_new {
+        create_owned_directory(&paths.state_root().join("generations"), 0o700)?;
+        create_owned_directory(&generation, 0o700)?;
+        create_owned_directory(&data_directory, 0o700)?;
+        sync_directory(&generation)?;
+        sync_directory(
+            generation
+                .parent()
+                .ok_or(EmbeddedHostError::InvalidInstanceState)?,
+        )?;
+        sync_directory(paths.state_root())?;
+    } else {
+        require_directory(&data_directory, service.uid, service.gid, 0o700)?;
+        let manifest_path = paths.state_root().join(INSTANCE_MANIFEST_NAME);
+        let bytes = read_regular_file(&manifest_path, service.uid, service.gid, 0o600)?;
+        let active = instance_manifest_bytes(&identity, true);
+        let pending = instance_manifest_bytes(&identity, false);
+        if bytes != active && bytes != pending {
+            return Err(EmbeddedHostError::InvalidInstanceState);
+        }
+    }
+
+    let support_parent = paths.runtime_root().join(SUPPORT_DIRECTORY);
+    match fs::symlink_metadata(&support_parent) {
+        Ok(_) => require_directory(&support_parent, service.uid, service.gid, 0o700)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            create_owned_directory(&support_parent, 0o700)?;
+            sync_directory(paths.runtime_root())?;
+        }
+        Err(error) => return Err(error.into()),
+    }
+    let support = materialise_support_data(paths.support_root())?;
+    recreate_socket_directory(paths.socket_directory(), &service)?;
+    remove_stale_ready(paths.runtime_root().join(READY_NAME), &service)?;
+
+    Ok(PreparedInstance {
+        paths,
+        identity,
+        data_directory,
+        is_new,
+        _package_lock: package_lock,
+        _instance_lock: instance_lock,
+        _support: support,
+    })
+}
+
+fn require_service_identity() -> Result<ServiceIdentity, EmbeddedHostError> {
+    let user = User::from_name("orna")
+        .map_err(|_| EmbeddedHostError::InvalidServiceIdentity)?
+        .ok_or(EmbeddedHostError::InvalidServiceIdentity)?;
+    let group = Group::from_name("orna")
+        .map_err(|_| EmbeddedHostError::InvalidServiceIdentity)?
+        .ok_or(EmbeddedHostError::InvalidServiceIdentity)?;
+    let groups = getgroups().map_err(|_| EmbeddedHostError::InvalidServiceIdentity)?;
+    if user.uid.is_root()
+        || user.gid != group.gid
+        || user.shell != Path::new("/usr/sbin/nologin")
+        || geteuid() != user.uid
+        || getegid() != group.gid
+        || groups.iter().any(|gid| *gid != group.gid)
+        || group.mem.iter().any(|member| member != "orna")
+    {
+        return Err(EmbeddedHostError::InvalidServiceIdentity);
+    }
+    Ok(ServiceIdentity {
+        uid: user.uid.as_raw(),
+        gid: group.gid.as_raw(),
+    })
+}
+
+fn create_owned_directory(path: &Path, mode: u32) -> Result<(), EmbeddedHostError> {
+    fs::create_dir(path)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
+    sync_directory(path)?;
+    Ok(())
+}
+
+fn create_lock_file(path: &Path) -> Result<(), EmbeddedHostError> {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(b"\n")?;
+    file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    file.sync_all()?;
+    sync_directory(
+        path.parent()
+            .ok_or(EmbeddedHostError::InvalidInstanceState)?,
+    )?;
+    Ok(())
+}
+
+fn open_verified_lock(
+    path: &Path,
+    uid: u32,
+    gid: u32,
+    mode: u32,
+    lock_type: i16,
+    kind: LockKind,
+) -> Result<fs::File, EmbeddedHostError> {
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .write(lock_type == nix::libc::F_WRLCK as i16)
+        .custom_flags(libc_o_nofollow() | nix::libc::O_CLOEXEC)
+        .open(path)
+        .map_err(|_| kind.error())?;
+    require_metadata(&file.metadata().map_err(|_| kind.error())?, uid, gid, mode)
+        .map_err(|_| kind.error())?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).map_err(|_| kind.error())?;
+    if bytes != b"\n" {
+        return Err(kind.error());
+    }
+    file.seek(SeekFrom::Start(0)).map_err(|_| kind.error())?;
+    let mut lock = nix::libc::flock {
+        l_type: lock_type,
+        l_whence: nix::libc::SEEK_SET as i16,
+        l_start: 0,
+        l_len: 1,
+        l_pid: 0,
+    };
+    // SAFETY: the descriptor and lock pointer are valid for this fcntl call.
+    if unsafe { nix::libc::fcntl(file.as_raw_fd(), nix::libc::F_SETLK, &mut lock) } != 0 {
+        return Err(kind.error());
+    }
+    Ok(file)
+}
+
+fn require_file_bytes(
+    path: &Path,
+    uid: u32,
+    gid: u32,
+    mode: u32,
+    expected: &[u8],
+) -> Result<(), EmbeddedHostError> {
+    let bytes = read_regular_file(path, uid, gid, mode)?;
+    if bytes != expected {
+        return Err(EmbeddedHostError::InvalidInstanceState);
+    }
+    Ok(())
+}
+
+fn read_regular_file(
+    path: &Path,
+    uid: u32,
+    gid: u32,
+    mode: u32,
+) -> Result<Vec<u8>, EmbeddedHostError> {
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc_o_nofollow() | nix::libc::O_CLOEXEC)
+        .open(path)?;
+    require_metadata(&file.metadata()?, uid, gid, mode)?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+fn require_metadata(
+    metadata: &fs::Metadata,
+    uid: u32,
+    gid: u32,
+    mode: u32,
+) -> Result<(), EmbeddedHostError> {
+    if !metadata.file_type().is_file()
+        || metadata.nlink() != 1
+        || metadata.uid() != uid
+        || metadata.gid() != gid
+        || metadata.mode() & 0o7777 != mode
+    {
+        return Err(EmbeddedHostError::InvalidInstanceState);
+    }
+    Ok(())
+}
+
+fn require_directory(path: &Path, uid: u32, gid: u32, mode: u32) -> Result<(), EmbeddedHostError> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_dir()
+        || metadata.uid() != uid
+        || metadata.gid() != gid
+        || metadata.mode() & 0o7777 != mode
+    {
+        return Err(EmbeddedHostError::InvalidInstanceState);
+    }
+    Ok(())
+}
+
+fn recreate_socket_directory(
+    path: &Path,
+    service: &ServiceIdentity,
+) -> Result<(), EmbeddedHostError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => {
+            require_directory(path, service.uid, service.gid, 0o700)?;
+            fs::remove_dir(path).map_err(|_| EmbeddedHostError::InvalidInstanceState)?;
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    create_owned_directory(path, 0o700)?;
+    sync_directory(
+        path.parent()
+            .ok_or(EmbeddedHostError::InvalidInstanceState)?,
+    )?;
+    Ok(())
+}
+
+fn remove_stale_ready(path: PathBuf, service: &ServiceIdentity) -> Result<(), EmbeddedHostError> {
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) => {
+            require_metadata(&metadata, service.uid, service.gid, 0o600)?;
+            fs::remove_file(&path)?;
+            sync_directory(
+                path.parent()
+                    .ok_or(EmbeddedHostError::InvalidInstanceState)?,
+            )?;
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
+}
+
+fn instance_manifest_bytes(identity: &EmbeddedEngineIdentity, activation: bool) -> Vec<u8> {
+    format!(
+        "format = 1\ninstance = \"default\"\ngeneration = \"{GENERATION_NAME}\"\npostgresql_major = 18\nengine = \"{}\"\nactivation_committed = {activation}\n",
+        identity.as_str()
+    )
+    .into_bytes()
+}
+
+/// Runs the fixed default embedded PostgreSQL instance in the foreground.
+pub fn run_embedded_server() -> Result<(), EmbeddedHostError> {
+    install_shutdown_handlers()?;
+    let instance = prepare_instance()?;
+    if instance.is_new {
+        bootstrap_new_instance(&instance)?;
+    } else {
+        verify_normal_configuration(&instance)?;
+    }
+
+    let mut postmaster = start_embedded_postmaster(
+        instance.paths.support_root(),
+        &instance.data_directory,
+        instance.paths.socket_directory(),
+    )?;
+    let runtime = current_thread_runtime()?;
+    runtime.block_on(async {
+        postmaster.wait_until_ready("orna").await?;
+        let kernel = orna_kernel_postgres::PostgresKernel::new(private_database_config(
+            instance.paths.socket_directory(),
+            "orna",
+        ));
+        let _kernel = open_standard_database(kernel).await?;
+        Ok::<(), EmbeddedHostError>(())
+    })?;
+    drop(runtime);
+
+    let manifest = instance_manifest_bytes(&instance.identity, true);
+    atomic_write(
+        &instance.paths.state_root().join(INSTANCE_MANIFEST_NAME),
+        &manifest,
+        0o600,
+    )?;
+    let ready_path = instance.paths.runtime_root().join(READY_NAME);
+    let ready = ready_record_bytes(&instance, postmaster.pid(), &manifest)?;
+    atomic_write(&ready_path, &ready, 0o600)?;
+
+    let supervision = supervise_until_shutdown(&mut postmaster);
+    let removal = remove_ready_record(&ready_path);
+    supervision?;
+    removal?;
+    current_thread_runtime()?.block_on(postmaster.stop())
+}
+
+fn bootstrap_new_instance(instance: &PreparedInstance) -> Result<(), EmbeddedHostError> {
+    initialise_embedded_cluster(instance.paths.support_root(), &instance.data_directory)?;
+    write_authentication(&instance.data_directory, BOOTSTRAP_HBA_BYTES)?;
+    require_empty_auto_configuration(&instance.data_directory)?;
+
+    let mut postmaster = start_embedded_postmaster(
+        instance.paths.support_root(),
+        &instance.data_directory,
+        instance.paths.socket_directory(),
+    )?;
+    let runtime = current_thread_runtime()?;
+    runtime.block_on(async {
+        postmaster.wait_until_ready("postgres").await?;
+        create_private_database(instance.paths.socket_directory()).await?;
+        postmaster.stop().await
+    })?;
+    drop(runtime);
+
+    write_authentication(&instance.data_directory, NORMAL_HBA_BYTES)?;
+    atomic_write(
+        &instance.paths.state_root().join(INSTANCE_MANIFEST_NAME),
+        &instance_manifest_bytes(&instance.identity, false),
+        0o600,
+    )?;
+    Ok(())
+}
+
+fn verify_normal_configuration(instance: &PreparedInstance) -> Result<(), EmbeddedHostError> {
+    let owner = effective_identity();
+    require_file_bytes(
+        &instance.data_directory.join("pg_hba.conf"),
+        owner.0,
+        owner.1,
+        0o600,
+        NORMAL_HBA_BYTES,
+    )?;
+    require_file_bytes(
+        &instance.data_directory.join("pg_ident.conf"),
+        owner.0,
+        owner.1,
+        0o600,
+        IDENT_BYTES,
+    )?;
+    require_empty_auto_configuration(&instance.data_directory)
+}
+
+fn write_authentication(data_directory: &Path, hba: &[u8]) -> Result<(), EmbeddedHostError> {
+    atomic_write(&data_directory.join("pg_hba.conf"), hba, 0o600)?;
+    atomic_write(&data_directory.join("pg_ident.conf"), IDENT_BYTES, 0o600)
+}
+
+fn require_empty_auto_configuration(data_directory: &Path) -> Result<(), EmbeddedHostError> {
+    let owner = effective_identity();
+    require_file_bytes(
+        &data_directory.join("postgresql.auto.conf"),
+        owner.0,
+        owner.1,
+        0o600,
+        b"",
+    )
+}
+
+async fn create_private_database(socket_directory: &Path) -> Result<(), EmbeddedHostError> {
+    let (client, connection) = private_database_config(socket_directory, "postgres")
+        .connect(NoTls)
+        .await?;
+    let driver = tokio::spawn(connection);
+    let result = client
+        .batch_execute("CREATE DATABASE orna TEMPLATE template0")
+        .await;
+    drop(client);
+    let driver_result = driver
+        .await
+        .map_err(|_| EmbeddedHostError::InvalidInstanceState)?;
+    result?;
+    driver_result?;
+    Ok(())
+}
+
+fn current_thread_runtime() -> Result<tokio::runtime::Runtime, EmbeddedHostError> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(EmbeddedHostError::Runtime)
+}
+
+fn atomic_write(path: &Path, bytes: &[u8], mode: u32) -> Result<(), EmbeddedHostError> {
+    let parent = path
+        .parent()
+        .ok_or(EmbeddedHostError::InvalidInstanceState)?;
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or(EmbeddedHostError::InvalidInstanceState)?;
+    let temporary = path.with_file_name(format!(".{name}.orna-tmp"));
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(mode)
+        .open(&temporary)?;
+    file.write_all(bytes)?;
+    file.set_permissions(fs::Permissions::from_mode(mode))?;
+    file.sync_all()?;
+    drop(file);
+    fs::rename(&temporary, path)?;
+    sync_directory(parent)
+}
+
+fn ready_record_bytes(
+    instance: &PreparedInstance,
+    postmaster_pid: u32,
+    manifest: &[u8],
+) -> Result<Vec<u8>, EmbeddedHostError> {
+    let executable = fs::read("/proc/self/exe")?;
+    Ok(format!(
+        "format = 1\ninstance = \"default\"\nserver_pid = {}\npostmaster_pid = {postmaster_pid}\ngeneration = \"{GENERATION_NAME}\"\nengine = \"{}\"\nexecutable_sha256 = \"{}\"\ninstance_manifest_sha256 = \"{}\"\n",
+        std::process::id(),
+        instance.identity.as_str(),
+        hex_digest(&executable),
+        hex_digest(manifest),
+    )
+    .into_bytes())
+}
+
+fn install_shutdown_handlers() -> Result<(), EmbeddedHostError> {
+    SHUTDOWN_SIGNAL.store(0, Ordering::SeqCst);
+    let action = SigAction::new(
+        SigHandler::Handler(record_shutdown_signal),
+        SaFlags::SA_RESTART,
+        SigSet::empty(),
+    );
+    // SAFETY: the handler only stores one integer in a lock-free atomic.
+    unsafe {
+        sigaction(Signal::SIGINT, &action).map_err(|_| EmbeddedHostError::Signal)?;
+        sigaction(Signal::SIGTERM, &action).map_err(|_| EmbeddedHostError::Signal)?;
+    }
+    Ok(())
+}
+
+extern "C" fn record_shutdown_signal(signal: i32) {
+    let _ = SHUTDOWN_SIGNAL.compare_exchange(0, signal, Ordering::SeqCst, Ordering::SeqCst);
+}
+
+fn supervise_until_shutdown(postmaster: &mut EmbeddedPostmaster) -> Result<(), EmbeddedHostError> {
+    loop {
+        if SHUTDOWN_SIGNAL.load(Ordering::SeqCst) != 0 {
+            return Ok(());
+        }
+        postmaster.require_running()?;
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn remove_ready_record(path: &Path) -> Result<(), EmbeddedHostError> {
+    fs::remove_file(path)?;
+    sync_directory(
+        path.parent()
+            .ok_or(EmbeddedHostError::InvalidInstanceState)?,
+    )
+}
+
 /// A verified materialised copy of the embedded support-data bundle.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MaterialisedSupport {
@@ -116,7 +663,11 @@ impl MaterialisedSupport {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum EmbeddedHostError {
+    Database(tokio_postgres::Error),
     Engine(EngineError),
+    InvalidServiceIdentity,
+    InvalidPackageState,
+    InvalidInstanceState,
     InvalidSupportManifest,
     InvalidSupportPath,
     MultipleThreads,
@@ -127,6 +678,9 @@ pub enum EmbeddedHostError {
     PostmasterSignalled(i32),
     PostmasterWait,
     ReadinessTimeout,
+    Runtime(io::Error),
+    Signal,
+    Standard(OpenStandardDatabaseError),
     SupportMismatch(&'static str),
     Io(io::Error),
 }
@@ -134,7 +688,15 @@ pub enum EmbeddedHostError {
 impl fmt::Display for EmbeddedHostError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Database(source) => source.fmt(formatter),
             Self::Engine(source) => source.fmt(formatter),
+            Self::InvalidServiceIdentity => formatter.write_str("Orna service identity is invalid"),
+            Self::InvalidPackageState => {
+                formatter.write_str("orna: package maintenance is incomplete")
+            }
+            Self::InvalidInstanceState => {
+                formatter.write_str("embedded PostgreSQL instance state is invalid")
+            }
             Self::InvalidSupportManifest => {
                 formatter.write_str("embedded PostgreSQL support manifest is invalid")
             }
@@ -170,6 +732,9 @@ impl fmt::Display for EmbeddedHostError {
             Self::ReadinessTimeout => {
                 formatter.write_str("embedded PostgreSQL did not become ready")
             }
+            Self::Runtime(source) => write!(formatter, "Orna server runtime failed: {source}"),
+            Self::Signal => formatter.write_str("Orna server signal handling failed"),
+            Self::Standard(source) => source.fmt(formatter),
             Self::SupportMismatch(reason) => {
                 write!(
                     formatter,
@@ -187,8 +752,11 @@ impl fmt::Display for EmbeddedHostError {
 impl std::error::Error for EmbeddedHostError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Self::Database(source) => Some(source),
             Self::Engine(source) => Some(source),
             Self::Io(source) => Some(source),
+            Self::Runtime(source) => Some(source),
+            Self::Standard(source) => Some(source),
             _ => None,
         }
     }
@@ -203,6 +771,18 @@ impl From<io::Error> for EmbeddedHostError {
 impl From<EngineError> for EmbeddedHostError {
     fn from(source: EngineError) -> Self {
         Self::Engine(source)
+    }
+}
+
+impl From<tokio_postgres::Error> for EmbeddedHostError {
+    fn from(source: tokio_postgres::Error) -> Self {
+        Self::Database(source)
+    }
+}
+
+impl From<OpenStandardDatabaseError> for EmbeddedHostError {
+    fn from(source: OpenStandardDatabaseError) -> Self {
+        Self::Standard(source)
     }
 }
 
@@ -415,17 +995,36 @@ pub fn start_embedded_postmaster(
 ) -> Result<EmbeddedPostmaster, EmbeddedHostError> {
     require_single_thread()?;
     let support_root = AbsolutePath::new(support_root)?;
-    let mut arguments = LinkedArguments::new([
-        Path::new("/usr/bin/orna").as_os_str(),
-        std::ffi::OsStr::new("-D"),
-        data_directory.as_os_str(),
-        std::ffi::OsStr::new("-k"),
-        socket_directory.as_os_str(),
-        std::ffi::OsStr::new("-h"),
-        std::ffi::OsStr::new(""),
-        std::ffi::OsStr::new("-p"),
-        std::ffi::OsStr::new("5432"),
-    ])?;
+    let values = [
+        OsString::from("/usr/bin/orna"),
+        OsString::from("-D"),
+        data_directory.as_os_str().to_owned(),
+        OsString::from("-k"),
+        socket_directory.as_os_str().to_owned(),
+        OsString::from("-h"),
+        OsString::new(),
+        OsString::from("-p"),
+        OsString::from("5432"),
+        OsString::from("-c"),
+        OsString::from("unix_socket_permissions=0700"),
+        OsString::from("-c"),
+        OsString::from("ssl=off"),
+        OsString::from("-c"),
+        OsString::from("allow_alter_system=off"),
+        OsString::from("-c"),
+        OsString::from("shared_preload_libraries="),
+        OsString::from("-c"),
+        OsString::from("session_preload_libraries="),
+        OsString::from("-c"),
+        OsString::from("local_preload_libraries="),
+        OsString::from("-c"),
+        OsString::from("archive_mode=off"),
+        OsString::from("-c"),
+        OsString::from("archive_command="),
+        OsString::from("-c"),
+        OsString::from("archive_library="),
+    ];
+    let mut arguments = LinkedArguments::new(values)?;
     let environment = FixedChildEnvironment::new();
 
     // SAFETY: the thread gate ran immediately before this call. All child arguments and
