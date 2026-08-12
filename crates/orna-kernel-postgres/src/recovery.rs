@@ -2600,14 +2600,20 @@ fn validate_function_type(
     if resolved_type.legacy_scalar().is_some() {
         return Ok(());
     }
-    if let Some(target) = resolved_type
-        .named_type()
-        .or(resolved_type.reference_target())
-    {
-        if catalogue.object_type_by_id(target).is_none() {
+    if let Some(target) = resolved_type.named_type() {
+        if catalogue.object_type_by_id(target).is_none()
+            && catalogue.enum_type_by_id(target).is_none()
+        {
             return Err(record.invariant(
-                "every named or reference function type target must be an active object type",
+                "every named function type target must be an active object or enum type",
             ));
+        }
+        return Ok(());
+    }
+    if let Some(target) = resolved_type.reference_target() {
+        if catalogue.object_type_by_id(target).is_none() {
+            return Err(record
+                .invariant("every reference function type target must be an active object type"));
         }
         return Ok(());
     }
@@ -2663,7 +2669,9 @@ mod tests {
             catalogue_digest, source_bundle_digest, source_revision_record_digest,
             source_unit_content_digest,
         },
-        catalogue::CatalogueSnapshot,
+        catalogue::{
+            CatalogueSnapshot, EnumTypeDefinition, QualifiedSemanticName, SchemaDefinition,
+        },
         revision::StoredSourceUnit,
         revision::{CatalogueHashContext, CatalogueHashVersion},
         types::{ResolvedType, StandardScalar},
@@ -2675,7 +2683,7 @@ mod tests {
         LegacyResolvedTypeTupleMember, RecoveredCatalogueSemantics, RecoveredFunctionState,
         RecoveredRevisionHeader, ResolvedTypeTuple, assemble_revision,
         decode_catalogue_hash_version, decode_legacy_resolved_type_tuple,
-        decode_legacy_resolved_type_tuple_kind, decode_resolved_type_tuple,
+        decode_legacy_resolved_type_tuple_kind, decode_resolved_type_tuple, validate_function_type,
     };
 
     #[test]
@@ -2691,6 +2699,47 @@ mod tests {
             CatalogueHashVersion::Version2
         );
         assert!(decode_catalogue_hash_version(3, &record).is_err());
+    }
+
+    #[test]
+    fn function_links_accept_only_active_named_enums_and_object_references() {
+        let enum_type = TypeId::from_bytes([0x81; 16]);
+        let catalogue = CatalogueSnapshot::new_with_enum_types(
+            CatalogueRevisionId::from_bytes([0x82; 16]),
+            vec![SchemaDefinition::new(
+                orna_core::SchemaId::from_bytes([0x83; 16]),
+                QualifiedSemanticName::new(["app"]).unwrap(),
+            )],
+            Vec::new(),
+            Vec::new(),
+            vec![EnumTypeDefinition::new(
+                enum_type,
+                QualifiedSemanticName::new(["app", "stage"]).unwrap(),
+                ["lead"],
+            )],
+            Vec::new(),
+        )
+        .unwrap();
+        let record = DurableRecord::new(
+            "_orna_kernel.catalogue_function_return_columns",
+            "enum-link",
+        );
+
+        assert!(
+            validate_function_type(&catalogue, ResolvedType::named(enum_type), &record).is_ok()
+        );
+        assert!(
+            validate_function_type(
+                &catalogue,
+                ResolvedType::named(TypeId::from_bytes([0x84; 16])),
+                &record,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_function_type(&catalogue, ResolvedType::reference(enum_type), &record)
+                .is_err()
+        );
     }
 
     #[test]
