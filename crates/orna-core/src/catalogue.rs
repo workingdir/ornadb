@@ -510,6 +510,9 @@ pub struct CatalogueSnapshot {
     enum_types: Vec<EnumTypeDefinition>,
     enum_type_indices_by_name: HashMap<QualifiedSemanticName, usize>,
     enum_type_indices_by_id: HashMap<TypeId, usize>,
+    record_value_types: Vec<RecordValueTypeDefinition>,
+    record_value_type_indices_by_name: HashMap<QualifiedSemanticName, usize>,
+    record_value_type_indices_by_id: HashMap<TypeId, usize>,
     type_bindings: Vec<TypeBinding>,
     type_binding_indices_by_name: HashMap<TypeLookupName, usize>,
     type_binding_indices_by_id: HashMap<TypeBindingId, usize>,
@@ -592,7 +595,7 @@ impl CatalogueSnapshot {
         )
     }
 
-    /// Validates and creates a snapshot with every catalogue type category.
+    /// Validates and creates a snapshot with enum types and the earlier categories.
     pub fn new_with_enum_types(
         revision: CatalogueRevisionId,
         schemas: Vec<SchemaDefinition>,
@@ -612,13 +615,59 @@ impl CatalogueSnapshot {
         )
     }
 
-    /// Validates and creates a snapshot with functions and every type category.
+    /// Validates and creates a snapshot with functions, enums, and earlier categories.
     pub fn new_with_functions_and_enum_types(
         revision: CatalogueRevisionId,
         schemas: Vec<SchemaDefinition>,
         object_types: Vec<ObjectTypeDefinition>,
         value_types: Vec<ValueTypeDefinition>,
         enum_types: Vec<EnumTypeDefinition>,
+        type_bindings: Vec<TypeBinding>,
+        functions: Vec<FunctionDefinition>,
+    ) -> Result<Self, CatalogueSnapshotError> {
+        Self::new_with_functions_and_record_value_types(
+            revision,
+            schemas,
+            object_types,
+            value_types,
+            enum_types,
+            Vec::new(),
+            type_bindings,
+            functions,
+        )
+    }
+
+    /// Validates and creates a snapshot with every type category, including records.
+    pub fn new_with_record_value_types(
+        revision: CatalogueRevisionId,
+        schemas: Vec<SchemaDefinition>,
+        object_types: Vec<ObjectTypeDefinition>,
+        value_types: Vec<ValueTypeDefinition>,
+        enum_types: Vec<EnumTypeDefinition>,
+        record_value_types: Vec<RecordValueTypeDefinition>,
+        type_bindings: Vec<TypeBinding>,
+    ) -> Result<Self, CatalogueSnapshotError> {
+        Self::new_with_functions_and_record_value_types(
+            revision,
+            schemas,
+            object_types,
+            value_types,
+            enum_types,
+            record_value_types,
+            type_bindings,
+            Vec::new(),
+        )
+    }
+
+    /// Validates and creates a snapshot with functions and every type category.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_functions_and_record_value_types(
+        revision: CatalogueRevisionId,
+        schemas: Vec<SchemaDefinition>,
+        object_types: Vec<ObjectTypeDefinition>,
+        value_types: Vec<ValueTypeDefinition>,
+        enum_types: Vec<EnumTypeDefinition>,
+        record_value_types: Vec<RecordValueTypeDefinition>,
         type_bindings: Vec<TypeBinding>,
         functions: Vec<FunctionDefinition>,
     ) -> Result<Self, CatalogueSnapshotError> {
@@ -630,14 +679,22 @@ impl CatalogueSnapshot {
         let mut value_type_indices_by_id = HashMap::with_capacity(value_types.len());
         let mut enum_type_indices_by_name = HashMap::with_capacity(enum_types.len());
         let mut enum_type_indices_by_id = HashMap::with_capacity(enum_types.len());
+        let mut record_value_type_indices_by_name =
+            HashMap::with_capacity(record_value_types.len());
+        let mut record_value_type_indices_by_id = HashMap::with_capacity(record_value_types.len());
         let mut type_binding_indices_by_name = HashMap::with_capacity(type_bindings.len());
         let mut type_binding_indices_by_id = HashMap::with_capacity(type_bindings.len());
         let mut type_ids_by_qualified_name = HashMap::with_capacity(
-            object_types.len() + value_types.len() + enum_types.len() + type_bindings.len(),
+            object_types.len()
+                + value_types.len()
+                + enum_types.len()
+                + record_value_types.len()
+                + type_bindings.len(),
         );
         let mut type_ids_by_prelude_name = HashMap::with_capacity(type_bindings.len());
-        let mut primary_type_ids =
-            HashMap::with_capacity(object_types.len() + value_types.len() + enum_types.len());
+        let mut primary_type_ids = HashMap::with_capacity(
+            object_types.len() + value_types.len() + enum_types.len() + record_value_types.len(),
+        );
         let mut function_indices_by_name = HashMap::with_capacity(functions.len());
         let mut function_indices_by_id = HashMap::with_capacity(functions.len());
 
@@ -810,6 +867,82 @@ impl CatalogueSnapshot {
             }
         }
 
+        for (type_index, record_value_type) in record_value_types.iter().enumerate() {
+            if record_value_type.fields().is_empty() {
+                return Err(CatalogueSnapshotError::EmptyRecordValueTypeFields {
+                    record_value_type: record_value_type.id(),
+                });
+            }
+            if record_value_type_indices_by_name
+                .insert(record_value_type.name().clone(), type_index)
+                .is_some()
+            {
+                return Err(CatalogueSnapshotError::DuplicateRecordValueTypeName {
+                    name: record_value_type.name().clone(),
+                });
+            }
+            if record_value_type_indices_by_id
+                .insert(record_value_type.id(), type_index)
+                .is_some()
+            {
+                return Err(CatalogueSnapshotError::DuplicateRecordValueTypeId {
+                    id: record_value_type.id(),
+                });
+            }
+            if type_ids_by_qualified_name
+                .insert(record_value_type.name().clone(), record_value_type.id())
+                .is_some()
+            {
+                return Err(CatalogueSnapshotError::DuplicateTypeName {
+                    name: TypeLookupName::qualified(record_value_type.name().clone()),
+                });
+            }
+            if primary_type_ids
+                .insert(record_value_type.id(), record_value_type.name().clone())
+                .is_some()
+            {
+                return Err(CatalogueSnapshotError::DuplicateTypeId {
+                    id: record_value_type.id(),
+                });
+            }
+
+            let namespace = namespace_of(record_value_type.name()).ok_or(
+                CatalogueSnapshotError::RecordValueTypeHasNoSchema {
+                    record_value_type: record_value_type.id(),
+                },
+            )?;
+            if !schema_indices_by_name.contains_key(&namespace) {
+                return Err(CatalogueSnapshotError::RecordValueTypeSchemaNotDeclared {
+                    record_value_type: record_value_type.id(),
+                    schema: namespace,
+                });
+            }
+        }
+
+        for record_value_type in &record_value_types {
+            Self::validate_record_value_fields(record_value_type)?;
+            for field in record_value_type.fields() {
+                let accepted = match field.resolved_type() {
+                    ResolvedType::Value(target) => {
+                        value_type_indices_by_id.contains_key(&target)
+                            || !primary_type_ids.contains_key(&target)
+                    }
+                    ResolvedType::Named(target) => {
+                        enum_type_indices_by_id.contains_key(&target)
+                            || !primary_type_ids.contains_key(&target)
+                    }
+                    ResolvedType::Scalar(_) | ResolvedType::Reference { .. } => false,
+                };
+                if !accepted {
+                    return Err(CatalogueSnapshotError::UnsupportedRecordValueFieldType {
+                        owner: record_value_type.id(),
+                        field: field.id(),
+                        resolved_type: field.resolved_type(),
+                    });
+                }
+            }
+        }
+
         for (binding_index, binding) in type_bindings.iter().enumerate() {
             if type_binding_indices_by_name
                 .insert(binding.name().clone(), binding_index)
@@ -918,6 +1051,9 @@ impl CatalogueSnapshot {
             enum_types,
             enum_type_indices_by_name,
             enum_type_indices_by_id,
+            record_value_types,
+            record_value_type_indices_by_name,
+            record_value_type_indices_by_id,
             type_bindings,
             type_binding_indices_by_name,
             type_binding_indices_by_id,
@@ -1013,6 +1149,28 @@ impl CatalogueSnapshot {
             .map(|index| &self.enum_types[*index])
     }
 
+    /// Returns record value type definitions in their snapshot order.
+    pub fn record_value_types(&self) -> &[RecordValueTypeDefinition] {
+        &self.record_value_types
+    }
+
+    /// Finds a record value type by its exact canonical qualified name.
+    pub fn record_value_type_by_name(
+        &self,
+        name: &QualifiedSemanticName,
+    ) -> Option<&RecordValueTypeDefinition> {
+        self.record_value_type_indices_by_name
+            .get(name)
+            .map(|index| &self.record_value_types[*index])
+    }
+
+    /// Finds a record value type by its stable identity.
+    pub fn record_value_type_by_id(&self, id: TypeId) -> Option<&RecordValueTypeDefinition> {
+        self.record_value_type_indices_by_id
+            .get(&id)
+            .map(|index| &self.record_value_types[*index])
+    }
+
     /// Returns direct type bindings in their snapshot order.
     pub fn type_bindings(&self) -> &[TypeBinding] {
         &self.type_bindings
@@ -1046,6 +1204,10 @@ impl CatalogueSnapshot {
             .map(TypeDefinition::Object)
             .or_else(|| self.value_type_by_id(id).map(TypeDefinition::Value))
             .or_else(|| self.enum_type_by_id(id).map(TypeDefinition::Enum))
+            .or_else(|| {
+                self.record_value_type_by_id(id)
+                    .map(TypeDefinition::RecordValue)
+            })
     }
 
     /// Finds a primary type definition through its exact name or direct binding.
@@ -1101,6 +1263,43 @@ impl CatalogueSnapshot {
             },
             |field, expected, actual| CatalogueSnapshotError::FieldOrdinalOutOfSequence {
                 owner: object_type.id,
+                field,
+                expected,
+                actual,
+            },
+        )
+    }
+
+    fn validate_record_value_fields(
+        record_value_type: &RecordValueTypeDefinition,
+    ) -> Result<(), CatalogueSnapshotError> {
+        Self::validate_ordered_named_members(
+            record_value_type
+                .fields()
+                .iter()
+                .map(|field| (field.id(), field.name(), field.ordinal())),
+            |field| CatalogueSnapshotError::EmptyFieldName {
+                owner: record_value_type.id(),
+                field,
+            },
+            |name| CatalogueSnapshotError::DuplicateFieldName {
+                owner: record_value_type.id(),
+                name: name.to_owned(),
+            },
+            |id| CatalogueSnapshotError::DuplicateFieldId {
+                owner: record_value_type.id(),
+                id,
+            },
+            |ordinal| CatalogueSnapshotError::DuplicateFieldOrdinal {
+                owner: record_value_type.id(),
+                ordinal,
+            },
+            |field| CatalogueSnapshotError::FieldOrdinalOutOfRange {
+                owner: record_value_type.id(),
+                field,
+            },
+            |field, expected, actual| CatalogueSnapshotError::FieldOrdinalOutOfSequence {
+                owner: record_value_type.id(),
                 field,
                 expected,
                 actual,
@@ -1330,6 +1529,42 @@ pub enum CatalogueSnapshotError {
         /// The missing exact schema name.
         schema: QualifiedSemanticName,
     },
+    /// More than one record value type has the same resolved qualified name.
+    DuplicateRecordValueTypeName {
+        /// The repeated name.
+        name: QualifiedSemanticName,
+    },
+    /// More than one record value type has the same stable identity.
+    DuplicateRecordValueTypeId {
+        /// The repeated identity.
+        id: TypeId,
+    },
+    /// A record value type has no fields.
+    EmptyRecordValueTypeFields {
+        /// The invalid record value type identity.
+        record_value_type: TypeId,
+    },
+    /// A record value type has no namespace that can refer to a declared schema.
+    RecordValueTypeHasNoSchema {
+        /// The invalid record value type identity.
+        record_value_type: TypeId,
+    },
+    /// A record value type refers to an undeclared exact namespace.
+    RecordValueTypeSchemaNotDeclared {
+        /// The record value type identity.
+        record_value_type: TypeId,
+        /// The missing exact schema name.
+        schema: QualifiedSemanticName,
+    },
+    /// A record value field has a locally disproven primitive-or-enum shape.
+    UnsupportedRecordValueFieldType {
+        /// The owning record value type.
+        owner: TypeId,
+        /// The invalid field identity.
+        field: FieldId,
+        /// The rejected resolved type descriptor.
+        resolved_type: ResolvedType,
+    },
     /// A value type has no versioned representation contract.
     EmptyValueTypeRepresentationContract {
         /// The invalid value type identity.
@@ -1506,44 +1741,44 @@ pub enum CatalogueSnapshotError {
         /// The actual ordinal.
         actual: u32,
     },
-    /// An object field has no semantic name.
+    /// A field has no semantic name.
     EmptyFieldName {
         /// The type that owns the invalid field.
         owner: TypeId,
         /// The invalid field identity.
         field: FieldId,
     },
-    /// More than one field in an object type has the same semantic name.
+    /// More than one field in a type has the same semantic name.
     DuplicateFieldName {
-        /// The owning object type.
+        /// The owning type.
         owner: TypeId,
         /// The repeated name.
         name: String,
     },
-    /// More than one field in an object type has the same stable identity.
+    /// More than one field in a type has the same stable identity.
     DuplicateFieldId {
-        /// The owning object type.
+        /// The owning type.
         owner: TypeId,
         /// The repeated identity.
         id: FieldId,
     },
-    /// More than one field in an object type has the same ordinal.
+    /// More than one field in a type has the same ordinal.
     DuplicateFieldOrdinal {
-        /// The owning object type.
+        /// The owning type.
         owner: TypeId,
         /// The repeated ordinal.
         ordinal: u32,
     },
-    /// An object type has more fields than the ordinal representation allows.
+    /// A type has more fields than the ordinal representation allows.
     FieldOrdinalOutOfRange {
-        /// The owning object type.
+        /// The owning type.
         owner: TypeId,
         /// The field without a representable ordinal.
         field: FieldId,
     },
     /// Fields must be contiguous and stored in declaration ordinal order.
     FieldOrdinalOutOfSequence {
-        /// The owning object type.
+        /// The owning type.
         owner: TypeId,
         /// The field that has the invalid ordinal.
         field: FieldId,
@@ -1593,6 +1828,37 @@ impl fmt::Display for CatalogueSnapshotError {
             Self::EnumTypeSchemaNotDeclared { enum_type, schema } => write!(
                 formatter,
                 "enum type {enum_type} refers to undeclared schema {schema}"
+            ),
+            Self::DuplicateRecordValueTypeName { name } => {
+                write!(formatter, "duplicate record value type name {name}")
+            }
+            Self::DuplicateRecordValueTypeId { id } => {
+                write!(formatter, "duplicate record value type identity {id}")
+            }
+            Self::EmptyRecordValueTypeFields { record_value_type } => {
+                write!(
+                    formatter,
+                    "record value type {record_value_type} has no fields"
+                )
+            }
+            Self::RecordValueTypeHasNoSchema { record_value_type } => write!(
+                formatter,
+                "record value type {record_value_type} has no declared schema"
+            ),
+            Self::RecordValueTypeSchemaNotDeclared {
+                record_value_type,
+                schema,
+            } => write!(
+                formatter,
+                "record value type {record_value_type} refers to undeclared schema {schema}"
+            ),
+            Self::UnsupportedRecordValueFieldType {
+                owner,
+                field,
+                resolved_type,
+            } => write!(
+                formatter,
+                "field {field} in record value type {owner} has unsupported type {resolved_type:?}"
             ),
             Self::EmptyValueTypeRepresentationContract { value_type } => write!(
                 formatter,
@@ -1738,33 +2004,24 @@ impl fmt::Display for CatalogueSnapshotError {
                 "return column in function {owner} has ordinal {actual}, expected {expected}"
             ),
             Self::EmptyFieldName { owner, field } => {
-                write!(
-                    formatter,
-                    "field {field} in object type {owner} has an empty name"
-                )
+                write!(formatter, "field {field} in type {owner} has an empty name")
             }
             Self::DuplicateFieldName { owner, name } => {
-                write!(
-                    formatter,
-                    "duplicate field name {name} in object type {owner}"
-                )
+                write!(formatter, "duplicate field name {name} in type {owner}")
             }
             Self::DuplicateFieldId { owner, id } => {
-                write!(
-                    formatter,
-                    "duplicate field identity {id} in object type {owner}"
-                )
+                write!(formatter, "duplicate field identity {id} in type {owner}")
             }
             Self::DuplicateFieldOrdinal { owner, ordinal } => {
                 write!(
                     formatter,
-                    "duplicate field ordinal {ordinal} in object type {owner}"
+                    "duplicate field ordinal {ordinal} in type {owner}"
                 )
             }
             Self::FieldOrdinalOutOfRange { owner, field } => {
                 write!(
                     formatter,
-                    "field {field} in object type {owner} has no representable ordinal"
+                    "field {field} in type {owner} has no representable ordinal"
                 )
             }
             Self::FieldOrdinalOutOfSequence {
@@ -1774,7 +2031,7 @@ impl fmt::Display for CatalogueSnapshotError {
                 actual,
             } => write!(
                 formatter,
-                "field {field} in object type {owner} has ordinal {actual}, expected {expected}"
+                "field {field} in type {owner} has ordinal {actual}, expected {expected}"
             ),
         }
     }
@@ -1789,8 +2046,9 @@ mod tests {
         FunctionDefinition, FunctionDomain, FunctionReturn, FunctionReturnColumnDefinition,
         FunctionSecurity, FunctionTransaction, FunctionVolatility, ObjectTypeDefinition,
         OnDeleteAction, ParameterDefinition, PreludeTypeName, QualifiedSemanticName,
-        SchemaDefinition, SemanticNameError, TypeBinding, TypeBindingKind, TypeDefinitionKind,
-        TypeLookupName, ValueTypeDefinition, ValueTypeMutability, ValueTypePersistence,
+        RecordValueFieldDefinition, RecordValueTypeDefinition, SchemaDefinition, SemanticNameError,
+        TypeBinding, TypeBindingKind, TypeDefinitionKind, TypeLookupName, ValueTypeDefinition,
+        ValueTypeMutability, ValueTypePersistence,
     };
     use crate::{
         CatalogueRevisionId, ExpressionId, FieldId, FunctionId, FunctionRevisionId, ParameterId,
@@ -1817,6 +2075,32 @@ mod tests {
 
     fn object(id: u8, name_parts: &[&str], fields: Vec<FieldDefinition>) -> ObjectTypeDefinition {
         ObjectTypeDefinition::new(TypeId::from_bytes([id; 16]), name(name_parts), fields)
+    }
+
+    fn record_field(id: u8, name: &str, ordinal: u32) -> RecordValueFieldDefinition {
+        record_field_with_type(
+            id,
+            name,
+            ordinal,
+            ResolvedType::value(TypeId::from_bytes([90; 16])),
+        )
+    }
+
+    fn record_field_with_type(
+        id: u8,
+        name: &str,
+        ordinal: u32,
+        resolved_type: ResolvedType,
+    ) -> RecordValueFieldDefinition {
+        RecordValueFieldDefinition::new(FieldId::from_bytes([id; 16]), name, ordinal, resolved_type)
+    }
+
+    fn record(
+        id: u8,
+        name_parts: &[&str],
+        fields: Vec<RecordValueFieldDefinition>,
+    ) -> RecordValueTypeDefinition {
+        RecordValueTypeDefinition::new(TypeId::from_bytes([id; 16]), name(name_parts), fields)
     }
 
     fn schema(id: u8, name_parts: &[&str]) -> SchemaDefinition {
@@ -2029,6 +2313,476 @@ mod tests {
             catalogue.type_id_by_name(&TypeLookupName::qualified(name(&["crm", "stage_alias"]))),
             Some(stage)
         );
+    }
+
+    #[test]
+    fn snapshot_resolves_record_value_types_in_the_shared_type_namespace() {
+        let boolean_id = TypeId::from_bytes([90; 16]);
+        let boolean = ValueTypeDefinition::primitive(
+            boolean_id,
+            name(&["std", "types", "boolean"]),
+            ValueTypeMutability::Immutable,
+            ValueTypePersistence::Persistable,
+            "orna.kernel.value.boolean@1",
+        );
+        let axis_id = TypeId::from_bytes([91; 16]);
+        let axis = EnumTypeDefinition::new(
+            axis_id,
+            name(&["geometry", "axis"]),
+            ["horizontal", "vertical"],
+        );
+        let point_id = TypeId::from_bytes([2; 16]);
+        let point = record(
+            2,
+            &["geometry", "point"],
+            vec![
+                record_field(3, "x", 0),
+                record_field(4, "y", 1),
+                record_field_with_type(5, "axis", 2, ResolvedType::named(axis_id)),
+            ],
+        );
+        let alias = TypeBinding::qualified(name(&["geometry", "coordinate"]), point_id).unwrap();
+        let catalogue = CatalogueSnapshot::new_with_record_value_types(
+            CatalogueRevisionId::from_bytes([7; 16]),
+            vec![schema(1, &["geometry"]), schema(2, &["std", "types"])],
+            vec![],
+            vec![boolean],
+            vec![axis],
+            vec![point],
+            vec![alias],
+        )
+        .unwrap();
+
+        let definition = catalogue
+            .type_definition_by_name(&TypeLookupName::qualified(name(&["geometry", "point"])))
+            .unwrap();
+        assert_eq!(definition.id(), point_id);
+        assert_eq!(definition.kind(), TypeDefinitionKind::Value);
+        assert!(definition.as_value().is_none());
+        let point = definition.as_record_value().unwrap();
+        assert_eq!(point.mutability(), ValueTypeMutability::Immutable);
+        assert_eq!(point.persistence(), ValueTypePersistence::Persistable);
+        assert_eq!(point.fields()[0].name(), "x");
+        assert_eq!(point.fields()[1].ordinal(), 1);
+        assert_eq!(point.field_by_name("x"), Some(&point.fields()[0]));
+        assert_eq!(
+            point.field_by_id(FieldId::from_bytes([4; 16])),
+            Some(&point.fields()[1])
+        );
+        assert_eq!(
+            point.fields()[2].resolved_type(),
+            ResolvedType::named(axis_id)
+        );
+        assert_eq!(catalogue.record_value_type_by_id(point_id), Some(point));
+        assert_eq!(
+            catalogue.record_value_type_by_name(&name(&["geometry", "point"])),
+            Some(point)
+        );
+        assert_eq!(catalogue.record_value_types(), std::slice::from_ref(point));
+        assert_eq!(
+            catalogue.type_id_by_name(&TypeLookupName::qualified(name(&[
+                "geometry",
+                "coordinate"
+            ]))),
+            Some(point_id)
+        );
+    }
+
+    #[test]
+    fn snapshot_rejects_invalid_record_value_type_members() {
+        let build = |record_value_type| {
+            CatalogueSnapshot::new_with_record_value_types(
+                CatalogueRevisionId::from_bytes([7; 16]),
+                vec![schema(1, &["geometry"])],
+                vec![],
+                vec![],
+                vec![],
+                vec![record_value_type],
+                vec![],
+            )
+        };
+        let point_id = TypeId::from_bytes([2; 16]);
+
+        assert_eq!(
+            build(record(2, &["geometry", "point"], vec![])).unwrap_err(),
+            CatalogueSnapshotError::EmptyRecordValueTypeFields {
+                record_value_type: point_id,
+            }
+        );
+        assert!(matches!(
+            build(record(
+                2,
+                &["geometry", "point"],
+                vec![record_field(3, "x", 0), record_field(4, "x", 1)],
+            )),
+            Err(CatalogueSnapshotError::DuplicateFieldName { owner, .. }) if owner == point_id
+        ));
+        assert!(matches!(
+            build(record(
+                2,
+                &["geometry", "point"],
+                vec![record_field(3, "x", 0), record_field(3, "y", 1)],
+            )),
+            Err(CatalogueSnapshotError::DuplicateFieldId { owner, .. }) if owner == point_id
+        ));
+        assert!(matches!(
+            build(record(
+                2,
+                &["geometry", "point"],
+                vec![record_field(3, "x", 0), record_field(4, "y", 0)],
+            )),
+            Err(CatalogueSnapshotError::DuplicateFieldOrdinal { owner, .. }) if owner == point_id
+        ));
+        assert!(matches!(
+            build(record(
+                2,
+                &["geometry", "point"],
+                vec![record_field(3, "x", 1)],
+            )),
+            Err(CatalogueSnapshotError::FieldOrdinalOutOfSequence {
+                owner,
+                expected: 0,
+                actual: 1,
+                ..
+            }) if owner == point_id
+        ));
+    }
+
+    #[test]
+    fn snapshot_validates_record_value_field_representation_shape() {
+        let transient_id = TypeId::from_bytes([91; 16]);
+        let transient = ValueTypeDefinition::primitive(
+            transient_id,
+            name(&["std", "types", "void"]),
+            ValueTypeMutability::Immutable,
+            ValueTypePersistence::Transient,
+            "orna.kernel.value.void@1",
+        );
+        let build = |resolved_type| {
+            CatalogueSnapshot::new_with_record_value_types(
+                CatalogueRevisionId::from_bytes([7; 16]),
+                vec![schema(1, &["geometry"]), schema(2, &["std", "types"])],
+                vec![],
+                vec![transient.clone()],
+                vec![],
+                vec![record(
+                    2,
+                    &["geometry", "point"],
+                    vec![record_field_with_type(3, "x", 0, resolved_type)],
+                )],
+                vec![],
+            )
+        };
+
+        for resolved_type in [
+            ResolvedType::scalar(StandardScalar::Integer),
+            ResolvedType::reference(TypeId::from_bytes([92; 16])),
+        ] {
+            assert_eq!(
+                build(resolved_type).unwrap_err(),
+                CatalogueSnapshotError::UnsupportedRecordValueFieldType {
+                    owner: TypeId::from_bytes([2; 16]),
+                    field: FieldId::from_bytes([3; 16]),
+                    resolved_type,
+                }
+            );
+        }
+
+        for resolved_type in [
+            ResolvedType::value(TypeId::from_bytes([93; 16])),
+            ResolvedType::value(transient_id),
+            ResolvedType::named(TypeId::from_bytes([94; 16])),
+        ] {
+            assert_eq!(
+                build(resolved_type).unwrap().record_value_types()[0].fields()[0].resolved_type(),
+                resolved_type
+            );
+        }
+
+        let object_id = TypeId::from_bytes([95; 16]);
+        let enum_id = TypeId::from_bytes([96; 16]);
+        for resolved_type in [ResolvedType::named(object_id), ResolvedType::value(enum_id)] {
+            let error = CatalogueSnapshot::new_with_record_value_types(
+                CatalogueRevisionId::from_bytes([7; 16]),
+                vec![schema(1, &["geometry"])],
+                vec![object(95, &["geometry", "object"], vec![])],
+                vec![],
+                vec![EnumTypeDefinition::new(
+                    enum_id,
+                    name(&["geometry", "axis"]),
+                    ["x"],
+                )],
+                vec![record(
+                    2,
+                    &["geometry", "point"],
+                    vec![record_field_with_type(3, "x", 0, resolved_type)],
+                )],
+                vec![],
+            )
+            .unwrap_err();
+            assert_eq!(
+                error,
+                CatalogueSnapshotError::UnsupportedRecordValueFieldType {
+                    owner: TypeId::from_bytes([2; 16]),
+                    field: FieldId::from_bytes([3; 16]),
+                    resolved_type,
+                }
+            );
+        }
+
+        let nested_id = TypeId::from_bytes([97; 16]);
+        let error = CatalogueSnapshot::new_with_record_value_types(
+            CatalogueRevisionId::from_bytes([7; 16]),
+            vec![schema(1, &["geometry"])],
+            vec![],
+            vec![],
+            vec![],
+            vec![
+                record(
+                    2,
+                    &["geometry", "point"],
+                    vec![record_field_with_type(
+                        3,
+                        "nested",
+                        0,
+                        ResolvedType::named(nested_id),
+                    )],
+                ),
+                record(
+                    97,
+                    &["geometry", "nested"],
+                    vec![record_field_with_type(
+                        4,
+                        "external",
+                        0,
+                        ResolvedType::value(TypeId::from_bytes([98; 16])),
+                    )],
+                ),
+            ],
+            vec![],
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            CatalogueSnapshotError::UnsupportedRecordValueFieldType {
+                owner: TypeId::from_bytes([2; 16]),
+                field: FieldId::from_bytes([3; 16]),
+                resolved_type: ResolvedType::named(nested_id),
+            }
+        );
+    }
+
+    #[test]
+    fn snapshot_rejects_invalid_record_value_type_roots() {
+        let boolean = || {
+            ValueTypeDefinition::primitive(
+                TypeId::from_bytes([90; 16]),
+                name(&["std", "types", "boolean"]),
+                ValueTypeMutability::Immutable,
+                ValueTypePersistence::Persistable,
+                "orna.kernel.value.boolean@1",
+            )
+        };
+        let build = |schemas, records| {
+            CatalogueSnapshot::new_with_record_value_types(
+                CatalogueRevisionId::from_bytes([7; 16]),
+                schemas,
+                vec![],
+                vec![boolean()],
+                vec![],
+                records,
+                vec![],
+            )
+        };
+
+        assert!(matches!(
+            build(
+                vec![schema(1, &["geometry"]), schema(2, &["std", "types"])],
+                vec![
+                    record(
+                        2,
+                        &["geometry", "point"],
+                        vec![record_field(3, "x", 0)],
+                    ),
+                    record(
+                        2,
+                        &["geometry", "coordinate"],
+                        vec![record_field(4, "x", 0)],
+                    ),
+                ],
+            ),
+            Err(CatalogueSnapshotError::DuplicateRecordValueTypeId { id })
+                if id == TypeId::from_bytes([2; 16])
+        ));
+        assert_eq!(
+            build(
+                vec![schema(2, &["std", "types"])],
+                vec![record(2, &["point"], vec![record_field(3, "x", 0)])],
+            )
+            .unwrap_err(),
+            CatalogueSnapshotError::RecordValueTypeHasNoSchema {
+                record_value_type: TypeId::from_bytes([2; 16]),
+            }
+        );
+        assert_eq!(
+            build(
+                vec![schema(2, &["std", "types"])],
+                vec![record(
+                    2,
+                    &["geometry", "point"],
+                    vec![record_field(3, "x", 0)],
+                )],
+            )
+            .unwrap_err(),
+            CatalogueSnapshotError::RecordValueTypeSchemaNotDeclared {
+                record_value_type: TypeId::from_bytes([2; 16]),
+                schema: name(&["geometry"]),
+            }
+        );
+    }
+
+    #[test]
+    fn record_value_types_collide_with_every_primary_type_category() {
+        let record_value_type = record(2, &["geometry", "point"], vec![record_field(3, "x", 0)]);
+        let object = object(4, &["geometry", "point"], vec![]);
+        let error = CatalogueSnapshot::new_with_record_value_types(
+            CatalogueRevisionId::from_bytes([7; 16]),
+            vec![schema(1, &["geometry"])],
+            vec![object],
+            vec![],
+            vec![],
+            vec![record_value_type],
+            vec![],
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            CatalogueSnapshotError::DuplicateTypeName {
+                name: TypeLookupName::qualified(name(&["geometry", "point"])),
+            }
+        );
+
+        let record_value_type = record(2, &["geometry", "point"], vec![record_field(3, "x", 0)]);
+        let enum_type = EnumTypeDefinition::new(
+            TypeId::from_bytes([2; 16]),
+            name(&["geometry", "axis"]),
+            ["x"],
+        );
+        let error = CatalogueSnapshot::new_with_record_value_types(
+            CatalogueRevisionId::from_bytes([7; 16]),
+            vec![schema(1, &["geometry"])],
+            vec![],
+            vec![],
+            vec![enum_type],
+            vec![record_value_type],
+            vec![],
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            CatalogueSnapshotError::DuplicateTypeId {
+                id: TypeId::from_bytes([2; 16]),
+            }
+        );
+
+        let boolean = ValueTypeDefinition::primitive(
+            TypeId::from_bytes([90; 16]),
+            name(&["geometry", "point"]),
+            ValueTypeMutability::Immutable,
+            ValueTypePersistence::Persistable,
+            "orna.kernel.value.boolean@1",
+        );
+        let error = CatalogueSnapshot::new_with_record_value_types(
+            CatalogueRevisionId::from_bytes([7; 16]),
+            vec![schema(1, &["geometry"])],
+            vec![],
+            vec![boolean],
+            vec![],
+            vec![record(
+                2,
+                &["geometry", "point"],
+                vec![record_field(3, "x", 0)],
+            )],
+            vec![],
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            CatalogueSnapshotError::DuplicateTypeName { .. }
+        ));
+
+        let enum_type = EnumTypeDefinition::new(
+            TypeId::from_bytes([5; 16]),
+            name(&["geometry", "point"]),
+            ["x"],
+        );
+        let error = CatalogueSnapshot::new_with_record_value_types(
+            CatalogueRevisionId::from_bytes([7; 16]),
+            vec![schema(1, &["geometry"])],
+            vec![],
+            vec![],
+            vec![enum_type],
+            vec![record(
+                2,
+                &["geometry", "point"],
+                vec![record_field(3, "x", 0)],
+            )],
+            vec![],
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            CatalogueSnapshotError::DuplicateTypeName { .. }
+        ));
+
+        let record_value_type = record(2, &["geometry", "point"], vec![record_field(3, "x", 0)]);
+        let binding =
+            TypeBinding::qualified(name(&["geometry", "point"]), TypeId::from_bytes([2; 16]))
+                .unwrap();
+        let error = CatalogueSnapshot::new_with_record_value_types(
+            CatalogueRevisionId::from_bytes([7; 16]),
+            vec![schema(1, &["geometry"]), schema(2, &["std", "types"])],
+            vec![],
+            vec![ValueTypeDefinition::primitive(
+                TypeId::from_bytes([90; 16]),
+                name(&["std", "types", "boolean"]),
+                ValueTypeMutability::Immutable,
+                ValueTypePersistence::Persistable,
+                "orna.kernel.value.boolean@1",
+            )],
+            vec![],
+            vec![record_value_type],
+            vec![binding],
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            CatalogueSnapshotError::DuplicateTypeName { .. }
+        ));
+
+        let error = CatalogueSnapshot::new_with_record_value_types(
+            CatalogueRevisionId::from_bytes([7; 16]),
+            vec![schema(1, &["geometry"]), schema(2, &["std", "types"])],
+            vec![],
+            vec![ValueTypeDefinition::primitive(
+                TypeId::from_bytes([90; 16]),
+                name(&["std", "types", "boolean"]),
+                ValueTypeMutability::Immutable,
+                ValueTypePersistence::Persistable,
+                "orna.kernel.value.boolean@1",
+            )],
+            vec![],
+            vec![
+                record(2, &["geometry", "point"], vec![record_field(3, "x", 0)]),
+                record(4, &["geometry", "point"], vec![record_field(5, "y", 0)]),
+            ],
+            vec![],
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            CatalogueSnapshotError::DuplicateRecordValueTypeName { .. }
+        ));
     }
 
     #[test]
