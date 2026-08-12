@@ -2,15 +2,15 @@ use rowan::{GreenNode, GreenNodeBuilder, Language};
 
 use crate::{
     CapabilitySpecification, ClientFunctionBody, ClientFunctionDeclaration, DeleteStatement,
-    Diagnostic, FieldRenameDeclaration, FunctionReturnType, FunctionSecurity, FunctionTransaction,
-    FunctionVolatility, InsertStatement, MutationValue, NamePart, NullOrdering,
-    ObjectFieldDeclaration, ObjectSource, ObjectTypeDeclaration, OnDeletePolicy, OrderingDirection,
-    OrderingExpression, Parse, PrimitiveValueTypeDeclaration, PrimitiveValueTypePersistence,
-    QualifiedName, QueryExpression, RowsColumnDeclaration, SchemaDeclaration, SelectQuantifier,
-    SelectQuery, ServerFunctionBody, ServerFunctionDeclaration, ServerFunctionParameter,
-    SourceSlice, SourceSpan, SqlDeleteBody, SqlInsertBody, SqlQueryBody, SqlUpdateBody,
-    StandardLargeObjectKind, SyntaxTree, TypeExportDeclaration, TypeExportTarget,
-    TypeSpecification, UpdateAssignment, UpdateStatement,
+    Diagnostic, EnumLabelDeclaration, EnumTypeDeclaration, FieldRenameDeclaration,
+    FunctionReturnType, FunctionSecurity, FunctionTransaction, FunctionVolatility, InsertStatement,
+    MutationValue, NamePart, NullOrdering, ObjectFieldDeclaration, ObjectSource,
+    ObjectTypeDeclaration, OnDeletePolicy, OrderingDirection, OrderingExpression, Parse,
+    PrimitiveValueTypeDeclaration, PrimitiveValueTypePersistence, QualifiedName, QueryExpression,
+    RowsColumnDeclaration, SchemaDeclaration, SelectQuantifier, SelectQuery, ServerFunctionBody,
+    ServerFunctionDeclaration, ServerFunctionParameter, SourceSlice, SourceSpan, SqlDeleteBody,
+    SqlInsertBody, SqlQueryBody, SqlUpdateBody, StandardLargeObjectKind, SyntaxTree,
+    TypeExportDeclaration, TypeExportTarget, TypeSpecification, UpdateAssignment, UpdateStatement,
     lexer::{Token, TokenKind, lex},
 };
 
@@ -128,6 +128,7 @@ struct Parser<'source> {
     diagnostics: Vec<Diagnostic>,
     schemas: Vec<SchemaDeclaration>,
     object_types: Vec<ObjectTypeDeclaration>,
+    enum_types: Vec<EnumTypeDeclaration>,
     primitive_value_types: Vec<PrimitiveValueTypeDeclaration>,
     type_exports: Vec<TypeExportDeclaration>,
     field_renames: Vec<FieldRenameDeclaration>,
@@ -146,6 +147,7 @@ impl<'source> Parser<'source> {
             diagnostics,
             schemas: Vec::new(),
             object_types: Vec::new(),
+            enum_types: Vec::new(),
             primitive_value_types: Vec::new(),
             type_exports: Vec::new(),
             field_renames: Vec::new(),
@@ -183,6 +185,7 @@ impl<'source> Parser<'source> {
             diagnostics: self.diagnostics,
             schemas: self.schemas,
             object_types: self.object_types,
+            enum_types: self.enum_types,
             primitive_value_types: self.primitive_value_types,
             type_exports: self.type_exports,
             field_renames: self.field_renames,
@@ -1236,10 +1239,12 @@ impl<'source> Parser<'source> {
         self.skip_trivia();
         if self.take_word("OBJECT").is_some() {
             self.parse_create_object_type_body(statement_start, name);
+        } else if self.take_word("ENUM").is_some() {
+            self.parse_create_enum_type_body(statement_start, name);
         } else if self.take_word("VALUE").is_some() {
             self.parse_create_primitive_value_type_body(statement_start, name);
         } else {
-            self.error_current("ORNA0001", "expected OBJECT or VALUE after AS");
+            self.error_current("ORNA0001", "expected OBJECT, ENUM, or VALUE after AS");
             self.recover_statement();
             self.builder.finish_node();
             return;
@@ -1281,6 +1286,98 @@ impl<'source> Parser<'source> {
             }
             (_, _, None) => self.recover_statement(),
             _ => {}
+        }
+    }
+
+    fn parse_create_enum_type_body(&mut self, statement_start: usize, name: Option<QualifiedName>) {
+        self.skip_trivia();
+        if self
+            .expect_kind(TokenKind::LeftParenthesis, "expected '(' after AS ENUM")
+            .is_none()
+        {
+            self.recover_statement();
+            return;
+        }
+
+        let mut labels = Vec::new();
+        loop {
+            self.skip_trivia();
+            if self
+                .current()
+                .is_some_and(|token| token.kind == TokenKind::RightParenthesis)
+            {
+                let message = if labels.is_empty() {
+                    "enum type must declare at least one label"
+                } else {
+                    "enum type cannot have a trailing comma"
+                };
+                self.error_current("ORNA0001", message);
+                self.recover_statement();
+                return;
+            }
+            let Some(label) = self
+                .current()
+                .cloned()
+                .filter(|token| token.kind == TokenKind::StringLiteral)
+            else {
+                self.error_current("ORNA0001", "expected a string literal enum label");
+                self.recover_statement();
+                return;
+            };
+            self.bump();
+            labels.push(EnumLabelDeclaration {
+                literal: SourceSlice {
+                    text: label.text.to_owned(),
+                    span: label.span(),
+                },
+            });
+
+            self.skip_trivia();
+            if self
+                .current()
+                .is_some_and(|token| token.kind == TokenKind::RightParenthesis)
+            {
+                self.bump();
+                break;
+            }
+            if self
+                .current()
+                .is_some_and(|token| token.kind == TokenKind::Comma)
+            {
+                self.bump();
+                continue;
+            }
+            let message = if self.current().is_none()
+                || self
+                    .current()
+                    .is_some_and(|token| token.kind == TokenKind::Semicolon)
+            {
+                "expected ')' after enum labels"
+            } else {
+                "expected ',' or ')' after enum label"
+            };
+            self.error_current("ORNA0001", message);
+            self.recover_statement();
+            return;
+        }
+
+        self.skip_trivia();
+        let Some(semicolon) = self.expect_kind(
+            TokenKind::Semicolon,
+            "expected ';' after enum type declaration",
+        ) else {
+            self.recover_statement();
+            return;
+        };
+        if let Some(name) = name {
+            self.enum_types.push(EnumTypeDeclaration {
+                name,
+                labels,
+                span: SourceSpan {
+                    start: statement_start,
+                    end: semicolon.end,
+                },
+            });
         }
     }
 
