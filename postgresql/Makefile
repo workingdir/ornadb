@@ -186,7 +186,8 @@ build-image:
 	[[ "$${target_root}" == "$(REPOSITORY_ROOT)/target/"* ]] || { \
 		printf '%s\n' '[postgresql] error: TARGET_ROOT must be an absolute path below the repository target directory' >&2; exit 1; }; \
 	mkdir -p -- "$${target_root}/container-context"; \
-	docker build --platform linux/amd64 --tag "$(IMAGE)" \
+	docker build --platform linux/amd64 --provenance=false \
+		--build-arg SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) --tag "$(IMAGE)" \
 		--file "$(CONTAINERFILE)" "$${target_root}/container-context"
 
 archives: prepare-source build-image
