@@ -37,6 +37,8 @@ const EXPECTED_KERNEL_TABLES: &[&str] = &[
     "catalogue_function_return_columns",
     "catalogue_functions",
     "catalogue_object_types",
+    "catalogue_record_value_fields",
+    "catalogue_record_value_types",
     "catalogue_revisions",
     "catalogue_schemas",
     "definition_references",
@@ -128,6 +130,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "catalogue enum reference targets",
         include_str!("../migrations/0014_enum_reference_targets.sql"),
     ),
+    (
+        15,
+        "catalogue record value storage",
+        include_str!("../migrations/0015_catalogue_record_value_types.sql"),
+    ),
 ];
 const MIGRATION_DATA_STEP_SEPARATOR: &[u8] = b"\0orna.kernel.migration-step\0";
 const CANONICAL_HASH_V1_EMPTY_SEED_STEP: &[u8] = b"canonical-hash-v1-empty-seed/v1";
@@ -145,6 +152,8 @@ const ORIGIN_TABLES: &[&str] = &[
     "catalogue_enum_types",
     "catalogue_object_types",
     "catalogue_fields",
+    "catalogue_record_value_fields",
+    "catalogue_record_value_types",
     "catalogue_expressions",
     "catalogue_functions",
     "catalogue_function_parameters",
@@ -207,28 +216,31 @@ struct CatalogueSurfaceSnapshot {
     schema_acls: Vec<(String, String)>,
 }
 
+fn is_later_catalogue_relation(relation: &str) -> bool {
+    relation.starts_with("security_")
+        || relation.starts_with("catalogue_enum_types")
+        || relation.starts_with("catalogue_record_value")
+        || relation == "definition_references_enum_type_target_index"
+}
+
 fn without_later_relations(snapshot: &CatalogueSurfaceSnapshot) -> CatalogueSurfaceSnapshot {
     CatalogueSurfaceSnapshot {
         relations_and_indexes: snapshot
             .relations_and_indexes
             .iter()
-            .filter(|(_, relation, _)| {
-                !relation.starts_with("security_") && !relation.starts_with("catalogue_enum_types")
-            })
+            .filter(|(_, relation, _)| !is_later_catalogue_relation(relation))
             .cloned()
             .collect(),
         triggers: snapshot
             .triggers
             .iter()
-            .filter(|(_, relation, _, _)| !relation.starts_with("security_"))
+            .filter(|(_, relation, _, _)| !is_later_catalogue_relation(relation))
             .cloned()
             .collect(),
         relation_acls: snapshot
             .relation_acls
             .iter()
-            .filter(|(_, relation, _)| {
-                !relation.starts_with("security_") && !relation.starts_with("catalogue_enum_types")
-            })
+            .filter(|(_, relation, _)| !is_later_catalogue_relation(relation))
             .cloned()
             .collect(),
         schema_acls: snapshot.schema_acls.clone(),
@@ -366,6 +378,14 @@ fn enum_reference_target_migration_checksum_binds_exact_sql_bytes() {
 }
 
 #[test]
+fn catalogue_record_value_migration_checksum_binds_exact_sql_bytes() {
+    assert_eq!(
+        hex_bytes(expected_migration_checksum(15, MIGRATIONS[14].2)),
+        "31891de1fe93086185d54aa8d995bb5f1f569c8906596e16a007c13ef48385a3"
+    );
+}
+
+#[test]
 fn security_snapshot_migration_is_the_registered_version_nine() -> TestResult<()> {
     let (version, name, sql) = MIGRATIONS[8];
 
@@ -468,23 +488,54 @@ fn resolved_enum_type_storage_is_the_registered_version_thirteen() -> TestResult
 
 #[test]
 fn enum_reference_targets_are_the_registered_version_fourteen() -> TestResult<()> {
-    let Some((version, name, sql)) = MIGRATIONS.last() else {
-        return Err(failure("migration registry is empty"));
-    };
+    let (version, name, sql) = MIGRATIONS[13];
 
     require(
-        *version == 14,
-        format!("last migration is version {version}"),
+        version == 14,
+        format!("enum reference migration is version {version}"),
     )?;
     require(
-        *name == "catalogue enum reference targets",
-        format!("last migration has unexpected name {name:?}"),
+        name == "catalogue enum reference targets",
+        format!("enum reference migration has unexpected name {name:?}"),
     )?;
     require(
         sql.contains("target_enum_catalogue_revision_id")
             && sql.contains("target_kind = 'enum_type'")
             && sql.contains("REFERENCES _orna_kernel.catalogue_enum_types"),
         "enum reference migration does not bind named evidence to its catalogue enum",
+    )
+}
+
+#[test]
+fn record_value_storage_is_the_registered_version_fifteen() -> TestResult<()> {
+    let Some((version, name, sql)) = MIGRATIONS.last() else {
+        return Err(failure("migration registry is empty"));
+    };
+
+    require(
+        *version == 15,
+        format!("last migration is version {version}"),
+    )?;
+    require(
+        *name == "catalogue record value storage",
+        format!("last migration has unexpected name {name:?}"),
+    )?;
+    require(
+        sql.contains("CREATE TABLE _orna_kernel.catalogue_record_value_types")
+            && sql.contains("CREATE TABLE _orna_kernel.catalogue_record_value_fields")
+            && sql.contains("CHECK (value_kind = 'record')")
+            && sql.contains("CHECK (mutability = 'immutable')")
+            && sql.contains("CHECK (persistence = 'persistable')")
+            && sql.contains("CHECK (type_kind IN ('value', 'enum'))")
+            && sql.contains("REFERENCES _orna_kernel.standard_catalogue_value_types")
+            && sql.contains("REFERENCES _orna_kernel.catalogue_enum_types")
+            && sql.contains(
+                "REVOKE ALL ON TABLE _orna_kernel.catalogue_record_value_types FROM PUBLIC",
+            )
+            && sql.contains(
+                "REVOKE ALL ON TABLE _orna_kernel.catalogue_record_value_fields FROM PUBLIC",
+            ),
+        "record value migration does not preserve the complete protected definition contract",
     )
 }
 
@@ -598,8 +649,8 @@ async fn bootstrap_upgrades_v5_write_reference_evidence_without_mutating_semanti
 
         let after = snapshot_upgrade_state(&database).await?;
         require(
-            after.migrations.len() == 14 && after.migrations[..5] == before.migrations[..],
-            format!("v6-v14 changed prior migration records: {:?}", after.migrations),
+            after.migrations.len() == 15 && after.migrations[..5] == before.migrations[..],
+            format!("v6-v15 changed prior migration records: {:?}", after.migrations),
         )?;
         require(
             after.migrations[5]
@@ -681,6 +732,15 @@ async fn bootstrap_upgrades_v5_write_reference_evidence_without_mutating_semanti
                     expected_migration_checksum(14, MIGRATIONS[13].2),
                 ),
             format!("v14 migration record is not exact: {:?}", after.migrations[13]),
+        )?;
+        require(
+            after.migrations[14]
+                == (
+                    15,
+                    "catalogue record value storage".to_owned(),
+                    expected_migration_checksum(15, MIGRATIONS[14].2),
+                ),
+            format!("v15 migration record is not exact: {:?}", after.migrations[14]),
         )?;
         require(
             after.active_pair == before.active_pair,
@@ -768,7 +828,7 @@ async fn bootstrap_upgrades_registered_v6_without_standard_rows() -> TestResult<
 
         let after = snapshot_upgrade_state(&database).await?;
         require(
-            after.migrations.len() == 14
+            after.migrations.len() == 15
                 && after.migrations[..6] == before.migrations[..]
                 && after.migrations[6]
                     == (
@@ -840,6 +900,15 @@ async fn bootstrap_upgrades_registered_v6_without_standard_rows() -> TestResult<
                     expected_migration_checksum(14, MIGRATIONS[13].2),
                 ),
             format!("v14 migration record is not exact: {:?}", after.migrations[13]),
+        )?;
+        require(
+            after.migrations[14]
+                == (
+                    15,
+                    "catalogue record value storage".to_owned(),
+                    expected_migration_checksum(15, MIGRATIONS[14].2),
+                ),
+            format!("v15 migration record is not exact: {:?}", after.migrations[14]),
         )?;
         require(
             after.active_pair == before.active_pair
@@ -915,7 +984,7 @@ async fn bootstrap_upgrades_registered_v7_without_resolved_value_rows() -> TestR
         let after_surface = snapshot_catalogue_surface(&database).await?;
         let after_target_fks = snapshot_application_target_foreign_keys(&database).await?;
         require(
-            after.migrations.len() == 14
+            after.migrations.len() == 15
                 && after.migrations[..7] == before.migrations[..]
                 && after.migrations[7]
                     == (
@@ -958,6 +1027,12 @@ async fn bootstrap_upgrades_registered_v7_without_resolved_value_rows() -> TestR
                         14,
                         "catalogue enum reference targets".to_owned(),
                         expected_migration_checksum(14, MIGRATIONS[13].2),
+                    )
+                && after.migrations[14]
+                    == (
+                        15,
+                        "catalogue record value storage".to_owned(),
+                        expected_migration_checksum(15, MIGRATIONS[14].2),
                     ),
             format!("v7 upgrade produced unexpected migrations: {:?}", after.migrations),
         )?;
@@ -1273,7 +1348,7 @@ async fn bootstrap_rejects_tampered_gapped_and_newer_migration_history() -> Test
         Sha256::digest(MIGRATIONS[1].2.as_bytes()).to_vec(),
     )
     .await?;
-    reject_migration_history(14, "future migration", vec![0; 32]).await
+    reject_migration_history(16, "future migration", vec![0; 32]).await
 }
 
 async fn inspect_bootstrap_state(database: &TestDatabase) -> TestResult<()> {
@@ -1337,6 +1412,7 @@ async fn inspect_client(client: &Client) -> TestResult<()> {
     inspect_standard_catalogue_schema(client).await?;
     inspect_resolved_value_storage(client, true).await?;
     inspect_resolved_enum_storage(client, true).await?;
+    inspect_record_value_storage(client).await?;
     inspect_security_snapshot_schema(client).await?;
 
     for schema in ["_orna_kernel", "_orna_data"] {
@@ -2128,6 +2204,133 @@ async fn inspect_resolved_enum_storage(
         )
         .await?;
     }
+    Ok(())
+}
+
+async fn inspect_record_value_storage(client: &Client) -> TestResult<()> {
+    inspect_columns(
+        client,
+        "catalogue_record_value_types",
+        &[
+            ("catalogue_revision_id", "bytea", "bytea", "NO", Some("")),
+            ("type_id", "bytea", "bytea", "NO", Some("")),
+            ("schema_id", "bytea", "bytea", "NO", Some("")),
+            ("name_parts", "ARRAY", "_text", "NO", Some("")),
+            ("value_kind", "text", "text", "NO", Some("")),
+            ("mutability", "text", "text", "NO", Some("")),
+            ("persistence", "text", "text", "NO", Some("")),
+            ("source_unit_id", "bytea", "bytea", "NO", Some("")),
+            ("source_start", "bigint", "int8", "NO", Some("")),
+            ("source_end", "bigint", "int8", "NO", Some("")),
+        ],
+    )
+    .await?;
+    inspect_columns(
+        client,
+        "catalogue_record_value_fields",
+        &[
+            ("catalogue_revision_id", "bytea", "bytea", "NO", Some("")),
+            ("owner_type_id", "bytea", "bytea", "NO", Some("")),
+            ("field_id", "bytea", "bytea", "NO", Some("")),
+            ("name", "text", "text", "NO", Some("")),
+            ("ordinal", "bigint", "int8", "NO", Some("")),
+            ("type_kind", "text", "text", "NO", Some("")),
+            ("value_type_id", "bytea", "bytea", "YES", Some("")),
+            (
+                "value_standard_library_revision_id",
+                "bytea",
+                "bytea",
+                "YES",
+                Some(""),
+            ),
+            ("enum_type_id", "bytea", "bytea", "YES", Some("")),
+            ("source_unit_id", "bytea", "bytea", "NO", Some("")),
+            ("source_start", "bigint", "int8", "NO", Some("")),
+            ("source_end", "bigint", "int8", "NO", Some("")),
+        ],
+    )
+    .await?;
+
+    for (table, constraint, fragment) in [
+        (
+            "catalogue_record_value_types",
+            "cat_record_value_types_value_kind_check",
+            "value_kind = 'record'::text",
+        ),
+        (
+            "catalogue_record_value_types",
+            "cat_record_value_types_mutability_check",
+            "mutability = 'immutable'::text",
+        ),
+        (
+            "catalogue_record_value_types",
+            "cat_record_value_types_persistence_check",
+            "persistence = 'persistable'::text",
+        ),
+        (
+            "catalogue_record_value_fields",
+            "cat_record_value_fields_type_kind_check",
+            "type_kind = ANY (ARRAY['value'::text, 'enum'::text])",
+        ),
+        (
+            "catalogue_record_value_fields",
+            "cat_record_value_fields_owner_fk",
+            "REFERENCES _orna_kernel.catalogue_record_value_types",
+        ),
+        (
+            "catalogue_record_value_fields",
+            "cat_record_value_fields_value_pin_fk",
+            "REFERENCES _orna_kernel.catalogue_revisions",
+        ),
+        (
+            "catalogue_record_value_fields",
+            "cat_record_value_fields_value_type_fk",
+            "REFERENCES _orna_kernel.standard_catalogue_value_types",
+        ),
+        (
+            "catalogue_record_value_fields",
+            "cat_record_value_fields_enum_type_fk",
+            "REFERENCES _orna_kernel.catalogue_enum_types",
+        ),
+    ] {
+        require_constraint(client, table, constraint, fragment).await?;
+    }
+
+    for table in [
+        "catalogue_record_value_types",
+        "catalogue_record_value_fields",
+    ] {
+        require_count(
+            client,
+            &format!("_orna_kernel.{table}"),
+            &format!("SELECT count(*) FROM _orna_kernel.{table}"),
+            0,
+        )
+        .await?;
+        for privilege in [
+            "SELECT",
+            "INSERT",
+            "UPDATE",
+            "DELETE",
+            "TRUNCATE",
+            "REFERENCES",
+            "TRIGGER",
+            "MAINTAIN",
+        ] {
+            let relation = format!("_orna_kernel.{table}");
+            let row = client
+                .query_one(
+                    "SELECT has_table_privilege('public', $1, $2)",
+                    &[&relation, &privilege],
+                )
+                .await?;
+            require(
+                !value::<bool>(&row, 0)?,
+                format!("PUBLIC has {privilege} on protected table {relation}"),
+            )?;
+        }
+    }
+
     Ok(())
 }
 
@@ -3205,10 +3408,11 @@ async fn inspect_origin_columns(client: &Client) -> TestResult<()> {
     let schema = "_orna_kernel";
 
     for table in ORIGIN_TABLES {
-        let nullability = if *table == "catalogue_enum_types" {
-            "NO"
-        } else {
-            "YES"
+        let nullability = match *table {
+            "catalogue_enum_types"
+            | "catalogue_record_value_fields"
+            | "catalogue_record_value_types" => "NO",
+            _ => "YES",
         };
         let expected_columns = BTreeSet::from([
             ("source_end".to_owned(), nullability.to_owned()),
