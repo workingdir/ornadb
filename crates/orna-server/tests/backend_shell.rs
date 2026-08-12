@@ -247,6 +247,10 @@ fn hostile_client_environment_cannot_select_a_program_or_connection() {
             ),
             (OsString::from("PGHOST"), OsString::from("elsewhere")),
             (OsString::from("PGPASSWORD"), OsString::from("secret")),
+            (
+                OsString::from("ORNA_PACKAGE_MAINTENANCE"),
+                OsString::from("complete"),
+            ),
             (OsString::from("HOME"), directory.0.clone().into_os_string()),
         ],
         &directory.0,

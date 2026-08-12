@@ -4,6 +4,8 @@ use std::{
     process::ExitCode,
 };
 
+mod package_maintenance;
+
 const USAGE: &str = "Usage: orna server <run|backend-shell>";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -13,7 +15,17 @@ enum Command {
 }
 
 fn main() -> ExitCode {
-    let Some(command) = parse_command(std::env::args_os()) else {
+    let arguments = std::env::args_os().collect::<Vec<_>>();
+    if let Some(result) = package_maintenance::run_if_selected(arguments.len()) {
+        return match result {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                write_stderr_line(&error.to_string());
+                ExitCode::from(1)
+            }
+        };
+    }
+    let Some(command) = parse_command(arguments) else {
         write_stderr_line(USAGE);
         return ExitCode::from(2);
     };
