@@ -17,8 +17,8 @@ use orna_core::{
     revision::{ActiveDatabaseRevision, DeployableRevision, RevisionPair},
     security::{
         ExecuteDenial, ExecuteGrant, InvocationTarget, Principal, PrincipalKind, PrincipalStatus,
-        SecurityAuditDenial, SecurityAuditEvent, SecurityAuditKind, SecurityAuditOutcome,
-        SecuritySnapshot,
+        RoleMembership, SecurityAuditDenial, SecurityAuditEvent, SecurityAuditKind,
+        SecurityAuditOutcome, SecuritySnapshot,
     },
     source::{SourceBundle, SourceUnit},
     types::{ResolvedType, StandardScalar},
@@ -378,33 +378,113 @@ async fn authenticated_server_select_commits_allowed_and_denied_execute_decision
             "this function does not accept arguments",
         )?;
 
-        let denied = SecuritySnapshot::new(
+        let role = PrincipalId::from_bytes([0xa9; 16]);
+        let selected = SecuritySnapshot::new(
+            applied.pair(),
+            function_ids.clone(),
+            vec![
+                Principal::new(principal, PrincipalKind::User, PrincipalStatus::Active),
+                Principal::new(role, PrincipalKind::Role, PrincipalStatus::Active),
+            ],
+            vec![RoleMembership::new(role, principal)],
+            vec![ExecuteGrant::new(role, function.id())],
+        )?;
+        let selected = kernel.replace_security_snapshot(&selected).await?;
+        let selected_session = selected.bind_authenticated_session(principal, vec![role])?;
+        kernel
+            .execute_authenticated_server_select(&selected_session, function.id(), &[])
+            .await?;
+
+        let unselected_session = selected.bind_authenticated_session(principal, vec![])?;
+        let error = kernel
+            .execute_authenticated_server_select(&unselected_session, function.id(), &[])
+            .await
+            .expect_err("unselected role must not authorise SERVER SELECT");
+        require_server_execute_denial(
+            &error,
+            applied.pair(),
+            function.id(),
+            ExecuteDenial::MissingExecuteGrant,
+        )?;
+
+        let unknown_function = FunctionId::from_bytes([0xaa; 16]);
+        let error = kernel
+            .execute_authenticated_server_select(&selected_session, unknown_function, &[])
+            .await
+            .expect_err("unknown function must deny SERVER SELECT");
+        require_server_execute_denial(
+            &error,
+            applied.pair(),
+            unknown_function,
+            ExecuteDenial::UnknownFunction,
+        )?;
+
+        let stale = SecuritySnapshot::new(
+            applied.pair(),
+            function_ids.clone(),
+            vec![
+                Principal::new(principal, PrincipalKind::User, PrincipalStatus::Active),
+                Principal::new(role, PrincipalKind::Role, PrincipalStatus::Active),
+            ],
+            vec![],
+            vec![ExecuteGrant::new(role, function.id())],
+        )?;
+        kernel.replace_security_snapshot(&stale).await?;
+        let error = kernel
+            .execute_authenticated_server_select(&selected_session, function.id(), &[])
+            .await
+            .expect_err("stale active-role selection must deny SERVER SELECT");
+        require_server_execute_denial(
+            &error,
+            applied.pair(),
+            function.id(),
+            ExecuteDenial::InvalidSession,
+        )?;
+
+        let disabled = SecuritySnapshot::new(
+            applied.pair(),
+            function_ids.clone(),
+            vec![
+                Principal::new(principal, PrincipalKind::User, PrincipalStatus::Disabled),
+                Principal::new(role, PrincipalKind::Role, PrincipalStatus::Active),
+            ],
+            vec![RoleMembership::new(role, principal)],
+            vec![ExecuteGrant::new(role, function.id())],
+        )?;
+        kernel.replace_security_snapshot(&disabled).await?;
+        let error = kernel
+            .execute_authenticated_server_select(&selected_session, function.id(), &[])
+            .await
+            .expect_err("disabled session must deny SERVER SELECT");
+        require_server_execute_denial(
+            &error,
+            applied.pair(),
+            function.id(),
+            ExecuteDenial::InvalidSession,
+        )?;
+
+        let replacement_principal = PrincipalId::from_bytes([0xab; 16]);
+        let unknown = SecuritySnapshot::new(
             applied.pair(),
             function_ids,
             vec![Principal::new(
-                principal,
+                replacement_principal,
                 PrincipalKind::User,
                 PrincipalStatus::Active,
             )],
             vec![],
             vec![],
         )?;
-        let denied = kernel.replace_security_snapshot(&denied).await?;
-        let denied_session = denied.bind_authenticated_session(principal, vec![])?;
+        kernel.replace_security_snapshot(&unknown).await?;
         let error = kernel
-            .execute_authenticated_server_select(&denied_session, function.id(), &[])
+            .execute_authenticated_server_select(&allowed_session, function.id(), &[])
             .await
-            .expect_err("missing EXECUTE grant must deny SERVER SELECT");
-        require(
-            matches!(
-                error,
-                PostgresKernelError::ServerExecuteDenied {
-                    pair,
-                    function: denied_function,
-                    reason: ExecuteDenial::MissingExecuteGrant,
-                } if pair == applied.pair() && denied_function == function.id()
-            ),
-            "authenticated SERVER denial did not retain its exact context",
+            .expect_err("unknown session must deny SERVER SELECT");
+        require_server_execute_denial(
+            &error,
+            applied.pair(),
+            function.id(),
+            ExecuteDenial::InvalidSession,
         )?;
 
         let audits = kernel.recover_security_audit_events().await?;
@@ -413,7 +493,7 @@ async fn authenticated_server_select_commits_allowed_and_denied_execute_decision
             .filter(|event| event.decision().kind() == SecurityAuditKind::Execute)
             .collect::<Vec<_>>();
         require(
-            execute.len() == 3,
+            execute.len() == 8,
             "authenticated SERVER audit count differs",
         )?;
         let target = InvocationTarget::new(function.id(), applied.pair());
@@ -437,15 +517,64 @@ async fn authenticated_server_select_commits_allowed_and_denied_execute_decision
         )?;
         require_server_execute_audit(
             execute[2],
+            SecurityAuditOutcome::Allowed,
+            principal,
+            Some(principal),
+            Some(role),
+            target,
+            None,
+        )?;
+        require_server_execute_audit(
+            execute[3],
             SecurityAuditOutcome::Denied,
             principal,
             None,
             None,
             target,
             Some(ExecuteDenial::MissingExecuteGrant),
-        )
+        )?;
+        require_server_execute_audit(
+            execute[4],
+            SecurityAuditOutcome::Denied,
+            principal,
+            None,
+            None,
+            InvocationTarget::new(unknown_function, applied.pair()),
+            Some(ExecuteDenial::UnknownFunction),
+        )?;
+        for event in &execute[5..] {
+            require_server_execute_audit(
+                event,
+                SecurityAuditOutcome::Denied,
+                principal,
+                None,
+                None,
+                target,
+                Some(ExecuteDenial::InvalidSession),
+            )?;
+        }
+        Ok(())
     })
     .await
+}
+
+fn require_server_execute_denial(
+    error: &PostgresKernelError,
+    pair: RevisionPair,
+    function: FunctionId,
+    reason: ExecuteDenial,
+) -> TestResult<()> {
+    require(
+        matches!(
+            error,
+            PostgresKernelError::ServerExecuteDenied {
+                pair: denied_pair,
+                function: denied_function,
+                reason: denied_reason,
+            } if *denied_pair == pair && *denied_function == function && *denied_reason == reason
+        ),
+        "authenticated SERVER denial changed its exact context",
+    )
 }
 
 fn require_server_execute_audit(
