@@ -1,0 +1,487 @@
+diff -U0 -Nr a/src/backend/Makefile b/src/backend/Makefile
+--- a/src/backend/Makefile
++++ b/src/backend/Makefile
+@@ -60,3 +60,3 @@
+-# Build one deterministic flattened backend link input.  PostgreSQL normally
+-# puts server archives in OBJS; flatten them before ar so this archive has no
+-# nested archive member.
++# Build deterministic flattened backend and initialiser link inputs.  PostgreSQL
++# normally puts server archives in OBJS; flatten them with whole-archive before
++# ar so neither final archive contains a nested archive member.
+@@ -75,0 +76,21 @@
++NM := $(if $(NM),$(NM),nm)
++OBJCOPY := $(if $(OBJCOPY),$(OBJCOPY),objcopy)
++RANLIB := $(if $(RANLIB),$(RANLIB),ranlib)
++
++ORNA_EMBEDDED_INITDB_ARCHIVE = $(top_builddir)/src/bin/initdb/liborna_postgres18_initdb.a
++ORNA_EMBEDDED_INITDB_RELOCATABLE_OBJECT = $(top_builddir)/src/bin/initdb/liborna_postgres18_initdb.relocatable.o
++ORNA_EMBEDDED_INITDB_OBJECT = $(top_builddir)/src/bin/initdb/liborna_postgres18_initdb.o
++ORNA_EMBEDDED_INITDB_RENAME_MAP = $(top_builddir)/src/bin/initdb/initdb-redefine-symbols.txt
++ORNA_EMBEDDED_INITDB_DEFINED_SYMBOLS = $(top_builddir)/src/bin/initdb/initdb-defined-symbols.txt
++ORNA_EMBEDDED_INITDB_UNDEFINED_SYMBOLS = $(top_builddir)/src/bin/initdb/initdb-undefined-symbols.txt
++ORNA_EMBEDDED_INITDB_OBJECTS = \
++	$(top_builddir)/src/bin/initdb/orna_embedded_initdb.o \
++	$(top_builddir)/src/bin/initdb/findtimezone.o \
++	$(top_builddir)/src/bin/initdb/localtime.o
++ORNA_EMBEDDED_INITDB_ARCHIVES = \
++	$(top_builddir)/src/fe_utils/libpgfeutils.a \
++	$(top_builddir)/src/interfaces/libpq/libpq.a \
++	$(top_builddir)/src/common/libpgcommon.a \
++	$(top_builddir)/src/port/libpgport.a \
++	$(ORNA_EMBEDDED_ZLIB_ARCHIVE)
++
+@@ -91,0 +113,23 @@
++$(ORNA_EMBEDDED_INITDB_RELOCATABLE_OBJECT): generated-headers submake-libpgport
++	$(MAKE) -C $(top_builddir)/src/bin/initdb orna_embedded_initdb.o findtimezone.o localtime.o
++	$(MAKE) -C $(top_builddir)/src/common libpgcommon.a
++	$(MAKE) -C $(top_builddir)/src/port libpgport.a
++	$(MAKE) -C $(top_builddir)/src/interfaces/libpq libpq.a
++	$(MAKE) -C $(top_builddir)/src/fe_utils libpgfeutils.a
++	$(CC) $(CFLAGS) $(LDFLAGS) -r -o $@ $(ORNA_EMBEDDED_INITDB_OBJECTS) \
++		-Wl,--whole-archive $(ORNA_EMBEDDED_INITDB_ARCHIVES) -Wl,--no-whole-archive
++
++$(ORNA_EMBEDDED_INITDB_OBJECT): $(ORNA_EMBEDDED_INITDB_RELOCATABLE_OBJECT)
++	$(NM) --format=posix --extern-only --defined-only $< | \
++		awk -v entry="orna_postgres18_initdb_entry" \
++			-v prefix="orna_postgres18_initdb_" \
++			'$$2 ~ /^[A-Za-z]$$/ && $$1 != entry { print $$1 " " prefix $$1 }' | \
++		LC_ALL=C sort > $(ORNA_EMBEDDED_INITDB_RENAME_MAP)
++	$(OBJCOPY) --redefine-syms=$(ORNA_EMBEDDED_INITDB_RENAME_MAP) $< $@
++	$(NM) --format=posix --extern-only --defined-only $@ | LC_ALL=C sort > $(ORNA_EMBEDDED_INITDB_DEFINED_SYMBOLS)
++	$(NM) --format=posix --extern-only --undefined-only $@ | LC_ALL=C sort > $(ORNA_EMBEDDED_INITDB_UNDEFINED_SYMBOLS)
++
++$(ORNA_EMBEDDED_INITDB_ARCHIVE): $(ORNA_EMBEDDED_INITDB_OBJECT)
++	$(AR) rcD $@ $<
++	$(RANLIB) -D $@
++
+@@ -96,0 +141,9 @@
++
++.PHONY: orna_postgres18_lifecycle_archives
++orna_postgres18_lifecycle_archives: $(ORNA_EMBEDDED_ARCHIVE) $(ORNA_EMBEDDED_INITDB_ARCHIVE)
++
++.PHONY: orna_postgres18_lifecycle_probe
++orna_postgres18_lifecycle_probe: orna_postgres18_lifecycle_archives
++	test -n "$(ORNA_EMBEDDED_LIFECYCLE_PROBE_SOURCE)" -a -n "$(ORNA_EMBEDDED_LIFECYCLE_PROBE_OUTPUT)"
++	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $(ORNA_EMBEDDED_LIFECYCLE_PROBE_OUTPUT) \
++		$(ORNA_EMBEDDED_LIFECYCLE_PROBE_SOURCE) $(ORNA_EMBEDDED_INITDB_ARCHIVE) $(ORNA_EMBEDDED_ARCHIVE) $(LIBS)
+diff -U0 -Nr a/src/backend/main/main.c b/src/backend/main/main.c
+--- a/src/backend/main/main.c
++++ b/src/backend/main/main.c
+@@ -75,0 +76,4 @@
++#ifdef ORNA_EMBEDDED_ENTRY
++	int			clear_pglocaledir_result;
++	int			clear_pgsysconfdir_result;
++#endif
+@@ -77,0 +82,8 @@
++	clear_pgsysconfdir_result = unsetenv("PGSYSCONFDIR");
++	clear_pglocaledir_result = unsetenv("PGLOCALEDIR");
++	if (clear_pgsysconfdir_result != 0 ||
++		clear_pglocaledir_result != 0 ||
++		setlocale(LC_ALL, "C.UTF-8") == NULL)
++		return 1;
++#endif
++#ifdef ORNA_EMBEDDED_ENTRY
+@@ -81,0 +94,3 @@
++#ifdef ORNA_EMBEDDED_ENTRY
++	strlcpy(my_exec_path, "/usr/bin/orna", MAXPGPATH);
++#endif
+@@ -131,0 +147 @@
++#ifndef ORNA_EMBEDDED_ENTRY
+@@ -132,0 +149 @@
++#endif
+diff -U0 -Nr a/src/bin/initdb/Makefile b/src/bin/initdb/Makefile
+--- a/src/bin/initdb/Makefile
++++ b/src/bin/initdb/Makefile
+@@ -63,0 +64,3 @@
++orna_embedded_initdb.o: initdb.c $(top_builddir)/src/Makefile.global
++	$(CC) $(CFLAGS) $(CPPFLAGS) -DORNA_EMBEDDED_INITDB_ENTRY -c $< -o $@
++
+diff -U0 -Nr a/src/bin/initdb/initdb.c b/src/bin/initdb/initdb.c
+--- a/src/bin/initdb/initdb.c
++++ b/src/bin/initdb/initdb.c
+@@ -218,15 +217,0 @@
+-/*
+- * Centralized knowledge of switches to pass to backend
+- *
+- * Note: we run the backend with -F (fsync disabled) and then do a single
+- * pass of fsync'ing at the end.  This is faster than fsync'ing each step.
+- *
+- * Note: in the shell-script version, we also passed PGDATA as a -D switch,
+- * but here it is more convenient to pass it as an environment variable
+- * (no quoting to worry about).
+- */
+-static const char *const backend_options = "--single -F -O -j -c search_path=pg_catalog -c exit_on_error=true -c log_checkpoints=false";
+-
+-/* Additional switches to pass to backend (either boot or standalone) */
+-static char *extra_options = "";
+-
+@@ -262 +246,0 @@
+-static char backend_exec[MAXPGPATH];
+@@ -278,2 +262,2 @@
+-static FILE *popen_check(const char *command, const char *mode);
+-static FILE *orna_start_backend(char **argv, pid_t *child_pid);
++static FILE *orna_start_backend(char **argv, pid_t *child_pid,
++							bool system_functions_initialisation);
+@@ -280,0 +265,4 @@
++static FILE *orna_open_backend_sql(char **sql, size_t *length);
++static void orna_close_backend_sql(FILE *cmdfd, char **sql);
++static void orna_run_backend_sql(char **argv, char *sql, size_t length,
++						 bool system_functions_initialisation);
+@@ -301 +288,0 @@
+-static void load_plpgsql(FILE *cmdfd);
+@@ -326,18 +312,0 @@
+-/*
+- * macros for running pipes to postgres
+- */
+-#define PG_CMD_DECL		FILE *cmdfd
+-
+-#define PG_CMD_OPEN(cmd) \
+-do { \
+-	cmdfd = popen_check(cmd, "w"); \
+-	if (cmdfd == NULL) \
+-		exit(1); /* message already printed by popen_check */ \
+-} while (0)
+-
+-#define PG_CMD_CLOSE() \
+-do { \
+-	if (pclose_check(cmdfd)) \
+-		exit(1); /* message already printed by pclose_check */ \
+-} while (0)
+-
+@@ -752,16 +720,0 @@
+- * Open a subcommand with suitable error messaging
+- */
+-static FILE *
+-popen_check(const char *command, const char *mode)
+-{
+-	FILE	   *cmdfd;
+-
+-	fflush(NULL);
+-	errno = 0;
+-	cmdfd = popen(command, mode);
+-	if (cmdfd == NULL)
+-		pg_log_error("could not execute command \"%s\": %m", command);
+-	return cmdfd;
+-}
+-
+-/*
+@@ -813 +766,2 @@
+-orna_start_backend(char **argv, pid_t *child_pid)
++orna_start_backend(char **argv, pid_t *child_pid,
++				   bool system_functions_initialisation)
+@@ -871,0 +826,2 @@
++		orna_postgres18_set_system_functions_initialisation_capability(
++			system_functions_initialisation);
+@@ -931,0 +888,58 @@
++ * Render each standalone SQL phase before its child exists.  Support-file
++ * reads and allocations can fail, but must never strand a linked child.
++ */
++static FILE *
++orna_open_backend_sql(char **sql, size_t *length)
++{
++	FILE	   *cmdfd;
++
++	output_failed = false;
++	output_errno = 0;
++	*sql = NULL;
++	*length = 0;
++	cmdfd = open_memstream(sql, length);
++	if (cmdfd == NULL)
++		pg_fatal("could not prepare linked PostgreSQL child input: %m");
++	return cmdfd;
++}
++
++static void
++orna_close_backend_sql(FILE *cmdfd, char **sql)
++{
++	if (fclose(cmdfd) != 0 || output_failed)
++	{
++		if (output_failed)
++			errno = output_errno;
++		free(*sql);
++		*sql = NULL;
++		pg_fatal("could not prepare linked PostgreSQL child input: %m");
++	}
++}
++
++static void
++orna_run_backend_sql(char **argv, char *sql, size_t length,
++					 bool system_functions_initialisation)
++{
++	FILE	   *cmdfd;
++	pid_t		child_pid;
++	OrnaBackendResult result;
++	bool		write_failed;
++
++	cmdfd = orna_start_backend(argv, &child_pid,
++							 system_functions_initialisation);
++	if (cmdfd == NULL)
++	{
++		free(sql);
++		pg_fatal("could not start linked PostgreSQL child");
++	}
++	write_failed = fwrite(sql, 1, length, cmdfd) != length ||
++		fflush(cmdfd) != 0;
++	result = orna_finish_backend(cmdfd, child_pid);
++	free(sql);
++	if (result != ORNA_BACKEND_OK)
++		pg_fatal("linked PostgreSQL child did not complete successfully");
++	if (write_failed)
++		pg_fatal("could not write to linked PostgreSQL child");
++}
++
++/*
+@@ -1415 +1429 @@
+-	cmdfd = orna_start_backend(argv, &child_pid);
++	cmdfd = orna_start_backend(argv, &child_pid, false);
+@@ -1785 +1799 @@
+-	cmdfd = orna_start_backend(argv, &child_pid);
++	cmdfd = orna_start_backend(argv, &child_pid, false);
+@@ -1939,9 +1953,41 @@
+-	/*
+-	 * Set the collation version for collations defined in pg_collation.dat,
+-	 * but not the ones where we know that the collation behavior will never
+-	 * change.
+-	 */
+-	PG_CMD_PUTS("UPDATE pg_collation SET collversion = pg_collation_actual_version(oid) WHERE collname = 'unicode';\n\n");
+-
+-	/* Import all collations we can find in the operating system */
+-	PG_CMD_PUTS("SELECT pg_import_system_collations('pg_catalog');\n\n");
++	PG_CMD_PUTS("CREATE TEMP TABLE pg_temp.orna_collation_facts "
++				"(valid boolean NOT NULL CONSTRAINT "
++				"orna_collation_facts_valid CHECK (valid)) ON COMMIT DROP; "
++				"INSERT INTO pg_temp.orna_collation_facts VALUES ((SELECT count(*) = 7 FROM pg_collation) AND "
++				"(SELECT count(*) = 1 FROM pg_collation WHERE oid = 100 "
++				"AND collname = 'default' AND collnamespace = 11 AND collowner = 10 "
++				"AND collprovider = 'd' AND collisdeterministic AND collencoding = -1 "
++				"AND collcollate IS NULL AND collctype IS NULL AND colllocale IS NULL "
++				"AND collicurules IS NULL AND collversion IS NULL) AND "
++				"(SELECT count(*) = 1 FROM pg_collation WHERE oid = 950 "
++				"AND collname = 'C' AND collnamespace = 11 AND collowner = 10 "
++				"AND collprovider = 'c' AND collisdeterministic AND collencoding = -1 "
++				"AND collcollate = 'C' AND collctype = 'C' AND colllocale IS NULL "
++				"AND collicurules IS NULL AND collversion IS NULL) AND "
++				"(SELECT count(*) = 1 FROM pg_collation WHERE oid = 951 "
++				"AND collname = 'POSIX' AND collnamespace = 11 AND collowner = 10 "
++				"AND collprovider = 'c' AND collisdeterministic AND collencoding = -1 "
++				"AND collcollate = 'POSIX' AND collctype = 'POSIX' "
++				"AND colllocale IS NULL AND collicurules IS NULL AND collversion IS NULL) AND "
++				"(SELECT count(*) = 1 FROM pg_collation WHERE oid = 962 "
++				"AND collname = 'ucs_basic' AND collnamespace = 11 AND collowner = 10 "
++				"AND collprovider = 'b' AND collisdeterministic AND collencoding = 6 "
++				"AND collcollate IS NULL AND collctype IS NULL AND colllocale = 'C' "
++				"AND collicurules IS NULL AND collversion = '1') AND "
++				"(SELECT count(*) = 1 FROM pg_collation WHERE oid = 963 "
++				"AND collname = 'unicode' AND collnamespace = 11 AND collowner = 10 "
++				"AND collprovider = 'i' AND collisdeterministic AND collencoding = -1 "
++				"AND collcollate IS NULL AND collctype IS NULL AND colllocale = 'und' "
++				"AND collicurules IS NULL AND collversion IS NULL) AND "
++				"(SELECT count(*) = 1 FROM pg_collation WHERE oid = 811 "
++				"AND collname = 'pg_c_utf8' AND collnamespace = 11 AND collowner = 10 "
++				"AND collprovider = 'b' AND collisdeterministic AND collencoding = 6 "
++				"AND collcollate IS NULL AND collctype IS NULL AND colllocale = 'C.UTF-8' "
++				"AND collicurules IS NULL AND collversion = '1') AND "
++				"(SELECT count(*) = 1 FROM pg_collation WHERE oid = 6411 "
++				"AND collname = 'pg_unicode_fast' AND collnamespace = 11 AND collowner = 10 "
++				"AND collprovider = 'b' AND collisdeterministic AND collencoding = 6 "
++				"AND collcollate IS NULL AND collctype IS NULL "
++				"AND colllocale = 'PG_UNICODE_FAST' AND collicurules IS NULL "
++				"AND collversion = '1')); "
++				"DROP TABLE pg_temp.orna_collation_facts;\n\n");
+@@ -2155,9 +2200,0 @@
+- * load PL/pgSQL server-side language
+- */
+-static void
+-load_plpgsql(FILE *cmdfd)
+-{
+-	PG_CMD_PUTS("CREATE EXTENSION plpgsql;\n\n");
+-}
+-
+-/*
+@@ -2719 +2755,0 @@
+-	printf(_("      --discard-caches      set debug_discard_caches=1\n"));
+@@ -2816 +2852 @@
+-	int			ret;
++	const char *support_root = orna_postgres18_support_root();
+@@ -2818,4 +2854,3 @@
+-	if ((ret = find_other_exec(argv0, "postgres", PG_BACKEND_VERSIONSTR,
+-							   backend_exec)) < 0)
+-	{
+-		char		full_path[MAXPGPATH];
++	(void) argv0;
++	if (support_root == NULL)
++		pg_fatal("Orna PostgreSQL support root is not set");
+@@ -2823,15 +2858 @@
+-		if (find_my_exec(argv0, full_path) < 0)
+-			strlcpy(full_path, progname, sizeof(full_path));
+-
+-		if (ret == -1)
+-			pg_fatal("program \"%s\" is needed by %s but was not found in the same directory as \"%s\"",
+-					 "postgres", progname, full_path);
+-		else
+-			pg_fatal("program \"%s\" was found by \"%s\" but was not the same version as %s",
+-					 "postgres", full_path, progname);
+-	}
+-
+-	/* store binary directory */
+-	strcpy(bin_path, backend_exec);
+-	*last_dir_separator(bin_path) = '\0';
+-	canonicalize_path(bin_path);
++	strlcpy(bin_path, support_root, sizeof(bin_path));
+@@ -2841,2 +2862 @@
+-		share_path = pg_malloc(MAXPGPATH);
+-		get_share_path(backend_exec, share_path);
++		share_path = pg_strdup(support_root);
+@@ -3212,2 +3231,0 @@
+-	PG_CMD_DECL;
+-	PQExpBufferData cmd;
+@@ -3214,0 +3233,8 @@
++	char	   *sql;
++	size_t		sql_length;
++	FILE	   *sqlfd;
++	char	   *single_argv[] = {
++		"/usr/bin/orna", "--single", "-F", "-O", "-j",
++		"-c", "search_path=pg_catalog", "-c", "exit_on_error=true",
++		"-c", "log_checkpoints=false", "template1", NULL
++	};
+@@ -3277,11 +3303,10 @@
+-	initPQExpBuffer(&cmd);
+-	printfPQExpBuffer(&cmd, "\"%s\" %s %s template1 >%s",
+-					  backend_exec, backend_options, extra_options, DEVNULL);
+-
+-	PG_CMD_OPEN(cmd.data);
+-
+-	setup_auth(cmdfd);
+-
+-	setup_run_file(cmdfd, system_constraints_file);
+-
+-	setup_run_file(cmdfd, system_functions_file);
++	sqlfd = orna_open_backend_sql(&sql, &sql_length);
++	setup_auth(sqlfd);
++	setup_run_file(sqlfd, system_constraints_file);
++	orna_close_backend_sql(sqlfd, &sql);
++	orna_run_backend_sql(single_argv, sql, sql_length, false);
++
++	sqlfd = orna_open_backend_sql(&sql, &sql_length);
++	setup_run_file(sqlfd, system_functions_file);
++	orna_close_backend_sql(sqlfd, &sql);
++	orna_run_backend_sql(single_argv, sql, sql_length, true);
+@@ -3289 +3314,2 @@
+-	setup_depend(cmdfd);
++	sqlfd = orna_open_backend_sql(&sql, &sql_length);
++	setup_depend(sqlfd);
+@@ -3296,22 +3322,11 @@
+-	setup_run_file(cmdfd, system_views_file);
+-
+-	setup_description(cmdfd);
+-
+-	setup_collation(cmdfd);
+-
+-	setup_run_file(cmdfd, dictionary_file);
+-
+-	setup_privileges(cmdfd);
+-
+-	setup_schema(cmdfd);
+-
+-	load_plpgsql(cmdfd);
+-
+-	vacuum_db(cmdfd);
+-
+-	make_template0(cmdfd);
+-
+-	make_postgres(cmdfd);
+-
+-	PG_CMD_CLOSE();
+-	termPQExpBuffer(&cmd);
++	setup_run_file(sqlfd, system_views_file);
++	setup_description(sqlfd);
++	setup_collation(sqlfd);
++	setup_run_file(sqlfd, dictionary_file);
++	setup_privileges(sqlfd);
++	setup_schema(sqlfd);
++	vacuum_db(sqlfd);
++	make_template0(sqlfd);
++	make_postgres(sqlfd);
++	orna_close_backend_sql(sqlfd, &sql);
++	orna_run_backend_sql(single_argv, sql, sql_length, false);
+@@ -3323,2 +3338,2 @@
+-int
+-main(int argc, char *argv[])
++static int
++orna_postgres18_initdb_main(int argc, char *argv[])
+@@ -3359 +3373,0 @@
+-		{"discard-caches", no_argument, NULL, 14},
+@@ -3389,0 +3404 @@
++#ifndef ORNA_EMBEDDED_INITDB_ENTRY
+@@ -3390,0 +3406 @@
++#endif
+@@ -3528,5 +3543,0 @@
+-			case 14:
+-				extra_options = psprintf("%s %s",
+-										 extra_options,
+-										 "-c debug_discard_caches=1");
+-				break;
+@@ -3729,0 +3741,63 @@
++}
++
++int
++orna_postgres18_initdb_entry(const char *data_directory)
++{
++	char	   *argv[] = {
++		"/usr/bin/orna", "--pgdata", (char *) data_directory,
++		"--username=orna_kernel", "--encoding=UTF8", "--locale=C",
++		"--locale-provider=builtin", "--builtin-locale=PG_UNICODE_FAST",
++		"--data-checksums", "--auth-local=peer", "--auth-host=reject",
++		"--no-instructions", NULL
++	};
++	int			clear_pglocaledir_result;
++	int			clear_pgsysconfdir_result;
++
++	clear_pgsysconfdir_result = unsetenv("PGSYSCONFDIR");
++	clear_pglocaledir_result = unsetenv("PGLOCALEDIR");
++	if (clear_pgsysconfdir_result != 0 ||
++		clear_pglocaledir_result != 0 ||
++		setlocale(LC_ALL, "C") == NULL ||
++		data_directory == NULL || data_directory[0] != '/' ||
++		orna_postgres18_support_root() == NULL ||
++		orna_postgres18_install_exec_filter() != 0)
++		return 1;
++	optind = 1;
++#ifdef HAVE_INT_OPTRESET
++	optreset = 1;
++#endif
++	return orna_postgres18_initdb_main(lengthof(argv) - 1, argv);
++}
++
++#ifndef ORNA_EMBEDDED_INITDB_ENTRY
++int
++main(int argc, char *argv[])
++{
++	return orna_postgres18_initdb_main(argc, argv);
++}
++#endif
++
++/*
++ * libpq's static members use its public encoding names, while initdb links
++ * libpgcommon.a's private encoding implementation.  Keep that tiny public
++ * closure inside the initialiser relocatable before its symbol-prefix pass.
++ */
++#undef pg_char_to_encoding
++#undef pg_encoding_to_char
++#undef pg_valid_server_encoding_id
++int
++pg_char_to_encoding(const char *name)
++{
++	return pg_char_to_encoding_private(name);
++}
++
++const char *
++pg_encoding_to_char(int encoding)
++{
++	return pg_encoding_to_char_private(encoding);
++}
++
++int
++pg_valid_server_encoding_id(int encoding)
++{
++	return pg_valid_server_encoding_id_private(encoding);
