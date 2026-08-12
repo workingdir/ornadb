@@ -530,13 +530,27 @@ async fn authenticated_server_select_commits_allowed_and_denied_execute_decision
             ExecuteDenial::InvalidSession,
         )?;
 
+        kernel.replace_security_snapshot(&selected).await?;
+        let error = kernel
+            .execute_authenticated_server_select_with_forced_post_commit_driver_shutdown(
+                &selected_session,
+                function.id(),
+                &[],
+            )
+            .await
+            .expect_err("post-commit driver shutdown must fail SERVER SELECT");
+        require(
+            matches!(error, PostgresKernelError::DriverTask(_)),
+            "authenticated SERVER SELECT hid its post-commit driver failure",
+        )?;
+
         let audits = kernel.recover_security_audit_events().await?;
         let execute = audits
             .iter()
             .filter(|event| event.decision().kind() == SecurityAuditKind::Execute)
             .collect::<Vec<_>>();
         require(
-            execute.len() == 8,
+            execute.len() == 9,
             "authenticated SERVER audit count differs",
         )?;
         let target = InvocationTarget::new(function.id(), applied.pair());
@@ -585,7 +599,7 @@ async fn authenticated_server_select_commits_allowed_and_denied_execute_decision
             InvocationTarget::new(unknown_function, applied.pair()),
             Some(ExecuteDenial::UnknownFunction),
         )?;
-        for event in &execute[5..] {
+        for event in &execute[5..8] {
             require_server_execute_audit(
                 event,
                 SecurityAuditOutcome::Denied,
@@ -596,6 +610,15 @@ async fn authenticated_server_select_commits_allowed_and_denied_execute_decision
                 Some(ExecuteDenial::InvalidSession),
             )?;
         }
+        require_server_execute_audit(
+            execute[8],
+            SecurityAuditOutcome::Allowed,
+            principal,
+            Some(principal),
+            Some(role),
+            target,
+            None,
+        )?;
         Ok(())
     })
     .await
