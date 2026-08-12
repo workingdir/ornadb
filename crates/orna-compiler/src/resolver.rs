@@ -1163,7 +1163,7 @@ fn check_application_parsed(
     for header in &record_value_headers {
         submitted_ids.insert(
             semantic_name(&header.declaration.name),
-            SubmittedType::RecordValue,
+            SubmittedType::RecordValue(header.id),
         );
     }
 
@@ -3508,7 +3508,7 @@ struct ResolvedApplicationType {
 enum SubmittedType {
     Object(CheckedTypeId),
     Enum(CheckedTypeId),
-    RecordValue,
+    RecordValue(CheckedTypeId),
 }
 
 fn resolve_application_type(
@@ -3547,14 +3547,12 @@ fn resolve_application_type(
                     logical_path,
                     &name.span,
                 )),
-                Some(SubmittedType::RecordValue) => diagnostics.push(diagnostic(
-                    DiagnosticCode::TypeMismatch,
-                    format!(
-                        "record value type {semantic_name} cannot be used before the record value codec exists"
-                    ),
-                    logical_path,
-                    &name.span,
-                )),
+                Some(SubmittedType::RecordValue(id)) => {
+                    return Some(ResolvedApplicationType {
+                        semantic_type: SemanticType::Named(id),
+                        standard_value_type: None,
+                    });
+                }
                 None => diagnostics.push(diagnostic(
                     DiagnosticCode::UnknownQualifiedName,
                     format!("unknown type name {semantic_name}"),
@@ -3621,7 +3619,7 @@ fn resolve_application_type(
                     ));
                     None
                 }
-                Some(SubmittedType::RecordValue) => {
+                Some(SubmittedType::RecordValue(_)) => {
                     diagnostics.push(diagnostic(
                         DiagnosticCode::InvalidReferenceTarget,
                         format!("REF target {name} is a record value type"),
@@ -3651,6 +3649,23 @@ fn resolve_record_value_field_type(
     diagnostics: &mut Vec<CompilerDiagnostic>,
     standard: &CheckedStandardLibrary,
 ) -> Option<ResolvedApplicationType> {
+    if let TypeSpecification::Named(name) = specification {
+        let semantic_name = semantic_name(name);
+        if matches!(
+            submitted_ids.get(&semantic_name),
+            Some(SubmittedType::RecordValue(_))
+        ) {
+            diagnostics.push(diagnostic(
+                DiagnosticCode::TypeMismatch,
+                format!(
+                    "record value type {semantic_name} cannot be used as a nested record field"
+                ),
+                logical_path,
+                &name.span,
+            ));
+            return None;
+        }
+    }
     let resolved = resolve_application_type(
         specification,
         submitted_ids,
@@ -5007,7 +5022,7 @@ mod tests {
                 ),
                 (
                     DiagnosticCode::TypeMismatch,
-                    "record value type app.first cannot be used before the record value codec exists",
+                    "record value type app.first cannot be used as a nested record field",
                 ),
                 (
                     DiagnosticCode::TypeMismatch,
@@ -5064,6 +5079,51 @@ mod tests {
         assert_eq!(
             unsupported.diagnostics()[0].message(),
             "record value field uses a type outside the initial record family"
+        );
+    }
+
+    #[test]
+    fn record_value_resolution_binds_object_fields_and_server_rows_to_one_identity() {
+        let snapshot = verified_standard_library_for_relational_test();
+        let standard = check_standard_library_source(&snapshot).unwrap();
+        let source = bundle([(
+            "records.orna",
+            "CREATE SCHEMA app; \
+             CREATE TYPE app.status AS VALUE (active BOOLEAN) IMMUTABLE PERSISTABLE; \
+             CREATE TYPE app.task AS OBJECT (status app.status NOT NULL); \
+             CREATE SERVER FUNCTION app.read() RETURNS ROWS (status app.status) \
+             TRANSACTION READ ONLY VOLATILITY STABLE \
+             AS SELECT task.status FROM app.task task;",
+        )]);
+
+        let report = check_new_application(&source, &standard).unwrap();
+
+        assert_eq!(report.diagnostics(), &[]);
+        let checked = report.checked_bundle().unwrap();
+        let record_type = checked.record_value_types().next().unwrap().id();
+        assert_eq!(
+            checked
+                .object_types()
+                .next()
+                .unwrap()
+                .fields()
+                .next()
+                .unwrap()
+                .resolved_type()
+                .named_type(),
+            Some(record_type)
+        );
+        assert_eq!(
+            checked
+                .server_functions()
+                .next()
+                .unwrap()
+                .return_columns()
+                .next()
+                .unwrap()
+                .resolved_type()
+                .named_type(),
+            Some(record_type)
         );
     }
 
