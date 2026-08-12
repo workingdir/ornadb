@@ -23,13 +23,21 @@ static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum BackendShellError {
+    /// One or more standard streams are not interactive terminals.
     TerminalRequired,
+    /// The caller does not have the exact unprivileged Orna service identity.
     ServiceAccountRequired,
+    /// Package maintenance is incomplete or excludes new readers.
     PackageIncomplete,
+    /// The default managed instance has not been installed.
     InstanceNotInstalled,
+    /// The installed instance or its readiness evidence is inconsistent.
     InstanceInvalid,
+    /// The running executable cannot supply the instance's embedded engine.
     EngineInvalid,
+    /// The fixed private Unix-socket connection could not be established.
     AttachFailed,
+    /// Terminal or PostgreSQL protocol handling failed after attachment.
     SessionFailed,
 }
 
