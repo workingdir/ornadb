@@ -13,8 +13,8 @@ use orna_artifact::server_plan::{
 use orna_core::{
     FieldId, FunctionId, FunctionRevisionId, ObjectId, ParameterId, TypeId,
     catalogue::{
-        FunctionDefinition, FunctionDomain, FunctionReturn, FunctionSecurity, FunctionTransaction,
-        FunctionVolatility,
+        CatalogueSnapshot, FunctionDefinition, FunctionDomain, FunctionReturn, FunctionSecurity,
+        FunctionTransaction, FunctionVolatility,
     },
     revision::{
         ActiveDatabaseRevision, CatalogueHashContext, DefinitionReferenceKind,
@@ -22,8 +22,8 @@ use orna_core::{
     },
     types::{ResolvedType, StandardScalar},
     value::{
-        FunctionArgument, ResultColumn, ResultRow, ResultRows, ResultRowsError, RuntimeFloat,
-        RuntimeValue,
+        EnumValue, FunctionArgument, ResultColumn, ResultRow, ResultRows, ResultRowsError,
+        RuntimeFloat, RuntimeValue,
     },
 };
 use tokio_postgres::{
@@ -35,8 +35,8 @@ use crate::{
     PostgresKernel, PostgresKernelError,
     server_runtime::{
         ExpectedDefinitionReference, ReferenceReplayMismatch, ResolvedRuntimeType,
-        configure_and_recover, postgres_type, resolve_runtime_type, runtime_types_match,
-        validate_function_reference_replay,
+        configure_and_recover, postgres_type, resolve_catalogue_runtime_type, resolve_runtime_type,
+        runtime_types_match, validate_function_reference_replay,
     },
     storage::{DATA_SCHEMA, OBJECT_ID_COLUMN, field_name, relation_name},
 };
@@ -660,6 +660,7 @@ async fn execute_active_transaction(
             validate_reference_evidence(active, function, plan)?;
             let columns = result_columns_for_projections(function, &plan.projections)?;
             validate_target_entries(
+                active.catalogue(),
                 active.catalogue_hash_context(),
                 plan.projections.len(),
                 &columns,
@@ -691,6 +692,7 @@ async fn execute_active_transaction(
             )?;
             let columns = result_columns_for_projections(function, plan.projections())?;
             validate_target_entries(
+                active.catalogue(),
                 active.catalogue_hash_context(),
                 plan.projections().len(),
                 &columns,
@@ -717,6 +719,7 @@ async fn execute_active_transaction(
             validate_distinct_reference_evidence(active, function, plan)?;
             let columns = result_columns_for_projections(function, plan.projections())?;
             validate_target_entries(
+                active.catalogue(),
                 active.catalogue_hash_context(),
                 plan.projections().len(),
                 &columns,
@@ -736,6 +739,7 @@ async fn execute_active_transaction(
         .await
         .map_err(PostgresKernelError::Database)?;
     validate_prepared_columns(
+        active.catalogue(),
         active.catalogue_hash_context(),
         &statement,
         &columns,
@@ -746,6 +750,7 @@ async fn execute_active_transaction(
         &statement,
         &lowered.binds,
         ResultReadShape {
+            catalogue: active.catalogue(),
             context: active.catalogue_hash_context(),
             columns: &columns,
             guards: &lowered.guards,
@@ -984,7 +989,7 @@ fn validate_identity_selected_plan(
         ) {
             return Err(plan_invariant("projection type must equal its ROWS column"));
         }
-        if !supports_result_type(context, projection.value_type.resolved_type) {
+        if !supports_result_type(catalogue, context, projection.value_type.resolved_type) {
             return Err(plan_invariant(
                 "projection type is outside the initial runtime result subset",
             ));
@@ -1048,7 +1053,7 @@ fn validate_distinct_plan(
         if !supports_distinct_projection_type(context, projection.value_type.resolved_type) {
             return Err(distinct_error(DISTINCT_PROJECTION_RULE));
         }
-        if !supports_result_type(context, projection.value_type.resolved_type) {
+        if !supports_result_type(catalogue, context, projection.value_type.resolved_type) {
             return Err(plan_invariant(
                 "projection type is outside the initial runtime result subset",
             ));
@@ -1177,9 +1182,10 @@ fn runtime_type_is_active(
     context: &CatalogueHashContext,
     resolved_type: ResolvedType,
 ) -> bool {
-    match resolve_runtime_type(context, resolved_type) {
+    match resolve_catalogue_runtime_type(catalogue, context, resolved_type) {
         runtime @ ResolvedRuntimeType::LegacyScalar(_)
         | runtime @ ResolvedRuntimeType::VerifiedValue { .. } => postgres_type(runtime).is_some(),
+        ResolvedRuntimeType::CatalogueEnum(_) => true,
         ResolvedRuntimeType::Reference(target) => catalogue.object_type_by_id(target).is_some(),
         ResolvedRuntimeType::Unsupported => false,
     }
@@ -1231,7 +1237,7 @@ fn validate_plan(
         ) {
             return Err(plan_invariant("projection type must equal its ROWS column"));
         }
-        if !supports_result_type(context, projection.value_type.resolved_type) {
+        if !supports_result_type(catalogue, context, projection.value_type.resolved_type) {
             return Err(plan_invariant(
                 "projection type is outside the initial runtime result subset",
             ));
@@ -1375,7 +1381,11 @@ fn supports_distinct_projection_type(
     )
 }
 
-fn supports_result_type(context: &CatalogueHashContext, resolved_type: ResolvedType) -> bool {
+fn supports_result_type(
+    catalogue: &CatalogueSnapshot,
+    context: &CatalogueHashContext,
+    resolved_type: ResolvedType,
+) -> bool {
     matches!(
         resolve_runtime_type(context, resolved_type).compatibility_scalar(),
         Some(
@@ -1387,8 +1397,8 @@ fn supports_result_type(context: &CatalogueHashContext, resolved_type: ResolvedT
                 | StandardScalar::BinaryLargeObject
         )
     ) || matches!(
-        resolve_runtime_type(context, resolved_type),
-        ResolvedRuntimeType::Reference(_)
+        resolve_catalogue_runtime_type(catalogue, context, resolved_type),
+        ResolvedRuntimeType::CatalogueEnum(_) | ResolvedRuntimeType::Reference(_)
     )
 }
 
@@ -1402,6 +1412,7 @@ fn validate_execution_complexity(plan: &ServerPlan) -> Result<(), PostgresKernel
 }
 
 fn validate_target_entries(
+    catalogue: &CatalogueSnapshot,
     context: &CatalogueHashContext,
     projections: usize,
     columns: &[ResultColumn],
@@ -1409,7 +1420,7 @@ fn validate_target_entries(
 ) -> Result<(), PostgresKernelError> {
     let guards = columns
         .iter()
-        .filter(|column| is_variable_type(context, column.resolved_type()))
+        .filter(|column| is_variable_type(catalogue, context, column.resolved_type()))
         .count();
     validate_target_entry_count(projections, guards, ordering)
 }
@@ -1853,13 +1864,13 @@ fn lower_select_projections<'a>(
         binds: Vec::new(),
         field_path_steps: 0,
     };
-    let variable_payload_limit = variable_payload_limit(context, columns)?;
+    let variable_payload_limit = variable_payload_limit(catalogue, context, columns)?;
     let mut projections = Vec::with_capacity(expressions.len());
     let mut guard_projections = Vec::new();
     let mut guards = Vec::new();
     for (index, expression) in expressions.iter().enumerate() {
         let expression = lowerer.expression(expression)?;
-        if is_variable_type(context, columns[index].resolved_type()) {
+        if is_variable_type(catalogue, context, columns[index].resolved_type()) {
             let alias = format!("g{}", guards.len());
             projections.push(format!(
                 "CASE WHEN octet_length({expression}) <= {variable_payload_limit} THEN {expression} ELSE NULL END AS c{index}"
@@ -1930,24 +1941,36 @@ const fn ordering_sql(direction: SortDirection) -> &'static str {
     }
 }
 
-fn is_variable_type(context: &CatalogueHashContext, resolved_type: ResolvedType) -> bool {
+fn is_variable_type(
+    catalogue: &CatalogueSnapshot,
+    context: &CatalogueHashContext,
+    resolved_type: ResolvedType,
+) -> bool {
     matches!(
+        resolve_catalogue_runtime_type(catalogue, context, resolved_type),
+        ResolvedRuntimeType::CatalogueEnum(_)
+    ) || matches!(
         resolve_runtime_type(context, resolved_type).compatibility_scalar(),
         Some(StandardScalar::CharacterLargeObject | StandardScalar::BinaryLargeObject)
     )
 }
 
 fn variable_payload_limit(
+    catalogue: &CatalogueSnapshot,
     context: &CatalogueHashContext,
     columns: &[ResultColumn],
 ) -> Result<usize, PostgresKernelError> {
     let names = initial_payload_len(columns)?;
     let fixed = columns
         .iter()
-        .filter(|column| !is_variable_type(context, column.resolved_type()))
+        .filter(|column| !is_variable_type(catalogue, context, column.resolved_type()))
         .try_fold(0usize, |total, column| {
             total
-                .checked_add(maximum_fixed_payload_len(context, column.resolved_type()))
+                .checked_add(maximum_fixed_payload_len(
+                    catalogue,
+                    context,
+                    column.resolved_type(),
+                ))
                 .ok_or_else(|| {
                     server_error(ServerSelectError::PayloadLimit {
                         maximum: PAYLOAD_LIMIT,
@@ -1964,7 +1987,7 @@ fn variable_payload_limit(
         })?;
     let variable_count = columns
         .iter()
-        .filter(|column| is_variable_type(context, column.resolved_type()))
+        .filter(|column| is_variable_type(catalogue, context, column.resolved_type()))
         .count();
     if variable_count == 0 {
         return Ok(0);
@@ -1972,8 +1995,12 @@ fn variable_payload_limit(
     Ok(available / variable_count)
 }
 
-fn maximum_fixed_payload_len(context: &CatalogueHashContext, resolved_type: ResolvedType) -> usize {
-    match resolve_runtime_type(context, resolved_type) {
+fn maximum_fixed_payload_len(
+    catalogue: &CatalogueSnapshot,
+    context: &CatalogueHashContext,
+    resolved_type: ResolvedType,
+) -> usize {
+    match resolve_catalogue_runtime_type(catalogue, context, resolved_type) {
         runtime if runtime.compatibility_scalar() == Some(StandardScalar::Boolean) => 1,
         runtime if runtime.compatibility_scalar() == Some(StandardScalar::Integer) => 4,
         runtime
@@ -1985,6 +2012,7 @@ fn maximum_fixed_payload_len(context: &CatalogueHashContext, resolved_type: Reso
             8
         }
         ResolvedRuntimeType::Reference(_) => 16,
+        ResolvedRuntimeType::CatalogueEnum(_) => 0,
         ResolvedRuntimeType::LegacyScalar(_)
         | ResolvedRuntimeType::VerifiedValue { .. }
         | ResolvedRuntimeType::Unsupported => 0,
@@ -2096,6 +2124,7 @@ impl Lowerer<'_> {
 }
 
 fn validate_prepared_columns(
+    catalogue: &CatalogueSnapshot,
     context: &CatalogueHashContext,
     statement: &Statement,
     expected: &[ResultColumn],
@@ -2108,7 +2137,8 @@ fn validate_prepared_columns(
     }
     for (index, (column, expected)) in statement.columns().iter().zip(expected).enumerate() {
         if column.name() != format!("c{index}")
-            || *column.type_() != expected_postgres_type(context, expected.resolved_type())?
+            || *column.type_()
+                != expected_postgres_type(catalogue, context, expected.resolved_type())?
         {
             return Err(server_error(ServerSelectError::PreparedResult {
                 rule: "prepared result column name and PostgreSQL type must match generated shape",
@@ -2126,10 +2156,16 @@ fn validate_prepared_columns(
 }
 
 fn expected_postgres_type(
+    catalogue: &CatalogueSnapshot,
     context: &CatalogueHashContext,
     resolved_type: ResolvedType,
 ) -> Result<Type, PostgresKernelError> {
-    postgres_type(resolve_runtime_type(context, resolved_type)).ok_or_else(|| {
+    postgres_type(resolve_catalogue_runtime_type(
+        catalogue,
+        context,
+        resolved_type,
+    ))
+    .ok_or_else(|| {
         server_error(ServerSelectError::PreparedResult {
             rule: "result type is outside the initial runtime subset",
         })
@@ -2152,6 +2188,7 @@ impl ResultCardinality {
 }
 
 struct ResultReadShape<'a> {
+    catalogue: &'a CatalogueSnapshot,
     context: &'a CatalogueHashContext,
     columns: &'a [ResultColumn],
     guards: &'a [VariableGuard],
@@ -2219,7 +2256,14 @@ async fn stream_rows(
         }
         let mut values = Vec::with_capacity(shape.columns.len());
         for (column_index, column) in shape.columns.iter().enumerate() {
-            let value = decode_value(shape.context, &row, row_index, column_index, column)?;
+            let value = decode_value(
+                shape.catalogue,
+                shape.context,
+                &row,
+                row_index,
+                column_index,
+                column,
+            )?;
             payload = add_payload(payload, logical_payload_len(&value)?)?;
             values.push(value);
         }
@@ -2260,6 +2304,7 @@ fn add_payload(payload: usize, additional: usize) -> Result<usize, PostgresKerne
 }
 
 fn decode_value(
+    catalogue: &CatalogueSnapshot,
     context: &CatalogueHashContext,
     row: &Row,
     row_index: usize,
@@ -2281,7 +2326,7 @@ fn decode_value(
         };
     }
     let resolved_type = column.resolved_type();
-    let value = match resolve_runtime_type(context, resolved_type) {
+    let value = match resolve_catalogue_runtime_type(catalogue, context, resolved_type) {
         runtime if runtime.compatibility_scalar() == Some(StandardScalar::Boolean) => {
             decode!(bool, |value| Ok(RuntimeValue::Boolean(value)))
         }
@@ -2315,6 +2360,17 @@ fn decode_value(
             })?;
             Ok(RuntimeValue::Reference { target, object })
         }),
+        ResolvedRuntimeType::CatalogueEnum(enum_type) => decode!(String, |value| {
+            EnumValue::new(catalogue, enum_type, value)
+                .map(RuntimeValue::Enum)
+                .map_err(|_| {
+                    server_error(ServerSelectError::ValueInvariant {
+                        row: row_index,
+                        column: column_index,
+                        rule: "enum result must contain one exact label declared by the active enum type",
+                    })
+                })
+        }),
         ResolvedRuntimeType::LegacyScalar(_)
         | ResolvedRuntimeType::VerifiedValue { .. }
         | ResolvedRuntimeType::Unsupported => {
@@ -2340,6 +2396,7 @@ fn logical_payload_len(value: &RuntimeValue) -> Result<usize, PostgresKernelErro
         RuntimeValue::Text(value) => value.len(),
         RuntimeValue::Bytes(value) => value.len(),
         RuntimeValue::Reference { .. } => 16,
+        RuntimeValue::Enum(value) => value.label().len(),
         _ => {
             return Err(server_error(ServerSelectError::ValueInvariant {
                 row: 0,
@@ -4182,6 +4239,8 @@ mod tests {
     #[test]
     fn variable_payload_budget_reserves_names_and_fixed_values() {
         let context = CatalogueHashContext::version_one();
+        let catalogue =
+            CatalogueSnapshot::new(CatalogueRevisionId::new(), Vec::new(), Vec::new()).unwrap();
         let columns = [
             ResultColumn::new(
                 "integer",
@@ -4203,7 +4262,7 @@ mod tests {
             .unwrap(),
         ];
         assert_eq!(
-            variable_payload_limit(&context, &columns).unwrap(),
+            variable_payload_limit(&catalogue, &context, &columns).unwrap(),
             (PAYLOAD_LIMIT - "integerleftright".len() - 4) / 2
         );
     }
