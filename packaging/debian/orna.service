@@ -17,7 +17,7 @@ SendSIGKILL=yes
 Restart=on-failure
 RestartSec=5s
 RuntimeDirectory=orna/default
-RuntimeDirectoryMode=0700
+RuntimeDirectoryMode=0711
 UMask=0077
 
 [Install]
