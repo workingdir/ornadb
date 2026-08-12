@@ -123,6 +123,9 @@ fn map_physical_projection_error(error: PhysicalPlanError) -> PostgresKernelErro
             field_record(object_type, field)
                 .invariant("VOID cannot lower to a physical PostgreSQL column")
         }
+        PhysicalPlanError::UnsupportedNullableRecordField { object_type, field } => {
+            field_record(object_type, field).invariant("record fields cannot be nullable")
+        }
         error @ (PhysicalPlanError::ExpectedBaseMismatch { .. }
         | PhysicalPlanError::UnsupportedObjectDrop { .. }
         | PhysicalPlanError::UnsupportedExistingObjectChange { .. }
@@ -241,6 +244,7 @@ impl ExpectedColumn {
         let (type_name, reference) = match field.field_type() {
             PhysicalFieldType::Scalar(scalar) => (postgres_catalogue_type(scalar, &record)?, None),
             PhysicalFieldType::Enum(_) => ("text", None),
+            PhysicalFieldType::Record(_) => ("bytea", None),
             PhysicalFieldType::Reference { target, on_delete } => {
                 ("bytea", Some(ExpectedReference { target, on_delete }))
             }
@@ -1340,7 +1344,8 @@ mod tests {
         },
         catalogue::{
             CatalogueSnapshot, EnumTypeDefinition, FieldDefinition, ObjectTypeDefinition,
-            OnDeleteAction, QualifiedSemanticName, SchemaDefinition,
+            OnDeleteAction, QualifiedSemanticName, RecordValueFieldDefinition,
+            RecordValueTypeDefinition, SchemaDefinition,
         },
         revision::{
             ActiveDatabaseRevision, ActiveDatabaseRevisionInput, ActiveRevisionContent,
@@ -1621,6 +1626,64 @@ mod tests {
 
         assert_eq!(column.name, field_name(field));
         assert_eq!(column.type_name, "text");
+        assert!(!column.nullable);
+        assert!(column.reference.is_none());
+    }
+
+    #[test]
+    fn expected_builder_requires_bytea_without_reference_for_record_fields() {
+        let standard = orna_standard::verify_standard_library_snapshot(
+            orna_standard::retained_standard_library_snapshot()
+                .expect("retained standard-library snapshot"),
+        )
+        .expect("verified standard-library snapshot");
+        let boolean = standard
+            .catalogue()
+            .value_types()
+            .iter()
+            .find(|value| value.representation_contract() == "orna.kernel.value.boolean@1")
+            .expect("verified Boolean value type")
+            .id();
+        let record_type = TypeId::from_bytes([0x3b; 16]);
+        let object = TypeId::from_bytes([0x3c; 16]);
+        let field = FieldId::from_bytes([0x3d; 16]);
+        let active = active_revision_with_objects_and_records(
+            CatalogueHashContext::version_two(standard),
+            vec![ObjectTypeDefinition::new(
+                object,
+                name(&["test", "record_holder"]),
+                vec![FieldDefinition::new(
+                    field,
+                    "status",
+                    0,
+                    ResolvedType::named(record_type),
+                    false,
+                    false,
+                    None,
+                    None,
+                )],
+            )],
+            vec![RecordValueTypeDefinition::new(
+                record_type,
+                name(&["test", "status"]),
+                vec![RecordValueFieldDefinition::new(
+                    FieldId::from_bytes([0x3e; 16]),
+                    "active",
+                    0,
+                    ResolvedType::value(boolean),
+                )],
+            )],
+        );
+
+        let expected = ExpectedCatalogue::from_active(&active).expect("record expected catalogue");
+        let column = &expected
+            .tables
+            .get(&relation_name(object))
+            .expect("record object table")
+            .columns[1];
+
+        assert_eq!(column.name, field_name(field));
+        assert_eq!(column.type_name, "bytea");
         assert!(!column.nullable);
         assert!(column.reference.is_none());
     }
@@ -1925,6 +1988,10 @@ mod tests {
                 PhysicalPlanError::UnsupportedVoidField { object_type, field },
                 "VOID cannot lower to a physical PostgreSQL column",
             ),
+            (
+                PhysicalPlanError::UnsupportedNullableRecordField { object_type, field },
+                "record fields cannot be nullable",
+            ),
         ] {
             let mapped = map_physical_projection_error(error);
             assert!(matches!(
@@ -2116,6 +2183,23 @@ mod tests {
         objects: Vec<ObjectTypeDefinition>,
         enum_types: Vec<EnumTypeDefinition>,
     ) -> ActiveDatabaseRevision {
+        active_revision_with_types(context, objects, enum_types, Vec::new())
+    }
+
+    fn active_revision_with_objects_and_records(
+        context: CatalogueHashContext,
+        objects: Vec<ObjectTypeDefinition>,
+        record_value_types: Vec<RecordValueTypeDefinition>,
+    ) -> ActiveDatabaseRevision {
+        active_revision_with_types(context, objects, Vec::new(), record_value_types)
+    }
+
+    fn active_revision_with_types(
+        context: CatalogueHashContext,
+        objects: Vec<ObjectTypeDefinition>,
+        enum_types: Vec<EnumTypeDefinition>,
+        record_value_types: Vec<RecordValueTypeDefinition>,
+    ) -> ActiveDatabaseRevision {
         let source_unit = SourceUnitId::from_bytes([0x31; 16]);
         let unit = StoredSourceUnit::new(
             source_unit,
@@ -2137,12 +2221,14 @@ mod tests {
         )
         .expect("source revision");
         let schema = SchemaDefinition::new(SchemaId::from_bytes([0x35; 16]), name(&["test"]));
-        let catalogue = CatalogueSnapshot::new_with_enum_types(
+        let catalogue = CatalogueSnapshot::new_with_functions_and_record_value_types(
             CatalogueRevisionId::from_bytes([0x37; 16]),
             vec![schema.clone()],
             objects.clone(),
             Vec::new(),
             enum_types,
+            record_value_types,
+            Vec::new(),
             Vec::new(),
         )
         .expect("catalogue");
@@ -2169,6 +2255,21 @@ mod tests {
         origins.extend(catalogue.enum_types().iter().map(|enum_type| {
             DefinitionOrigin::new(DefinitionIdentity::ValueType(enum_type.id()), origin)
         }));
+        for record_type in catalogue.record_value_types() {
+            origins.push(DefinitionOrigin::new(
+                DefinitionIdentity::ValueType(record_type.id()),
+                origin,
+            ));
+            origins.extend(record_type.fields().iter().map(|field| {
+                DefinitionOrigin::new(
+                    DefinitionIdentity::Field {
+                        owner: record_type.id(),
+                        field: field.id(),
+                    },
+                    origin,
+                )
+            }));
+        }
         let catalogue_hash =
             catalogue_digest_with_context(&context, &catalogue, &[], &[], &origins, &[])
                 .expect("catalogue digest");

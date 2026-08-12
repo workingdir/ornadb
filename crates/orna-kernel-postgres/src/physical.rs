@@ -109,6 +109,7 @@ fn field_definition(field: &CreateField) -> Result<String, PostgresKernelError> 
     let storage_type = match field.field_type() {
         PhysicalFieldType::Scalar(scalar) => scalar_storage_type(scalar)?,
         PhysicalFieldType::Enum(_) => "text",
+        PhysicalFieldType::Record(_) => "bytea",
         PhysicalFieldType::Reference { .. } => "bytea",
     };
     let nullability = if field.nullable() { "" } else { " NOT NULL" };
@@ -181,7 +182,8 @@ mod tests {
         },
         catalogue::{
             CatalogueSnapshot, EnumTypeDefinition, FieldDefinition, ObjectTypeDefinition,
-            QualifiedSemanticName, SchemaDefinition,
+            QualifiedSemanticName, RecordValueFieldDefinition, RecordValueTypeDefinition,
+            SchemaDefinition,
         },
         physical::plan_physical_changes,
         revision::{
@@ -532,6 +534,65 @@ mod tests {
         );
     }
 
+    #[test]
+    fn lowers_record_fields_to_canonical_bytea_without_reference_constraints() {
+        let standard = orna_standard::verify_standard_library_snapshot(
+            orna_standard::retained_standard_library_snapshot()
+                .expect("retained standard-library snapshot"),
+        )
+        .expect("verified standard-library snapshot");
+        let boolean = standard
+            .catalogue()
+            .value_types()
+            .iter()
+            .find(|value| value.representation_contract() == "orna.kernel.value.boolean@1")
+            .expect("verified Boolean value type")
+            .id();
+        let active = empty_active_with_context(CatalogueHashContext::version_two(standard));
+        let record_type = TypeId::from_bytes([0x54; 16]);
+        let object = TypeId::from_bytes([0x55; 16]);
+        let field = FieldId::from_bytes([0x56; 16]);
+        let candidate = candidate_with_objects_and_records(
+            &active,
+            vec![ObjectTypeDefinition::new(
+                object,
+                semantic_name(&["private_words", "record_holder"]),
+                vec![FieldDefinition::new(
+                    field,
+                    "status",
+                    0,
+                    ResolvedType::named(record_type),
+                    false,
+                    false,
+                    None,
+                    None,
+                )],
+            )],
+            vec![RecordValueTypeDefinition::new(
+                record_type,
+                semantic_name(&["private_words", "status"]),
+                vec![RecordValueFieldDefinition::new(
+                    FieldId::from_bytes([0x57; 16]),
+                    "active",
+                    0,
+                    ResolvedType::value(boolean),
+                )],
+            )],
+        );
+        let statements = lower_physical_plan(
+            &plan_physical_changes(&active, &candidate).expect("record physical plan"),
+        )
+        .expect("record PostgreSQL statements");
+
+        assert_eq!(statements.references, Vec::<String>::new());
+        assert!(
+            statements.creates[0].contains("f_56565656565656565656565656565656 bytea NOT NULL")
+        );
+        assert!(
+            !statements.creates[0].contains("octet_length(f_56565656565656565656565656565656)")
+        );
+    }
+
     fn empty_active() -> ActiveDatabaseRevision {
         empty_active_with_context(CatalogueHashContext::version_one())
     }
@@ -579,13 +640,32 @@ mod tests {
         object_types: Vec<ObjectTypeDefinition>,
         enum_types: Vec<EnumTypeDefinition>,
     ) -> DeployableRevision {
+        candidate_with_types(active, object_types, enum_types, Vec::new())
+    }
+
+    fn candidate_with_objects_and_records(
+        active: &ActiveDatabaseRevision,
+        object_types: Vec<ObjectTypeDefinition>,
+        record_value_types: Vec<RecordValueTypeDefinition>,
+    ) -> DeployableRevision {
+        candidate_with_types(active, object_types, Vec::new(), record_value_types)
+    }
+
+    fn candidate_with_types(
+        active: &ActiveDatabaseRevision,
+        object_types: Vec<ObjectTypeDefinition>,
+        enum_types: Vec<EnumTypeDefinition>,
+        record_value_types: Vec<RecordValueTypeDefinition>,
+    ) -> DeployableRevision {
         let schema = SchemaDefinition::new(SchemaId::new(), semantic_name(&["private_words"]));
-        let catalogue = CatalogueSnapshot::new_with_enum_types(
+        let catalogue = CatalogueSnapshot::new_with_functions_and_record_value_types(
             CatalogueRevisionId::new(),
             vec![schema.clone()],
             object_types,
             Vec::new(),
             enum_types,
+            record_value_types,
+            Vec::new(),
             Vec::new(),
         )
         .unwrap();
@@ -635,6 +715,21 @@ mod tests {
         origins.extend(catalogue.enum_types().iter().map(|enum_type| {
             DefinitionOrigin::new(DefinitionIdentity::ValueType(enum_type.id()), source_origin)
         }));
+        for record_type in catalogue.record_value_types() {
+            origins.push(DefinitionOrigin::new(
+                DefinitionIdentity::ValueType(record_type.id()),
+                source_origin,
+            ));
+            origins.extend(record_type.fields().iter().map(|field| {
+                DefinitionOrigin::new(
+                    DefinitionIdentity::Field {
+                        owner: record_type.id(),
+                        field: field.id(),
+                    },
+                    source_origin,
+                )
+            }));
+        }
         let context = active.catalogue_hash_context().clone();
         let catalogue_hash =
             catalogue_digest_with_context(&context, &catalogue, &[], &[], &origins, &[]).unwrap();

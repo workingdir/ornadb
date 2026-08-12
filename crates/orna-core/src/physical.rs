@@ -171,6 +171,8 @@ pub enum PhysicalFieldType {
     Scalar(StandardScalar),
     /// An application enum stored through its stable catalogue identity.
     Enum(TypeId),
+    /// A nominal record value stored as canonical Orna value bytes.
+    Record(TypeId),
     /// A typed object reference with its delete action.
     Reference {
         /// The referenced durable object type.
@@ -194,6 +196,8 @@ pub enum PhysicalPlanError {
     UnsupportedExistingObjectChange { object_type: TypeId },
     /// A new field uses a named value type without a storage contract.
     UnsupportedNamedFieldType { object_type: TypeId, field: FieldId },
+    /// A record field is nullable before nullable record values are defined.
+    UnsupportedNullableRecordField { object_type: TypeId, field: FieldId },
     /// A resolved value type is absent from the pinned standard library.
     MissingValueTypeDefinition {
         object_type: TypeId,
@@ -243,6 +247,9 @@ impl fmt::Display for PhysicalPlanError {
             }
             Self::UnsupportedNamedFieldType { .. } => {
                 formatter.write_str("named field storage is not supported")
+            }
+            Self::UnsupportedNullableRecordField { .. } => {
+                formatter.write_str("nullable record fields are not supported")
             }
             Self::MissingValueTypeDefinition { .. } => formatter
                 .write_str("physical value type is absent from the pinned standard library"),
@@ -338,13 +345,26 @@ fn project_physical_field(
     let field_type = if let Some(scalar) = legacy_scalar {
         PhysicalFieldType::Scalar(scalar)
     } else if let Some(named_type) = named_type {
-        if revision.catalogue().enum_type_by_id(named_type).is_none() {
+        if revision.catalogue().enum_type_by_id(named_type).is_some() {
+            PhysicalFieldType::Enum(named_type)
+        } else if revision
+            .catalogue()
+            .record_value_type_by_id(named_type)
+            .is_some()
+        {
+            if field.nullable() {
+                return Err(PhysicalPlanError::UnsupportedNullableRecordField {
+                    object_type,
+                    field: field.id(),
+                });
+            }
+            PhysicalFieldType::Record(named_type)
+        } else {
             return Err(PhysicalPlanError::UnsupportedNamedFieldType {
                 object_type,
                 field: field.id(),
             });
         }
-        PhysicalFieldType::Enum(named_type)
     } else if let Some(target) = reference_target {
         if revision.catalogue().object_type_by_id(target).is_none() {
             return Err(PhysicalPlanError::UnknownReferenceTarget {
@@ -482,8 +502,8 @@ mod tests {
         SourceUnitId, StandardLibraryRevisionId, TypeId,
         catalogue::{
             CatalogueSnapshot, EnumTypeDefinition, FieldDefinition, ObjectTypeDefinition,
-            QualifiedSemanticName, SchemaDefinition, ValueTypeDefinition, ValueTypeMutability,
-            ValueTypePersistence,
+            QualifiedSemanticName, RecordValueFieldDefinition, RecordValueTypeDefinition,
+            SchemaDefinition, ValueTypeDefinition, ValueTypeMutability, ValueTypePersistence,
         },
         revision::{
             ActiveDatabaseRevision, ActiveDatabaseRevisionInput, ActiveRevisionContent,
@@ -628,6 +648,89 @@ mod tests {
                     unique: false,
                 }],
             }]
+        );
+    }
+
+    #[test]
+    fn projects_record_values_as_canonical_byte_fields() {
+        let record_type = TypeId::from_bytes([0xa3; 16]);
+        let standard = verified_standard(vec![standard_value_type(
+            TypeId::from_bytes([0xa4; 16]),
+            "orna.kernel.value.boolean@1",
+            ValueTypePersistence::Persistable,
+        )]);
+        let active = active_version_two(Vec::new(), standard.clone(), 1);
+        let source = source(2, Some(active.pair().source()));
+        let catalogue = CatalogueSnapshot::new_with_functions_and_record_value_types(
+            CatalogueRevisionId::from_bytes([3; 16]),
+            vec![schema()],
+            vec![object(
+                FIRST_TYPE,
+                "first",
+                vec![field(
+                    FIRST_FIELD,
+                    "status",
+                    0,
+                    ResolvedType::named(record_type),
+                    false,
+                )],
+            )],
+            vec![],
+            vec![],
+            vec![RecordValueTypeDefinition::new(
+                record_type,
+                name(&["demo", "status"]),
+                vec![RecordValueFieldDefinition::new(
+                    SECOND_FIELD,
+                    "active",
+                    0,
+                    ResolvedType::value(TypeId::from_bytes([0xa4; 16])),
+                )],
+            )],
+            vec![],
+            vec![],
+        )
+        .unwrap();
+        let origins = origins(&source, &catalogue);
+        let candidate = DeployableRevision::new_with_catalogue_hash_context(
+            DeployableRevisionInput::new(
+                active.pair(),
+                source,
+                active.pair().catalogue(),
+                catalogue,
+                digest(2),
+                DeployableRevisionContent::new(origins, Vec::new(), Vec::new(), Vec::new())
+                    .with_current_function_revisions(Vec::new()),
+            ),
+            CatalogueHashContext::version_two(standard),
+        )
+        .unwrap();
+
+        assert_eq!(
+            plan_physical_changes(&active, &candidate)
+                .unwrap()
+                .create_objects()[0]
+                .fields()[0]
+                .field_type(),
+            PhysicalFieldType::Record(record_type)
+        );
+        let nullable = field(
+            FieldId::from_bytes([22; 16]),
+            "optional_status",
+            0,
+            ResolvedType::named(record_type),
+            true,
+        );
+        assert_eq!(
+            project_physical_field(
+                PhysicalRevision::Deployable(&candidate),
+                FIRST_TYPE,
+                &nullable,
+            ),
+            Err(PhysicalPlanError::UnsupportedNullableRecordField {
+                object_type: FIRST_TYPE,
+                field: nullable.id(),
+            })
         );
     }
 
@@ -2193,6 +2296,21 @@ mod tests {
         values.extend(catalogue.enum_types().iter().map(|enum_type| {
             DefinitionOrigin::new(DefinitionIdentity::ValueType(enum_type.id()), source_origin)
         }));
+        for record_type in catalogue.record_value_types() {
+            values.push(DefinitionOrigin::new(
+                DefinitionIdentity::ValueType(record_type.id()),
+                source_origin,
+            ));
+            values.extend(record_type.fields().iter().map(|field| {
+                DefinitionOrigin::new(
+                    DefinitionIdentity::Field {
+                        owner: record_type.id(),
+                        field: field.id(),
+                    },
+                    source_origin,
+                )
+            }));
+        }
         values
     }
 
