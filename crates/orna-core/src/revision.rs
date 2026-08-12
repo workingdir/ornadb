@@ -2013,6 +2013,13 @@ fn validate_catalogue_hash_context_version_one(
     origins: &[DefinitionOrigin],
     references: &[DefinitionReference],
 ) -> Result<(), RevisionInvariantError> {
+    if let Some(enum_type) = catalogue.enum_types().first() {
+        return Err(
+            RevisionInvariantError::ValueTypeDefinitionRequiresCatalogueHashVersionTwo {
+                value_type: enum_type.id(),
+            },
+        );
+    }
     if let Some(value_type) = catalogue.value_types().first() {
         return Err(
             RevisionInvariantError::ValueTypeDefinitionRequiresCatalogueHashVersionTwo {
@@ -2243,6 +2250,12 @@ fn expected_definition_identities(
     );
     identities.extend(
         catalogue
+            .enum_types()
+            .iter()
+            .map(|enum_type| DefinitionIdentity::ValueType(enum_type.id())),
+    );
+    identities.extend(
+        catalogue
             .type_bindings()
             .iter()
             .map(|binding| DefinitionIdentity::TypeBinding(binding.id())),
@@ -2280,7 +2293,9 @@ fn definition_exists(
     match identity {
         DefinitionIdentity::Schema(id) => catalogue.schema_by_id(id).is_some(),
         DefinitionIdentity::ObjectType(id) => catalogue.object_type_by_id(id).is_some(),
-        DefinitionIdentity::ValueType(id) => catalogue.value_type_by_id(id).is_some(),
+        DefinitionIdentity::ValueType(id) => {
+            catalogue.value_type_by_id(id).is_some() || catalogue.enum_type_by_id(id).is_some()
+        }
         DefinitionIdentity::TypeBinding(id) => catalogue.type_binding_by_id(id).is_some(),
         DefinitionIdentity::Field { owner, field } => catalogue
             .object_type_by_id(owner)
@@ -2787,8 +2802,8 @@ mod tests {
             verify_standard_library_snapshot,
         },
         catalogue::{
-            FieldDefinition, FunctionDefinition, FunctionDomain, FunctionReturn,
-            FunctionReturnColumnDefinition, FunctionSecurity, FunctionVolatility,
+            EnumTypeDefinition, FieldDefinition, FunctionDefinition, FunctionDomain,
+            FunctionReturn, FunctionReturnColumnDefinition, FunctionSecurity, FunctionVolatility,
             ObjectTypeDefinition, ParameterDefinition, QualifiedSemanticName, SchemaDefinition,
             TypeBinding, ValueTypeDefinition, ValueTypeMutability, ValueTypePersistence,
         },
@@ -3526,6 +3541,43 @@ mod tests {
             vec![],
         )
         .unwrap()
+    }
+
+    fn enum_type_catalogue() -> CatalogueSnapshot {
+        CatalogueSnapshot::new_with_enum_types(
+            CatalogueRevisionId::from_bytes(id::<7>()),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes(id::<8>()),
+                QualifiedSemanticName::new(["crm"]).unwrap(),
+            )],
+            vec![],
+            vec![],
+            vec![EnumTypeDefinition::new(
+                TypeId::from_bytes(id::<71>()),
+                QualifiedSemanticName::new(["crm", "stage"]).unwrap(),
+                ["lead", "customer"],
+            )],
+            vec![],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn enum_types_use_value_origins_and_require_the_version_two_catalogue_contract() {
+        let catalogue = enum_type_catalogue();
+        let enum_identity = DefinitionIdentity::ValueType(TypeId::from_bytes(id::<71>()));
+        assert!(expected_definition_identities(&catalogue, &[]).contains(&enum_identity));
+        assert!(definition_exists(
+            &catalogue,
+            &HashSet::new(),
+            enum_identity
+        ));
+        assert!(matches!(
+            validate_catalogue_hash_context_version_one(&catalogue, &[], &[], &[]),
+            Err(RevisionInvariantError::ValueTypeDefinitionRequiresCatalogueHashVersionTwo {
+                value_type,
+            }) if value_type == TypeId::from_bytes(id::<71>())
+        ));
     }
 
     fn value_type_origins() -> Vec<DefinitionOrigin> {
