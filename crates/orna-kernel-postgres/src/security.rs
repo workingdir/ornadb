@@ -48,7 +48,11 @@ impl PostgresKernel {
         .await
     }
 
-    /// Pauses protected SERVER execution after it recovers its security snapshot.
+    /// Pauses protected SERVER execution after security recovery for race proof.
+    ///
+    /// The hook exposes one deterministic point to the integration harness. It
+    /// is absent from production builds and deliberately does not alter the
+    /// transaction or decision authority.
     #[cfg(feature = "test-hooks")]
     #[doc(hidden)]
     pub async fn execute_authenticated_server_select_with_test_barrier(
@@ -69,7 +73,10 @@ impl PostgresKernel {
         .await
     }
 
-    /// Forces driver shutdown after a protected SERVER result commits.
+    /// Forces driver shutdown after commit for cleanup-failure proof.
+    ///
+    /// The hook lets the integration harness prove that cleanup failure
+    /// overrides a committed result. It is absent from production builds.
     #[cfg(feature = "test-hooks")]
     #[doc(hidden)]
     pub async fn execute_authenticated_server_select_with_forced_post_commit_driver_shutdown(
@@ -374,11 +381,13 @@ impl PostgresKernel {
     }
 }
 
+#[cfg(feature = "test-hooks")]
 struct AuthenticatedSelectTestBarrier {
     reached: std::sync::Arc<tokio::sync::Barrier>,
     resume: std::sync::Arc<tokio::sync::Barrier>,
 }
 
+#[cfg(feature = "test-hooks")]
 async fn pause_after_authenticated_select_recovery(
     test_barrier: Option<&AuthenticatedSelectTestBarrier>,
 ) {
@@ -386,6 +395,15 @@ async fn pause_after_authenticated_select_recovery(
         test_barrier.reached.wait().await;
         test_barrier.resume.wait().await;
     }
+}
+
+#[cfg(not(feature = "test-hooks"))]
+struct AuthenticatedSelectTestBarrier;
+
+#[cfg(not(feature = "test-hooks"))]
+async fn pause_after_authenticated_select_recovery(
+    _test_barrier: Option<&AuthenticatedSelectTestBarrier>,
+) {
 }
 
 fn finish_security_session<T>(
