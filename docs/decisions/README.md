@@ -45,3 +45,7 @@ source-of-truth or authority rules.
   [PostgreSQL Persists the Security Decision Snapshot](0021-durable-security-snapshot.md)
 * **work ADR 0022:**
   [CLIENT Evaluation Requires an Authorised Invocation](0022-client-evaluation-requires-authorisation.md)
+* **work ADR 0023:**
+  [Local Sessions Authenticate with Unix Peer Credentials](0023-local-peer-authentication.md)
+* **work ADR 0024:**
+  [Security Decisions Append Protected Audit Records](0024-protected-security-audit.md)
