@@ -146,9 +146,12 @@ Tests must prove:
   from the active `RevisionPair` and function revision recorded by the result;
 * a selected-role grant produces the exact authorising principal in the
   allowed audit event and cannot be replaced by an unselected role;
-* an invalid, disabled, stale, or unknown session, an unknown function, a
-  stale target, and a missing grant produce one exact denied audit event,
-  commit it, return `ServerExecuteDenied`, and issue no private data SQL;
+* an invalid, disabled, stale, or unknown session, an unknown function, and a
+  missing grant produce one exact denied audit event, commit it, return
+  `ServerExecuteDenied`, and issue no private data SQL;
+* the public operation cannot receive a caller-supplied revision or stale
+  target; it constructs the sole `InvocationTarget` from the requested
+  `FunctionId` and the recovered active `RevisionPair`;
 * the allowed audit event is appended before target validation and execution,
   and contains the exact session, effective, authorising, function, and
   revision evidence from `AuthorisedInvocation`;
