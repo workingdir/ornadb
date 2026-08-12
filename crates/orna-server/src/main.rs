@@ -5,14 +5,16 @@ use std::{
 };
 
 mod package_maintenance;
+mod source_check;
 
-const USAGE: &str = "Usage: orna server <run|backend-shell|upgrade>";
+const USAGE: &str = "Usage:\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna source check <file.orna>";
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum Command {
     Run,
     BackendShell,
     Upgrade,
+    SourceCheck(String),
 }
 
 fn main() -> ExitCode {
@@ -53,6 +55,18 @@ fn main() -> ExitCode {
                 ExitCode::from(1)
             }
         },
+        Command::SourceCheck(path) => {
+            let stderr = io::stderr();
+            let mut stderr = stderr.lock();
+            match source_check::run(&path, &mut stderr) {
+                source_check::SourceCheckResult::Success => ExitCode::SUCCESS,
+                source_check::SourceCheckResult::Failure => ExitCode::from(1),
+                source_check::SourceCheckResult::Usage => {
+                    let _ = writeln!(stderr, "{USAGE}");
+                    ExitCode::from(2)
+                }
+            }
+        }
     }
 }
 
@@ -63,16 +77,34 @@ where
     let mut args = args.into_iter();
     let _argv0 = args.next();
 
-    if !matches!(args.next().as_deref(), Some(value) if value == OsStr::new("server")) {
-        return None;
+    match args.next().as_deref() {
+        Some(value) if value == OsStr::new("server") => {
+            let command = match args.next().as_deref() {
+                Some(value) if value == OsStr::new("run") => Command::Run,
+                Some(value) if value == OsStr::new("backend-shell") => Command::BackendShell,
+                Some(value) if value == OsStr::new("upgrade") => Command::Upgrade,
+                _ => return None,
+            };
+            args.next().is_none().then_some(command)
+        }
+        Some(value) if value == OsStr::new("source") => {
+            if !matches!(args.next().as_deref(), Some(value) if value == OsStr::new("check")) {
+                return None;
+            }
+            let path = args.next()?.into_string().ok()?;
+            (args.next().is_none() && valid_source_path(&path))
+                .then_some(Command::SourceCheck(path))
+        }
+        _ => None,
     }
-    let command = match args.next().as_deref() {
-        Some(value) if value == OsStr::new("run") => Command::Run,
-        Some(value) if value == OsStr::new("backend-shell") => Command::BackendShell,
-        Some(value) if value == OsStr::new("upgrade") => Command::Upgrade,
-        _ => return None,
-    };
-    args.next().is_none().then_some(command)
+}
+
+fn valid_source_path(path: &str) -> bool {
+    !path.is_empty()
+        && !path.starts_with('-')
+        && !path
+            .chars()
+            .any(|character| character.is_control() || matches!(character, '\u{2028}' | '\u{2029}'))
 }
 
 fn write_stderr_line(line: &str) {
@@ -101,6 +133,14 @@ mod tests {
         assert_eq!(
             parse_command(arguments(&["orna", "server", "upgrade"])),
             Some(Command::Upgrade)
+        );
+    }
+
+    #[test]
+    fn accepts_one_exact_source_check_path() {
+        assert_eq!(
+            parse_command(arguments(&["orna", "source", "check", "app.orna"])),
+            Some(Command::SourceCheck("app.orna".to_owned()))
         );
     }
 
@@ -143,6 +183,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn rejects_invalid_source_check_shapes_and_paths() {
+        for values in [
+            vec!["orna", "source"],
+            vec!["orna", "source", "check"],
+            vec!["orna", "source", "check", ""],
+            vec!["orna", "source", "check", "-"],
+            vec!["orna", "source", "check", "-x"],
+            vec!["orna", "source", "check", "a", "b"],
+            vec!["orna", "source", "--check", "a"],
+            vec!["orna", "--source", "check", "a"],
+            vec!["orna", "source", "check", "line\nbreak"],
+            vec!["orna", "source", "check", "line\u{2028}break"],
+        ] {
+            assert_eq!(parse_command(arguments(&values)), None, "{values:?}");
+        }
+        assert_eq!(
+            parse_command(arguments(&["orna", "source", "check", "./-x"])),
+            Some(Command::SourceCheck("./-x".to_owned()))
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn rejects_non_unicode_tokens() {
@@ -161,6 +223,9 @@ mod tests {
 
     #[test]
     fn usage_diagnostic_is_exact() {
-        assert_eq!(USAGE, "Usage: orna server <run|backend-shell|upgrade>");
+        assert_eq!(
+            USAGE,
+            "Usage:\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna source check <file.orna>"
+        );
     }
 }
