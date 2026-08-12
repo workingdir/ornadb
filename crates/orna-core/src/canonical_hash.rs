@@ -17,11 +17,11 @@ use crate::{
     ExpressionId, FieldId, FunctionId, FunctionRevisionId, ParameterId, SchemaId, SourceBundleId,
     SourceRevisionId, SourceUnitId, StandardLibraryRevisionId, TypeBindingId, TypeId,
     catalogue::{
-        CatalogueSnapshot, FunctionDefinition, FunctionDomain, FunctionReturn, FunctionSecurity,
-        FunctionTransaction, FunctionVolatility, ObjectTypeDefinition, OnDeleteAction,
-        ParameterDefinition, PreludeTypeName, QualifiedSemanticName, SchemaDefinition, TypeBinding,
-        TypeBindingKind, TypeLookupName, ValueTypeDefinition, ValueTypeKind, ValueTypeMutability,
-        ValueTypePersistence,
+        CatalogueSnapshot, EnumTypeDefinition, FunctionDefinition, FunctionDomain, FunctionReturn,
+        FunctionSecurity, FunctionTransaction, FunctionVolatility, ObjectTypeDefinition,
+        OnDeleteAction, ParameterDefinition, PreludeTypeName, QualifiedSemanticName,
+        SchemaDefinition, TypeBinding, TypeBindingKind, TypeLookupName, ValueTypeDefinition,
+        ValueTypeKind, ValueTypeMutability, ValueTypePersistence,
     },
     revision::{
         CatalogueHashContext, CatalogueHashVersion, DefinitionIdentity, DefinitionOrigin,
@@ -51,6 +51,8 @@ const ARTIFACT_PAYLOAD_DOMAIN: &[u8] = b"ornadb.hash/artifact-payload/v1\0";
 pub enum CatalogueHashFact {
     /// One value-type definition.
     ValueTypeDefinition(TypeId),
+    /// One enum-type definition.
+    EnumTypeDefinition(TypeId),
     /// One direct type-name binding.
     TypeBinding(TypeBindingId),
     /// One definition source origin.
@@ -320,6 +322,11 @@ impl fmt::Display for CanonicalHashError {
                     "catalogue hash version {} cannot include value types; use catalogue hash version 2",
                     version.to_u32()
                 ),
+                CatalogueHashFact::EnumTypeDefinition(_) => write!(
+                    formatter,
+                    "catalogue hash version {} cannot include enum types; use catalogue hash version 2",
+                    version.to_u32()
+                ),
                 CatalogueHashFact::TypeBinding(_) => write!(
                     formatter,
                     "catalogue hash version {} cannot include type-name bindings; use catalogue hash version 2",
@@ -571,6 +578,13 @@ fn calculate_standard_library_digest(
         standard.catalogue().value_types(),
         Some(&origins),
     )?;
+    if !standard.catalogue().enum_types().is_empty() {
+        encode_enum_types(
+            &mut encoder,
+            standard.catalogue().enum_types(),
+            Some(&origins),
+        )?;
+    }
     encode_type_bindings(
         &mut encoder,
         standard.catalogue().type_bindings(),
@@ -792,6 +806,9 @@ pub fn catalogue_digest_with_context(
             encode_catalogue_schemas(&mut encoder, catalogue.schemas())?;
             encode_catalogue_object_types(&mut encoder, catalogue)?;
             encode_value_types(&mut encoder, catalogue.value_types(), None)?;
+            if !catalogue.enum_types().is_empty() {
+                encode_enum_types(&mut encoder, catalogue.enum_types(), None)?;
+            }
             encode_type_bindings(&mut encoder, catalogue.type_bindings(), None)?;
             encode_catalogue_functions(&mut encoder, catalogue)?;
             encode_expression_artifacts(&mut encoder, expressions)?;
@@ -905,6 +922,12 @@ fn validate_catalogue_version_facts(
 ) -> Result<(), CanonicalHashError> {
     match version {
         CatalogueHashVersion::Version1 => {
+            if let Some(enum_type) = catalogue.enum_types().first() {
+                return Err(CanonicalHashError::CatalogueFactUnsupportedByHashVersion {
+                    version,
+                    fact: CatalogueHashFact::EnumTypeDefinition(enum_type.id()),
+                });
+            }
             if let Some(value_type) = catalogue.value_types().first() {
                 return Err(CanonicalHashError::CatalogueFactUnsupportedByHashVersion {
                     version,
@@ -1027,6 +1050,31 @@ fn encode_value_types(
                 encoder,
                 origins,
                 DefinitionIdentity::ValueType(value_type.id()),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn encode_enum_types(
+    encoder: &mut Encoder,
+    enum_types: &[EnumTypeDefinition],
+    origins: Option<&HashMap<DefinitionIdentity, &DefinitionOrigin>>,
+) -> Result<(), CanonicalHashError> {
+    let enum_types = sorted_by_key(enum_types, |enum_type| enum_type.id().to_bytes());
+    encoder.sequence_len(enum_types.len(), "catalogue enum types")?;
+    for enum_type in enum_types {
+        encoder.type_id(enum_type.id());
+        encoder.semantic_name(enum_type.name())?;
+        encoder.sequence_len(enum_type.labels().len(), "enum labels")?;
+        for label in enum_type.labels() {
+            encoder.text(label, "enum label")?;
+        }
+        if let Some(origins) = origins {
+            encode_required_origin(
+                encoder,
+                origins,
+                DefinitionIdentity::ValueType(enum_type.id()),
             )?;
         }
     }
@@ -1547,6 +1595,7 @@ fn definition_identity_exists(
         }
         DefinitionIdentity::ValueType(value_type) => {
             catalogue.value_type_by_id(value_type).is_some()
+                || catalogue.enum_type_by_id(value_type).is_some()
         }
         DefinitionIdentity::TypeBinding(binding) => catalogue.type_binding_by_id(binding).is_some(),
         DefinitionIdentity::Field { owner, field } => catalogue
@@ -1587,6 +1636,9 @@ fn catalogue_definition_identities(
     }
     for value_type in catalogue.value_types() {
         identities.push(DefinitionIdentity::ValueType(value_type.id()));
+    }
+    for enum_type in catalogue.enum_types() {
+        identities.push(DefinitionIdentity::ValueType(enum_type.id()));
     }
     for binding in catalogue.type_bindings() {
         identities.push(DefinitionIdentity::TypeBinding(binding.id()));
@@ -2030,8 +2082,9 @@ mod tests {
     use crate::{
         CatalogueRevisionId,
         catalogue::{
-            FieldDefinition, FunctionReturnColumnDefinition, PreludeTypeName, SchemaDefinition,
-            TypeBinding, ValueTypeDefinition, ValueTypeMutability, ValueTypePersistence,
+            EnumTypeDefinition, FieldDefinition, FunctionReturnColumnDefinition, PreludeTypeName,
+            SchemaDefinition, TypeBinding, ValueTypeDefinition, ValueTypeMutability,
+            ValueTypePersistence,
         },
         revision::{CatalogueHashContext, SourceOrigin},
         types::{ResolvedType, StandardScalar},
@@ -3150,6 +3203,60 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn catalogue_hash_binds_every_enum_label_and_its_declaration_order() {
+        let digest = |labels: &[&str]| {
+            let schema = SchemaDefinition::new(
+                SchemaId::from_bytes(id::<1>()),
+                QualifiedSemanticName::new(["crm"]).unwrap(),
+            );
+            let enum_types = if labels.is_empty() {
+                Vec::new()
+            } else {
+                vec![EnumTypeDefinition::new(
+                    TypeId::from_bytes(id::<2>()),
+                    QualifiedSemanticName::new(["crm", "stage"]).unwrap(),
+                    labels.iter().copied(),
+                )]
+            };
+            let catalogue = CatalogueSnapshot::new_with_enum_types(
+                CatalogueRevisionId::from_bytes(id::<7>()),
+                vec![schema],
+                vec![],
+                vec![],
+                enum_types,
+                vec![],
+            )
+            .unwrap();
+            let mut origins = vec![DefinitionOrigin::new(
+                DefinitionIdentity::Schema(SchemaId::from_bytes(id::<1>())),
+                SourceOrigin::new(SourceUnitId::from_bytes(id::<10>()), 0, 1).unwrap(),
+            )];
+            if !labels.is_empty() {
+                origins.push(DefinitionOrigin::new(
+                    DefinitionIdentity::ValueType(TypeId::from_bytes(id::<2>())),
+                    SourceOrigin::new(SourceUnitId::from_bytes(id::<10>()), 1, 2).unwrap(),
+                ));
+            }
+            catalogue_digest_with_context(
+                &CatalogueHashContext::version_two(verified_standard_snapshot(false)),
+                &catalogue,
+                &[],
+                &[],
+                &origins,
+                &[],
+            )
+            .unwrap()
+        };
+
+        let original = digest(&["lead", "qualified", "customer"]);
+        assert_ne!(digest(&[]), original);
+        assert_ne!(digest(&["lead", "qualified"]), original);
+        assert_ne!(digest(&["lead", "accepted", "customer"]), original);
+        assert_ne!(digest(&["qualified", "lead", "customer"]), original);
+        assert_eq!(digest(&["lead", "qualified", "customer"]), original);
     }
 
     #[test]
