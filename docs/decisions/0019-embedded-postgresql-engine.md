@@ -67,9 +67,10 @@ final PostgreSQL-relative paths. An overlay can only add an absent path; it
 cannot replace an upstream file. Changes to existing upstream files use the
 small ordered series beneath `postgresql/patches/18.4/`. A patch must contain
 only the minimum existing-file edit that cannot be expressed as an added
-source file. The recipe pins every overlay and patch path, mode, SHA-256 digest,
-and patch order. Unlisted files, duplicate destinations, a patch that adds a
-file, and an overlay that replaces a file fail the build.
+source file. The Git index pins each overlay and patch path, mode, and byte
+content. The zero-padded patch filenames define their order. Untracked input,
+duplicate destinations, a patch that adds a file, and an overlay that replaces
+a file fail the build. There is no separate source recipe.
 
 A proof build fails if the submodule is absent, modified, has untracked files,
 is at another commit, or does not match the pinned source-tree inventory.
@@ -77,9 +78,9 @@ is at another commit, or does not match the pinned source-tree inventory.
 the submodule. `make -C postgresql update-source POSTGRESQL_REF=<full-commit>`
 is the only maintenance interface that may change the gitlink. It accepts only
 a full commit identifier, fetches through the configured upstream submodule
-remote, checks out that detached commit, updates the recipe source identity,
-and stops before building or committing. The resulting gitlink and recipe
-change remain ordinary reviewable superproject changes.
+remote, checks out that detached commit, and stops before building, staging, or
+committing. The resulting gitlink change remains an ordinary reviewable
+superproject change.
 
 Credential-free workflow checkout is the one provisioning boundary. It may
 initialise and fetch the exact superproject-pinned submodule and its required
@@ -92,10 +93,11 @@ builds must produce identical static link inputs and embedded support-data
 inputs. `postgresql/Makefile` is the one Orna build interface. It verifies the
 immutable upstream gitlink, copies its canonical tracked-file inventory into a
 private source directory beneath the caller-owned `target` root, installs the
-verified added-file overlays, and applies each verified patch in recipe order
+tracked added-file overlays, and applies each tracked patch in filename order
 with `--batch --forward --fuzz=0`. It then configures and builds only in a
-separate out-of-tree build directory. It never writes into the submodule and
-never uses a host-global temporary directory.
+separate out-of-tree build directory. It never writes into the submodule,
+never uses a host-global temporary directory, and contains no second
+declarative build language.
 
 The `Containerfile` prepares the pinned dependency and toolchain image before
 either proof build. That image preparation may use only the accepted Debian
@@ -109,12 +111,13 @@ submodule URL and path, exact upstream commit, canonical upstream source-tree
 inventory, ordered overlay and patch inventories, resulting prepared-source
 inventory, C compiler and linker, static archives, symbol closure, path
 remapping, PostgreSQL licence, and support data for downstream build stages.
-It also binds the exact checked-in `Makefile`, `Containerfile`, recipe, support
+It also binds the exact checked-in `Makefile`, `Containerfile`, support
 generator, manifest generator, lifecycle probe, lifecycle verifier, prepared
-builder image digest, and pinned Debian package closure. It does not select its
-own source commit. All inventories use path and blob bytes, not filesystem
-times. The submodule is an upstream input, not a separate runtime acceptance,
-publication, or signing authority.
+builder image digest, and pinned Debian package closure. The manifest records
+evidence after the build. It does not configure the build or select its own
+inputs. All inventories use path and blob bytes, not filesystem times. The
+submodule is an upstream input, not a separate runtime acceptance, publication,
+or signing authority.
 
 A later Orna distribution manifest must bind that embedded-engine manifest to
 the exact Rust toolchain, `Cargo.lock`, Rust linker flags, Rust path remapping,
@@ -191,7 +194,7 @@ The first tracer is deliberately smaller than a database lifecycle. It must:
 7. build the same archive and probe twice and compare their exact bytes.
 
 The submodule-backed reproduction of this proof starts only from the checked
-out gitlink and the checked-in Orna recipe, overlays, and sparse patch series.
+out gitlink and the checked-in Orna Makefile, overlays, and sparse patch series.
 It runs with network access disabled. Before `configure` runs, it proves the
 exact clean upstream commit and inventory, copies that inventory beneath the
 caller-owned target root, applies only the recorded overlays and patches, and
@@ -755,8 +758,9 @@ fresh network-disabled Debian 12 amd64 machine:
 ## PostgreSQL source integration
 
 The immutable upstream checkout contains no Orna commits. The prepared source
-is the upstream tree plus this exact Orna-owned input sequence. The recipe is
-the machine-readable path, digest, mode, and order authority.
+is the upstream tree plus this exact Orna-owned input sequence. Git records the
+input bytes and modes. The table documents their responsibilities, and the
+zero-padded patch filenames define application order.
 
 | Input | PostgreSQL-relative scope | Required result |
 | --- | --- | --- |
@@ -795,10 +799,11 @@ only the exact one to three files listed in that row.
 
 A change only to patch hunk context is a representation correction, not an
 embedded-engine change, when `--fuzz=0` application produces a byte-identical
-final source tree and every deterministic output remains byte-identical. The
-recipe and embedded manifest bind the new patch digest, but the embedded
-identity does not advance. Any applied source or deterministic-output byte
-change fails this exception and requires a new identity.
+final source tree and every deterministic output remains byte-identical. Git
+records the new patch bytes and the embedded manifest records their digest,
+but the embedded identity does not advance. Any applied source or
+deterministic-output byte change fails this exception and requires a new
+identity.
 
 ### Completed prototype history
 
@@ -832,12 +837,12 @@ prototype history and are not current source or build authority.
 | `build(postgres): add embedded PostgreSQL overlays` | `postgresql/overlays/18.4/src/backend/main/orna_embedded.c`; `postgresql/overlays/18.4/src/include/orna_embedded.h` | Add the complete reviewed Orna-owned source files outside the submodule, with no generated or duplicate source authority. |
 | `build(postgres): add embedded patches one` | `postgresql/patches/18.4/0001-linked-backend-entry.patch`; `postgresql/patches/18.4/0002-fixed-postmaster-paths.patch`; `postgresql/patches/18.4/0003-executable-code-guards.patch` | Add the first three sparse existing-file patch concerns and prove serial zero-fuzz application after overlay installation. |
 | `build(postgres): add embedded patches two` | `postgresql/patches/18.4/0004-linked-check-and-bootstrap.patch`; `postgresql/patches/18.4/0005-complete-initialiser.patch` | Add the final two sparse existing-file patch concerns and prove the complete prepared source matches the accepted prototype source. |
-| `build(postgres): define the PostgreSQL engine build` | `postgresql/Makefile`; `postgresql/Containerfile`; `postgresql/engine.toml` | Add the only build and maintenance interface. Pin the upstream commit, overlays, patches, prepared image, Debian package closure, toolchain, configure, archive, licence, source inventories, and output contracts. Prepare source only beneath caller-owned `target`; provide the explicit full-commit `update-source` target. |
-| `build(postgres): generate embedded support data` | `postgresql/support_bundle.py`; `postgresql/Makefile`; `postgresql/engine.toml` | Generate and verify the deterministic data-only support bundle from the prepared source and out-of-tree build. |
-| `build(postgres): emit the embedded engine manifest` | `postgresql/engine_manifest.py`; `postgresql/Makefile`; `postgresql/engine.toml` | Bind the upstream gitlink and inventory, overlay and patch bytes and order, prepared-source inventory, every checked-in build and proof input, prepared image digest, package closure, archives, symbols, support data, and licence. |
-| `test(postgres): add the linked lifecycle probe` | `postgresql/lifecycle_probe.c`; `postgresql/Makefile`; `postgresql/engine.toml` | Add the unpublished one-ELF initialiser, postmaster, raw-pgwire, hostile-authority, and controlled-shutdown tracer as ordinary reviewed C source and bind it as a build input. |
-| `test(postgres): verify the embedded lifecycle` | `postgresql/verify_lifecycle.py`; `postgresql/Makefile`; `postgresql/engine.toml` | Gate the exact cluster, support, process, filter, network, mapping, trace, output, and two-build reproducibility contracts and bind the verifier as a build input. |
-| `build(postgres): prove patch-managed engine parity` | `.github/workflows/postgresql-embedded.yml`; `postgresql/Makefile`; `postgresql/engine.toml` | While the legacy builder remains selected, run both paths and require byte-identical archives, support data, symbol evidence, licence, and deterministic entry-probe output; require the top-level path's full lifecycle proof twice. |
+| `build(postgres): define the PostgreSQL engine build` | `postgresql/Makefile`; `postgresql/Containerfile` | Add the only build and maintenance interface. Use the gitlink as upstream identity, Git as overlay and patch byte authority, numbered filenames as patch order, and the Containerfile as the Debian package and toolchain authority. Prepare source only beneath caller-owned `target`; provide the explicit full-commit `update-source` target. |
+| `build(postgres): generate embedded support data` | `postgresql/support_bundle.py`; `postgresql/Makefile` | Generate and verify the deterministic data-only support bundle from the prepared source and out-of-tree build. |
+| `build(postgres): emit the embedded engine manifest` | `postgresql/engine_manifest.py`; `postgresql/Makefile` | Record the upstream gitlink and inventory, overlay and patch bytes and order, prepared-source inventory, every checked-in build and proof input, prepared image digest, package closure, archives, symbols, support data, and licence. The manifest records evidence and is not build configuration. |
+| `test(postgres): add the linked lifecycle probe` | `postgresql/lifecycle_probe.c`; `postgresql/Makefile` | Add the unpublished one-ELF initialiser, postmaster, raw-pgwire, hostile-authority, and controlled-shutdown tracer as ordinary reviewed C source and bind it as a build input. |
+| `test(postgres): verify the embedded lifecycle` | `postgresql/verify_lifecycle.py`; `postgresql/Makefile` | Gate the exact cluster, support, process, filter, network, mapping, trace, output, and two-build reproducibility contracts and bind the verifier as a build input. |
+| `build(postgres): prove patch-managed engine parity` | `.github/workflows/postgresql-embedded.yml`; `postgresql/Makefile` | While the legacy builder remains selected, run both paths and require byte-identical archives, support data, symbol evidence, licence, and deterministic entry-probe output; require the top-level path's full lifecycle proof twice. |
 | `build(postgres): select the PostgreSQL engine build` | `.github/workflows/postgresql-embedded.yml`; `justfile`; `packaging/postgresql/build-embedded.sh` | Check out the exact upstream submodule with no persisted credentials, atomically select only the already-green `postgresql/Makefile`, delete the legacy builder entry point, and upload only the accepted evidence root. |
 | `chore(postgres): remove legacy embedded recipe` | `packaging/postgresql/embedded-build.toml` | Remove the inert tarball recipe after the top-level path is the only callable proof. |
 | `chore(postgres): remove legacy patches one` | `packaging/postgresql/embedded-postgresql-18.4/0001-linked-backend-entry-and-archive.patch`; `packaging/postgresql/embedded-postgresql-18.4/0002-embedded-runtime-capabilities-and-seccomp.patch`; `packaging/postgresql/embedded-postgresql-18.4/0003-fixed-postmaster-support-paths.patch` | Remove the first obsolete prototype patch group while retaining it in Git history. |
