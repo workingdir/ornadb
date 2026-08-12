@@ -123,6 +123,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "resolved enum type storage",
         include_str!("../migrations/0013_resolved_enum_types.sql"),
     ),
+    (
+        14,
+        "catalogue enum reference targets",
+        include_str!("../migrations/0014_enum_reference_targets.sql"),
+    ),
 ];
 const MIGRATION_DATA_STEP_SEPARATOR: &[u8] = b"\0orna.kernel.migration-step\0";
 const CANONICAL_HASH_V1_EMPTY_SEED_STEP: &[u8] = b"canonical-hash-v1-empty-seed/v1";
@@ -353,6 +358,14 @@ fn resolved_enum_type_migration_checksum_binds_exact_sql_bytes() {
 }
 
 #[test]
+fn enum_reference_target_migration_checksum_binds_exact_sql_bytes() {
+    assert_eq!(
+        hex_bytes(expected_migration_checksum(14, MIGRATIONS[13].2)),
+        "c130918d3a24a386d78c61cae41775df3b57f5a0b070afac19b9fb143088e38d"
+    );
+}
+
+#[test]
 fn security_snapshot_migration_is_the_registered_version_nine() -> TestResult<()> {
     let (version, name, sql) = MIGRATIONS[8];
 
@@ -429,17 +442,15 @@ fn catalogue_enum_type_storage_is_the_registered_version_twelve() -> TestResult<
 
 #[test]
 fn resolved_enum_type_storage_is_the_registered_version_thirteen() -> TestResult<()> {
-    let Some((version, name, sql)) = MIGRATIONS.last() else {
-        return Err(failure("migration registry is empty"));
-    };
+    let (version, name, sql) = MIGRATIONS[12];
 
     require(
-        *version == 13,
-        format!("last migration is version {version}"),
+        version == 13,
+        format!("resolved enum migration is version {version}"),
     )?;
     require(
-        *name == "resolved enum type storage",
-        format!("last migration has unexpected name {name:?}"),
+        name == "resolved enum type storage",
+        format!("resolved enum migration has unexpected name {name:?}"),
     )?;
     for column in ["enum_type_id", "return_enum_type_id"] {
         require(
@@ -452,6 +463,28 @@ fn resolved_enum_type_storage_is_the_registered_version_thirteen() -> TestResult
             .count()
             == 4,
         "resolved enum migration does not bind every type position to the enum catalogue",
+    )
+}
+
+#[test]
+fn enum_reference_targets_are_the_registered_version_fourteen() -> TestResult<()> {
+    let Some((version, name, sql)) = MIGRATIONS.last() else {
+        return Err(failure("migration registry is empty"));
+    };
+
+    require(
+        *version == 14,
+        format!("last migration is version {version}"),
+    )?;
+    require(
+        *name == "catalogue enum reference targets",
+        format!("last migration has unexpected name {name:?}"),
+    )?;
+    require(
+        sql.contains("target_enum_catalogue_revision_id")
+            && sql.contains("target_kind = 'enum_type'")
+            && sql.contains("REFERENCES _orna_kernel.catalogue_enum_types"),
+        "enum reference migration does not bind named evidence to its catalogue enum",
     )
 }
 
@@ -565,8 +598,8 @@ async fn bootstrap_upgrades_v5_write_reference_evidence_without_mutating_semanti
 
         let after = snapshot_upgrade_state(&database).await?;
         require(
-            after.migrations.len() == 13 && after.migrations[..5] == before.migrations[..],
-            format!("v6-v13 changed prior migration records: {:?}", after.migrations),
+            after.migrations.len() == 14 && after.migrations[..5] == before.migrations[..],
+            format!("v6-v14 changed prior migration records: {:?}", after.migrations),
         )?;
         require(
             after.migrations[5]
@@ -639,6 +672,15 @@ async fn bootstrap_upgrades_v5_write_reference_evidence_without_mutating_semanti
                     expected_migration_checksum(13, MIGRATIONS[12].2),
                 ),
             format!("v13 migration record is not exact: {:?}", after.migrations[12]),
+        )?;
+        require(
+            after.migrations[13]
+                == (
+                    14,
+                    "catalogue enum reference targets".to_owned(),
+                    expected_migration_checksum(14, MIGRATIONS[13].2),
+                ),
+            format!("v14 migration record is not exact: {:?}", after.migrations[13]),
         )?;
         require(
             after.active_pair == before.active_pair,
@@ -726,7 +768,7 @@ async fn bootstrap_upgrades_registered_v6_without_standard_rows() -> TestResult<
 
         let after = snapshot_upgrade_state(&database).await?;
         require(
-            after.migrations.len() == 13
+            after.migrations.len() == 14
                 && after.migrations[..6] == before.migrations[..]
                 && after.migrations[6]
                     == (
@@ -789,6 +831,15 @@ async fn bootstrap_upgrades_registered_v6_without_standard_rows() -> TestResult<
                     expected_migration_checksum(13, MIGRATIONS[12].2),
                 ),
             format!("v13 migration record is not exact: {:?}", after.migrations[12]),
+        )?;
+        require(
+            after.migrations[13]
+                == (
+                    14,
+                    "catalogue enum reference targets".to_owned(),
+                    expected_migration_checksum(14, MIGRATIONS[13].2),
+                ),
+            format!("v14 migration record is not exact: {:?}", after.migrations[13]),
         )?;
         require(
             after.active_pair == before.active_pair
@@ -864,7 +915,7 @@ async fn bootstrap_upgrades_registered_v7_without_resolved_value_rows() -> TestR
         let after_surface = snapshot_catalogue_surface(&database).await?;
         let after_target_fks = snapshot_application_target_foreign_keys(&database).await?;
         require(
-            after.migrations.len() == 13
+            after.migrations.len() == 14
                 && after.migrations[..7] == before.migrations[..]
                 && after.migrations[7]
                     == (
@@ -901,6 +952,12 @@ async fn bootstrap_upgrades_registered_v7_without_resolved_value_rows() -> TestR
                         13,
                         "resolved enum type storage".to_owned(),
                         expected_migration_checksum(13, MIGRATIONS[12].2),
+                    )
+                && after.migrations[13]
+                    == (
+                        14,
+                        "catalogue enum reference targets".to_owned(),
+                        expected_migration_checksum(14, MIGRATIONS[13].2),
                     ),
             format!("v7 upgrade produced unexpected migrations: {:?}", after.migrations),
         )?;
@@ -1216,7 +1273,7 @@ async fn bootstrap_rejects_tampered_gapped_and_newer_migration_history() -> Test
         Sha256::digest(MIGRATIONS[1].2.as_bytes()).to_vec(),
     )
     .await?;
-    reject_migration_history(13, "future migration", vec![0; 32]).await
+    reject_migration_history(14, "future migration", vec![0; 32]).await
 }
 
 async fn inspect_bootstrap_state(database: &TestDatabase) -> TestResult<()> {
@@ -3244,6 +3301,10 @@ async fn inspect_definition_references(client: &Client) -> TestResult<()> {
             "target_standard_library_revision_id".to_owned(),
             "YES".to_owned(),
         ),
+        (
+            "target_enum_catalogue_revision_id".to_owned(),
+            "YES".to_owned(),
+        ),
     ];
     require(
         actual_columns == expected_columns,
@@ -3274,7 +3335,7 @@ async fn inspect_definition_references(client: &Client) -> TestResult<()> {
         client,
         "definition_references",
         "definition_references_target_kind_check",
-        "CHECK ((target_kind = ANY (ARRAY['object_type'::text, 'field'::text, 'function'::text, 'parameter'::text, 'expression'::text, 'value_type'::text])))",
+        "CHECK ((target_kind = ANY (ARRAY['object_type'::text, 'field'::text, 'function'::text, 'parameter'::text, 'expression'::text, 'value_type'::text, 'enum_type'::text])))",
         false,
         false,
     )
@@ -3332,7 +3393,7 @@ async fn inspect_definition_references(client: &Client) -> TestResult<()> {
         client,
         "definition_references",
         "definition_references_reference_target_compatibility_check",
-        "CHECK ((((reference_kind = 'function_call'::text) AND (target_kind = 'function'::text)) OR ((reference_kind = ANY (ARRAY['named_type'::text, 'object_reference'::text, 'query_object'::text])) AND (target_kind = 'object_type'::text)) OR ((reference_kind = 'parameter_read'::text) AND (target_kind = 'parameter'::text)) OR ((reference_kind = 'query_field'::text) AND (target_kind = 'field'::text)) OR ((reference_kind = 'expression'::text) AND (target_kind = 'expression'::text)) OR ((reference_kind = 'write_object'::text) AND (target_kind = 'object_type'::text)) OR ((reference_kind = 'write_field'::text) AND (target_kind = 'field'::text)) OR ((reference_kind = 'named_type'::text) AND (target_kind = 'value_type'::text))))",
+        "CHECK ((((reference_kind = 'function_call'::text) AND (target_kind = 'function'::text)) OR ((reference_kind = ANY (ARRAY['named_type'::text, 'object_reference'::text, 'query_object'::text])) AND (target_kind = 'object_type'::text)) OR ((reference_kind = 'parameter_read'::text) AND (target_kind = 'parameter'::text)) OR ((reference_kind = 'query_field'::text) AND (target_kind = 'field'::text)) OR ((reference_kind = 'expression'::text) AND (target_kind = 'expression'::text)) OR ((reference_kind = 'write_object'::text) AND (target_kind = 'object_type'::text)) OR ((reference_kind = 'write_field'::text) AND (target_kind = 'field'::text)) OR ((reference_kind = 'named_type'::text) AND (target_kind = 'value_type'::text)) OR ((reference_kind = 'named_type'::text) AND (target_kind = 'enum_type'::text))))",
         false,
         false,
     )
@@ -3387,6 +3448,33 @@ async fn inspect_definition_references(client: &Client) -> TestResult<()> {
         true,
     )
     .await?;
+    require_exact_constraint(
+        client,
+        "definition_references",
+        "definition_references_target_enum_revision_length",
+        "CHECK (((target_enum_catalogue_revision_id IS NULL) OR (octet_length(target_enum_catalogue_revision_id) = 16)))",
+        false,
+        false,
+    )
+    .await?;
+    require_exact_constraint(
+        client,
+        "definition_references",
+        "definition_references_target_enum_revision_shape",
+        "CHECK ((((target_kind = 'enum_type'::text) AND (target_enum_catalogue_revision_id = catalogue_revision_id)) OR ((target_kind <> 'enum_type'::text) AND (target_enum_catalogue_revision_id IS NULL))))",
+        false,
+        false,
+    )
+    .await?;
+    require_exact_constraint(
+        client,
+        "definition_references",
+        "definition_references_enum_type_target_fk",
+        "FOREIGN KEY (target_enum_catalogue_revision_id, target_definition_id) REFERENCES _orna_kernel.catalogue_enum_types(catalogue_revision_id, type_id) DEFERRABLE INITIALLY DEFERRED",
+        true,
+        true,
+    )
+    .await?;
     require_index(
         client,
         "definition_references_field_target_index",
@@ -3403,6 +3491,12 @@ async fn inspect_definition_references(client: &Client) -> TestResult<()> {
         client,
         "definition_references_direct_target_index",
         "(target_kind, target_definition_id, catalogue_revision_id) WHERE (target_kind <> ALL (ARRAY['field'::text, 'parameter'::text]))",
+    )
+    .await?;
+    require_index(
+        client,
+        "definition_references_enum_type_target_index",
+        "(target_enum_catalogue_revision_id, target_definition_id) WHERE (target_kind = 'enum_type'::text)",
     )
     .await?;
     require_index_absent(client, "definition_references_target_index").await?;
