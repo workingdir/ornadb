@@ -424,6 +424,7 @@ dependencies = [
  "orna-kernel-postgres",
  "orna-postgres-engine",
  "orna-standard",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",
