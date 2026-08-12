@@ -3,14 +3,21 @@
 use std::{
     fmt,
     io::{self, BufRead, IsTerminal, Write},
+    sync::atomic::{AtomicBool, Ordering},
 };
 
-use tokio_postgres::{NoTls, SimpleQueryMessage};
+use nix::sys::signal::{SaFlags, SigAction, SigHandler, SigSet, Signal, sigaction};
 
 use crate::{EmbeddedHostError, inspect_ready_embedded_host};
 
+#[path = "backend_protocol.rs"]
+mod backend_protocol;
+
+use backend_protocol::BackendSession;
+
 const EMPTY_PROMPT: &str = "orna=> ";
 const CONTINUED_PROMPT: &str = "orna-> ";
+static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
 /// A failure that prevents or ends the host-only backend shell.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -51,11 +58,9 @@ pub fn run_backend_shell() -> Result<(), BackendShellError> {
         return Err(BackendShellError::TerminalRequired);
     }
     let host = inspect_ready_embedded_host().map_err(map_host_error)?;
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|_| BackendShellError::SessionFailed)?;
-    runtime.block_on(run_session(host.config().clone()))
+    let _interrupt_handler = InterruptHandler::install()?;
+    let mut session = BackendSession::connect(host.config())?;
+    terminal_loop(&mut session)
 }
 
 fn terminals_are_interactive() -> bool {
@@ -76,23 +81,7 @@ fn map_host_error(error: EmbeddedHostError) -> BackendShellError {
     }
 }
 
-async fn run_session(config: tokio_postgres::Config) -> Result<(), BackendShellError> {
-    let (client, connection) = config
-        .connect(NoTls)
-        .await
-        .map_err(|_| BackendShellError::AttachFailed)?;
-    let driver = tokio::spawn(connection);
-    let session_result = terminal_loop(&client).await;
-    drop(client);
-    let driver_result = driver.await;
-    session_result?;
-    match driver_result {
-        Ok(Ok(())) => Ok(()),
-        _ => Err(BackendShellError::SessionFailed),
-    }
-}
-
-async fn terminal_loop(client: &tokio_postgres::Client) -> Result<(), BackendShellError> {
+fn terminal_loop(session: &mut BackendSession) -> Result<(), BackendShellError> {
     let stdin = io::stdin();
     let mut input = stdin.lock();
     let stdout = io::stdout();
@@ -113,6 +102,7 @@ async fn terminal_loop(client: &tokio_postgres::Client) -> Result<(), BackendShe
         let length = match input.read_line(&mut line) {
             Ok(length) => length,
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+                let _ = interrupt_requested();
                 buffer.clear();
                 output
                     .write_all(b"\n")
@@ -121,9 +111,16 @@ async fn terminal_loop(client: &tokio_postgres::Client) -> Result<(), BackendShe
             }
             Err(_) => return Err(BackendShellError::SessionFailed),
         };
+        if interrupt_requested() {
+            buffer.clear();
+            output
+                .write_all(b"\n")
+                .map_err(|_| BackendShellError::SessionFailed)?;
+            continue;
+        }
         if length == 0 {
             return if buffer.is_empty() {
-                Ok(())
+                session.terminate()
             } else {
                 Err(BackendShellError::SessionFailed)
             };
@@ -132,10 +129,10 @@ async fn terminal_loop(client: &tokio_postgres::Client) -> Result<(), BackendShe
             .strip_suffix('\n')
             .and_then(|line| line.strip_suffix('\r').or(Some(line)));
         match control {
-            Some("\\q") => return Ok(()),
+            Some("\\q") => return session.terminate(),
             Some("\\g") if buffer.is_empty() => continue,
             Some("\\g") => {
-                render_query(client, &buffer, &mut output).await?;
+                session.execute(&buffer, &mut input, &mut output)?;
                 buffer.clear();
             }
             _ => buffer.push_str(&line),
@@ -143,98 +140,38 @@ async fn terminal_loop(client: &tokio_postgres::Client) -> Result<(), BackendShe
     }
 }
 
-async fn render_query(
-    client: &tokio_postgres::Client,
-    query: &str,
-    output: &mut impl Write,
-) -> Result<(), BackendShellError> {
-    match client.simple_query(query).await {
-        Ok(messages) => {
-            for message in messages {
-                match message {
-                    SimpleQueryMessage::RowDescription(columns) => {
-                        render_fields(columns.iter().map(|column| Some(column.name())), output)?;
-                    }
-                    SimpleQueryMessage::Row(row) => {
-                        render_fields((0..row.len()).map(|index| row.get(index)), output)?;
-                    }
-                    SimpleQueryMessage::CommandComplete(rows) => {
-                        writeln!(output, "({rows} rows)")
-                            .map_err(|_| BackendShellError::SessionFailed)?;
-                    }
-                    _ => return Err(BackendShellError::SessionFailed),
-                }
-            }
-        }
-        Err(error) => render_database_error(&error, output)?,
-    }
-    output.flush().map_err(|_| BackendShellError::SessionFailed)
+struct InterruptHandler {
+    previous: SigAction,
 }
 
-fn render_fields<'a>(
-    fields: impl IntoIterator<Item = Option<&'a str>>,
-    output: &mut impl Write,
-) -> Result<(), BackendShellError> {
-    let mut separator = "";
-    for field in fields {
-        output
-            .write_all(separator.as_bytes())
+impl InterruptHandler {
+    fn install() -> Result<Self, BackendShellError> {
+        INTERRUPTED.store(false, Ordering::SeqCst);
+        let action = SigAction::new(
+            SigHandler::Handler(record_interrupt),
+            SaFlags::empty(),
+            SigSet::empty(),
+        );
+        // SAFETY: the handler performs only one lock-free atomic store.
+        let previous = unsafe { sigaction(Signal::SIGINT, &action) }
             .map_err(|_| BackendShellError::SessionFailed)?;
-        match field {
-            Some(value) => write_escaped(value, output)?,
-            None => output
-                .write_all(b"<NULL>")
-                .map_err(|_| BackendShellError::SessionFailed)?,
-        }
-        separator = "\t";
+        Ok(Self { previous })
     }
-    output
-        .write_all(b"\n")
-        .map_err(|_| BackendShellError::SessionFailed)
 }
 
-fn render_database_error(
-    error: &tokio_postgres::Error,
-    output: &mut impl Write,
-) -> Result<(), BackendShellError> {
-    let Some(error) = error.as_db_error() else {
-        return Err(BackendShellError::SessionFailed);
-    };
-    write!(output, "ERROR {}: ", error.code().code())
-        .map_err(|_| BackendShellError::SessionFailed)?;
-    write_escaped(error.message(), output)?;
-    output
-        .write_all(b"\n")
-        .map_err(|_| BackendShellError::SessionFailed)?;
-    for (label, value) in [("DETAIL", error.detail()), ("HINT", error.hint())] {
-        if let Some(value) = value {
-            write!(output, "{label}: ").map_err(|_| BackendShellError::SessionFailed)?;
-            write_escaped(value, output)?;
-            output
-                .write_all(b"\n")
-                .map_err(|_| BackendShellError::SessionFailed)?;
-        }
+impl Drop for InterruptHandler {
+    fn drop(&mut self) {
+        // SAFETY: this restores the action returned by the successful installation.
+        let _ = unsafe { sigaction(Signal::SIGINT, &self.previous) };
     }
-    Ok(())
 }
 
-fn write_escaped(value: &str, output: &mut impl Write) -> Result<(), BackendShellError> {
-    for character in value.chars() {
-        match character {
-            '\\' => output.write_all(b"\\\\"),
-            '\t' => output.write_all(b"\\t"),
-            '\r' => output.write_all(b"\\r"),
-            '\n' => output.write_all(b"\\n"),
-            '\u{1b}' => output.write_all(b"\\e"),
-            '\u{7f}' => output.write_all(b"\\x7f"),
-            character if character.is_control() => {
-                write!(output, "\\u{{{:x}}}", character as u32)
-            }
-            character => write!(output, "{character}"),
-        }
-        .map_err(|_| BackendShellError::SessionFailed)?;
-    }
-    Ok(())
+extern "C" fn record_interrupt(_: i32) {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+pub(super) fn interrupt_requested() -> bool {
+    INTERRUPTED.swap(false, Ordering::SeqCst)
 }
 
 #[cfg(test)]
@@ -285,7 +222,7 @@ mod tests {
     #[test]
     fn terminal_escaping_is_unambiguous() {
         let mut output = Vec::new();
-        write_escaped("a\\b\t\r\n\u{1b}\u{7f}\0é", &mut output).unwrap();
+        backend_protocol::write_escaped("a\\b\t\r\n\u{1b}\u{7f}\0é", &mut output).unwrap();
         assert_eq!(output, b"a\\\\b\\t\\r\\n\\e\\x7f\\u{0}\xc3\xa9");
     }
 }
