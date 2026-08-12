@@ -55,7 +55,8 @@ const BASIC_CHANGED_SOURCE: &str = "CREATE SCHEMA app;\n\
 const STANDARD_APPLICATION_SOURCE: &str = "CREATE SCHEMA app;\n";
 
 const ENUM_APPLICATION_SOURCE: &str = "CREATE SCHEMA app;\n\
-    CREATE TYPE app.stage AS ENUM ('lead', 'owner''s', 'customer');\n";
+    CREATE TYPE app.stage AS ENUM ('lead', 'owner''s', 'customer');\n\
+    CREATE TYPE app.case AS OBJECT (stage app.stage NOT NULL);\n";
 
 const STANDARD_UPGRADE_V1_SOURCE: &str = "CREATE SCHEMA app;\n\
     CREATE TYPE app.item AS OBJECT (done BOOLEAN NOT NULL);\n\
@@ -378,6 +379,15 @@ async fn applies_and_recovers_ordered_catalogue_enum_labels() -> TestResult<()> 
             .schemas()
             .first()
             .ok_or_else(|| failure("enum candidate did not contain its schema"))?;
+        let expected_object = candidate
+            .candidate()
+            .object_types()
+            .first()
+            .ok_or_else(|| failure("enum candidate did not contain its object"))?;
+        let expected_field = expected_object
+            .fields()
+            .first()
+            .ok_or_else(|| failure("enum candidate object did not contain its field"))?;
         let expected_origin = candidate
             .origins()
             .iter()
@@ -411,6 +421,32 @@ async fn applies_and_recovers_ordered_catalogue_enum_labels() -> TestResult<()> 
             )
             .await?
             .try_get(0)?;
+        let field_row = session
+            .client()
+            .query_one(
+                "SELECT type_kind, scalar_type, target_type_id, value_type_id,
+                        value_standard_library_revision_id, enum_type_id
+                 FROM _orna_kernel.catalogue_fields
+                 WHERE catalogue_revision_id = $1
+                   AND owner_type_id = $2 AND field_id = $3",
+                &[
+                    &candidate.candidate().revision().to_bytes().to_vec(),
+                    &expected_object.id().to_bytes().to_vec(),
+                    &expected_field.id().to_bytes().to_vec(),
+                ],
+            )
+            .await?;
+        let physical_row = session
+            .client()
+            .query_one(
+                "SELECT pg_catalog.format_type(attribute.atttypid, attribute.atttypmod),
+                        attribute.attnotnull
+                 FROM pg_catalog.pg_attribute AS attribute
+                 WHERE attribute.attrelid = pg_catalog.to_regclass($1)
+                   AND attribute.attname = $2 AND NOT attribute.attisdropped",
+                &[&relation(expected_object.id()), &field(expected_field.id())],
+            )
+            .await?;
         require(
             row.try_get::<_, Vec<u8>>(0)? == expected.id().to_bytes().to_vec()
                 && row.try_get::<_, Vec<u8>>(1)? == expected_schema.id().to_bytes().to_vec()
@@ -420,8 +456,17 @@ async fn applies_and_recovers_ordered_catalogue_enum_labels() -> TestResult<()> 
                     == expected_origin.source().source_unit().to_bytes().to_vec()
                 && row.try_get::<_, i64>(5)? == i64::from(expected_origin.source().byte_start())
                 && row.try_get::<_, i64>(6)? == i64::from(expected_origin.source().byte_end())
+                && expected_field.resolved_type() == ResolvedType::named(expected.id())
+                && field_row.try_get::<_, String>(0)? == "enum"
+                && field_row.try_get::<_, Option<String>>(1)?.is_none()
+                && field_row.try_get::<_, Option<Vec<u8>>>(2)?.is_none()
+                && field_row.try_get::<_, Option<Vec<u8>>>(3)?.is_none()
+                && field_row.try_get::<_, Option<Vec<u8>>>(4)?.is_none()
+                && field_row.try_get::<_, Vec<u8>>(5)? == expected.id().to_bytes().to_vec()
+                && physical_row.try_get::<_, String>(0)? == "text"
+                && physical_row.try_get::<_, bool>(1)?
                 && postgres_enum_count == 0,
-            "enum apply did not preserve the exact protected catalogue row",
+            "enum apply did not preserve its exact catalogue and text storage rows",
         )?;
         session.shutdown().await?;
 
