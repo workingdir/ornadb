@@ -150,6 +150,15 @@ pub enum PostgresKernelError {
         /// The fail-closed reason for denying execution.
         reason: ExecuteDenial,
     },
+    /// The active security snapshot denied a SERVER SELECT invocation.
+    ServerExecuteDenied {
+        /// The active revision pair used for the decision.
+        pair: RevisionPair,
+        /// The requested function identity.
+        function: FunctionId,
+        /// The fail-closed reason for denying execution.
+        reason: ExecuteDenial,
+    },
     /// An authorised CLIENT function could not be evaluated.
     ClientExecution(ClientExecutionError),
     /// A kernel-supplied local peer UID could not establish an Orna session.
@@ -265,6 +274,9 @@ impl fmt::Display for PostgresKernelError {
             Self::ClientExecuteDenied { .. } => {
                 formatter.write_str("CLIENT function execution was denied")
             }
+            Self::ServerExecuteDenied { .. } => {
+                formatter.write_str("SERVER SELECT execution was denied")
+            }
             Self::ClientExecution(error) => {
                 write!(formatter, "CLIENT function execution failed: {error}")
             }
@@ -341,6 +353,7 @@ impl Error for PostgresKernelError {
             | Self::SecurityRevisionMismatch { .. }
             | Self::SecurityFunctionSetMismatch
             | Self::ClientExecuteDenied { .. }
+            | Self::ServerExecuteDenied { .. }
             | Self::DurableInvariant { .. } => None,
         }
     }
