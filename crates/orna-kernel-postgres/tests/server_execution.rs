@@ -17,7 +17,7 @@ use orna_core::{
     revision::{ActiveDatabaseRevision, DeployableRevision, RevisionPair},
     source::{SourceBundle, SourceUnit},
     types::{ResolvedType, StandardScalar},
-    value::{FunctionArgument, RuntimeFloat, RuntimeValue},
+    value::{EnumValue, FunctionArgument, RecordValue, RuntimeFloat, RuntimeValue},
 };
 #[cfg(feature = "test-hooks")]
 use orna_core::{
@@ -31,6 +31,7 @@ use orna_core::{
 use orna_kernel_postgres::{
     PostgresKernel, PostgresKernelError, ServerSelectError, ServerSelectResult,
 };
+use orna_protocol::{ValueCodecError, encode_active_value};
 use orna_standard::{
     BIGINT_TYPE_ID, BINARY_LARGE_OBJECT_TYPE_ID, BOOLEAN_TYPE_ID, CHARACTER_LARGE_OBJECT_TYPE_ID,
     FLOAT_TYPE_ID, INTEGER_TYPE_ID,
@@ -71,6 +72,16 @@ const ENUM_EXECUTION_SOURCE: &str = r"CREATE SCHEMA enum_exec;
     CREATE SERVER FUNCTION enum_exec.read()
     RETURNS ROWS (stage enum_exec.stage)
     AS SELECT item.stage FROM enum_exec.case item;
+";
+
+const RECORD_EXECUTION_SOURCE: &str = r"CREATE SCHEMA record_exec;
+    CREATE TYPE record_exec.stage AS ENUM ('lead', 'qualified');
+    CREATE TYPE record_exec.status AS VALUE (enabled BOOLEAN, stage record_exec.stage)
+    IMMUTABLE PERSISTABLE;
+    CREATE TYPE record_exec.case AS OBJECT (status record_exec.status NOT NULL);
+    CREATE SERVER FUNCTION record_exec.read()
+    RETURNS ROWS (status record_exec.status)
+    AS SELECT item.status FROM record_exec.case item;
 ";
 
 #[cfg(feature = "test-hooks")]
@@ -265,6 +276,132 @@ async fn executes_catalogue_enum_results_and_rejects_undeclared_storage_labels()
             .await
             .expect_err("undeclared stored label must fail");
         require_enum_value_error(
+            &error,
+            applied.pair(),
+            function.id(),
+            function.current_revision(),
+        )
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn executes_canonical_named_record_results_and_rejects_malformed_storage() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = hostile_kernel(&database)?;
+        kernel.bootstrap().await?;
+        let empty = kernel.recover().await?;
+        let version_one = kernel
+            .apply(&candidate("CREATE SCHEMA record_exec;\n", &empty)?)
+            .await?;
+        let upgrade = orna_standard::prepare_standard_upgrade(&version_one)
+            .map_err(|error| failure(format!("standard upgrade preparation failed: {error}")))?;
+        let version_two = kernel.apply_standard_upgrade(&upgrade).await?;
+        let candidate =
+            standard_execution_candidate(RECORD_EXECUTION_SOURCE, &version_two, &upgrade)?;
+        let applied = kernel.apply(&candidate).await?;
+        let record = applied
+            .catalogue()
+            .record_value_types()
+            .first()
+            .ok_or_else(|| failure("record execution catalogue has no record"))?;
+        let enum_type = applied
+            .catalogue()
+            .enum_types()
+            .first()
+            .ok_or_else(|| failure("record execution catalogue has no enum"))?;
+        let object = applied
+            .catalogue()
+            .object_types()
+            .first()
+            .ok_or_else(|| failure("record execution catalogue has no object"))?;
+        let record_field = object
+            .fields()
+            .first()
+            .ok_or_else(|| failure("record execution object has no field"))?;
+        let function = applied
+            .catalogue()
+            .functions()
+            .first()
+            .ok_or_else(|| failure("record execution catalogue has no function"))?;
+        let value = RuntimeValue::Record(RecordValue::new(
+            &applied,
+            record.id(),
+            [
+                (String::from("enabled"), RuntimeValue::Boolean(true)),
+                (
+                    String::from("stage"),
+                    RuntimeValue::Enum(EnumValue::new(
+                        applied.catalogue(),
+                        enum_type.id(),
+                        "qualified",
+                    )?),
+                ),
+            ],
+        )?);
+        let encoded = encode_active_value(&applied, &value)?;
+        let object_id = ObjectId::from_bytes([0xe3; 16]);
+        let session = database.open().await?;
+        session
+            .client()
+            .execute(
+                &format!(
+                    "INSERT INTO {} (_orna_object_id, {}) VALUES ($1, $2)",
+                    relation(object.id()),
+                    field(record_field.id()),
+                ),
+                &[&object_id.to_bytes().to_vec(), &encoded],
+            )
+            .await?;
+        session.shutdown().await?;
+
+        let result = kernel.execute_server_select(function.id()).await?;
+        require(
+            result.pair() == applied.pair()
+                && result.function() == function.id()
+                && result.function_revision() == function.current_revision()
+                && result.rows().columns().len() == 1
+                && result.rows().columns()[0].name() == "status"
+                && result.rows().columns()[0].resolved_type() == ResolvedType::named(record.id())
+                && result.rows().rows().len() == 1,
+            "record SELECT changed its pinned result identity or shape",
+        )?;
+        let [RuntimeValue::Record(actual)] = result.rows().rows()[0].values() else {
+            return Err(failure("record SELECT did not return one named record"));
+        };
+        require(
+            actual.record_type() == record.id()
+                && actual.fields()
+                    == [
+                        RuntimeValue::Boolean(true),
+                        RuntimeValue::Enum(EnumValue::new(
+                            applied.catalogue(),
+                            enum_type.id(),
+                            "qualified",
+                        )?),
+                    ],
+            "record SELECT changed the nominal type, field order, or values",
+        )?;
+
+        let session = database.open().await?;
+        session
+            .client()
+            .execute(
+                &format!(
+                    "UPDATE {} SET {} = $1 WHERE _orna_object_id = $2",
+                    relation(object.id()),
+                    field(record_field.id()),
+                ),
+                &[&b"ORV3".to_vec(), &object_id.to_bytes().to_vec()],
+            )
+            .await?;
+        session.shutdown().await?;
+        let error = kernel
+            .execute_server_select(function.id())
+            .await
+            .expect_err("malformed stored record must fail");
+        require_record_codec_error(
             &error,
             applied.pair(),
             function.id(),
@@ -3274,6 +3411,40 @@ fn require_enum_value_error(
             "enum value invariant evidence differs",
         ),
         _ => Err(failure("enum execution source is not ValueInvariant")),
+    }
+}
+
+fn require_record_codec_error(
+    error: &PostgresKernelError,
+    pair: RevisionPair,
+    function: FunctionId,
+    revision: FunctionRevisionId,
+) -> TestResult<()> {
+    let PostgresKernelError::ServerSelect(ServerSelectError::Execution { context, source }) = error
+    else {
+        return Err(failure(
+            "record codec error is not contextual SERVER SELECT execution",
+        ));
+    };
+    require(context.pair() == pair, "record codec context pair differs")?;
+    require(
+        context.function() == function,
+        "record codec context function differs",
+    )?;
+    require(
+        context.function_revision() == revision,
+        "record codec context revision differs",
+    )?;
+    match source.as_ref() {
+        ServerSelectError::ValueCodec {
+            row,
+            column,
+            source: ValueCodecError::TruncatedHeader { actual },
+        } => require(
+            *row == 0 && *column == 0 && *actual == 4,
+            "record codec location or truncation evidence differs",
+        ),
+        _ => Err(failure("record execution source is not ValueCodec")),
     }
 }
 

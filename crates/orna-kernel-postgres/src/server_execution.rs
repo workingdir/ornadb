@@ -27,6 +27,7 @@ use orna_core::{
         RuntimeFloat, RuntimeValue,
     },
 };
+use orna_protocol::{ValueCodecError, decode_active_value, encode_active_value};
 use tokio_postgres::{
     Client, IsolationLevel, Row, Statement, Transaction,
     types::{ToSql, Type},
@@ -53,6 +54,7 @@ const FIELD_PATH_STEP_LIMIT: usize = 8_192;
 const JOIN_LIMIT: usize = 1_024;
 const SQL_LIMIT: usize = 1024 * 1024;
 const TARGET_ENTRY_LIMIT: usize = 1_600;
+const ACTIVE_VALUE_ENVELOPE_LENGTH: usize = 25;
 const VERSION_ONE_EQUALITY_RULE: &str = "version 1 SERVER SELECT equality supports only BOOLEAN, INTEGER, BIGINT, BYTES, and references";
 const PARAMETERISED_EQUALITY_RULE: &str = "parameterised SERVER SELECT equality supports only BOOLEAN, INTEGER, BIGINT, BYTES, and references";
 const DISTINCT_EQUALITY_RULE: &str =
@@ -253,6 +255,15 @@ pub enum ServerSelectError {
         /// The exact runtime rule that failed.
         rule: &'static str,
     },
+    /// Canonical record bytes did not decode under the pinned active revision.
+    ValueCodec {
+        /// The zero-based result row index.
+        row: usize,
+        /// The zero-based result column index.
+        column: usize,
+        /// The canonical value-codec failure.
+        source: ValueCodecError,
+    },
     /// A variable result value exceeded its per-cell payload bound.
     VariablePayload {
         /// The zero-based result row index.
@@ -383,6 +394,14 @@ impl fmt::Display for ServerSelectError {
                     "result row {row} column {column} violates {rule}"
                 )
             }
+            Self::ValueCodec {
+                row,
+                column,
+                source,
+            } => write!(
+                formatter,
+                "cannot decode canonical result row {row} column {column}: {source}",
+            ),
             Self::VariablePayload {
                 row,
                 column,
@@ -417,6 +436,7 @@ impl Error for ServerSelectError {
             Self::PlanDecode(error) => Some(error),
             Self::ResultRows(error) => Some(error),
             Self::RowDecode { source, .. } => Some(source),
+            Self::ValueCodec { source, .. } => Some(source),
             Self::FunctionNotActive { .. }
             | Self::AuthorisationMismatch { .. }
             | Self::FunctionDomain { .. }
@@ -795,8 +815,7 @@ async fn execute_active_transaction(
         &statement,
         &lowered.binds,
         ResultReadShape {
-            catalogue: active.catalogue(),
-            context: active.catalogue_hash_context(),
+            active,
             columns: &columns,
             guards: &lowered.guards,
             variable_payload_limit: lowered.variable_payload_limit,
@@ -1034,7 +1053,12 @@ fn validate_identity_selected_plan(
         ) {
             return Err(plan_invariant("projection type must equal its ROWS column"));
         }
-        if !supports_result_type(catalogue, context, projection.value_type.resolved_type) {
+        if !supports_result_type(
+            catalogue,
+            context,
+            projection.value_type.resolved_type,
+            projection.value_type.nullable,
+        ) {
             return Err(plan_invariant(
                 "projection type is outside the initial runtime result subset",
             ));
@@ -1098,7 +1122,12 @@ fn validate_distinct_plan(
         if !supports_distinct_projection_type(context, projection.value_type.resolved_type) {
             return Err(distinct_error(DISTINCT_PROJECTION_RULE));
         }
-        if !supports_result_type(catalogue, context, projection.value_type.resolved_type) {
+        if !supports_result_type(
+            catalogue,
+            context,
+            projection.value_type.resolved_type,
+            projection.value_type.nullable,
+        ) {
             return Err(plan_invariant(
                 "projection type is outside the initial runtime result subset",
             ));
@@ -1283,7 +1312,12 @@ fn validate_plan(
         ) {
             return Err(plan_invariant("projection type must equal its ROWS column"));
         }
-        if !supports_result_type(catalogue, context, projection.value_type.resolved_type) {
+        if !supports_result_type(
+            catalogue,
+            context,
+            projection.value_type.resolved_type,
+            projection.value_type.nullable,
+        ) {
             return Err(plan_invariant(
                 "projection type is outside the initial runtime result subset",
             ));
@@ -1431,7 +1465,16 @@ fn supports_result_type(
     catalogue: &CatalogueSnapshot,
     context: &CatalogueHashContext,
     resolved_type: ResolvedType,
+    nullable: bool,
 ) -> bool {
+    if nullable
+        && matches!(
+            resolve_catalogue_runtime_type(catalogue, context, resolved_type),
+            ResolvedRuntimeType::Record(_)
+        )
+    {
+        return false;
+    }
     matches!(
         resolve_runtime_type(context, resolved_type).compatibility_scalar(),
         Some(
@@ -1444,7 +1487,9 @@ fn supports_result_type(
         )
     ) || matches!(
         resolve_catalogue_runtime_type(catalogue, context, resolved_type),
-        ResolvedRuntimeType::CatalogueEnum(_) | ResolvedRuntimeType::Reference(_)
+        ResolvedRuntimeType::CatalogueEnum(_)
+            | ResolvedRuntimeType::Record(_)
+            | ResolvedRuntimeType::Reference(_)
     )
 }
 
@@ -1917,16 +1962,30 @@ fn lower_select_projections<'a>(
     for (index, expression) in expressions.iter().enumerate() {
         let expression = lowerer.expression(expression)?;
         if is_variable_type(catalogue, context, columns[index].resolved_type()) {
+            let guarded_payload_limit = if matches!(
+                resolve_catalogue_runtime_type(catalogue, context, columns[index].resolved_type(),),
+                ResolvedRuntimeType::Record(_)
+            ) {
+                variable_payload_limit
+                    .checked_add(ACTIVE_VALUE_ENVELOPE_LENGTH)
+                    .ok_or_else(|| {
+                        server_error(ServerSelectError::PayloadLimit {
+                            maximum: PAYLOAD_LIMIT,
+                        })
+                    })?
+            } else {
+                variable_payload_limit
+            };
             let alias = format!("g{}", guards.len());
             projections.push(format!(
-                "CASE WHEN octet_length({expression}) <= {variable_payload_limit} THEN {expression} ELSE NULL END AS c{index}"
+                "CASE WHEN octet_length({expression}) <= {guarded_payload_limit} THEN {expression} ELSE NULL END AS c{index}"
             ));
             guards.push(VariableGuard {
                 column: index,
                 alias: alias.clone(),
             });
             guard_projections.push(format!(
-                "CASE WHEN {expression} IS NULL OR octet_length({expression}) <= {variable_payload_limit} THEN TRUE ELSE FALSE END AS {alias}"
+                "CASE WHEN {expression} IS NULL OR octet_length({expression}) <= {guarded_payload_limit} THEN TRUE ELSE FALSE END AS {alias}"
             ));
         } else {
             projections.push(format!("{expression} AS c{index}"));
@@ -1994,7 +2053,7 @@ fn is_variable_type(
 ) -> bool {
     matches!(
         resolve_catalogue_runtime_type(catalogue, context, resolved_type),
-        ResolvedRuntimeType::CatalogueEnum(_)
+        ResolvedRuntimeType::CatalogueEnum(_) | ResolvedRuntimeType::Record(_)
     ) || matches!(
         resolve_runtime_type(context, resolved_type).compatibility_scalar(),
         Some(StandardScalar::CharacterLargeObject | StandardScalar::BinaryLargeObject)
@@ -2234,8 +2293,7 @@ impl ResultCardinality {
 }
 
 struct ResultReadShape<'a> {
-    catalogue: &'a CatalogueSnapshot,
-    context: &'a CatalogueHashContext,
+    active: &'a ActiveDatabaseRevision,
     columns: &'a [ResultColumn],
     guards: &'a [VariableGuard],
     variable_payload_limit: usize,
@@ -2302,15 +2360,14 @@ async fn stream_rows(
         }
         let mut values = Vec::with_capacity(shape.columns.len());
         for (column_index, column) in shape.columns.iter().enumerate() {
-            let value = decode_value(
-                shape.catalogue,
-                shape.context,
-                &row,
-                row_index,
-                column_index,
-                column,
-            )?;
-            payload = add_payload(payload, logical_payload_len(&value)?)?;
+            let value = decode_value(shape.active, &row, row_index, column_index, column)?;
+            let value_payload = match &value {
+                RuntimeValue::Record(_) => {
+                    canonical_record_payload_len(shape.active, &value, row_index, column_index)?
+                }
+                _ => logical_payload_len(&value)?,
+            };
+            payload = add_payload(payload, value_payload)?;
             values.push(value);
         }
         rows.push(ResultRow::new(values));
@@ -2350,13 +2407,14 @@ fn add_payload(payload: usize, additional: usize) -> Result<usize, PostgresKerne
 }
 
 fn decode_value(
-    catalogue: &CatalogueSnapshot,
-    context: &CatalogueHashContext,
+    active: &ActiveDatabaseRevision,
     row: &Row,
     row_index: usize,
     column_index: usize,
     column: &ResultColumn,
 ) -> Result<RuntimeValue, PostgresKernelError> {
+    let catalogue = active.catalogue();
+    let context = active.catalogue_hash_context();
     macro_rules! decode {
         ($type:ty, $value:expr) => {
             row.try_get::<usize, Option<$type>>(column_index)
@@ -2417,11 +2475,25 @@ fn decode_value(
                     })
                 })
         }),
-        ResolvedRuntimeType::Record(_) => {
-            return Err(server_error(ServerSelectError::PreparedResult {
-                rule: "record results require active canonical decoding",
-            }));
-        }
+        ResolvedRuntimeType::Record(record_type) => decode!(Vec<u8>, |encoded| {
+            match decode_active_value(active, &encoded) {
+                Ok(value) => match &value {
+                    RuntimeValue::Record(record) if record.record_type() == record_type => {
+                        Ok(value)
+                    }
+                    _ => Err(server_error(ServerSelectError::ValueInvariant {
+                        row: row_index,
+                        column: column_index,
+                        rule: "canonical record result type must equal its declared active type",
+                    })),
+                },
+                Err(source) => Err(server_error(ServerSelectError::ValueCodec {
+                    row: row_index,
+                    column: column_index,
+                    source,
+                })),
+            }
+        }),
         ResolvedRuntimeType::LegacyScalar(_)
         | ResolvedRuntimeType::VerifiedValue { .. }
         | ResolvedRuntimeType::Unsupported => {
@@ -2438,6 +2510,31 @@ fn decode_value(
     }
 }
 
+fn canonical_record_payload_len(
+    active: &ActiveDatabaseRevision,
+    value: &RuntimeValue,
+    row: usize,
+    column: usize,
+) -> Result<usize, PostgresKernelError> {
+    encode_active_value(active, value)
+        .map_err(|source| {
+            server_error(ServerSelectError::ValueCodec {
+                row,
+                column,
+                source,
+            })
+        })?
+        .len()
+        .checked_sub(ACTIVE_VALUE_ENVELOPE_LENGTH)
+        .ok_or_else(|| {
+            server_error(ServerSelectError::ValueInvariant {
+                row,
+                column,
+                rule: "canonical record result must contain one complete ORV3 envelope",
+            })
+        })
+}
+
 fn logical_payload_len(value: &RuntimeValue) -> Result<usize, PostgresKernelError> {
     Ok(match value {
         RuntimeValue::Null(_) => 0,
@@ -2448,6 +2545,13 @@ fn logical_payload_len(value: &RuntimeValue) -> Result<usize, PostgresKernelErro
         RuntimeValue::Bytes(value) => value.len(),
         RuntimeValue::Reference { .. } => 16,
         RuntimeValue::Enum(value) => value.label().len(),
+        RuntimeValue::Record(_) => {
+            return Err(server_error(ServerSelectError::ValueInvariant {
+                row: 0,
+                column: 0,
+                rule: "record payload accounting requires an active revision",
+            }));
+        }
         _ => {
             return Err(server_error(ServerSelectError::ValueInvariant {
                 row: 0,
@@ -2514,8 +2618,9 @@ mod tests {
     use orna_core::{
         CatalogueRevisionId, FieldId, ParameterId, SchemaId,
         catalogue::{
-            CatalogueSnapshot, FieldDefinition, FunctionReturnColumnDefinition,
-            ObjectTypeDefinition, ParameterDefinition, QualifiedSemanticName, SchemaDefinition,
+            CatalogueSnapshot, EnumTypeDefinition, FieldDefinition, FunctionReturnColumnDefinition,
+            ObjectTypeDefinition, ParameterDefinition, QualifiedSemanticName,
+            RecordValueFieldDefinition, RecordValueTypeDefinition, SchemaDefinition,
         },
         revision::CatalogueHashContext,
     };
@@ -2641,6 +2746,53 @@ mod tests {
         )
         .expect("value catalogue");
         (catalogue, source, field)
+    }
+
+    fn catalogue_with_record_field() -> (CatalogueSnapshot, TypeId, FieldId, TypeId) {
+        let object = TypeId::from_bytes([0x74; 16]);
+        let field = FieldId::from_bytes([0x75; 16]);
+        let record = TypeId::from_bytes([0x76; 16]);
+        let enum_type = TypeId::from_bytes([0x77; 16]);
+        let catalogue = CatalogueSnapshot::new_with_record_value_types(
+            CatalogueRevisionId::from_bytes([0x78; 16]),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes([0x79; 16]),
+                name(&["record_test"]),
+            )],
+            vec![ObjectTypeDefinition::new(
+                object,
+                name(&["record_test", "object"]),
+                vec![FieldDefinition::new(
+                    field,
+                    "status",
+                    0,
+                    ResolvedType::named(record),
+                    false,
+                    false,
+                    None,
+                    None,
+                )],
+            )],
+            vec![],
+            vec![EnumTypeDefinition::new(
+                enum_type,
+                name(&["record_test", "stage"]),
+                ["lead"],
+            )],
+            vec![RecordValueTypeDefinition::new(
+                record,
+                name(&["record_test", "status"]),
+                vec![RecordValueFieldDefinition::new(
+                    FieldId::from_bytes([0x7a; 16]),
+                    "stage",
+                    0,
+                    ResolvedType::named(enum_type),
+                )],
+            )],
+            vec![],
+        )
+        .expect("record catalogue");
+        (catalogue, object, field, record)
     }
 
     fn field_projection(source: TypeId, field: FieldId, scalar: StandardScalar) -> Expression {
@@ -4415,6 +4567,62 @@ mod tests {
             )
             .unwrap(),
             0
+        );
+    }
+
+    #[test]
+    fn record_results_require_non_null_bytea_and_guard_the_outer_envelope() {
+        let (catalogue, object, field, record) = catalogue_with_record_field();
+        let context = CatalogueHashContext::version_one();
+        assert!(supports_result_type(
+            &catalogue,
+            &context,
+            ResolvedType::named(record),
+            false,
+        ));
+        assert!(!supports_result_type(
+            &catalogue,
+            &context,
+            ResolvedType::named(record),
+            true,
+        ));
+        assert_eq!(
+            expected_postgres_type(&catalogue, &context, ResolvedType::named(record)).unwrap(),
+            Type::BYTEA,
+        );
+
+        let columns = [ResultColumn::new("status", ResolvedType::named(record), false).unwrap()];
+        let expression = Expression {
+            kind: ExpressionKind::FieldPath {
+                input: 0,
+                steps: vec![FieldStep {
+                    owner: object,
+                    field,
+                }],
+            },
+            value_type: ValueType {
+                resolved_type: ResolvedType::named(record),
+                nullable: false,
+            },
+        };
+        let logical_limit = variable_payload_limit(&catalogue, &context, &columns).unwrap();
+        let lowered = lower_select_projections(
+            &catalogue,
+            RuntimeResultColumns {
+                context: &context,
+                columns: &columns,
+            },
+            object,
+            &[expression],
+        )
+        .unwrap();
+        assert_eq!(lowered.variable_payload_limit, logical_limit);
+        let guarded_limit = logical_limit + ACTIVE_VALUE_ENVELOPE_LENGTH;
+        assert!(
+            lowered
+                .projections
+                .iter()
+                .all(|projection| projection.contains(&format!("<= {guarded_limit}")))
         );
     }
 
