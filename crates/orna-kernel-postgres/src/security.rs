@@ -1,8 +1,12 @@
+use orna_client::{
+    ClientExecutionResult, evaluate_client_function as evaluate_authorised_client_function,
+};
 use orna_core::{
     FunctionId, PrincipalId,
-    revision::RevisionPair,
+    revision::{ActiveDatabaseRevision, RevisionPair},
     security::{
-        ExecuteGrant, Principal, PrincipalKind, PrincipalStatus, RoleMembership, SecuritySnapshot,
+        AuthenticatedSession, ExecuteDecision, ExecuteGrant, InvocationTarget, Principal,
+        PrincipalKind, PrincipalStatus, RoleMembership, SecuritySnapshot,
     },
 };
 use tokio_postgres::{IsolationLevel, Row, Transaction};
@@ -13,6 +17,48 @@ use crate::{
 };
 
 impl PostgresKernel {
+    /// Authorises and evaluates one CLIENT function against one active snapshot.
+    pub async fn evaluate_client_function(
+        &self,
+        authenticated_session: &AuthenticatedSession,
+        function: FunctionId,
+    ) -> Result<ClientExecutionResult, PostgresKernelError> {
+        let mut database_session = self.open().await?;
+        let operation = async {
+            let transaction = database_session
+                .client
+                .build_transaction()
+                .isolation_level(IsolationLevel::RepeatableRead)
+                .read_only(true)
+                .start()
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            require_current_migrations(&transaction).await?;
+            let active = recover_active_revision(&transaction).await?;
+            let security = recover_security_snapshot_for_active(&transaction, &active).await?;
+            let target = InvocationTarget::new(function, active.pair());
+            let authorisation = match security.authorise_execute(authenticated_session, target) {
+                ExecuteDecision::Allowed(authorisation) => authorisation,
+                ExecuteDecision::Denied(reason) => {
+                    return Err(PostgresKernelError::ClientExecuteDenied {
+                        pair: active.pair(),
+                        function,
+                        reason,
+                    });
+                }
+            };
+            let result = evaluate_authorised_client_function(&active, &authorisation)
+                .map_err(PostgresKernelError::ClientExecution)?;
+            transaction
+                .commit()
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            Ok(result)
+        }
+        .await;
+        finish_security_session(operation, database_session.shutdown().await)
+    }
+
     /// Recovers the security decision snapshot for the active revision.
     pub async fn recover_security_snapshot(&self) -> Result<SecuritySnapshot, PostgresKernelError> {
         let mut session = self.open().await?;
@@ -201,6 +247,13 @@ async fn recover_security_snapshot(
     transaction: &Transaction<'_>,
 ) -> Result<SecuritySnapshot, PostgresKernelError> {
     let active = recover_active_revision(transaction).await?;
+    recover_security_snapshot_for_active(transaction, &active).await
+}
+
+async fn recover_security_snapshot_for_active(
+    transaction: &Transaction<'_>,
+    active: &ActiveDatabaseRevision,
+) -> Result<SecuritySnapshot, PostgresKernelError> {
     let functions = active
         .catalogue()
         .functions()
