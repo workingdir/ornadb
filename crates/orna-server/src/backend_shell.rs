@@ -1,395 +1,243 @@
-//! The host-only PostgreSQL escape hatch.
+//! The host-only native PostgreSQL escape hatch.
 
-use std::fmt;
+use std::{
+    fmt,
+    io::{self, BufRead, IsTerminal, Write},
+};
 
-/// A failure that prevents the host-only backend shell from starting.
+use tokio_postgres::{NoTls, SimpleQueryMessage};
+
+use crate::{EmbeddedHostError, inspect_ready_embedded_host};
+
+const EMPTY_PROMPT: &str = "orna=> ";
+const CONTINUED_PROMPT: &str = "orna-> ";
+
+/// A failure that prevents or ends the host-only backend shell.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum BackendShellError {
-    /// The command does not have three terminal standard streams.
     TerminalRequired,
-    /// `ORNA_SERVER_POSTGRES_URL` is absent or empty.
-    MissingConfiguration,
-    /// `ORNA_SERVER_POSTGRES_URL` does not use the accepted form.
-    InvalidConfiguration,
-    /// An executable `psql` could not be found or started.
-    PsqlUnavailable,
+    ServiceAccountRequired,
+    PackageIncomplete,
+    InstanceNotInstalled,
+    InstanceInvalid,
+    EngineInvalid,
+    AttachFailed,
+    SessionFailed,
 }
 
 impl fmt::Display for BackendShellError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let message = match self {
+        formatter.write_str(match self {
             Self::TerminalRequired => "orna: backend-shell must be run in an interactive terminal",
-            Self::MissingConfiguration => "orna: backend-shell needs ORNA_SERVER_POSTGRES_URL",
-            Self::InvalidConfiguration => {
-                "orna: ORNA_SERVER_POSTGRES_URL must use postgresql://user[:password]@host:port/database"
+            Self::ServiceAccountRequired => {
+                "orna: backend-shell must run as the orna service account"
             }
-            Self::PsqlUnavailable => "orna: could not start psql from PATH",
-        };
-
-        formatter.write_str(message)
+            Self::PackageIncomplete => "orna: package maintenance is incomplete",
+            Self::InstanceNotInstalled => "orna: the default Orna instance is not installed",
+            Self::InstanceInvalid => "orna: the default Orna instance is invalid",
+            Self::EngineInvalid => "orna: the embedded PostgreSQL engine is not valid",
+            Self::AttachFailed => "orna: could not attach the backend shell",
+            Self::SessionFailed => "orna: backend-shell session failed",
+        })
     }
 }
 
 impl std::error::Error for BackendShellError {}
 
-#[cfg(unix)]
-mod unix {
-    use super::BackendShellError;
-    use crate::{ServerHostConfig, ServerHostConfigError};
-    use nix::unistd::{AccessFlags, access, execve};
-    use std::{
-        convert::Infallible,
-        env,
-        ffi::{CString, OsStr, OsString},
-        fs,
-        io::{self, IsTerminal},
-        os::unix::{
-            ffi::{OsStrExt, OsStringExt},
-            fs::PermissionsExt,
-        },
-        path::{Path, PathBuf},
-    };
+/// Attaches a native simple-query terminal to the running embedded PostgreSQL host.
+pub fn run_backend_shell() -> Result<(), BackendShellError> {
+    if !terminals_are_interactive() {
+        return Err(BackendShellError::TerminalRequired);
+    }
+    let host = inspect_ready_embedded_host().map_err(map_host_error)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| BackendShellError::SessionFailed)?;
+    runtime.block_on(run_session(host.config().clone()))
+}
 
-    const URL_ENV: &[u8] = b"ORNA_SERVER_POSTGRES_URL";
-    const PGHOST: &[u8] = b"PGHOST";
-    const PGPORT: &[u8] = b"PGPORT";
-    const PGUSER: &[u8] = b"PGUSER";
-    const PGDATABASE: &[u8] = b"PGDATABASE";
-    const PGPASSWORD: &[u8] = b"PGPASSWORD";
-    const PGPASSFILE: &[u8] = b"PGPASSFILE";
-    const PGSSLMODE: &[u8] = b"PGSSLMODE";
-    const PGGSSENCMODE: &[u8] = b"PGGSSENCMODE";
+fn terminals_are_interactive() -> bool {
+    io::stdin().is_terminal() && io::stdout().is_terminal() && io::stderr().is_terminal()
+}
 
-    /// Attaches the caller to the configured PostgreSQL backend.
-    pub fn run_backend_shell() -> Result<Infallible, BackendShellError> {
-        if !terminals_are_interactive() {
-            return Err(BackendShellError::TerminalRequired);
+fn map_host_error(error: EmbeddedHostError) -> BackendShellError {
+    match error {
+        EmbeddedHostError::InvalidServiceIdentity => BackendShellError::ServiceAccountRequired,
+        EmbeddedHostError::InvalidPackageState => BackendShellError::PackageIncomplete,
+        EmbeddedHostError::Engine(_) => BackendShellError::EngineInvalid,
+        EmbeddedHostError::Io(ref source) if source.kind() == io::ErrorKind::NotFound => {
+            BackendShellError::InstanceNotInstalled
         }
-
-        let config = ServerHostConfig::from_env().map_err(map_configuration_error)?;
-        let executable = resolve_psql(env::var_os("PATH").as_deref())
-            .ok_or(BackendShellError::PsqlUnavailable)?;
-        let specification = prepare_command(&config, &executable, env::vars_os());
-
-        exec(specification).map_err(|_| BackendShellError::PsqlUnavailable)
+        _ => BackendShellError::InstanceInvalid,
     }
+}
 
-    fn map_configuration_error(error: ServerHostConfigError) -> BackendShellError {
-        match error {
-            ServerHostConfigError::MissingOrEmpty => BackendShellError::MissingConfiguration,
-            ServerHostConfigError::Invalid => BackendShellError::InvalidConfiguration,
-        }
+async fn run_session(config: tokio_postgres::Config) -> Result<(), BackendShellError> {
+    let (client, connection) = config
+        .connect(NoTls)
+        .await
+        .map_err(|_| BackendShellError::AttachFailed)?;
+    let driver = tokio::spawn(connection);
+    let session_result = terminal_loop(&client).await;
+    drop(client);
+    let driver_result = driver.await;
+    session_result?;
+    match driver_result {
+        Ok(Ok(())) => Ok(()),
+        _ => Err(BackendShellError::SessionFailed),
     }
+}
 
-    fn terminals_are_interactive() -> bool {
-        io::stdin().is_terminal() && io::stdout().is_terminal() && io::stderr().is_terminal()
-    }
+async fn terminal_loop(client: &tokio_postgres::Client) -> Result<(), BackendShellError> {
+    let stdin = io::stdin();
+    let mut input = stdin.lock();
+    let stdout = io::stdout();
+    let mut output = stdout.lock();
+    let mut buffer = String::new();
+    let mut line = String::new();
 
-    fn resolve_psql(path: Option<&OsStr>) -> Option<PathBuf> {
-        resolve_psql_with(path, |candidate| {
-            fs::metadata(candidate)
-                .map(|metadata| {
-                    metadata.is_file()
-                        && metadata.permissions().mode() & 0o111 != 0
-                        && access(candidate, AccessFlags::X_OK).is_ok()
-                })
-                .unwrap_or(false)
-        })
-    }
-
-    fn resolve_psql_with<F>(path: Option<&OsStr>, is_executable: F) -> Option<PathBuf>
-    where
-        F: FnMut(&Path) -> bool,
-    {
-        let mut is_executable = is_executable;
-        let path = path?;
-        let path = path.as_bytes();
-        if path.is_empty() {
-            return None;
-        }
-
-        for entry in path.split(|byte| *byte == b':') {
-            if entry.is_empty() {
-                continue;
-            }
-
-            let directory = Path::new(OsStr::from_bytes(entry));
-            if !directory.is_absolute() {
-                continue;
-            }
-
-            let candidate = directory.join("psql");
-            if is_executable(&candidate) {
-                return Some(candidate);
-            }
-        }
-
-        None
-    }
-
-    struct CommandSpecification {
-        executable: PathBuf,
-        arguments: Vec<OsString>,
-        environment: Vec<(OsString, OsString)>,
-    }
-
-    fn prepare_command<I>(
-        config: &ServerHostConfig,
-        executable: &Path,
-        inherited: I,
-    ) -> CommandSpecification
-    where
-        I: IntoIterator<Item = (OsString, OsString)>,
-    {
-        let mut environment = inherited
-            .into_iter()
-            .filter(|(name, _)| !is_connection_input(name))
-            .collect::<Vec<_>>();
-
-        environment.extend([
-            os_pair(PGHOST, config.host()),
-            os_pair(PGPORT, &config.port().to_string()),
-            os_pair(PGUSER, config.user()),
-            os_pair(PGDATABASE, config.database()),
-            os_pair(PGPASSFILE, "/dev/null"),
-            os_pair(PGSSLMODE, "disable"),
-            os_pair(PGGSSENCMODE, "disable"),
-        ]);
-        if let Some(password) = config.password.as_deref() {
-            environment.push(os_pair(PGPASSWORD, password));
-        }
-
-        CommandSpecification {
-            executable: executable.to_owned(),
-            arguments: vec![OsString::from("--no-psqlrc")],
-            environment,
-        }
-    }
-
-    fn is_connection_input(name: &OsStr) -> bool {
-        let name = name.as_bytes();
-        name == URL_ENV || name.starts_with(b"PG")
-    }
-
-    fn os_pair(name: &[u8], value: &str) -> (OsString, OsString) {
-        (OsString::from_vec(name.to_vec()), OsString::from(value))
-    }
-
-    fn exec(specification: CommandSpecification) -> Result<Infallible, io::Error> {
-        let executable = c_string(specification.executable.as_os_str())?;
-        let arguments = std::iter::once(specification.executable.as_os_str())
-            .chain(specification.arguments.iter().map(OsString::as_os_str))
-            .map(c_string)
-            .collect::<Result<Vec<_>, _>>()?;
-        let environment = specification
-            .environment
-            .iter()
-            .map(|(name, value)| {
-                let mut entry = name.as_bytes().to_vec();
-                entry.push(b'=');
-                entry.extend_from_slice(value.as_bytes());
-                CString::new(entry).map_err(|_| invalid_process_input())
+    loop {
+        output
+            .write_all(if buffer.is_empty() {
+                EMPTY_PROMPT.as_bytes()
+            } else {
+                CONTINUED_PROMPT.as_bytes()
             })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        execve(&executable, &arguments, &environment).map_err(io::Error::from)
-    }
-
-    fn c_string(value: &OsStr) -> Result<CString, io::Error> {
-        CString::new(value.as_bytes()).map_err(|_| invalid_process_input())
-    }
-
-    fn invalid_process_input() -> io::Error {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "backend-shell process input contains a null byte",
-        )
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-        use std::collections::BTreeMap;
-        use std::os::unix::ffi::OsStringExt;
-
-        fn config(url: &str) -> ServerHostConfig {
-            ServerHostConfig::parse(url).expect("test URL is valid")
-        }
-
-        fn environment_map(environment: &[(OsString, OsString)]) -> BTreeMap<Vec<u8>, Vec<u8>> {
-            environment
-                .iter()
-                .map(|(name, value)| (name.as_bytes().to_vec(), value.as_bytes().to_vec()))
-                .collect()
-        }
-
-        #[test]
-        fn path_search_requires_an_absolute_entry_and_finds_the_first_executable() {
-            let path = OsString::from(":relative:/missing:/first:/second");
-            let first = Path::new("/first/psql");
-            let second = Path::new("/second/psql");
-            let mut visited = Vec::new();
-            let result = resolve_psql_with(Some(&path), |candidate| {
-                visited.push(candidate.to_owned());
-                candidate == first || candidate == second
-            });
-
-            assert_eq!(result.as_deref(), Some(first));
-            assert_eq!(
-                visited,
-                vec![PathBuf::from("/missing/psql"), first.to_owned()]
-            );
-        }
-
-        #[test]
-        fn path_search_rejects_absent_empty_and_non_executable_entries() {
-            let empty = OsString::new();
-            assert_eq!(resolve_psql_with(None, |_| true), None);
-            assert_eq!(resolve_psql_with(Some(&empty), |_| true), None);
-
-            let relative = OsString::from("relative:also-relative");
-            assert_eq!(resolve_psql_with(Some(&relative), |_| true), None);
-
-            let no_executable = OsString::from("/first:/second");
-            assert_eq!(resolve_psql_with(Some(&no_executable), |_| false), None);
-        }
-
-        #[test]
-        fn path_search_preserves_absolute_directory_bytes_and_ignores_empty_entries() {
-            let path = OsString::from("::/dir with spaces/$shell:/last");
-            let expected = PathBuf::from("/dir with spaces/$shell/psql");
-            let result = resolve_psql_with(Some(&path), |candidate| candidate == expected);
-
-            assert_eq!(result, Some(expected));
-        }
-
-        #[test]
-        fn child_environment_removes_url_and_all_raw_pg_names() {
-            let non_unicode_pg = OsString::from_vec(b"PG\xffHOST".to_vec());
-            let inherited = vec![
-                (OsString::from("PATH"), OsString::from("/bin")),
-                (OsString::from("DATABASE_URL"), OsString::from("other")),
-                (
-                    OsString::from("ORNA_SERVER_POSTGRES_URL"),
-                    OsString::from("secret"),
-                ),
-                (OsString::from("PGHOST"), OsString::from("hostile")),
-                (non_unicode_pg, OsString::from("hostile")),
-            ];
-            let specification = prepare_command(
-                &config("postgresql://user:secret@db.example:5432/catalogue"),
-                Path::new("/bin/psql"),
-                inherited,
-            );
-            let environment = environment_map(&specification.environment);
-
-            assert_eq!(environment.get(b"PATH".as_slice()), Some(&b"/bin".to_vec()));
-            assert_eq!(
-                environment.get(b"DATABASE_URL".as_slice()),
-                Some(&b"other".to_vec())
-            );
-            assert!(!environment.contains_key(URL_ENV));
-            assert_eq!(
-                environment.get(b"PGHOST".as_slice()),
-                Some(&b"db.example".to_vec())
-            );
-            assert!(!environment.contains_key(b"PG\xffHOST".as_slice()));
-        }
-
-        #[test]
-        fn child_environment_maps_target_and_fixed_transport_values() {
-            let specification = prepare_command(
-                &config("postgresql://user@db.example:5432/catalogue"),
-                Path::new("/bin/psql"),
-                std::iter::empty(),
-            );
-            let environment = environment_map(&specification.environment);
-
-            assert_eq!(
-                environment.get(b"PGHOST".as_slice()),
-                Some(&b"db.example".to_vec())
-            );
-            assert_eq!(
-                environment.get(b"PGPORT".as_slice()),
-                Some(&b"5432".to_vec())
-            );
-            assert_eq!(
-                environment.get(b"PGUSER".as_slice()),
-                Some(&b"user".to_vec())
-            );
-            assert_eq!(
-                environment.get(b"PGDATABASE".as_slice()),
-                Some(&b"catalogue".to_vec())
-            );
-            assert_eq!(
-                environment.get(b"PGPASSFILE".as_slice()),
-                Some(&b"/dev/null".to_vec())
-            );
-            assert_eq!(
-                environment.get(b"PGSSLMODE".as_slice()),
-                Some(&b"disable".to_vec())
-            );
-            assert_eq!(
-                environment.get(b"PGGSSENCMODE".as_slice()),
-                Some(&b"disable".to_vec())
-            );
-            assert!(!environment.contains_key(b"PGPASSWORD".as_slice()));
-        }
-
-        #[test]
-        fn child_environment_preserves_absent_empty_and_nonempty_password_state() {
-            let absent = prepare_command(
-                &config("postgresql://user@db.example:5432/catalogue"),
-                Path::new("/bin/psql"),
-                std::iter::empty(),
-            );
-            let empty = prepare_command(
-                &config("postgresql://user:@db.example:5432/catalogue"),
-                Path::new("/bin/psql"),
-                std::iter::empty(),
-            );
-            let present = prepare_command(
-                &config("postgresql://user:secret@db.example:5432/catalogue"),
-                Path::new("/bin/psql"),
-                std::iter::empty(),
-            );
-
-            let password = |specification: &CommandSpecification| {
-                environment_map(&specification.environment)
-                    .get(b"PGPASSWORD".as_slice())
-                    .cloned()
+            .and_then(|()| output.flush())
+            .map_err(|_| BackendShellError::SessionFailed)?;
+        line.clear();
+        let length = match input.read_line(&mut line) {
+            Ok(length) => length,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+                buffer.clear();
+                output
+                    .write_all(b"\n")
+                    .map_err(|_| BackendShellError::SessionFailed)?;
+                continue;
+            }
+            Err(_) => return Err(BackendShellError::SessionFailed),
+        };
+        if length == 0 {
+            return if buffer.is_empty() {
+                Ok(())
+            } else {
+                Err(BackendShellError::SessionFailed)
             };
-
-            assert_eq!(password(&absent), None);
-            assert_eq!(password(&empty), Some(Vec::new()));
-            assert_eq!(password(&present), Some(b"secret".to_vec()));
         }
-
-        #[test]
-        fn command_specification_has_only_the_psqlrc_argument_and_absolute_executable() {
-            let specification = prepare_command(
-                &config("postgresql://user@db.example:5432/catalogue"),
-                Path::new("/safe/path/psql"),
-                std::iter::empty(),
-            );
-
-            assert_eq!(specification.executable, Path::new("/safe/path/psql"));
-            assert_eq!(specification.arguments, vec![OsString::from("--no-psqlrc")]);
+        let control = line
+            .strip_suffix('\n')
+            .and_then(|line| line.strip_suffix('\r').or(Some(line)));
+        match control {
+            Some("\\q") => return Ok(()),
+            Some("\\g") if buffer.is_empty() => continue,
+            Some("\\g") => {
+                render_query(client, &buffer, &mut output).await?;
+                buffer.clear();
+            }
+            _ => buffer.push_str(&line),
         }
     }
 }
 
-#[cfg(unix)]
-pub use unix::run_backend_shell;
+async fn render_query(
+    client: &tokio_postgres::Client,
+    query: &str,
+    output: &mut impl Write,
+) -> Result<(), BackendShellError> {
+    match client.simple_query(query).await {
+        Ok(messages) => {
+            for message in messages {
+                match message {
+                    SimpleQueryMessage::RowDescription(columns) => {
+                        render_fields(columns.iter().map(|column| Some(column.name())), output)?;
+                    }
+                    SimpleQueryMessage::Row(row) => {
+                        render_fields((0..row.len()).map(|index| row.get(index)), output)?;
+                    }
+                    SimpleQueryMessage::CommandComplete(rows) => {
+                        writeln!(output, "({rows} rows)")
+                            .map_err(|_| BackendShellError::SessionFailed)?;
+                    }
+                    _ => return Err(BackendShellError::SessionFailed),
+                }
+            }
+        }
+        Err(error) => render_database_error(&error, output)?,
+    }
+    output.flush().map_err(|_| BackendShellError::SessionFailed)
+}
 
-#[cfg(not(unix))]
-compile_error!("orna-server backend shell requires a Unix host");
+fn render_fields<'a>(
+    fields: impl IntoIterator<Item = Option<&'a str>>,
+    output: &mut impl Write,
+) -> Result<(), BackendShellError> {
+    let mut separator = "";
+    for field in fields {
+        output
+            .write_all(separator.as_bytes())
+            .map_err(|_| BackendShellError::SessionFailed)?;
+        match field {
+            Some(value) => write_escaped(value, output)?,
+            None => output
+                .write_all(b"<NULL>")
+                .map_err(|_| BackendShellError::SessionFailed)?,
+        }
+        separator = "\t";
+    }
+    output
+        .write_all(b"\n")
+        .map_err(|_| BackendShellError::SessionFailed)
+}
+
+fn render_database_error(
+    error: &tokio_postgres::Error,
+    output: &mut impl Write,
+) -> Result<(), BackendShellError> {
+    let Some(error) = error.as_db_error() else {
+        return Err(BackendShellError::SessionFailed);
+    };
+    write!(output, "ERROR {}: ", error.code().code())
+        .map_err(|_| BackendShellError::SessionFailed)?;
+    write_escaped(error.message(), output)?;
+    output
+        .write_all(b"\n")
+        .map_err(|_| BackendShellError::SessionFailed)?;
+    for (label, value) in [("DETAIL", error.detail()), ("HINT", error.hint())] {
+        if let Some(value) = value {
+            write!(output, "{label}: ").map_err(|_| BackendShellError::SessionFailed)?;
+            write_escaped(value, output)?;
+            output
+                .write_all(b"\n")
+                .map_err(|_| BackendShellError::SessionFailed)?;
+        }
+    }
+    Ok(())
+}
+
+fn write_escaped(value: &str, output: &mut impl Write) -> Result<(), BackendShellError> {
+    for character in value.chars() {
+        match character {
+            '\\' => output.write_all(b"\\\\"),
+            '\t' => output.write_all(b"\\t"),
+            '\r' => output.write_all(b"\\r"),
+            '\n' => output.write_all(b"\\n"),
+            '\u{1b}' => output.write_all(b"\\e"),
+            '\u{7f}' => output.write_all(b"\\x7f"),
+            character if character.is_control() => {
+                write!(output, "\\u{{{:x}}}", character as u32)
+            }
+            character => write!(output, "{character}"),
+        }
+        .map_err(|_| BackendShellError::SessionFailed)?;
+    }
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {
-    use super::BackendShellError;
-    use std::error::Error;
+    use super::*;
 
     #[test]
     fn errors_have_the_exact_human_readable_lines() {
@@ -399,24 +247,43 @@ mod tests {
                 "orna: backend-shell must be run in an interactive terminal",
             ),
             (
-                BackendShellError::MissingConfiguration,
-                "orna: backend-shell needs ORNA_SERVER_POSTGRES_URL",
+                BackendShellError::ServiceAccountRequired,
+                "orna: backend-shell must run as the orna service account",
             ),
             (
-                BackendShellError::InvalidConfiguration,
-                "orna: ORNA_SERVER_POSTGRES_URL must use postgresql://user[:password]@host:port/database",
+                BackendShellError::PackageIncomplete,
+                "orna: package maintenance is incomplete",
             ),
             (
-                BackendShellError::PsqlUnavailable,
-                "orna: could not start psql from PATH",
+                BackendShellError::InstanceNotInstalled,
+                "orna: the default Orna instance is not installed",
+            ),
+            (
+                BackendShellError::InstanceInvalid,
+                "orna: the default Orna instance is invalid",
+            ),
+            (
+                BackendShellError::EngineInvalid,
+                "orna: the embedded PostgreSQL engine is not valid",
+            ),
+            (
+                BackendShellError::AttachFailed,
+                "orna: could not attach the backend shell",
+            ),
+            (
+                BackendShellError::SessionFailed,
+                "orna: backend-shell session failed",
             ),
         ];
-
         for (error, expected) in cases {
             assert_eq!(error.to_string(), expected);
-            assert!(error.source().is_none());
-            assert!(!format!("{error:?}").contains("secret"));
-            assert!(!error.to_string().contains("secret"));
         }
+    }
+
+    #[test]
+    fn terminal_escaping_is_unambiguous() {
+        let mut output = Vec::new();
+        write_escaped("a\\b\t\r\n\u{1b}\u{7f}\0é", &mut output).unwrap();
+        assert_eq!(output, b"a\\\\b\\t\\r\\n\\e\\x7f\\u{0}\xc3\xa9");
     }
 }
