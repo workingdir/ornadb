@@ -92,12 +92,13 @@ Record types share the existing qualified type namespace with object,
 primitive value, enum, and type-binding definitions. A collision by exact
 qualified name or `TypeId` is invalid.
 
-Semantic matching can preserve a record `TypeId` across a type rename and a
-field `FieldId` across a field rename. Rename-only evolution is the complete
-initial evolution surface. Adding, dropping, reordering, or changing the type
-of a field remains deferred. The canonical `ALTER TYPE ADD/DROP FIELD`
-proposal uses the object-field grammar and does not apply implicitly to record
-values.
+Exact semantic-name matching preserves a record `TypeId` and each field
+`FieldId` when the same complete definition is submitted against its active
+catalogue. Record type renames and record field renames remain deferred.
+Removing an existing name and adding another does not infer continuity.
+Adding, dropping, reordering, or changing the type of a field also remains
+deferred. The canonical `ALTER TYPE ADD/DROP FIELD` proposal uses the
+object-field grammar and does not apply implicitly to record values.
 
 Catalogue hash version 1 rejects record value definitions. Catalogue hash
 version 2 accepts one conditional record-definition section immediately after
@@ -168,8 +169,8 @@ Tests must prove:
   fields, while caller field order cannot change the checked value;
 * type names collide with every other member of the shared type namespace;
 * duplicate field names are rejected before candidate allocation;
-* semantic comparison preserves exact type and field identities only for the
-  accepted rename cases;
+* exact-name replay preserves type and field identities, while type or field
+  spelling changes are rejected without inferring continuity;
 * catalogue hashes change for every semantic field fact and preserve all
   existing version-1 and record-free version-2 golden bytes;
 * apply, recovery, and verification preserve exact identities, names, order,
@@ -231,8 +232,9 @@ request type.
 
 This decision does not define opaque values, collections, optionals, unions,
 nested records, references, defaults, checks, documentation modifiers,
-nullable fields, structural evolution, general value subtyping, automatic
-conversion, presenters, `sys.invoke`, or a physical PostgreSQL composite.
+nullable fields, type or record-field renames, structural evolution, general
+value subtyping, automatic conversion, presenters, `sys.invoke`, or a physical
+PostgreSQL composite.
 
 ## Precedence
 
@@ -245,3 +247,8 @@ primitive value types, enum types, or opaque transient values.
 This decision extends work ADRs 0016, 0025, and 0029. It keeps their stable
 standard identities, codec-version closure, enum identity, and all existing
 canonical bytes unchanged.
+
+ADR 0006 remains limited to object fields. Its `ALTER TYPE ... RENAME FIELD`
+transition does not apply to record value fields. A later decision must define
+record rename syntax and identity evidence before either record type or record
+field renames are accepted.
