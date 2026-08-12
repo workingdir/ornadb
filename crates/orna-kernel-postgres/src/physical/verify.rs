@@ -240,6 +240,7 @@ impl ExpectedColumn {
         let record = field_record(owner, field.field_id());
         let (type_name, reference) = match field.field_type() {
             PhysicalFieldType::Scalar(scalar) => (postgres_catalogue_type(scalar, &record)?, None),
+            PhysicalFieldType::Enum(_) => ("text", None),
             PhysicalFieldType::Reference { target, on_delete } => {
                 ("bytea", Some(ExpectedReference { target, on_delete }))
             }
@@ -1338,8 +1339,8 @@ mod tests {
             source_unit_content_digest,
         },
         catalogue::{
-            CatalogueSnapshot, FieldDefinition, ObjectTypeDefinition, OnDeleteAction,
-            QualifiedSemanticName, SchemaDefinition,
+            CatalogueSnapshot, EnumTypeDefinition, FieldDefinition, ObjectTypeDefinition,
+            OnDeleteAction, QualifiedSemanticName, SchemaDefinition,
         },
         revision::{
             ActiveDatabaseRevision, ActiveDatabaseRevisionInput, ActiveRevisionContent,
@@ -1576,6 +1577,52 @@ mod tests {
         assert_eq!(table.columns[1].type_name, "int4");
         assert!(!table.columns[1].nullable);
         assert!(table.columns[1].reference.is_none());
+    }
+
+    #[test]
+    fn expected_builder_requires_text_for_catalogue_enum_fields() {
+        let standard = orna_standard::verify_standard_library_snapshot(
+            orna_standard::retained_standard_library_snapshot()
+                .expect("retained standard-library snapshot"),
+        )
+        .expect("verified standard-library snapshot");
+        let enum_type = TypeId::from_bytes([0x38; 16]);
+        let object = TypeId::from_bytes([0x39; 16]);
+        let field = FieldId::from_bytes([0x3a; 16]);
+        let active = active_revision_with_objects_and_enums(
+            CatalogueHashContext::version_two(standard),
+            vec![ObjectTypeDefinition::new(
+                object,
+                name(&["test", "enum_holder"]),
+                vec![FieldDefinition::new(
+                    field,
+                    "stage",
+                    0,
+                    ResolvedType::named(enum_type),
+                    false,
+                    false,
+                    None,
+                    None,
+                )],
+            )],
+            vec![EnumTypeDefinition::new(
+                enum_type,
+                name(&["test", "stage"]),
+                ["lead", "qualified"],
+            )],
+        );
+
+        let expected = ExpectedCatalogue::from_active(&active).expect("enum expected catalogue");
+        let column = &expected
+            .tables
+            .get(&relation_name(object))
+            .expect("enum object table")
+            .columns[1];
+
+        assert_eq!(column.name, field_name(field));
+        assert_eq!(column.type_name, "text");
+        assert!(!column.nullable);
+        assert!(column.reference.is_none());
     }
 
     #[test]
@@ -2061,6 +2108,14 @@ mod tests {
         context: CatalogueHashContext,
         objects: Vec<ObjectTypeDefinition>,
     ) -> ActiveDatabaseRevision {
+        active_revision_with_objects_and_enums(context, objects, Vec::new())
+    }
+
+    fn active_revision_with_objects_and_enums(
+        context: CatalogueHashContext,
+        objects: Vec<ObjectTypeDefinition>,
+        enum_types: Vec<EnumTypeDefinition>,
+    ) -> ActiveDatabaseRevision {
         let source_unit = SourceUnitId::from_bytes([0x31; 16]);
         let unit = StoredSourceUnit::new(
             source_unit,
@@ -2082,10 +2137,13 @@ mod tests {
         )
         .expect("source revision");
         let schema = SchemaDefinition::new(SchemaId::from_bytes([0x35; 16]), name(&["test"]));
-        let catalogue = CatalogueSnapshot::new(
+        let catalogue = CatalogueSnapshot::new_with_enum_types(
             CatalogueRevisionId::from_bytes([0x37; 16]),
             vec![schema.clone()],
             objects.clone(),
+            Vec::new(),
+            enum_types,
+            Vec::new(),
         )
         .expect("catalogue");
         let origin = SourceOrigin::new(source_unit, 0, 0).expect("empty source origin");
@@ -2108,6 +2166,9 @@ mod tests {
                 ));
             }
         }
+        origins.extend(catalogue.enum_types().iter().map(|enum_type| {
+            DefinitionOrigin::new(DefinitionIdentity::ValueType(enum_type.id()), origin)
+        }));
         let catalogue_hash =
             catalogue_digest_with_context(&context, &catalogue, &[], &[], &origins, &[])
                 .expect("catalogue digest");

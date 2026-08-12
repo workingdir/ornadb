@@ -169,6 +169,8 @@ impl CreateField {
 pub enum PhysicalFieldType {
     /// A standard scalar with a backend storage encoding.
     Scalar(StandardScalar),
+    /// An application enum stored through its stable catalogue identity.
+    Enum(TypeId),
     /// A typed object reference with its delete action.
     Reference {
         /// The referenced durable object type.
@@ -335,11 +337,14 @@ fn project_physical_field(
 
     let field_type = if let Some(scalar) = legacy_scalar {
         PhysicalFieldType::Scalar(scalar)
-    } else if named_type.is_some() {
-        return Err(PhysicalPlanError::UnsupportedNamedFieldType {
-            object_type,
-            field: field.id(),
-        });
+    } else if let Some(named_type) = named_type {
+        if revision.catalogue().enum_type_by_id(named_type).is_none() {
+            return Err(PhysicalPlanError::UnsupportedNamedFieldType {
+                object_type,
+                field: field.id(),
+            });
+        }
+        PhysicalFieldType::Enum(named_type)
     } else if let Some(target) = reference_target {
         if revision.catalogue().object_type_by_id(target).is_none() {
             return Err(PhysicalPlanError::UnknownReferenceTarget {
@@ -377,9 +382,7 @@ fn project_physical_field(
             field: field.id(),
         });
     }
-    if let PhysicalFieldType::Scalar(_) = field_type
-        && field.on_delete().is_some()
-    {
+    if !matches!(field_type, PhysicalFieldType::Reference { .. }) && field.on_delete().is_some() {
         return Err(PhysicalPlanError::InvalidDeleteAction {
             object_type,
             field: field.id(),
@@ -478,8 +481,9 @@ mod tests {
         CatalogueRevisionId, ExpressionId, FieldId, SchemaId, SourceBundleId, SourceRevisionId,
         SourceUnitId, StandardLibraryRevisionId, TypeId,
         catalogue::{
-            CatalogueSnapshot, FieldDefinition, ObjectTypeDefinition, QualifiedSemanticName,
-            SchemaDefinition, ValueTypeDefinition, ValueTypeMutability, ValueTypePersistence,
+            CatalogueSnapshot, EnumTypeDefinition, FieldDefinition, ObjectTypeDefinition,
+            QualifiedSemanticName, SchemaDefinition, ValueTypeDefinition, ValueTypeMutability,
+            ValueTypePersistence,
         },
         revision::{
             ActiveDatabaseRevision, ActiveDatabaseRevisionInput, ActiveRevisionContent,
@@ -560,6 +564,66 @@ mod tests {
                 fields: vec![CreateField {
                     field_id: FIRST_FIELD,
                     field_type: PhysicalFieldType::Scalar(StandardScalar::Boolean),
+                    nullable: false,
+                    unique: false,
+                }],
+            }]
+        );
+    }
+
+    #[test]
+    fn projects_catalogue_enums_as_named_physical_fields() {
+        let enum_type = TypeId::from_bytes([0xa2; 16]);
+        let standard = verified_standard(Vec::new());
+        let active = active_version_two(Vec::new(), standard.clone(), 1);
+        let source = source(2, Some(active.pair().source()));
+        let catalogue = CatalogueSnapshot::new_with_enum_types(
+            CatalogueRevisionId::from_bytes([3; 16]),
+            vec![schema()],
+            vec![object(
+                FIRST_TYPE,
+                "first",
+                vec![field(
+                    FIRST_FIELD,
+                    "stage",
+                    0,
+                    ResolvedType::named(enum_type),
+                    false,
+                )],
+            )],
+            vec![],
+            vec![EnumTypeDefinition::new(
+                enum_type,
+                name(&["demo", "stage"]),
+                ["lead", "qualified"],
+            )],
+            vec![],
+        )
+        .unwrap();
+        let origins = origins(&source, &catalogue);
+        let candidate = DeployableRevision::new_with_catalogue_hash_context(
+            DeployableRevisionInput::new(
+                active.pair(),
+                source,
+                active.pair().catalogue(),
+                catalogue,
+                digest(2),
+                DeployableRevisionContent::new(origins, Vec::new(), Vec::new(), Vec::new())
+                    .with_current_function_revisions(Vec::new()),
+            ),
+            CatalogueHashContext::version_two(standard),
+        )
+        .unwrap();
+
+        assert_eq!(
+            plan_physical_changes(&active, &candidate)
+                .unwrap()
+                .create_objects(),
+            [CreateObject {
+                type_id: FIRST_TYPE,
+                fields: vec![CreateField {
+                    field_id: FIRST_FIELD,
+                    field_type: PhysicalFieldType::Enum(enum_type),
                     nullable: false,
                     unique: false,
                 }],
@@ -2126,6 +2190,9 @@ mod tests {
                 )
             }));
         }
+        values.extend(catalogue.enum_types().iter().map(|enum_type| {
+            DefinitionOrigin::new(DefinitionIdentity::ValueType(enum_type.id()), source_origin)
+        }));
         values
     }
 
