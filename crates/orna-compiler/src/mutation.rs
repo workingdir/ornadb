@@ -219,10 +219,10 @@ where
             fields: fields
                 .iter()
                 .map(|field| {
-                    Ok(MutationRecordFieldExpression {
-                        owner: map_type(field.owner)?,
-                        field: map_field(field.field)?,
-                        kind: match field.kind {
+                    Ok(MutationRecordFieldExpression::new(
+                        map_type(field.owner)?,
+                        map_field(field.field)?,
+                        match field.kind {
                             MutationRecordFieldExpressionKind::ParameterRead {
                                 owner,
                                 parameter,
@@ -234,8 +234,8 @@ where
                                 MutationRecordFieldExpressionKind::BooleanLiteral { value }
                             }
                         },
-                        value_type: map_value_type(field.value_type, map_type)?,
-                    })
+                        map_value_type(field.value_type, map_type)?,
+                    ))
                 })
                 .collect::<Result<Vec<_>, E>>()?,
         },
@@ -372,39 +372,40 @@ pub(crate) struct MutationRecordFieldExpression<T, F, G, P> {
     value_type: MutationValueType<T>,
 }
 
+impl<T, F, G, P> MutationRecordFieldExpression<T, F, G, P> {
+    /// Creates one field expression with its resolved semantic facts.
+    pub(crate) const fn new(
+        owner: T,
+        field: F,
+        kind: MutationRecordFieldExpressionKind<G, P>,
+        value_type: MutationValueType<T>,
+    ) -> Self {
+        Self {
+            owner,
+            field,
+            kind,
+            value_type,
+        }
+    }
+}
+
 impl<T: Copy, F: Copy, G, P> MutationRecordFieldExpression<T, F, G, P> {
     /// Returns the nominal record value type that owns this field.
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "artifact lowering is the next slice")
-    )]
     pub(crate) const fn owner(&self) -> T {
         self.owner
     }
 
     /// Returns the stable record field identity.
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "artifact lowering is the next slice")
-    )]
     pub(crate) const fn field(&self) -> F {
         self.field
     }
 
     /// Returns the checked child expression kind.
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "artifact lowering is the next slice")
-    )]
     pub(crate) const fn kind(&self) -> &MutationRecordFieldExpressionKind<G, P> {
         &self.kind
     }
 
     /// Returns the checked child semantic value facts.
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "artifact lowering is the next slice")
-    )]
     pub(crate) const fn value_type(&self) -> &MutationValueType<T> {
         &self.value_type
     }
@@ -1633,12 +1634,12 @@ where
                 source_field.value.span(),
             ),
         });
-        checked_fields.push(MutationRecordFieldExpression {
-            owner: record_type,
-            field: record_field.id(),
-            kind: child_kind,
-            value_type: child_value_type,
-        });
+        checked_fields.push(MutationRecordFieldExpression::new(
+            record_type,
+            record_field.id(),
+            child_kind,
+            child_value_type,
+        ));
     });
     if !diagnostics.is_empty() {
         return Err(diagnostics);
