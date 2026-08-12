@@ -5,9 +5,11 @@ mod frame;
 pub use frame::{
     CallArgument, CallFailure, Channel, ClientAction, ClientFrame, ConnectionError, Event,
     EventRecord, FrameCodecError, MAX_FRAME_PAYLOAD_LENGTH, ProtocolConnection, RawCall,
-    ServerAction, ServerFrame, decode_catalogue_client_frame, decode_catalogue_server_frame,
-    decode_client_frame, decode_server_frame, encode_catalogue_client_frame,
-    encode_catalogue_server_frame, encode_client_frame, encode_server_frame,
+    ServerAction, ServerFrame, decode_active_client_frame, decode_active_server_frame,
+    decode_catalogue_client_frame, decode_catalogue_server_frame, decode_client_frame,
+    decode_server_frame, encode_active_client_frame, encode_active_server_frame,
+    encode_catalogue_client_frame, encode_catalogue_server_frame, encode_client_frame,
+    encode_server_frame,
 };
 
 use std::{error::Error, fmt};
@@ -985,8 +987,8 @@ fn require_fixed_payload<const LENGTH: usize>(
 #[cfg(test)]
 mod tests {
     use orna_core::{
-        CatalogueRevisionId, FieldId, ObjectId, SchemaId, SourceBundleId, SourceRevisionId,
-        SourceUnitId,
+        CatalogueRevisionId, FieldId, FunctionId, InvocationId, ObjectId, ParameterId, SchemaId,
+        SourceBundleId, SourceRevisionId, SourceUnitId,
         canonical_hash::{
             catalogue_digest_with_context, source_bundle_digest, source_revision_record_digest,
             source_unit_content_digest,
@@ -1268,6 +1270,316 @@ mod tests {
 
         assert_eq!(encode_active_value(&active, &value), Ok(expected.clone()));
         assert_eq!(decode_active_value(&active, &expected), Ok(value));
+    }
+
+    #[test]
+    fn active_client_frame_has_exact_record_bytes_and_round_trips() {
+        let active = active_record_revision();
+        let record = &active.catalogue().record_value_types()[0];
+        let value = RuntimeValue::Record(
+            RecordValue::new(
+                &active,
+                record.id(),
+                [
+                    (String::from("enabled"), RuntimeValue::Boolean(true)),
+                    (
+                        String::from("verified"),
+                        RuntimeValue::Enum(
+                            EnumValue::new(active.catalogue(), ENUM_TYPE, "lead").unwrap(),
+                        ),
+                    ),
+                ],
+            )
+            .unwrap(),
+        );
+        let parameter = ParameterId::from_bytes([0x5f; 16]);
+        let frame = ClientFrame::CallArgument {
+            stream: 7,
+            parameter,
+            value: value.clone(),
+        };
+        let mut record_value = b"ORV3".to_vec();
+        record_value.push(0x0b);
+        record_value.extend_from_slice(&record.id().to_bytes());
+        record_value.extend_from_slice(&99_u32.to_be_bytes());
+        record_value.extend_from_slice(&2_u32.to_be_bytes());
+        record_value.extend_from_slice(&record.fields()[0].id().to_bytes());
+        record_value.extend_from_slice(&26_u32.to_be_bytes());
+        record_value.extend_from_slice(b"ORV3");
+        record_value.push(0x02);
+        record_value.extend_from_slice(&BOOLEAN_TYPE_ID.to_bytes());
+        record_value.extend_from_slice(&1_u32.to_be_bytes());
+        record_value.push(1);
+        record_value.extend_from_slice(&record.fields()[1].id().to_bytes());
+        record_value.extend_from_slice(&29_u32.to_be_bytes());
+        record_value.extend_from_slice(b"ORV3");
+        record_value.push(0x0a);
+        record_value.extend_from_slice(&ENUM_TYPE.to_bytes());
+        record_value.extend_from_slice(&4_u32.to_be_bytes());
+        record_value.extend_from_slice(b"lead");
+        let mut expected = b"ORF3\x02\0".to_vec();
+        expected.extend_from_slice(&7_u64.to_be_bytes());
+        expected.extend_from_slice(&140_u32.to_be_bytes());
+        expected.extend_from_slice(&parameter.to_bytes());
+        expected.extend_from_slice(&record_value);
+
+        assert_eq!(
+            encode_active_client_frame(&active, &frame),
+            Ok(expected.clone())
+        );
+        assert_eq!(decode_active_client_frame(&active, &expected), Ok(frame));
+        assert_eq!(
+            decode_client_frame(&expected),
+            Err(FrameCodecError::InvalidMarker)
+        );
+        assert_eq!(
+            decode_catalogue_client_frame(active.catalogue(), &expected),
+            Err(FrameCodecError::InvalidMarker)
+        );
+        let mut wrong_value_marker = expected.clone();
+        wrong_value_marker[34..38].copy_from_slice(b"ORV2");
+        assert_eq!(
+            decode_active_client_frame(&active, &wrong_value_marker),
+            Err(FrameCodecError::Value {
+                source: ValueCodecError::InvalidMarker,
+            })
+        );
+
+        let server = ServerFrame::EventBatch {
+            stream: 7,
+            channel: Channel::ResultValues,
+            events: vec![EventRecord {
+                sequence: 1,
+                event: Event::Value(value),
+            }],
+        };
+        let mut expected_server = b"ORF3\x82\0".to_vec();
+        expected_server.extend_from_slice(&7_u64.to_be_bytes());
+        expected_server.extend_from_slice(&140_u32.to_be_bytes());
+        expected_server.push(0x01);
+        expected_server.extend_from_slice(&1_u16.to_be_bytes());
+        expected_server.extend_from_slice(&1_u64.to_be_bytes());
+        expected_server.push(0x01);
+        expected_server.extend_from_slice(&124_u32.to_be_bytes());
+        expected_server.extend_from_slice(&record_value);
+        assert_eq!(
+            encode_active_server_frame(&active, &server),
+            Ok(expected_server.clone())
+        );
+        assert_eq!(
+            decode_active_server_frame(&active, &expected_server),
+            Ok(server)
+        );
+
+        for marker in [b"ORF1", b"ORF2"] {
+            let mut wrong_version = expected.clone();
+            wrong_version[..4].copy_from_slice(marker);
+            assert_eq!(
+                decode_active_client_frame(&active, &wrong_version),
+                Err(FrameCodecError::InvalidMarker)
+            );
+        }
+    }
+
+    #[test]
+    fn active_frame_codec_round_trips_every_non_value_frame_shape() {
+        let active = active_record_revision();
+        let function = FunctionId::from_bytes([0x60; 16]);
+        let invocation = InvocationId::from_bytes([0x61; 16]);
+        let token = [1, 2, 3, 4, 5, 6, 7, 8];
+        let client_frames = [
+            ClientFrame::CallRawStart {
+                stream: 1,
+                function,
+            },
+            ClientFrame::CallArgumentsComplete { stream: 1 },
+            ClientFrame::WindowUpdate {
+                stream: 1,
+                channel: Channel::ResultValues,
+                credit: 4096,
+            },
+            ClientFrame::CallCancel { stream: 1 },
+            ClientFrame::Ping { token },
+        ];
+        for frame in client_frames {
+            let encoded = encode_active_client_frame(&active, &frame).unwrap();
+            let version_one = encode_client_frame(&frame).unwrap();
+            assert_eq!(&encoded[..4], b"ORF3");
+            assert_eq!(&encoded[4..], &version_one[4..]);
+            assert_eq!(decode_active_client_frame(&active, &encoded), Ok(frame));
+        }
+
+        let server_frames = [
+            ServerFrame::CallAccepted {
+                stream: 1,
+                invocation,
+            },
+            ServerFrame::EventBatch {
+                stream: 1,
+                channel: Channel::ResultBytes,
+                events: vec![EventRecord {
+                    sequence: 1,
+                    event: Event::Bytes(vec![1, 2, 3]),
+                }],
+            },
+            ServerFrame::CallCompleted { stream: 1 },
+            ServerFrame::CallFailed {
+                stream: 1,
+                failure: CallFailure::ExecuteDenied,
+            },
+            ServerFrame::CallCancelled { stream: 1 },
+            ServerFrame::Pong { token },
+        ];
+        for frame in server_frames {
+            let encoded = encode_active_server_frame(&active, &frame).unwrap();
+            let version_one = encode_server_frame(&frame).unwrap();
+            assert_eq!(&encoded[..4], b"ORF3");
+            assert_eq!(&encoded[4..], &version_one[4..]);
+            assert_eq!(decode_active_server_frame(&active, &encoded), Ok(frame));
+        }
+    }
+
+    #[test]
+    fn active_frame_codec_rejects_a_record_from_an_incompatible_revision() {
+        let original = active_record_revision();
+        let record = &original.catalogue().record_value_types()[0];
+        let value = RuntimeValue::Record(
+            RecordValue::new(
+                &original,
+                record.id(),
+                [
+                    (String::from("enabled"), RuntimeValue::Boolean(true)),
+                    (
+                        String::from("verified"),
+                        RuntimeValue::Enum(
+                            EnumValue::new(original.catalogue(), ENUM_TYPE, "lead").unwrap(),
+                        ),
+                    ),
+                ],
+            )
+            .unwrap(),
+        );
+        let frame = ClientFrame::CallArgument {
+            stream: 1,
+            parameter: ParameterId::from_bytes([0x62; 16]),
+            value,
+        };
+        let encoded = encode_active_client_frame(&original, &frame).unwrap();
+        let changed = active_record_revision_with_second_type(ResolvedType::value(BIGINT_TYPE_ID));
+
+        assert_eq!(
+            encode_active_client_frame(&changed, &frame),
+            Err(FrameCodecError::Value {
+                source: ValueCodecError::RecordValueNotActive {
+                    record_type: record.id(),
+                },
+            })
+        );
+        assert!(matches!(
+            decode_active_client_frame(&changed, &encoded),
+            Err(FrameCodecError::Value {
+                source: ValueCodecError::WrongRecordFieldType { ordinal: 1, .. },
+            })
+        ));
+    }
+
+    #[test]
+    fn active_connection_carries_record_arguments_and_results() {
+        let active = active_record_revision();
+        let record = &active.catalogue().record_value_types()[0];
+        let value = RuntimeValue::Record(
+            RecordValue::new(
+                &active,
+                record.id(),
+                [
+                    (String::from("enabled"), RuntimeValue::Boolean(true)),
+                    (
+                        String::from("verified"),
+                        RuntimeValue::Enum(
+                            EnumValue::new(active.catalogue(), ENUM_TYPE, "lead").unwrap(),
+                        ),
+                    ),
+                ],
+            )
+            .unwrap(),
+        );
+        let function = FunctionId::from_bytes([0x63; 16]);
+        let parameter = ParameterId::from_bytes([0x64; 16]);
+        let invocation = InvocationId::from_bytes([0x65; 16]);
+        let mut connection = ProtocolConnection::new();
+        connection
+            .receive_active(
+                &active,
+                ClientFrame::CallRawStart {
+                    stream: 1,
+                    function,
+                },
+            )
+            .unwrap();
+        connection
+            .receive_active(
+                &active,
+                ClientFrame::CallArgument {
+                    stream: 1,
+                    parameter,
+                    value: value.clone(),
+                },
+            )
+            .unwrap();
+        connection
+            .receive_active(
+                &active,
+                ClientFrame::WindowUpdate {
+                    stream: 1,
+                    channel: Channel::ResultValues,
+                    credit: 4096,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            connection
+                .receive_active(&active, ClientFrame::CallArgumentsComplete { stream: 1 })
+                .unwrap(),
+            Some(ClientAction::Dispatch {
+                stream: 1,
+                call: RawCall {
+                    function,
+                    arguments: vec![CallArgument {
+                        parameter,
+                        value: value.clone(),
+                    }],
+                },
+            })
+        );
+        connection
+            .apply_active(
+                &active,
+                ServerAction::Accepted {
+                    stream: 1,
+                    invocation,
+                },
+            )
+            .unwrap();
+        let result = connection
+            .apply_active(
+                &active,
+                ServerAction::Events {
+                    stream: 1,
+                    events: vec![Event::Value(value.clone())],
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            result,
+            ServerFrame::EventBatch {
+                stream: 1,
+                channel: Channel::ResultValues,
+                events: vec![EventRecord {
+                    sequence: 1,
+                    event: Event::Value(value),
+                }],
+            }
+        );
     }
 
     #[test]
@@ -1999,6 +2311,25 @@ mod tests {
             encoded.extend_from_slice(&declared.to_be_bytes());
             encoded.extend_from_slice(&payload);
             let _ = decode_active_value(&active, &encoded);
+        }
+
+        #[test]
+        fn arbitrary_version_three_frame_envelopes_never_panic(
+            tag in any::<u8>(),
+            flags in any::<u8>(),
+            stream in any::<u64>(),
+            declared in any::<u32>(),
+            payload in prop::collection::vec(any::<u8>(), 0..=4_096),
+        ) {
+            let active = active_record_revision();
+            let mut encoded = b"ORF3".to_vec();
+            encoded.push(tag);
+            encoded.push(flags);
+            encoded.extend_from_slice(&stream.to_be_bytes());
+            encoded.extend_from_slice(&declared.to_be_bytes());
+            encoded.extend_from_slice(&payload);
+            let _ = decode_active_client_frame(&active, &encoded);
+            let _ = decode_active_server_frame(&active, &encoded);
         }
     }
 
