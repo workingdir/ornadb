@@ -2076,31 +2076,42 @@ pub(crate) fn record_value_field_type_is_supported(
     standard: &CatalogueSnapshot,
     resolved_type: ResolvedType,
 ) -> bool {
+    record_value_field_runtime_type(catalogue, standard, resolved_type).is_some()
+}
+
+pub(crate) fn record_value_field_runtime_type(
+    catalogue: &CatalogueSnapshot,
+    standard: &CatalogueSnapshot,
+    resolved_type: ResolvedType,
+) -> Option<ResolvedType> {
     match resolved_type {
         ResolvedType::Value(value_type) => standard
             .value_type_by_id(value_type)
-            .is_some_and(accepted_record_primitive),
-        ResolvedType::Named(enum_type) => {
-            catalogue.enum_type_by_id(enum_type).is_some()
-                || standard.enum_type_by_id(enum_type).is_some()
-        }
-        ResolvedType::Scalar(_) | ResolvedType::Reference { .. } => false,
+            .and_then(accepted_record_scalar)
+            .map(ResolvedType::scalar),
+        ResolvedType::Named(enum_type) => (catalogue.enum_type_by_id(enum_type).is_some()
+            || standard.enum_type_by_id(enum_type).is_some())
+        .then_some(ResolvedType::named(enum_type)),
+        ResolvedType::Scalar(_) | ResolvedType::Reference { .. } => None,
     }
 }
 
-pub(crate) fn accepted_record_primitive(value_type: &ValueTypeDefinition) -> bool {
-    value_type.kind() == ValueTypeKind::Primitive
-        && value_type.mutability() == ValueTypeMutability::Immutable
-        && value_type.persistence() == ValueTypePersistence::Persistable
-        && matches!(
-            value_type.representation_contract(),
-            "orna.kernel.value.boolean@1"
-                | "orna.kernel.value.integer@1"
-                | "orna.kernel.value.bigint@1"
-                | "orna.kernel.value.float@1"
-                | "orna.kernel.value.character-large-object@1"
-                | "orna.kernel.value.binary-large-object@1"
-        )
+fn accepted_record_scalar(value_type: &ValueTypeDefinition) -> Option<StandardScalar> {
+    if value_type.kind() != ValueTypeKind::Primitive
+        || value_type.mutability() != ValueTypeMutability::Immutable
+        || value_type.persistence() != ValueTypePersistence::Persistable
+    {
+        return None;
+    }
+    match value_type.representation_contract() {
+        "orna.kernel.value.boolean@1" => Some(StandardScalar::Boolean),
+        "orna.kernel.value.integer@1" => Some(StandardScalar::Integer),
+        "orna.kernel.value.bigint@1" => Some(StandardScalar::BigInt),
+        "orna.kernel.value.float@1" => Some(StandardScalar::Float),
+        "orna.kernel.value.character-large-object@1" => Some(StandardScalar::CharacterLargeObject),
+        "orna.kernel.value.binary-large-object@1" => Some(StandardScalar::BinaryLargeObject),
+        _ => None,
+    }
 }
 
 fn validate_catalogue_hash_context_version_one(
@@ -3958,17 +3969,23 @@ mod tests {
     #[test]
     fn record_value_field_type_policy_is_closed_and_uses_pinned_standard_primitives() {
         let accepted_contracts = [
-            "orna.kernel.value.boolean@1",
-            "orna.kernel.value.integer@1",
-            "orna.kernel.value.bigint@1",
-            "orna.kernel.value.float@1",
-            "orna.kernel.value.character-large-object@1",
-            "orna.kernel.value.binary-large-object@1",
+            ("orna.kernel.value.boolean@1", StandardScalar::Boolean),
+            ("orna.kernel.value.integer@1", StandardScalar::Integer),
+            ("orna.kernel.value.bigint@1", StandardScalar::BigInt),
+            ("orna.kernel.value.float@1", StandardScalar::Float),
+            (
+                "orna.kernel.value.character-large-object@1",
+                StandardScalar::CharacterLargeObject,
+            ),
+            (
+                "orna.kernel.value.binary-large-object@1",
+                StandardScalar::BinaryLargeObject,
+            ),
         ];
         let accepted_values = accepted_contracts
             .iter()
             .enumerate()
-            .map(|(index, contract)| {
+            .map(|(index, (contract, _))| {
                 ValueTypeDefinition::primitive(
                     TypeId::from_bytes([index as u8 + 1; 16]),
                     QualifiedSemanticName::new(["std", "types", *contract]).unwrap(),
@@ -3990,12 +4007,17 @@ mod tests {
         )
         .unwrap();
         let application = empty_catalogue();
-        for index in 0..accepted_contracts.len() {
+        for (index, (_, scalar)) in accepted_contracts.iter().enumerate() {
+            let resolved_type = ResolvedType::value(TypeId::from_bytes([index as u8 + 1; 16]));
             assert!(record_value_field_type_is_supported(
                 &application,
                 &standard,
-                ResolvedType::value(TypeId::from_bytes([index as u8 + 1; 16])),
+                resolved_type,
             ));
+            assert_eq!(
+                record_value_field_runtime_type(&application, &standard, resolved_type),
+                Some(ResolvedType::scalar(*scalar))
+            );
         }
 
         for contract in [
@@ -4008,13 +4030,16 @@ mod tests {
             "orna.kernel.value.void@1",
             "orna.kernel.value.custom@1",
         ] {
-            assert!(!accepted_record_primitive(&ValueTypeDefinition::primitive(
-                TypeId::from_bytes(id::<92>()),
-                QualifiedSemanticName::new(["std", "types", "excluded"]).unwrap(),
-                ValueTypeMutability::Immutable,
-                ValueTypePersistence::Persistable,
-                contract,
-            )));
+            assert!(
+                accepted_record_scalar(&ValueTypeDefinition::primitive(
+                    TypeId::from_bytes(id::<92>()),
+                    QualifiedSemanticName::new(["std", "types", "excluded"]).unwrap(),
+                    ValueTypeMutability::Immutable,
+                    ValueTypePersistence::Persistable,
+                    contract,
+                ))
+                .is_none()
+            );
         }
 
         let application_primitive = TypeId::from_bytes(id::<93>());
