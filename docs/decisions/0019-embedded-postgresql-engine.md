@@ -302,6 +302,14 @@ names, and version fields. Any difference is initialisation failure. The
 selected database locale remains the built-in `PG_UNICODE_FAST`; host locale
 installation and ordering cannot change the initial catalogue.
 
+The first embedded cluster retains only PostgreSQL's built-in `simple`
+text-search configuration. It does not install the Snowball dictionaries.
+Upstream `snowball_create.sql` defines `LANGUAGE C` functions backed by the
+separate `dict_snowball` shared object, which is outside the one-executable
+boundary. Orna has no PostgreSQL full-text-search contract. A later release
+must define and prove a statically linked text-search boundary before it can
+add those functions or support assets.
+
 Initial database creation then follows the retained work ADR 0017 contract:
 Orna starts the embedded postmaster on the bootstrap private Unix socket,
 connects as the accepted peer, creates `orna` from `template0`, fast-stops and
@@ -320,12 +328,9 @@ The first closed inventory contains:
 
 * `postgres.bki`, `pg_hba.conf.sample`, `pg_ident.conf.sample`, and
   `postgresql.conf.sample`;
-* `snowball_create.sql`, `information_schema.sql`, `sql_features.txt`,
-  `system_constraints.sql`, `system_functions.sql`, and `system_views.sql`;
-* the compiled PostgreSQL time-zone tree and selected `timezonesets` files;
-  and
-* the selected `tsearch_data` files referenced by the retained built-in text
-  search definitions.
+* `information_schema.sql`, `sql_features.txt`, `system_constraints.sql`,
+  `system_functions.sql`, and `system_views.sql`; and
+* the compiled PostgreSQL time-zone tree and selected `timezonesets` files.
 
 The inventory contains no `extension` member, control file, procedural
 language SQL, executable, archive, object, or shared object. The build fails
@@ -772,6 +777,7 @@ zero-padded patch filenames define application order.
 | `postgresql/patches/18.4/0004-linked-check-and-bootstrap.patch` | backend child output and initdb | Replace external configuration-check and bootstrap processes with the hardened fresh linked-child runner, and suppress only expected initialisation-child output. |
 | `postgresql/patches/18.4/0005-complete-initialiser.patch` | backend and initdb Makefiles, backend `main.c`, and initdb | Add fixed initialiser authority, deterministic bootstrap facts, three linked single-user phases, the typed initialiser entry, the namespaced initialiser archive, and the dual-archive target. |
 | `postgresql/patches/18.4/0006-empty-automatic-configuration.patch` | initdb | Create `postgresql.auto.conf` as an exact empty file before the first linked configuration check. Keep it empty for the completed cluster so the check child emits no missing-file log and SQL cannot inherit an alternate configuration authority. |
+| `postgresql/patches/18.4/0007-simple-text-search.patch` | initdb | Select the built-in `simple` text-search configuration and omit Snowball SQL definitions that require a separate native module. |
 
 A patch can change more than one upstream file only when those edits implement
 one indivisible concern and cannot be moved into an added overlay file. Patch
@@ -842,6 +848,7 @@ prototype history and are not current source or build authority.
 | `build(postgres): generate embedded support data` | `postgresql/support_bundle.py`; `postgresql/Makefile` | Generate and verify the deterministic data-only support bundle from the prepared source and out-of-tree build. |
 | `build(postgres): emit the embedded engine manifest` | `postgresql/engine_manifest.py`; `postgresql/Makefile` | Record the upstream gitlink and inventory, overlay and patch bytes and order, prepared-source inventory, every checked-in build and proof input, prepared image digest, package closure, archives, symbols, support data, and licence. The manifest records evidence and is not build configuration. |
 | `fix(postgres): create empty automatic configuration` | `postgresql/patches/18.4/0006-empty-automatic-configuration.patch`; `TODO.md` | Add the smallest existing-file correction discovered by the live linked initialiser. Require the first configuration-check child to start without a missing-file diagnostic and retain exact empty `postgresql.auto.conf` bytes after initialisation. |
+| `fix(postgres): retain simple text search` | `postgresql/patches/18.4/0007-simple-text-search.patch`; `postgresql/support_bundle.py`; `postgresql/Makefile` | Omit upstream Snowball SQL and stop-word assets because they require the separate `dict_snowball` native module. Retain only the built-in `simple` text-search configuration and prove that linked initialisation needs no C-language function definition or shared object. |
 | `test(postgres): add the linked lifecycle probe` | `postgresql/lifecycle_probe.c`; `postgresql/Makefile` | Add the unpublished one-ELF initialiser, postmaster, raw-pgwire, hostile-authority, and controlled-shutdown tracer as ordinary reviewed C source and bind it as a build input. |
 | `test(postgres): verify the embedded lifecycle` | `postgresql/verify_lifecycle.py`; `postgresql/Makefile` | Gate the exact cluster, support, process, filter, network, mapping, trace, output, and two-build reproducibility contracts and bind the verifier as a build input. |
 | `build(postgres): prove patch-managed engine parity` | `.github/workflows/postgresql-embedded.yml`; `postgresql/Makefile` | While the legacy builder remains selected, run both paths and require byte-identical archives, support data, symbol evidence, licence, and deterministic entry-probe output; require the top-level path's full lifecycle proof twice. |
