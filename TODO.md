@@ -2,7 +2,8 @@
 
 This checklist tracks user-visible delivery. The work ADRs contain the exact
 contracts and small commit sequences. A checked item means that the slice is
-implemented, reviewed, committed, and pushed.
+implemented, reviewed, committed, and verified locally. Publication is a
+separate release action.
 
 ## Current focus
 
@@ -13,36 +14,40 @@ implemented, reviewed, committed, and pushed.
 - [x] Pin the exact unmodified upstream PostgreSQL 18.4 commit as the
   `third_party/postgresql` submodule.
 - [x] Add the top-level `postgresql/` module with reviewed added-file overlays,
-  the six sparse existing-file patches, and one explicit source-update target.
-- [ ] Add the Make-based prepared-source build beside the selected legacy proof
+  the seven sparse existing-file patches, and one explicit source-update target.
+- [x] Add the Make-based prepared-source build beside the selected legacy proof
   and bind its toolchain, upstream tree, overlays, patches, support data,
   lifecycle probe, and verifier.
-- [ ] Prove exact legacy/prepared-source archive, support, symbol, licence, and
+- [x] Prove exact legacy/prepared-source archive, support, symbol, licence, and
   entry evidence parity while independently running the new lifecycle twice.
-- [ ] Cut over atomically to `postgresql/Makefile`, delete the legacy builder
+- [x] Cut over atomically to `postgresql/Makefile`, delete the legacy builder
   entry point, then remove the inert `packaging/postgresql` prototype files in
   small commits.
 - [x] Accept the offline `orna source check <file.orna>` contract.
-- [ ] Add the Orna-owned instance model, cluster initialisation, private Unix
+- [x] Add the Orna-owned instance model, cluster initialisation, private Unix
   socket authentication, and foreground PostgreSQL supervision.
 
 ## First usable Orna workflow
 
 - [x] Retain and verify the exact `std` source needed by application checking.
-- [ ] Resolve application type names through the verified standard catalogue.
-- [ ] Implement `orna source check <file.orna>` without PostgreSQL, network
+- [x] Resolve application type names through the verified standard catalogue.
+- [x] Implement `orna source check <file.orna>` without PostgreSQL, network
   access, configuration, or filesystem writes.
-- [ ] Prove exact diagnostics, byte spans, exit statuses, and no dependency on
+- [x] Prove exact diagnostics, byte spans, exit statuses, and no dependency on
   a running server.
 
 ## Embedded distribution
 
-- [ ] Bind `orna server backend-shell` to the Orna-owned private SQL console.
-- [ ] Define safe same-major compatibility and later multi-major embedded
-  PostgreSQL upgrades without an external `pg_upgrade` executable.
-- [ ] Build the Debian package with one public `/usr/bin/orna` executable and
+- [x] Bind `orna server backend-shell` to the Orna-owned private SQL console.
+- [x] Define the first release's current-engine no-op and fail-closed
+  unsupported-engine upgrade boundary.
+- [ ] Add the durable same-major transition when a release first declares a
+  real predecessor edge, then define the later multi-major transition without
+  an external `pg_upgrade` executable.
+- [x] Build the Debian package with one public `/usr/bin/orna` executable and
   embedded PostgreSQL code and support assets.
-- [ ] Prove installation, initialisation, restart recovery, upgrade, shell, and
+- [x] Prove installation, initialisation, restart recovery, current upgrade
+  boundaries, shell, and
   removal on a clean Debian host with no system PostgreSQL, Docker, or second
   PostgreSQL executable.
 
