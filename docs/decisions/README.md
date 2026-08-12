@@ -39,3 +39,5 @@ source-of-truth or authority rules.
 * **work ADR 0017 (partly superseded):** [Orna Ships and Owns Its PostgreSQL Runtime](0017-bundled-postgresql-runtime.md)
 * **work ADR 0018:** [Source Check Is an Offline One-File Compiler Command](0018-offline-source-check.md)
 * **work ADR 0019:** [PostgreSQL Is Part of the Orna Executable](0019-embedded-postgresql-engine.md)
+* **work ADR 0020:**
+  [Authenticated Sessions Authorise Pinned Function Execution](0020-authenticated-execute-decisions.md)
