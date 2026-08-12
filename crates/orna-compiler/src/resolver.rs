@@ -11,7 +11,6 @@ pub use identity::{
     CheckedTypeId, ProvisionalExpressionId, ProvisionalFieldId, ProvisionalFunctionId,
     ProvisionalParameterId, ProvisionalSchemaId, ProvisionalTypeId,
 };
-use model::CheckedEnumType;
 pub use model::{
     CheckReport, CheckedApplicationTypeUse, CheckedBundle, CheckedClientFunction, CheckedDefault,
     CheckedDefinitionReference, CheckedDefinitionReferenceTarget, CheckedField,
@@ -19,7 +18,8 @@ pub use model::{
     CheckedServerFunctionParameter, CheckedServerFunctionReturnColumn,
     CheckedStandardApplicationBundle, CheckedStandardApplicationClientFunction,
     CheckedStandardApplicationField, CheckedStandardApplicationObjectType,
-    CheckedStandardApplicationParameter, CheckedStandardApplicationReturnColumn,
+    CheckedStandardApplicationParameter, CheckedStandardApplicationRecordValueField,
+    CheckedStandardApplicationRecordValueType, CheckedStandardApplicationReturnColumn,
     CheckedStandardApplicationServerFunction, CheckedStandardLibrary, CheckedStandardSchema,
     CheckedStandardTypeBinding, CheckedStandardTypeReference, CheckedStandardValueType,
     CheckedTypeUseKind, CheckedValueTypeUse, ConstantValue, SemanticType,
@@ -30,6 +30,7 @@ pub(crate) use model::{
     CheckedClientFunctionBody, CheckedFieldRename, CheckedServerFunctionBody, QueryCatalogue,
     QueryField, QueryObjectType, ResolutionCatalogue,
 };
+use model::{CheckedEnumType, CheckedRecordValueField, CheckedRecordValueType};
 
 use std::{
     collections::{HashMap, HashSet},
@@ -59,9 +60,9 @@ use orna_syntax::{
     ClientFunctionDeclaration, FieldRenameDeclaration, FunctionReturnType,
     FunctionSecurity as SyntaxFunctionSecurity, FunctionTransaction as SyntaxFunctionTransaction,
     FunctionVolatility as SyntaxFunctionVolatility, ObjectTypeDeclaration, OnDeletePolicy,
-    PrimitiveValueTypePersistence, QualifiedName, SelectQuantifier, ServerFunctionBody,
-    ServerFunctionDeclaration, SourceSlice, SourceSpan, StandardLargeObjectKind, TypeExportTarget,
-    TypeSpecification,
+    PrimitiveValueTypePersistence, QualifiedName, RecordValueTypeDeclaration, SelectQuantifier,
+    ServerFunctionBody, ServerFunctionDeclaration, SourceSlice, SourceSpan,
+    StandardLargeObjectKind, TypeExportTarget, TypeSpecification,
 };
 
 use crate::mutation::{
@@ -798,6 +799,13 @@ struct Header<'a> {
 }
 
 #[derive(Clone, Copy)]
+struct RecordValueHeader<'a> {
+    declaration: &'a RecordValueTypeDeclaration,
+    logical_path: &'a str,
+    id: CheckedTypeId,
+}
+
+#[derive(Clone, Copy)]
 struct FieldRenameInput<'a> {
     declaration: &'a FieldRenameDeclaration,
     logical_path: &'a str,
@@ -1091,6 +1099,57 @@ fn check_application_parsed(
         }
     }
 
+    let mut record_value_headers = Vec::new();
+    for unit in parse_report.units() {
+        for declaration in unit.parsed().record_value_types() {
+            let name = semantic_name(&declaration.name);
+            let Some(namespace) = namespace_of(&name) else {
+                diagnostics.push(diagnostic(
+                    DiagnosticCode::UnknownQualifiedName,
+                    format!("record value type {name} has no declared schema"),
+                    unit.logical_path(),
+                    &declaration.name.span,
+                ));
+                continue;
+            };
+            if !known_schemas.contains(&namespace) {
+                diagnostics.push(diagnostic(
+                    DiagnosticCode::UnknownQualifiedName,
+                    format!("unknown schema {namespace} for record value type {name}"),
+                    unit.logical_path(),
+                    &declaration.name.span,
+                ));
+                continue;
+            }
+            if !declarations_by_name.insert(name.clone()) {
+                diagnostics.push(diagnostic(
+                    DiagnosticCode::DuplicateDefinition,
+                    format!("duplicate record value type definition {name}"),
+                    unit.logical_path(),
+                    &declaration.name.span,
+                ));
+                continue;
+            }
+            if standard.is_none() {
+                diagnostics.push(diagnostic(
+                    DiagnosticCode::DomainIncompatible,
+                    "record value types require checked standard-library authority",
+                    unit.logical_path(),
+                    &declaration.name.span,
+                ));
+                continue;
+            }
+            record_value_headers.push(RecordValueHeader {
+                declaration,
+                logical_path: unit.logical_path(),
+                id: assignments.type_id(
+                    base.record_value_type_by_name(&name)
+                        .map(|record_value_type| record_value_type.id()),
+                ),
+            });
+        }
+    }
+
     let mut submitted_ids = HashMap::new();
     for header in &headers {
         submitted_ids.insert(
@@ -1100,6 +1159,69 @@ fn check_application_parsed(
     }
     for enum_type in &checked_enum_types {
         submitted_ids.insert(enum_type.name.clone(), SubmittedType::Enum(enum_type.id));
+    }
+    for header in &record_value_headers {
+        submitted_ids.insert(
+            semantic_name(&header.declaration.name),
+            SubmittedType::RecordValue,
+        );
+    }
+
+    let mut checked_record_value_types = Vec::with_capacity(record_value_headers.len());
+    for header in record_value_headers {
+        let type_name = semantic_name(&header.declaration.name);
+        let base_type = base.record_value_type_by_name(&type_name);
+        let mut field_names = HashSet::new();
+        let mut fields = Vec::with_capacity(header.declaration.fields.len());
+        for field in &header.declaration.fields {
+            let name = semantic_part(&field.name);
+            if !field_names.insert(name.clone()) {
+                diagnostics.push(diagnostic(
+                    DiagnosticCode::DuplicateDefinition,
+                    format!("duplicate record field definition {name} in {type_name}"),
+                    header.logical_path,
+                    &field.name.span,
+                ));
+                continue;
+            }
+            let Some(resolved_type) = resolve_record_value_field_type(
+                &field.type_specification,
+                &submitted_ids,
+                header.logical_path,
+                &mut diagnostics,
+                standard.expect("record value headers require checked standard authority"),
+            ) else {
+                continue;
+            };
+            let id = assignments.field_id(
+                base_type
+                    .and_then(|record_value_type| record_value_type.field_by_name(&name))
+                    .map(|field| field.id()),
+            );
+            fields.push(CheckedRecordValueField {
+                id,
+                name,
+                ordinal: field.order as u32,
+                semantic_type: resolved_type.semantic_type,
+                location: location(header.logical_path, &field.span),
+            });
+            record_standard_type_use(
+                &mut uses,
+                standard,
+                CheckedTypeUseKind::Field {
+                    owner: header.id,
+                    field: id,
+                },
+                resolved_type,
+                type_use_location(&field.type_specification, header.logical_path),
+            );
+        }
+        checked_record_value_types.push(CheckedRecordValueType {
+            id: header.id,
+            name: type_name,
+            fields,
+            location: location(header.logical_path, &header.declaration.span),
+        });
     }
 
     let field_renames = check_field_renames(&parse_report, base, &headers, &mut diagnostics);
@@ -1314,6 +1436,7 @@ fn check_application_parsed(
             schemas: checked_schemas,
             object_types: checked_types,
             enum_types: checked_enum_types,
+            record_value_types: checked_record_value_types,
             server_functions: checked_functions,
             client_functions: checked_client_functions,
             field_renames: field_renames
@@ -1343,6 +1466,9 @@ fn check_protected_source(parse_report: &ParseReport) -> Vec<CompilerDiagnostic>
             owners.push((&declaration.name, &declaration.name.span, &declaration.span));
         }
         for declaration in unit.parsed().enum_types() {
+            owners.push((&declaration.name, &declaration.name.span, &declaration.span));
+        }
+        for declaration in unit.parsed().record_value_types() {
             owners.push((&declaration.name, &declaration.name.span, &declaration.span));
         }
         for declaration in unit.parsed().primitive_value_types() {
@@ -3382,6 +3508,7 @@ struct ResolvedApplicationType {
 enum SubmittedType {
     Object(CheckedTypeId),
     Enum(CheckedTypeId),
+    RecordValue,
 }
 
 fn resolve_application_type(
@@ -3417,6 +3544,14 @@ fn resolve_application_type(
                 Some(SubmittedType::Object(_)) => diagnostics.push(diagnostic(
                     DiagnosticCode::TypeMismatch,
                     format!("object type {semantic_name} must be declared with REF"),
+                    logical_path,
+                    &name.span,
+                )),
+                Some(SubmittedType::RecordValue) => diagnostics.push(diagnostic(
+                    DiagnosticCode::TypeMismatch,
+                    format!(
+                        "record value type {semantic_name} cannot be used before the record value codec exists"
+                    ),
                     logical_path,
                     &name.span,
                 )),
@@ -3486,6 +3621,15 @@ fn resolve_application_type(
                     ));
                     None
                 }
+                Some(SubmittedType::RecordValue) => {
+                    diagnostics.push(diagnostic(
+                        DiagnosticCode::InvalidReferenceTarget,
+                        format!("REF target {name} is a record value type"),
+                        logical_path,
+                        &target.span,
+                    ));
+                    None
+                }
                 None => {
                     diagnostics.push(diagnostic(
                         DiagnosticCode::UnknownQualifiedName,
@@ -3498,6 +3642,60 @@ fn resolve_application_type(
             }
         }
     }
+}
+
+fn resolve_record_value_field_type(
+    specification: &TypeSpecification,
+    submitted_ids: &HashMap<QualifiedSemanticName, SubmittedType>,
+    logical_path: &str,
+    diagnostics: &mut Vec<CompilerDiagnostic>,
+    standard: &CheckedStandardLibrary,
+) -> Option<ResolvedApplicationType> {
+    let resolved = resolve_application_type(
+        specification,
+        submitted_ids,
+        logical_path,
+        diagnostics,
+        Some(standard),
+    )?;
+    let supported = match (resolved.semantic_type, resolved.standard_value_type) {
+        (SemanticType::Named(_), None) => true,
+        (SemanticType::Scalar(scalar), Some(type_id)) => standard
+            .value_types()
+            .iter()
+            .find(|value_type| value_type.id() == type_id)
+            .is_some_and(|value_type| {
+                value_type.kind() == ValueTypeKind::Primitive
+                    && value_type.mutability() == ValueTypeMutability::Immutable
+                    && value_type.persistence() == ValueTypePersistence::Persistable
+                    && supports_record_value_scalar(scalar)
+            }),
+        (SemanticType::Scalar(_), None)
+        | (SemanticType::Named(_), Some(_))
+        | (SemanticType::Reference { .. }, _) => false,
+    };
+    if supported {
+        return Some(resolved);
+    }
+    diagnostics.push(diagnostic(
+        DiagnosticCode::TypeMismatch,
+        "record value field uses a type outside the initial record family",
+        logical_path,
+        specification.span(),
+    ));
+    None
+}
+
+const fn supports_record_value_scalar(scalar: StandardScalar) -> bool {
+    matches!(
+        scalar,
+        StandardScalar::Boolean
+            | StandardScalar::Integer
+            | StandardScalar::BigInt
+            | StandardScalar::Float
+            | StandardScalar::CharacterLargeObject
+            | StandardScalar::BinaryLargeObject
+    )
 }
 
 fn standard_value_by_name(
@@ -4079,7 +4277,7 @@ mod tests {
         StandardApplicationCheckContext, StandardApplicationContextError, check,
         check_new_application, check_new_application_with_catalogue, check_standard_application,
         check_standard_library_source, checked_standard_library_with_contract_overrides_for_test,
-        location, reconcile_standard_source, sort_standard_type_uses,
+        location, reconcile_standard_source, sort_standard_type_uses, supports_record_value_scalar,
     };
     use crate::{ParsedSourceUnit, parse_bundle};
 
@@ -4567,6 +4765,170 @@ mod tests {
             duplicate.diagnostics()[0].message(),
             "duplicate enum label \"owner's\" in crm.stage"
         );
+    }
+
+    #[test]
+    fn resolves_record_value_fields_through_the_closed_standard_and_enum_family() {
+        let snapshot = verified_standard_library_for_relational_test();
+        let standard = check_standard_library_source(&snapshot).unwrap();
+        let source = bundle([(
+            "types.orna",
+            "CREATE SCHEMA app;\nCREATE TYPE app.phase AS ENUM ('new', 'done');\nCREATE TYPE app.status AS VALUE (active BOOLEAN, phase app.phase) IMMUTABLE PERSISTABLE;",
+        )]);
+        let report = check_new_application(&source, &standard).unwrap();
+
+        assert_eq!(report.diagnostics(), &[]);
+        assert!(report.preparation_view().is_none());
+        let checked = report.checked_bundle().unwrap();
+        let records = checked.record_value_types().collect::<Vec<_>>();
+        assert_eq!(records.len(), 1);
+        let record = records[0];
+        assert!(record.id().is_provisional());
+        assert_eq!(record.name().to_string(), "app.status");
+        let fields = record.fields().collect::<Vec<_>>();
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].name(), "active");
+        assert_eq!(fields[0].ordinal(), 0);
+        assert_eq!(
+            fields[0]
+                .resolved_type()
+                .value()
+                .map(CheckedValueTypeUse::type_id),
+            Some(TypeId::from_bytes([3; 16]))
+        );
+        assert_eq!(fields[1].name(), "phase");
+        assert_eq!(fields[1].ordinal(), 1);
+        assert!(
+            fields[1]
+                .resolved_type()
+                .named_type()
+                .is_some_and(CheckedTypeId::is_provisional)
+        );
+        assert!(fields.iter().all(|field| field.id().is_provisional()));
+        assert_eq!(checked.uses().len(), 2);
+    }
+
+    #[test]
+    fn record_value_resolution_rejects_legacy_nested_object_and_duplicate_shapes() {
+        let source = bundle([(
+            "types.orna",
+            "CREATE SCHEMA app; CREATE TYPE app.status AS VALUE (active BOOLEAN) IMMUTABLE PERSISTABLE;",
+        )]);
+        let legacy = check(&source, &empty_catalogue());
+        assert_eq!(legacy.diagnostics().len(), 1);
+        assert_eq!(
+            legacy.diagnostics()[0].code(),
+            DiagnosticCode::DomainIncompatible
+        );
+        assert_eq!(
+            legacy.diagnostics()[0].message(),
+            "record value types require checked standard-library authority"
+        );
+        assert!(legacy.checked_bundle().is_none());
+
+        let snapshot = verified_standard_library_for_relational_test();
+        let standard = check_standard_library_source(&snapshot).unwrap();
+        let invalid = bundle([(
+            "invalid.orna",
+            "CREATE SCHEMA app;\nCREATE TYPE app.object AS OBJECT ();\nCREATE TYPE app.first AS VALUE (duplicate BOOLEAN, duplicate BOOLEAN) IMMUTABLE PERSISTABLE;\nCREATE TYPE app.second AS VALUE (nested app.first, object app.object) IMMUTABLE PERSISTABLE;",
+        )]);
+        let report = check_new_application(&invalid, &standard).unwrap();
+        assert_eq!(
+            report
+                .diagnostics()
+                .iter()
+                .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    DiagnosticCode::DuplicateDefinition,
+                    "duplicate record field definition duplicate in app.first",
+                ),
+                (
+                    DiagnosticCode::TypeMismatch,
+                    "record value type app.first cannot be used before the record value codec exists",
+                ),
+                (
+                    DiagnosticCode::TypeMismatch,
+                    "object type app.object must be declared with REF",
+                ),
+            ]
+        );
+        assert!(report.checked_bundle().is_none());
+
+        let collision = bundle([(
+            "collision.orna",
+            "CREATE SCHEMA app; CREATE TYPE app.same AS ENUM ('x'); CREATE TYPE app.same AS VALUE (active BOOLEAN) IMMUTABLE PERSISTABLE;",
+        )]);
+        let report = check_new_application(&collision, &standard).unwrap();
+        assert_eq!(report.diagnostics().len(), 1);
+        assert_eq!(
+            report.diagnostics()[0].code(),
+            DiagnosticCode::DuplicateDefinition
+        );
+        assert_eq!(
+            report.diagnostics()[0].message(),
+            "duplicate record value type definition app.same"
+        );
+
+        let decimal_standard = checked_standard_library_with_contract_overrides_for_test(
+            &snapshot,
+            &[(0, "orna.kernel.value.decimal@1")],
+        )
+        .unwrap();
+        let unsupported = check_new_application(&source, &decimal_standard).unwrap();
+        assert_eq!(unsupported.diagnostics().len(), 1);
+        assert_eq!(
+            unsupported.diagnostics()[0].code(),
+            DiagnosticCode::TypeMismatch
+        );
+        assert_eq!(
+            unsupported.diagnostics()[0].message(),
+            "record value field uses a type outside the initial record family"
+        );
+
+        let mut transient_standard = check_standard_library_source(&snapshot).unwrap();
+        transient_standard
+            .value_types
+            .iter_mut()
+            .find(|value_type| value_type.representation_contract == "orna.kernel.value.boolean@1")
+            .unwrap()
+            .persistence = ValueTypePersistence::Transient;
+        let unsupported = check_new_application(&source, &transient_standard).unwrap();
+        assert_eq!(unsupported.diagnostics().len(), 1);
+        assert_eq!(
+            unsupported.diagnostics()[0].code(),
+            DiagnosticCode::TypeMismatch
+        );
+        assert_eq!(
+            unsupported.diagnostics()[0].message(),
+            "record value field uses a type outside the initial record family"
+        );
+    }
+
+    #[test]
+    fn record_value_scalar_family_is_exact() {
+        for scalar in [
+            StandardScalar::Boolean,
+            StandardScalar::Integer,
+            StandardScalar::BigInt,
+            StandardScalar::Float,
+            StandardScalar::CharacterLargeObject,
+            StandardScalar::BinaryLargeObject,
+        ] {
+            assert!(supports_record_value_scalar(scalar));
+        }
+        for scalar in [
+            StandardScalar::Decimal,
+            StandardScalar::Uuid,
+            StandardScalar::Date,
+            StandardScalar::Time,
+            StandardScalar::Timestamp,
+            StandardScalar::Duration,
+            StandardScalar::Void,
+        ] {
+            assert!(!supports_record_value_scalar(scalar));
+        }
     }
 
     #[test]
