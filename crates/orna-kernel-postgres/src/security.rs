@@ -38,6 +38,42 @@ impl PostgresKernel {
         function: FunctionId,
         arguments: &[FunctionArgument],
     ) -> Result<ServerSelectResult, PostgresKernelError> {
+        self.execute_authenticated_server_select_with_options(
+            authenticated_session,
+            function,
+            arguments,
+            None,
+        )
+        .await
+    }
+
+    /// Pauses protected SERVER execution after it recovers its security snapshot.
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub async fn execute_authenticated_server_select_with_test_barrier(
+        &self,
+        authenticated_session: &AuthenticatedSession,
+        function: FunctionId,
+        arguments: &[FunctionArgument],
+        reached: std::sync::Arc<tokio::sync::Barrier>,
+        resume: std::sync::Arc<tokio::sync::Barrier>,
+    ) -> Result<ServerSelectResult, PostgresKernelError> {
+        self.execute_authenticated_server_select_with_options(
+            authenticated_session,
+            function,
+            arguments,
+            Some(AuthenticatedSelectTestBarrier { reached, resume }),
+        )
+        .await
+    }
+
+    async fn execute_authenticated_server_select_with_options(
+        &self,
+        authenticated_session: &AuthenticatedSession,
+        function: FunctionId,
+        arguments: &[FunctionArgument],
+        test_barrier: Option<AuthenticatedSelectTestBarrier>,
+    ) -> Result<ServerSelectResult, PostgresKernelError> {
         let mut database_session = self.open().await?;
         let operation = async {
             let mut transaction = database_session
@@ -50,6 +86,7 @@ impl PostgresKernel {
             require_current_migrations(&transaction).await?;
             let active = configure_and_recover(&transaction).await?;
             let security = recover_security_snapshot_for_active(&transaction, &active).await?;
+            pause_after_authenticated_select_recovery(test_barrier.as_ref()).await;
             let target = InvocationTarget::new(function, active.pair());
 
             match security.authorise_execute(authenticated_session, target) {
@@ -306,6 +343,20 @@ impl PostgresKernel {
         }
         .await;
         finish_security_session(operation, session.shutdown().await)
+    }
+}
+
+struct AuthenticatedSelectTestBarrier {
+    reached: std::sync::Arc<tokio::sync::Barrier>,
+    resume: std::sync::Arc<tokio::sync::Barrier>,
+}
+
+async fn pause_after_authenticated_select_recovery(
+    test_barrier: Option<&AuthenticatedSelectTestBarrier>,
+) {
+    if let Some(test_barrier) = test_barrier {
+        test_barrier.reached.wait().await;
+        test_barrier.resume.wait().await;
     }
 }
 

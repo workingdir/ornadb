@@ -270,6 +270,7 @@ async fn executes_catalogue_enum_results_and_rejects_undeclared_storage_labels()
     .await
 }
 
+#[cfg(feature = "test-hooks")]
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
 async fn authenticated_server_select_commits_allowed_and_denied_execute_decisions() -> TestResult<()>
@@ -391,9 +392,51 @@ async fn authenticated_server_select_commits_allowed_and_denied_execute_decision
         )?;
         let selected = kernel.replace_security_snapshot(&selected).await?;
         let selected_session = selected.bind_authenticated_session(principal, vec![role])?;
-        kernel
-            .execute_authenticated_server_select(&selected_session, function.id(), &[])
+        let reached = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let resume = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let executor = kernel.clone();
+        let execution_session = selected_session.clone();
+        let execution_function = function.id();
+        let execution_reached = reached.clone();
+        let execution_resume = resume.clone();
+        let mut execution = ExecutionTask::new(tokio::spawn(async move {
+            executor
+                .execute_authenticated_server_select_with_test_barrier(
+                    &execution_session,
+                    execution_function,
+                    &[],
+                    execution_reached,
+                    execution_resume,
+                )
+                .await
+        }));
+        if tokio::time::timeout(WAIT, reached.wait()).await.is_err() {
+            execution.abort_and_wait().await;
+            return Err(failure(
+                "authenticated SERVER SELECT did not pin its security snapshot",
+            ));
+        }
+        let revoked = SecuritySnapshot::new(
+            applied.pair(),
+            function_ids.clone(),
+            vec![
+                Principal::new(principal, PrincipalKind::User, PrincipalStatus::Active),
+                Principal::new(role, PrincipalKind::Role, PrincipalStatus::Active),
+            ],
+            vec![RoleMembership::new(role, principal)],
+            vec![],
+        )?;
+        kernel.replace_security_snapshot(&revoked).await?;
+        if tokio::time::timeout(WAIT, resume.wait()).await.is_err() {
+            execution.abort_and_wait().await;
+            return Err(failure(
+                "authenticated SERVER SELECT did not resume after security replacement",
+            ));
+        }
+        execution
+            .finish("authenticated SERVER SELECT snapshot proof")
             .await?;
+        kernel.replace_security_snapshot(&selected).await?;
 
         let unselected_session = selected.bind_authenticated_session(principal, vec![])?;
         let error = kernel
