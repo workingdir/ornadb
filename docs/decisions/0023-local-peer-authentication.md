@@ -14,11 +14,12 @@ Linux UID to an active `USER` or `SERVICE` principal. A UID and a principal may
 each occur at most once. A missing mapping, unknown principal, disabled
 principal, or role principal fails authentication without creating a session.
 
-The trusted kernel recovers the mapping, principal, and role-membership state
-in one repeatable-read transaction. It derives every reachable active role in
-canonical identity order and returns an `AuthenticatedSession`. The local
-client cannot submit a principal or active-role list. Explicit role selection
-is deferred until a protected session-control operation exists.
+The trusted kernel recovers the mapping and principal state in one
+repeatable-read transaction and returns an `AuthenticatedSession` with no
+active roles. Reachable but unselected roles grant no authority, as required by
+ADR 0020. The local client cannot submit a principal or active-role list.
+Explicit role selection is deferred until a protected session-control
+operation exists.
 
 This is authentication for Orna's public local transport. It is distinct from
 the fixed peer mapping used internally between the Orna server and its embedded
@@ -54,8 +55,8 @@ Tests must prove:
 
 * duplicate UIDs and duplicate mapped principals are rejected;
 * unknown, disabled, and role principals cannot authenticate;
-* nested reachable active roles are derived in canonical order;
-* disabled roles are omitted and cannot grant authority;
+* authentication starts with no active roles, including when reachable role
+  memberships exist;
 * replacement and restart recovery preserve the exact mapping;
 * an unmapped UID fails without falling back to an Orna or PostgreSQL identity;
 * the Unix adapter uses the actual peer UID from `SO_PEERCRED`; and
