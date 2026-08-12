@@ -421,6 +421,7 @@ dependencies = [
  "orna-client",
  "orna-compiler",
  "orna-core",
+ "orna-protocol",
  "orna-standard",
  "sha2",
  "tokio",
