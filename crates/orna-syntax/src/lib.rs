@@ -644,6 +644,24 @@ pub struct ObjectTypeDeclaration {
     pub span: SourceSpan,
 }
 
+/// One label in a parsed `CREATE TYPE ... AS ENUM` declaration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnumLabelDeclaration {
+    /// The exact string literal, including apostrophes and source escaping.
+    pub literal: SourceSlice,
+}
+
+/// A parsed `CREATE TYPE ... AS ENUM` declaration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnumTypeDeclaration {
+    /// The declared enum type name.
+    pub name: QualifiedName,
+    /// The enum labels in declaration order.
+    pub labels: Vec<EnumLabelDeclaration>,
+    /// The declaration span, including its terminating semicolon.
+    pub span: SourceSpan,
+}
+
 /// The persistence selected for a primitive value type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrimitiveValueTypePersistence {
@@ -745,6 +763,7 @@ pub struct Parse {
     diagnostics: Vec<Diagnostic>,
     schemas: Vec<SchemaDeclaration>,
     object_types: Vec<ObjectTypeDeclaration>,
+    enum_types: Vec<EnumTypeDeclaration>,
     primitive_value_types: Vec<PrimitiveValueTypeDeclaration>,
     type_exports: Vec<TypeExportDeclaration>,
     field_renames: Vec<FieldRenameDeclaration>,
@@ -771,6 +790,11 @@ impl Parse {
     /// Return successfully parsed object type declarations in source order.
     pub fn object_types(&self) -> &[ObjectTypeDeclaration] {
         &self.object_types
+    }
+
+    /// Return successfully parsed enum type declarations in source order.
+    pub fn enum_types(&self) -> &[EnumTypeDeclaration] {
+        &self.enum_types
     }
 
     /// Return successfully parsed primitive value type declarations in source order.
@@ -801,10 +825,10 @@ impl Parse {
 
 /// Parse one Orna source unit.
 ///
-/// The parser recognises schema declarations, object type declarations,
-/// primitive value type declarations, type export declarations, field rename
-/// declarations, and function declarations. It keeps all source bytes in its
-/// CST, including bytes in malformed statements.
+/// The parser recognises schema declarations, object and enum type
+/// declarations, primitive value type declarations, type export declarations,
+/// field rename declarations, and function declarations. It keeps all source
+/// bytes in its CST, including bytes in malformed statements.
 pub fn parse(source: &str) -> Parse {
     parser::parse(source)
 }
@@ -829,6 +853,86 @@ mod tests {
         assert_eq!(parsed.syntax().text(), source);
         assert_eq!(parsed.schemas()[0].name.parts[0].text, "crm");
         assert_eq!(parsed.schemas()[0].name.parts[1].text, "sales");
+    }
+
+    #[test]
+    fn parses_enum_labels_losslessly_in_declaration_order() {
+        let source = "CREATE TYPE crm.stage AS ENUM (\n    'lead', /* keep */ 'qual''ified',\n    'customer'\n);";
+        let parsed = parse(source);
+
+        assert!(parsed.diagnostics().is_empty());
+        assert_eq!(parsed.syntax().text(), source);
+        let declaration = &parsed.enum_types()[0];
+        assert_eq!(declaration.name.parts[0].text, "crm");
+        assert_eq!(declaration.name.parts[1].text, "stage");
+        assert_eq!(
+            declaration
+                .labels
+                .iter()
+                .map(|label| label.literal.text.as_str())
+                .collect::<Vec<_>>(),
+            ["'lead'", "'qual''ified'", "'customer'"]
+        );
+        assert_eq!(
+            declaration.labels[1].literal.span.start,
+            source.find("'qual''ified'").unwrap()
+        );
+        assert_eq!(
+            declaration.span,
+            SourceSpan {
+                start: 0,
+                end: source.len()
+            }
+        );
+    }
+
+    #[test]
+    fn reports_closed_enum_syntax_diagnostics_without_partial_declarations() {
+        let cases = [
+            (
+                "CREATE TYPE app.stage AS ENUM ();",
+                "enum type must declare at least one label",
+            ),
+            (
+                "CREATE TYPE app.stage AS ENUM (lead);",
+                "expected a string literal enum label",
+            ),
+            (
+                "CREATE TYPE app.stage AS ENUM ('lead',);",
+                "enum type cannot have a trailing comma",
+            ),
+            (
+                "CREATE TYPE app.stage AS ENUM ('lead' 'customer');",
+                "expected ',' or ')' after enum label",
+            ),
+            (
+                "CREATE TYPE app.stage AS ENUM ('lead';",
+                "expected ')' after enum labels",
+            ),
+            (
+                "CREATE TYPE app.stage AS ENUM ('lead')",
+                "expected ';' after enum type declaration",
+            ),
+        ];
+
+        for (source, message) in cases {
+            let parsed = parse(source);
+            assert!(parsed.enum_types().is_empty(), "{source}");
+            assert_eq!(parsed.diagnostics().len(), 1, "{source}");
+            assert_eq!(parsed.diagnostics()[0].message, message, "{source}");
+            assert_eq!(parsed.syntax().text(), source, "{source}");
+        }
+    }
+
+    #[test]
+    fn recovers_from_an_invalid_enum_to_a_later_declaration() {
+        let source = "CREATE TYPE app.stage AS ENUM ('lead',); CREATE SCHEMA later;";
+        let parsed = parse(source);
+
+        assert_eq!(parsed.diagnostics().len(), 1);
+        assert!(parsed.enum_types().is_empty());
+        assert_eq!(parsed.schemas().len(), 1);
+        assert_eq!(parsed.schemas()[0].name.parts[0].text, "later");
     }
 
     #[test]
@@ -910,7 +1014,7 @@ mod tests {
         let cases = [
             (
                 "CREATE TYPE app.value AS ;",
-                "expected OBJECT or VALUE after AS",
+                "expected OBJECT, ENUM, or VALUE after AS",
             ),
             (
                 "CREATE TYPE app.value AS VALUE ;",
