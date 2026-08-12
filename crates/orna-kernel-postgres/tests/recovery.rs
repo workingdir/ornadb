@@ -1506,7 +1506,7 @@ async fn rejects_raw_v2_value_tuple_pin_and_definition_tampering_without_repair(
              SET scalar_type = 'boolean'
              WHERE owner_type_id = decode(repeat('81', 16), 'hex')
                AND field_id = decode(repeat('90', 16), 'hex')",
-            "field type kind, scalar type, target identity, value type identity, and standard library revision must form one exact supported tuple",
+            "field type kind, scalar type, target identity, value type identity, standard library revision, and enum type identity must form one exact supported tuple",
         ),
     ];
     for (statement, rule) in cases {
