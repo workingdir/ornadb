@@ -16,8 +16,9 @@ use orna_core::{
     catalogue::FunctionReturn,
     revision::{ActiveDatabaseRevision, DeployableRevision, RevisionPair},
     security::{
-        ExecuteDenial, ExecuteGrant, Principal, PrincipalKind, PrincipalStatus, SecurityAuditKind,
-        SecurityAuditOutcome, SecuritySnapshot,
+        ExecuteDenial, ExecuteGrant, InvocationTarget, Principal, PrincipalKind, PrincipalStatus,
+        SecurityAuditDenial, SecurityAuditEvent, SecurityAuditKind, SecurityAuditOutcome,
+        SecuritySnapshot,
     },
     source::{SourceBundle, SourceUnit},
     types::{ResolvedType, StandardScalar},
@@ -349,6 +350,7 @@ async fn authenticated_server_select_commits_allowed_and_denied_execute_decision
         require(
             result.pair() == applied.pair()
                 && result.function() == function.id()
+                && result.function_revision() == function.current_revision()
                 && value.enum_type() == enum_type.id()
                 && value.label() == "customer",
             "authenticated SERVER SELECT changed its pinned result",
@@ -411,23 +413,60 @@ async fn authenticated_server_select_commits_allowed_and_denied_execute_decision
             .filter(|event| event.decision().kind() == SecurityAuditKind::Execute)
             .collect::<Vec<_>>();
         require(
-            execute.len() == 3
-                && execute[0].decision().outcome() == SecurityAuditOutcome::Allowed
-                && execute[0].decision().target()
-                    == Some(orna_core::security::InvocationTarget::new(
-                        function.id(),
-                        applied.pair(),
-                    ))
-                && execute[1].decision().outcome() == SecurityAuditOutcome::Allowed
-                && execute[2].decision().outcome() == SecurityAuditOutcome::Denied
-                && execute[2].decision().denial()
-                    == Some(orna_core::security::SecurityAuditDenial::Execute(
-                        ExecuteDenial::MissingExecuteGrant,
-                    )),
-            "authenticated SERVER audit decisions differ",
+            execute.len() == 3,
+            "authenticated SERVER audit count differs",
+        )?;
+        let target = InvocationTarget::new(function.id(), applied.pair());
+        require_server_execute_audit(
+            execute[0],
+            SecurityAuditOutcome::Allowed,
+            principal,
+            Some(principal),
+            Some(principal),
+            target,
+            None,
+        )?;
+        require_server_execute_audit(
+            execute[1],
+            SecurityAuditOutcome::Allowed,
+            principal,
+            Some(principal),
+            Some(principal),
+            target,
+            None,
+        )?;
+        require_server_execute_audit(
+            execute[2],
+            SecurityAuditOutcome::Denied,
+            principal,
+            None,
+            None,
+            target,
+            Some(ExecuteDenial::MissingExecuteGrant),
         )
     })
     .await
+}
+
+fn require_server_execute_audit(
+    event: &SecurityAuditEvent,
+    outcome: SecurityAuditOutcome,
+    session: PrincipalId,
+    effective: Option<PrincipalId>,
+    authorising: Option<PrincipalId>,
+    target: InvocationTarget,
+    denial: Option<ExecuteDenial>,
+) -> TestResult<()> {
+    require(
+        event.decision().kind() == SecurityAuditKind::Execute
+            && event.decision().outcome() == outcome
+            && event.decision().session_principal() == Some(session)
+            && event.decision().effective_principal() == effective
+            && event.decision().authorising_principal() == authorising
+            && event.decision().target() == Some(target)
+            && event.decision().denial() == denial.map(SecurityAuditDenial::Execute),
+        "authenticated SERVER audit decision changed its closed evidence",
+    )
 }
 
 #[tokio::test]
