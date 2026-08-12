@@ -43,6 +43,7 @@ impl PostgresKernel {
             function,
             arguments,
             None,
+            false,
         )
         .await
     }
@@ -63,6 +64,26 @@ impl PostgresKernel {
             function,
             arguments,
             Some(AuthenticatedSelectTestBarrier { reached, resume }),
+            false,
+        )
+        .await
+    }
+
+    /// Forces driver shutdown after a protected SERVER result commits.
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub async fn execute_authenticated_server_select_with_forced_post_commit_driver_shutdown(
+        &self,
+        authenticated_session: &AuthenticatedSession,
+        function: FunctionId,
+        arguments: &[FunctionArgument],
+    ) -> Result<ServerSelectResult, PostgresKernelError> {
+        self.execute_authenticated_server_select_with_options(
+            authenticated_session,
+            function,
+            arguments,
+            None,
+            true,
         )
         .await
     }
@@ -73,6 +94,7 @@ impl PostgresKernel {
         function: FunctionId,
         arguments: &[FunctionArgument],
         test_barrier: Option<AuthenticatedSelectTestBarrier>,
+        force_post_commit_driver_shutdown: bool,
     ) -> Result<ServerSelectResult, PostgresKernelError> {
         let mut database_session = self.open().await?;
         let operation = async {
@@ -155,6 +177,12 @@ impl PostgresKernel {
             }
         }
         .await;
+        #[cfg(feature = "test-hooks")]
+        if operation.is_ok() && force_post_commit_driver_shutdown {
+            database_session.abort_driver();
+        }
+        #[cfg(not(feature = "test-hooks"))]
+        let _ = force_post_commit_driver_shutdown;
         finish_authenticated_server_select_session(operation, database_session.shutdown().await)
     }
 
