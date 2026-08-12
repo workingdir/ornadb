@@ -10,9 +10,9 @@ implemented, reviewed, committed, and pushed.
   archive inputs without producing a PostgreSQL executable or shared object.
 - [x] Select the embedded process, resource, shell, upgrade, error, command,
   lifecycle, and complete proof contracts.
-- [ ] Pin the exact unmodified upstream PostgreSQL 18.4 commit as the
+- [x] Pin the exact unmodified upstream PostgreSQL 18.4 commit as the
   `third_party/postgresql` submodule.
-- [ ] Add the top-level `postgresql/` module with reviewed added-file overlays,
+- [x] Add the top-level `postgresql/` module with reviewed added-file overlays,
   the five sparse existing-file patches, and one explicit source-update target.
 - [ ] Add the Make-based prepared-source build beside the selected legacy proof
   and bind its toolchain, upstream tree, overlays, patches, support data,
