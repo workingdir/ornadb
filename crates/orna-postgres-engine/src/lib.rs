@@ -208,10 +208,7 @@ mod embedded {
         }
 
         /// Reads and validates one stopped cluster's PostgreSQL control file.
-        pub fn read_control(
-            &self,
-            data_directory: &AbsolutePath,
-        ) -> Result<ControlData, EngineError> {
+        pub fn read_control(data_directory: &AbsolutePath) -> Result<ControlData, EngineError> {
             let mut raw = RawControlData {
                 system_identifier: 0,
                 pg_control_version: 0,
@@ -277,9 +274,8 @@ mod embedded {
 
         #[test]
         fn rejects_missing_control_data() {
-            let engine = EmbeddedEngine { _private: () };
             let data_directory = AbsolutePath::new(Path::new("/missing-orna-pgdata")).unwrap();
-            let error = engine.read_control(&data_directory).unwrap_err();
+            let error = EmbeddedEngine::read_control(&data_directory).unwrap_err();
             assert_eq!(error, EngineError::ControlDataRejected);
         }
     }
