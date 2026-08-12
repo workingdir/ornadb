@@ -37,8 +37,9 @@ use orna_core::{
     security::{
         ExecuteDecision, ExecuteDenial, ExecuteGrant, InvocationTarget,
         LocalPeerAuthenticationError, LocalPeerCredential, Principal, PrincipalKind,
-        PrincipalStatus, RoleMembership, SecurityAuditDecision, SecurityAuditEvent,
-        SecuritySnapshot, SecuritySnapshotError, SessionBindingError,
+        PrincipalStatus, RoleMembership, SecurityAuditDecision, SecurityAuditDenial,
+        SecurityAuditEvent, SecurityAuditKind, SecurityAuditOutcome, SecuritySnapshot,
+        SecuritySnapshotError, SessionBindingError,
     },
     types::{ResolvedType, StandardScalar},
     value::RuntimeValue,
@@ -886,6 +887,179 @@ async fn recovers_closed_security_audit_history_and_rejects_tamper() -> TestResu
         require_no_session_leaks(&database).await
     })
     .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn local_peer_authentication_appends_one_protected_decision() -> TestResult<()> {
+    const USER_UID: u32 = 1_001;
+    const DISABLED_UID: u32 = 1_002;
+    const UNKNOWN_UID: u32 = 1_003;
+    const USER: PrincipalId = PrincipalId::from_bytes([0x61; 16]);
+    const DISABLED: PrincipalId = PrincipalId::from_bytes([0x62; 16]);
+
+    with_test_database(|database| async move {
+        let kernel = kernel(&database)?;
+        let active = kernel.bootstrap().await?;
+        let active_pair = RevisionPair::new(active.source(), active.catalogue());
+        let security = SecuritySnapshot::new_with_local_peer_credentials(
+            active_pair,
+            vec![],
+            vec![
+                Principal::new(USER, PrincipalKind::User, PrincipalStatus::Active),
+                Principal::new(DISABLED, PrincipalKind::User, PrincipalStatus::Disabled),
+            ],
+            vec![],
+            vec![],
+            vec![
+                LocalPeerCredential::new(USER_UID, USER),
+                LocalPeerCredential::new(DISABLED_UID, DISABLED),
+            ],
+        )?;
+        kernel.replace_security_snapshot(&security).await?;
+
+        let authenticated = kernel.authenticate_local_peer(USER_UID).await?;
+        require(
+            authenticated.principal() == USER && authenticated.active_roles().is_empty(),
+            "allowed local authentication changed its session",
+        )?;
+        let unknown = kernel
+            .authenticate_local_peer(UNKNOWN_UID)
+            .await
+            .expect_err("unknown local peer must be denied");
+        require(
+            matches!(
+                unknown,
+                PostgresKernelError::LocalPeerAuthentication(
+                    LocalPeerAuthenticationError::UnknownUid
+                )
+            ),
+            "unknown local peer returned the wrong denial",
+        )?;
+        let disabled = kernel
+            .authenticate_local_peer(DISABLED_UID)
+            .await
+            .expect_err("disabled mapped principal must be denied");
+        require(
+            matches!(
+                disabled,
+                PostgresKernelError::LocalPeerAuthentication(
+                    LocalPeerAuthenticationError::InvalidPrincipal(
+                        SessionBindingError::DisabledSessionPrincipal
+                    )
+                )
+            ),
+            "disabled mapped principal returned the wrong denial",
+        )?;
+
+        let revoked = SecuritySnapshot::new(
+            active_pair,
+            vec![],
+            security.principals().collect(),
+            vec![],
+            vec![],
+        )?;
+        kernel.replace_security_snapshot(&revoked).await?;
+        let revoked_error = kernel
+            .authenticate_local_peer(USER_UID)
+            .await
+            .expect_err("revoked local credential must be denied");
+        require(
+            matches!(
+                revoked_error,
+                PostgresKernelError::LocalPeerAuthentication(
+                    LocalPeerAuthenticationError::UnknownUid
+                )
+            ),
+            "revoked local credential returned the wrong denial",
+        )?;
+
+        let events = PostgresKernel::new(database.config()?)
+            .recover_security_audit_events()
+            .await?;
+        require(
+            events.len() == 4
+                && events
+                    .iter()
+                    .enumerate()
+                    .all(|(index, event)| event.sequence() == (index + 1) as i64)
+                && events.iter().enumerate().all(|(index, event)| {
+                    events[..index]
+                        .iter()
+                        .all(|earlier| earlier.id() != event.id())
+                }),
+            "authentication audit history changed its exact order or unique identities",
+        )?;
+        require_authentication_audit(&events[0], SecurityAuditOutcome::Allowed, Some(USER), None)?;
+        require_authentication_audit(
+            &events[1],
+            SecurityAuditOutcome::Denied,
+            None,
+            Some(LocalPeerAuthenticationError::UnknownUid),
+        )?;
+        require_authentication_audit(
+            &events[2],
+            SecurityAuditOutcome::Denied,
+            Some(DISABLED),
+            Some(LocalPeerAuthenticationError::InvalidPrincipal(
+                SessionBindingError::DisabledSessionPrincipal,
+            )),
+        )?;
+        require_authentication_audit(
+            &events[3],
+            SecurityAuditOutcome::Denied,
+            None,
+            Some(LocalPeerAuthenticationError::UnknownUid),
+        )?;
+
+        let session = database.open().await?;
+        let constraint = session
+            .client()
+            .batch_execute(
+                "ALTER TABLE _orna_kernel.security_audit_events
+                 ADD CONSTRAINT security_audit_events_test_reject_insert
+                 CHECK (false) NOT VALID;",
+            )
+            .await
+            .map_err(Into::into);
+        finish_session(
+            constraint,
+            session.shutdown().await,
+            "security audit insert failure fixture",
+        )?;
+        let audit_failure = kernel
+            .authenticate_local_peer(USER_UID)
+            .await
+            .expect_err("audit insertion failure must fail authentication");
+        require(
+            matches!(audit_failure, PostgresKernelError::Database(_)),
+            "audit insertion failure returned a normal authentication denial",
+        )?;
+        require(
+            kernel.recover_security_audit_events().await? == events,
+            "failed authentication audit insertion changed prior history",
+        )?;
+        require_no_session_leaks(&database).await
+    })
+    .await
+}
+
+fn require_authentication_audit(
+    event: &SecurityAuditEvent,
+    outcome: SecurityAuditOutcome,
+    principal: Option<PrincipalId>,
+    denial: Option<LocalPeerAuthenticationError>,
+) -> TestResult<()> {
+    require(
+        event.decision().kind() == SecurityAuditKind::Authentication
+            && event.decision().outcome() == outcome
+            && event.decision().session_principal() == principal
+            && event.decision().effective_principal().is_none()
+            && event.decision().authorising_principal().is_none()
+            && event.decision().target().is_none()
+            && event.decision().denial() == denial.map(SecurityAuditDenial::Authentication),
+        "authentication audit record changed its closed decision evidence",
+    )
 }
 
 #[tokio::test]
