@@ -42,6 +42,9 @@ const EXPECTED_KERNEL_TABLES: &[&str] = &[
     "function_artifacts",
     "function_revisions",
     "schema_migrations",
+    "security_execute_grants",
+    "security_principals",
+    "security_role_memberships",
     "source_bundles",
     "source_revisions",
     "source_units",
@@ -91,6 +94,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         8,
         "resolved value type storage",
         include_str!("../migrations/0008_resolved_value_types.sql"),
+    ),
+    (
+        9,
+        "security decision snapshot",
+        include_str!("../migrations/0009_security_snapshot.sql"),
     ),
 ];
 const MIGRATION_DATA_STEP_SEPARATOR: &[u8] = b"\0orna.kernel.migration-step\0";
@@ -168,6 +176,30 @@ struct CatalogueSurfaceSnapshot {
     triggers: Vec<(String, String, String, bool)>,
     relation_acls: Vec<(String, String, String)>,
     schema_acls: Vec<(String, String)>,
+}
+
+fn without_security_relations(snapshot: &CatalogueSurfaceSnapshot) -> CatalogueSurfaceSnapshot {
+    CatalogueSurfaceSnapshot {
+        relations_and_indexes: snapshot
+            .relations_and_indexes
+            .iter()
+            .filter(|(_, relation, _)| !relation.starts_with("security_"))
+            .cloned()
+            .collect(),
+        triggers: snapshot
+            .triggers
+            .iter()
+            .filter(|(_, relation, _, _)| !relation.starts_with("security_"))
+            .cloned()
+            .collect(),
+        relation_acls: snapshot
+            .relation_acls
+            .iter()
+            .filter(|(_, relation, _)| !relation.starts_with("security_"))
+            .cloned()
+            .collect(),
+        schema_acls: snapshot.schema_acls.clone(),
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -250,6 +282,34 @@ fn resolved_value_type_migration_checksum_binds_exact_sql_bytes() {
         hex_bytes(expected_migration_checksum(8, MIGRATIONS[7].2)),
         "2ef8d844814dafd7d70d40fb39ce7e5e6c52dea3cfc668e84c74c2c5c1dd06e7"
     );
+}
+
+#[test]
+fn security_snapshot_migration_checksum_binds_exact_sql_bytes() {
+    assert_eq!(
+        hex_bytes(expected_migration_checksum(9, MIGRATIONS[8].2)),
+        "101413b9478a975b08099cda32bd26e4c41ad0bc00b8c473c5ca281a7e2690ef"
+    );
+}
+
+#[test]
+fn security_snapshot_migration_is_the_registered_version_nine() -> TestResult<()> {
+    let Some((version, name, sql)) = MIGRATIONS.last() else {
+        return Err(failure("migration registry is empty"));
+    };
+
+    require(
+        *version == 9,
+        format!("last migration is version {version}"),
+    )?;
+    require(
+        *name == "security decision snapshot",
+        format!("last migration has unexpected name {name:?}"),
+    )?;
+    require(
+        sql.contains("CREATE TABLE _orna_kernel.security_principals"),
+        "security migration does not create the principal table",
+    )
 }
 
 #[tokio::test]
@@ -362,8 +422,8 @@ async fn bootstrap_upgrades_v5_write_reference_evidence_without_mutating_semanti
 
         let after = snapshot_upgrade_state(&database).await?;
         require(
-            after.migrations.len() == 8 && after.migrations[..5] == before.migrations[..],
-            format!("v6/v7 changed prior migration records: {:?}", after.migrations),
+            after.migrations.len() == 9 && after.migrations[..5] == before.migrations[..],
+            format!("v6-v9 changed prior migration records: {:?}", after.migrations),
         )?;
         require(
             after.migrations[5]
@@ -391,6 +451,15 @@ async fn bootstrap_upgrades_v5_write_reference_evidence_without_mutating_semanti
                     expected_migration_checksum(8, MIGRATIONS[7].2),
                 ),
             format!("v8 migration record is not exact: {:?}", after.migrations[7]),
+        )?;
+        require(
+            after.migrations[8]
+                == (
+                    9,
+                    "security decision snapshot".to_owned(),
+                    expected_migration_checksum(9, MIGRATIONS[8].2),
+                ),
+            format!("v9 migration record is not exact: {:?}", after.migrations[8]),
         )?;
         require(
             after.active_pair == before.active_pair,
@@ -478,7 +547,7 @@ async fn bootstrap_upgrades_registered_v6_without_standard_rows() -> TestResult<
 
         let after = snapshot_upgrade_state(&database).await?;
         require(
-            after.migrations.len() == 8
+            after.migrations.len() == 9
                 && after.migrations[..6] == before.migrations[..]
                 && after.migrations[6]
                     == (
@@ -496,6 +565,15 @@ async fn bootstrap_upgrades_registered_v6_without_standard_rows() -> TestResult<
                     expected_migration_checksum(8, MIGRATIONS[7].2),
                 ),
             format!("v8 migration record is not exact: {:?}", after.migrations[7]),
+        )?;
+        require(
+            after.migrations[8]
+                == (
+                    9,
+                    "security decision snapshot".to_owned(),
+                    expected_migration_checksum(9, MIGRATIONS[8].2),
+                ),
+            format!("v9 migration record is not exact: {:?}", after.migrations[8]),
         )?;
         require(
             after.active_pair == before.active_pair
@@ -571,13 +649,19 @@ async fn bootstrap_upgrades_registered_v7_without_resolved_value_rows() -> TestR
         let after_surface = snapshot_catalogue_surface(&database).await?;
         let after_target_fks = snapshot_application_target_foreign_keys(&database).await?;
         require(
-            after.migrations.len() == 8
+            after.migrations.len() == 9
                 && after.migrations[..7] == before.migrations[..]
                 && after.migrations[7]
                     == (
                         8,
                         "resolved value type storage".to_owned(),
                         expected_migration_checksum(8, MIGRATIONS[7].2),
+                    )
+                && after.migrations[8]
+                    == (
+                        9,
+                        "security decision snapshot".to_owned(),
+                        expected_migration_checksum(9, MIGRATIONS[8].2),
                     ),
             format!("v7 upgrade produced unexpected migrations: {:?}", after.migrations),
         )?;
@@ -590,7 +674,7 @@ async fn bootstrap_upgrades_registered_v7_without_resolved_value_rows() -> TestR
             "migration 0008 changed the active pair, references, or semantic hashes",
         )?;
         require(
-            before_surface == after_surface,
+            before_surface == without_security_relations(&after_surface),
             format!(
                 "migration 0008 changed a relation, index, trigger, or ACL: before={before_surface:?}, after={after_surface:?}"
             ),
@@ -955,6 +1039,7 @@ async fn inspect_client(client: &Client) -> TestResult<()> {
     inspect_function_revision_constraints(client).await?;
     inspect_standard_catalogue_schema(client).await?;
     inspect_resolved_value_storage(client, true).await?;
+    inspect_security_snapshot_schema(client).await?;
 
     for schema in ["_orna_kernel", "_orna_data"] {
         let role = "public";
@@ -997,6 +1082,126 @@ async fn inspect_client(client: &Client) -> TestResult<()> {
             "protected table set differs; expected {expected_tables:?}, found {actual_tables:?}"
         ),
     )
+}
+
+async fn inspect_security_snapshot_schema(client: &Client) -> TestResult<()> {
+    inspect_columns(
+        client,
+        "security_principals",
+        &[
+            ("id", "bytea", "bytea", "NO", Some("")),
+            ("kind", "text", "text", "NO", Some("")),
+            ("status", "text", "text", "NO", Some("")),
+        ],
+    )
+    .await?;
+    inspect_columns(
+        client,
+        "security_role_memberships",
+        &[
+            ("role_id", "bytea", "bytea", "NO", Some("")),
+            ("member_id", "bytea", "bytea", "NO", Some("")),
+        ],
+    )
+    .await?;
+    inspect_columns(
+        client,
+        "security_execute_grants",
+        &[
+            ("grantee_id", "bytea", "bytea", "NO", Some("")),
+            ("function_id", "bytea", "bytea", "NO", Some("")),
+        ],
+    )
+    .await?;
+
+    for (table, constraint, expected) in [
+        (
+            "security_principals",
+            "security_principals_id_length",
+            "octet_length(id) = 16",
+        ),
+        (
+            "security_principals",
+            "security_principals_kind_check",
+            "kind = ANY",
+        ),
+        (
+            "security_principals",
+            "security_principals_status_check",
+            "status = ANY",
+        ),
+        (
+            "security_role_memberships",
+            "security_role_memberships_not_self",
+            "role_id <> member_id",
+        ),
+        (
+            "security_role_memberships",
+            "security_role_memberships_role_fk",
+            "FOREIGN KEY (role_id)",
+        ),
+        (
+            "security_role_memberships",
+            "security_role_memberships_member_fk",
+            "FOREIGN KEY (member_id)",
+        ),
+        (
+            "security_execute_grants",
+            "security_execute_grants_function_id_length",
+            "octet_length(function_id) = 16",
+        ),
+        (
+            "security_execute_grants",
+            "security_execute_grants_grantee_fk",
+            "FOREIGN KEY (grantee_id)",
+        ),
+    ] {
+        require_constraint(client, table, constraint, expected).await?;
+    }
+    require_index(
+        client,
+        "security_role_memberships_member_index",
+        "(member_id, role_id)",
+    )
+    .await?;
+    require_index(
+        client,
+        "security_execute_grants_function_index",
+        "(function_id, grantee_id)",
+    )
+    .await?;
+
+    for table in [
+        "security_principals",
+        "security_role_memberships",
+        "security_execute_grants",
+    ] {
+        for privilege in [
+            "SELECT",
+            "INSERT",
+            "UPDATE",
+            "DELETE",
+            "TRUNCATE",
+            "REFERENCES",
+            "TRIGGER",
+            "MAINTAIN",
+        ] {
+            let relation = format!("_orna_kernel.{table}");
+            let row = client
+                .query_one(
+                    "SELECT has_table_privilege('public', $1, $2)",
+                    &[&relation, &privilege],
+                )
+                .await?;
+            let granted: bool = value(&row, 0)?;
+            require(
+                !granted,
+                format!("PUBLIC has {privilege} on protected table {relation}"),
+            )?;
+        }
+    }
+
+    Ok(())
 }
 
 async fn inspect_standard_catalogue_schema(client: &Client) -> TestResult<()> {
