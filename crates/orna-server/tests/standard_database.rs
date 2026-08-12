@@ -20,7 +20,7 @@ use orna_core::{
 use orna_kernel_postgres::{PostgresKernel, PostgresKernelError};
 use orna_protocol::{
     CallFailure, Channel, ClientFrame, Event, RawCall, ServerAction, ServerFrame,
-    decode_server_frame, encode_client_frame,
+    decode_catalogue_server_frame, encode_catalogue_client_frame,
 };
 use orna_server::{
     LocalAuthenticationError, LocalRawSocketError, LocalRawSocketResources,
@@ -463,6 +463,7 @@ async fn serves_the_actual_local_peer_through_the_raw_socket_protocol() -> TestR
             vec![LocalPeerCredential::new(uid, RAW_CLIENT_USER)],
         )?;
         kernel.replace_security_snapshot(&granted).await?;
+        let catalogue = active.catalogue().clone();
 
         let (server, client) = StandardUnixStream::pair()?;
         client.set_nonblocking(true)?;
@@ -474,25 +475,27 @@ async fn serves_the_actual_local_peer_through_the_raw_socket_protocol() -> TestR
         ));
         let operation = async {
             client
-                .write_all(b"ORNA\x01\x00\x00\x01\x00\x00\x00\x00")
+                .write_all(b"ORNA\x01\x00\x00\x02\x00\x00\x00\x00")
                 .await?;
             let mut acknowledgement = [0_u8; 12];
             client.read_exact(&mut acknowledgement).await?;
             require(
-                acknowledgement == *b"ORNA\x81\x00\x00\x01\x00\x00\x00\x00",
-                "local raw socket returned the wrong authenticated acknowledgement",
+                acknowledgement == *b"ORNA\x81\x00\x00\x02\x00\x00\x00\x00",
+                "local raw socket returned the wrong catalogue acknowledgement",
             )?;
 
-            send_protocol_frame(
+            send_catalogue_protocol_frame(
                 &mut client,
+                &catalogue,
                 &ClientFrame::CallRawStart {
                     stream: 1,
                     function: client_function,
                 },
             )
             .await?;
-            send_protocol_frame(
+            send_catalogue_protocol_frame(
                 &mut client,
+                &catalogue,
                 &ClientFrame::WindowUpdate {
                     stream: 1,
                     channel: Channel::ResultValues,
@@ -500,21 +503,22 @@ async fn serves_the_actual_local_peer_through_the_raw_socket_protocol() -> TestR
                 },
             )
             .await?;
-            send_protocol_frame(
+            send_catalogue_protocol_frame(
                 &mut client,
+                &catalogue,
                 &ClientFrame::CallArgumentsComplete { stream: 1 },
             )
             .await?;
             require(
                 matches!(
-                    read_protocol_frame(&mut client).await?,
+                    read_catalogue_protocol_frame(&mut client, &catalogue).await?,
                     ServerFrame::CallAccepted { stream: 1, .. }
                 ),
-                "local raw socket did not accept the authenticated CLIENT call",
+                "local raw socket did not accept the catalogue CLIENT call",
             )?;
             require(
                 matches!(
-                    read_protocol_frame(&mut client).await?,
+                    read_catalogue_protocol_frame(&mut client, &catalogue).await?,
                     ServerFrame::EventBatch {
                         stream: 1,
                         channel: Channel::ResultValues,
@@ -523,11 +527,12 @@ async fn serves_the_actual_local_peer_through_the_raw_socket_protocol() -> TestR
                         && events[0].sequence == 1
                         && events[0].event == Event::Value(RuntimeValue::Boolean(true))
                 ),
-                "local raw socket returned the wrong typed CLIENT value",
+                "local raw socket returned the wrong catalogue CLIENT value",
             )?;
             require(
-                read_protocol_frame(&mut client).await? == ServerFrame::CallCompleted { stream: 1 },
-                "local raw socket did not complete the CLIENT call",
+                read_catalogue_protocol_frame(&mut client, &catalogue).await?
+                    == ServerFrame::CallCompleted { stream: 1 },
+                "local raw socket did not complete the catalogue CLIENT call",
             )
         }
         .await;
@@ -619,19 +624,33 @@ fn raw_call(function: FunctionId) -> RawCall {
     }
 }
 
-async fn send_protocol_frame(stream: &mut UnixStream, frame: &ClientFrame) -> TestResult<()> {
-    stream.write_all(&encode_client_frame(frame)?).await?;
+async fn send_catalogue_protocol_frame(
+    stream: &mut UnixStream,
+    catalogue: &orna_core::catalogue::CatalogueSnapshot,
+    frame: &ClientFrame,
+) -> TestResult<()> {
+    stream
+        .write_all(&encode_catalogue_client_frame(catalogue, frame)?)
+        .await?;
     Ok(())
 }
 
-async fn read_protocol_frame(stream: &mut UnixStream) -> TestResult<ServerFrame> {
+async fn read_catalogue_protocol_frame(
+    stream: &mut UnixStream,
+    catalogue: &orna_core::catalogue::CatalogueSnapshot,
+) -> TestResult<ServerFrame> {
+    let encoded = read_encoded_protocol_frame(stream).await?;
+    Ok(decode_catalogue_server_frame(catalogue, &encoded)?)
+}
+
+async fn read_encoded_protocol_frame(stream: &mut UnixStream) -> TestResult<Vec<u8>> {
     let mut header = [0_u8; 18];
     stream.read_exact(&mut header).await?;
     let length = u32::from_be_bytes(header[14..18].try_into()?) as usize;
     let mut encoded = header.to_vec();
     encoded.resize(18 + length, 0);
     stream.read_exact(&mut encoded[18..]).await?;
-    Ok(decode_server_frame(&encoded)?)
+    Ok(encoded)
 }
 
 fn require_dispatch_failure(
