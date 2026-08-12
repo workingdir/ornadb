@@ -1921,7 +1921,6 @@ fn validate_resolved_type_slots(
         for field in object_type.fields() {
             validate_resolved_type_slot(
                 context,
-                catalogue,
                 DefinitionIdentity::Field {
                     owner: object_type.id(),
                     field: field.id(),
@@ -1935,7 +1934,6 @@ fn validate_resolved_type_slots(
         for parameter in function.parameters() {
             validate_resolved_type_slot(
                 context,
-                catalogue,
                 DefinitionIdentity::Parameter {
                     owner: function.id(),
                     parameter: parameter.id(),
@@ -1949,7 +1947,6 @@ fn validate_resolved_type_slots(
                 for column in columns {
                     validate_resolved_type_slot(
                         context,
-                        catalogue,
                         DefinitionIdentity::FunctionReturnColumn {
                             owner: function.id(),
                             ordinal: column.ordinal(),
@@ -1960,7 +1957,6 @@ fn validate_resolved_type_slots(
             }
             FunctionReturn::Single(resolved_type) => validate_resolved_type_slot(
                 context,
-                catalogue,
                 DefinitionIdentity::Function(function.id()),
                 *resolved_type,
             )?,
@@ -1972,20 +1968,9 @@ fn validate_resolved_type_slots(
 
 fn validate_resolved_type_slot(
     context: &CatalogueHashContext,
-    catalogue: &CatalogueSnapshot,
     identity: DefinitionIdentity,
     resolved_type: ResolvedType,
 ) -> Result<(), RevisionInvariantError> {
-    if let ResolvedType::Named(record_value_type) = resolved_type
-        && catalogue
-            .record_value_type_by_id(record_value_type)
-            .is_some()
-    {
-        return Err(RevisionInvariantError::RecordValueSlotRequiresCodec {
-            identity,
-            record_value_type,
-        });
-    }
     match resolved_type {
         ResolvedType::Scalar(scalar) => {
             if matches!(context, CatalogueHashContext::Version2 { .. }) {
@@ -2590,13 +2575,6 @@ pub enum RevisionInvariantError {
         /// The absent durable standard value-type identity.
         value_type: TypeId,
     },
-    /// A durable or executable slot uses a record before its value codec exists.
-    RecordValueSlotRequiresCodec {
-        /// The catalogue slot containing the record type.
-        identity: DefinitionIdentity,
-        /// The record value type requiring a codec.
-        record_value_type: TypeId,
-    },
     /// A version-2 function semantic hash was paired with a version-1 catalogue hash.
     FunctionSemanticHashVersionRequiresCatalogueHashVersionTwo {
         /// The function whose immutable revision uses the newer contract.
@@ -2850,9 +2828,6 @@ impl fmt::Display for RevisionInvariantError {
             }
             ResolvedValueTypeNotInPinnedStandard { .. } => formatter
                 .write_str("resolved value type is absent from the pinned standard library"),
-            RecordValueSlotRequiresCodec { .. } => {
-                formatter.write_str("record value slots require the record value codec")
-            }
             FunctionSemanticHashVersionRequiresCatalogueHashVersionTwo { .. } => formatter
                 .write_str("function semantic hash version 2 requires catalogue hash version 2"),
             ValueTypeDefinitionRequiresCatalogueHashVersionTwo { .. } => {
@@ -2981,8 +2956,8 @@ mod tests {
         },
         catalogue::{
             EnumTypeDefinition, FieldDefinition, FunctionDefinition, FunctionDomain,
-            FunctionReturn, FunctionReturnColumnDefinition, FunctionSecurity, FunctionVolatility,
-            ObjectTypeDefinition, ParameterDefinition, QualifiedSemanticName,
+            FunctionReturn, FunctionReturnColumnDefinition, FunctionSecurity, FunctionTransaction,
+            FunctionVolatility, ObjectTypeDefinition, ParameterDefinition, QualifiedSemanticName,
             RecordValueFieldDefinition, RecordValueTypeDefinition, SchemaDefinition, TypeBinding,
             ValueTypeDefinition, ValueTypeMutability, ValueTypePersistence,
         },
@@ -3801,7 +3776,21 @@ mod tests {
                 )],
             )],
             vec![],
-            vec![],
+            vec![FunctionDefinition::new(
+                FunctionId::from_bytes(id::<82>()),
+                QualifiedSemanticName::new(["crm", "read_status"]).unwrap(),
+                FunctionDomain::Server,
+                vec![],
+                FunctionReturn::Rows(vec![FunctionReturnColumnDefinition::new(
+                    "status",
+                    0,
+                    ResolvedType::named(record_value_type),
+                )]),
+                FunctionRevisionId::from_bytes(id::<83>()),
+                FunctionSecurity::Invoker,
+                Some(FunctionTransaction::ReadOnly),
+                FunctionVolatility::Stable,
+            )],
         )
         .unwrap()
     }
@@ -3959,22 +3948,10 @@ mod tests {
     }
 
     #[test]
-    fn record_value_types_cannot_enter_runtime_or_storage_slots_before_the_codec() {
-        assert_eq!(
-            validate_catalogue_hash_context_coherence(
-                &standard_context(),
-                &catalogue_with_record_value_slot(),
-                &[],
-                &[],
-                &[],
-            ),
-            Err(RevisionInvariantError::RecordValueSlotRequiresCodec {
-                identity: DefinitionIdentity::Field {
-                    owner: TypeId::from_bytes(id::<80>()),
-                    field: FieldId::from_bytes(id::<81>()),
-                },
-                record_value_type: TypeId::from_bytes(id::<76>()),
-            })
+    fn record_value_types_can_enter_object_and_rows_slots() {
+        assert!(
+            validate_resolved_type_slots(&standard_context(), &catalogue_with_record_value_slot(),)
+                .is_ok()
         );
     }
 
