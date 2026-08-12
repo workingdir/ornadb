@@ -143,8 +143,9 @@ def main() -> None:
     repository = Path(sys.argv[1]).resolve(strict=True)
     target_root = Path(sys.argv[2]).resolve(strict=True)
     image = sys.argv[3]
-    if target_root.parent != repository / "target":
-        raise SystemExit("manifest target root must be directly below the repository target directory")
+    target_directory = (repository / "target").resolve(strict=True)
+    if target_directory not in target_root.parents:
+        raise SystemExit("manifest target root must be below the repository target directory")
     source = repository / "third_party/postgresql"
     prepared_inventory = target_root / "prepared-source-inventory.txt"
     output_root = target_root / "output"
