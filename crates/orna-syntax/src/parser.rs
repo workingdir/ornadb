@@ -7,6 +7,7 @@ use crate::{
     MutationValue, NamePart, NullOrdering, ObjectFieldDeclaration, ObjectSource,
     ObjectTypeDeclaration, OnDeletePolicy, OrderingDirection, OrderingExpression, Parse,
     PrimitiveValueTypeDeclaration, PrimitiveValueTypePersistence, QualifiedName, QueryExpression,
+    RecordConstructor, RecordConstructorField, RecordConstructorFieldValue,
     RecordValueTypeDeclaration, RowsColumnDeclaration, SchemaDeclaration, SelectQuantifier,
     SelectQuery, ServerFunctionBody, ServerFunctionDeclaration, ServerFunctionParameter,
     SourceSlice, SourceSpan, SqlDeleteBody, SqlInsertBody, SqlQueryBody, SqlUpdateBody,
@@ -2754,6 +2755,7 @@ impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
             values.push(self.parse_mutation_value(
                 "use the declared parameter name by itself in VALUES; do not add an object or alias",
                 "function calls in INSERT values",
+                true,
             )?);
             self.skip_trivia();
             if self.take_kind(TokenKind::Comma).is_some() {
@@ -2838,6 +2840,7 @@ impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
         &mut self,
         qualified_name_message: &str,
         function_call_feature: &str,
+        permit_record_constructor: bool,
     ) -> Result<MutationValue, QueryParseError> {
         if let Some(token) = self.take_word("TRUE") {
             return Ok(MutationValue::BooleanLiteral {
@@ -2866,13 +2869,42 @@ impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
             });
         }
 
-        let name = self.parse_name_part("a declared parameter, TRUE, FALSE, or NULL")?;
+        let first = self
+            .parse_name_part("a declared parameter, TRUE, FALSE, NULL, or a record constructor")?;
+        let mut parts = vec![first.clone()];
+        let mut first_dot = None;
+        loop {
+            self.skip_trivia();
+            let Some(dot) = self.take_kind(TokenKind::Dot) else {
+                break;
+            };
+            first_dot.get_or_insert_with(|| dot.clone());
+            self.skip_trivia();
+            parts.push(self.parse_name_part("a record type name after '.'")?);
+        }
         self.skip_trivia();
         if self
             .current()
-            .is_some_and(|token| token.kind == TokenKind::Dot)
+            .is_some_and(|token| token.kind == TokenKind::Other && token.text == "{")
         {
-            let dot = self.current().expect("dot exists");
+            if !permit_record_constructor {
+                return Err(self.implementation_gap(
+                    "record constructors in UPDATE values",
+                    "a declared parameter name by itself",
+                ));
+            }
+            let end = parts.last().expect("record type has a name part").span.end;
+            return self
+                .parse_record_constructor(QualifiedName {
+                    parts,
+                    span: SourceSpan {
+                        start: first.span.start,
+                        end,
+                    },
+                })
+                .map(MutationValue::RecordConstructor);
+        }
+        if let Some(dot) = first_dot {
             return Err(QueryParseError {
                 code: "ORNA0001",
                 message: qualified_name_message.to_owned(),
@@ -2886,7 +2918,192 @@ impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
             return Err(self
                 .implementation_gap(function_call_feature, "a declared parameter name by itself"));
         }
-        Ok(MutationValue::Parameter(name))
+        Ok(MutationValue::Parameter(first))
+    }
+
+    fn parse_record_constructor(
+        &mut self,
+        record_type: QualifiedName,
+    ) -> Result<RecordConstructor, QueryParseError> {
+        self.take_symbol("{")
+            .ok_or_else(|| self.expected("'{' after the record type name"))?;
+        self.skip_trivia();
+        let mut fields = Vec::new();
+        if self
+            .current()
+            .is_some_and(|token| token.kind == TokenKind::Other && token.text == "}")
+        {
+            return Err(QueryParseError {
+                code: "ORNA0001",
+                message: "record constructor must supply at least one field".to_owned(),
+                span: self.current_span(),
+            });
+        }
+
+        let close = loop {
+            let name = self.parse_name_part("a record constructor field name")?;
+            if fields
+                .iter()
+                .any(|field: &RecordConstructorField| identifiers_equal(&field.name, &name))
+            {
+                return Err(QueryParseError {
+                    code: "ORNA0001",
+                    message: format!(
+                        "record constructor field {} appears more than once",
+                        normalise_identifier(&name)
+                    ),
+                    span: name.span.clone(),
+                });
+            }
+            self.skip_trivia();
+            self.take_symbol(":")
+                .ok_or_else(|| self.expected("':' after a record constructor field name"))?;
+            self.skip_trivia();
+            let value = self.parse_record_constructor_field_value()?;
+            let span = SourceSpan {
+                start: name.span.start,
+                end: value.span().end,
+            };
+            fields.push(RecordConstructorField { name, value, span });
+            self.skip_trivia();
+            if let Some(close) = self.take_symbol("}") {
+                break close;
+            }
+            self.take_kind(TokenKind::Comma)
+                .ok_or_else(|| self.expected("',' or '}' after a record constructor field"))?;
+            self.skip_trivia();
+            if let Some(close) = self.take_symbol("}") {
+                break close;
+            }
+        };
+
+        Ok(RecordConstructor {
+            span: SourceSpan {
+                start: record_type.span.start,
+                end: close.range.end,
+            },
+            record_type,
+            fields,
+        })
+    }
+
+    fn parse_record_constructor_field_value(
+        &mut self,
+    ) -> Result<RecordConstructorFieldValue, QueryParseError> {
+        if let Some(token) = self.take_word("TRUE") {
+            return Ok(RecordConstructorFieldValue::BooleanLiteral {
+                value: true,
+                source: SourceSlice {
+                    text: token.text.to_owned(),
+                    span: token.span(),
+                },
+            });
+        }
+        if let Some(token) = self.take_word("FALSE") {
+            return Ok(RecordConstructorFieldValue::BooleanLiteral {
+                value: false,
+                source: SourceSlice {
+                    text: token.text.to_owned(),
+                    span: token.span(),
+                },
+            });
+        }
+        if self.current().is_some_and(|token| token.is_word("NULL")) {
+            return Err(QueryParseError {
+                code: "ORNA0001",
+                message:
+                    "record constructor fields accept only a declared parameter, TRUE, or FALSE"
+                        .to_owned(),
+                span: self.current_span(),
+            });
+        }
+
+        let parameter = self.parse_name_part(
+            "a declared parameter, TRUE, or FALSE in a record constructor field",
+        )?;
+        self.skip_trivia();
+        if self
+            .current()
+            .is_some_and(|token| token.kind == TokenKind::LeftParenthesis)
+        {
+            return Err(QueryParseError {
+                code: "ORNA0001",
+                message: "record constructor fields do not support function calls".to_owned(),
+                span: self.current_span(),
+            });
+        }
+        if self.qualified_value_opens_constructor() {
+            return Err(QueryParseError {
+                code: "ORNA0001",
+                message: "record constructor fields do not support nested record constructors"
+                    .to_owned(),
+                span: self
+                    .tokens
+                    .iter()
+                    .skip(self.index)
+                    .find(|token| {
+                        !token.kind.is_trivia()
+                            && token.kind == TokenKind::Other
+                            && token.text == "{"
+                    })
+                    .map_or_else(|| self.current_span(), Token::span),
+            });
+        }
+        if self
+            .current()
+            .is_some_and(|token| token.kind == TokenKind::Dot)
+        {
+            return Err(QueryParseError {
+                code: "ORNA0001",
+                message: "record constructor fields do not support field paths or qualified values"
+                    .to_owned(),
+                span: self.current_span(),
+            });
+        }
+        if self
+            .current()
+            .is_some_and(|token| token.kind == TokenKind::Other && token.text == "{")
+        {
+            return Err(QueryParseError {
+                code: "ORNA0001",
+                message: "record constructor fields do not support nested record constructors"
+                    .to_owned(),
+                span: self.current_span(),
+            });
+        }
+        Ok(RecordConstructorFieldValue::Parameter(parameter))
+    }
+
+    fn qualified_value_opens_constructor(&self) -> bool {
+        let mut significant = self
+            .tokens
+            .iter()
+            .skip(self.index)
+            .filter(|token| !token.kind.is_trivia())
+            .peekable();
+        loop {
+            let Some(dot) = significant.next() else {
+                return false;
+            };
+            if dot.kind != TokenKind::Dot {
+                return false;
+            }
+            let Some(name) = significant.next() else {
+                return false;
+            };
+            if !name.is_identifier() {
+                return false;
+            }
+            let Some(next) = significant.peek() else {
+                return false;
+            };
+            if next.kind == TokenKind::Other && next.text == "{" {
+                return true;
+            }
+            if next.kind != TokenKind::Dot {
+                return false;
+            }
+        }
     }
 }
 
@@ -2938,6 +3155,7 @@ impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
             let value = self.parse_mutation_value(
                 "use the declared parameter name by itself after '='; do not add an object or alias",
                 "function calls in UPDATE values",
+                false,
             )?;
             let assignment_span = SourceSpan {
                 start: target_field.span.start,
