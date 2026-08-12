@@ -430,6 +430,11 @@ for every x32-numbered syscall before any native x86-64 syscall comparison.
 Orna does not use the x32 ABI. An x32 syscall number cannot select an alias of
 `execve`, `execveat`, `memfd_create`, or an executable mapping operation.
 
+The support-root check and filter installation are compiled only into the
+private backend entry object built with `ORNA_EMBEDDED_ENTRY`. The ordinary
+PostgreSQL `main` object has no Orna runtime reference and retains its upstream
+startup behaviour.
+
 Preload lists, JIT, injection points, output plugins, archive libraries,
 archive commands, restore commands, recovery-end commands, and SSL remain
 disabled. `allow_alter_system=off` and an exact empty
@@ -753,7 +758,7 @@ than three files.
 | --- | --- | --- |
 | `build(embedded): add linked backend archive` | `src/backend/Makefile`; `src/backend/main/main.c`; `src/include/orna_embedded.h` | Add the private backend entry and deterministic flattened backend archive without changing the ordinary PostgreSQL executable. |
 | `feat(embedded): add runtime capabilities` | `src/backend/main/orna_embedded.c`; `src/include/orna_embedded.h` | Add the one-shot support root, initialisation capabilities, and executable-load filter implementation without activating it. Reject every x32-numbered syscall with `EPERM` before native syscall dispatch and fail compilation when the accepted x86-64 syscall definitions are absent. |
-| `build(embedded): link runtime capabilities` | `src/backend/Makefile`; `src/backend/main/main.c` | Link the runtime object and require the fixed support root and filter before private backend dispatch. |
+| `build(embedded): link runtime capabilities` | `src/backend/Makefile`; `src/backend/main/main.c` | Link the runtime object into the private archive and guard support-root validation and filter installation with `ORNA_EMBEDDED_ENTRY` before private backend dispatch. Keep the ordinary PostgreSQL `main` object free of Orna runtime references. |
 | `fix(embedded): use fixed postmaster support paths` | `src/backend/postmaster/postmaster.c`; `src/port/path.c` | Remove executable-relative postmaster, share, and `pkglib` path discovery from linked roles. |
 | `feat(embedded): reject executable SQL utilities` | `src/backend/tcop/utility.c`; `src/include/tcop/utility.h` | Reject executable utility statements before hooks, privilege checks, mutation, or file access. |
 | `feat(embedded): reject external function languages` | `src/backend/commands/functioncmds.c` | Reject external-language function definitions before path or catalogue work. |
@@ -827,6 +832,7 @@ prototype history and are not current source or build authority.
 | `fix(postgres): reject x32 syscall aliases` | `packaging/postgresql/embedded-postgresql-18.4/0002-embedded-runtime-capabilities-and-seccomp.patch`; `packaging/postgresql/embedded-build.toml`; `packaging/postgresql/build-embedded.sh` | Apply the same x32-first denial to the still-selected legacy patch authority, update its digest, advance the embedded identity to `.2`, and prove in a fresh filtered child that an x32-numbered harmless syscall returns `EPERM` before the legacy build is reproduced twice. |
 | `fix(ci): run the legacy embedded proof` | `.github/workflows/postgresql-embedded.yml` | Watch the complete ordered patch-series directory, pass one explicit absolute repository-local output root to the still-selected legacy builder, and upload that exact verified evidence root. |
 | `chore(postgres): advance runtime capabilities` | `third_party/postgresql` | Advance the gitlink by only `feat(embedded): add runtime capabilities` after its ordinary build gate passes. |
+| `fix(postgres): guard legacy embedded entry setup` | `packaging/postgresql/embedded-postgresql-18.4/0002-embedded-runtime-capabilities-and-seccomp.patch`; `packaging/postgresql/embedded-build.toml`; `packaging/postgresql/build-embedded.sh` | Add the same `ORNA_EMBEDDED_ENTRY` guard to the still-selected legacy patch authority, update its digest, advance the embedded identity from `.2` to `.3`, prove that the ordinary `main` object has no Orna runtime reference, and reproduce the full selected legacy proof twice before the fork linkage commit. The later native recipe inherits identity `.3`. |
 | `chore(postgres): advance runtime linkage` | `third_party/postgresql` | Advance the gitlink by only `build(embedded): link runtime capabilities` after its ordinary and private-target gates pass. |
 | `chore(postgres): advance fixed postmaster paths` | `third_party/postgresql` | Advance the gitlink by only `fix(embedded): use fixed postmaster support paths` after its ordinary build gate passes. |
 | `chore(postgres): advance executable SQL guard` | `third_party/postgresql` | Advance the gitlink by only `feat(embedded): reject executable SQL utilities` after its ordinary build gate passes. |
