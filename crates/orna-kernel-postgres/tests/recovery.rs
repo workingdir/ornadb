@@ -1,6 +1,10 @@
 mod support;
 
-use std::{error::Error, str::FromStr};
+use std::{
+    error::Error,
+    str::FromStr,
+    time::{Duration, UNIX_EPOCH},
+};
 
 use orna_client::evaluate_client_function;
 use orna_compiler::{
@@ -33,8 +37,8 @@ use orna_core::{
     security::{
         ExecuteDecision, ExecuteDenial, ExecuteGrant, InvocationTarget,
         LocalPeerAuthenticationError, LocalPeerCredential, Principal, PrincipalKind,
-        PrincipalStatus, RoleMembership, SecuritySnapshot, SecuritySnapshotError,
-        SessionBindingError,
+        PrincipalStatus, RoleMembership, SecurityAuditDecision, SecurityAuditEvent,
+        SecuritySnapshot, SecuritySnapshotError, SessionBindingError,
     },
     types::{ResolvedType, StandardScalar},
     value::RuntimeValue,
@@ -627,6 +631,257 @@ async fn persists_recovers_revokes_and_disables_execute_authority() -> TestResul
                 PostgresKernelError::SecuritySnapshot(SecuritySnapshotError::CyclicRoleMembership)
             ),
             "durable role cycle returned the wrong typed error",
+        )?;
+        require_no_session_leaks(&database).await
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn recovers_closed_security_audit_history_and_rejects_tamper() -> TestResult<()> {
+    const USER: PrincipalId = PrincipalId::from_bytes([0x31; 16]);
+    const EFFECTIVE: PrincipalId = PrincipalId::from_bytes([0x32; 16]);
+    const AUTHORISING: PrincipalId = PrincipalId::from_bytes([0x33; 16]);
+    const FUNCTION: FunctionId = FunctionId::from_bytes([0xf1; 16]);
+    const PAIR: RevisionPair = RevisionPair::new(
+        SourceRevisionId::from_bytes([0x51; 16]),
+        CatalogueRevisionId::from_bytes([0xc1; 16]),
+    );
+
+    with_test_database(|database| async move {
+        let kernel = kernel(&database)?;
+        kernel.bootstrap().await?;
+        let session = database.open().await?;
+        let insertion = session
+            .client()
+            .batch_execute(
+                "INSERT INTO _orna_kernel.security_audit_events
+                     (event_id, recorded_at, event_kind, outcome, session_principal_id)
+                 VALUES
+                     (decode(repeat('a1', 16), 'hex'),
+                      TIMESTAMP '1969-12-31 23:59:59',
+                      'authentication', 'allowed', decode(repeat('31', 16), 'hex'));
+
+                 INSERT INTO _orna_kernel.security_audit_events
+                     (event_id, recorded_at, event_kind, outcome, denial_reason)
+                 VALUES
+                     (decode(repeat('a2', 16), 'hex'),
+                      TIMESTAMP '1970-01-01 00:00:00',
+                      'authentication', 'denied', 'authentication_unknown_uid');
+
+                 INSERT INTO _orna_kernel.security_audit_events
+                     (event_id, recorded_at, event_kind, outcome,
+                      session_principal_id, effective_principal_id,
+                      authorising_principal_id, function_id, source_revision_id,
+                      catalogue_revision_id)
+                 VALUES
+                     (decode(repeat('a3', 16), 'hex'),
+                      TIMESTAMP '1970-01-01 00:00:01',
+                      'execute', 'allowed',
+                      decode(repeat('31', 16), 'hex'),
+                      decode(repeat('32', 16), 'hex'),
+                      decode(repeat('33', 16), 'hex'),
+                      decode(repeat('f1', 16), 'hex'),
+                      decode(repeat('51', 16), 'hex'),
+                      decode(repeat('c1', 16), 'hex'));
+
+                 INSERT INTO _orna_kernel.security_audit_events
+                     (event_id, recorded_at, event_kind, outcome,
+                      session_principal_id, function_id, source_revision_id,
+                      catalogue_revision_id, denial_reason)
+                 VALUES
+                     (decode(repeat('a4', 16), 'hex'),
+                      TIMESTAMP '1970-01-01 00:00:02',
+                      'execute', 'denied',
+                      decode(repeat('31', 16), 'hex'),
+                      decode(repeat('f1', 16), 'hex'),
+                      decode(repeat('51', 16), 'hex'),
+                      decode(repeat('c1', 16), 'hex'),
+                      'execute_missing_grant');",
+            )
+            .await
+            .map_err(Into::into);
+        finish_session(
+            insertion,
+            session.shutdown().await,
+            "security audit fixture insertion",
+        )?;
+
+        let target = InvocationTarget::new(FUNCTION, PAIR);
+        let expected = vec![
+            SecurityAuditEvent::new(
+                orna_core::SecurityAuditEventId::from_bytes([0xa1; 16]),
+                1,
+                UNIX_EPOCH - Duration::from_secs(1),
+                SecurityAuditDecision::recover_authentication_allowed(USER),
+            ),
+            SecurityAuditEvent::new(
+                orna_core::SecurityAuditEventId::from_bytes([0xa2; 16]),
+                2,
+                UNIX_EPOCH,
+                SecurityAuditDecision::authentication_denied(
+                    None,
+                    LocalPeerAuthenticationError::UnknownUid,
+                )?,
+            ),
+            SecurityAuditEvent::new(
+                orna_core::SecurityAuditEventId::from_bytes([0xa3; 16]),
+                3,
+                UNIX_EPOCH + Duration::from_secs(1),
+                SecurityAuditDecision::recover_execute_allowed(
+                    USER,
+                    EFFECTIVE,
+                    AUTHORISING,
+                    target,
+                ),
+            ),
+            SecurityAuditEvent::new(
+                orna_core::SecurityAuditEventId::from_bytes([0xa4; 16]),
+                4,
+                UNIX_EPOCH + Duration::from_secs(2),
+                SecurityAuditDecision::recover_execute_denied(
+                    USER,
+                    target,
+                    ExecuteDenial::MissingExecuteGrant,
+                ),
+            ),
+        ];
+        let recovered = PostgresKernel::new(database.config()?)
+            .recover_security_audit_events()
+            .await?;
+        require(
+            recovered == expected,
+            "security audit recovery changed order, time, identity, or decision evidence",
+        )?;
+
+        let session = database.open().await?;
+        session
+            .client()
+            .batch_execute(
+                "ALTER TABLE _orna_kernel.security_audit_events
+                     DROP CONSTRAINT security_audit_events_shape_check,
+                     DROP CONSTRAINT security_audit_events_revision_pair_check,
+                     DROP CONSTRAINT security_audit_events_denial_reason_check;
+                 UPDATE _orna_kernel.security_audit_events
+                 SET function_id = decode(repeat('f1', 16), 'hex')
+                 WHERE sequence = 1;",
+            )
+            .await?;
+
+        let error = kernel
+            .recover_security_audit_events()
+            .await
+            .expect_err("invalid durable security audit shape must fail recovery");
+        require(
+            matches!(
+                error,
+                PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.security_audit_events",
+                    ref record,
+                    rule: "audit event shape is not recognised",
+                } if record == "1"
+            ),
+            "security audit shape tamper returned the wrong durable invariant",
+        )?;
+
+        let retained: bool = session
+            .client()
+            .query_one(
+                "SELECT function_id = decode(repeat('f1', 16), 'hex')
+                 FROM _orna_kernel.security_audit_events
+                 WHERE sequence = 1",
+                &[],
+            )
+            .await?
+            .get(0);
+        require(
+            retained,
+            "rejected security audit shape tamper was repaired",
+        )?;
+
+        session
+            .client()
+            .batch_execute(
+                "UPDATE _orna_kernel.security_audit_events
+                 SET function_id = NULL
+                 WHERE sequence = 1;
+                 UPDATE _orna_kernel.security_audit_events
+                 SET catalogue_revision_id = NULL
+                 WHERE sequence = 4;",
+            )
+            .await?;
+        let error = kernel
+            .recover_security_audit_events()
+            .await
+            .expect_err("incomplete durable security audit pair must fail recovery");
+        require(
+            matches!(
+                error,
+                PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.security_audit_events",
+                    ref record,
+                    rule: "EXECUTE requires a catalogue revision",
+                } if record == "4"
+            ),
+            "security audit pair tamper returned the wrong durable invariant",
+        )?;
+        let retained_pair: bool = session
+            .client()
+            .query_one(
+                "SELECT catalogue_revision_id IS NULL
+                 FROM _orna_kernel.security_audit_events
+                 WHERE sequence = 4",
+                &[],
+            )
+            .await?
+            .get(0);
+        require(
+            retained_pair,
+            "rejected security audit pair tamper was repaired",
+        )?;
+
+        session
+            .client()
+            .batch_execute(
+                "UPDATE _orna_kernel.security_audit_events
+                 SET catalogue_revision_id = decode(repeat('c1', 16), 'hex'),
+                     denial_reason = 'execute_not_supported'
+                 WHERE sequence = 4;",
+            )
+            .await?;
+        let error = kernel
+            .recover_security_audit_events()
+            .await
+            .expect_err("unknown durable security audit denial must fail recovery");
+        require(
+            matches!(
+                error,
+                PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.security_audit_events",
+                    ref record,
+                    rule: "EXECUTE denial reason is unsupported",
+                } if record == "4"
+            ),
+            "security audit denial tamper returned the wrong durable invariant",
+        )?;
+        let retained_reason: String = session
+            .client()
+            .query_one(
+                "SELECT denial_reason
+                 FROM _orna_kernel.security_audit_events
+                 WHERE sequence = 4",
+                &[],
+            )
+            .await?
+            .get(0);
+        finish_session(
+            require(
+                retained_reason == "execute_not_supported",
+                "rejected security audit denial tamper was repaired",
+            ),
+            session.shutdown().await,
+            "security audit tamper retention checks",
         )?;
         require_no_session_leaks(&database).await
     })

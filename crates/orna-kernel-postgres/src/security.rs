@@ -1,15 +1,19 @@
+use std::time::SystemTime;
+
 use orna_client::{
     ClientExecutionResult, evaluate_client_function as evaluate_authorised_client_function,
 };
 use orna_core::{
-    FunctionId, PrincipalId,
+    CatalogueRevisionId, FunctionId, PrincipalId, SecurityAuditEventId, SourceRevisionId,
     revision::{ActiveDatabaseRevision, RevisionPair},
     security::{
-        AuthenticatedSession, ExecuteDecision, ExecuteGrant, InvocationTarget, LocalPeerCredential,
-        Principal, PrincipalKind, PrincipalStatus, RoleMembership, SecuritySnapshot,
+        AuthenticatedSession, ExecuteDecision, ExecuteGrant, InvocationTarget,
+        LocalPeerAuthenticationError, LocalPeerCredential, Principal, PrincipalKind,
+        PrincipalStatus, RoleMembership, SecurityAuditDecision, SecurityAuditEvent,
+        SecuritySnapshot, SessionBindingError,
     },
 };
-use tokio_postgres::{IsolationLevel, Row, Transaction};
+use tokio_postgres::{IsolationLevel, Row, Transaction, types::FromSqlOwned};
 
 use crate::{
     PostgresKernel, PostgresKernelError, bootstrap::require_current_migrations,
@@ -108,6 +112,32 @@ impl PostgresKernel {
                 .await
                 .map_err(PostgresKernelError::Database)?;
             Ok(snapshot)
+        }
+        .await;
+        finish_security_session(operation, session.shutdown().await)
+    }
+
+    /// Recovers protected security audit history in database sequence order.
+    pub async fn recover_security_audit_events(
+        &self,
+    ) -> Result<Vec<SecurityAuditEvent>, PostgresKernelError> {
+        let mut session = self.open().await?;
+        let operation = async {
+            let transaction = session
+                .client
+                .build_transaction()
+                .isolation_level(IsolationLevel::RepeatableRead)
+                .read_only(true)
+                .start()
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            require_current_migrations(&transaction).await?;
+            let events = load_security_audit_events(&transaction).await?;
+            transaction
+                .commit()
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            Ok(events)
         }
         .await;
         finish_security_session(operation, session.shutdown().await)
@@ -457,6 +487,256 @@ async fn load_local_peer_credentials(
         .collect()
 }
 
+async fn load_security_audit_events(
+    transaction: &Transaction<'_>,
+) -> Result<Vec<SecurityAuditEvent>, PostgresKernelError> {
+    transaction
+        .query(
+            "SELECT sequence, event_id, recorded_at, event_kind, outcome,
+                    session_principal_id, effective_principal_id,
+                    authorising_principal_id, function_id, source_revision_id,
+                    catalogue_revision_id, denial_reason
+             FROM _orna_kernel.security_audit_events
+             ORDER BY sequence",
+            &[],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?
+        .iter()
+        .map(decode_security_audit_event)
+        .collect()
+}
+
+fn decode_security_audit_event(row: &Row) -> Result<SecurityAuditEvent, PostgresKernelError> {
+    let sequence: i64 = audit_column(row, "selected row", "sequence")?;
+    let record = sequence.to_string();
+    let id = SecurityAuditEventId::from_bytes(audit_id(row, &record, "event_id")?);
+    let recorded_at: SystemTime = audit_column(row, &record, "recorded_at")?;
+    let kind: String = audit_column(row, &record, "event_kind")?;
+    let outcome: String = audit_column(row, &record, "outcome")?;
+    let session_principal =
+        audit_optional_id(row, &record, "session_principal_id")?.map(PrincipalId::from_bytes);
+    let effective_principal =
+        audit_optional_id(row, &record, "effective_principal_id")?.map(PrincipalId::from_bytes);
+    let authorising_principal =
+        audit_optional_id(row, &record, "authorising_principal_id")?.map(PrincipalId::from_bytes);
+    let function = audit_optional_id(row, &record, "function_id")?.map(FunctionId::from_bytes);
+    let source_revision =
+        audit_optional_id(row, &record, "source_revision_id")?.map(SourceRevisionId::from_bytes);
+    let catalogue_revision = audit_optional_id(row, &record, "catalogue_revision_id")?
+        .map(CatalogueRevisionId::from_bytes);
+    let denial_reason: Option<String> = audit_column(row, &record, "denial_reason")?;
+
+    let decision = match (kind.as_str(), outcome.as_str()) {
+        ("authentication", "allowed")
+            if effective_principal.is_none()
+                && authorising_principal.is_none()
+                && function.is_none()
+                && source_revision.is_none()
+                && catalogue_revision.is_none()
+                && denial_reason.is_none() =>
+        {
+            SecurityAuditDecision::recover_authentication_allowed(require_audit_value(
+                session_principal,
+                &record,
+                "allowed authentication requires a session principal",
+            )?)
+        }
+        ("authentication", "denied")
+            if effective_principal.is_none()
+                && authorising_principal.is_none()
+                && function.is_none()
+                && source_revision.is_none()
+                && catalogue_revision.is_none() =>
+        {
+            let reason = decode_authentication_audit_denial(
+                require_audit_value(
+                    denial_reason,
+                    &record,
+                    "denied authentication requires a reason",
+                )?,
+                &record,
+            )?;
+            SecurityAuditDecision::authentication_denied(session_principal, reason).map_err(
+                |_| audit_invariant(&record, "authentication principal and reason must agree"),
+            )?
+        }
+        ("execute", "allowed") if denial_reason.is_none() => {
+            let target = audit_target(function, source_revision, catalogue_revision, &record)?;
+            SecurityAuditDecision::recover_execute_allowed(
+                require_audit_value(
+                    session_principal,
+                    &record,
+                    "allowed EXECUTE requires a session principal",
+                )?,
+                require_audit_value(
+                    effective_principal,
+                    &record,
+                    "allowed EXECUTE requires an effective principal",
+                )?,
+                require_audit_value(
+                    authorising_principal,
+                    &record,
+                    "allowed EXECUTE requires an authorising principal",
+                )?,
+                target,
+            )
+        }
+        ("execute", "denied")
+            if effective_principal.is_none() && authorising_principal.is_none() =>
+        {
+            let target = audit_target(function, source_revision, catalogue_revision, &record)?;
+            let reason = decode_execute_audit_denial(
+                require_audit_value(denial_reason, &record, "denied EXECUTE requires a reason")?,
+                &record,
+            )?;
+            SecurityAuditDecision::recover_execute_denied(
+                require_audit_value(
+                    session_principal,
+                    &record,
+                    "denied EXECUTE requires a session principal",
+                )?,
+                target,
+                reason,
+            )
+        }
+        _ => {
+            return Err(audit_invariant(
+                &record,
+                "audit event shape is not recognised",
+            ));
+        }
+    };
+
+    Ok(SecurityAuditEvent::new(id, sequence, recorded_at, decision))
+}
+
+fn audit_target(
+    function: Option<FunctionId>,
+    source: Option<SourceRevisionId>,
+    catalogue: Option<CatalogueRevisionId>,
+    record: &str,
+) -> Result<InvocationTarget, PostgresKernelError> {
+    Ok(InvocationTarget::new(
+        require_audit_value(function, record, "EXECUTE requires a function")?,
+        RevisionPair::new(
+            require_audit_value(source, record, "EXECUTE requires a source revision")?,
+            require_audit_value(catalogue, record, "EXECUTE requires a catalogue revision")?,
+        ),
+    ))
+}
+
+fn decode_authentication_audit_denial(
+    value: String,
+    record: &str,
+) -> Result<LocalPeerAuthenticationError, PostgresKernelError> {
+    let invalid = |reason| LocalPeerAuthenticationError::InvalidPrincipal(reason);
+    match value.as_str() {
+        "authentication_unknown_uid" => Ok(LocalPeerAuthenticationError::UnknownUid),
+        "authentication_unknown_session_principal" => {
+            Ok(invalid(SessionBindingError::UnknownSessionPrincipal))
+        }
+        "authentication_disabled_session_principal" => {
+            Ok(invalid(SessionBindingError::DisabledSessionPrincipal))
+        }
+        "authentication_role_cannot_authenticate" => {
+            Ok(invalid(SessionBindingError::RoleCannotAuthenticate))
+        }
+        "authentication_duplicate_active_role" => {
+            Ok(invalid(SessionBindingError::DuplicateActiveRole))
+        }
+        "authentication_unknown_active_role" => Ok(invalid(SessionBindingError::UnknownActiveRole)),
+        "authentication_disabled_active_role" => {
+            Ok(invalid(SessionBindingError::DisabledActiveRole))
+        }
+        "authentication_active_principal_is_not_role" => {
+            Ok(invalid(SessionBindingError::ActivePrincipalIsNotRole))
+        }
+        "authentication_unreachable_active_role" => {
+            Ok(invalid(SessionBindingError::UnreachableActiveRole))
+        }
+        _ => Err(audit_invariant(
+            record,
+            "authentication denial reason is unsupported",
+        )),
+    }
+}
+
+fn decode_execute_audit_denial(
+    value: String,
+    record: &str,
+) -> Result<orna_core::security::ExecuteDenial, PostgresKernelError> {
+    use orna_core::security::ExecuteDenial;
+
+    match value.as_str() {
+        "execute_invalid_session" => Ok(ExecuteDenial::InvalidSession),
+        "execute_unknown_function" => Ok(ExecuteDenial::UnknownFunction),
+        "execute_revision_mismatch" => Ok(ExecuteDenial::RevisionMismatch),
+        "execute_missing_grant" => Ok(ExecuteDenial::MissingExecuteGrant),
+        _ => Err(audit_invariant(
+            record,
+            "EXECUTE denial reason is unsupported",
+        )),
+    }
+}
+
+fn require_audit_value<T>(
+    value: Option<T>,
+    record: &str,
+    rule: &'static str,
+) -> Result<T, PostgresKernelError> {
+    value.ok_or_else(|| audit_invariant(record, rule))
+}
+
+fn audit_optional_id(
+    row: &Row,
+    record: &str,
+    column: &'static str,
+) -> Result<Option<[u8; 16]>, PostgresKernelError> {
+    let value: Option<Vec<u8>> = audit_column(row, record, column)?;
+    value
+        .map(|bytes| {
+            bytes.try_into().map_err(|_| {
+                audit_invariant(record, "audit identity must be exactly sixteen bytes")
+            })
+        })
+        .transpose()
+}
+
+fn audit_id(
+    row: &Row,
+    record: &str,
+    column: &'static str,
+) -> Result<[u8; 16], PostgresKernelError> {
+    let bytes: Vec<u8> = audit_column(row, record, column)?;
+    bytes
+        .try_into()
+        .map_err(|_| audit_invariant(record, "audit event identity must be exactly sixteen bytes"))
+}
+
+fn audit_column<T: FromSqlOwned>(
+    row: &Row,
+    record: &str,
+    column: &'static str,
+) -> Result<T, PostgresKernelError> {
+    row.try_get(column)
+        .map_err(|source| PostgresKernelError::RowDecode {
+            relation: "_orna_kernel.security_audit_events",
+            record: record.to_owned(),
+            column,
+            rule: "security audit column must use its exact PostgreSQL type",
+            source,
+        })
+}
+
+fn audit_invariant(record: &str, rule: &'static str) -> PostgresKernelError {
+    PostgresKernelError::DurableInvariant {
+        relation: "_orna_kernel.security_audit_events",
+        record: record.to_owned(),
+        rule,
+    }
+}
+
 fn exact_id(
     row: &Row,
     column: &'static str,
@@ -531,5 +811,106 @@ fn decode_principal_status(value: String) -> Result<PrincipalStatus, PostgresKer
             record: value,
             rule: "principal status must be active or disabled",
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use orna_core::security::ExecuteDenial;
+
+    #[test]
+    fn audit_denial_decoder_maps_the_complete_closed_vocabulary() {
+        let authentication = [
+            (
+                "authentication_unknown_uid",
+                LocalPeerAuthenticationError::UnknownUid,
+            ),
+            (
+                "authentication_unknown_session_principal",
+                LocalPeerAuthenticationError::InvalidPrincipal(
+                    SessionBindingError::UnknownSessionPrincipal,
+                ),
+            ),
+            (
+                "authentication_disabled_session_principal",
+                LocalPeerAuthenticationError::InvalidPrincipal(
+                    SessionBindingError::DisabledSessionPrincipal,
+                ),
+            ),
+            (
+                "authentication_role_cannot_authenticate",
+                LocalPeerAuthenticationError::InvalidPrincipal(
+                    SessionBindingError::RoleCannotAuthenticate,
+                ),
+            ),
+            (
+                "authentication_duplicate_active_role",
+                LocalPeerAuthenticationError::InvalidPrincipal(
+                    SessionBindingError::DuplicateActiveRole,
+                ),
+            ),
+            (
+                "authentication_unknown_active_role",
+                LocalPeerAuthenticationError::InvalidPrincipal(
+                    SessionBindingError::UnknownActiveRole,
+                ),
+            ),
+            (
+                "authentication_disabled_active_role",
+                LocalPeerAuthenticationError::InvalidPrincipal(
+                    SessionBindingError::DisabledActiveRole,
+                ),
+            ),
+            (
+                "authentication_active_principal_is_not_role",
+                LocalPeerAuthenticationError::InvalidPrincipal(
+                    SessionBindingError::ActivePrincipalIsNotRole,
+                ),
+            ),
+            (
+                "authentication_unreachable_active_role",
+                LocalPeerAuthenticationError::InvalidPrincipal(
+                    SessionBindingError::UnreachableActiveRole,
+                ),
+            ),
+        ];
+        for (stored, expected) in authentication {
+            assert_eq!(
+                decode_authentication_audit_denial(stored.to_owned(), "41")
+                    .expect("closed authentication reason must decode"),
+                expected
+            );
+        }
+
+        for (stored, expected) in [
+            ("execute_invalid_session", ExecuteDenial::InvalidSession),
+            ("execute_unknown_function", ExecuteDenial::UnknownFunction),
+            ("execute_revision_mismatch", ExecuteDenial::RevisionMismatch),
+            ("execute_missing_grant", ExecuteDenial::MissingExecuteGrant),
+        ] {
+            assert_eq!(
+                decode_execute_audit_denial(stored.to_owned(), "42")
+                    .expect("closed EXECUTE reason must decode"),
+                expected
+            );
+        }
+
+        assert!(matches!(
+            decode_authentication_audit_denial("authentication_other".to_owned(), "43"),
+            Err(PostgresKernelError::DurableInvariant {
+                relation: "_orna_kernel.security_audit_events",
+                ref record,
+                rule: "authentication denial reason is unsupported",
+            }) if record == "43"
+        ));
+        assert!(matches!(
+            decode_execute_audit_denial("execute_other".to_owned(), "44"),
+            Err(PostgresKernelError::DurableInvariant {
+                relation: "_orna_kernel.security_audit_events",
+                ref record,
+                rule: "EXECUTE denial reason is unsupported",
+            }) if record == "44"
+        ));
     }
 }

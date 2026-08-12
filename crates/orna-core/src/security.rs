@@ -416,9 +416,12 @@ pub struct SecurityAuditDecision(SecurityAuditDecisionShape);
 impl SecurityAuditDecision {
     /// Records an allowed authentication decision for one bound session.
     pub fn authentication_allowed(session: &AuthenticatedSession) -> Self {
-        Self(SecurityAuditDecisionShape::AuthenticationAllowed {
-            session_principal: session.principal,
-        })
+        Self::recover_authentication_allowed(session.principal)
+    }
+
+    /// Recovers an allowed authentication decision from protected storage.
+    pub const fn recover_authentication_allowed(session_principal: PrincipalId) -> Self {
+        Self(SecurityAuditDecisionShape::AuthenticationAllowed { session_principal })
     }
 
     /// Records a denied local authentication decision.
@@ -445,11 +448,26 @@ impl SecurityAuditDecision {
 
     /// Records an allowed `EXECUTE` decision from its immutable evidence.
     pub fn execute_allowed(authorised: &AuthorisedInvocation) -> Self {
+        Self::recover_execute_allowed(
+            authorised.session_principal,
+            authorised.effective_principal,
+            authorised.authorising_principal,
+            authorised.target,
+        )
+    }
+
+    /// Recovers an allowed `EXECUTE` decision from protected storage.
+    pub const fn recover_execute_allowed(
+        session_principal: PrincipalId,
+        effective_principal: PrincipalId,
+        authorising_principal: PrincipalId,
+        target: InvocationTarget,
+    ) -> Self {
         Self(SecurityAuditDecisionShape::ExecuteAllowed {
-            session_principal: authorised.session_principal,
-            effective_principal: authorised.effective_principal,
-            authorising_principal: authorised.authorising_principal,
-            target: authorised.target,
+            session_principal,
+            effective_principal,
+            authorising_principal,
+            target,
         })
     }
 
@@ -459,8 +477,17 @@ impl SecurityAuditDecision {
         target: InvocationTarget,
         reason: ExecuteDenial,
     ) -> Self {
+        Self::recover_execute_denied(session.principal, target, reason)
+    }
+
+    /// Recovers a denied `EXECUTE` decision from protected storage.
+    pub const fn recover_execute_denied(
+        session_principal: PrincipalId,
+        target: InvocationTarget,
+        reason: ExecuteDenial,
+    ) -> Self {
         Self(SecurityAuditDecisionShape::ExecuteDenied {
-            session_principal: session.principal,
+            session_principal,
             target,
             reason,
         })
