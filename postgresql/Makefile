@@ -9,6 +9,7 @@ OVERLAY_ROOT := $(CURDIR)/overlays/18.4
 PATCH_ROOT := $(CURDIR)/patches/18.4
 CONTAINERFILE := $(CURDIR)/Containerfile
 SUPPORT_BUILDER := $(CURDIR)/support_bundle.py
+MANIFEST_BUILDER := $(CURDIR)/engine_manifest.py
 IMAGE := orna-postgresql-engine:debian12-amd64-1
 SOURCE_DATE_EPOCH := 1778528675
 
@@ -46,7 +47,7 @@ CONFIGURE_FLAGS := \
 	--without-llvm \
 	--with-zlib
 
-.PHONY: help verify-inputs prepare-source build-image archives support-data update-source
+.PHONY: help verify-inputs prepare-source build-image archives support-data manifest update-source
 
 help:
 	@printf '%s\n' \
@@ -56,6 +57,7 @@ help:
 		'  make -C postgresql prepare-source TARGET_ROOT=<absolute-repo-target-path>' \
 		'  make -C postgresql archives TARGET_ROOT=<absolute-repo-target-path>' \
 		'  make -C postgresql support-data TARGET_ROOT=<absolute-repo-target-path>' \
+		'  make -C postgresql manifest TARGET_ROOT=<absolute-repo-target-path>' \
 		'  make -C postgresql update-source POSTGRESQL_REF=<full-commit>'
 
 verify-inputs:
@@ -69,14 +71,17 @@ verify-inputs:
 	[[ -z "$$(git -C "$(UPSTREAM_SOURCE)" status --porcelain=v1 --untracked-files=all)" ]] || { \
 		printf '%s\n' '[postgresql] error: the upstream checkout is not clean' >&2; exit 1; }; \
 	git -C "$(REPOSITORY_ROOT)" ls-files --error-unmatch -- \
-		postgresql/Makefile postgresql/Containerfile postgresql/support_bundle.py \
+		postgresql/Makefile postgresql/Containerfile \
+		postgresql/support_bundle.py postgresql/engine_manifest.py \
 		postgresql/overlays/18.4 postgresql/patches/18.4 >/dev/null; \
 	[[ -z "$$(git -C "$(REPOSITORY_ROOT)" ls-files --others --exclude-standard -- \
-		postgresql/Makefile postgresql/Containerfile postgresql/support_bundle.py \
+		postgresql/Makefile postgresql/Containerfile \
+		postgresql/support_bundle.py postgresql/engine_manifest.py \
 		postgresql/overlays/18.4 postgresql/patches/18.4)" ]] || { \
 		printf '%s\n' '[postgresql] error: the integration input contains an untracked file' >&2; exit 1; }; \
 	git -C "$(REPOSITORY_ROOT)" diff --quiet -- \
-		postgresql/Makefile postgresql/Containerfile postgresql/support_bundle.py \
+		postgresql/Makefile postgresql/Containerfile \
+		postgresql/support_bundle.py postgresql/engine_manifest.py \
 		postgresql/overlays/18.4 postgresql/patches/18.4 || { \
 		printf '%s\n' '[postgresql] error: the integration input differs from the Git index' >&2; exit 1; }; \
 	[[ -z "$$(find "$(OVERLAY_ROOT)" -mindepth 1 ! -type d ! -type f -print -quit)" ]] || { \
@@ -260,6 +265,10 @@ archives: prepare-source build-image
 	printf '%s\n' "[postgresql] built embedded archives below $${target_root}/output"
 
 support-data: archives
+
+manifest: support-data
+	@python3 "$(MANIFEST_BUILDER)" "$(REPOSITORY_ROOT)" "$(TARGET_ROOT)" "$(IMAGE)"
+	@printf '%s\n' "[postgresql] recorded build evidence below $(TARGET_ROOT)/output"
 
 update-source:
 	@reference='$(POSTGRESQL_REF)'; \
