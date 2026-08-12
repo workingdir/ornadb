@@ -1,3 +1,9 @@
+//! Typed Rust access to the PostgreSQL engine and support data linked into
+//! the Orna executable.
+//!
+//! PostgreSQL entry points own process-global state. Callers must use the
+//! process interfaces only from prepared, single-threaded child processes.
+
 #![cfg_attr(not(feature = "embedded"), allow(dead_code))]
 
 #[cfg(feature = "embedded")]
