@@ -11,6 +11,7 @@ pub use identity::{
     CheckedTypeId, ProvisionalExpressionId, ProvisionalFieldId, ProvisionalFunctionId,
     ProvisionalParameterId, ProvisionalSchemaId, ProvisionalTypeId,
 };
+use model::CheckedEnumType;
 pub use model::{
     CheckReport, CheckedApplicationTypeUse, CheckedBundle, CheckedClientFunction, CheckedDefault,
     CheckedDefinitionReference, CheckedDefinitionReferenceTarget, CheckedField,
@@ -438,8 +439,10 @@ fn validate_standard_source_shape(
     if parsed_unit.source_text() != stored_unit.content()
         || parsed_unit.source_text() != parsed_unit.syntax_text()
         || !catalogue.object_types().is_empty()
+        || !catalogue.enum_types().is_empty()
         || !catalogue.functions().is_empty()
         || !parsed_unit.parsed().object_types().is_empty()
+        || !parsed_unit.parsed().enum_types().is_empty()
         || !parsed_unit.parsed().field_renames().is_empty()
         || !parsed_unit.parsed().server_functions().is_empty()
         || !parsed_unit.parsed().client_functions().is_empty()
@@ -980,7 +983,7 @@ fn check_application_parsed(
     }
 
     let mut headers = Vec::new();
-    let mut declarations_by_name = HashMap::<QualifiedSemanticName, usize>::new();
+    let mut declarations_by_name = HashSet::<QualifiedSemanticName>::new();
     for unit in parse_report.units() {
         for declaration in unit.parsed().object_types() {
             let name = semantic_name(&declaration.name);
@@ -1002,7 +1005,7 @@ fn check_application_parsed(
                 ));
                 continue;
             }
-            if declarations_by_name.contains_key(&name) {
+            if !declarations_by_name.insert(name.clone()) {
                 diagnostics.push(diagnostic(
                     DiagnosticCode::DuplicateDefinition,
                     format!("duplicate object type definition {name}"),
@@ -1011,7 +1014,6 @@ fn check_application_parsed(
                 ));
                 continue;
             }
-            declarations_by_name.insert(name.clone(), headers.len());
             let id = assignments.type_id(
                 base.object_type_by_name(&name)
                     .map(|object_type| object_type.id()),
@@ -1020,6 +1022,71 @@ fn check_application_parsed(
                 declaration,
                 logical_path: unit.logical_path(),
                 id,
+            });
+        }
+    }
+
+    let mut checked_enum_types = Vec::new();
+    for unit in parse_report.units() {
+        for declaration in unit.parsed().enum_types() {
+            let name = semantic_name(&declaration.name);
+            let Some(namespace) = namespace_of(&name) else {
+                diagnostics.push(diagnostic(
+                    DiagnosticCode::UnknownQualifiedName,
+                    format!("enum type {name} has no declared schema"),
+                    unit.logical_path(),
+                    &declaration.name.span,
+                ));
+                continue;
+            };
+            if !known_schemas.contains(&namespace) {
+                diagnostics.push(diagnostic(
+                    DiagnosticCode::UnknownQualifiedName,
+                    format!("unknown schema {namespace} for enum type {name}"),
+                    unit.logical_path(),
+                    &declaration.name.span,
+                ));
+                continue;
+            }
+            if !declarations_by_name.insert(name.clone()) {
+                diagnostics.push(diagnostic(
+                    DiagnosticCode::DuplicateDefinition,
+                    format!("duplicate enum type definition {name}"),
+                    unit.logical_path(),
+                    &declaration.name.span,
+                ));
+                continue;
+            }
+
+            let mut labels = Vec::with_capacity(declaration.labels.len());
+            let mut distinct_labels = HashSet::with_capacity(declaration.labels.len());
+            let mut valid = true;
+            for label in &declaration.labels {
+                let decoded = decode_string_literal(&label.literal)
+                    .expect("parser accepted one complete enum string literal");
+                if !distinct_labels.insert(decoded.clone()) {
+                    diagnostics.push(diagnostic(
+                        DiagnosticCode::DuplicateDefinition,
+                        format!("duplicate enum label {decoded:?} in {name}"),
+                        unit.logical_path(),
+                        &label.literal.span,
+                    ));
+                    valid = false;
+                }
+                labels.push(decoded);
+            }
+            if !valid {
+                continue;
+            }
+
+            checked_enum_types.push(CheckedEnumType {
+                id: assignments.type_id(
+                    base.enum_type_by_name(&name)
+                        .map(|enum_type| enum_type.id()),
+                ),
+                name,
+                labels,
+                location: location(unit.logical_path(), &declaration.span),
             });
         }
     }
@@ -1240,6 +1307,7 @@ fn check_application_parsed(
             base_catalogue_revision: base.revision(),
             schemas: checked_schemas,
             object_types: checked_types,
+            enum_types: checked_enum_types,
             server_functions: checked_functions,
             client_functions: checked_client_functions,
             field_renames: field_renames
@@ -1266,6 +1334,9 @@ fn check_protected_source(parse_report: &ParseReport) -> Vec<CompilerDiagnostic>
             owners.push((&declaration.name, &declaration.name.span, &declaration.span));
         }
         for declaration in unit.parsed().object_types() {
+            owners.push((&declaration.name, &declaration.name.span, &declaration.span));
+        }
+        for declaration in unit.parsed().enum_types() {
             owners.push((&declaration.name, &declaration.name.span, &declaration.span));
         }
         for declaration in unit.parsed().primitive_value_types() {
@@ -3949,12 +4020,12 @@ mod tests {
             verify_standard_library_snapshot,
         },
         catalogue::{
-            CatalogueSnapshot, CatalogueSnapshotError, FieldDefinition, FunctionDefinition,
-            FunctionDomain, FunctionReturn, FunctionReturnColumnDefinition, FunctionSecurity,
-            FunctionTransaction, FunctionVolatility, ObjectTypeDefinition, OnDeleteAction,
-            ParameterDefinition, PreludeTypeName, QualifiedSemanticName, SchemaDefinition,
-            TypeBinding, TypeLookupName, ValueTypeDefinition, ValueTypeMutability,
-            ValueTypePersistence,
+            CatalogueSnapshot, CatalogueSnapshotError, EnumTypeDefinition, FieldDefinition,
+            FunctionDefinition, FunctionDomain, FunctionReturn, FunctionReturnColumnDefinition,
+            FunctionSecurity, FunctionTransaction, FunctionVolatility, ObjectTypeDefinition,
+            OnDeleteAction, ParameterDefinition, PreludeTypeName, QualifiedSemanticName,
+            SchemaDefinition, TypeBinding, TypeLookupName, ValueTypeDefinition,
+            ValueTypeMutability, ValueTypePersistence,
         },
         revision::{
             DefinitionIdentity, DefinitionOrigin, DefinitionReferenceKind, Sha256Digest,
@@ -4397,6 +4468,90 @@ mod tests {
                 .map(|(path, source)| SourceUnit::new(path, source)),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn resolves_enum_labels_and_rejects_decoded_duplicates_before_a_checked_bundle() {
+        let accepted = check(
+            &bundle([(
+                "types.orna",
+                "CREATE SCHEMA crm; CREATE TYPE crm.stage AS ENUM ('lead', 'owner''s');",
+            )]),
+            &empty_catalogue(),
+        );
+        assert!(accepted.diagnostics().is_empty());
+        let checked = accepted.checked_bundle().unwrap();
+        let enum_types = checked.enum_types().collect::<Vec<_>>();
+        assert_eq!(enum_types.len(), 1);
+        assert_eq!(enum_types[0].1.to_string(), "crm.stage");
+        assert_eq!(enum_types[0].2, &["lead", "owner's"]);
+
+        let existing_id = TypeId::from_bytes([0x44; 16]);
+        let base = CatalogueSnapshot::new_with_enum_types(
+            CatalogueRevisionId::from_bytes([0x45; 16]),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes([0x46; 16]),
+                QualifiedSemanticName::new(["crm"]).unwrap(),
+            )],
+            vec![],
+            vec![],
+            vec![EnumTypeDefinition::new(
+                existing_id,
+                QualifiedSemanticName::new(["crm", "stage"]).unwrap(),
+                ["lead"],
+            )],
+            vec![],
+        )
+        .unwrap();
+        let changed = check(
+            &bundle([(
+                "types.orna",
+                "CREATE SCHEMA crm; CREATE TYPE crm.stage AS ENUM ('lead', 'customer');",
+            )]),
+            &base,
+        );
+        assert_eq!(
+            changed
+                .checked_bundle()
+                .unwrap()
+                .enum_types()
+                .next()
+                .unwrap()
+                .0,
+            CheckedTypeId::Existing(existing_id)
+        );
+
+        let duplicate = check(
+            &bundle([(
+                "types.orna",
+                "CREATE SCHEMA crm; CREATE TYPE crm.stage AS ENUM ('owner''s', 'owner''s');",
+            )]),
+            &empty_catalogue(),
+        );
+        assert!(duplicate.checked_bundle().is_none());
+        assert_eq!(duplicate.diagnostics().len(), 1);
+        assert_eq!(
+            duplicate.diagnostics()[0].message(),
+            "duplicate enum label \"owner's\" in crm.stage"
+        );
+    }
+
+    #[test]
+    fn enum_and_object_declarations_share_one_resolved_type_namespace() {
+        let report = check(
+            &bundle([(
+                "types.orna",
+                "CREATE SCHEMA crm; CREATE TYPE crm.stage AS OBJECT (); CREATE TYPE crm.stage AS ENUM ('lead');",
+            )]),
+            &empty_catalogue(),
+        );
+
+        assert!(report.checked_bundle().is_none());
+        assert_eq!(report.diagnostics().len(), 1);
+        assert_eq!(
+            report.diagnostics()[0].message(),
+            "duplicate enum type definition crm.stage"
+        );
     }
 
     fn standard_reconciliation_inputs(

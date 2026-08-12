@@ -40,10 +40,10 @@ use orna_core::{
         source_unit_content_digest,
     },
     catalogue::{
-        CatalogueSnapshot, CatalogueSnapshotError, FieldDefinition, FunctionDefinition,
-        FunctionDomain, FunctionReturn, FunctionReturnColumnDefinition, FunctionSecurity,
-        FunctionTransaction, FunctionVolatility, ObjectTypeDefinition, ParameterDefinition,
-        QualifiedSemanticName, SchemaDefinition,
+        CatalogueSnapshot, CatalogueSnapshotError, EnumTypeDefinition, FieldDefinition,
+        FunctionDefinition, FunctionDomain, FunctionReturn, FunctionReturnColumnDefinition,
+        FunctionSecurity, FunctionTransaction, FunctionVolatility, ObjectTypeDefinition,
+        ParameterDefinition, QualifiedSemanticName, SchemaDefinition,
     },
     revision::{
         ActiveDatabaseRevision, CatalogueHashContext, DefinitionIdentity, DefinitionOrigin,
@@ -777,6 +777,12 @@ fn active_std_namespace_occupant(catalogue: &CatalogueSnapshot) -> Option<Qualif
                 .map(ObjectTypeDefinition::name),
         )
         .chain(catalogue.value_types().iter().map(|value| value.name()))
+        .chain(
+            catalogue
+                .enum_types()
+                .iter()
+                .map(|enum_type| enum_type.name()),
+        )
         .find(|name| name_starts_std(name))
         .cloned()
         .or_else(|| {
@@ -867,6 +873,21 @@ pub(crate) fn active_reserved_standard_identity(
                 .any(|reserved| reserved.id() == value.id())
         {
             return Some(StandardUpgradeIdentity::Type(value.id()));
+        }
+    }
+    for enum_type in catalogue.enum_types() {
+        if snapshot
+            .catalogue()
+            .object_types()
+            .iter()
+            .any(|reserved| reserved.id() == enum_type.id())
+            || snapshot
+                .catalogue()
+                .value_types()
+                .iter()
+                .any(|reserved| reserved.id() == enum_type.id())
+        {
+            return Some(StandardUpgradeIdentity::Type(enum_type.id()));
         }
     }
     for binding in catalogue.type_bindings() {
@@ -3397,6 +3418,9 @@ fn checked_locations(checked: &CheckedBundle) -> Vec<&SourceLocation> {
             }
         }
     }
+    for (_, _, _, location) in checked.enum_types() {
+        locations.push(location);
+    }
     for function in checked.server_functions() {
         locations.push(function.location());
         locations.extend(function.parameters().iter().map(|value| value.location()));
@@ -3774,6 +3798,24 @@ impl IdentityMap {
             }
         }
 
+        for (checked_id, _, _, _) in checked.enum_types() {
+            let type_id = match checked_id {
+                CheckedTypeId::Existing(id) => id,
+                CheckedTypeId::Provisional(_) if allow_provisional => allocations.type_id(),
+                CheckedTypeId::Provisional(_) => {
+                    return Err(PrepareError::InvalidCheckedBundle {
+                        reason: "matched active source contains a provisional enum type",
+                    });
+                }
+            };
+            insert_unique(
+                &mut result.types,
+                checked_id,
+                type_id,
+                "duplicate checked enum type",
+            )?;
+        }
+
         match function_identities {
             None => {
                 for function in checked.server_functions() {
@@ -3958,6 +4000,19 @@ impl IdentityMap {
                         return Err(existing_mismatch(DefinitionIdentity::Expression(id)));
                     }
                 }
+            }
+        }
+
+        for (checked_id, name, _, _) in checked.enum_types() {
+            let CheckedTypeId::Existing(id) = checked_id else {
+                continue;
+            };
+            let matches = active
+                .catalogue()
+                .enum_type_by_id(id)
+                .is_some_and(|base| base.name() == name);
+            if !matches {
+                return Err(existing_mismatch(DefinitionIdentity::ValueType(id)));
             }
         }
 
@@ -4447,6 +4502,7 @@ fn catalogue_matches(left: &CatalogueSnapshot, right: &CatalogueSnapshot) -> boo
         && same_member_multiset(left.schemas(), right.schemas())
         && same_member_multiset(left.object_types(), right.object_types())
         && same_member_multiset(left.value_types(), right.value_types())
+        && same_member_multiset(left.enum_types(), right.enum_types())
         && same_member_multiset(left.type_bindings(), right.type_bindings())
         && same_member_multiset(left.functions(), right.functions())
 }
@@ -4657,6 +4713,7 @@ impl<'a> CandidateBuilder<'a> {
     fn materialise(mut self) -> Result<CandidateMaterial, PrepareError> {
         let schemas = self.build_schemas()?;
         let object_types = self.build_object_types()?;
+        let enum_types = self.build_enum_types()?;
         self.build_functions(&object_types.compatibility)?;
         if self
             .declaration_evidence
@@ -4668,10 +4725,13 @@ impl<'a> CandidateBuilder<'a> {
             });
         }
 
-        let catalogue = CatalogueSnapshot::new_with_functions(
+        let catalogue = CatalogueSnapshot::new_with_functions_and_enum_types(
             self.catalogue_revision,
             schemas,
             object_types.durable,
+            Vec::new(),
+            enum_types,
+            Vec::new(),
             self.functions,
         )?;
         Ok(CandidateMaterial {
@@ -4822,6 +4882,30 @@ impl<'a> CandidateBuilder<'a> {
             compatibility,
             durable,
         })
+    }
+
+    fn build_enum_types(&mut self) -> Result<Vec<EnumTypeDefinition>, PrepareError> {
+        let checked = self
+            .checked
+            .enum_types()
+            .map(|(id, name, labels, location)| {
+                Ok((
+                    EnumTypeDefinition::new(
+                        self.identities.type_id(id)?,
+                        name.clone(),
+                        labels.iter().cloned(),
+                    ),
+                    location.clone(),
+                ))
+            })
+            .collect::<Result<Vec<_>, PrepareError>>()?;
+        for (enum_type, location) in &checked {
+            self.push_origin(DefinitionIdentity::ValueType(enum_type.id()), location)?;
+        }
+        Ok(checked
+            .into_iter()
+            .map(|(enum_type, _)| enum_type)
+            .collect())
     }
 
     fn record_object_type_metadata(&mut self) -> Result<(), PrepareError> {
@@ -5807,6 +5891,54 @@ mod tests {
         assert!(same_member_multiset(&[1_u8, 2, 2, 3], &[3, 2, 1, 2]));
         assert!(!same_member_multiset(&[1_u8, 2, 2, 3], &[3, 2, 1, 4]));
         assert!(!same_member_multiset(&[1_u8, 2, 2, 3], &[3, 2, 1, 1]));
+    }
+
+    #[test]
+    fn legacy_preparation_reaches_the_explicit_enum_hash_version_gate() {
+        let active = empty_active();
+        let report = checked_report(
+            "CREATE SCHEMA crm; CREATE TYPE crm.stage AS ENUM ('lead', 'customer');",
+            active.catalogue(),
+        );
+        assert!(report.diagnostics().is_empty());
+        let checked = report.checked_bundle().unwrap();
+        let mut allocations = CandidateAllocator::legacy();
+        let identities = IdentityMap::build_legacy(checked, &active, &mut allocations).unwrap();
+        let source = PreparedSource::new(
+            report.parse_report(),
+            active.pair().source(),
+            &mut allocations,
+        )
+        .unwrap();
+        let material = CandidateBuilder::new(
+            report.parse_report(),
+            checked,
+            &active,
+            identities,
+            source,
+            PreparationMode::LegacyV1,
+            allocations.catalogue_revision(),
+        )
+        .materialise()
+        .unwrap();
+        let enum_type = &material.catalogue.enum_types()[0];
+        assert_eq!(enum_type.name(), &semantic_name(&["crm", "stage"]));
+        assert_eq!(enum_type.labels(), &["lead", "customer"]);
+        assert!(
+            material.origins.iter().any(|origin| {
+                origin.identity() == DefinitionIdentity::ValueType(enum_type.id())
+            })
+        );
+
+        assert!(matches!(
+            prepare(&report, active.pair(), &active),
+            Err(PrepareError::CanonicalHash(
+                CanonicalHashError::CatalogueFactUnsupportedByHashVersion {
+                    fact: orna_core::canonical_hash::CatalogueHashFact::EnumTypeDefinition(_),
+                    ..
+                }
+            ))
+        ));
     }
 
     const SOURCE: &str = "CREATE SCHEMA tasks;\n\
