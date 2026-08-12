@@ -53,7 +53,7 @@ separate release action.
 
 ## Product expansion
 
-- [ ] Complete the first verified CLIENT Boolean function path.
+- [x] Complete the first verified CLIENT Boolean function path.
 - [ ] Add the accepted invocation, authorisation, and public protocol slices.
 - [ ] Extend catalogue-backed types beyond the standard primitive set through
   separate accepted decisions for enum, record, and opaque value types.
