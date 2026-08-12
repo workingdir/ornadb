@@ -30,6 +30,7 @@ use tokio_postgres::{Client, Row};
 
 const EXPECTED_KERNEL_TABLES: &[&str] = &[
     "active_revision",
+    "catalogue_enum_types",
     "catalogue_expressions",
     "catalogue_fields",
     "catalogue_function_parameters",
@@ -112,6 +113,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "protected security audit",
         include_str!("../migrations/0011_security_audit.sql"),
     ),
+    (
+        12,
+        "catalogue enum type storage",
+        include_str!("../migrations/0012_catalogue_enum_types.sql"),
+    ),
 ];
 const MIGRATION_DATA_STEP_SEPARATOR: &[u8] = b"\0orna.kernel.migration-step\0";
 const CANONICAL_HASH_V1_EMPTY_SEED_STEP: &[u8] = b"canonical-hash-v1-empty-seed/v1";
@@ -126,6 +132,7 @@ const HASH_CONTRACT_TABLES: &[&str] = &[
 ];
 const ORIGIN_TABLES: &[&str] = &[
     "catalogue_schemas",
+    "catalogue_enum_types",
     "catalogue_object_types",
     "catalogue_fields",
     "catalogue_expressions",
@@ -190,12 +197,14 @@ struct CatalogueSurfaceSnapshot {
     schema_acls: Vec<(String, String)>,
 }
 
-fn without_security_relations(snapshot: &CatalogueSurfaceSnapshot) -> CatalogueSurfaceSnapshot {
+fn without_later_relations(snapshot: &CatalogueSurfaceSnapshot) -> CatalogueSurfaceSnapshot {
     CatalogueSurfaceSnapshot {
         relations_and_indexes: snapshot
             .relations_and_indexes
             .iter()
-            .filter(|(_, relation, _)| !relation.starts_with("security_"))
+            .filter(|(_, relation, _)| {
+                !relation.starts_with("security_") && !relation.starts_with("catalogue_enum_types")
+            })
             .cloned()
             .collect(),
         triggers: snapshot
@@ -207,7 +216,9 @@ fn without_security_relations(snapshot: &CatalogueSurfaceSnapshot) -> CatalogueS
         relation_acls: snapshot
             .relation_acls
             .iter()
-            .filter(|(_, relation, _)| !relation.starts_with("security_"))
+            .filter(|(_, relation, _)| {
+                !relation.starts_with("security_") && !relation.starts_with("catalogue_enum_types")
+            })
             .cloned()
             .collect(),
         schema_acls: snapshot.schema_acls.clone(),
@@ -321,6 +332,14 @@ fn protected_security_audit_migration_checksum_binds_exact_sql_bytes() {
 }
 
 #[test]
+fn catalogue_enum_type_migration_checksum_binds_exact_sql_bytes() {
+    assert_eq!(
+        hex_bytes(expected_migration_checksum(12, MIGRATIONS[11].2)),
+        "87635d3052423176b969ce860e0c3e0fec665199259c14c1dbf5a0e3e385d3ff"
+    );
+}
+
+#[test]
 fn security_snapshot_migration_is_the_registered_version_nine() -> TestResult<()> {
     let (version, name, sql) = MIGRATIONS[8];
 
@@ -358,21 +377,42 @@ fn local_peer_credential_migration_is_the_registered_version_ten() -> TestResult
 
 #[test]
 fn protected_security_audit_is_the_registered_version_eleven() -> TestResult<()> {
-    let Some((version, name, sql)) = MIGRATIONS.last() else {
-        return Err(failure("migration registry is empty"));
-    };
+    let (version, name, sql) = MIGRATIONS[10];
 
     require(
-        *version == 11,
+        version == 11,
         format!("last migration is version {version}"),
     )?;
     require(
-        *name == "protected security audit",
+        name == "protected security audit",
         format!("last migration has unexpected name {name:?}"),
     )?;
     require(
         sql.contains("CREATE TABLE _orna_kernel.security_audit_events"),
         "protected security audit migration does not create its table",
+    )
+}
+
+#[test]
+fn catalogue_enum_type_storage_is_the_registered_version_twelve() -> TestResult<()> {
+    let Some((version, name, sql)) = MIGRATIONS.last() else {
+        return Err(failure("migration registry is empty"));
+    };
+
+    require(
+        *version == 12,
+        format!("last migration is version {version}"),
+    )?;
+    require(
+        *name == "catalogue enum type storage",
+        format!("last migration has unexpected name {name:?}"),
+    )?;
+    require(
+        sql.contains("CREATE TABLE _orna_kernel.catalogue_enum_types")
+            && sql.contains("labels text[] NOT NULL")
+            && sql.contains("cardinality(labels) > 0")
+            && sql.contains("REVOKE ALL ON TABLE _orna_kernel.catalogue_enum_types FROM PUBLIC"),
+        "catalogue enum migration does not preserve protected ordered label storage",
     )
 }
 
@@ -486,8 +526,8 @@ async fn bootstrap_upgrades_v5_write_reference_evidence_without_mutating_semanti
 
         let after = snapshot_upgrade_state(&database).await?;
         require(
-            after.migrations.len() == 11 && after.migrations[..5] == before.migrations[..],
-            format!("v6-v11 changed prior migration records: {:?}", after.migrations),
+            after.migrations.len() == 12 && after.migrations[..5] == before.migrations[..],
+            format!("v6-v12 changed prior migration records: {:?}", after.migrations),
         )?;
         require(
             after.migrations[5]
@@ -542,6 +582,15 @@ async fn bootstrap_upgrades_v5_write_reference_evidence_without_mutating_semanti
                     expected_migration_checksum(11, MIGRATIONS[10].2),
                 ),
             format!("v11 migration record is not exact: {:?}", after.migrations[10]),
+        )?;
+        require(
+            after.migrations[11]
+                == (
+                    12,
+                    "catalogue enum type storage".to_owned(),
+                    expected_migration_checksum(12, MIGRATIONS[11].2),
+                ),
+            format!("v12 migration record is not exact: {:?}", after.migrations[11]),
         )?;
         require(
             after.active_pair == before.active_pair,
@@ -629,7 +678,7 @@ async fn bootstrap_upgrades_registered_v6_without_standard_rows() -> TestResult<
 
         let after = snapshot_upgrade_state(&database).await?;
         require(
-            after.migrations.len() == 11
+            after.migrations.len() == 12
                 && after.migrations[..6] == before.migrations[..]
                 && after.migrations[6]
                     == (
@@ -674,6 +723,15 @@ async fn bootstrap_upgrades_registered_v6_without_standard_rows() -> TestResult<
                     expected_migration_checksum(11, MIGRATIONS[10].2),
                 ),
             format!("v11 migration record is not exact: {:?}", after.migrations[10]),
+        )?;
+        require(
+            after.migrations[11]
+                == (
+                    12,
+                    "catalogue enum type storage".to_owned(),
+                    expected_migration_checksum(12, MIGRATIONS[11].2),
+                ),
+            format!("v12 migration record is not exact: {:?}", after.migrations[11]),
         )?;
         require(
             after.active_pair == before.active_pair
@@ -749,7 +807,7 @@ async fn bootstrap_upgrades_registered_v7_without_resolved_value_rows() -> TestR
         let after_surface = snapshot_catalogue_surface(&database).await?;
         let after_target_fks = snapshot_application_target_foreign_keys(&database).await?;
         require(
-            after.migrations.len() == 11
+            after.migrations.len() == 12
                 && after.migrations[..7] == before.migrations[..]
                 && after.migrations[7]
                     == (
@@ -774,6 +832,12 @@ async fn bootstrap_upgrades_registered_v7_without_resolved_value_rows() -> TestR
                         11,
                         "protected security audit".to_owned(),
                         expected_migration_checksum(11, MIGRATIONS[10].2),
+                    )
+                && after.migrations[11]
+                    == (
+                        12,
+                        "catalogue enum type storage".to_owned(),
+                        expected_migration_checksum(12, MIGRATIONS[11].2),
                     ),
             format!("v7 upgrade produced unexpected migrations: {:?}", after.migrations),
         )?;
@@ -786,7 +850,7 @@ async fn bootstrap_upgrades_registered_v7_without_resolved_value_rows() -> TestR
             "migration 0008 changed the active pair, references, or semantic hashes",
         )?;
         require(
-            before_surface == without_security_relations(&after_surface),
+            before_surface == without_later_relations(&after_surface),
             format!(
                 "migration 0008 changed a relation, index, trigger, or ACL: before={before_surface:?}, after={after_surface:?}"
             ),
@@ -2939,13 +3003,18 @@ async fn inspect_hash_contract_columns(client: &Client) -> TestResult<()> {
 
 async fn inspect_origin_columns(client: &Client) -> TestResult<()> {
     let schema = "_orna_kernel";
-    let expected_columns = BTreeSet::from([
-        ("source_end".to_owned(), "YES".to_owned()),
-        ("source_start".to_owned(), "YES".to_owned()),
-        ("source_unit_id".to_owned(), "YES".to_owned()),
-    ]);
 
     for table in ORIGIN_TABLES {
+        let nullability = if *table == "catalogue_enum_types" {
+            "NO"
+        } else {
+            "YES"
+        };
+        let expected_columns = BTreeSet::from([
+            ("source_end".to_owned(), nullability.to_owned()),
+            ("source_start".to_owned(), nullability.to_owned()),
+            ("source_unit_id".to_owned(), nullability.to_owned()),
+        ]);
         let rows = client
             .query(
                 "SELECT column_name, is_nullable
