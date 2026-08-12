@@ -1650,6 +1650,8 @@ async fn persist_revisions_and_references(
             standard_library_revision,
             enum_catalogue_revision,
             record_catalogue_revision,
+            record_field_catalogue_revision,
+            record_field_owner_type,
         ) = encoder.reference_columns(reference)?;
         let reference_kind = reference_kind(reference.kind())?;
         let source = reference.source_origin();
@@ -1660,9 +1662,11 @@ async fn persist_revisions_and_references(
                  ordinal, target_definition_id, target_kind, target_owner_type_id,
                  target_owner_function_id, target_standard_library_revision_id,
                  target_enum_catalogue_revision_id, target_record_catalogue_revision_id,
+                 target_record_field_catalogue_revision_id,
+                 target_record_field_owner_type_id,
                  reference_kind, source_subobject_id,
                  source_unit_id, source_start, source_end)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NULL, $13, $14, $15)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NULL, $15, $16, $17)",
                 &[
                     &bytes(catalogue),
                     &bytes(reference.source_function()),
@@ -1675,6 +1679,8 @@ async fn persist_revisions_and_references(
                     &standard_library_revision,
                     &enum_catalogue_revision,
                     &record_catalogue_revision,
+                    &record_field_catalogue_revision,
+                    &record_field_owner_type,
                     &reference_kind,
                     &bytes(source.source_unit()),
                     &i64::from(source.byte_start()),
@@ -2044,7 +2050,17 @@ impl<'a> CandidateEncoder<'a> {
         value: DefinitionReferenceTarget,
     ) -> Result<ReferenceTargetColumns, PostgresKernelError> {
         if let DefinitionReferenceTarget::ObjectType(id) = value {
-            return Ok(("object_type", bytes(id), None, None, None, None, None));
+            return Ok((
+                "object_type",
+                bytes(id),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ));
         }
         if let DefinitionReferenceTarget::ValueType(id) = value {
             if self.catalogue.enum_type_by_id(id).is_some() {
@@ -2055,6 +2071,8 @@ impl<'a> CandidateEncoder<'a> {
                     None,
                     None,
                     Some(bytes(self.catalogue.revision())),
+                    None,
+                    None,
                     None,
                 ));
             }
@@ -2067,6 +2085,8 @@ impl<'a> CandidateEncoder<'a> {
                     None,
                     None,
                     Some(bytes(self.catalogue.revision())),
+                    None,
+                    None,
                 ));
             }
             let standard_library_revision = self.standard_library_revision().ok_or_else(|| {
@@ -2080,9 +2100,37 @@ impl<'a> CandidateEncoder<'a> {
                 Some(bytes(standard_library_revision)),
                 None,
                 None,
+                None,
+                None,
             ));
         }
         if let DefinitionReferenceTarget::Field { owner, field } = value {
+            let record_field = self
+                .catalogue
+                .record_value_type_by_id(owner)
+                .is_some_and(|record| record.field_by_id(field).is_some());
+            if record_field {
+                return Ok((
+                    "record_field",
+                    bytes(field),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(bytes(self.catalogue.revision())),
+                    Some(bytes(owner)),
+                ));
+            }
+            if self
+                .catalogue
+                .object_type_by_id(owner)
+                .is_none_or(|object| object.field_by_id(field).is_none())
+            {
+                return Err(invariant(
+                    "definition reference field target is absent from the candidate catalogue",
+                ));
+            }
             return Ok((
                 "field",
                 bytes(field),
@@ -2091,10 +2139,22 @@ impl<'a> CandidateEncoder<'a> {
                 None,
                 None,
                 None,
+                None,
+                None,
             ));
         }
         if let DefinitionReferenceTarget::Function(id) = value {
-            return Ok(("function", bytes(id), None, None, None, None, None));
+            return Ok((
+                "function",
+                bytes(id),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ));
         }
         if let DefinitionReferenceTarget::Parameter { owner, parameter } = value {
             return Ok((
@@ -2105,10 +2165,22 @@ impl<'a> CandidateEncoder<'a> {
                 None,
                 None,
                 None,
+                None,
+                None,
             ));
         }
         if let DefinitionReferenceTarget::Expression(id) = value {
-            return Ok(("expression", bytes(id), None, None, None, None, None));
+            return Ok((
+                "expression",
+                bytes(id),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ));
         }
         Err(invariant(
             "definition reference target is not supported by PostgreSQL persistence",
@@ -2127,6 +2199,8 @@ impl<'a> CandidateEncoder<'a> {
             standard_library_revision,
             enum_catalogue_revision,
             record_catalogue_revision,
+            record_field_catalogue_revision,
+            record_field_owner_type,
         ) = self.reference_target(reference.target())?;
         Ok((
             target,
@@ -2136,6 +2210,8 @@ impl<'a> CandidateEncoder<'a> {
             standard_library_revision,
             enum_catalogue_revision,
             record_catalogue_revision,
+            record_field_catalogue_revision,
+            record_field_owner_type,
         ))
     }
 }
@@ -2262,6 +2338,8 @@ type ReferenceTargetColumns = (
     Option<Vec<u8>>,
     Option<Vec<u8>>,
     Option<Vec<u8>>,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
 );
 
 #[cfg(test)]
@@ -2293,6 +2371,8 @@ fn reference_target(
 type ReferenceInsertColumns = (
     Vec<u8>,
     &'static str,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
     Option<Vec<u8>>,
     Option<Vec<u8>>,
     Option<Vec<u8>>,
@@ -2724,6 +2804,8 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
+                None,
             )
         );
 
@@ -2743,6 +2825,8 @@ mod tests {
                 None,
                 None,
                 Some(standard.revision().to_bytes().to_vec()),
+                None,
+                None,
                 None,
                 None,
             )
@@ -2812,6 +2896,8 @@ mod tests {
                 None,
                 Some(catalogue.revision().to_bytes().to_vec()),
                 None,
+                None,
+                None,
             )
         );
         assert_eq!(
@@ -2840,6 +2926,28 @@ mod tests {
                 None,
                 None,
                 Some(catalogue.revision().to_bytes().to_vec()),
+                None,
+                None,
+            )
+        );
+        let record_field = FieldId::from_bytes([0x65; 16]);
+        assert_eq!(
+            encoder
+                .reference_target(DefinitionReferenceTarget::Field {
+                    owner: record_type,
+                    field: record_field,
+                })
+                .unwrap(),
+            (
+                "record_field",
+                record_field.to_bytes().to_vec(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(catalogue.revision().to_bytes().to_vec()),
+                Some(record_type.to_bytes().to_vec()),
             )
         );
     }
