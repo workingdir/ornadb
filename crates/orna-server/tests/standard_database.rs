@@ -1,6 +1,6 @@
 #![cfg(unix)]
 
-use std::error::Error;
+use std::{error::Error, os::unix::net::UnixStream as StandardUnixStream};
 
 use orna_compiler::{
     StandardApplicationCheckContext, check, check_standard_application, prepare,
@@ -10,17 +10,28 @@ use orna_core::{
     CatalogueRevisionId, FunctionId, PrincipalId, SourceRevisionId,
     revision::RevisionPair,
     security::{
-        ExecuteDenial, ExecuteGrant, InvocationTarget, Principal, PrincipalKind, PrincipalStatus,
-        SecurityAuditDenial, SecurityAuditOutcome, SecuritySnapshot,
+        ExecuteDenial, ExecuteGrant, InvocationTarget, LocalPeerAuthenticationError,
+        LocalPeerCredential, Principal, PrincipalKind, PrincipalStatus, SecurityAuditDenial,
+        SecurityAuditKind, SecurityAuditOutcome, SecuritySnapshot,
     },
     source::{SourceBundle, SourceUnit},
     value::RuntimeValue,
 };
 use orna_kernel_postgres::{PostgresKernel, PostgresKernelError};
-use orna_protocol::{CallFailure, Event, RawCall, ServerAction};
-use orna_server::{OpenStandardDatabaseError, RawClientDispatch, open_standard_database};
+use orna_protocol::{
+    CallFailure, Channel, ClientFrame, Event, RawCall, ServerAction, ServerFrame,
+    decode_server_frame, encode_client_frame,
+};
+use orna_server::{
+    LocalAuthenticationError, LocalRawSocketError, LocalRawSocketResources,
+    OpenStandardDatabaseError, RawClientDispatch, open_standard_database, serve_local_raw_stream,
+};
 use orna_standard::{
     BOOLEAN_TYPE_ID, retained_standard_library_snapshot, verify_standard_library_snapshot,
+};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::UnixStream,
 };
 
 #[path = "../../orna-kernel-postgres/tests/support/mod.rs"]
@@ -426,11 +437,201 @@ async fn dispatches_raw_client_calls_through_security_audit_and_evaluation() -> 
     .await
 }
 
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn serves_the_actual_local_peer_through_the_raw_socket_protocol() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = kernel(&database)?;
+        let (active, client_function, _) = install_raw_client_fixture(&kernel).await?;
+        let functions = active
+            .catalogue()
+            .functions()
+            .iter()
+            .map(|function| function.id())
+            .collect::<Vec<_>>();
+        let uid = nix::unistd::getuid().as_raw();
+        let granted = SecuritySnapshot::new_with_local_peer_credentials(
+            active.pair(),
+            functions.clone(),
+            vec![Principal::new(
+                RAW_CLIENT_USER,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            vec![],
+            vec![ExecuteGrant::new(RAW_CLIENT_USER, client_function)],
+            vec![LocalPeerCredential::new(uid, RAW_CLIENT_USER)],
+        )?;
+        kernel.replace_security_snapshot(&granted).await?;
+
+        let (server, client) = StandardUnixStream::pair()?;
+        client.set_nonblocking(true)?;
+        let mut client = UnixStream::from_std(client)?;
+        let connection = tokio::spawn(serve_local_raw_stream(
+            kernel.clone(),
+            server,
+            LocalRawSocketResources::new(),
+        ));
+        let operation = async {
+            client
+                .write_all(b"ORNA\x01\x00\x00\x01\x00\x00\x00\x00")
+                .await?;
+            let mut acknowledgement = [0_u8; 12];
+            client.read_exact(&mut acknowledgement).await?;
+            require(
+                acknowledgement == *b"ORNA\x81\x00\x00\x01\x00\x00\x00\x00",
+                "local raw socket returned the wrong authenticated acknowledgement",
+            )?;
+
+            send_protocol_frame(
+                &mut client,
+                &ClientFrame::CallRawStart {
+                    stream: 1,
+                    function: client_function,
+                },
+            )
+            .await?;
+            send_protocol_frame(
+                &mut client,
+                &ClientFrame::WindowUpdate {
+                    stream: 1,
+                    channel: Channel::ResultValues,
+                    credit: 1024,
+                },
+            )
+            .await?;
+            send_protocol_frame(
+                &mut client,
+                &ClientFrame::CallArgumentsComplete { stream: 1 },
+            )
+            .await?;
+            require(
+                matches!(
+                    read_protocol_frame(&mut client).await?,
+                    ServerFrame::CallAccepted { stream: 1, .. }
+                ),
+                "local raw socket did not accept the authenticated CLIENT call",
+            )?;
+            require(
+                matches!(
+                    read_protocol_frame(&mut client).await?,
+                    ServerFrame::EventBatch {
+                        stream: 1,
+                        channel: Channel::ResultValues,
+                        events,
+                    } if events.len() == 1
+                        && events[0].sequence == 1
+                        && events[0].event == Event::Value(RuntimeValue::Boolean(true))
+                ),
+                "local raw socket returned the wrong typed CLIENT value",
+            )?;
+            require(
+                read_protocol_frame(&mut client).await? == ServerFrame::CallCompleted { stream: 1 },
+                "local raw socket did not complete the CLIENT call",
+            )
+        }
+        .await;
+        let shutdown = client.shutdown().await.map_err(Into::into);
+        let connection = connection.await.map_err(Into::into).and_then(|result| {
+            result.map_err(|error| -> Box<dyn Error + Send + Sync> { Box::new(error) })
+        });
+        let cleanup = finish_session(shutdown, connection, "local raw socket connection cleanup");
+        finish_session(operation, cleanup, "local raw socket protocol operation")?;
+
+        let events = kernel.recover_security_audit_events().await?;
+        require(
+            events.len() == 2
+                && events[0].decision().outcome() == SecurityAuditOutcome::Allowed
+                && events[0].decision().session_principal() == Some(RAW_CLIENT_USER)
+                && events[0].decision().target().is_none()
+                && events[1].decision().outcome() == SecurityAuditOutcome::Allowed
+                && events[1].decision().session_principal() == Some(RAW_CLIENT_USER)
+                && events[1].decision().target()
+                    == Some(InvocationTarget::new(client_function, active.pair())),
+            "local raw socket changed the exact authentication and execute audit sequence",
+        )?;
+
+        let revoked = SecuritySnapshot::new(
+            active.pair(),
+            functions,
+            granted.principals().collect(),
+            vec![],
+            granted.execute_grants().collect(),
+        )?;
+        kernel.replace_security_snapshot(&revoked).await?;
+        let (server, client) = StandardUnixStream::pair()?;
+        client.set_nonblocking(true)?;
+        let mut client = UnixStream::from_std(client)?;
+        let rejected = tokio::spawn(serve_local_raw_stream(
+            kernel.clone(),
+            server,
+            LocalRawSocketResources::new(),
+        ));
+        let wire = async {
+            client
+                .write_all(b"ORNA\x01\x00\x00\x01\x00\x00\x00\x00")
+                .await?;
+            let mut response = [0_u8; 1];
+            require(
+                client.read(&mut response).await? == 0,
+                "revoked local peer received bytes instead of a silent close",
+            )
+        }
+        .await;
+        let shutdown = client.shutdown().await.map_err(Into::into);
+        let rejection = rejected.await?;
+        finish_session(wire, shutdown, "revoked local raw socket cleanup")?;
+        require(
+            matches!(
+                rejection,
+                Err(LocalRawSocketError::Authentication {
+                    source: LocalAuthenticationError::Kernel {
+                        source: PostgresKernelError::LocalPeerAuthentication(
+                            LocalPeerAuthenticationError::UnknownUid
+                        )
+                    }
+                })
+            ),
+            "revoked local peer returned the wrong typed authentication rejection",
+        )?;
+        let events = kernel.recover_security_audit_events().await?;
+        require(
+            events.len() == 3
+                && events[2].decision().kind() == SecurityAuditKind::Authentication
+                && events[2].decision().outcome() == SecurityAuditOutcome::Denied
+                && events[2].decision().session_principal().is_none()
+                && events[2].decision().target().is_none()
+                && events[2].decision().denial()
+                    == Some(SecurityAuditDenial::Authentication(
+                        LocalPeerAuthenticationError::UnknownUid,
+                    )),
+            "revoked local peer changed the exact denied authentication audit evidence",
+        )?;
+        require_no_database_sessions(&database).await
+    })
+    .await
+}
+
 fn raw_call(function: FunctionId) -> RawCall {
     RawCall {
         function,
         arguments: vec![],
     }
+}
+
+async fn send_protocol_frame(stream: &mut UnixStream, frame: &ClientFrame) -> TestResult<()> {
+    stream.write_all(&encode_client_frame(frame)?).await?;
+    Ok(())
+}
+
+async fn read_protocol_frame(stream: &mut UnixStream) -> TestResult<ServerFrame> {
+    let mut header = [0_u8; 18];
+    stream.read_exact(&mut header).await?;
+    let length = u32::from_be_bytes(header[14..18].try_into()?) as usize;
+    let mut encoded = header.to_vec();
+    encoded.resize(18 + length, 0);
+    stream.read_exact(&mut encoded[18..]).await?;
+    Ok(decode_server_frame(&encoded)?)
 }
 
 fn require_dispatch_failure(
