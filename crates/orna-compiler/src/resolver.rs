@@ -1093,7 +1093,13 @@ fn check_application_parsed(
 
     let mut submitted_ids = HashMap::new();
     for header in &headers {
-        submitted_ids.insert(semantic_name(&header.declaration.name), header.id);
+        submitted_ids.insert(
+            semantic_name(&header.declaration.name),
+            SubmittedType::Object(header.id),
+        );
+    }
+    for enum_type in &checked_enum_types {
+        submitted_ids.insert(enum_type.name.clone(), SubmittedType::Enum(enum_type.id));
     }
 
     let field_renames = check_field_renames(&parse_report, base, &headers, &mut diagnostics);
@@ -1815,7 +1821,7 @@ fn resolve_client_function_headers<'a>(
 
 fn resolve_client_function_inputs<'a>(
     headers: &[ClientFunctionHeader<'a>],
-    submitted_ids: &HashMap<QualifiedSemanticName, CheckedTypeId>,
+    submitted_ids: &HashMap<QualifiedSemanticName, SubmittedType>,
     diagnostics: &mut Vec<CompilerDiagnostic>,
     standard: Option<&CheckedStandardLibrary>,
     uses: &mut Vec<CheckedApplicationTypeUse>,
@@ -2035,7 +2041,7 @@ fn is_standard_client_boolean_return(specification: &TypeSpecification) -> bool 
 
 fn resolve_server_function_inputs<'a>(
     headers: &[ServerFunctionHeader<'a>],
-    submitted_ids: &HashMap<QualifiedSemanticName, CheckedTypeId>,
+    submitted_ids: &HashMap<QualifiedSemanticName, SubmittedType>,
     base: &CatalogueSnapshot,
     assignments: &mut CheckAssignments,
     diagnostics: &mut Vec<CompilerDiagnostic>,
@@ -2164,7 +2170,7 @@ fn reject_unplanned_server_function_features(
 
 fn resolve_server_function_return(
     return_type: &FunctionReturnType,
-    submitted_ids: &HashMap<QualifiedSemanticName, CheckedTypeId>,
+    submitted_ids: &HashMap<QualifiedSemanticName, SubmittedType>,
     logical_path: &str,
     diagnostics: &mut Vec<CompilerDiagnostic>,
     standard: Option<&CheckedStandardLibrary>,
@@ -3372,9 +3378,15 @@ struct ResolvedApplicationType {
     standard_value_type: Option<orna_core::TypeId>,
 }
 
+#[derive(Clone, Copy)]
+enum SubmittedType {
+    Object(CheckedTypeId),
+    Enum(CheckedTypeId),
+}
+
 fn resolve_application_type(
     specification: &TypeSpecification,
-    submitted_ids: &HashMap<QualifiedSemanticName, CheckedTypeId>,
+    submitted_ids: &HashMap<QualifiedSemanticName, SubmittedType>,
     logical_path: &str,
     diagnostics: &mut Vec<CompilerDiagnostic>,
     standard: Option<&CheckedStandardLibrary>,
@@ -3395,20 +3407,25 @@ fn resolve_application_type(
                 });
             }
             let semantic_name = semantic_name(name);
-            if submitted_ids.contains_key(&semantic_name) {
-                diagnostics.push(diagnostic(
+            match submitted_ids.get(&semantic_name).copied() {
+                Some(SubmittedType::Enum(id)) => {
+                    return Some(ResolvedApplicationType {
+                        semantic_type: SemanticType::Named(id),
+                        standard_value_type: None,
+                    });
+                }
+                Some(SubmittedType::Object(_)) => diagnostics.push(diagnostic(
                     DiagnosticCode::TypeMismatch,
                     format!("object type {semantic_name} must be declared with REF"),
                     logical_path,
                     &name.span,
-                ));
-            } else {
-                diagnostics.push(diagnostic(
+                )),
+                None => diagnostics.push(diagnostic(
                     DiagnosticCode::UnknownQualifiedName,
                     format!("unknown type name {semantic_name}"),
                     logical_path,
                     &name.span,
-                ));
+                )),
             }
             None
         }
@@ -3455,19 +3472,29 @@ fn resolve_application_type(
                 return None;
             }
             let name = semantic_name(target);
-            if let Some(id) = submitted_ids.get(&name).copied() {
-                Some(ResolvedApplicationType {
+            match submitted_ids.get(&name).copied() {
+                Some(SubmittedType::Object(id)) => Some(ResolvedApplicationType {
                     semantic_type: SemanticType::reference(id),
                     standard_value_type: None,
-                })
-            } else {
-                diagnostics.push(diagnostic(
-                    DiagnosticCode::UnknownQualifiedName,
-                    format!("unknown object type {name}"),
-                    logical_path,
-                    &target.span,
-                ));
-                None
+                }),
+                Some(SubmittedType::Enum(_)) => {
+                    diagnostics.push(diagnostic(
+                        DiagnosticCode::InvalidReferenceTarget,
+                        format!("REF target {name} is an enum type"),
+                        logical_path,
+                        &target.span,
+                    ));
+                    None
+                }
+                None => {
+                    diagnostics.push(diagnostic(
+                        DiagnosticCode::UnknownQualifiedName,
+                        format!("unknown object type {name}"),
+                        logical_path,
+                        &target.span,
+                    ));
+                    None
+                }
             }
         }
     }
@@ -3554,6 +3581,12 @@ fn record_standard_type_use(
             kind,
             location,
         }));
+    } else if let SemanticType::Named(target) = resolved.semantic_type {
+        uses.push(CheckedApplicationTypeUse::Named {
+            target,
+            kind,
+            location,
+        });
     } else if let SemanticType::Reference { target } = resolved.semantic_type {
         uses.push(CheckedApplicationTypeUse::ObjectReference(
             CheckedObjectReferenceUse {
@@ -4554,6 +4587,48 @@ mod tests {
         );
     }
 
+    #[test]
+    fn resolves_application_enum_uses_as_named_values_and_rejects_ref() {
+        let standard =
+            check_standard_library_source(&verified_standard_library_for_relational_test())
+                .unwrap();
+        let application = empty_catalogue();
+        let context = StandardApplicationCheckContext::try_new(&application, &standard).unwrap();
+        let source = "CREATE SCHEMA crm; CREATE TYPE crm.stage AS ENUM ('lead', 'qualified'); \
+            CREATE TYPE crm.customer AS OBJECT (stage crm.stage NOT NULL);";
+        let report = check_standard_application(&bundle([("types.orna", source)]), &context);
+
+        assert_eq!(report.diagnostics(), &[]);
+        let checked = report.checked_bundle().unwrap();
+        let enum_type = checked.inner.enum_types().next().unwrap().0;
+        let object = checked.object_types().next().unwrap();
+        let field = object.fields().next().unwrap();
+        assert_eq!(field.resolved_type().named_type(), Some(enum_type));
+        assert!(field.resolved_type().value().is_none());
+        assert!(field.resolved_type().object_reference().is_none());
+        let type_start = source.rfind("crm.stage").unwrap();
+        assert_type_use_span(field.resolved_type(), type_start, "crm.stage");
+
+        let rejected = check_standard_application(
+            &bundle([(
+                "types.orna",
+                "CREATE SCHEMA crm; CREATE TYPE crm.stage AS ENUM ('lead'); \
+                 CREATE TYPE crm.customer AS OBJECT (stage REF crm.stage);",
+            )]),
+            &context,
+        );
+        assert!(rejected.checked_bundle().is_none());
+        assert_eq!(rejected.diagnostics().len(), 1);
+        assert_eq!(
+            rejected.diagnostics()[0].code(),
+            DiagnosticCode::InvalidReferenceTarget
+        );
+        assert_eq!(
+            rejected.diagnostics()[0].message(),
+            "REF target crm.stage is an enum type"
+        );
+    }
+
     fn standard_reconciliation_inputs(
         source: &str,
     ) -> (
@@ -5027,6 +5102,7 @@ mod tests {
             .into_iter()
             .map(|type_use| match type_use {
                 CheckedApplicationTypeUse::Value(value) => (Some(value.type_id()), None),
+                CheckedApplicationTypeUse::Named { .. } => (None, None),
                 CheckedApplicationTypeUse::ObjectReference(reference) => {
                     (None, Some(reference.target()))
                 }

@@ -1614,15 +1614,25 @@ impl CheckedObjectReferenceUse {
 /// The canonical public type use for one written slot in a standard-backed application.
 ///
 /// This use is the canonical public resolved-type carrier for its slot. `Value` carries the
-/// checked standard [`TypeId`]. `ObjectReference` carries the checked application object target.
-/// Separate signature references are evidence about the same resolution, not another resolved
-/// type. The compatibility [`SemanticType::Scalar`] is not a source-name or `TypeId` authority,
-/// and declarations do not own a scalar-to-`TypeId` sidecar.
+/// checked standard [`TypeId`], `Named` carries a checked application value type, and
+/// `ObjectReference` carries the checked application object target. Separate signature
+/// references are evidence about the same resolution, not another resolved type. The
+/// compatibility [`SemanticType::Scalar`] is not a source-name or `TypeId` authority, and
+/// declarations do not own a scalar-to-`TypeId` sidecar.
 #[non_exhaustive]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CheckedApplicationTypeUse {
     /// A resolved standard value-type use with its checked standard [`TypeId`].
     Value(CheckedValueTypeUse),
+    /// A resolved application value-type use with its checked application identity.
+    Named {
+        /// The checked application value-type target.
+        target: CheckedTypeId,
+        /// The type-use kind.
+        kind: CheckedTypeUseKind,
+        /// The direct declaration or complete expression location.
+        location: SourceLocation,
+    },
     /// A resolved application object-reference use with its checked application object target.
     ObjectReference(CheckedObjectReferenceUse),
 }
@@ -1632,14 +1642,22 @@ impl CheckedApplicationTypeUse {
     pub fn value(&self) -> Option<&CheckedValueTypeUse> {
         match self {
             Self::Value(value) => Some(value),
-            Self::ObjectReference(_) => None,
+            Self::Named { .. } | Self::ObjectReference(_) => None,
+        }
+    }
+
+    /// Returns the checked application value-type target, when present.
+    pub const fn named_type(&self) -> Option<CheckedTypeId> {
+        match self {
+            Self::Named { target, .. } => Some(*target),
+            Self::Value(_) | Self::ObjectReference(_) => None,
         }
     }
 
     /// Returns the object-reference use when this use resolves an application object.
     pub fn object_reference(&self) -> Option<&CheckedObjectReferenceUse> {
         match self {
-            Self::Value(_) => None,
+            Self::Value(_) | Self::Named { .. } => None,
             Self::ObjectReference(reference) => Some(reference),
         }
     }
@@ -1648,6 +1666,7 @@ impl CheckedApplicationTypeUse {
     pub const fn kind(&self) -> CheckedTypeUseKind {
         match self {
             Self::Value(value) => value.kind,
+            Self::Named { kind, .. } => *kind,
             Self::ObjectReference(reference) => reference.kind,
         }
     }
@@ -1656,6 +1675,7 @@ impl CheckedApplicationTypeUse {
     pub fn location(&self) -> &SourceLocation {
         match self {
             Self::Value(value) => &value.location,
+            Self::Named { location, .. } => location,
             Self::ObjectReference(reference) => &reference.location,
         }
     }
@@ -1847,6 +1867,9 @@ impl StandardApplicationCheckReport {
         };
         match type_use {
             CheckedApplicationTypeUse::Value(value) => value.location = location,
+            CheckedApplicationTypeUse::Named {
+                location: current, ..
+            } => *current = location,
             CheckedApplicationTypeUse::ObjectReference(reference) => reference.location = location,
         }
         true
@@ -1866,6 +1889,7 @@ impl StandardApplicationCheckReport {
         };
         match type_use {
             CheckedApplicationTypeUse::Value(value) => value.kind = kind,
+            CheckedApplicationTypeUse::Named { kind: current, .. } => *current = kind,
             CheckedApplicationTypeUse::ObjectReference(reference) => reference.kind = kind,
         }
         true
@@ -2069,6 +2093,7 @@ impl StandardApplicationCheckReport {
             };
             match type_use {
                 CheckedApplicationTypeUse::Value(value) => value.kind = kind,
+                CheckedApplicationTypeUse::Named { kind: current, .. } => *current = kind,
                 CheckedApplicationTypeUse::ObjectReference(reference) => reference.kind = kind,
             }
         };
@@ -2145,6 +2170,7 @@ impl StandardApplicationCheckReport {
             {
                 match type_use {
                     CheckedApplicationTypeUse::Value(value) => value.kind = replacement,
+                    CheckedApplicationTypeUse::Named { kind, .. } => *kind = replacement,
                     CheckedApplicationTypeUse::ObjectReference(reference) => {
                         reference.kind = replacement;
                     }
@@ -2224,6 +2250,9 @@ impl StandardApplicationCheckReport {
             {
                 match type_use {
                     CheckedApplicationTypeUse::Value(value) => value.location = location.clone(),
+                    CheckedApplicationTypeUse::Named {
+                        location: current, ..
+                    } => *current = location.clone(),
                     CheckedApplicationTypeUse::ObjectReference(reference) => {
                         reference.location = location.clone();
                     }
@@ -2359,6 +2388,9 @@ impl StandardApplicationCheckReport {
                             CheckedApplicationTypeUse::Value(value) => {
                                 value.location = location.clone()
                             }
+                            CheckedApplicationTypeUse::Named {
+                                location: current, ..
+                            } => *current = location.clone(),
                             CheckedApplicationTypeUse::ObjectReference(reference) => {
                                 reference.location = location.clone()
                             }
@@ -2650,7 +2682,7 @@ impl CheckedStandardApplicationBundle {
 
     /// Returns every declared or body type use in canonical order.
     ///
-    /// The `Value` entry for a standard-value slot is its canonical public resolved-type carrier.
+    /// `Value` and `Named` entries retain standard and application value identities respectively.
     pub fn uses(&self) -> &[CheckedApplicationTypeUse] {
         &self.uses
     }
@@ -2808,8 +2840,9 @@ impl CheckedStandardApplicationField<'_> {
 
     /// Returns the canonical public type use for this field's written slot.
     ///
-    /// A standard value use carries its checked standard [`TypeId`]; the declaration's
-    /// compatibility [`SemanticType::Scalar`] is not a source-name or `TypeId` authority.
+    /// Standard and application value uses carry their checked identities. A standard
+    /// declaration's compatibility [`SemanticType::Scalar`] is not a source-name or `TypeId`
+    /// authority.
     pub fn resolved_type(&self) -> &CheckedApplicationTypeUse {
         self.bundle.type_use(CheckedTypeUseKind::Field {
             owner: self.owner,
@@ -2981,8 +3014,9 @@ impl<'a> CheckedStandardApplicationClientFunction<'a> {
 
     /// Returns the canonical public type use for this CLIENT return slot.
     ///
-    /// A standard value use carries its checked standard [`TypeId`]; the declaration's
-    /// compatibility [`SemanticType::Scalar`] is not a source-name or `TypeId` authority.
+    /// Standard and application value uses carry their checked identities. A standard
+    /// declaration's compatibility [`SemanticType::Scalar`] is not a source-name or `TypeId`
+    /// authority.
     pub fn return_type(&self) -> &CheckedApplicationTypeUse {
         self.bundle.type_use(CheckedTypeUseKind::Return {
             owner: self.function.id,
@@ -3054,8 +3088,9 @@ impl CheckedStandardApplicationParameter<'_> {
 
     /// Returns the canonical public type use for this parameter's written slot.
     ///
-    /// A standard value use carries its checked standard [`TypeId`]; the declaration's
-    /// compatibility [`SemanticType::Scalar`] is not a source-name or `TypeId` authority.
+    /// Standard and application value uses carry their checked identities. A standard
+    /// declaration's compatibility [`SemanticType::Scalar`] is not a source-name or `TypeId`
+    /// authority.
     pub fn resolved_type(&self) -> &CheckedApplicationTypeUse {
         self.bundle.type_use(CheckedTypeUseKind::Parameter {
             owner: self.owner,
@@ -3101,8 +3136,9 @@ impl CheckedStandardApplicationReturnColumn<'_> {
 
     /// Returns the canonical public type use for this return column's written slot.
     ///
-    /// A standard value use carries its checked standard [`TypeId`]; the declaration's
-    /// compatibility [`SemanticType::Scalar`] is not a source-name or `TypeId` authority.
+    /// Standard and application value uses carry their checked identities. A standard
+    /// declaration's compatibility [`SemanticType::Scalar`] is not a source-name or `TypeId`
+    /// authority.
     pub fn resolved_type(&self) -> &CheckedApplicationTypeUse {
         self.bundle.type_use(CheckedTypeUseKind::Return {
             owner: self.owner,
