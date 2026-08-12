@@ -33,6 +33,7 @@ REPORT = {
     "postmaster_clean_stop": True,
     "postmaster_sigquit_escalation": False,
     "support_members": 620,
+    "x32_syscall_rejected": True,
 }
 
 
