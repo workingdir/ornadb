@@ -147,6 +147,28 @@ struct PreparedInstance {
     _support: MaterialisedSupport,
 }
 
+/// A verified live embedded host retained for one private client lifetime.
+pub struct ReadyEmbeddedHost {
+    config: Config,
+    _package_lock: fs::File,
+    _instance_lock: fs::File,
+}
+
+impl ReadyEmbeddedHost {
+    pub fn config(&self) -> &Config {
+        &self.config
+    }
+}
+
+impl fmt::Debug for ReadyEmbeddedHost {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ReadyEmbeddedHost")
+            .field("config", &"private Unix socket")
+            .finish_non_exhaustive()
+    }
+}
+
 fn prepare_instance() -> Result<PreparedInstance, EmbeddedHostError> {
     let service = require_service_identity()?;
     require_file_bytes(
@@ -251,6 +273,167 @@ fn prepare_instance() -> Result<PreparedInstance, EmbeddedHostError> {
     })
 }
 
+/// Verifies and retains the package and instance facts for a private host client.
+pub fn inspect_ready_embedded_host() -> Result<ReadyEmbeddedHost, EmbeddedHostError> {
+    let service = require_service_identity()?;
+    require_file_bytes(
+        Path::new(CONFIGURATION_PATH),
+        0,
+        0,
+        0o644,
+        CONFIGURATION_BYTES,
+    )?;
+    let package_lock = open_verified_lock(
+        Path::new(PACKAGE_LOCK_PATH),
+        0,
+        service.gid,
+        0o640,
+        nix::libc::F_RDLCK as i16,
+        LockKind::Package,
+    )?;
+    require_file_bytes(
+        Path::new(PACKAGE_STATE_PATH),
+        0,
+        service.gid,
+        0o640,
+        PACKAGE_STATE_BYTES,
+    )
+    .map_err(|_| EmbeddedHostError::InvalidPackageState)?;
+
+    let paths = EmbeddedHostPaths::production();
+    require_directory(paths.state_root(), service.uid, service.gid, 0o700)?;
+    require_directory(paths.runtime_root(), service.uid, service.gid, 0o700)?;
+    require_directory(paths.socket_directory(), service.uid, service.gid, 0o700)?;
+    let instance_lock = open_verified_file(
+        &paths.state_root().join(INSTANCE_LOCK_NAME),
+        service.uid,
+        service.gid,
+        0o600,
+        true,
+        LockKind::Instance,
+    )?;
+    let ready = read_regular_file(
+        &paths.runtime_root().join(READY_NAME),
+        service.uid,
+        service.gid,
+        0o600,
+    )?;
+    let ready = parse_ready_record(&ready)?;
+    if ready.engine != EmbeddedEngineIdentity::current().as_str()
+        || ready.generation != GENERATION_NAME
+        || ready.executable_sha256 != hex_digest(&fs::read("/proc/self/exe")?)
+        || !process_exists(ready.server_pid)
+        || !process_exists(ready.postmaster_pid)
+    {
+        return Err(EmbeddedHostError::InvalidInstanceState);
+    }
+    require_lock_holder(&instance_lock, ready.server_pid)?;
+    let manifest = read_regular_file(
+        &paths.state_root().join(INSTANCE_MANIFEST_NAME),
+        service.uid,
+        service.gid,
+        0o600,
+    )?;
+    if manifest != instance_manifest_bytes(&EmbeddedEngineIdentity::current(), true)
+        || hex_digest(&manifest) != ready.instance_manifest_sha256
+    {
+        return Err(EmbeddedHostError::InvalidInstanceState);
+    }
+
+    Ok(ReadyEmbeddedHost {
+        config: private_database_config(paths.socket_directory(), "orna"),
+        _package_lock: package_lock,
+        _instance_lock: instance_lock,
+    })
+}
+
+struct ReadyRecord<'a> {
+    server_pid: i32,
+    postmaster_pid: i32,
+    generation: &'a str,
+    engine: &'a str,
+    executable_sha256: &'a str,
+    instance_manifest_sha256: &'a str,
+}
+
+fn parse_ready_record(bytes: &[u8]) -> Result<ReadyRecord<'_>, EmbeddedHostError> {
+    let text = std::str::from_utf8(bytes).map_err(|_| EmbeddedHostError::InvalidInstanceState)?;
+    let mut lines = text.lines();
+    if lines.next() != Some("format = 1") || lines.next() != Some("instance = \"default\"") {
+        return Err(EmbeddedHostError::InvalidInstanceState);
+    }
+    let server_pid = parse_ready_number(lines.next(), "server_pid = ")?;
+    let postmaster_pid = parse_ready_number(lines.next(), "postmaster_pid = ")?;
+    let generation = parse_ready_string(lines.next(), "generation = \"")?;
+    let engine = parse_ready_string(lines.next(), "engine = \"")?;
+    let executable = parse_ready_string(lines.next(), "executable_sha256 = \"")?;
+    let instance_manifest_sha256 =
+        parse_ready_string(lines.next(), "instance_manifest_sha256 = \"")?;
+    if lines.next().is_some()
+        || !text.ends_with('\n')
+        || !is_sha256(engine)
+        || !is_sha256(executable)
+        || !is_sha256(instance_manifest_sha256)
+    {
+        return Err(EmbeddedHostError::InvalidInstanceState);
+    }
+    Ok(ReadyRecord {
+        server_pid,
+        postmaster_pid,
+        generation,
+        engine,
+        executable_sha256: executable,
+        instance_manifest_sha256,
+    })
+}
+
+fn parse_ready_number(line: Option<&str>, prefix: &str) -> Result<i32, EmbeddedHostError> {
+    line.and_then(|line| line.strip_prefix(prefix))
+        .and_then(|value| value.parse::<i32>().ok())
+        .filter(|value| *value > 1)
+        .ok_or(EmbeddedHostError::InvalidInstanceState)
+}
+
+fn parse_ready_string<'a>(
+    line: Option<&'a str>,
+    prefix: &str,
+) -> Result<&'a str, EmbeddedHostError> {
+    line.and_then(|line| line.strip_prefix(prefix))
+        .and_then(|value| value.strip_suffix('"'))
+        .filter(|value| !value.is_empty())
+        .ok_or(EmbeddedHostError::InvalidInstanceState)
+}
+
+fn is_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn process_exists(pid: i32) -> bool {
+    // SAFETY: signal zero performs only process existence and permission checks.
+    unsafe { nix::libc::kill(pid, 0) == 0 }
+}
+
+fn require_lock_holder(file: &fs::File, server_pid: i32) -> Result<(), EmbeddedHostError> {
+    let mut lock = nix::libc::flock {
+        l_type: nix::libc::F_WRLCK as i16,
+        l_whence: nix::libc::SEEK_SET as i16,
+        l_start: 0,
+        l_len: 1,
+        l_pid: 0,
+    };
+    // SAFETY: the descriptor and lock pointer are valid for this fcntl call.
+    if unsafe { nix::libc::fcntl(file.as_raw_fd(), nix::libc::F_GETLK, &mut lock) } != 0
+        || lock.l_type != nix::libc::F_WRLCK as i16
+        || lock.l_pid != server_pid
+    {
+        return Err(EmbeddedHostError::InvalidInstanceState);
+    }
+    Ok(())
+}
+
 fn require_service_identity() -> Result<ServiceIdentity, EmbeddedHostError> {
     let user = User::from_name("orna")
         .map_err(|_| EmbeddedHostError::InvalidServiceIdentity)?
@@ -306,20 +489,14 @@ fn open_verified_lock(
     lock_type: i16,
     kind: LockKind,
 ) -> Result<fs::File, EmbeddedHostError> {
-    let mut file = fs::OpenOptions::new()
-        .read(true)
-        .write(lock_type == nix::libc::F_WRLCK as i16)
-        .custom_flags(libc_o_nofollow() | nix::libc::O_CLOEXEC)
-        .open(path)
-        .map_err(|_| kind.error())?;
-    require_metadata(&file.metadata().map_err(|_| kind.error())?, uid, gid, mode)
-        .map_err(|_| kind.error())?;
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).map_err(|_| kind.error())?;
-    if bytes != b"\n" {
-        return Err(kind.error());
-    }
-    file.seek(SeekFrom::Start(0)).map_err(|_| kind.error())?;
+    let file = open_verified_file(
+        path,
+        uid,
+        gid,
+        mode,
+        lock_type == nix::libc::F_WRLCK as i16,
+        kind,
+    )?;
     let mut lock = nix::libc::flock {
         l_type: lock_type,
         l_whence: nix::libc::SEEK_SET as i16,
@@ -331,6 +508,31 @@ fn open_verified_lock(
     if unsafe { nix::libc::fcntl(file.as_raw_fd(), nix::libc::F_SETLK, &mut lock) } != 0 {
         return Err(kind.error());
     }
+    Ok(file)
+}
+
+fn open_verified_file(
+    path: &Path,
+    uid: u32,
+    gid: u32,
+    mode: u32,
+    write: bool,
+    kind: LockKind,
+) -> Result<fs::File, EmbeddedHostError> {
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .write(write)
+        .custom_flags(libc_o_nofollow() | nix::libc::O_CLOEXEC)
+        .open(path)
+        .map_err(|_| kind.error())?;
+    require_metadata(&file.metadata().map_err(|_| kind.error())?, uid, gid, mode)
+        .map_err(|_| kind.error())?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).map_err(|_| kind.error())?;
+    if bytes != b"\n" {
+        return Err(kind.error());
+    }
+    file.seek(SeekFrom::Start(0)).map_err(|_| kind.error())?;
     Ok(file)
 }
 
@@ -1500,5 +1702,18 @@ mod tests {
             materialise_support_data(&root),
             Err(EmbeddedHostError::SupportMismatch(_))
         ));
+    }
+
+    #[test]
+    fn parses_only_the_exact_ready_record_shape() {
+        let digest = "a".repeat(64);
+        let record = format!(
+            "format = 1\ninstance = \"default\"\nserver_pid = 10\npostmaster_pid = 11\ngeneration = \"{GENERATION_NAME}\"\nengine = \"{digest}\"\nexecutable_sha256 = \"{digest}\"\ninstance_manifest_sha256 = \"{digest}\"\n"
+        );
+        let parsed = parse_ready_record(record.as_bytes()).expect("valid ready record");
+        assert_eq!(parsed.server_pid, 10);
+        assert_eq!(parsed.postmaster_pid, 11);
+        assert_eq!(parsed.generation, GENERATION_NAME);
+        assert!(parse_ready_record(format!("{record}extra = true\n").as_bytes()).is_err());
     }
 }
