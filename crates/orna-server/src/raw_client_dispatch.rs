@@ -1,0 +1,354 @@
+//! Protected dispatch for the current raw CLIENT call subset.
+
+use orna_core::{InvocationId, security::AuthenticatedSession};
+use orna_kernel_postgres::{PostgresKernel, PostgresKernelError};
+use orna_protocol::{CallFailure, Event, RawCall, ServerAction};
+
+/// One accepted raw CLIENT call bound to trusted session state.
+pub struct RawClientDispatch {
+    kernel: PostgresKernel,
+    session: AuthenticatedSession,
+    stream: u64,
+    call: RawCall,
+    invocation: InvocationId,
+}
+
+impl RawClientDispatch {
+    /// Accepts a complete raw call for protected dispatch.
+    pub fn new(
+        kernel: PostgresKernel,
+        session: AuthenticatedSession,
+        stream: u64,
+        call: RawCall,
+    ) -> Self {
+        Self {
+            kernel,
+            session,
+            stream,
+            call,
+            invocation: InvocationId::new(),
+        }
+    }
+
+    /// Returns the fresh invocation identity assigned during acceptance.
+    pub const fn invocation(&self) -> InvocationId {
+        self.invocation
+    }
+
+    /// Returns the action that acknowledges this accepted call.
+    ///
+    /// After applying this action, the transport adapter must poll [`Self::finish`]
+    /// to completion, even when cancellation is already pending. Dropping the
+    /// future can skip required security audit, transaction, or shutdown work.
+    pub const fn accepted_action(&self) -> ServerAction {
+        ServerAction::Accepted {
+            stream: self.stream,
+            invocation: self.invocation,
+        }
+    }
+
+    /// Runs the protected CLIENT kernel path and closes the public outcome.
+    ///
+    /// Success returns one typed value action followed by completion. A call
+    /// with arguments returns `TARGET_UNAVAILABLE` without opening PostgreSQL.
+    /// Kernel execute denial returns `EXECUTE_DENIED`, a CLIENT evaluator error
+    /// returns `CLIENT_EVALUATION_FAILED`, and every other kernel error returns
+    /// `INTERNAL_FAILURE`. The result retains the private typed kernel source
+    /// for trusted diagnostics only.
+    pub async fn finish(self) -> RawClientDispatchResult {
+        if !self.call.arguments.is_empty() {
+            return RawClientDispatchResult::failure(
+                self.stream,
+                CallFailure::TargetUnavailable,
+                None,
+                false,
+            );
+        }
+
+        match self
+            .kernel
+            .evaluate_client_function(&self.session, self.call.function)
+            .await
+        {
+            Ok(result) => RawClientDispatchResult::success(self.stream, result.value().clone()),
+            Err(source) => RawClientDispatchResult::from_kernel_error(self.stream, source),
+        }
+    }
+}
+
+/// The closed public actions and private diagnostic source for one dispatch.
+pub struct RawClientDispatchResult {
+    stream: u64,
+    actions: Vec<ServerAction>,
+    source: Option<PostgresKernelError>,
+    operational_failure: bool,
+}
+
+impl RawClientDispatchResult {
+    fn success(stream: u64, value: orna_core::value::RuntimeValue) -> Self {
+        Self {
+            stream,
+            actions: vec![
+                ServerAction::Events {
+                    stream,
+                    events: vec![Event::Value(value)],
+                },
+                ServerAction::Completed { stream },
+            ],
+            source: None,
+            operational_failure: false,
+        }
+    }
+
+    fn from_kernel_error(stream: u64, source: PostgresKernelError) -> Self {
+        let (failure, operational_failure) = match source {
+            PostgresKernelError::ClientExecuteDenied { .. } => (CallFailure::ExecuteDenied, false),
+            PostgresKernelError::ClientExecution(_) => (CallFailure::ClientEvaluationFailed, false),
+            _ => (CallFailure::InternalFailure, true),
+        };
+        Self::failure(stream, failure, Some(source), operational_failure)
+    }
+
+    fn failure(
+        stream: u64,
+        failure: CallFailure,
+        source: Option<PostgresKernelError>,
+        operational_failure: bool,
+    ) -> Self {
+        Self {
+            stream,
+            actions: vec![ServerAction::Failed { stream, failure }],
+            source,
+            operational_failure,
+        }
+    }
+
+    /// Returns the ordered public actions for normal completion.
+    pub fn actions(&self) -> &[ServerAction] {
+        &self.actions
+    }
+
+    /// Transfers the ordered public actions without cloning their values.
+    pub fn into_actions(self) -> Vec<ServerAction> {
+        self.actions
+    }
+
+    /// Returns the private kernel error retained for trusted diagnostics.
+    pub const fn source(&self) -> Option<&PostgresKernelError> {
+        self.source.as_ref()
+    }
+
+    /// Returns the terminal action when cancellation raced with completion.
+    ///
+    /// A transport cancellation may replace a clean kernel outcome. An
+    /// operational kernel failure remains an internal failure instead.
+    pub const fn action_after_cancellation(&self) -> ServerAction {
+        if self.operational_failure {
+            ServerAction::Failed {
+                stream: self.stream,
+                failure: CallFailure::InternalFailure,
+            }
+        } else {
+            ServerAction::Cancelled {
+                stream: self.stream,
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::str::FromStr;
+
+    use orna_client::ClientExecutionError;
+    use orna_core::{
+        CatalogueRevisionId, FunctionId, ParameterId, PrincipalId, SourceRevisionId,
+        revision::RevisionPair,
+        security::{
+            AuthenticatedSession, ExecuteDenial, Principal, PrincipalKind, PrincipalStatus,
+            SecuritySnapshot,
+        },
+        value::RuntimeValue,
+    };
+    use orna_kernel_postgres::PostgresKernel;
+    use orna_protocol::{
+        CallArgument, CallFailure, RawCall, ServerAction, ServerFrame, encode_server_frame,
+    };
+
+    use super::*;
+
+    const FUNCTION: FunctionId = FunctionId::from_bytes([1; 16]);
+    const PAIR: RevisionPair = RevisionPair::new(
+        SourceRevisionId::from_bytes([2; 16]),
+        CatalogueRevisionId::from_bytes([3; 16]),
+    );
+
+    fn test_session() -> AuthenticatedSession {
+        let principal = PrincipalId::from_bytes([4; 16]);
+        SecuritySnapshot::new(
+            PAIR,
+            vec![],
+            vec![Principal::new(
+                principal,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            vec![],
+            vec![],
+        )
+        .expect("test security snapshot is valid")
+        .bind_authenticated_session(principal, vec![])
+        .expect("test principal can authenticate")
+    }
+
+    fn unavailable_kernel() -> PostgresKernel {
+        PostgresKernel::from_str("host=127.0.0.1 port=1 dbname=absent")
+            .expect("configuration parses without connecting")
+    }
+
+    #[tokio::test]
+    async fn non_empty_call_never_opens_postgres_and_returns_only_redacted_target_failure() {
+        let call = RawCall {
+            function: FUNCTION,
+            arguments: vec![CallArgument {
+                parameter: ParameterId::from_bytes([5; 16]),
+                value: RuntimeValue::Boolean(true),
+            }],
+        };
+
+        let dispatch = RawClientDispatch::new(unavailable_kernel(), test_session(), 7, call);
+        let invocation = dispatch.invocation();
+        assert_eq!(
+            dispatch.accepted_action(),
+            ServerAction::Accepted {
+                stream: 7,
+                invocation,
+            }
+        );
+
+        let result = dispatch.finish().await;
+        assert!(result.source().is_none());
+        assert_eq!(
+            result.actions(),
+            &[ServerAction::Failed {
+                stream: 7,
+                failure: CallFailure::TargetUnavailable,
+            }]
+        );
+        let failure = ServerFrame::CallFailed {
+            stream: 7,
+            failure: CallFailure::TargetUnavailable,
+        };
+        let encoded = encode_server_frame(&failure).expect("closed failure encodes");
+        assert_eq!(&encoded[18..], &[0x02, 0x00, 0x01, 0x00]);
+        assert_eq!(
+            result.action_after_cancellation(),
+            ServerAction::Cancelled { stream: 7 }
+        );
+    }
+
+    #[test]
+    fn every_acceptance_uses_a_fresh_invocation_identity() {
+        let call = RawCall {
+            function: FUNCTION,
+            arguments: vec![],
+        };
+        let first = RawClientDispatch::new(unavailable_kernel(), test_session(), 1, call.clone());
+        let second = RawClientDispatch::new(unavailable_kernel(), test_session(), 2, call);
+
+        assert_ne!(first.invocation(), second.invocation());
+    }
+
+    #[test]
+    fn success_maps_to_one_value_event_then_completion() {
+        let success = RawClientDispatchResult::success(8, RuntimeValue::Boolean(true));
+        let expected = vec![
+            ServerAction::Events {
+                stream: 8,
+                events: vec![Event::Value(RuntimeValue::Boolean(true))],
+            },
+            ServerAction::Completed { stream: 8 },
+        ];
+
+        assert!(success.source().is_none());
+        assert_eq!(success.actions(), expected);
+        assert_eq!(
+            success.action_after_cancellation(),
+            ServerAction::Cancelled { stream: 8 }
+        );
+        assert_eq!(success.into_actions(), expected);
+    }
+
+    #[test]
+    fn every_kernel_error_family_uses_the_closed_mapping_and_precedence() {
+        let denied = RawClientDispatchResult::from_kernel_error(
+            9,
+            PostgresKernelError::ClientExecuteDenied {
+                pair: PAIR,
+                function: FUNCTION,
+                reason: ExecuteDenial::MissingExecuteGrant,
+            },
+        );
+        assert!(matches!(
+            denied.source(),
+            Some(PostgresKernelError::ClientExecuteDenied { .. })
+        ));
+        assert_eq!(
+            denied.actions(),
+            &[ServerAction::Failed {
+                stream: 9,
+                failure: CallFailure::ExecuteDenied,
+            }]
+        );
+        assert_eq!(
+            denied.action_after_cancellation(),
+            ServerAction::Cancelled { stream: 9 }
+        );
+
+        let evaluator = RawClientDispatchResult::from_kernel_error(
+            10,
+            PostgresKernelError::ClientExecution(ClientExecutionError::FunctionNotFound {
+                pair: PAIR,
+                function: FUNCTION,
+            }),
+        );
+        assert!(matches!(
+            evaluator.source(),
+            Some(PostgresKernelError::ClientExecution(_))
+        ));
+        assert_eq!(
+            evaluator.actions(),
+            &[ServerAction::Failed {
+                stream: 10,
+                failure: CallFailure::ClientEvaluationFailed,
+            }]
+        );
+        assert_eq!(
+            evaluator.action_after_cancellation(),
+            ServerAction::Cancelled { stream: 10 }
+        );
+
+        let operational = RawClientDispatchResult::from_kernel_error(
+            11,
+            PostgresKernelError::MigrationMismatch { version: 99 },
+        );
+        assert!(matches!(
+            operational.source(),
+            Some(PostgresKernelError::MigrationMismatch { version: 99 })
+        ));
+        assert_eq!(
+            operational.actions(),
+            &[ServerAction::Failed {
+                stream: 11,
+                failure: CallFailure::InternalFailure,
+            }]
+        );
+        assert_eq!(
+            operational.action_after_cancellation(),
+            ServerAction::Failed {
+                stream: 11,
+                failure: CallFailure::InternalFailure,
+            }
+        );
+    }
+}

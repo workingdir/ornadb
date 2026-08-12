@@ -3,6 +3,7 @@
 mod backend_shell;
 mod embedded;
 mod local_auth;
+mod raw_client_dispatch;
 mod upgrade;
 
 pub use backend_shell::{BackendShellError, run_backend_shell};
@@ -13,6 +14,7 @@ pub use embedded::{
     run_embedded_server, start_embedded_postmaster,
 };
 pub use local_auth::{LocalAuthenticationError, authenticate_local_stream};
+pub use raw_client_dispatch::{RawClientDispatch, RawClientDispatchResult};
 pub use upgrade::{EmbeddedUpgradeError, run_embedded_upgrade};
 
 use std::fmt;
