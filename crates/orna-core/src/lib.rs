@@ -179,6 +179,7 @@ define_id!(StateSlotId, "state-slot");
 define_id!(CallSiteId, "call-site");
 define_id!(InvocationId, "invocation");
 define_id!(PrincipalId, "principal");
+define_id!(SecurityAuditEventId, "security-audit-event");
 
 #[cfg(test)]
 mod tests {
