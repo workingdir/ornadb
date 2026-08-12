@@ -108,6 +108,30 @@ impl ExecuteGrant {
     }
 }
 
+/// A protected mapping from one Linux peer UID to one Orna principal.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct LocalPeerCredential {
+    uid: u32,
+    principal: PrincipalId,
+}
+
+impl LocalPeerCredential {
+    /// Creates a local peer credential mapping.
+    pub const fn new(uid: u32, principal: PrincipalId) -> Self {
+        Self { uid, principal }
+    }
+
+    /// Returns the numeric Linux peer UID.
+    pub const fn uid(self) -> u32 {
+        self.uid
+    }
+
+    /// Returns the principal selected by this protected mapping.
+    pub const fn principal(self) -> PrincipalId {
+        self.principal
+    }
+}
+
 /// A function and revision pair selected by the server for one invocation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct InvocationTarget {
@@ -189,6 +213,33 @@ impl fmt::Display for SessionBindingError {
 
 impl Error for SessionBindingError {}
 
+/// A failure to authenticate a kernel-supplied local peer UID.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LocalPeerAuthenticationError {
+    /// No protected credential maps this UID to an Orna principal.
+    UnknownUid,
+    /// The mapped principal cannot create an authenticated session.
+    InvalidPrincipal(SessionBindingError),
+}
+
+impl fmt::Display for LocalPeerAuthenticationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnknownUid => formatter.write_str("local peer credential is unknown"),
+            Self::InvalidPrincipal(source) => source.fmt(formatter),
+        }
+    }
+}
+
+impl Error for LocalPeerAuthenticationError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::UnknownUid => None,
+            Self::InvalidPrincipal(source) => Some(source),
+        }
+    }
+}
+
 /// An invariant violation in recovered or newly prepared security state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SecuritySnapshotError {
@@ -214,6 +265,12 @@ pub enum SecuritySnapshotError {
     UnknownGrantPrincipal,
     /// A grant names a function absent from the snapshot.
     UnknownGrantFunction,
+    /// Two local credentials use the same Linux UID.
+    DuplicateLocalPeerUid,
+    /// Two local credentials map to the same principal.
+    DuplicateLocalPeerPrincipal,
+    /// A local credential names a principal absent from the snapshot.
+    UnknownLocalPeerPrincipal,
 }
 
 impl fmt::Display for SecuritySnapshotError {
@@ -230,6 +287,13 @@ impl fmt::Display for SecuritySnapshotError {
             Self::CyclicRoleMembership => "security snapshot contains cyclic role membership",
             Self::UnknownGrantPrincipal => "security snapshot grant has an unknown principal",
             Self::UnknownGrantFunction => "security snapshot grant has an unknown function",
+            Self::DuplicateLocalPeerUid => "security snapshot contains a duplicate local peer UID",
+            Self::DuplicateLocalPeerPrincipal => {
+                "security snapshot contains a duplicate local peer principal"
+            }
+            Self::UnknownLocalPeerPrincipal => {
+                "security snapshot local credential has an unknown principal"
+            }
         })
     }
 }
@@ -303,6 +367,7 @@ pub struct SecuritySnapshot {
     principals: BTreeMap<PrincipalId, Principal>,
     memberships: Vec<RoleMembership>,
     grants: BTreeSet<ExecuteGrant>,
+    local_peer_credentials: BTreeMap<u32, LocalPeerCredential>,
 }
 
 fn role_graph_has_cycle(
@@ -360,6 +425,25 @@ impl SecuritySnapshot {
         memberships: Vec<RoleMembership>,
         grants: Vec<ExecuteGrant>,
     ) -> Result<Self, SecuritySnapshotError> {
+        Self::new_with_local_peer_credentials(
+            revision,
+            functions,
+            principals,
+            memberships,
+            grants,
+            vec![],
+        )
+    }
+
+    /// Creates a security snapshot with protected local peer credentials.
+    pub fn new_with_local_peer_credentials(
+        revision: RevisionPair,
+        functions: Vec<FunctionId>,
+        principals: Vec<Principal>,
+        memberships: Vec<RoleMembership>,
+        grants: Vec<ExecuteGrant>,
+        local_peer_credentials: Vec<LocalPeerCredential>,
+    ) -> Result<Self, SecuritySnapshotError> {
         let mut known_functions = BTreeSet::new();
         for function in functions {
             if !known_functions.insert(function) {
@@ -413,12 +497,30 @@ impl SecuritySnapshot {
             }
         }
 
+        let mut local_peers_by_uid = BTreeMap::new();
+        let mut local_peer_principals = BTreeSet::new();
+        for credential in local_peer_credentials {
+            if local_peers_by_uid
+                .insert(credential.uid, credential)
+                .is_some()
+            {
+                return Err(SecuritySnapshotError::DuplicateLocalPeerUid);
+            }
+            if !local_peer_principals.insert(credential.principal) {
+                return Err(SecuritySnapshotError::DuplicateLocalPeerPrincipal);
+            }
+            if !principals_by_id.contains_key(&credential.principal) {
+                return Err(SecuritySnapshotError::UnknownLocalPeerPrincipal);
+            }
+        }
+
         Ok(Self {
             revision,
             functions: known_functions,
             principals: principals_by_id,
             memberships: validated_memberships,
             grants: validated_grants,
+            local_peer_credentials: local_peers_by_uid,
         })
     }
 
@@ -445,6 +547,24 @@ impl SecuritySnapshot {
     /// Iterates over `EXECUTE` grants ordered by grantee and function.
     pub fn execute_grants(&self) -> impl Iterator<Item = ExecuteGrant> + '_ {
         self.grants.iter().copied()
+    }
+
+    /// Iterates over local peer credentials in numeric UID order.
+    pub fn local_peer_credentials(&self) -> impl Iterator<Item = LocalPeerCredential> + '_ {
+        self.local_peer_credentials.values().copied()
+    }
+
+    /// Authenticates a kernel-supplied Linux peer UID with no selected roles.
+    pub fn authenticate_local_peer(
+        &self,
+        uid: u32,
+    ) -> Result<AuthenticatedSession, LocalPeerAuthenticationError> {
+        let credential = self
+            .local_peer_credentials
+            .get(&uid)
+            .ok_or(LocalPeerAuthenticationError::UnknownUid)?;
+        self.bind_authenticated_session(credential.principal, vec![])
+            .map_err(LocalPeerAuthenticationError::InvalidPrincipal)
     }
 
     /// Binds trusted authentication state to this snapshot.
@@ -1049,5 +1169,117 @@ mod tests {
                 ExecuteGrant::new(ROLE, OTHER_FUNCTION),
             ]
         );
+    }
+
+    #[test]
+    fn local_peer_authentication_binds_only_the_mapped_principal() {
+        let snapshot = SecuritySnapshot::new_with_local_peer_credentials(
+            REVISION,
+            vec![FUNCTION],
+            vec![
+                active(USER, PrincipalKind::User),
+                active(ROLE, PrincipalKind::Role),
+            ],
+            vec![RoleMembership::new(ROLE, USER)],
+            vec![ExecuteGrant::new(ROLE, FUNCTION)],
+            vec![LocalPeerCredential::new(1_001, USER)],
+        )
+        .expect("valid local peer snapshot");
+
+        let session = snapshot
+            .authenticate_local_peer(1_001)
+            .expect("mapped active user should authenticate");
+
+        assert_eq!(session.principal(), USER);
+        assert_eq!(session.active_roles(), &[]);
+        assert_eq!(
+            snapshot.authorise_execute(&session, InvocationTarget::new(FUNCTION, REVISION)),
+            ExecuteDecision::Denied(ExecuteDenial::MissingExecuteGrant)
+        );
+        assert_eq!(
+            snapshot.authenticate_local_peer(1_002),
+            Err(LocalPeerAuthenticationError::UnknownUid)
+        );
+        assert_eq!(
+            snapshot.local_peer_credentials().collect::<Vec<_>>(),
+            vec![LocalPeerCredential::new(1_001, USER)]
+        );
+    }
+
+    #[test]
+    fn local_peer_authentication_rejects_disabled_and_role_principals() {
+        for (principal, expected) in [
+            (
+                Principal::new(USER, PrincipalKind::User, PrincipalStatus::Disabled),
+                SessionBindingError::DisabledSessionPrincipal,
+            ),
+            (
+                active(USER, PrincipalKind::Role),
+                SessionBindingError::RoleCannotAuthenticate,
+            ),
+        ] {
+            let snapshot = SecuritySnapshot::new_with_local_peer_credentials(
+                REVISION,
+                vec![FUNCTION],
+                vec![principal],
+                vec![],
+                vec![],
+                vec![LocalPeerCredential::new(1_001, USER)],
+            )
+            .expect("existing principal may retain a local credential");
+
+            assert_eq!(
+                snapshot.authenticate_local_peer(1_001),
+                Err(LocalPeerAuthenticationError::InvalidPrincipal(expected))
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_local_peer_credentials_reject_the_snapshot() {
+        let credential = LocalPeerCredential::new(1_001, USER);
+        let other_uid = LocalPeerCredential::new(1_002, USER);
+        let other_principal = LocalPeerCredential::new(1_001, OTHER_PRINCIPAL);
+        let principals = vec![
+            active(USER, PrincipalKind::User),
+            active(OTHER_PRINCIPAL, PrincipalKind::Service),
+        ];
+
+        assert!(matches!(
+            SecuritySnapshot::new_with_local_peer_credentials(
+                REVISION,
+                vec![FUNCTION],
+                principals.clone(),
+                vec![],
+                vec![],
+                vec![credential, other_principal],
+            ),
+            Err(SecuritySnapshotError::DuplicateLocalPeerUid)
+        ));
+        assert!(matches!(
+            SecuritySnapshot::new_with_local_peer_credentials(
+                REVISION,
+                vec![FUNCTION],
+                principals.clone(),
+                vec![],
+                vec![],
+                vec![credential, other_uid],
+            ),
+            Err(SecuritySnapshotError::DuplicateLocalPeerPrincipal)
+        ));
+        assert!(matches!(
+            SecuritySnapshot::new_with_local_peer_credentials(
+                REVISION,
+                vec![FUNCTION],
+                principals,
+                vec![],
+                vec![],
+                vec![LocalPeerCredential::new(
+                    1_003,
+                    PrincipalId::from_bytes([0xff; 16]),
+                )],
+            ),
+            Err(SecuritySnapshotError::UnknownLocalPeerPrincipal)
+        ));
     }
 }
