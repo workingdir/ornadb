@@ -421,6 +421,8 @@ name = "orna-server"
 version = "0.1.0"
 dependencies = [
  "nix",
+ "orna-compiler",
+ "orna-core",
  "orna-kernel-postgres",
  "orna-postgres-engine",
  "orna-standard",
