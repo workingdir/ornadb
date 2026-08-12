@@ -43,3 +43,5 @@ source-of-truth or authority rules.
   [Authenticated Sessions Authorise Pinned Function Execution](0020-authenticated-execute-decisions.md)
 * **work ADR 0021:**
   [PostgreSQL Persists the Security Decision Snapshot](0021-durable-security-snapshot.md)
+* **work ADR 0022:**
+  [CLIENT Evaluation Requires an Authorised Invocation](0022-client-evaluation-requires-authorisation.md)
