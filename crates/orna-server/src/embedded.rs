@@ -34,7 +34,10 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio_postgres::{Config, NoTls};
 
-use crate::{EmbeddedUpgradeError, OpenStandardDatabaseError, open_standard_database};
+use crate::{
+    EmbeddedUpgradeError, LocalRawSocketServer, LocalRawSocketServerError,
+    OpenStandardDatabaseError, open_standard_database, start_local_raw_socket,
+};
 
 #[path = "distribution.rs"]
 mod distribution;
@@ -226,7 +229,7 @@ fn prepare_instance() -> Result<PreparedInstance, EmbeddedHostError> {
 
     let paths = EmbeddedHostPaths::production();
     require_directory(Path::new(INSTANCE_PARENT), service.uid, service.gid, 0o700)?;
-    require_directory(paths.runtime_root(), service.uid, service.gid, 0o700)?;
+    require_directory(paths.runtime_root(), service.uid, service.gid, 0o711)?;
     let state_metadata = fs::symlink_metadata(paths.state_root());
     let is_new = match state_metadata {
         Ok(_) => {
@@ -500,7 +503,7 @@ pub fn inspect_ready_embedded_host() -> Result<ReadyEmbeddedHost, EmbeddedHostEr
 
     let paths = EmbeddedHostPaths::production();
     require_directory(paths.state_root(), service.uid, service.gid, 0o700)?;
-    require_directory(paths.runtime_root(), service.uid, service.gid, 0o700)?;
+    require_directory(paths.runtime_root(), service.uid, service.gid, 0o711)?;
     require_directory(paths.socket_directory(), service.uid, service.gid, 0o700)?;
     let instance_lock = open_verified_file(
         &paths.state_root().join(INSTANCE_LOCK_NAME),
@@ -862,6 +865,54 @@ pub fn run_embedded_server() -> Result<(), EmbeddedHostError> {
         &instance.data_directory,
         instance.paths.socket_directory(),
     )?;
+    let kernel = match prepare_running_kernel(&mut postmaster, &instance) {
+        Ok(kernel) => kernel,
+        Err(primary) => return stop_postmaster_after(primary, postmaster),
+    };
+    let local_socket = match start_local_raw_socket(instance.paths.runtime_root(), kernel) {
+        Ok(local_socket) => local_socket,
+        Err(source) => {
+            return stop_postmaster_after(EmbeddedHostError::from(source), postmaster);
+        }
+    };
+
+    let manifest = instance_manifest_bytes(&instance.identity, true);
+    if let Err(primary) = atomic_write(
+        &instance.paths.state_root().join(INSTANCE_MANIFEST_NAME),
+        &manifest,
+        0o600,
+    ) {
+        return stop_server_after(primary, local_socket, postmaster);
+    }
+    let ready_path = instance.paths.runtime_root().join(READY_NAME);
+    let ready = match ready_record_bytes(&instance, postmaster.pid(), &manifest) {
+        Ok(ready) => ready,
+        Err(primary) => return stop_server_after(primary, local_socket, postmaster),
+    };
+    if let Err(primary) = atomic_write(&ready_path, &ready, 0o600) {
+        return stop_server_after(primary, local_socket, postmaster);
+    }
+    if let Err(error) = notify_systemd(b"READY=1\nSTATUS=OrnaDB is ready") {
+        return stop_ready_server_after(error, &ready_path, local_socket, postmaster);
+    }
+
+    let supervision = supervise_until_shutdown(&mut postmaster, &local_socket);
+    let notification = notify_systemd(b"STOPPING=1\nSTATUS=OrnaDB is stopping");
+    let removal = remove_ready_record(&ready_path);
+    let socket_stop = local_socket.stop().map_err(EmbeddedHostError::from);
+    let stop = stop_postmaster(postmaster);
+    let reap = reap_orphaned_descendants();
+    let supervision = match (supervision, &socket_stop) {
+        (Err(EmbeddedHostError::LocalSocketUnavailable), Err(_)) => Ok(()),
+        (supervision, _) => supervision,
+    };
+    first_lifecycle_error([socket_stop, supervision, notification, removal, stop, reap])
+}
+
+fn prepare_running_kernel(
+    postmaster: &mut EmbeddedPostmaster,
+    instance: &PreparedInstance,
+) -> Result<orna_kernel_postgres::PostgresKernel, EmbeddedHostError> {
     let runtime = current_thread_runtime()?;
     runtime.block_on(async {
         postmaster.wait_until_ready("orna").await?;
@@ -869,42 +920,69 @@ pub fn run_embedded_server() -> Result<(), EmbeddedHostError> {
             instance.paths.socket_directory(),
             "orna",
         ));
-        let _kernel = open_standard_database(kernel).await?;
-        Ok::<(), EmbeddedHostError>(())
-    })?;
-    drop(runtime);
+        open_standard_database(kernel)
+            .await
+            .map_err(EmbeddedHostError::from)
+    })
+}
 
-    let manifest = instance_manifest_bytes(&instance.identity, true);
-    atomic_write(
-        &instance.paths.state_root().join(INSTANCE_MANIFEST_NAME),
-        &manifest,
-        0o600,
-    )?;
-    let ready_path = instance.paths.runtime_root().join(READY_NAME);
-    let ready = ready_record_bytes(&instance, postmaster.pid(), &manifest)?;
-    atomic_write(&ready_path, &ready, 0o600)?;
-    if let Err(error) = notify_systemd(b"READY=1\nSTATUS=OrnaDB is ready") {
-        let removal = remove_ready_record(&ready_path);
-        let stop = current_thread_runtime()?.block_on(postmaster.stop());
-        let reap = reap_orphaned_descendants();
-        removal?;
-        stop?;
-        reap?;
-        return Err(error);
-    }
-
-    let supervision = supervise_until_shutdown(&mut postmaster);
-    let notification = notify_systemd(b"STOPPING=1\nSTATUS=OrnaDB is stopping");
-    let removal = remove_ready_record(&ready_path);
-    let stop = match supervision {
-        Ok(()) => current_thread_runtime()?.block_on(postmaster.stop()),
-        Err(error) => Err(error),
-    };
+fn stop_ready_server_after(
+    primary: EmbeddedHostError,
+    ready_path: &Path,
+    local_socket: LocalRawSocketServer,
+    postmaster: EmbeddedPostmaster,
+) -> Result<(), EmbeddedHostError> {
+    let removal = remove_ready_record(ready_path);
+    let socket_stop = local_socket.stop().map_err(EmbeddedHostError::from);
+    let postmaster_stop = stop_postmaster(postmaster);
     let reap = reap_orphaned_descendants();
-    notification?;
-    removal?;
-    stop?;
-    reap
+    finish_lifecycle(primary, [removal, socket_stop, postmaster_stop, reap])
+}
+
+fn stop_server_after(
+    primary: EmbeddedHostError,
+    local_socket: LocalRawSocketServer,
+    postmaster: EmbeddedPostmaster,
+) -> Result<(), EmbeddedHostError> {
+    let socket_stop = local_socket.stop().map_err(EmbeddedHostError::from);
+    let postmaster_stop = stop_postmaster(postmaster);
+    let reap = reap_orphaned_descendants();
+    finish_lifecycle(primary, [socket_stop, postmaster_stop, reap])
+}
+
+fn stop_postmaster_after(
+    primary: EmbeddedHostError,
+    postmaster: EmbeddedPostmaster,
+) -> Result<(), EmbeddedHostError> {
+    let stop = stop_postmaster(postmaster);
+    let reap = reap_orphaned_descendants();
+    finish_lifecycle(primary, [stop, reap])
+}
+
+fn stop_postmaster(postmaster: EmbeddedPostmaster) -> Result<(), EmbeddedHostError> {
+    current_thread_runtime()?.block_on(postmaster.stop())
+}
+
+fn finish_lifecycle<const N: usize>(
+    primary: EmbeddedHostError,
+    cleanup: [Result<(), EmbeddedHostError>; N],
+) -> Result<(), EmbeddedHostError> {
+    match cleanup.into_iter().find_map(Result::err) {
+        Some(cleanup) => Err(EmbeddedHostError::Lifecycle {
+            primary: Box::new(primary),
+            cleanup: Box::new(cleanup),
+        }),
+        None => Err(primary),
+    }
+}
+
+fn first_lifecycle_error<const N: usize>(
+    phases: [Result<(), EmbeddedHostError>; N],
+) -> Result<(), EmbeddedHostError> {
+    match phases.into_iter().find_map(Result::err) {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }
 
 fn bootstrap_new_instance(instance: &PreparedInstance) -> Result<(), EmbeddedHostError> {
@@ -1145,12 +1223,18 @@ extern "C" fn record_shutdown_signal(signal: i32) {
     let _ = SHUTDOWN_SIGNAL.compare_exchange(0, signal, Ordering::SeqCst, Ordering::SeqCst);
 }
 
-fn supervise_until_shutdown(postmaster: &mut EmbeddedPostmaster) -> Result<(), EmbeddedHostError> {
+fn supervise_until_shutdown(
+    postmaster: &mut EmbeddedPostmaster,
+    local_socket: &LocalRawSocketServer,
+) -> Result<(), EmbeddedHostError> {
     loop {
         if SHUTDOWN_SIGNAL.load(Ordering::SeqCst) != 0 {
             return Ok(());
         }
         postmaster.require_running()?;
+        if !local_socket.is_healthy() {
+            return Err(EmbeddedHostError::LocalSocketUnavailable);
+        }
         std::thread::sleep(Duration::from_millis(100));
     }
 }
@@ -1186,6 +1270,13 @@ impl MaterialisedSupport {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum EmbeddedHostError {
+    /// A foreground lifecycle operation failed and ordered cleanup also failed.
+    Lifecycle {
+        /// The first lifecycle failure.
+        primary: Box<EmbeddedHostError>,
+        /// The first cleanup failure in lifecycle order.
+        cleanup: Box<EmbeddedHostError>,
+    },
     /// A private PostgreSQL connection failed.
     Database(tokio_postgres::Error),
     /// The linked embedded-engine boundary rejected an input.
@@ -1222,6 +1313,10 @@ pub enum EmbeddedHostError {
     ReadinessTimeout,
     /// The private asynchronous runtime could not start or complete.
     Runtime(io::Error),
+    /// The public local raw-socket listener failed to start or stop.
+    LocalSocket(LocalRawSocketServerError),
+    /// Foreground supervision observed that the local listener was no longer healthy.
+    LocalSocketUnavailable,
     /// Supervisor signal setup failed.
     Signal,
     /// Linux child-process containment or descriptor closure failed.
@@ -1239,6 +1334,9 @@ pub enum EmbeddedHostError {
 impl fmt::Display for EmbeddedHostError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Lifecycle { primary, cleanup } => {
+                write!(formatter, "{primary}; cleanup also failed: {cleanup}")
+            }
             Self::Database(source) => source.fmt(formatter),
             Self::Engine(source) => source.fmt(formatter),
             Self::InvalidServiceIdentity => formatter.write_str("Orna service identity is invalid"),
@@ -1290,6 +1388,10 @@ impl fmt::Display for EmbeddedHostError {
                 formatter.write_str("embedded PostgreSQL did not become ready")
             }
             Self::Runtime(source) => write!(formatter, "Orna server runtime failed: {source}"),
+            Self::LocalSocket(source) => source.fmt(formatter),
+            Self::LocalSocketUnavailable => {
+                formatter.write_str("local raw socket listener is unavailable")
+            }
             Self::Signal => formatter.write_str("Orna server signal handling failed"),
             Self::ProcessControl => formatter.write_str("Orna server process containment failed"),
             Self::Notification => formatter.write_str("Orna server notification failed"),
@@ -1311,10 +1413,12 @@ impl fmt::Display for EmbeddedHostError {
 impl std::error::Error for EmbeddedHostError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Self::Lifecycle { primary, .. } => Some(primary.as_ref()),
             Self::Database(source) => Some(source),
             Self::Engine(source) => Some(source),
             Self::Io(source) => Some(source),
             Self::Runtime(source) => Some(source),
+            Self::LocalSocket(source) => Some(source),
             Self::Standard(source) => Some(source),
             _ => None,
         }
@@ -1342,6 +1446,12 @@ impl From<tokio_postgres::Error> for EmbeddedHostError {
 impl From<OpenStandardDatabaseError> for EmbeddedHostError {
     fn from(source: OpenStandardDatabaseError) -> Self {
         Self::Standard(source)
+    }
+}
+
+impl From<LocalRawSocketServerError> for EmbeddedHostError {
+    fn from(source: LocalRawSocketServerError) -> Self {
+        Self::LocalSocket(source)
     }
 }
 
