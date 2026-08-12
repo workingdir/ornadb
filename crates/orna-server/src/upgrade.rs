@@ -40,6 +40,11 @@ impl fmt::Display for EmbeddedUpgradeError {
 
 impl std::error::Error for EmbeddedUpgradeError {}
 
+/// Validates and, when authorised, upgrades the stopped default instance.
+pub fn run_embedded_upgrade() -> Result<(), EmbeddedUpgradeError> {
+    crate::embedded::upgrade_default_instance()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
