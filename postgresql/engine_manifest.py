@@ -184,6 +184,15 @@ def main() -> None:
         "docker", "run", "--rm", "--network=none", image,
         "dpkg-query", "-W", "-f=${binary:Package}=${Version}\\n",
     ).decode().splitlines()
+    image_digest = command(
+        "docker", "image", "inspect", "--format={{.Id}}", image,
+    ).decode().strip()
+    if len(image_digest) != 71 or not image_digest.startswith("sha256:"):
+        raise SystemExit("prepared builder image digest is not accepted")
+    try:
+        bytes.fromhex(image_digest.removeprefix("sha256:"))
+    except ValueError as error:
+        raise SystemExit("prepared builder image digest is not accepted") from error
 
     manifest = {
         "build_inputs": {
@@ -195,6 +204,7 @@ def main() -> None:
             "base_image": base_image,
             "containerfile_sha256": containerfile_record["sha256"],
             "image": image,
+            "image_digest": image_digest,
             "packages": sorted(package_lines),
         },
         "format": 1,
