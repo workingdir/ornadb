@@ -13,10 +13,11 @@ pub use frame::{
 use std::{error::Error, fmt};
 
 use orna_core::{
-    ObjectId, TypeId,
+    FieldId, ObjectId, TypeId,
     catalogue::CatalogueSnapshot,
+    revision::ActiveDatabaseRevision,
     types::{ResolvedType, StandardScalar},
-    value::{EnumValue, EnumValueError, RuntimeFloat, RuntimeValue},
+    value::{EnumValue, EnumValueError, RecordValue, RuntimeFloat, RuntimeValue},
 };
 use orna_standard::{
     BIGINT_TYPE_ID, BINARY_LARGE_OBJECT_TYPE_ID, BOOLEAN_TYPE_ID, CHARACTER_LARGE_OBJECT_TYPE_ID,
@@ -25,7 +26,9 @@ use orna_standard::{
 
 const MARKER: &[u8; 4] = b"ORV1";
 const CATALOGUE_MARKER: &[u8; 4] = b"ORV2";
+const ACTIVE_MARKER: &[u8; 4] = b"ORV3";
 const HEADER_LENGTH: usize = 25;
+const RECORD_FIELD_HEADER_LENGTH: usize = 20;
 const NULL_SCALAR_TAG: u8 = 0x00;
 const NULL_REFERENCE_TAG: u8 = 0x01;
 const BOOLEAN_TAG: u8 = 0x02;
@@ -37,19 +40,22 @@ const BYTES_TAG: u8 = 0x07;
 const REFERENCE_TAG: u8 = 0x08;
 const NULL_ENUM_TAG: u8 = 0x09;
 const ENUM_TAG: u8 = 0x0a;
+const RECORD_TAG: u8 = 0x0b;
 const PAYLOAD_LIMIT: usize = 16 * 1024 * 1024;
-const SUPPORTED_SCALAR_TYPES: [(TypeId, StandardScalar); 6] = [
-    (BOOLEAN_TYPE_ID, StandardScalar::Boolean),
-    (INTEGER_TYPE_ID, StandardScalar::Integer),
-    (BIGINT_TYPE_ID, StandardScalar::BigInt),
-    (FLOAT_TYPE_ID, StandardScalar::Float),
+const SUPPORTED_SCALAR_TYPES: [(TypeId, StandardScalar, u8); 6] = [
+    (BOOLEAN_TYPE_ID, StandardScalar::Boolean, BOOLEAN_TAG),
+    (INTEGER_TYPE_ID, StandardScalar::Integer, INTEGER_TAG),
+    (BIGINT_TYPE_ID, StandardScalar::BigInt, BIGINT_TAG),
+    (FLOAT_TYPE_ID, StandardScalar::Float, FLOAT_TAG),
     (
         CHARACTER_LARGE_OBJECT_TYPE_ID,
         StandardScalar::CharacterLargeObject,
+        TEXT_TAG,
     ),
     (
         BINARY_LARGE_OBJECT_TYPE_ID,
         StandardScalar::BinaryLargeObject,
+        BYTES_TAG,
     ),
 ];
 
@@ -57,16 +63,16 @@ const SUPPORTED_SCALAR_TYPES: [(TypeId, StandardScalar); 6] = [
 #[non_exhaustive]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ValueCodecError {
-    /// The runtime value category is not defined by codec version 1.
+    /// The runtime value category is not defined by the selected codec version.
     UnsupportedValue,
     /// The encoded value does not contain the complete fixed header.
     TruncatedHeader {
         /// The total number of available bytes.
         actual: usize,
     },
-    /// The encoded value does not start with the version-1 marker.
+    /// The encoded value does not start with the selected codec marker.
     InvalidMarker,
-    /// The value tag is not defined by codec version 1.
+    /// The value tag is not defined by the selected codec version.
     UnknownTag {
         /// The unrecognised wire tag.
         tag: u8,
@@ -108,7 +114,7 @@ pub enum ValueCodecError {
     },
     /// A float payload is non-finite or is the non-canonical negative zero.
     NonCanonicalFloat,
-    /// A supplied or declared payload exceeds the version-1 limit.
+    /// A supplied or declared payload exceeds the shared codec limit.
     PayloadTooLarge {
         /// The supplied or declared payload length.
         actual: usize,
@@ -134,13 +140,71 @@ pub enum ValueCodecError {
         /// The undeclared label.
         label: String,
     },
+    /// The active revision does not contain the supplied record type.
+    InactiveRecordType {
+        /// The inactive record type identity.
+        record_type: TypeId,
+    },
+    /// A checked record value is not valid against the supplied active revision.
+    RecordValueNotActive {
+        /// The incompatible record type identity.
+        record_type: TypeId,
+    },
+    /// The encoded field count differs from the active record definition.
+    WrongRecordFieldCount {
+        /// The field count required by the active definition.
+        expected: usize,
+        /// The field count declared by the encoded payload.
+        actual: usize,
+    },
+    /// An encoded field identity differs from the active declaration ordinal.
+    WrongRecordFieldIdentity {
+        /// The zero-based declaration ordinal.
+        ordinal: usize,
+        /// The stable field identity required at this ordinal.
+        expected: FieldId,
+        /// The stable field identity found in the encoded payload.
+        actual: FieldId,
+    },
+    /// The record payload ends before one complete field-entry header.
+    TruncatedRecordFieldHeader {
+        /// The zero-based declaration ordinal.
+        ordinal: usize,
+        /// The bytes available for the field-entry header.
+        actual: usize,
+    },
+    /// An encoded complete field-value length cannot fit in the record payload.
+    InvalidRecordFieldLength {
+        /// The zero-based declaration ordinal.
+        ordinal: usize,
+        /// The complete field-value length declared by the entry.
+        declared: usize,
+        /// The bytes available after the entry header.
+        remaining: usize,
+    },
+    /// A record field contains the deferred nested-record shape.
+    NestedRecordValue {
+        /// The zero-based declaration ordinal.
+        ordinal: usize,
+    },
+    /// A record field value does not use its declared wire type.
+    WrongRecordFieldType {
+        /// The zero-based declaration ordinal.
+        ordinal: usize,
+        /// The resolved field type required by the active definition.
+        expected: ResolvedType,
+        /// The encoded value tag.
+        tag: u8,
+        /// The encoded stable type identity.
+        actual: TypeId,
+    },
 }
 
 impl fmt::Display for ValueCodecError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::UnsupportedValue => {
-                formatter.write_str("runtime value is not supported by codec version 1")
+                formatter.write_str("runtime value is not supported by the selected codec version")
             }
             Self::TruncatedHeader { .. } => {
                 formatter.write_str("runtime value header is truncated")
@@ -175,6 +239,30 @@ impl fmt::Display for ValueCodecError {
             }
             Self::UndeclaredEnumLabel { .. } => {
                 formatter.write_str("enum label is not declared by the active type")
+            }
+            Self::InactiveRecordType { .. } => {
+                formatter.write_str("record type is not active for the canonical value")
+            }
+            Self::RecordValueNotActive { .. } => {
+                formatter.write_str("record value is not valid for the active revision")
+            }
+            Self::WrongRecordFieldCount { .. } => {
+                formatter.write_str("record field count does not match the active definition")
+            }
+            Self::WrongRecordFieldIdentity { .. } => {
+                formatter.write_str("record field identity does not match its declaration ordinal")
+            }
+            Self::TruncatedRecordFieldHeader { .. } => {
+                formatter.write_str("record field-entry header is truncated")
+            }
+            Self::InvalidRecordFieldLength { .. } => {
+                formatter.write_str("record field length is invalid")
+            }
+            Self::NestedRecordValue { .. } => {
+                formatter.write_str("nested record values are not supported")
+            }
+            Self::WrongRecordFieldType { .. } => {
+                formatter.write_str("record field value does not match its declared type")
             }
         }
     }
@@ -303,6 +391,242 @@ pub fn decode_catalogue_value(
     encoded: &[u8],
 ) -> Result<RuntimeValue, ValueCodecError> {
     let (tag, type_id, payload) = decode_envelope(encoded, CATALOGUE_MARKER)?;
+    decode_catalogue_value_parts(catalogue, tag, type_id, payload)
+}
+
+/// Encodes one runtime value against an active revision as canonical
+/// version-3 bytes.
+///
+/// Version 3 retains every version-2 scalar and enum shape under the `ORV3`
+/// marker and adds named immutable record values.
+///
+/// # Errors
+///
+/// Returns [`ValueCodecError`] when the value violates an earlier codec rule
+/// or is not valid against the supplied active revision.
+pub fn encode_active_value(
+    active: &ActiveDatabaseRevision,
+    value: &RuntimeValue,
+) -> Result<Vec<u8>, ValueCodecError> {
+    match value {
+        RuntimeValue::Record(value) => encode_record_value(active, value),
+        _ => encode_catalogue_value(active.catalogue(), value).map(with_active_marker),
+    }
+}
+
+/// Decodes one complete canonical version-3 value against an active revision.
+///
+/// # Errors
+///
+/// Returns [`ValueCodecError`] for every invalid version-2 byte shape and for
+/// a record that does not match the active nominal definition. It never
+/// returns a partial value.
+pub fn decode_active_value(
+    active: &ActiveDatabaseRevision,
+    encoded: &[u8],
+) -> Result<RuntimeValue, ValueCodecError> {
+    let (tag, type_id, payload) = decode_envelope(encoded, ACTIVE_MARKER)?;
+    if tag == RECORD_TAG {
+        decode_record_value(active, type_id, payload)
+    } else {
+        decode_active_non_record_value(active, tag, type_id, payload)
+    }
+}
+
+fn encode_record_value(
+    active: &ActiveDatabaseRevision,
+    value: &RecordValue,
+) -> Result<Vec<u8>, ValueCodecError> {
+    let definition = active
+        .catalogue()
+        .record_value_type_by_id(value.record_type())
+        .ok_or(ValueCodecError::InactiveRecordType {
+            record_type: value.record_type(),
+        })?;
+    if definition.fields().len() != value.fields().len() {
+        return Err(ValueCodecError::RecordValueNotActive {
+            record_type: value.record_type(),
+        });
+    }
+    RecordValue::new(
+        active,
+        value.record_type(),
+        definition
+            .fields()
+            .iter()
+            .zip(value.fields())
+            .map(|(field, value)| (field.name().to_owned(), value.clone())),
+    )
+    .map_err(|_| ValueCodecError::RecordValueNotActive {
+        record_type: value.record_type(),
+    })?;
+
+    let field_count =
+        u32::try_from(definition.fields().len()).map_err(|_| ValueCodecError::PayloadTooLarge {
+            actual: usize::MAX,
+            maximum: PAYLOAD_LIMIT,
+        })?;
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&field_count.to_be_bytes());
+    for (field, value) in definition.fields().iter().zip(value.fields()) {
+        let encoded =
+            encode_record_field_value(active, definition.id(), field.resolved_type(), value)?;
+        let encoded_length =
+            u32::try_from(encoded.len()).map_err(|_| ValueCodecError::PayloadTooLarge {
+                actual: encoded.len(),
+                maximum: PAYLOAD_LIMIT,
+            })?;
+        let next_length = payload
+            .len()
+            .checked_add(RECORD_FIELD_HEADER_LENGTH)
+            .and_then(|length| length.checked_add(encoded.len()))
+            .ok_or(ValueCodecError::PayloadTooLarge {
+                actual: usize::MAX,
+                maximum: PAYLOAD_LIMIT,
+            })?;
+        require_payload_limit(next_length)?;
+        payload.reserve(RECORD_FIELD_HEADER_LENGTH + encoded.len());
+        payload.extend_from_slice(&field.id().to_bytes());
+        payload.extend_from_slice(&encoded_length.to_be_bytes());
+        payload.extend_from_slice(&encoded);
+    }
+    Ok(encode_with_marker(
+        ACTIVE_MARKER,
+        RECORD_TAG,
+        value.record_type(),
+        &payload,
+    ))
+}
+
+fn decode_record_value(
+    active: &ActiveDatabaseRevision,
+    record_type: TypeId,
+    payload: &[u8],
+) -> Result<RuntimeValue, ValueCodecError> {
+    let definition = active
+        .catalogue()
+        .record_value_type_by_id(record_type)
+        .ok_or(ValueCodecError::InactiveRecordType { record_type })?;
+    if payload.len() < 4 {
+        return Err(ValueCodecError::TruncatedPayload {
+            declared: 4,
+            actual: payload.len(),
+        });
+    }
+    let field_count = u32::from_be_bytes(payload[..4].try_into().expect("length checked")) as usize;
+    if field_count != definition.fields().len() {
+        return Err(ValueCodecError::WrongRecordFieldCount {
+            expected: definition.fields().len(),
+            actual: field_count,
+        });
+    }
+    let minimum = 4_usize
+        .checked_add(
+            field_count
+                .checked_mul(RECORD_FIELD_HEADER_LENGTH + HEADER_LENGTH)
+                .ok_or(ValueCodecError::PayloadTooLarge {
+                    actual: usize::MAX,
+                    maximum: PAYLOAD_LIMIT,
+                })?,
+        )
+        .ok_or(ValueCodecError::PayloadTooLarge {
+            actual: usize::MAX,
+            maximum: PAYLOAD_LIMIT,
+        })?;
+    if payload.len() < minimum {
+        return Err(ValueCodecError::TruncatedPayload {
+            declared: minimum,
+            actual: payload.len(),
+        });
+    }
+
+    let mut cursor = 4;
+    let mut fields = Vec::with_capacity(field_count);
+    for (ordinal, definition_field) in definition.fields().iter().enumerate() {
+        let remaining = payload.len() - cursor;
+        if remaining < RECORD_FIELD_HEADER_LENGTH {
+            return Err(ValueCodecError::TruncatedRecordFieldHeader {
+                ordinal,
+                actual: remaining,
+            });
+        }
+        let field_end = cursor + 16;
+        let field = FieldId::from_bytes(
+            payload[cursor..field_end]
+                .try_into()
+                .expect("minimum record entry length checked"),
+        );
+        if field != definition_field.id() {
+            return Err(ValueCodecError::WrongRecordFieldIdentity {
+                ordinal,
+                expected: definition_field.id(),
+                actual: field,
+            });
+        }
+        cursor = field_end;
+        let length_end = cursor + 4;
+        let declared = u32::from_be_bytes(
+            payload[cursor..length_end]
+                .try_into()
+                .expect("minimum record entry length checked"),
+        ) as usize;
+        cursor = length_end;
+        let remaining = payload.len() - cursor;
+        if declared < HEADER_LENGTH || declared > remaining {
+            return Err(ValueCodecError::InvalidRecordFieldLength {
+                ordinal,
+                declared,
+                remaining,
+            });
+        }
+        let encoded_end = cursor + declared;
+        let encoded = &payload[cursor..encoded_end];
+        let (tag, type_id, field_payload) = decode_envelope(encoded, ACTIVE_MARKER)?;
+        if tag == RECORD_TAG {
+            return Err(ValueCodecError::NestedRecordValue { ordinal });
+        }
+        require_record_field_wire_type(
+            active,
+            definition_field.resolved_type(),
+            ordinal,
+            tag,
+            type_id,
+        )?;
+        let value = decode_record_field_value(
+            active,
+            definition_field.resolved_type(),
+            tag,
+            field_payload,
+        )?;
+        fields.push((definition_field.name().to_owned(), value));
+        cursor = encoded_end;
+    }
+    if cursor != payload.len() {
+        return Err(ValueCodecError::TrailingBytes {
+            declared: cursor,
+            actual: payload.len(),
+        });
+    }
+    RecordValue::new(active, record_type, fields)
+        .map(RuntimeValue::Record)
+        .map_err(|_| ValueCodecError::RecordValueNotActive { record_type })
+}
+
+fn decode_active_non_record_value(
+    active: &ActiveDatabaseRevision,
+    tag: u8,
+    type_id: TypeId,
+    payload: &[u8],
+) -> Result<RuntimeValue, ValueCodecError> {
+    decode_catalogue_value_parts(active.catalogue(), tag, type_id, payload)
+}
+
+fn decode_catalogue_value_parts(
+    catalogue: &CatalogueSnapshot,
+    tag: u8,
+    type_id: TypeId,
+    payload: &[u8],
+) -> Result<RuntimeValue, ValueCodecError> {
     match tag {
         NULL_ENUM_TAG => {
             require_empty_payload(tag, payload)?;
@@ -313,10 +637,97 @@ pub fn decode_catalogue_value(
         ENUM_TAG => {
             require_payload_limit(payload.len())?;
             let label = std::str::from_utf8(payload).map_err(|_| ValueCodecError::InvalidUtf8)?;
-            let value = validate_enum_value(catalogue, type_id, label)?;
-            Ok(RuntimeValue::Enum(value))
+            validate_enum_value(catalogue, type_id, label).map(RuntimeValue::Enum)
         }
         _ => decode_non_enum_value(tag, type_id, payload),
+    }
+}
+
+fn require_record_field_wire_type(
+    active: &ActiveDatabaseRevision,
+    expected: ResolvedType,
+    ordinal: usize,
+    tag: u8,
+    actual: TypeId,
+) -> Result<(), ValueCodecError> {
+    let matches = match expected {
+        ResolvedType::Value(expected) => active
+            .record_value_field_runtime_type(ResolvedType::value(expected))
+            .and_then(ResolvedType::legacy_scalar)
+            .is_some_and(|scalar| {
+                actual == expected && supported_scalar_tag_from_scalar(scalar) == Some(tag)
+            }),
+        ResolvedType::Named(expected) => actual == expected && tag == ENUM_TAG,
+        ResolvedType::Scalar(_) | ResolvedType::Reference { .. } => false,
+    };
+    if matches {
+        Ok(())
+    } else {
+        Err(ValueCodecError::WrongRecordFieldType {
+            ordinal,
+            expected,
+            tag,
+            actual,
+        })
+    }
+}
+
+fn encode_record_field_value(
+    active: &ActiveDatabaseRevision,
+    record_type: TypeId,
+    declared: ResolvedType,
+    value: &RuntimeValue,
+) -> Result<Vec<u8>, ValueCodecError> {
+    match declared {
+        ResolvedType::Value(type_id) => {
+            let expected = active
+                .record_value_field_runtime_type(declared)
+                .ok_or(ValueCodecError::UnsupportedValue)?;
+            if value.resolved_type() != expected {
+                return Err(ValueCodecError::RecordValueNotActive { record_type });
+            }
+            let mut encoded = encode_value(value)?;
+            encoded[..ACTIVE_MARKER.len()].copy_from_slice(ACTIVE_MARKER);
+            encoded[5..21].copy_from_slice(&type_id.to_bytes());
+            Ok(encoded)
+        }
+        ResolvedType::Named(enum_type) => {
+            let RuntimeValue::Enum(value) = value else {
+                return Err(ValueCodecError::RecordValueNotActive { record_type });
+            };
+            validate_active_enum_value(active, enum_type, value.label())?;
+            encode_variable(ENUM_TAG, enum_type, value.label().as_bytes()).map(with_active_marker)
+        }
+        ResolvedType::Scalar(_) | ResolvedType::Reference { .. } => {
+            Err(ValueCodecError::UnsupportedValue)
+        }
+    }
+}
+
+fn decode_record_field_value(
+    active: &ActiveDatabaseRevision,
+    declared: ResolvedType,
+    tag: u8,
+    payload: &[u8],
+) -> Result<RuntimeValue, ValueCodecError> {
+    match declared {
+        ResolvedType::Value(_) => {
+            let scalar = active
+                .record_value_field_runtime_type(declared)
+                .and_then(ResolvedType::legacy_scalar)
+                .ok_or(ValueCodecError::UnsupportedValue)?;
+            let canonical_type =
+                supported_scalar_type_id(scalar).ok_or(ValueCodecError::UnsupportedValue)?;
+            decode_non_enum_value(tag, canonical_type, payload)
+        }
+        ResolvedType::Named(enum_type) => {
+            require_payload_limit(payload.len())?;
+            let label = std::str::from_utf8(payload).map_err(|_| ValueCodecError::InvalidUtf8)?;
+            validate_active_enum_value(active, enum_type, label).map(RuntimeValue::Enum)
+        }
+        ResolvedType::Scalar(_) | ResolvedType::Reference { .. } => {
+            Err(ValueCodecError::UnsupportedValue)
+        }
     }
 }
 
@@ -422,6 +833,11 @@ fn with_catalogue_marker(mut encoded: Vec<u8>) -> Vec<u8> {
     encoded
 }
 
+fn with_active_marker(mut encoded: Vec<u8>) -> Vec<u8> {
+    encoded[..ACTIVE_MARKER.len()].copy_from_slice(ACTIVE_MARKER);
+    encoded
+}
+
 fn encode_variable(tag: u8, type_id: TypeId, payload: &[u8]) -> Result<Vec<u8>, ValueCodecError> {
     require_payload_limit(payload.len())?;
     Ok(encode(tag, type_id, payload))
@@ -491,6 +907,22 @@ fn validate_enum_value(
     })
 }
 
+fn validate_active_enum_value(
+    active: &ActiveDatabaseRevision,
+    enum_type: TypeId,
+    label: &str,
+) -> Result<EnumValue, ValueCodecError> {
+    if active.catalogue().enum_type_by_id(enum_type).is_some() {
+        return validate_enum_value(active.catalogue(), enum_type, label);
+    }
+    let standard = active
+        .catalogue_hash_context()
+        .standard()
+        .ok_or(ValueCodecError::InactiveEnumType { enum_type })?
+        .catalogue();
+    validate_enum_value(standard, enum_type, label)
+}
+
 fn require_type(tag: u8, actual: TypeId, expected: TypeId) -> Result<(), ValueCodecError> {
     if actual == expected {
         Ok(())
@@ -522,13 +954,19 @@ fn require_reference_target(target: TypeId) -> Result<(), ValueCodecError> {
 fn supported_scalar_type_id(scalar: StandardScalar) -> Option<TypeId> {
     SUPPORTED_SCALAR_TYPES
         .iter()
-        .find_map(|(type_id, candidate)| (*candidate == scalar).then_some(*type_id))
+        .find_map(|(type_id, candidate, _)| (*candidate == scalar).then_some(*type_id))
 }
 
 fn supported_scalar_from_type_id(type_id: TypeId) -> Option<StandardScalar> {
     SUPPORTED_SCALAR_TYPES
         .iter()
-        .find_map(|(candidate, scalar)| (*candidate == type_id).then_some(*scalar))
+        .find_map(|(candidate, scalar, _)| (*candidate == type_id).then_some(*scalar))
+}
+
+fn supported_scalar_tag_from_scalar(scalar: StandardScalar) -> Option<u8> {
+    SUPPORTED_SCALAR_TYPES
+        .iter()
+        .find_map(|(_, candidate, tag)| (*candidate == scalar).then_some(*tag))
 }
 
 fn require_fixed_payload<const LENGTH: usize>(
@@ -596,8 +1034,22 @@ mod tests {
     }
 
     fn active_record_revision() -> ActiveDatabaseRevision {
+        active_record_revision_with_second_type(ResolvedType::named(ENUM_TYPE))
+    }
+
+    fn active_record_revision_with_second_type(
+        second_field_type: ResolvedType,
+    ) -> ActiveDatabaseRevision {
+        active_record_revision_with_types(ResolvedType::value(BOOLEAN_TYPE_ID), second_field_type)
+    }
+
+    fn active_record_revision_with_types(
+        first_field_type: ResolvedType,
+        second_field_type: ResolvedType,
+    ) -> ActiveDatabaseRevision {
         let record_type = TypeId::from_bytes([0x47; 16]);
         let record_field = FieldId::from_bytes([0x48; 16]);
+        let second_record_field = FieldId::from_bytes([0x4e; 16]);
         let schema = SchemaId::from_bytes([0x49; 16]);
         let catalogue_revision = CatalogueRevisionId::from_bytes([0x4a; 16]);
         let catalogue = CatalogueSnapshot::new_with_record_value_types(
@@ -608,16 +1060,23 @@ mod tests {
             )],
             vec![],
             vec![],
-            vec![],
+            vec![EnumTypeDefinition::new(
+                ENUM_TYPE,
+                QualifiedSemanticName::new(["crm", "stage"]).unwrap(),
+                ["lead", "qualified"],
+            )],
             vec![RecordValueTypeDefinition::new(
                 record_type,
                 QualifiedSemanticName::new(["crm", "flag"]).unwrap(),
-                vec![RecordValueFieldDefinition::new(
-                    record_field,
-                    "enabled",
-                    0,
-                    ResolvedType::value(BOOLEAN_TYPE_ID),
-                )],
+                vec![
+                    RecordValueFieldDefinition::new(record_field, "enabled", 0, first_field_type),
+                    RecordValueFieldDefinition::new(
+                        second_record_field,
+                        "verified",
+                        1,
+                        second_field_type,
+                    ),
+                ],
             )],
             vec![],
         )
@@ -657,9 +1116,20 @@ mod tests {
                 SourceOrigin::new(source_unit_id, 1, 2).unwrap(),
             ),
             DefinitionOrigin::new(
+                DefinitionIdentity::ValueType(ENUM_TYPE),
+                SourceOrigin::new(source_unit_id, 1, 2).unwrap(),
+            ),
+            DefinitionOrigin::new(
                 DefinitionIdentity::Field {
                     owner: record_type,
                     field: record_field,
+                },
+                SourceOrigin::new(source_unit_id, 1, 2).unwrap(),
+            ),
+            DefinitionOrigin::new(
+                DefinitionIdentity::Field {
+                    owner: record_type,
+                    field: second_record_field,
                 },
                 SourceOrigin::new(source_unit_id, 1, 2).unwrap(),
             ),
@@ -733,7 +1203,15 @@ mod tests {
             RecordValue::new(
                 &active,
                 record_type,
-                [(String::from("enabled"), RuntimeValue::Boolean(true))],
+                [
+                    (String::from("enabled"), RuntimeValue::Boolean(true)),
+                    (
+                        String::from("verified"),
+                        RuntimeValue::Enum(
+                            EnumValue::new(active.catalogue(), ENUM_TYPE, "lead").unwrap(),
+                        ),
+                    ),
+                ],
             )
             .unwrap(),
         );
@@ -742,6 +1220,342 @@ mod tests {
         assert_eq!(
             encode_catalogue_value(active.catalogue(), &value),
             Err(ValueCodecError::UnsupportedValue)
+        );
+    }
+
+    #[test]
+    fn active_codec_has_exact_record_bytes_and_round_trips() {
+        let active = active_record_revision();
+        let record = &active.catalogue().record_value_types()[0];
+        let value = RuntimeValue::Record(
+            RecordValue::new(
+                &active,
+                record.id(),
+                [
+                    (String::from("enabled"), RuntimeValue::Boolean(true)),
+                    (
+                        String::from("verified"),
+                        RuntimeValue::Enum(
+                            EnumValue::new(active.catalogue(), ENUM_TYPE, "lead").unwrap(),
+                        ),
+                    ),
+                ],
+            )
+            .unwrap(),
+        );
+        let mut field_value = b"ORV3".to_vec();
+        field_value.push(0x02);
+        field_value.extend_from_slice(&BOOLEAN_TYPE_ID.to_bytes());
+        field_value.extend_from_slice(&1_u32.to_be_bytes());
+        field_value.push(1);
+        let mut payload = 2_u32.to_be_bytes().to_vec();
+        payload.extend_from_slice(&record.fields()[0].id().to_bytes());
+        payload.extend_from_slice(&26_u32.to_be_bytes());
+        payload.extend_from_slice(&field_value);
+        let mut second_field_value = b"ORV3".to_vec();
+        second_field_value.push(0x0a);
+        second_field_value.extend_from_slice(&ENUM_TYPE.to_bytes());
+        second_field_value.extend_from_slice(&4_u32.to_be_bytes());
+        second_field_value.extend_from_slice(b"lead");
+        payload.extend_from_slice(&record.fields()[1].id().to_bytes());
+        payload.extend_from_slice(&29_u32.to_be_bytes());
+        payload.extend_from_slice(&second_field_value);
+        let mut expected = b"ORV3".to_vec();
+        expected.push(0x0b);
+        expected.extend_from_slice(&record.id().to_bytes());
+        expected.extend_from_slice(&99_u32.to_be_bytes());
+        expected.extend_from_slice(&payload);
+
+        assert_eq!(encode_active_value(&active, &value), Ok(expected.clone()));
+        assert_eq!(decode_active_value(&active, &expected), Ok(value));
+    }
+
+    #[test]
+    fn active_codec_preserves_earlier_shapes_and_marker_closure() {
+        let active = active_record_revision();
+        let boolean = RuntimeValue::Boolean(true);
+        let mut expected_boolean = b"ORV3".to_vec();
+        expected_boolean.push(0x02);
+        expected_boolean.extend_from_slice(&BOOLEAN_TYPE_ID.to_bytes());
+        expected_boolean.extend_from_slice(&1_u32.to_be_bytes());
+        expected_boolean.push(1);
+        let enum_value =
+            RuntimeValue::Enum(EnumValue::new(active.catalogue(), ENUM_TYPE, "qualified").unwrap());
+        let mut expected_enum = b"ORV3".to_vec();
+        expected_enum.push(0x0a);
+        expected_enum.extend_from_slice(&ENUM_TYPE.to_bytes());
+        expected_enum.extend_from_slice(&9_u32.to_be_bytes());
+        expected_enum.extend_from_slice(b"qualified");
+
+        assert_eq!(
+            encode_active_value(&active, &boolean),
+            Ok(expected_boolean.clone())
+        );
+        assert_eq!(decode_active_value(&active, &expected_boolean), Ok(boolean));
+        assert_eq!(
+            encode_active_value(&active, &enum_value),
+            Ok(expected_enum.clone())
+        );
+        assert_eq!(decode_active_value(&active, &expected_enum), Ok(enum_value));
+        assert_eq!(
+            decode_value(&expected_boolean),
+            Err(ValueCodecError::InvalidMarker)
+        );
+        assert_eq!(
+            decode_catalogue_value(active.catalogue(), &expected_boolean),
+            Err(ValueCodecError::InvalidMarker)
+        );
+        assert_eq!(
+            decode_active_value(&active, &encoded_value(0x02, BOOLEAN_TYPE_ID, &[1])),
+            Err(ValueCodecError::InvalidMarker)
+        );
+        assert_eq!(
+            decode_active_value(
+                &active,
+                &encoded_catalogue_value(0x02, BOOLEAN_TYPE_ID, &[1])
+            ),
+            Err(ValueCodecError::InvalidMarker)
+        );
+    }
+
+    #[test]
+    fn active_codec_rejects_record_structure_and_value_corruption() {
+        let active = active_record_revision();
+        let record = &active.catalogue().record_value_types()[0];
+        let value = RuntimeValue::Record(
+            RecordValue::new(
+                &active,
+                record.id(),
+                [
+                    (String::from("enabled"), RuntimeValue::Boolean(true)),
+                    (
+                        String::from("verified"),
+                        RuntimeValue::Enum(
+                            EnumValue::new(active.catalogue(), ENUM_TYPE, "lead").unwrap(),
+                        ),
+                    ),
+                ],
+            )
+            .unwrap(),
+        );
+        let encoded = encode_active_value(&active, &value).unwrap();
+
+        let mut wrong_count = encoded.clone();
+        wrong_count[25..29].copy_from_slice(&1_u32.to_be_bytes());
+        assert_eq!(
+            decode_active_value(&active, &wrong_count),
+            Err(ValueCodecError::WrongRecordFieldCount {
+                expected: 2,
+                actual: 1,
+            })
+        );
+
+        let mut wrong_identity = encoded.clone();
+        wrong_identity[29..45].fill(0xff);
+        assert_eq!(
+            decode_active_value(&active, &wrong_identity),
+            Err(ValueCodecError::WrongRecordFieldIdentity {
+                ordinal: 0,
+                expected: record.fields()[0].id(),
+                actual: FieldId::from_bytes([0xff; 16]),
+            })
+        );
+
+        let mut unknown_record = encoded.clone();
+        unknown_record[5..21].fill(0xfe);
+        assert_eq!(
+            decode_active_value(&active, &unknown_record),
+            Err(ValueCodecError::InactiveRecordType {
+                record_type: TypeId::from_bytes([0xfe; 16]),
+            })
+        );
+
+        let mut unknown_tag = encoded.clone();
+        unknown_tag[4] = 0x0c;
+        assert_eq!(
+            decode_active_value(&active, &unknown_tag),
+            Err(ValueCodecError::UnknownTag { tag: 0x0c })
+        );
+
+        for declared in [24_u32, u32::MAX] {
+            let mut wrong_length = encoded.clone();
+            wrong_length[45..49].copy_from_slice(&declared.to_be_bytes());
+            assert_eq!(
+                decode_active_value(&active, &wrong_length),
+                Err(ValueCodecError::InvalidRecordFieldLength {
+                    ordinal: 0,
+                    declared: declared as usize,
+                    remaining: 75,
+                })
+            );
+        }
+
+        let mut nested = encoded.clone();
+        nested[53] = 0x0b;
+        assert_eq!(
+            decode_active_value(&active, &nested),
+            Err(ValueCodecError::NestedRecordValue { ordinal: 0 })
+        );
+
+        let mut wrong_field_type = encoded.clone();
+        wrong_field_type[53] = 0x06;
+        wrong_field_type[54..70].copy_from_slice(&CHARACTER_LARGE_OBJECT_TYPE_ID.to_bytes());
+        assert_eq!(
+            decode_active_value(&active, &wrong_field_type),
+            Err(ValueCodecError::WrongRecordFieldType {
+                ordinal: 0,
+                expected: ResolvedType::value(BOOLEAN_TYPE_ID),
+                tag: 0x06,
+                actual: CHARACTER_LARGE_OBJECT_TYPE_ID,
+            })
+        );
+
+        let mut stale_enum = encoded.clone();
+        stale_enum[120..124].copy_from_slice(b"lost");
+        assert_eq!(
+            decode_active_value(&active, &stale_enum),
+            Err(ValueCodecError::UndeclaredEnumLabel {
+                enum_type: ENUM_TYPE,
+                label: String::from("lost"),
+            })
+        );
+
+        let mut wrong_inner_marker = encoded.clone();
+        wrong_inner_marker[49..53].copy_from_slice(b"ORV2");
+        assert_eq!(
+            decode_active_value(&active, &wrong_inner_marker),
+            Err(ValueCodecError::InvalidMarker)
+        );
+
+        let mut null_field = encoded.clone();
+        null_field[45..49].copy_from_slice(&25_u32.to_be_bytes());
+        null_field[53] = 0x00;
+        null_field[70..74].copy_from_slice(&0_u32.to_be_bytes());
+        null_field.remove(74);
+        null_field[21..25].copy_from_slice(&98_u32.to_be_bytes());
+        assert_eq!(
+            decode_active_value(&active, &null_field),
+            Err(ValueCodecError::WrongRecordFieldType {
+                ordinal: 0,
+                expected: ResolvedType::value(BOOLEAN_TYPE_ID),
+                tag: 0x00,
+                actual: BOOLEAN_TYPE_ID,
+            })
+        );
+
+        let mut reference_field = encoded.clone();
+        let reference_type = TypeId::from_bytes([0x51; 16]);
+        reference_field[45..49].copy_from_slice(&41_u32.to_be_bytes());
+        reference_field[53] = 0x08;
+        reference_field[54..70].copy_from_slice(&reference_type.to_bytes());
+        reference_field[70..74].copy_from_slice(&16_u32.to_be_bytes());
+        reference_field.splice(74..75, [0x52; 16]);
+        reference_field[21..25].copy_from_slice(&114_u32.to_be_bytes());
+        assert_eq!(
+            decode_active_value(&active, &reference_field),
+            Err(ValueCodecError::WrongRecordFieldType {
+                ordinal: 0,
+                expected: ResolvedType::value(BOOLEAN_TYPE_ID),
+                tag: 0x08,
+                actual: reference_type,
+            })
+        );
+
+        let mut truncated = encoded.clone();
+        truncated.pop();
+        assert_eq!(
+            decode_active_value(&active, &truncated),
+            Err(ValueCodecError::TruncatedPayload {
+                declared: 99,
+                actual: 98,
+            })
+        );
+
+        let mut trailing = encoded.clone();
+        trailing[21..25].copy_from_slice(&100_u32.to_be_bytes());
+        trailing.push(0);
+        assert_eq!(
+            decode_active_value(&active, &trailing),
+            Err(ValueCodecError::TrailingBytes {
+                declared: 99,
+                actual: 100,
+            })
+        );
+
+        let mut oversized = encoded;
+        oversized[21..25].copy_from_slice(&((PAYLOAD_LIMIT as u32) + 1).to_be_bytes());
+        assert_eq!(
+            decode_active_value(&active, &oversized),
+            Err(ValueCodecError::PayloadTooLarge {
+                actual: PAYLOAD_LIMIT + 1,
+                maximum: PAYLOAD_LIMIT,
+            })
+        );
+    }
+
+    #[test]
+    fn active_codec_rejects_a_field_length_that_consumes_the_next_entry() {
+        let active = active_record_revision_with_types(
+            ResolvedType::value(BINARY_LARGE_OBJECT_TYPE_ID),
+            ResolvedType::named(ENUM_TYPE),
+        );
+        let record = &active.catalogue().record_value_types()[0];
+        let value = RuntimeValue::Record(
+            RecordValue::new(
+                &active,
+                record.id(),
+                [
+                    (String::from("enabled"), RuntimeValue::Bytes(vec![1])),
+                    (
+                        String::from("verified"),
+                        RuntimeValue::Enum(
+                            EnumValue::new(active.catalogue(), ENUM_TYPE, "lead").unwrap(),
+                        ),
+                    ),
+                ],
+            )
+            .unwrap(),
+        );
+        let mut encoded = encode_active_value(&active, &value).unwrap();
+        encoded[45..49].copy_from_slice(&75_u32.to_be_bytes());
+        encoded[70..74].copy_from_slice(&50_u32.to_be_bytes());
+
+        assert_eq!(
+            decode_active_value(&active, &encoded),
+            Err(ValueCodecError::TruncatedRecordFieldHeader {
+                ordinal: 1,
+                actual: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn active_codec_rejects_a_record_from_an_incompatible_active_revision() {
+        let original = active_record_revision();
+        let record = &original.catalogue().record_value_types()[0];
+        let value = RuntimeValue::Record(
+            RecordValue::new(
+                &original,
+                record.id(),
+                [
+                    (String::from("enabled"), RuntimeValue::Boolean(true)),
+                    (
+                        String::from("verified"),
+                        RuntimeValue::Enum(
+                            EnumValue::new(original.catalogue(), ENUM_TYPE, "lead").unwrap(),
+                        ),
+                    ),
+                ],
+            )
+            .unwrap(),
+        );
+        let changed = active_record_revision_with_second_type(ResolvedType::value(BIGINT_TYPE_ID));
+
+        assert_eq!(
+            encode_active_value(&changed, &value),
+            Err(ValueCodecError::RecordValueNotActive {
+                record_type: record.id(),
+            })
         );
     }
 
@@ -1169,6 +1983,22 @@ mod tests {
             encoded.extend_from_slice(&declared.to_be_bytes());
             encoded.extend_from_slice(&payload);
             let _ = decode_catalogue_value(&catalogue, &encoded);
+        }
+
+        #[test]
+        fn arbitrary_version_three_envelopes_never_panic(
+            tag in any::<u8>(),
+            type_bytes in any::<[u8; 16]>(),
+            declared in any::<u32>(),
+            payload in prop::collection::vec(any::<u8>(), 0..=4_096),
+        ) {
+            let active = active_record_revision();
+            let mut encoded = b"ORV3".to_vec();
+            encoded.push(tag);
+            encoded.extend_from_slice(&type_bytes);
+            encoded.extend_from_slice(&declared.to_be_bytes());
+            encoded.extend_from_slice(&payload);
+            let _ = decode_active_value(&active, &encoded);
         }
     }
 

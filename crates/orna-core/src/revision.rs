@@ -1264,6 +1264,18 @@ impl ActiveDatabaseRevision {
         &self.catalogue_hash_context
     }
 
+    /// Resolves one admitted record field to its executable runtime type.
+    ///
+    /// This uses the application catalogue and the exact verified standard
+    /// snapshot pinned by this active revision.
+    pub fn record_value_field_runtime_type(
+        &self,
+        resolved_type: ResolvedType,
+    ) -> Option<ResolvedType> {
+        let standard = self.catalogue_hash_context.standard()?.catalogue();
+        record_value_field_runtime_type(&self.catalogue, standard, resolved_type)
+    }
+
     /// Returns expression artifacts by durable record order.
     pub fn expressions(&self) -> &[ExpressionArtifact] {
         &self.expressions
