@@ -1231,6 +1231,7 @@ fn runtime_type_is_active(
         runtime @ ResolvedRuntimeType::LegacyScalar(_)
         | runtime @ ResolvedRuntimeType::VerifiedValue { .. } => postgres_type(runtime).is_some(),
         ResolvedRuntimeType::CatalogueEnum(_) => true,
+        ResolvedRuntimeType::Record(_) => false,
         ResolvedRuntimeType::Reference(target) => catalogue.object_type_by_id(target).is_some(),
         ResolvedRuntimeType::Unsupported => false,
     }
@@ -2057,7 +2058,7 @@ fn maximum_fixed_payload_len(
             8
         }
         ResolvedRuntimeType::Reference(_) => 16,
-        ResolvedRuntimeType::CatalogueEnum(_) => 0,
+        ResolvedRuntimeType::CatalogueEnum(_) | ResolvedRuntimeType::Record(_) => 0,
         ResolvedRuntimeType::LegacyScalar(_)
         | ResolvedRuntimeType::VerifiedValue { .. }
         | ResolvedRuntimeType::Unsupported => 0,
@@ -2416,6 +2417,11 @@ fn decode_value(
                     })
                 })
         }),
+        ResolvedRuntimeType::Record(_) => {
+            return Err(server_error(ServerSelectError::PreparedResult {
+                rule: "record results require active canonical decoding",
+            }));
+        }
         ResolvedRuntimeType::LegacyScalar(_)
         | ResolvedRuntimeType::VerifiedValue { .. }
         | ResolvedRuntimeType::Unsupported => {
