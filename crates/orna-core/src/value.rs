@@ -8,6 +8,7 @@ use std::{error::Error, fmt};
 
 use crate::{
     ObjectId, ParameterId, TypeId,
+    catalogue::CatalogueSnapshot,
     types::{ResolvedType, StandardScalar},
 };
 
@@ -31,6 +32,8 @@ pub enum RuntimeValue {
     Bytes(Vec<u8>),
     /// A typed durable object reference.
     Reference { target: TypeId, object: ObjectId },
+    /// A catalogue-validated enum value.
+    Enum(EnumValue),
 }
 
 impl RuntimeValue {
@@ -51,6 +54,7 @@ impl RuntimeValue {
             Self::Text(_) => ResolvedType::scalar(StandardScalar::CharacterLargeObject),
             Self::Bytes(_) => ResolvedType::scalar(StandardScalar::BinaryLargeObject),
             Self::Reference { target, .. } => ResolvedType::reference(*target),
+            Self::Enum(value) => ResolvedType::value(value.enum_type),
         }
     }
 
@@ -59,6 +63,76 @@ impl RuntimeValue {
         matches!(self, Self::Null(_))
     }
 }
+
+/// One enum label validated against an active catalogue snapshot.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EnumValue {
+    enum_type: TypeId,
+    label: String,
+}
+
+impl EnumValue {
+    /// Creates an enum value only when the active type declares the exact label.
+    pub fn new(
+        catalogue: &CatalogueSnapshot,
+        enum_type: TypeId,
+        label: impl Into<String>,
+    ) -> Result<Self, EnumValueError> {
+        let definition = catalogue
+            .enum_type_by_id(enum_type)
+            .ok_or(EnumValueError::UnknownType { enum_type })?;
+        let label = label.into();
+        if !definition
+            .labels()
+            .iter()
+            .any(|declared| declared == &label)
+        {
+            return Err(EnumValueError::UndeclaredLabel { enum_type, label });
+        }
+        Ok(Self { enum_type, label })
+    }
+
+    /// Returns the stable identity of the declaring enum type.
+    pub const fn enum_type(&self) -> TypeId {
+        self.enum_type
+    }
+
+    /// Returns the exact declared label.
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+}
+
+/// An error from validating an enum runtime value.
+#[non_exhaustive]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum EnumValueError {
+    /// The active catalogue does not contain the supplied enum type.
+    UnknownType {
+        /// The unknown enum type identity.
+        enum_type: TypeId,
+    },
+    /// The active enum type does not declare the supplied exact label.
+    UndeclaredLabel {
+        /// The active enum type identity.
+        enum_type: TypeId,
+        /// The undeclared label.
+        label: String,
+    },
+}
+
+impl fmt::Display for EnumValueError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnknownType { .. } => formatter.write_str("enum type is not active"),
+            Self::UndeclaredLabel { .. } => {
+                formatter.write_str("enum label is not declared by the active type")
+            }
+        }
+    }
+}
+
+impl Error for EnumValueError {}
 
 /// One typed argument supplied to a server function.
 #[derive(Clone, Debug, PartialEq)]
@@ -81,7 +155,8 @@ impl FunctionArgument {
             | RuntimeValue::Float(_)
             | RuntimeValue::Text(_)
             | RuntimeValue::Bytes(_)
-            | RuntimeValue::Reference { .. } => Ok(Self { parameter, value }),
+            | RuntimeValue::Reference { .. }
+            | RuntimeValue::Enum(_) => Ok(Self { parameter, value }),
         }
     }
 
@@ -387,6 +462,7 @@ fn require_supported_runtime_type(resolved_type: ResolvedType) -> Result<(), Res
 
 const fn supports_runtime_value(resolved_type: ResolvedType) -> bool {
     resolved_type.reference_target().is_some()
+        || resolved_type.value_type().is_some()
         || matches!(
             resolved_type.legacy_scalar(),
             Some(
@@ -404,8 +480,35 @@ const fn supports_runtime_value(resolved_type: ResolvedType) -> bool {
 mod tests {
     use super::*;
 
+    use crate::{
+        CatalogueRevisionId, SchemaId,
+        catalogue::{
+            CatalogueSnapshot, EnumTypeDefinition, QualifiedSemanticName, SchemaDefinition,
+        },
+    };
+
     const TARGET: TypeId = TypeId::from_bytes([0x41; 16]);
     const OBJECT: ObjectId = ObjectId::from_bytes([0x42; 16]);
+    const ENUM_TYPE: TypeId = TypeId::from_bytes([0x43; 16]);
+
+    fn enum_catalogue(labels: &[&str]) -> CatalogueSnapshot {
+        CatalogueSnapshot::new_with_enum_types(
+            CatalogueRevisionId::from_bytes([0x44; 16]),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes([0x45; 16]),
+                QualifiedSemanticName::new(["crm"]).unwrap(),
+            )],
+            vec![],
+            vec![],
+            vec![EnumTypeDefinition::new(
+                ENUM_TYPE,
+                QualifiedSemanticName::new(["crm", "stage"]).unwrap(),
+                labels.iter().copied(),
+            )],
+            vec![],
+        )
+        .unwrap()
+    }
 
     fn column(name: &str, resolved_type: ResolvedType, nullable: bool) -> ResultColumn {
         ResultColumn::new(name, resolved_type, nullable).unwrap()
@@ -413,7 +516,8 @@ mod tests {
 
     #[test]
     fn accepts_every_current_non_null_runtime_value_as_a_function_argument() {
-        let values = [
+        let catalogue = enum_catalogue(&["lead", "qualified"]);
+        let values = vec![
             RuntimeValue::Boolean(true),
             RuntimeValue::Integer(-7),
             RuntimeValue::BigInt(8),
@@ -424,6 +528,7 @@ mod tests {
                 target: TARGET,
                 object: OBJECT,
             },
+            RuntimeValue::Enum(EnumValue::new(&catalogue, ENUM_TYPE, "qualified").unwrap()),
         ];
 
         for (index, value) in values.into_iter().enumerate() {
@@ -432,6 +537,60 @@ mod tests {
             assert_eq!(argument.parameter(), parameter);
             assert_eq!(argument.value(), &value);
         }
+    }
+
+    #[test]
+    fn enum_values_require_an_active_type_and_exact_declared_label() {
+        let catalogue = enum_catalogue(&["lead", "owner's", "customer"]);
+        let value = EnumValue::new(&catalogue, ENUM_TYPE, "owner's").unwrap();
+
+        assert_eq!(value.enum_type(), ENUM_TYPE);
+        assert_eq!(value.label(), "owner's");
+        assert_eq!(
+            RuntimeValue::Enum(value.clone()).resolved_type(),
+            ResolvedType::value(ENUM_TYPE)
+        );
+        assert_eq!(value, value.clone());
+
+        let unknown = TypeId::from_bytes([0x46; 16]);
+        let error = EnumValue::new(&catalogue, unknown, "lead").unwrap_err();
+        assert_eq!(error, EnumValueError::UnknownType { enum_type: unknown });
+        assert_eq!(error.to_string(), "enum type is not active");
+
+        let error = EnumValue::new(&catalogue, ENUM_TYPE, "Lead").unwrap_err();
+        assert_eq!(
+            error,
+            EnumValueError::UndeclaredLabel {
+                enum_type: ENUM_TYPE,
+                label: String::from("Lead"),
+            }
+        );
+        assert_eq!(
+            error.to_string(),
+            "enum label is not declared by the active type"
+        );
+        assert!(std::error::Error::source(&error).is_none());
+    }
+
+    #[test]
+    fn result_rows_accept_exact_enum_values_and_typed_nulls() {
+        let catalogue = enum_catalogue(&["lead", "qualified"]);
+        let enum_type = ResolvedType::value(ENUM_TYPE);
+        let value = RuntimeValue::Enum(EnumValue::new(&catalogue, ENUM_TYPE, "qualified").unwrap());
+        let rows = ResultRows::new(
+            [
+                column("stage", enum_type, false),
+                column("previous_stage", enum_type, true),
+            ],
+            [ResultRow::new([
+                value.clone(),
+                RuntimeValue::null(enum_type).unwrap(),
+            ])],
+        )
+        .unwrap();
+
+        assert_eq!(rows.rows()[0].values()[0], value);
+        assert!(rows.rows()[0].values()[1].is_null());
     }
 
     #[test]
