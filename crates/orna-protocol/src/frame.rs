@@ -20,7 +20,8 @@ const EVENT_BATCH_TAG: u8 = 0x82;
 const CALL_COMPLETED_TAG: u8 = 0x83;
 const CALL_FAILED_TAG: u8 = 0x84;
 const CALL_CANCELLED_TAG: u8 = 0x85;
-const PAYLOAD_LIMIT: usize = 16 * 1024 * 1024 + 64;
+/// The largest payload accepted by one version-1 raw-call frame.
+pub const MAX_FRAME_PAYLOAD_LENGTH: usize = 16 * 1024 * 1024 + 64;
 
 /// A separately flow-controlled raw-call output channel.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -421,7 +422,7 @@ impl Error for ConnectionError {
 
 const MAX_LIVE_STREAMS: usize = 64;
 const MAX_ARGUMENTS: usize = 256;
-const MAX_ARGUMENT_BYTES: usize = PAYLOAD_LIMIT;
+const MAX_ARGUMENT_BYTES: usize = MAX_FRAME_PAYLOAD_LENGTH;
 const MAX_WINDOW: u64 = 1024 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1280,12 +1281,12 @@ fn decode_envelope(encoded: &[u8]) -> Result<(u8, u64, &[u8]), FrameCodecError> 
 }
 
 fn require_payload_limit(actual: usize) -> Result<(), FrameCodecError> {
-    if actual <= PAYLOAD_LIMIT {
+    if actual <= MAX_FRAME_PAYLOAD_LENGTH {
         Ok(())
     } else {
         Err(FrameCodecError::PayloadTooLarge {
             actual,
-            maximum: PAYLOAD_LIMIT,
+            maximum: MAX_FRAME_PAYLOAD_LENGTH,
         })
     }
 }
@@ -1710,12 +1711,12 @@ mod tests {
             })
         );
         invalid = valid.clone();
-        invalid[14..18].copy_from_slice(&((PAYLOAD_LIMIT + 1) as u32).to_be_bytes());
+        invalid[14..18].copy_from_slice(&((MAX_FRAME_PAYLOAD_LENGTH + 1) as u32).to_be_bytes());
         assert_eq!(
             decode_client_frame(&invalid),
             Err(FrameCodecError::PayloadTooLarge {
-                actual: PAYLOAD_LIMIT + 1,
-                maximum: PAYLOAD_LIMIT,
+                actual: MAX_FRAME_PAYLOAD_LENGTH + 1,
+                maximum: MAX_FRAME_PAYLOAD_LENGTH,
             })
         );
         invalid = valid[..valid.len() - 1].to_vec();
@@ -2349,7 +2350,7 @@ mod tests {
             .receive(ClientFrame::CallArgument {
                 stream: 1,
                 parameter: ParameterId::from_bytes([1; 16]),
-                value: RuntimeValue::Bytes(vec![0; PAYLOAD_LIMIT - 82]),
+                value: RuntimeValue::Bytes(vec![0; MAX_FRAME_PAYLOAD_LENGTH - 82]),
             })
             .unwrap();
         bytes
