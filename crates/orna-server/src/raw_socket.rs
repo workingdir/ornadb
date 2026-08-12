@@ -21,12 +21,12 @@ use std::{
     time::Duration,
 };
 
-use orna_core::security::AuthenticatedSession;
-use orna_kernel_postgres::PostgresKernel;
+use orna_core::{catalogue::CatalogueSnapshot, security::AuthenticatedSession};
+use orna_kernel_postgres::{PostgresKernel, PostgresKernelError};
 use orna_protocol::{
     ClientAction, ClientFrame, ConnectionError, FrameCodecError, MAX_FRAME_PAYLOAD_LENGTH,
-    ProtocolConnection, RawCall, ServerAction, ServerFrame, decode_client_frame,
-    encode_server_frame,
+    ProtocolConnection, RawCall, ServerAction, ServerFrame, decode_catalogue_client_frame,
+    decode_client_frame, encode_catalogue_server_frame, encode_server_frame,
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
@@ -42,7 +42,9 @@ use tokio::{
 use crate::{RawClientDispatch, authenticate_local_stream};
 
 const CLIENT_HELLO: [u8; 12] = *b"ORNA\x01\x00\x00\x01\x00\x00\x00\x00";
+const CLIENT_CATALOGUE_HELLO: [u8; 12] = *b"ORNA\x01\x00\x00\x02\x00\x00\x00\x00";
 const SERVER_ACK: [u8; 12] = *b"ORNA\x81\x00\x00\x01\x00\x00\x00\x00";
+const SERVER_CATALOGUE_ACK: [u8; 12] = *b"ORNA\x81\x00\x00\x02\x00\x00\x00\x00";
 const FRAME_HEADER_LENGTH: usize = 18;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const FRAME_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -50,6 +52,50 @@ const SHARED_PAYLOAD_BYTES: usize = 256 * 1024 * 1024;
 const KERNEL_OPERATION_LIMIT: usize = 64;
 const CONNECTION_LIMIT: usize = 64;
 const SOCKET_NAME: &str = "orna.sock";
+
+#[derive(Clone)]
+enum RawProtocolVersion {
+    One,
+    Catalogue(Arc<CatalogueSnapshot>),
+}
+
+impl RawProtocolVersion {
+    fn decode_client_frame(&self, encoded: &[u8]) -> Result<ClientFrame, FrameCodecError> {
+        match self {
+            Self::One => decode_client_frame(encoded),
+            Self::Catalogue(catalogue) => decode_catalogue_client_frame(catalogue, encoded),
+        }
+    }
+
+    fn encode_server_frame(&self, frame: &ServerFrame) -> Result<Vec<u8>, FrameCodecError> {
+        match self {
+            Self::One => encode_server_frame(frame),
+            Self::Catalogue(catalogue) => encode_catalogue_server_frame(catalogue, frame),
+        }
+    }
+
+    fn receive(
+        &self,
+        connection: &mut ProtocolConnection,
+        frame: ClientFrame,
+    ) -> Result<Option<ClientAction>, ConnectionError> {
+        match self {
+            Self::One => connection.receive(frame),
+            Self::Catalogue(catalogue) => connection.receive_catalogue(catalogue, frame),
+        }
+    }
+
+    fn apply(
+        &self,
+        connection: &mut ProtocolConnection,
+        action: ServerAction,
+    ) -> Result<ServerFrame, ConnectionError> {
+        match self {
+            Self::One => connection.apply(action),
+            Self::Catalogue(catalogue) => connection.apply_catalogue(catalogue, action),
+        }
+    }
+}
 
 /// Listener-wide admission resources for authenticated local raw calls.
 #[derive(Clone)]
@@ -59,7 +105,7 @@ pub struct LocalRawSocketResources {
 }
 
 impl LocalRawSocketResources {
-    /// Creates the fixed version-one listener budgets.
+    /// Creates the fixed listener budgets.
     pub fn new() -> Self {
         Self {
             payload: Arc::new(Semaphore::new(SHARED_PAYLOAD_BYTES)),
@@ -113,6 +159,11 @@ pub enum LocalRawSocketError {
         /// The protected authentication failure.
         source: crate::LocalAuthenticationError,
     },
+    /// The authenticated version-2 connection could not recover its catalogue.
+    Catalogue {
+        /// The protected catalogue recovery failure.
+        source: Box<PostgresKernelError>,
+    },
     /// Socket I/O failed or ended within a required envelope.
     Io {
         /// The socket failure.
@@ -149,6 +200,7 @@ impl fmt::Display for LocalRawSocketError {
             Self::PayloadCapacity => "local raw socket payload capacity is exhausted",
             Self::KernelCapacity => "local raw socket kernel capacity is exhausted",
             Self::Authentication { .. } => "local raw socket authentication failed",
+            Self::Catalogue { .. } => "local raw socket catalogue recovery failed",
             Self::Io { .. } => "local raw socket I/O failed",
             Self::Frame { .. } => "local raw socket frame is invalid",
             Self::Connection { .. } => "local raw socket state is invalid",
@@ -162,6 +214,7 @@ impl Error for LocalRawSocketError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Authentication { source } => Some(source),
+            Self::Catalogue { source } => Some(source),
             Self::Io { source } => Some(source),
             Self::Frame { source } => Some(source),
             Self::Connection { source } => Some(source),
@@ -626,25 +679,44 @@ async fn negotiate_and_drive(
         ) => result?,
         _ = wait_for_shutdown(&mut shutdown) => return Ok(()),
     }
-    if hello != CLIENT_HELLO {
-        return Err(LocalRawSocketError::InvalidHello);
-    }
+    let catalogue_protocol = match hello {
+        CLIENT_HELLO => false,
+        CLIENT_CATALOGUE_HELLO => true,
+        _ => return Err(LocalRawSocketError::InvalidHello),
+    };
 
     let authentication_permit = resources.reserve_kernel_operation()?;
     let session = authenticate_local_stream(&kernel, &peer_stream)
         .await
         .map_err(|source| LocalRawSocketError::Authentication { source })?;
+    let version = if catalogue_protocol {
+        let active = kernel
+            .recover()
+            .await
+            .map_err(|source| LocalRawSocketError::Catalogue {
+                source: Box::new(source),
+            })?;
+        RawProtocolVersion::Catalogue(Arc::new(active.catalogue().clone()))
+    } else {
+        RawProtocolVersion::One
+    };
     drop(authentication_permit);
     if *shutdown.borrow() {
         return Ok(());
     }
-    if !write_all_until_shutdown(&mut stream, &SERVER_ACK, &mut shutdown).await? {
+    let acknowledgement = if catalogue_protocol {
+        &SERVER_CATALOGUE_ACK
+    } else {
+        &SERVER_ACK
+    };
+    if !write_all_until_shutdown(&mut stream, acknowledgement, &mut shutdown).await? {
         return Ok(());
     }
 
-    drive_authenticated_stream_until_shutdown(
+    drive_versioned_authenticated_stream_until_shutdown(
         RawDispatchService { kernel },
         session,
+        version,
         stream,
         resources,
         shutdown,
@@ -723,23 +795,49 @@ async fn drive_authenticated_stream<D: DispatchService>(
     resources: LocalRawSocketResources,
 ) -> Result<(), LocalRawSocketError> {
     let (shutdown_guard, shutdown) = watch::channel(false);
-    let result =
-        drive_authenticated_stream_until_shutdown(dispatcher, session, stream, resources, shutdown)
-            .await;
+    let result = drive_versioned_authenticated_stream_until_shutdown(
+        dispatcher,
+        session,
+        RawProtocolVersion::One,
+        stream,
+        resources,
+        shutdown,
+    )
+    .await;
     drop(shutdown_guard);
     result
 }
 
+#[cfg(test)]
 async fn drive_authenticated_stream_until_shutdown<D: DispatchService>(
     dispatcher: D,
     session: AuthenticatedSession,
+    stream: UnixStream,
+    resources: LocalRawSocketResources,
+    shutdown: watch::Receiver<bool>,
+) -> Result<(), LocalRawSocketError> {
+    drive_versioned_authenticated_stream_until_shutdown(
+        dispatcher,
+        session,
+        RawProtocolVersion::One,
+        stream,
+        resources,
+        shutdown,
+    )
+    .await
+}
+
+async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>(
+    dispatcher: D,
+    session: AuthenticatedSession,
+    version: RawProtocolVersion,
     stream: UnixStream,
     resources: LocalRawSocketResources,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), LocalRawSocketError> {
     let (reader, mut writer) = stream.into_split();
     let (frame_sender, mut frame_receiver) = mpsc::channel(64);
-    let reader_task = spawn_frame_reader(reader, resources.clone(), frame_sender);
+    let reader_task = spawn_frame_reader(reader, version.clone(), resources.clone(), frame_sender);
     let mut connection = ProtocolConnection::new();
     let mut retained_payload = BTreeMap::<u64, Vec<PayloadReservation>>::new();
     let mut cancelled = BTreeSet::<u64>::new();
@@ -747,7 +845,15 @@ async fn drive_authenticated_stream_until_shutdown<D: DispatchService>(
     let mut tasks = JoinSet::<(u64, DispatchCompletion)>::new();
     let mut unstarted = VecDeque::<UnstartedDispatch>::new();
     let result = loop {
-        match flush_pending(&mut connection, &mut pending, &mut writer, &mut shutdown).await {
+        match flush_pending(
+            &version,
+            &mut connection,
+            &mut pending,
+            &mut writer,
+            &mut shutdown,
+        )
+        .await
+        {
             Ok(true) => {}
             Ok(false) => break Ok(()),
             Err(error) => break Err(error),
@@ -798,6 +904,7 @@ async fn drive_authenticated_stream_until_shutdown<D: DispatchService>(
                     incoming,
                     &dispatcher,
                     &session,
+                    &version,
                     &resources,
                     &mut connection,
                     &mut retained_payload,
@@ -861,6 +968,7 @@ async fn handle_client_frame<D: DispatchService>(
     incoming: IncomingFrame,
     dispatcher: &D,
     session: &AuthenticatedSession,
+    version: &RawProtocolVersion,
     resources: &LocalRawSocketResources,
     connection: &mut ProtocolConnection,
     retained_payload: &mut BTreeMap<u64, Vec<PayloadReservation>>,
@@ -880,8 +988,8 @@ async fn handle_client_frame<D: DispatchService>(
     } else {
         None
     };
-    let action = connection
-        .receive(incoming.frame)
+    let action = version
+        .receive(connection, incoming.frame)
         .map_err(|source| LocalRawSocketError::Connection { source })?;
 
     if retains_payload {
@@ -905,10 +1013,10 @@ async fn handle_client_frame<D: DispatchService>(
                 guards,
                 defer_once: true,
             });
-            let frame = connection
-                .apply(accepted)
+            let frame = version
+                .apply(connection, accepted)
                 .map_err(|source| LocalRawSocketError::Connection { source })?;
-            if !write_server_frame(socket, &frame, shutdown).await? {
+            if !write_server_frame(version, socket, &frame, shutdown).await? {
                 return Ok(false);
             }
         }
@@ -923,7 +1031,7 @@ async fn handle_client_frame<D: DispatchService>(
         }
         Some(ClientAction::Send(frame)) => {
             retained_payload.remove(&stream_id);
-            if !write_server_frame(socket, &frame, shutdown).await? {
+            if !write_server_frame(version, socket, &frame, shutdown).await? {
                 return Ok(false);
             }
         }
@@ -945,6 +1053,7 @@ fn start_one_dispatch(
 }
 
 async fn flush_pending(
+    version: &RawProtocolVersion,
     connection: &mut ProtocolConnection,
     pending: &mut BTreeMap<u64, DispatchCompletion>,
     stream: &mut OwnedWriteHalf,
@@ -961,12 +1070,12 @@ async fn flush_pending(
                 pending.remove(&stream_id);
                 break;
             };
-            let frame = match connection.apply(action) {
+            let frame = match version.apply(connection, action) {
                 Ok(frame) => frame,
                 Err(ConnectionError::InsufficientCredit { .. }) => break,
                 Err(source) => return Err(LocalRawSocketError::Connection { source }),
             };
-            if !write_server_frame(stream, &frame, shutdown).await? {
+            if !write_server_frame(version, stream, &frame, shutdown).await? {
                 return Ok(false);
             }
             pending
@@ -981,14 +1090,19 @@ async fn flush_pending(
 
 fn spawn_frame_reader(
     mut reader: OwnedReadHalf,
+    version: RawProtocolVersion,
     resources: LocalRawSocketResources,
     sender: mpsc::Sender<Result<Option<IncomingFrame>, LocalRawSocketError>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
-            let frame =
-                read_client_frame(&mut reader, &resources, Instant::now() + FRAME_IDLE_TIMEOUT)
-                    .await;
+            let frame = read_versioned_client_frame(
+                &mut reader,
+                &version,
+                &resources,
+                Instant::now() + FRAME_IDLE_TIMEOUT,
+            )
+            .await;
             let terminal = !matches!(frame, Ok(Some(_)));
             if sender.send(frame).await.is_err() || terminal {
                 return;
@@ -997,8 +1111,18 @@ fn spawn_frame_reader(
     })
 }
 
+#[cfg(test)]
 async fn read_client_frame<R: AsyncRead + Unpin>(
     stream: &mut R,
+    resources: &LocalRawSocketResources,
+    deadline: Instant,
+) -> Result<Option<IncomingFrame>, LocalRawSocketError> {
+    read_versioned_client_frame(stream, &RawProtocolVersion::One, resources, deadline).await
+}
+
+async fn read_versioned_client_frame<R: AsyncRead + Unpin>(
+    stream: &mut R,
+    version: &RawProtocolVersion,
     resources: &LocalRawSocketResources,
     deadline: Instant,
 ) -> Result<Option<IncomingFrame>, LocalRawSocketError> {
@@ -1026,8 +1150,9 @@ async fn read_client_frame<R: AsyncRead + Unpin>(
         LocalRawSocketError::FrameTimeout,
     )
     .await?;
-    let frame =
-        decode_client_frame(&encoded).map_err(|source| LocalRawSocketError::Frame { source })?;
+    let frame = version
+        .decode_client_frame(&encoded)
+        .map_err(|source| LocalRawSocketError::Frame { source })?;
     Ok(Some(IncomingFrame { frame, reservation }))
 }
 
@@ -1072,12 +1197,14 @@ async fn read_exact_before<R: AsyncRead + Unpin>(
 }
 
 async fn write_server_frame(
+    version: &RawProtocolVersion,
     stream: &mut OwnedWriteHalf,
     frame: &ServerFrame,
     shutdown: &mut watch::Receiver<bool>,
 ) -> Result<bool, LocalRawSocketError> {
-    let encoded =
-        encode_server_frame(frame).map_err(|source| LocalRawSocketError::Frame { source })?;
+    let encoded = version
+        .encode_server_frame(frame)
+        .map_err(|source| LocalRawSocketError::Frame { source })?;
     write_all_until_shutdown(stream, &encoded, shutdown).await
 }
 
@@ -1132,15 +1259,20 @@ mod tests {
     };
 
     use orna_core::{
-        CatalogueRevisionId, FunctionId, InvocationId, PrincipalId, SourceRevisionId,
+        CatalogueRevisionId, FunctionId, InvocationId, PrincipalId, SchemaId, SourceRevisionId,
+        TypeId,
+        catalogue::{
+            CatalogueSnapshot, EnumTypeDefinition, QualifiedSemanticName, SchemaDefinition,
+        },
         revision::RevisionPair,
         security::{
             AuthenticatedSession, Principal, PrincipalKind, PrincipalStatus, SecuritySnapshot,
         },
-        value::RuntimeValue,
+        value::{EnumValue, RuntimeValue},
     };
     use orna_protocol::{
-        Channel, ClientFrame, Event, ServerFrame, decode_server_frame, encode_client_frame,
+        Channel, ClientFrame, Event, ServerFrame, decode_catalogue_server_frame,
+        decode_server_frame, encode_catalogue_client_frame, encode_client_frame,
     };
     use tokio::sync::Notify;
     use tokio::time::timeout;
@@ -1148,6 +1280,26 @@ mod tests {
     use super::*;
 
     const FUNCTION: FunctionId = FunctionId::from_bytes([1; 16]);
+    const ENUM_TYPE: TypeId = TypeId::from_bytes([0x31; 16]);
+
+    fn enum_catalogue() -> CatalogueSnapshot {
+        CatalogueSnapshot::new_with_enum_types(
+            CatalogueRevisionId::from_bytes([0x32; 16]),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes([0x33; 16]),
+                QualifiedSemanticName::new(["crm"]).unwrap(),
+            )],
+            vec![],
+            vec![],
+            vec![EnumTypeDefinition::new(
+                ENUM_TYPE,
+                QualifiedSemanticName::new(["crm", "stage"]).unwrap(),
+                ["lead", "qualified"],
+            )],
+            vec![],
+        )
+        .unwrap()
+    }
 
     #[derive(Clone)]
     struct TestDispatch {
@@ -1250,7 +1402,15 @@ mod tests {
     #[test]
     fn handshake_bytes_and_listener_budgets_are_exact() {
         assert_eq!(CLIENT_HELLO, *b"ORNA\x01\x00\x00\x01\x00\x00\x00\x00");
+        assert_eq!(
+            CLIENT_CATALOGUE_HELLO,
+            *b"ORNA\x01\x00\x00\x02\x00\x00\x00\x00"
+        );
         assert_eq!(SERVER_ACK, *b"ORNA\x81\x00\x00\x01\x00\x00\x00\x00");
+        assert_eq!(
+            SERVER_CATALOGUE_ACK,
+            *b"ORNA\x81\x00\x00\x02\x00\x00\x00\x00"
+        );
 
         let resources = LocalRawSocketResources::new();
         let payload = resources
@@ -1276,6 +1436,78 @@ mod tests {
         ));
         drop(operations);
         assert!(resources.reserve_kernel_operation().is_ok());
+    }
+
+    #[tokio::test]
+    async fn catalogue_connection_drives_enum_arguments_and_results() {
+        let catalogue = Arc::new(enum_catalogue());
+        let value = RuntimeValue::Enum(EnumValue::new(&catalogue, ENUM_TYPE, "qualified").unwrap());
+        let dispatcher = TestDispatch::new(vec![
+            ServerAction::Events {
+                stream: 1,
+                events: vec![Event::Value(value.clone())],
+            },
+            ServerAction::Completed { stream: 1 },
+        ]);
+        let resources = LocalRawSocketResources::new();
+        let (server, mut client) = UnixStream::pair().expect("Unix stream pair");
+        let server_task = tokio::spawn(drive_versioned_authenticated_stream_until_shutdown(
+            dispatcher,
+            test_session(),
+            RawProtocolVersion::Catalogue(Arc::clone(&catalogue)),
+            server,
+            resources,
+            watch::channel(false).1,
+        ));
+
+        for frame in [
+            ClientFrame::CallRawStart {
+                stream: 1,
+                function: FUNCTION,
+            },
+            ClientFrame::WindowUpdate {
+                stream: 1,
+                channel: Channel::ResultValues,
+                credit: 1024,
+            },
+            ClientFrame::CallArgument {
+                stream: 1,
+                parameter: orna_core::ParameterId::from_bytes([0x34; 16]),
+                value: value.clone(),
+            },
+            ClientFrame::CallArgumentsComplete { stream: 1 },
+        ] {
+            client
+                .write_all(
+                    &encode_catalogue_client_frame(&catalogue, &frame)
+                        .expect("catalogue client frame encodes"),
+                )
+                .await
+                .expect("catalogue client frame writes");
+        }
+
+        assert!(matches!(
+            read_catalogue_server_frame(&mut client, &catalogue).await,
+            ServerFrame::CallAccepted { stream: 1, .. }
+        ));
+        assert!(matches!(
+            read_catalogue_server_frame(&mut client, &catalogue).await,
+            ServerFrame::EventBatch {
+                stream: 1,
+                channel: Channel::ResultValues,
+                events,
+            } if events.len() == 1 && events[0].event == Event::Value(value)
+        ));
+        assert_eq!(
+            read_catalogue_server_frame(&mut client, &catalogue).await,
+            ServerFrame::CallCompleted { stream: 1 }
+        );
+
+        client.shutdown().await.expect("client shutdown");
+        server_task
+            .await
+            .expect("catalogue connection task")
+            .expect("catalogue connection closes");
     }
 
     #[tokio::test]
@@ -1885,18 +2117,31 @@ mod tests {
     }
 
     async fn read_server_frame(stream: &mut UnixStream) -> ServerFrame {
+        let encoded = read_encoded_server_frame(stream, "server frame").await;
+        decode_server_frame(&encoded).expect("server frame decodes")
+    }
+
+    async fn read_catalogue_server_frame(
+        stream: &mut UnixStream,
+        catalogue: &CatalogueSnapshot,
+    ) -> ServerFrame {
+        let encoded = read_encoded_server_frame(stream, "catalogue server frame").await;
+        decode_catalogue_server_frame(catalogue, &encoded).expect("catalogue server frame decodes")
+    }
+
+    async fn read_encoded_server_frame(stream: &mut UnixStream, name: &str) -> Vec<u8> {
         let mut header = [0_u8; FRAME_HEADER_LENGTH];
         timeout(Duration::from_secs(1), stream.read_exact(&mut header))
             .await
-            .expect("server frame timeout")
-            .expect("server frame header");
+            .unwrap_or_else(|_| panic!("{name} timeout"))
+            .unwrap_or_else(|error| panic!("{name} header: {error}"));
         let length = u32::from_be_bytes(header[14..18].try_into().expect("fixed header")) as usize;
         let mut encoded = header.to_vec();
         encoded.resize(FRAME_HEADER_LENGTH + length, 0);
         stream
             .read_exact(&mut encoded[FRAME_HEADER_LENGTH..])
             .await
-            .expect("server frame payload");
-        decode_server_frame(&encoded).expect("server frame decodes")
+            .unwrap_or_else(|error| panic!("{name} payload: {error}"));
+        encoded
     }
 }
