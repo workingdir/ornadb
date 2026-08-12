@@ -135,6 +135,16 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "catalogue record value storage",
         include_str!("../migrations/0015_catalogue_record_value_types.sql"),
     ),
+    (
+        16,
+        "resolved record value type storage",
+        include_str!("../migrations/0016_resolved_record_value_types.sql"),
+    ),
+    (
+        17,
+        "record value field reference targets",
+        include_str!("../migrations/0017_record_field_reference_targets.sql"),
+    ),
 ];
 const MIGRATION_DATA_STEP_SEPARATOR: &[u8] = b"\0orna.kernel.migration-step\0";
 const CANONICAL_HASH_V1_EMPTY_SEED_STEP: &[u8] = b"canonical-hash-v1-empty-seed/v1";
@@ -508,16 +518,14 @@ fn enum_reference_targets_are_the_registered_version_fourteen() -> TestResult<()
 
 #[test]
 fn record_value_storage_is_the_registered_version_fifteen() -> TestResult<()> {
-    let Some((version, name, sql)) = MIGRATIONS.last() else {
-        return Err(failure("migration registry is empty"));
-    };
+    let (version, name, sql) = MIGRATIONS[14];
 
     require(
-        *version == 15,
+        version == 15,
         format!("last migration is version {version}"),
     )?;
     require(
-        *name == "catalogue record value storage",
+        name == "catalogue record value storage",
         format!("last migration has unexpected name {name:?}"),
     )?;
     require(
@@ -536,6 +544,24 @@ fn record_value_storage_is_the_registered_version_fifteen() -> TestResult<()> {
                 "REVOKE ALL ON TABLE _orna_kernel.catalogue_record_value_fields FROM PUBLIC",
             ),
         "record value migration does not preserve the complete protected definition contract",
+    )
+}
+
+#[test]
+fn record_field_reference_targets_are_the_registered_version_seventeen() -> TestResult<()> {
+    let (version, name, sql) = MIGRATIONS[16];
+    require(version == 17, format!("migration is version {version}"))?;
+    require(
+        name == "record value field reference targets",
+        format!("migration has unexpected name {name:?}"),
+    )?;
+    require(
+        sql.contains("target_kind = 'record_field'")
+            && sql.contains("definition_references_record_field_target_fk")
+            && sql.contains("REFERENCES _orna_kernel.catalogue_record_value_fields")
+            && sql.contains("DEFERRABLE INITIALLY DEFERRED")
+            && !sql.contains("LANGUAGE plpgsql"),
+        "record-field reference migration does not preserve exact relational integrity",
     )
 }
 
@@ -649,8 +675,8 @@ async fn bootstrap_upgrades_v5_write_reference_evidence_without_mutating_semanti
 
         let after = snapshot_upgrade_state(&database).await?;
         require(
-            after.migrations.len() == 15 && after.migrations[..5] == before.migrations[..],
-            format!("v6-v15 changed prior migration records: {:?}", after.migrations),
+            after.migrations.len() == 17 && after.migrations[..5] == before.migrations[..],
+            format!("v6-v17 changed prior migration records: {:?}", after.migrations),
         )?;
         require(
             after.migrations[5]
@@ -743,6 +769,24 @@ async fn bootstrap_upgrades_v5_write_reference_evidence_without_mutating_semanti
             format!("v15 migration record is not exact: {:?}", after.migrations[14]),
         )?;
         require(
+            after.migrations[15]
+                == (
+                    16,
+                    "resolved record value type storage".to_owned(),
+                    expected_migration_checksum(16, MIGRATIONS[15].2),
+                ),
+            format!("v16 migration record is not exact: {:?}", after.migrations[15]),
+        )?;
+        require(
+            after.migrations[16]
+                == (
+                    17,
+                    "record value field reference targets".to_owned(),
+                    expected_migration_checksum(17, MIGRATIONS[16].2),
+                ),
+            format!("v17 migration record is not exact: {:?}", after.migrations[16]),
+        )?;
+        require(
             after.active_pair == before.active_pair,
             "v6 changed the active revision pair",
         )?;
@@ -828,7 +872,7 @@ async fn bootstrap_upgrades_registered_v6_without_standard_rows() -> TestResult<
 
         let after = snapshot_upgrade_state(&database).await?;
         require(
-            after.migrations.len() == 15
+            after.migrations.len() == 17
                 && after.migrations[..6] == before.migrations[..]
                 && after.migrations[6]
                     == (
@@ -911,6 +955,24 @@ async fn bootstrap_upgrades_registered_v6_without_standard_rows() -> TestResult<
             format!("v15 migration record is not exact: {:?}", after.migrations[14]),
         )?;
         require(
+            after.migrations[15]
+                == (
+                    16,
+                    "resolved record value type storage".to_owned(),
+                    expected_migration_checksum(16, MIGRATIONS[15].2),
+                ),
+            format!("v16 migration record is not exact: {:?}", after.migrations[15]),
+        )?;
+        require(
+            after.migrations[16]
+                == (
+                    17,
+                    "record value field reference targets".to_owned(),
+                    expected_migration_checksum(17, MIGRATIONS[16].2),
+                ),
+            format!("v17 migration record is not exact: {:?}", after.migrations[16]),
+        )?;
+        require(
             after.active_pair == before.active_pair
                 && after.source_unit_count == before.source_unit_count
                 && after.references == before.references
@@ -984,7 +1046,7 @@ async fn bootstrap_upgrades_registered_v7_without_resolved_value_rows() -> TestR
         let after_surface = snapshot_catalogue_surface(&database).await?;
         let after_target_fks = snapshot_application_target_foreign_keys(&database).await?;
         require(
-            after.migrations.len() == 15
+            after.migrations.len() == 17
                 && after.migrations[..7] == before.migrations[..]
                 && after.migrations[7]
                     == (
@@ -1033,6 +1095,18 @@ async fn bootstrap_upgrades_registered_v7_without_resolved_value_rows() -> TestR
                         15,
                         "catalogue record value storage".to_owned(),
                         expected_migration_checksum(15, MIGRATIONS[14].2),
+                    )
+                && after.migrations[15]
+                    == (
+                        16,
+                        "resolved record value type storage".to_owned(),
+                        expected_migration_checksum(16, MIGRATIONS[15].2),
+                    )
+                && after.migrations[16]
+                    == (
+                        17,
+                        "record value field reference targets".to_owned(),
+                        expected_migration_checksum(17, MIGRATIONS[16].2),
                     ),
             format!("v7 upgrade produced unexpected migrations: {:?}", after.migrations),
         )?;
@@ -2088,18 +2162,18 @@ fn exact_resolved_type_constraint_definition(constraint: &str) -> Option<&'stati
         "catalogue_fields_type_kind_check"
         | "catalogue_function_parameters_type_kind_check"
         | "catalogue_function_return_columns_type_kind_check" => {
-            "CHECK ((type_kind = ANY (ARRAY['scalar'::text, 'named'::text, 'reference'::text, 'value'::text, 'enum'::text])))"
+            "CHECK ((type_kind = ANY (ARRAY['scalar'::text, 'named'::text, 'reference'::text, 'value'::text, 'enum'::text, 'record'::text])))"
         }
         "catalogue_fields_check"
         | "catalogue_function_parameters_check"
         | "catalogue_function_return_columns_check" => {
-            "CHECK ((((type_kind = 'scalar'::text) AND (scalar_type IS NOT NULL) AND (target_type_id IS NULL) AND (value_type_id IS NULL) AND (value_standard_library_revision_id IS NULL) AND (enum_type_id IS NULL)) OR ((type_kind = ANY (ARRAY['named'::text, 'reference'::text])) AND (scalar_type IS NULL) AND (target_type_id IS NOT NULL) AND (value_type_id IS NULL) AND (value_standard_library_revision_id IS NULL) AND (enum_type_id IS NULL)) OR ((type_kind = 'value'::text) AND (scalar_type IS NULL) AND (target_type_id IS NULL) AND (value_type_id IS NOT NULL) AND (value_standard_library_revision_id IS NOT NULL) AND (enum_type_id IS NULL)) OR ((type_kind = 'enum'::text) AND (scalar_type IS NULL) AND (target_type_id IS NULL) AND (value_type_id IS NULL) AND (value_standard_library_revision_id IS NULL) AND (enum_type_id IS NOT NULL))))"
+            "CHECK ((((type_kind = 'scalar'::text) AND (scalar_type IS NOT NULL) AND (target_type_id IS NULL) AND (value_type_id IS NULL) AND (value_standard_library_revision_id IS NULL) AND (enum_type_id IS NULL) AND (record_type_id IS NULL)) OR ((type_kind = ANY (ARRAY['named'::text, 'reference'::text])) AND (scalar_type IS NULL) AND (target_type_id IS NOT NULL) AND (value_type_id IS NULL) AND (value_standard_library_revision_id IS NULL) AND (enum_type_id IS NULL) AND (record_type_id IS NULL)) OR ((type_kind = 'value'::text) AND (scalar_type IS NULL) AND (target_type_id IS NULL) AND (value_type_id IS NOT NULL) AND (value_standard_library_revision_id IS NOT NULL) AND (enum_type_id IS NULL) AND (record_type_id IS NULL)) OR ((type_kind = 'enum'::text) AND (scalar_type IS NULL) AND (target_type_id IS NULL) AND (value_type_id IS NULL) AND (value_standard_library_revision_id IS NULL) AND (enum_type_id IS NOT NULL) AND (record_type_id IS NULL)) OR ((type_kind = 'record'::text) AND (scalar_type IS NULL) AND (target_type_id IS NULL) AND (value_type_id IS NULL) AND (value_standard_library_revision_id IS NULL) AND (enum_type_id IS NULL) AND (record_type_id IS NOT NULL))))"
         }
         "catalogue_functions_return_type_kind_check" => {
-            "CHECK ((return_type_kind = ANY (ARRAY['scalar'::text, 'named'::text, 'reference'::text, 'value'::text, 'enum'::text])))"
+            "CHECK ((return_type_kind = ANY (ARRAY['scalar'::text, 'named'::text, 'reference'::text, 'value'::text, 'enum'::text, 'record'::text])))"
         }
         "catalogue_functions_check1" => {
-            "CHECK ((((return_shape = 'rows'::text) AND (return_type_kind IS NULL) AND (return_scalar_type IS NULL) AND (return_target_type_id IS NULL) AND (return_value_type_id IS NULL) AND (return_standard_library_revision_id IS NULL) AND (return_enum_type_id IS NULL)) OR ((return_shape = 'single'::text) AND (((return_type_kind = 'scalar'::text) AND (return_scalar_type IS NOT NULL) AND (return_target_type_id IS NULL) AND (return_value_type_id IS NULL) AND (return_standard_library_revision_id IS NULL) AND (return_enum_type_id IS NULL)) OR ((return_type_kind = ANY (ARRAY['named'::text, 'reference'::text])) AND (return_scalar_type IS NULL) AND (return_target_type_id IS NOT NULL) AND (return_value_type_id IS NULL) AND (return_standard_library_revision_id IS NULL) AND (return_enum_type_id IS NULL)) OR ((return_type_kind = 'value'::text) AND (return_scalar_type IS NULL) AND (return_target_type_id IS NULL) AND (return_value_type_id IS NOT NULL) AND (return_standard_library_revision_id IS NOT NULL) AND (return_enum_type_id IS NULL)) OR ((return_type_kind = 'enum'::text) AND (return_scalar_type IS NULL) AND (return_target_type_id IS NULL) AND (return_value_type_id IS NULL) AND (return_standard_library_revision_id IS NULL) AND (return_enum_type_id IS NOT NULL))))))"
+            "CHECK ((((return_shape = 'rows'::text) AND (return_type_kind IS NULL) AND (return_scalar_type IS NULL) AND (return_target_type_id IS NULL) AND (return_value_type_id IS NULL) AND (return_standard_library_revision_id IS NULL) AND (return_enum_type_id IS NULL) AND (return_record_type_id IS NULL)) OR ((return_shape = 'single'::text) AND (((return_type_kind = 'scalar'::text) AND (return_scalar_type IS NOT NULL) AND (return_target_type_id IS NULL) AND (return_value_type_id IS NULL) AND (return_standard_library_revision_id IS NULL) AND (return_enum_type_id IS NULL) AND (return_record_type_id IS NULL)) OR ((return_type_kind = ANY (ARRAY['named'::text, 'reference'::text])) AND (return_scalar_type IS NULL) AND (return_target_type_id IS NOT NULL) AND (return_value_type_id IS NULL) AND (return_standard_library_revision_id IS NULL) AND (return_enum_type_id IS NULL) AND (return_record_type_id IS NULL)) OR ((return_type_kind = 'value'::text) AND (return_scalar_type IS NULL) AND (return_target_type_id IS NULL) AND (return_value_type_id IS NOT NULL) AND (return_standard_library_revision_id IS NOT NULL) AND (return_enum_type_id IS NULL) AND (return_record_type_id IS NULL)) OR ((return_type_kind = 'enum'::text) AND (return_scalar_type IS NULL) AND (return_target_type_id IS NULL) AND (return_value_type_id IS NULL) AND (return_standard_library_revision_id IS NULL) AND (return_enum_type_id IS NOT NULL) AND (return_record_type_id IS NULL)) OR ((return_type_kind = 'record'::text) AND (return_scalar_type IS NULL) AND (return_target_type_id IS NULL) AND (return_value_type_id IS NULL) AND (return_standard_library_revision_id IS NULL) AND (return_enum_type_id IS NULL) AND (return_record_type_id IS NOT NULL))))))"
         }
         "cat_fields_val_type_len"
         | "cat_fn_params_val_type_len"
@@ -3509,6 +3583,14 @@ async fn inspect_definition_references(client: &Client) -> TestResult<()> {
             "target_enum_catalogue_revision_id".to_owned(),
             "YES".to_owned(),
         ),
+        (
+            "target_record_catalogue_revision_id".to_owned(),
+            "YES".to_owned(),
+        ),
+        (
+            "target_record_field_catalogue_revision_id".to_owned(),
+            "YES".to_owned(),
+        ),
     ];
     require(
         actual_columns == expected_columns,
@@ -3539,7 +3621,7 @@ async fn inspect_definition_references(client: &Client) -> TestResult<()> {
         client,
         "definition_references",
         "definition_references_target_kind_check",
-        "CHECK ((target_kind = ANY (ARRAY['object_type'::text, 'field'::text, 'function'::text, 'parameter'::text, 'expression'::text, 'value_type'::text, 'enum_type'::text])))",
+        "CHECK ((target_kind = ANY (ARRAY['object_type'::text, 'field'::text, 'record_field'::text, 'function'::text, 'parameter'::text, 'expression'::text, 'value_type'::text, 'enum_type'::text, 'record_type'::text])))",
         false,
         false,
     )
@@ -3584,22 +3666,18 @@ async fn inspect_definition_references(client: &Client) -> TestResult<()> {
     )
     .await?;
 
-    require_exact_constraint(
+    require_constraint(
         client,
         "definition_references",
         "definition_references_target_owner_shape_check",
-        "CHECK ((((target_kind = 'field'::text) AND (target_owner_type_id IS NOT NULL) AND (target_owner_function_id IS NULL)) OR ((target_kind = 'parameter'::text) AND (target_owner_type_id IS NULL) AND (target_owner_function_id IS NOT NULL)) OR ((target_kind = 'value_type'::text) AND (target_owner_type_id IS NULL) AND (target_owner_function_id IS NULL)) OR ((target_kind <> ALL (ARRAY['field'::text, 'parameter'::text, 'value_type'::text])) AND (target_owner_type_id IS NULL) AND (target_owner_function_id IS NULL))))",
-        false,
-        false,
+        "target_kind = ANY (ARRAY['field'::text, 'record_field'::text])",
     )
     .await?;
-    require_exact_constraint(
+    require_constraint(
         client,
         "definition_references",
         "definition_references_reference_target_compatibility_check",
-        "CHECK ((((reference_kind = 'function_call'::text) AND (target_kind = 'function'::text)) OR ((reference_kind = ANY (ARRAY['named_type'::text, 'object_reference'::text, 'query_object'::text])) AND (target_kind = 'object_type'::text)) OR ((reference_kind = 'parameter_read'::text) AND (target_kind = 'parameter'::text)) OR ((reference_kind = 'query_field'::text) AND (target_kind = 'field'::text)) OR ((reference_kind = 'expression'::text) AND (target_kind = 'expression'::text)) OR ((reference_kind = 'write_object'::text) AND (target_kind = 'object_type'::text)) OR ((reference_kind = 'write_field'::text) AND (target_kind = 'field'::text)) OR ((reference_kind = 'named_type'::text) AND (target_kind = 'value_type'::text)) OR ((reference_kind = 'named_type'::text) AND (target_kind = 'enum_type'::text))))",
-        false,
-        false,
+        "(reference_kind = 'write_field'::text) AND (target_kind = ANY (ARRAY['field'::text, 'record_field'::text]))",
     )
     .await?;
     require_constraint(
@@ -3607,6 +3685,13 @@ async fn inspect_definition_references(client: &Client) -> TestResult<()> {
         "definition_references",
         "definition_references_field_target_fk",
         "FOREIGN KEY (catalogue_revision_id, target_owner_type_id, target_definition_id) REFERENCES _orna_kernel.catalogue_fields(catalogue_revision_id, owner_type_id, field_id) DEFERRABLE INITIALLY DEFERRED",
+    )
+    .await?;
+    require_constraint(
+        client,
+        "definition_references",
+        "definition_references_record_field_target_fk",
+        "FOREIGN KEY (target_record_field_catalogue_revision_id, target_owner_type_id, target_definition_id) REFERENCES _orna_kernel.catalogue_record_value_fields(catalogue_revision_id, owner_type_id, field_id) DEFERRABLE INITIALLY DEFERRED",
     )
     .await?;
     require_constraint(
@@ -3679,10 +3764,51 @@ async fn inspect_definition_references(client: &Client) -> TestResult<()> {
         true,
     )
     .await?;
+    require_constraint(
+        client,
+        "definition_references",
+        "definition_references_target_record_revision_length",
+        "octet_length(target_record_catalogue_revision_id) = 16",
+    )
+    .await?;
+    require_constraint(
+        client,
+        "definition_references",
+        "definition_references_target_record_revision_shape",
+        "target_kind = 'record_type'::text",
+    )
+    .await?;
+    require_constraint(
+        client,
+        "definition_references",
+        "definition_references_record_type_target_fk",
+        "FOREIGN KEY (target_record_catalogue_revision_id, target_definition_id) REFERENCES _orna_kernel.catalogue_record_value_types(catalogue_revision_id, type_id) DEFERRABLE INITIALLY DEFERRED",
+    )
+    .await?;
+    require_constraint(
+        client,
+        "definition_references",
+        "definition_references_target_record_field_revision_length",
+        "octet_length(target_record_field_catalogue_revision_id) = 16",
+    )
+    .await?;
+    require_constraint(
+        client,
+        "definition_references",
+        "definition_references_target_field_revision_shape",
+        "target_kind = 'record_field'::text",
+    )
+    .await?;
     require_index(
         client,
         "definition_references_field_target_index",
         "(target_owner_type_id, target_definition_id, catalogue_revision_id) WHERE (target_kind = 'field'::text)",
+    )
+    .await?;
+    require_index(
+        client,
+        "definition_references_record_field_target_index",
+        "(target_record_field_catalogue_revision_id, target_owner_type_id, target_definition_id) WHERE (target_kind = 'record_field'::text)",
     )
     .await?;
     require_index(
@@ -3694,13 +3820,19 @@ async fn inspect_definition_references(client: &Client) -> TestResult<()> {
     require_index(
         client,
         "definition_references_direct_target_index",
-        "(target_kind, target_definition_id, catalogue_revision_id) WHERE (target_kind <> ALL (ARRAY['field'::text, 'parameter'::text]))",
+        "(target_kind, target_definition_id, catalogue_revision_id) WHERE (target_kind <> ALL (ARRAY['field'::text, 'record_field'::text, 'parameter'::text]))",
     )
     .await?;
     require_index(
         client,
         "definition_references_enum_type_target_index",
         "(target_enum_catalogue_revision_id, target_definition_id) WHERE (target_kind = 'enum_type'::text)",
+    )
+    .await?;
+    require_index(
+        client,
+        "definition_references_record_type_target_index",
+        "(target_record_catalogue_revision_id, target_definition_id) WHERE (target_kind = 'record_type'::text)",
     )
     .await?;
     require_index_absent(client, "definition_references_target_index").await?;
