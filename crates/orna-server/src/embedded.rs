@@ -2,27 +2,39 @@
 
 use std::{
     collections::BTreeSet,
+    ffi::CString,
     fmt, fs,
     io::{self, Cursor, Read, Write},
     os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Component, Path, PathBuf},
+    time::Duration,
 };
 
 use nix::{
     errno::Errno,
-    sys::wait::{WaitStatus, waitpid},
+    sys::{
+        signal::{Signal, kill},
+        wait::{WaitPidFlag, WaitStatus, waitpid},
+    },
     unistd::{ForkResult, Pid, fork},
 };
 use orna_postgres_engine::{
-    AbsolutePath, ENGINE_MANIFEST, EmbeddedEngine, EngineError, SUPPORT_ARCHIVE, SUPPORT_MANIFEST,
+    AbsolutePath, ENGINE_MANIFEST, EmbeddedEngine, EngineError, LinkedArguments, SUPPORT_ARCHIVE,
+    SUPPORT_MANIFEST,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use tokio_postgres::{Config, NoTls};
 
 const INSTANCE_NAME: &str = "default";
 const STATE_ROOT: &str = "/var/lib/orna/instances/default";
 const RUNTIME_ROOT: &str = "/run/orna/default";
 const SUPPORT_DIRECTORY: &str = "embedded-postgresql";
+const POSTGRES_PORT: u16 = 5432;
+const STARTUP_ATTEMPTS: usize = 600;
+const STARTUP_INTERVAL: Duration = Duration::from_millis(50);
+const FAST_STOP_ATTEMPTS: usize = 600;
+const IMMEDIATE_STOP_ATTEMPTS: usize = 300;
 
 /// The immutable identity of the PostgreSQL engine embedded in this executable.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -111,6 +123,10 @@ pub enum EmbeddedHostError {
     InitialiserExited(i32),
     InitialiserSignalled(i32),
     InitialiserWait,
+    PostmasterExited(i32),
+    PostmasterSignalled(i32),
+    PostmasterWait,
+    ReadinessTimeout,
     SupportMismatch(&'static str),
     Io(io::Error),
 }
@@ -140,6 +156,19 @@ impl fmt::Display for EmbeddedHostError {
             ),
             Self::InitialiserWait => {
                 formatter.write_str("embedded PostgreSQL initialisation could not be reaped")
+            }
+            Self::PostmasterExited(status) => {
+                write!(formatter, "embedded PostgreSQL exited with status {status}")
+            }
+            Self::PostmasterSignalled(signal) => {
+                write!(
+                    formatter,
+                    "embedded PostgreSQL was stopped by signal {signal}"
+                )
+            }
+            Self::PostmasterWait => formatter.write_str("embedded PostgreSQL could not be reaped"),
+            Self::ReadinessTimeout => {
+                formatter.write_str("embedded PostgreSQL did not become ready")
             }
             Self::SupportMismatch(reason) => {
                 write!(
@@ -286,6 +315,212 @@ fn wait_for_initialiser(child: Pid) -> Result<(), EmbeddedHostError> {
             Err(_) => return Err(EmbeddedHostError::InitialiserWait),
         }
     }
+}
+
+/// One direct linked PostgreSQL postmaster child owned by the Rust supervisor.
+#[derive(Debug)]
+pub struct EmbeddedPostmaster {
+    child: Option<Pid>,
+    socket_directory: PathBuf,
+}
+
+impl EmbeddedPostmaster {
+    pub fn pid(&self) -> u32 {
+        self.child
+            .expect("a stopped postmaster has no public lifetime")
+            .as_raw() as u32
+    }
+
+    /// Waits until the private PostgreSQL database accepts a complete query.
+    pub async fn wait_until_ready(&mut self, database: &str) -> Result<(), EmbeddedHostError> {
+        let config = private_database_config(&self.socket_directory, database);
+        for _ in 0..STARTUP_ATTEMPTS {
+            self.require_running()?;
+            if let Ok((client, connection)) = config.connect(NoTls).await {
+                let driver = tokio::spawn(connection);
+                let result = client.simple_query("SELECT 1").await;
+                drop(client);
+                let driver_result = driver.await;
+                if result.is_ok() && matches!(driver_result, Ok(Ok(()))) {
+                    return Ok(());
+                }
+            }
+            tokio::time::sleep(STARTUP_INTERVAL).await;
+        }
+        self.require_running()?;
+        Err(EmbeddedHostError::ReadinessTimeout)
+    }
+
+    /// Requests fast shutdown, with a bounded immediate-shutdown escalation.
+    pub async fn stop(mut self) -> Result<(), EmbeddedHostError> {
+        let child = self.child.ok_or(EmbeddedHostError::PostmasterWait)?;
+        kill(child, Signal::SIGINT).map_err(|_| EmbeddedHostError::PostmasterWait)?;
+        if let Some(result) = wait_for_postmaster(child, FAST_STOP_ATTEMPTS).await? {
+            self.child = None;
+            return result;
+        }
+        kill(child, Signal::SIGQUIT).map_err(|_| EmbeddedHostError::PostmasterWait)?;
+        if let Some(result) = wait_for_postmaster(child, IMMEDIATE_STOP_ATTEMPTS).await? {
+            self.child = None;
+            return result;
+        }
+        Err(EmbeddedHostError::PostmasterWait)
+    }
+
+    fn require_running(&mut self) -> Result<(), EmbeddedHostError> {
+        let child = self.child.ok_or(EmbeddedHostError::PostmasterWait)?;
+        match waitpid(child, Some(WaitPidFlag::WNOHANG)) {
+            Ok(WaitStatus::StillAlive) => Ok(()),
+            Ok(status) => {
+                self.child = None;
+                postmaster_status(status)
+            }
+            Err(Errno::EINTR) => self.require_running(),
+            Err(_) => Err(EmbeddedHostError::PostmasterWait),
+        }
+    }
+}
+
+impl Drop for EmbeddedPostmaster {
+    fn drop(&mut self) {
+        let Some(child) = self.child.take() else {
+            return;
+        };
+        let _ = kill(child, Signal::SIGQUIT);
+        for _ in 0..300 {
+            match waitpid(child, Some(WaitPidFlag::WNOHANG)) {
+                Ok(WaitStatus::StillAlive) | Err(Errno::EINTR) => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Ok(_) | Err(Errno::ECHILD) => return,
+                Err(_) => return,
+            }
+        }
+        let _ = kill(child, Signal::SIGKILL);
+        loop {
+            match waitpid(child, None) {
+                Ok(_) | Err(Errno::ECHILD) => return,
+                Err(Errno::EINTR) => continue,
+                Err(_) => return,
+            }
+        }
+    }
+}
+
+/// Starts one linked PostgreSQL postmaster on the private Unix socket.
+pub fn start_embedded_postmaster(
+    support_root: &Path,
+    data_directory: &Path,
+    socket_directory: &Path,
+) -> Result<EmbeddedPostmaster, EmbeddedHostError> {
+    require_single_thread()?;
+    let support_root = AbsolutePath::new(support_root)?;
+    let mut arguments = LinkedArguments::new([
+        Path::new("/usr/bin/orna").as_os_str(),
+        std::ffi::OsStr::new("-D"),
+        data_directory.as_os_str(),
+        std::ffi::OsStr::new("-k"),
+        socket_directory.as_os_str(),
+        std::ffi::OsStr::new("-h"),
+        std::ffi::OsStr::new(""),
+        std::ffi::OsStr::new("-p"),
+        std::ffi::OsStr::new("5432"),
+    ])?;
+    let environment = FixedChildEnvironment::new();
+
+    // SAFETY: the thread gate ran immediately before this call. All child arguments and
+    // environment values are prepared and remain live in the selected branch.
+    match unsafe { fork() }.map_err(|_| EmbeddedHostError::PostmasterWait)? {
+        ForkResult::Child => {
+            if reset_child_signals().is_err() || environment.install().is_err() {
+                process_exit(126);
+            }
+            // SAFETY: this is the fresh, single-threaded child selected above.
+            let engine = match unsafe { EmbeddedEngine::configure_process(&support_root) } {
+                Ok(engine) => engine,
+                Err(_) => process_exit(124),
+            };
+            // SAFETY: the child owns PostgreSQL process-global state and its writable arguments.
+            let status = unsafe { engine.run_process(&mut arguments) };
+            process_exit(status);
+        }
+        ForkResult::Parent { child } => Ok(EmbeddedPostmaster {
+            child: Some(child),
+            socket_directory: socket_directory.to_owned(),
+        }),
+    }
+}
+
+/// Returns the private peer-authenticated connection configuration for one embedded database.
+pub fn private_database_config(socket_directory: &Path, database: &str) -> Config {
+    let mut config = Config::new();
+    config
+        .host_path(socket_directory)
+        .port(POSTGRES_PORT)
+        .user("orna_kernel")
+        .dbname(database);
+    config
+}
+
+struct FixedChildEnvironment {
+    values: [(CString, CString); 3],
+}
+
+impl FixedChildEnvironment {
+    fn new() -> Self {
+        Self {
+            values: [
+                (cstring("LANG"), cstring("C.UTF-8")),
+                (cstring("LC_ALL"), cstring("C.UTF-8")),
+                (cstring("TZ"), cstring("UTC0")),
+            ],
+        }
+    }
+
+    fn install(&self) -> Result<(), ()> {
+        // SAFETY: every pointer is a live NUL-terminated string. The caller is the fresh child.
+        unsafe {
+            if nix::libc::clearenv() != 0 {
+                return Err(());
+            }
+            for (name, value) in &self.values {
+                if nix::libc::setenv(name.as_ptr(), value.as_ptr(), 1) != 0 {
+                    return Err(());
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+async fn wait_for_postmaster(
+    child: Pid,
+    attempts: usize,
+) -> Result<Option<Result<(), EmbeddedHostError>>, EmbeddedHostError> {
+    for _ in 0..attempts {
+        match waitpid(child, Some(WaitPidFlag::WNOHANG)) {
+            Ok(WaitStatus::StillAlive) => tokio::time::sleep(STARTUP_INTERVAL).await,
+            Ok(status) => return Ok(Some(postmaster_status(status))),
+            Err(Errno::EINTR) => continue,
+            Err(_) => return Err(EmbeddedHostError::PostmasterWait),
+        }
+    }
+    Ok(None)
+}
+
+fn postmaster_status(status: WaitStatus) -> Result<(), EmbeddedHostError> {
+    match status {
+        WaitStatus::Exited(_, 0) => Ok(()),
+        WaitStatus::Exited(_, status) => Err(EmbeddedHostError::PostmasterExited(status)),
+        WaitStatus::Signaled(_, signal, _) => {
+            Err(EmbeddedHostError::PostmasterSignalled(signal as i32))
+        }
+        _ => Err(EmbeddedHostError::PostmasterWait),
+    }
+}
+
+fn cstring(value: &str) -> CString {
+    CString::new(value).expect("fixed PostgreSQL process input is a C string")
 }
 
 fn reset_child_signals() -> Result<(), ()> {
