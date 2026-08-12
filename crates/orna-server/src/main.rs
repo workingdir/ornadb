@@ -6,12 +6,13 @@ use std::{
 
 mod package_maintenance;
 
-const USAGE: &str = "Usage: orna server <run|backend-shell>";
+const USAGE: &str = "Usage: orna server <run|backend-shell|upgrade>";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Command {
     Run,
     BackendShell,
+    Upgrade,
 }
 
 fn main() -> ExitCode {
@@ -45,6 +46,13 @@ fn main() -> ExitCode {
                 ExitCode::from(1)
             }
         },
+        Command::Upgrade => match orna_server::run_embedded_upgrade() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                write_stderr_line(&error.to_string());
+                ExitCode::from(1)
+            }
+        },
     }
 }
 
@@ -61,6 +69,7 @@ where
     let command = match args.next().as_deref() {
         Some(value) if value == OsStr::new("run") => Command::Run,
         Some(value) if value == OsStr::new("backend-shell") => Command::BackendShell,
+        Some(value) if value == OsStr::new("upgrade") => Command::Upgrade,
         _ => return None,
     };
     args.next().is_none().then_some(command)
@@ -89,6 +98,10 @@ mod tests {
             parse_command(arguments(&["orna", "server", "backend-shell"])),
             Some(Command::BackendShell)
         );
+        assert_eq!(
+            parse_command(arguments(&["orna", "server", "upgrade"])),
+            Some(Command::Upgrade)
+        );
     }
 
     #[test]
@@ -102,6 +115,7 @@ mod tests {
             vec!["orna", "backend-shell"],
             vec!["orna", "server", "backend-shell", "--flag"],
             vec!["orna", "server", "backend-shell", "select 1"],
+            vec!["orna", "server", "upgrade", "--force"],
         ] {
             assert_eq!(parse_command(arguments(&values)), None);
         }
@@ -147,6 +161,6 @@ mod tests {
 
     #[test]
     fn usage_diagnostic_is_exact() {
-        assert_eq!(USAGE, "Usage: orna server <run|backend-shell>");
+        assert_eq!(USAGE, "Usage: orna server <run|backend-shell|upgrade>");
     }
 }
