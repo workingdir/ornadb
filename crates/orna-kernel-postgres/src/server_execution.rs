@@ -20,6 +20,7 @@ use orna_core::{
         ActiveDatabaseRevision, CatalogueHashContext, DefinitionReferenceKind,
         DefinitionReferenceTarget, ExecutableArtifactKind, RevisionPair,
     },
+    security::{AuthorisedInvocation, InvocationTarget},
     types::{ResolvedType, StandardScalar},
     value::{
         EnumValue, FunctionArgument, ResultColumn, ResultRow, ResultRows, ResultRowsError,
@@ -157,6 +158,13 @@ impl ServerSelectResult {
 #[non_exhaustive]
 #[derive(Debug)]
 pub enum ServerSelectError {
+    /// Authorisation evidence does not cover the recovered active revision.
+    AuthorisationMismatch {
+        /// The immutable target covered by the authorisation evidence.
+        authorised: InvocationTarget,
+        /// The recovered active revision pair.
+        active: RevisionPair,
+    },
     /// The requested function is not in the recovered active catalogue.
     FunctionNotActive {
         /// The recovered active revision pair.
@@ -272,6 +280,11 @@ pub enum ServerSelectError {
 impl fmt::Display for ServerSelectError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::AuthorisationMismatch { authorised, active } => write!(
+                formatter,
+                "authorised SERVER target {:?} does not match active pair {:?}",
+                authorised, active
+            ),
             Self::FunctionNotActive { pair, function } => {
                 write!(
                     formatter,
@@ -405,6 +418,7 @@ impl Error for ServerSelectError {
             Self::ResultRows(error) => Some(error),
             Self::RowDecode { source, .. } => Some(source),
             Self::FunctionNotActive { .. }
+            | Self::AuthorisationMismatch { .. }
             | Self::FunctionDomain { .. }
             | Self::FunctionSignature { .. }
             | Self::CurrentRevision { .. }
@@ -600,6 +614,44 @@ async fn execute_transaction(
     let result =
         execute_active_transaction(transaction, &active, function, context, arguments).await;
     result.map_err(|error| contextualize(context, error))
+}
+
+/// Executes an exact active SERVER target from protected authorisation evidence.
+///
+/// This helper does not recover state or make an authorisation decision. The
+/// caller must provide the active revision that produced `authorisation`.
+pub(crate) async fn execute_authorised_server_select(
+    transaction: &Transaction<'_>,
+    active: &ActiveDatabaseRevision,
+    authorisation: &AuthorisedInvocation,
+    arguments: &[FunctionArgument],
+) -> Result<ServerSelectResult, PostgresKernelError> {
+    let target = authorisation.target();
+    if target.revision() != active.pair() {
+        return Err(server_error(ServerSelectError::AuthorisationMismatch {
+            authorised: target,
+            active: active.pair(),
+        }));
+    }
+    let function = active
+        .catalogue()
+        .functions()
+        .iter()
+        .find(|function| function.id() == target.function())
+        .ok_or_else(|| {
+            server_error(ServerSelectError::FunctionNotActive {
+                pair: active.pair(),
+                function: target.function(),
+            })
+        })?;
+    let context = ServerSelectContext::new(
+        active.pair(),
+        target.function(),
+        function.current_revision(),
+    );
+    execute_active_transaction(transaction, active, function, context, arguments)
+        .await
+        .map_err(|error| contextualize(context, error))
 }
 
 #[cfg(feature = "test-hooks")]

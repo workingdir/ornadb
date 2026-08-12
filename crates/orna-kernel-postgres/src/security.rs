@@ -13,15 +13,114 @@ use orna_core::{
         SecurityAuditEvent, SecurityAuditKind, SecurityAuditOutcome, SecuritySnapshot,
         SessionBindingError,
     },
+    value::FunctionArgument,
 };
 use tokio_postgres::{IsolationLevel, Row, Transaction, types::FromSqlOwned};
 
 use crate::{
-    PostgresKernel, PostgresKernelError, bootstrap::require_current_migrations,
+    PostgresKernel, PostgresKernelError,
+    bootstrap::require_current_migrations,
     recovery::recover_active_revision,
+    server_execution::{ServerSelectResult, execute_authorised_server_select},
+    server_runtime::configure_and_recover,
 };
 
 impl PostgresKernel {
+    /// Executes one authorised SERVER `SELECT` against one active snapshot.
+    ///
+    /// The operation records and commits its protected `EXECUTE` decision. It
+    /// executes an allowed target through a savepoint. A target failure rolls
+    /// back only that savepoint, then commits the allowed audit decision before
+    /// it returns the original target error.
+    pub async fn execute_authenticated_server_select(
+        &self,
+        authenticated_session: &AuthenticatedSession,
+        function: FunctionId,
+        arguments: &[FunctionArgument],
+    ) -> Result<ServerSelectResult, PostgresKernelError> {
+        let mut database_session = self.open().await?;
+        let operation = async {
+            let mut transaction = database_session
+                .client
+                .build_transaction()
+                .isolation_level(IsolationLevel::RepeatableRead)
+                .start()
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            require_current_migrations(&transaction).await?;
+            let active = configure_and_recover(&transaction).await?;
+            let security = recover_security_snapshot_for_active(&transaction, &active).await?;
+            let target = InvocationTarget::new(function, active.pair());
+
+            match security.authorise_execute(authenticated_session, target) {
+                ExecuteDecision::Denied(reason) => {
+                    append_security_audit_event(
+                        &transaction,
+                        SecurityAuditDecision::execute_denied(
+                            authenticated_session,
+                            target,
+                            reason,
+                        ),
+                    )
+                    .await?;
+                    transaction
+                        .commit()
+                        .await
+                        .map_err(PostgresKernelError::Database)?;
+                    Err(PostgresKernelError::ServerExecuteDenied {
+                        pair: active.pair(),
+                        function,
+                        reason,
+                    })
+                }
+                ExecuteDecision::Allowed(authorisation) => {
+                    append_security_audit_event(
+                        &transaction,
+                        SecurityAuditDecision::execute_allowed(&authorisation),
+                    )
+                    .await?;
+                    let savepoint = transaction
+                        .savepoint("server_select_execution")
+                        .await
+                        .map_err(PostgresKernelError::Database)?;
+                    let execution = execute_authorised_server_select(
+                        &savepoint,
+                        &active,
+                        &authorisation,
+                        arguments,
+                    )
+                    .await;
+                    match execution {
+                        Ok(result) => {
+                            savepoint
+                                .commit()
+                                .await
+                                .map_err(PostgresKernelError::Database)?;
+                            transaction
+                                .commit()
+                                .await
+                                .map_err(PostgresKernelError::Database)?;
+                            Ok(result)
+                        }
+                        Err(error) => {
+                            savepoint
+                                .rollback()
+                                .await
+                                .map_err(PostgresKernelError::Database)?;
+                            transaction
+                                .commit()
+                                .await
+                                .map_err(PostgresKernelError::Database)?;
+                            Err(error)
+                        }
+                    }
+                }
+            }
+        }
+        .await;
+        finish_authenticated_server_select_session(operation, database_session.shutdown().await)
+    }
+
     /// Authenticates a kernel-supplied Linux peer UID with no selected roles.
     ///
     /// The operation appends and commits one protected audit record before it
@@ -218,6 +317,14 @@ fn finish_security_session<T>(
         (Ok(value), Ok(())) => Ok(value),
         (Err(error), _) | (Ok(_), Err(error)) => Err(error),
     }
+}
+
+fn finish_authenticated_server_select_session<T>(
+    operation: Result<T, PostgresKernelError>,
+    shutdown: Result<(), PostgresKernelError>,
+) -> Result<T, PostgresKernelError> {
+    shutdown?;
+    operation
 }
 
 async fn append_security_audit_event(
