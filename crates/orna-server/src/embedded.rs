@@ -2,12 +2,16 @@
 
 use std::{
     collections::BTreeSet,
-    ffi::{CString, OsString},
+    env,
+    ffi::{CString, OsStr, OsString},
     fmt, fs,
     io::{self, Cursor, Read, Seek, SeekFrom, Write},
     os::{
         fd::AsRawFd,
-        unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+        unix::{
+            ffi::OsStrExt,
+            fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+        },
     },
     path::{Component, Path, PathBuf},
     sync::atomic::{AtomicI32, Ordering},
@@ -23,8 +27,8 @@ use nix::{
     unistd::{ForkResult, Group, Pid, User, fork, getegid, geteuid, getgroups},
 };
 use orna_postgres_engine::{
-    AbsolutePath, ENGINE_MANIFEST, EmbeddedEngine, EngineError, LinkedArguments, SUPPORT_ARCHIVE,
-    SUPPORT_MANIFEST,
+    AbsolutePath, ENGINE_MANIFEST, EmbeddedEngine, EngineError, LinkedArguments,
+    POSTGRESQL_LICENCE, SUPPORT_ARCHIVE, SUPPORT_MANIFEST,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -176,6 +180,7 @@ impl fmt::Debug for ReadyEmbeddedHost {
 }
 
 fn prepare_instance() -> Result<PreparedInstance, EmbeddedHostError> {
+    validate_embedded_engine_manifest()?;
     let service = require_service_identity()?;
     require_file_bytes(
         Path::new(CONFIGURATION_PATH),
@@ -281,6 +286,7 @@ fn prepare_instance() -> Result<PreparedInstance, EmbeddedHostError> {
 
 /// Verifies and retains the package and instance facts for a private host client.
 pub fn inspect_ready_embedded_host() -> Result<ReadyEmbeddedHost, EmbeddedHostError> {
+    validate_embedded_engine_manifest()?;
     let service = require_service_identity()?;
     require_file_bytes(
         Path::new(CONFIGURATION_PATH),
@@ -647,6 +653,7 @@ fn instance_manifest_bytes(identity: &EmbeddedEngineIdentity, activation: bool) 
 
 /// Runs the fixed default embedded PostgreSQL instance in the foreground.
 pub fn run_embedded_server() -> Result<(), EmbeddedHostError> {
+    install_child_subreaper()?;
     install_shutdown_handlers()?;
     let instance = prepare_instance()?;
     if instance.is_new {
@@ -681,12 +688,28 @@ pub fn run_embedded_server() -> Result<(), EmbeddedHostError> {
     let ready_path = instance.paths.runtime_root().join(READY_NAME);
     let ready = ready_record_bytes(&instance, postmaster.pid(), &manifest)?;
     atomic_write(&ready_path, &ready, 0o600)?;
+    if let Err(error) = notify_systemd(b"READY=1\nSTATUS=OrnaDB is ready") {
+        let removal = remove_ready_record(&ready_path);
+        let stop = current_thread_runtime()?.block_on(postmaster.stop());
+        let reap = reap_orphaned_descendants();
+        removal?;
+        stop?;
+        reap?;
+        return Err(error);
+    }
 
     let supervision = supervise_until_shutdown(&mut postmaster);
+    let notification = notify_systemd(b"STOPPING=1\nSTATUS=OrnaDB is stopping");
     let removal = remove_ready_record(&ready_path);
-    supervision?;
+    let stop = match supervision {
+        Ok(()) => current_thread_runtime()?.block_on(postmaster.stop()),
+        Err(error) => Err(error),
+    };
+    let reap = reap_orphaned_descendants();
+    notification?;
     removal?;
-    current_thread_runtime()?.block_on(postmaster.stop())
+    stop?;
+    reap
 }
 
 fn bootstrap_new_instance(instance: &PreparedInstance) -> Result<(), EmbeddedHostError> {
@@ -828,6 +851,97 @@ fn install_shutdown_handlers() -> Result<(), EmbeddedHostError> {
     Ok(())
 }
 
+fn install_child_subreaper() -> Result<(), EmbeddedHostError> {
+    // SAFETY: prctl receives the documented integer-only subreaper arguments.
+    if unsafe { nix::libc::prctl(nix::libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } == 0 {
+        Ok(())
+    } else {
+        Err(EmbeddedHostError::ProcessControl)
+    }
+}
+
+fn notify_systemd(message: &[u8]) -> Result<(), EmbeddedHostError> {
+    let Some(socket) = env::var_os("NOTIFY_SOCKET") else {
+        return Ok(());
+    };
+    notify_socket(socket.as_os_str(), message)
+}
+
+fn notify_socket(socket: &OsStr, message: &[u8]) -> Result<(), EmbeddedHostError> {
+    let name = socket.as_bytes();
+    if name.is_empty() || name.contains(&0) {
+        return Err(EmbeddedHostError::Notification);
+    }
+
+    // SAFETY: sockaddr_un is a plain C address structure and zero is its valid initial state.
+    let mut address: nix::libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    address.sun_family = nix::libc::AF_UNIX as nix::libc::sa_family_t;
+    let path_capacity = address.sun_path.len();
+    let abstract_socket = name[0] == b'@';
+    let required = if abstract_socket {
+        name.len()
+    } else {
+        name.len()
+            .checked_add(1)
+            .ok_or(EmbeddedHostError::Notification)?
+    };
+    if required > path_capacity {
+        return Err(EmbeddedHostError::Notification);
+    }
+    let start = usize::from(abstract_socket);
+    for (destination, source) in address.sun_path[start..]
+        .iter_mut()
+        .zip(name[start..].iter().copied())
+    {
+        *destination = source as nix::libc::c_char;
+    }
+    let address_length = std::mem::offset_of!(nix::libc::sockaddr_un, sun_path)
+        .checked_add(required)
+        .ok_or(EmbeddedHostError::Notification)?;
+
+    // SAFETY: socket creates one close-on-exec datagram descriptor without external state.
+    let descriptor = unsafe {
+        nix::libc::socket(
+            nix::libc::AF_UNIX,
+            nix::libc::SOCK_DGRAM | nix::libc::SOCK_CLOEXEC,
+            0,
+        )
+    };
+    if descriptor < 0 {
+        return Err(EmbeddedHostError::Notification);
+    }
+    // SAFETY: the message and address remain live for the complete call.
+    let sent = unsafe {
+        nix::libc::sendto(
+            descriptor,
+            message.as_ptr().cast(),
+            message.len(),
+            0,
+            (&raw const address).cast(),
+            address_length as nix::libc::socklen_t,
+        )
+    };
+    // SAFETY: descriptor is owned by this function and is closed exactly once.
+    let closed = unsafe { nix::libc::close(descriptor) };
+    if sent == message.len() as isize && closed == 0 {
+        Ok(())
+    } else {
+        Err(EmbeddedHostError::Notification)
+    }
+}
+
+fn reap_orphaned_descendants() -> Result<(), EmbeddedHostError> {
+    for _ in 0..FAST_STOP_ATTEMPTS {
+        match waitpid(Pid::from_raw(-1), Some(WaitPidFlag::WNOHANG)) {
+            Ok(WaitStatus::StillAlive) => std::thread::sleep(STARTUP_INTERVAL),
+            Ok(_) | Err(Errno::EINTR) => continue,
+            Err(Errno::ECHILD) => return Ok(()),
+            Err(_) => return Err(EmbeddedHostError::ProcessControl),
+        }
+    }
+    Err(EmbeddedHostError::ProcessControl)
+}
+
 extern "C" fn record_shutdown_signal(signal: i32) {
     let _ = SHUTDOWN_SIGNAL.compare_exchange(0, signal, Ordering::SeqCst, Ordering::SeqCst);
 }
@@ -885,6 +999,8 @@ pub enum EmbeddedHostError {
     InvalidInstanceState,
     /// The embedded support manifest is malformed or internally inconsistent.
     InvalidSupportManifest,
+    /// The embedded engine manifest is malformed or does not bind its embedded data.
+    InvalidEngineManifest,
     /// A support member path is not a safe relative path.
     InvalidSupportPath,
     /// A linked PostgreSQL entry was requested after another thread existed.
@@ -907,6 +1023,10 @@ pub enum EmbeddedHostError {
     Runtime(io::Error),
     /// Supervisor signal setup failed.
     Signal,
+    /// Linux child-process containment or descriptor closure failed.
+    ProcessControl,
+    /// A configured systemd notification socket rejected the lifecycle message.
+    Notification,
     /// Kernel bootstrap or accepted-standard recovery failed.
     Standard(OpenStandardDatabaseError),
     /// Materialised support data differs from its embedded manifest.
@@ -929,6 +1049,9 @@ impl fmt::Display for EmbeddedHostError {
             }
             Self::InvalidSupportManifest => {
                 formatter.write_str("embedded PostgreSQL support manifest is invalid")
+            }
+            Self::InvalidEngineManifest => {
+                formatter.write_str("embedded PostgreSQL engine manifest is invalid")
             }
             Self::InvalidSupportPath => {
                 formatter.write_str("embedded PostgreSQL support path is invalid")
@@ -964,6 +1087,8 @@ impl fmt::Display for EmbeddedHostError {
             }
             Self::Runtime(source) => write!(formatter, "Orna server runtime failed: {source}"),
             Self::Signal => formatter.write_str("Orna server signal handling failed"),
+            Self::ProcessControl => formatter.write_str("Orna server process containment failed"),
+            Self::Notification => formatter.write_str("Orna server notification failed"),
             Self::Standard(source) => source.fmt(formatter),
             Self::SupportMismatch(reason) => {
                 write!(
@@ -1018,6 +1143,105 @@ impl From<OpenStandardDatabaseError> for EmbeddedHostError {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct EngineManifest {
+    build_inputs: serde_json::Value,
+    builder: serde_json::Value,
+    format: u32,
+    outputs: Vec<EngineOutput>,
+    prepared_source: serde_json::Value,
+    upstream: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EngineOutput {
+    length: u64,
+    mode: String,
+    path: String,
+    sha256: String,
+}
+
+fn validate_embedded_engine_manifest() -> Result<(), EmbeddedHostError> {
+    let manifest: EngineManifest = serde_json::from_slice(ENGINE_MANIFEST)
+        .map_err(|_| EmbeddedHostError::InvalidEngineManifest)?;
+    if manifest.format != 1
+        || !manifest.build_inputs.is_object()
+        || !manifest.builder.is_object()
+        || !manifest.prepared_source.is_object()
+        || !manifest.upstream.is_object()
+        || manifest.outputs.len() != 12
+    {
+        return Err(EmbeddedHostError::InvalidEngineManifest);
+    }
+
+    let mut paths = BTreeSet::new();
+    for output in &manifest.outputs {
+        if output.mode != "0644"
+            || !is_sha256(&output.sha256)
+            || !is_safe_relative_path(&output.path)
+            || !paths.insert(output.path.as_str())
+        {
+            return Err(EmbeddedHostError::InvalidEngineManifest);
+        }
+    }
+    let expected_paths = BTreeSet::from([
+        "POSTGRESQL-LICENSE",
+        "backend-defined-symbols.txt",
+        "backend-undefined-symbols.txt",
+        "embedded-initialisation-report.json",
+        "embedded-initialisation.stdout",
+        "embedded-postgresql-support-manifest.json",
+        "embedded-postgresql-support.tar",
+        "initdb-defined-symbols.txt",
+        "initdb-redefine-symbols.txt",
+        "initdb-undefined-symbols.txt",
+        "liborna_postgres18_backend.a",
+        "liborna_postgres18_initdb.a",
+    ]);
+    if paths != expected_paths {
+        return Err(EmbeddedHostError::InvalidEngineManifest);
+    }
+    require_embedded_output(
+        &manifest.outputs,
+        "embedded-postgresql-support.tar",
+        SUPPORT_ARCHIVE,
+    )?;
+    require_embedded_output(
+        &manifest.outputs,
+        "embedded-postgresql-support-manifest.json",
+        SUPPORT_MANIFEST,
+    )?;
+    require_embedded_output(&manifest.outputs, "POSTGRESQL-LICENSE", POSTGRESQL_LICENCE)
+}
+
+fn require_embedded_output(
+    outputs: &[EngineOutput],
+    path: &str,
+    bytes: &[u8],
+) -> Result<(), EmbeddedHostError> {
+    let output = outputs
+        .iter()
+        .find(|output| output.path == path)
+        .ok_or(EmbeddedHostError::InvalidEngineManifest)?;
+    if output.length == bytes.len() as u64 && output.sha256 == hex_digest(bytes) {
+        Ok(())
+    } else {
+        Err(EmbeddedHostError::InvalidEngineManifest)
+    }
+}
+
+fn is_safe_relative_path(value: &str) -> bool {
+    let path = Path::new(value);
+    !value.is_empty()
+        && !value.bytes().any(|byte| byte.is_ascii_control())
+        && !path.is_absolute()
+        && path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SupportManifest {
     format: u32,
     members: Vec<SupportMember>,
@@ -1066,13 +1290,17 @@ pub fn initialise_embedded_cluster(
     require_single_thread()?;
     let support_root = AbsolutePath::new(support_root)?;
     let data_directory = AbsolutePath::new(data_directory)?;
+    let environment = FixedChildEnvironment::new();
 
     // SAFETY: the thread gate ran immediately before this call. The child uses only prepared
     // values, resets its signal state, and enters process-global PostgreSQL code. The parent does
     // not call PostgreSQL and waits for the exact child.
     match unsafe { fork() }.map_err(|_| EmbeddedHostError::InitialiserWait)? {
         ForkResult::Child => {
-            if reset_child_signals().is_err() {
+            if reset_child_signals().is_err()
+                || close_inherited_descriptors().is_err()
+                || environment.install().is_err()
+            {
                 process_exit(126);
             }
             // SAFETY: this is the fresh, single-threaded child selected above.
@@ -1262,7 +1490,10 @@ pub fn start_embedded_postmaster(
     // environment values are prepared and remain live in the selected branch.
     match unsafe { fork() }.map_err(|_| EmbeddedHostError::PostmasterWait)? {
         ForkResult::Child => {
-            if reset_child_signals().is_err() || environment.install().is_err() {
+            if reset_child_signals().is_err()
+                || close_inherited_descriptors().is_err()
+                || environment.install().is_err()
+            {
                 process_exit(126);
             }
             // SAFETY: this is the fresh, single-threaded child selected above.
@@ -1278,6 +1509,16 @@ pub fn start_embedded_postmaster(
             child: Some(child),
             socket_directory: socket_directory.to_owned(),
         }),
+    }
+}
+
+fn close_inherited_descriptors() -> Result<(), EmbeddedHostError> {
+    // SAFETY: close_range closes only descriptors above stderr in this fresh child.
+    let result = unsafe { nix::libc::syscall(nix::libc::SYS_close_range, 3_u32, u32::MAX, 0_u32) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(EmbeddedHostError::ProcessControl)
     }
 }
 
@@ -1663,6 +1904,7 @@ fn libc_o_nofollow() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::net::UnixDatagram;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_TEST_ROOT: AtomicU64 = AtomicU64::new(0);
@@ -1744,5 +1986,22 @@ mod tests {
         assert_eq!(parsed.postmaster_pid, 11);
         assert_eq!(parsed.generation, GENERATION_NAME);
         assert!(parse_ready_record(format!("{record}extra = true\n").as_bytes()).is_err());
+    }
+
+    #[test]
+    fn validates_the_embedded_engine_manifest_and_bound_data() {
+        validate_embedded_engine_manifest().expect("embedded engine manifest");
+    }
+
+    #[test]
+    fn sends_the_exact_systemd_datagram_to_a_path_socket() {
+        let root = TestRoot::new();
+        let socket_path = root.0.join("notify.sock");
+        let socket = UnixDatagram::bind(&socket_path).expect("bind notification socket");
+        notify_socket(socket_path.as_os_str(), b"READY=1\nSTATUS=OrnaDB is ready")
+            .expect("send notification");
+        let mut message = [0_u8; 64];
+        let length = socket.recv(&mut message).expect("receive notification");
+        assert_eq!(&message[..length], b"READY=1\nSTATUS=OrnaDB is ready");
     }
 }

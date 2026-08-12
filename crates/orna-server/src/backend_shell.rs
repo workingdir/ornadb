@@ -66,7 +66,9 @@ fn map_host_error(error: EmbeddedHostError) -> BackendShellError {
     match error {
         EmbeddedHostError::InvalidServiceIdentity => BackendShellError::ServiceAccountRequired,
         EmbeddedHostError::InvalidPackageState => BackendShellError::PackageIncomplete,
-        EmbeddedHostError::Engine(_) => BackendShellError::EngineInvalid,
+        EmbeddedHostError::Engine(_) | EmbeddedHostError::InvalidEngineManifest => {
+            BackendShellError::EngineInvalid
+        }
         EmbeddedHostError::Io(ref source) if source.kind() == io::ErrorKind::NotFound => {
             BackendShellError::InstanceNotInstalled
         }
