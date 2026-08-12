@@ -12,9 +12,13 @@ use orna_compiler::{
     prepare_standard_application,
 };
 use orna_core::{
-    FieldId, FunctionId, FunctionRevisionId, ObjectId, ParameterId, TypeId,
+    FieldId, FunctionId, FunctionRevisionId, ObjectId, ParameterId, PrincipalId, TypeId,
     catalogue::FunctionReturn,
     revision::{ActiveDatabaseRevision, DeployableRevision, RevisionPair},
+    security::{
+        ExecuteDenial, ExecuteGrant, Principal, PrincipalKind, PrincipalStatus, SecurityAuditKind,
+        SecurityAuditOutcome, SecuritySnapshot,
+    },
     source::{SourceBundle, SourceUnit},
     types::{ResolvedType, StandardScalar},
     value::{FunctionArgument, RuntimeFloat, RuntimeValue},
@@ -260,6 +264,167 @@ async fn executes_catalogue_enum_results_and_rejects_undeclared_storage_labels()
             applied.pair(),
             function.id(),
             function.current_revision(),
+        )
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn authenticated_server_select_commits_allowed_and_denied_execute_decisions() -> TestResult<()>
+{
+    with_test_database(|database| async move {
+        let kernel = hostile_kernel(&database)?;
+        kernel.bootstrap().await?;
+        let empty = kernel.recover().await?;
+        let version_one = kernel
+            .apply(&candidate("CREATE SCHEMA enum_exec;\n", &empty)?)
+            .await?;
+        let upgrade = orna_standard::prepare_standard_upgrade(&version_one)
+            .map_err(|error| failure(format!("standard upgrade preparation failed: {error}")))?;
+        let version_two = kernel.apply_standard_upgrade(&upgrade).await?;
+        let candidate =
+            standard_execution_candidate(ENUM_EXECUTION_SOURCE, &version_two, &upgrade)?;
+        let applied = kernel.apply(&candidate).await?;
+        let enum_type = applied
+            .catalogue()
+            .enum_types()
+            .first()
+            .ok_or_else(|| failure("authenticated enum catalogue has no enum"))?;
+        let object = applied
+            .catalogue()
+            .object_types()
+            .first()
+            .ok_or_else(|| failure("authenticated enum catalogue has no object"))?;
+        let enum_field = object
+            .fields()
+            .first()
+            .ok_or_else(|| failure("authenticated enum object has no field"))?;
+        let function = applied
+            .catalogue()
+            .functions()
+            .first()
+            .ok_or_else(|| failure("authenticated enum catalogue has no function"))?;
+        let principal = PrincipalId::from_bytes([0xa7; 16]);
+        let function_ids = applied
+            .catalogue()
+            .functions()
+            .iter()
+            .map(|definition| definition.id())
+            .collect::<Vec<_>>();
+        let allowed = SecuritySnapshot::new(
+            applied.pair(),
+            function_ids.clone(),
+            vec![Principal::new(
+                principal,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            vec![],
+            vec![ExecuteGrant::new(principal, function.id())],
+        )?;
+        let allowed = kernel.replace_security_snapshot(&allowed).await?;
+        let allowed_session = allowed.bind_authenticated_session(principal, vec![])?;
+        let object_id = ObjectId::from_bytes([0xe2; 16]);
+        let session = database.open().await?;
+        let insert = format!(
+            "INSERT INTO {} (_orna_object_id, {}) VALUES ($1, $2)",
+            relation(object.id()),
+            field(enum_field.id()),
+        );
+        session
+            .client()
+            .execute(&insert, &[&object_id.to_bytes().to_vec(), &"customer"])
+            .await?;
+        session.shutdown().await?;
+
+        let result = kernel
+            .execute_authenticated_server_select(&allowed_session, function.id(), &[])
+            .await?;
+        let [RuntimeValue::Enum(value)] = result.rows().rows()[0].values() else {
+            return Err(failure(
+                "authenticated SERVER SELECT did not return one enum value",
+            ));
+        };
+        require(
+            result.pair() == applied.pair()
+                && result.function() == function.id()
+                && value.enum_type() == enum_type.id()
+                && value.label() == "customer",
+            "authenticated SERVER SELECT changed its pinned result",
+        )?;
+
+        let unexpected_parameter = ParameterId::from_bytes([0xa8; 16]);
+        let invalid_arguments = vec![FunctionArgument::new(
+            unexpected_parameter,
+            RuntimeValue::Boolean(true),
+        )?];
+        let error = kernel
+            .execute_authenticated_server_select(
+                &allowed_session,
+                function.id(),
+                &invalid_arguments,
+            )
+            .await
+            .expect_err("allowed invalid arguments must fail after audit");
+        require_select_argument_error(
+            &error,
+            applied.pair(),
+            function.id(),
+            function.current_revision(),
+            None,
+            "this function does not accept arguments",
+        )?;
+
+        let denied = SecuritySnapshot::new(
+            applied.pair(),
+            function_ids,
+            vec![Principal::new(
+                principal,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            vec![],
+            vec![],
+        )?;
+        let denied = kernel.replace_security_snapshot(&denied).await?;
+        let denied_session = denied.bind_authenticated_session(principal, vec![])?;
+        let error = kernel
+            .execute_authenticated_server_select(&denied_session, function.id(), &[])
+            .await
+            .expect_err("missing EXECUTE grant must deny SERVER SELECT");
+        require(
+            matches!(
+                error,
+                PostgresKernelError::ServerExecuteDenied {
+                    pair,
+                    function: denied_function,
+                    reason: ExecuteDenial::MissingExecuteGrant,
+                } if pair == applied.pair() && denied_function == function.id()
+            ),
+            "authenticated SERVER denial did not retain its exact context",
+        )?;
+
+        let audits = kernel.recover_security_audit_events().await?;
+        let execute = audits
+            .iter()
+            .filter(|event| event.decision().kind() == SecurityAuditKind::Execute)
+            .collect::<Vec<_>>();
+        require(
+            execute.len() == 3
+                && execute[0].decision().outcome() == SecurityAuditOutcome::Allowed
+                && execute[0].decision().target()
+                    == Some(orna_core::security::InvocationTarget::new(
+                        function.id(),
+                        applied.pair(),
+                    ))
+                && execute[1].decision().outcome() == SecurityAuditOutcome::Allowed
+                && execute[2].decision().outcome() == SecurityAuditOutcome::Denied
+                && execute[2].decision().denial()
+                    == Some(orna_core::security::SecurityAuditDenial::Execute(
+                        ExecuteDenial::MissingExecuteGrant,
+                    )),
+            "authenticated SERVER audit decisions differ",
         )
     })
     .await
