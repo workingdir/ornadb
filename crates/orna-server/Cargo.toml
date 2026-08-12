@@ -10,12 +10,10 @@ name = "orna"
 path = "src/main.rs"
 
 [dependencies]
-nix = { version = "0.31.3", features = ["fs", "process"] }
+nix = { version = "0.31.3", features = ["fs", "process", "signal", "term"] }
 orna-kernel-postgres = { path = "../orna-kernel-postgres" }
+orna-postgres-engine = { path = "../orna-postgres-engine", features = ["embedded"] }
 orna-standard = { path = "../orna-standard" }
-url = "2.5.8"
-
-[dev-dependencies]
-nix = { version = "0.31.3", features = ["signal", "term"] }
 tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread"] }
 tokio-postgres = "0.7.18"
+url = "2.5.8"

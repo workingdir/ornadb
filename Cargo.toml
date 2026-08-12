@@ -1,6 +1,5 @@
 [workspace]
 members = ["crates/*"]
-exclude = ["crates/orna-postgres-engine"]
 resolver = "3"
 
 [workspace.package]
