@@ -16,7 +16,6 @@ import tarfile
 SOURCE_DATE_EPOCH = 1778528675
 EXPECTED_TIMEZONE_FILES = 598
 GENERATED_INPUTS = {
-    "src/backend/snowball/snowball_create.sql",
     "src/include/catalog/postgres.bki",
     "src/include/catalog/system_constraints.sql",
 }
@@ -25,7 +24,6 @@ STATIC_INPUTS = (
     ("src/backend/libpq/pg_hba.conf.sample", ""),
     ("src/backend/libpq/pg_ident.conf.sample", ""),
     ("src/backend/utils/misc/postgresql.conf.sample", ""),
-    ("src/backend/snowball/snowball_create.sql", ""),
     ("src/backend/catalog/information_schema.sql", ""),
     ("src/backend/catalog/sql_features.txt", ""),
     ("src/include/catalog/system_constraints.sql", ""),
@@ -46,24 +44,6 @@ STATIC_INPUTS = (
         "Indian.txt",
         "Pacific.txt",
     )),
-    *((f"src/backend/snowball/stopwords/{language}.stop", "tsearch_data")
-      for language in (
-          "danish",
-          "dutch",
-          "english",
-          "finnish",
-          "french",
-          "german",
-          "hungarian",
-          "italian",
-          "nepali",
-          "norwegian",
-          "portuguese",
-          "russian",
-          "spanish",
-          "swedish",
-          "turkish",
-      )),
 )
 
 

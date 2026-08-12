@@ -213,13 +213,6 @@ archives: prepare-source build-image
 			LDFLAGS="-L/build/zlib/lib -Wl,--build-id=none" \
 			PKG_CONFIG_LIBDIR=/nonexistent RANLIB=ranlib SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) \
 			TMPDIR=/build/tmp TZ=UTC0 make -j1 -C /build/postgresql-build/src/timezone zic; \
-		env -i PATH="$${PATH}" AR=ar ARFLAGS=rcD CC=gcc \
-			CFLAGS="-O2 -g0 -fPIC -ffile-prefix-map=/build=. -fdebug-prefix-map=/build=. -Wdate-time" \
-			CPPFLAGS=-I/build/zlib/include LANG=C.UTF-8 LC_ALL=C.UTF-8 \
-			LDFLAGS="-L/build/zlib/lib -Wl,--build-id=none" \
-			PKG_CONFIG_LIBDIR=/nonexistent RANLIB=ranlib SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) \
-			TMPDIR=/build/tmp TZ=UTC0 make -j1 \
-			-C /build/postgresql-build/src/backend/snowball snowball_create.sql; \
 		mkdir -m 0700 /build/tmp/generated-timezone; \
 		umask 077; \
 		env -i PATH="$${PATH}" SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) TZ=UTC0 \
