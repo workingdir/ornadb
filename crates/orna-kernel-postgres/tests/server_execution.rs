@@ -56,6 +56,14 @@ const EXECUTION_SOURCE: &str = r"CREATE SCHEMA exec;
     AS SELECT n.active, n.value, n.amount, n.blob, n.child FROM exec.node n;
 ";
 
+const ENUM_EXECUTION_SOURCE: &str = r"CREATE SCHEMA enum_exec;
+    CREATE TYPE enum_exec.stage AS ENUM ('lead', 'qualified', 'customer');
+    CREATE TYPE enum_exec.case AS OBJECT (stage enum_exec.stage NOT NULL);
+    CREATE SERVER FUNCTION enum_exec.read()
+    RETURNS ROWS (stage enum_exec.stage)
+    AS SELECT item.stage FROM enum_exec.case item;
+";
+
 #[cfg(feature = "test-hooks")]
 const EXECUTION_SOURCE_EDIT: &str = r"-- source-only active edit
     CREATE SCHEMA exec;
@@ -164,6 +172,95 @@ async fn executes_installed_standard_values_with_the_legacy_select_result_shape(
         let fixture = Fixture::from_active(&applied)?;
         require_standard_execution_value_identities(&applied, fixture, &upgrade)?;
         execute_exact_fixture(&database, &kernel, &applied, fixture).await
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn executes_catalogue_enum_results_and_rejects_undeclared_storage_labels() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = hostile_kernel(&database)?;
+        kernel.bootstrap().await?;
+        let empty = kernel.recover().await?;
+        let version_one = kernel
+            .apply(&candidate("CREATE SCHEMA enum_exec;\n", &empty)?)
+            .await?;
+        let upgrade = orna_standard::prepare_standard_upgrade(&version_one)
+            .map_err(|error| failure(format!("standard upgrade preparation failed: {error}")))?;
+        let version_two = kernel.apply_standard_upgrade(&upgrade).await?;
+        let candidate =
+            standard_execution_candidate(ENUM_EXECUTION_SOURCE, &version_two, &upgrade)?;
+        let applied = kernel.apply(&candidate).await?;
+        let enum_type = applied
+            .catalogue()
+            .enum_types()
+            .first()
+            .ok_or_else(|| failure("enum execution catalogue has no enum"))?;
+        let object = applied
+            .catalogue()
+            .object_types()
+            .first()
+            .ok_or_else(|| failure("enum execution catalogue has no object"))?;
+        let enum_field = object
+            .fields()
+            .first()
+            .ok_or_else(|| failure("enum execution object has no field"))?;
+        let function = applied
+            .catalogue()
+            .functions()
+            .first()
+            .ok_or_else(|| failure("enum execution catalogue has no function"))?;
+        let object_id = ObjectId::from_bytes([0xe1; 16]);
+        let session = database.open().await?;
+        let insert = format!(
+            "INSERT INTO {} (_orna_object_id, {}) VALUES ($1, $2)",
+            relation(object.id()),
+            field(enum_field.id()),
+        );
+        session
+            .client()
+            .execute(&insert, &[&object_id.to_bytes().to_vec(), &"qualified"])
+            .await?;
+        session.shutdown().await?;
+
+        let result = kernel.execute_server_select(function.id()).await?;
+        require(
+            result.rows().columns().len() == 1
+                && result.rows().columns()[0].resolved_type()
+                    == ResolvedType::named(enum_type.id())
+                && result.rows().rows().len() == 1,
+            "enum SELECT did not preserve its declared result shape",
+        )?;
+        let [RuntimeValue::Enum(value)] = result.rows().rows()[0].values() else {
+            return Err(failure("enum SELECT did not return one typed enum value"));
+        };
+        require(
+            value.enum_type() == enum_type.id() && value.label() == "qualified",
+            "enum SELECT returned the wrong type or label",
+        )?;
+
+        let session = database.open().await?;
+        let update = format!(
+            "UPDATE {} SET {} = $1 WHERE _orna_object_id = $2",
+            relation(object.id()),
+            field(enum_field.id()),
+        );
+        session
+            .client()
+            .execute(&update, &[&"retired", &object_id.to_bytes().to_vec()])
+            .await?;
+        session.shutdown().await?;
+        let error = kernel
+            .execute_server_select(function.id())
+            .await
+            .expect_err("undeclared stored label must fail");
+        require_enum_value_error(
+            &error,
+            applied.pair(),
+            function.id(),
+            function.current_revision(),
+        )
     })
     .await
 }
@@ -2697,6 +2794,39 @@ fn require_variable_payload_error(
             )
         }
         _ => Err(failure("oversize source is not VariablePayload")),
+    }
+}
+
+fn require_enum_value_error(
+    error: &PostgresKernelError,
+    pair: RevisionPair,
+    function: FunctionId,
+    revision: FunctionRevisionId,
+) -> TestResult<()> {
+    let PostgresKernelError::ServerSelect(ServerSelectError::Execution { context, source }) = error
+    else {
+        return Err(failure(
+            "enum error is not contextual SERVER SELECT execution",
+        ));
+    };
+    require(context.pair() == pair, "enum error context pair differs")?;
+    require(
+        context.function() == function,
+        "enum error context function differs",
+    )?;
+    require(
+        context.function_revision() == revision,
+        "enum error context revision differs",
+    )?;
+    match source.as_ref() {
+        ServerSelectError::ValueInvariant { row, column, rule } => require(
+            *row == 0
+                && *column == 0
+                && *rule
+                    == "enum result must contain one exact label declared by the active enum type",
+            "enum value invariant evidence differs",
+        ),
+        _ => Err(failure("enum execution source is not ValueInvariant")),
     }
 }
 
