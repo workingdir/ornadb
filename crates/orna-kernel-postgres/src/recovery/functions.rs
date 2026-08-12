@@ -210,7 +210,7 @@ async fn load_parameters(
                 "SELECT catalogue_revision_id, function_id, parameter_id, name, ordinal,
                         type_kind, scalar_type, target_type_id,
                         value_type_id, value_standard_library_revision_id,
-                        enum_type_id,
+                        enum_type_id, record_type_id,
                         default_expression_id, source_unit_id, source_start, source_end
                  FROM _orna_kernel.catalogue_function_parameters
                  WHERE catalogue_revision_id = $1
@@ -318,7 +318,7 @@ async fn load_return_columns(
                 "SELECT catalogue_revision_id, function_id, name, ordinal,
                         type_kind, scalar_type, target_type_id,
                         value_type_id, value_standard_library_revision_id,
-                        enum_type_id,
+                        enum_type_id, record_type_id,
                         source_unit_id, source_start, source_end
                  FROM _orna_kernel.catalogue_function_return_columns
                  WHERE catalogue_revision_id = $1
@@ -418,6 +418,7 @@ async fn load_functions(
                         return_value_type_id AS value_type_id,
                         return_standard_library_revision_id AS value_standard_library_revision_id,
                         return_enum_type_id AS enum_type_id,
+                        return_record_type_id AS record_type_id,
                         current_function_revision_id,
                         source_unit_id, source_start, source_end
                  FROM _orna_kernel.catalogue_functions
@@ -716,6 +717,16 @@ fn decode_version_two_type_columns(
         "resolved enum type identity must be null or 16 bytes",
     )?
     .map(TypeId::from_bytes);
+    let record_type = optional_identity_bytes(
+        record.column(
+            row,
+            "record_type_id",
+            "resolved record type identity must be null or 16 bytes",
+        )?,
+        record,
+        "resolved record type identity must be null or 16 bytes",
+    )?
+    .map(TypeId::from_bytes);
     decode_resolved_type_tuple(
         ResolvedTypeTuple {
             kind,
@@ -724,6 +735,7 @@ fn decode_version_two_type_columns(
             value_type,
             standard_library_revision,
             enum_type,
+            record_type,
         },
         catalogue_hash_context,
         record,
@@ -765,12 +777,22 @@ fn require_null_type_columns(
     } else {
         None
     };
+    let record_type: Option<Vec<u8>> = if catalogue_hash_context.standard().is_some() {
+        record.column(
+            row,
+            "record_type_id",
+            "ROWS record type identity must be null",
+        )?
+    } else {
+        None
+    };
     if kind.is_some()
         || scalar.is_some()
         || target.is_some()
         || value_type.is_some()
         || standard_library_revision.is_some()
         || enum_type.is_some()
+        || record_type.is_some()
     {
         return Err(record.invariant("ROWS functions must not store one SINGLE return type tuple"));
     }
@@ -1569,6 +1591,7 @@ async fn load_references(
                     source_subobject_id, target_owner_type_id,
                     target_owner_function_id, target_standard_library_revision_id,
                     target_enum_catalogue_revision_id,
+                    target_record_catalogue_revision_id,
                     source_unit_id, source_start, source_end
              FROM _orna_kernel.definition_references
              WHERE catalogue_revision_id = $1
@@ -1699,6 +1722,16 @@ fn decode_reference(
         "reference target enum catalogue revision identity must be null or 16 bytes",
     )?
     .map(CatalogueRevisionId::from_bytes);
+    let target_record_catalogue_revision = optional_identity_bytes(
+        record.column(
+            row,
+            "target_record_catalogue_revision_id",
+            "reference target record catalogue revision identity must be null or 16 bytes",
+        )?,
+        &record,
+        "reference target record catalogue revision identity must be null or 16 bytes",
+    )?
+    .map(CatalogueRevisionId::from_bytes);
     let target_kind: String =
         record.column(row, "target_kind", "reference target kind must decode")?;
     let target = match (
@@ -1707,30 +1740,36 @@ fn decode_reference(
         owner_function,
         target_standard_library_revision,
         target_enum_catalogue_revision,
+        target_record_catalogue_revision,
     ) {
-        ("object_type", None, None, None, None) => {
+        ("object_type", None, None, None, None, None) => {
             DefinitionReferenceTarget::ObjectType(TypeId::from_bytes(target_bytes))
         }
-        ("field", Some(owner), None, None, None) => DefinitionReferenceTarget::Field {
+        ("field", Some(owner), None, None, None, None) => DefinitionReferenceTarget::Field {
             owner,
             field: orna_core::FieldId::from_bytes(target_bytes),
         },
-        ("function", None, None, None, None) => {
+        ("function", None, None, None, None, None) => {
             DefinitionReferenceTarget::Function(FunctionId::from_bytes(target_bytes))
         }
-        ("parameter", None, Some(owner), None, None) => DefinitionReferenceTarget::Parameter {
-            owner,
-            parameter: ParameterId::from_bytes(target_bytes),
-        },
-        ("expression", None, None, None, None) => {
+        ("parameter", None, Some(owner), None, None, None) => {
+            DefinitionReferenceTarget::Parameter {
+                owner,
+                parameter: ParameterId::from_bytes(target_bytes),
+            }
+        }
+        ("expression", None, None, None, None, None) => {
             DefinitionReferenceTarget::Expression(ExpressionId::from_bytes(target_bytes))
         }
-        ("value_type", None, None, Some(revision), None)
+        ("value_type", None, None, Some(revision), None, None)
             if Some(revision) == expected_standard_library_revision =>
         {
             DefinitionReferenceTarget::ValueType(TypeId::from_bytes(target_bytes))
         }
-        ("enum_type", None, None, None, Some(revision)) if revision == catalogue => {
+        ("enum_type", None, None, None, Some(revision), None) if revision == catalogue => {
+            DefinitionReferenceTarget::ValueType(TypeId::from_bytes(target_bytes))
+        }
+        ("record_type", None, None, None, None, Some(revision)) if revision == catalogue => {
             DefinitionReferenceTarget::ValueType(TypeId::from_bytes(target_bytes))
         }
         _ => {
