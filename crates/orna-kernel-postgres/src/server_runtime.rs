@@ -27,6 +27,7 @@ pub(crate) enum ResolvedRuntimeType {
         compatibility: StandardScalar,
     },
     CatalogueEnum(TypeId),
+    Record(TypeId),
     Reference(TypeId),
     Unsupported,
 }
@@ -40,7 +41,9 @@ impl ResolvedRuntimeType {
                 compatibility: scalar,
                 ..
             } => Some(scalar),
-            Self::CatalogueEnum(_) | Self::Reference(_) | Self::Unsupported => None,
+            Self::CatalogueEnum(_) | Self::Record(_) | Self::Reference(_) | Self::Unsupported => {
+                None
+            }
         }
     }
 }
@@ -91,6 +94,11 @@ pub(crate) fn resolve_catalogue_runtime_type(
         && catalogue.enum_type_by_id(enum_type).is_some()
     {
         return ResolvedRuntimeType::CatalogueEnum(enum_type);
+    }
+    if let Some(record_type) = resolved_type.named_type()
+        && catalogue.record_value_type_by_id(record_type).is_some()
+    {
+        return ResolvedRuntimeType::Record(record_type);
     }
     resolve_runtime_type(context, resolved_type)
 }
@@ -196,6 +204,7 @@ pub(crate) fn postgres_type(runtime_type: ResolvedRuntimeType) -> Option<Type> {
             compatibility: StandardScalar::BinaryLargeObject,
             ..
         }
+        | ResolvedRuntimeType::Record(_)
         | ResolvedRuntimeType::Reference(_) => Some(Type::BYTEA),
         ResolvedRuntimeType::CatalogueEnum(_) => Some(Type::TEXT),
         ResolvedRuntimeType::LegacyScalar(_)
@@ -306,7 +315,8 @@ mod tests {
         SourceUnitId, TypeId,
         catalogue::{
             EnumTypeDefinition, FunctionDomain, FunctionReturnColumnDefinition, FunctionSecurity,
-            FunctionVolatility, ParameterDefinition, QualifiedSemanticName, SchemaDefinition,
+            FunctionVolatility, ParameterDefinition, QualifiedSemanticName,
+            RecordValueFieldDefinition, RecordValueTypeDefinition, SchemaDefinition,
         },
         revision::{CatalogueHashContext, DefinitionReference, SourceOrigin},
     };
@@ -410,9 +420,10 @@ mod tests {
     }
 
     #[test]
-    fn active_catalogue_classifies_only_declared_enums_as_text() {
+    fn active_catalogue_classifies_declared_named_runtime_types() {
         let enum_type = TypeId::from_bytes([0x53; 16]);
-        let catalogue = CatalogueSnapshot::new_with_enum_types(
+        let record_type = TypeId::from_bytes([0x57; 16]);
+        let catalogue = CatalogueSnapshot::new_with_record_value_types(
             CatalogueRevisionId::from_bytes([0x54; 16]),
             vec![SchemaDefinition::new(
                 SchemaId::from_bytes([0x55; 16]),
@@ -424,6 +435,16 @@ mod tests {
                 enum_type,
                 QualifiedSemanticName::new(["app", "stage"]).unwrap(),
                 ["lead"],
+            )],
+            vec![RecordValueTypeDefinition::new(
+                record_type,
+                QualifiedSemanticName::new(["app", "flag"]).unwrap(),
+                vec![RecordValueFieldDefinition::new(
+                    FieldId::from_bytes([0x58; 16]),
+                    "stage",
+                    0,
+                    ResolvedType::named(enum_type),
+                )],
             )],
             Vec::new(),
         )
@@ -437,6 +458,14 @@ mod tests {
         assert_eq!(
             postgres_type(ResolvedRuntimeType::CatalogueEnum(enum_type)),
             Some(Type::TEXT)
+        );
+        assert_eq!(
+            resolve_catalogue_runtime_type(&catalogue, &context, ResolvedType::named(record_type),),
+            ResolvedRuntimeType::Record(record_type)
+        );
+        assert_eq!(
+            postgres_type(ResolvedRuntimeType::Record(record_type)),
+            Some(Type::BYTEA)
         );
         assert_eq!(
             resolve_catalogue_runtime_type(
