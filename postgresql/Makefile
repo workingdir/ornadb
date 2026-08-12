@@ -8,6 +8,7 @@ UPSTREAM_SOURCE := $(REPOSITORY_ROOT)/third_party/postgresql
 OVERLAY_ROOT := $(CURDIR)/overlays/18.4
 PATCH_ROOT := $(CURDIR)/patches/18.4
 CONTAINERFILE := $(CURDIR)/Containerfile
+SUPPORT_BUILDER := $(CURDIR)/support_bundle.py
 IMAGE := orna-postgresql-engine:debian12-amd64-1
 SOURCE_DATE_EPOCH := 1778528675
 
@@ -45,7 +46,7 @@ CONFIGURE_FLAGS := \
 	--without-llvm \
 	--with-zlib
 
-.PHONY: help verify-inputs prepare-source build-image archives update-source
+.PHONY: help verify-inputs prepare-source build-image archives support-data update-source
 
 help:
 	@printf '%s\n' \
@@ -54,6 +55,7 @@ help:
 		'  make -C postgresql verify-inputs' \
 		'  make -C postgresql prepare-source TARGET_ROOT=<absolute-repo-target-path>' \
 		'  make -C postgresql archives TARGET_ROOT=<absolute-repo-target-path>' \
+		'  make -C postgresql support-data TARGET_ROOT=<absolute-repo-target-path>' \
 		'  make -C postgresql update-source POSTGRESQL_REF=<full-commit>'
 
 verify-inputs:
@@ -67,14 +69,14 @@ verify-inputs:
 	[[ -z "$$(git -C "$(UPSTREAM_SOURCE)" status --porcelain=v1 --untracked-files=all)" ]] || { \
 		printf '%s\n' '[postgresql] error: the upstream checkout is not clean' >&2; exit 1; }; \
 	git -C "$(REPOSITORY_ROOT)" ls-files --error-unmatch -- \
-		postgresql/Makefile postgresql/Containerfile \
+		postgresql/Makefile postgresql/Containerfile postgresql/support_bundle.py \
 		postgresql/overlays/18.4 postgresql/patches/18.4 >/dev/null; \
 	[[ -z "$$(git -C "$(REPOSITORY_ROOT)" ls-files --others --exclude-standard -- \
-		postgresql/Makefile postgresql/Containerfile \
+		postgresql/Makefile postgresql/Containerfile postgresql/support_bundle.py \
 		postgresql/overlays/18.4 postgresql/patches/18.4)" ]] || { \
 		printf '%s\n' '[postgresql] error: the integration input contains an untracked file' >&2; exit 1; }; \
 	git -C "$(REPOSITORY_ROOT)" diff --quiet -- \
-		postgresql/Makefile postgresql/Containerfile \
+		postgresql/Makefile postgresql/Containerfile postgresql/support_bundle.py \
 		postgresql/overlays/18.4 postgresql/patches/18.4 || { \
 		printf '%s\n' '[postgresql] error: the integration input differs from the Git index' >&2; exit 1; }; \
 	[[ -z "$$(find "$(OVERLAY_ROOT)" -mindepth 1 ! -type d ! -type f -print -quit)" ]] || { \
@@ -182,6 +184,7 @@ archives: prepare-source build-image
 		--volume "$${target_root}/build:/build/postgresql-build:rw" \
 		--volume "$${target_root}/tmp:/build/tmp:rw" \
 		--volume "$${target_root}/output:/output:rw" \
+		--volume "$(SUPPORT_BUILDER):/build/support_bundle.py:ro" \
 		"$(IMAGE)" bash -euo pipefail -c '\
 		export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; \
 		cd /build/postgresql-build; \
@@ -199,6 +202,27 @@ archives: prepare-source build-image
 			TMPDIR=/build/tmp TZ=UTC0 make -j1 -C /build/postgresql-build/src/backend \
 			ORNA_EMBEDDED_ZLIB_ARCHIVE=/build/zlib/lib/libz.a \
 			orna_postgres18_lifecycle_archives; \
+		env -i PATH="$${PATH}" AR=ar ARFLAGS=rcD CC=gcc \
+			CFLAGS="-O2 -g0 -fPIC -ffile-prefix-map=/build=. -fdebug-prefix-map=/build=. -Wdate-time" \
+			CPPFLAGS=-I/build/zlib/include LANG=C.UTF-8 LC_ALL=C.UTF-8 \
+			LDFLAGS="-L/build/zlib/lib -Wl,--build-id=none" \
+			PKG_CONFIG_LIBDIR=/nonexistent RANLIB=ranlib SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) \
+			TMPDIR=/build/tmp TZ=UTC0 make -j1 -C /build/postgresql-build/src/timezone zic; \
+		env -i PATH="$${PATH}" AR=ar ARFLAGS=rcD CC=gcc \
+			CFLAGS="-O2 -g0 -fPIC -ffile-prefix-map=/build=. -fdebug-prefix-map=/build=. -Wdate-time" \
+			CPPFLAGS=-I/build/zlib/include LANG=C.UTF-8 LC_ALL=C.UTF-8 \
+			LDFLAGS="-L/build/zlib/lib -Wl,--build-id=none" \
+			PKG_CONFIG_LIBDIR=/nonexistent RANLIB=ranlib SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) \
+			TMPDIR=/build/tmp TZ=UTC0 make -j1 \
+			-C /build/postgresql-build/src/backend/snowball snowball_create.sql; \
+		mkdir -m 0700 /build/tmp/generated-timezone; \
+		umask 077; \
+		env -i PATH="$${PATH}" SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) TZ=UTC0 \
+			/build/postgresql-build/src/timezone/zic -d /build/tmp/generated-timezone \
+			/build/postgresql-source/src/timezone/data/tzdata.zi; \
+		python3 /build/support_bundle.py /build/postgresql-source \
+			/build/postgresql-build /build/tmp/generated-timezone \
+			/build/tmp/support-work /output; \
 		install -m 0644 /build/postgresql-build/src/backend/liborna_postgres18_backend.a /output/; \
 		install -m 0644 /build/postgresql-build/src/bin/initdb/liborna_postgres18_initdb.a /output/; \
 		install -m 0644 /build/postgresql-build/src/bin/initdb/initdb-redefine-symbols.txt /output/; \
@@ -234,6 +258,8 @@ archives: prepare-source build-image
 		! find /output -type f \( -perm /111 -o -name "*.so" -o -name "*.so.*" \) -print -quit | grep -q .; \
 		find /output -type f -exec chmod 0644 {} +'; \
 	printf '%s\n' "[postgresql] built embedded archives below $${target_root}/output"
+
+support-data: archives
 
 update-source:
 	@reference='$(POSTGRESQL_REF)'; \
