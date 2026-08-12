@@ -13,6 +13,20 @@ mod embedded {
         fn orna_postgres18_entry(argc: i32, argv: *mut *mut c_char) -> i32;
         fn orna_postgres18_initdb_entry(data_directory: *const c_char) -> i32;
         fn orna_postgres18_set_support_root(absolute_root: *const c_char) -> i32;
+        fn orna_postgres18_read_control(
+            data_directory: *const c_char,
+            control: *mut RawControlData,
+        ) -> i32;
+    }
+
+    #[derive(Clone, Copy)]
+    #[repr(C)]
+    struct RawControlData {
+        system_identifier: u64,
+        pg_control_version: u32,
+        catalog_version: u32,
+        state: u32,
+        data_checksum_version: u32,
     }
 
     /// A rejected typed input to the embedded PostgreSQL C boundary.
@@ -24,6 +38,8 @@ mod embedded {
         InvalidArgument,
         /// The linked engine did not accept the process-local support root.
         SupportRootRejected,
+        /// The linked engine could not read or validate the PostgreSQL control file.
+        ControlDataRejected,
     }
 
     impl fmt::Display for EngineError {
@@ -32,6 +48,7 @@ mod embedded {
                 Self::InvalidAbsolutePath => "embedded PostgreSQL path is not an absolute C string",
                 Self::InvalidArgument => "embedded PostgreSQL argument is not a C string",
                 Self::SupportRootRejected => "embedded PostgreSQL support root was rejected",
+                Self::ControlDataRejected => "embedded PostgreSQL control data was rejected",
             })
         }
     }
@@ -114,6 +131,43 @@ mod embedded {
         _private: (),
     }
 
+    /// The typed immutable facts read from one PostgreSQL control file.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub struct ControlData {
+        system_identifier: u64,
+        pg_control_version: u32,
+        catalog_version: u32,
+        state: u32,
+        data_checksum_version: u32,
+    }
+
+    impl ControlData {
+        /// Returns the cluster's unique PostgreSQL system identifier.
+        pub const fn system_identifier(self) -> u64 {
+            self.system_identifier
+        }
+
+        /// Returns the PostgreSQL control-file format version.
+        pub const fn pg_control_version(self) -> u32 {
+            self.pg_control_version
+        }
+
+        /// Returns the PostgreSQL catalogue format version.
+        pub const fn catalog_version(self) -> u32 {
+            self.catalog_version
+        }
+
+        /// Returns the PostgreSQL database-state value.
+        pub const fn state(self) -> u32 {
+            self.state
+        }
+
+        /// Returns the data-page checksum format version.
+        pub const fn data_checksum_version(self) -> u32 {
+            self.data_checksum_version
+        }
+    }
+
     impl EmbeddedEngine {
         /// Configures the linked engine's one-shot process-global support root.
         ///
@@ -151,6 +205,31 @@ mod embedded {
             let (count, pointers) = arguments.raw_parts();
             // SAFETY: upheld by the caller and by LinkedArguments' stable owned buffers.
             unsafe { orna_postgres18_entry(count, pointers) }
+        }
+
+        /// Reads and validates one stopped cluster's PostgreSQL control file.
+        pub fn read_control(
+            &self,
+            data_directory: &AbsolutePath,
+        ) -> Result<ControlData, EngineError> {
+            let mut raw = RawControlData {
+                system_identifier: 0,
+                pg_control_version: 0,
+                catalog_version: 0,
+                state: 0,
+                data_checksum_version: 0,
+            };
+            // SAFETY: both owned pointers remain live for the complete read-only call.
+            if unsafe { orna_postgres18_read_control(data_directory.as_ptr(), &mut raw) } != 0 {
+                return Err(EngineError::ControlDataRejected);
+            }
+            Ok(ControlData {
+                system_identifier: raw.system_identifier,
+                pg_control_version: raw.pg_control_version,
+                catalog_version: raw.catalog_version,
+                state: raw.state,
+                data_checksum_version: raw.data_checksum_version,
+            })
         }
     }
 
@@ -194,6 +273,14 @@ mod embedded {
                 );
                 assert!((*pointers.add(2)).is_null());
             }
+        }
+
+        #[test]
+        fn rejects_missing_control_data() {
+            let engine = EmbeddedEngine { _private: () };
+            let data_directory = AbsolutePath::new(Path::new("/missing-orna-pgdata")).unwrap();
+            let error = engine.read_control(&data_directory).unwrap_err();
+            assert_eq!(error, EngineError::ControlDataRejected);
         }
     }
 }

@@ -8,8 +8,11 @@
 #include "postgres.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stddef.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #ifdef __linux__
 #include <linux/audit.h>
@@ -25,8 +28,11 @@
 #endif
 #endif
 
+#include "catalog/catversion.h"
+#include "catalog/pg_control.h"
 #include "miscadmin.h"
 #include "orna_embedded.h"
+#include "port/pg_crc32c.h"
 
 static char orna_support_root[MAXPGPATH];
 static bool orna_support_root_is_set = false;
@@ -75,6 +81,66 @@ bool
 orna_postgres18_has_initialisation_child_capability(void)
 {
 	return orna_initialisation_child_capability;
+}
+
+int
+orna_postgres18_read_control(const char *data_directory,
+							 OrnaPostgres18ControlData *control)
+{
+	char		path[MAXPGPATH];
+	ControlFileData control_file;
+	struct stat metadata;
+	pg_crc32c	crc;
+	ssize_t		read_count;
+	size_t		offset = 0;
+	int			descriptor;
+	int			written;
+
+	if (data_directory == NULL || data_directory[0] != '/' ||
+		strlen(data_directory) >= MAXPGPATH || control == NULL)
+		return -1;
+	written = snprintf(path, sizeof(path), "%s/global/pg_control", data_directory);
+	if (written < 0 || (size_t) written >= sizeof(path))
+		return -1;
+	descriptor = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | PG_BINARY, 0);
+	if (descriptor < 0)
+		return -1;
+	if (fstat(descriptor, &metadata) != 0 || !S_ISREG(metadata.st_mode) ||
+		metadata.st_nlink != 1 || metadata.st_size != PG_CONTROL_FILE_SIZE)
+	{
+		(void) close(descriptor);
+		return -1;
+	}
+	while (offset < sizeof(control_file))
+	{
+		read_count = read(descriptor, ((char *) &control_file) + offset,
+						  sizeof(control_file) - offset);
+		if (read_count < 0 && errno == EINTR)
+			continue;
+		if (read_count <= 0)
+		{
+			(void) close(descriptor);
+			return -1;
+		}
+		offset += read_count;
+	}
+	if (close(descriptor) != 0)
+		return -1;
+
+	INIT_CRC32C(crc);
+	COMP_CRC32C(crc, &control_file, offsetof(ControlFileData, crc));
+	FIN_CRC32C(crc);
+	if (!EQ_CRC32C(crc, control_file.crc) ||
+		control_file.pg_control_version != PG_CONTROL_VERSION ||
+		control_file.catalog_version_no != CATALOG_VERSION_NO)
+		return -1;
+
+	control->system_identifier = control_file.system_identifier;
+	control->pg_control_version = control_file.pg_control_version;
+	control->catalog_version = control_file.catalog_version_no;
+	control->state = control_file.state;
+	control->data_checksum_version = control_file.data_checksum_version;
+	return 0;
 }
 
 int
