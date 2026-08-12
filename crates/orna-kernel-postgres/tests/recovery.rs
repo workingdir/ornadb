@@ -31,7 +31,8 @@ use orna_core::{
         VerifiedStandardLibrarySnapshot,
     },
     security::{
-        ExecuteDecision, ExecuteDenial, ExecuteGrant, InvocationTarget, Principal, PrincipalKind,
+        ExecuteDecision, ExecuteDenial, ExecuteGrant, InvocationTarget,
+        LocalPeerAuthenticationError, LocalPeerCredential, Principal, PrincipalKind,
         PrincipalStatus, RoleMembership, SecuritySnapshot, SecuritySnapshotError,
         SessionBindingError,
     },
@@ -216,6 +217,7 @@ async fn recovers_and_evaluates_a_standard_boolean_client_function() -> TestResu
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
 async fn persists_recovers_revokes_and_disables_execute_authority() -> TestResult<()> {
+    const USER_UID: u32 = 1_001;
     const USER: PrincipalId = PrincipalId::from_bytes([0x31; 16]);
     const ROLE: PrincipalId = PrincipalId::from_bytes([0x32; 16]);
     const SERVICE: PrincipalId = PrincipalId::from_bytes([0x33; 16]);
@@ -261,7 +263,7 @@ async fn persists_recovers_revokes_and_disables_execute_authority() -> TestResul
             .map(|definition| definition.id())
             .collect::<Vec<_>>();
 
-        let granted = SecuritySnapshot::new(
+        let granted = SecuritySnapshot::new_with_local_peer_credentials(
             active.pair(),
             functions.clone(),
             vec![
@@ -274,6 +276,7 @@ async fn persists_recovers_revokes_and_disables_execute_authority() -> TestResul
                 ExecuteGrant::new(ROLE, function),
                 ExecuteGrant::new(SERVICE, function),
             ],
+            vec![LocalPeerCredential::new(USER_UID, USER)],
         )?;
         kernel.replace_security_snapshot(&granted).await?;
 
@@ -283,6 +286,31 @@ async fn persists_recovers_revokes_and_disables_execute_authority() -> TestResul
         let user_session = recovered.bind_authenticated_session(USER, vec![ROLE])?;
         let service_session = recovered.bind_authenticated_session(SERVICE, vec![])?;
         let target = InvocationTarget::new(function, active.pair());
+        require(
+            recovered.local_peer_credentials().collect::<Vec<_>>()
+                == vec![LocalPeerCredential::new(USER_UID, USER)],
+            "recovered local peer credential changed",
+        )?;
+        let local_session = PostgresKernel::new(database.config()?)
+            .authenticate_local_peer(USER_UID)
+            .await?;
+        require(
+            local_session.principal() == USER && local_session.active_roles().is_empty(),
+            "local peer authentication changed the principal or selected roles",
+        )?;
+        let unknown_peer_error = kernel
+            .authenticate_local_peer(USER_UID + 1)
+            .await
+            .expect_err("unmapped local peer must fail authentication");
+        require(
+            matches!(
+                unknown_peer_error,
+                PostgresKernelError::LocalPeerAuthentication(
+                    LocalPeerAuthenticationError::UnknownUid
+                )
+            ),
+            "unmapped local peer returned the wrong typed error",
+        )?;
         require(
             matches!(
                 recovered.authorise_execute(&user_session, target),
@@ -372,7 +400,7 @@ async fn persists_recovers_revokes_and_disables_execute_authority() -> TestResul
             "stale security replacement changed durable grants",
         )?;
 
-        let revoked = SecuritySnapshot::new(
+        let revoked = SecuritySnapshot::new_with_local_peer_credentials(
             active.pair(),
             functions.clone(),
             vec![
@@ -381,6 +409,7 @@ async fn persists_recovers_revokes_and_disables_execute_authority() -> TestResul
                 Principal::new(SERVICE, PrincipalKind::Service, PrincipalStatus::Active),
             ],
             vec![RoleMembership::new(ROLE, USER)],
+            vec![],
             vec![],
         )?;
         kernel.replace_security_snapshot(&revoked).await?;
@@ -391,6 +420,23 @@ async fn persists_recovers_revokes_and_disables_execute_authority() -> TestResul
             reconnected.authorise_execute(&user_session, target)
                 == ExecuteDecision::Denied(ExecuteDenial::MissingExecuteGrant),
             "reconnected snapshot retained a revoked EXECUTE grant",
+        )?;
+        require(
+            reconnected.local_peer_credentials().next().is_none(),
+            "reconnected snapshot retained a revoked local peer credential",
+        )?;
+        let revoked_peer_error = kernel
+            .authenticate_local_peer(USER_UID)
+            .await
+            .expect_err("revoked local peer credential must block authentication");
+        require(
+            matches!(
+                revoked_peer_error,
+                PostgresKernelError::LocalPeerAuthentication(
+                    LocalPeerAuthenticationError::UnknownUid
+                )
+            ),
+            "revoked local peer credential returned the wrong authentication error",
         )?;
         let revoked_error = kernel
             .evaluate_client_function(&user_session, function)
@@ -408,7 +454,7 @@ async fn persists_recovers_revokes_and_disables_execute_authority() -> TestResul
             "kernel CLIENT gate returned the wrong revoked-grant denial",
         )?;
 
-        let stale_session_snapshot = SecuritySnapshot::new(
+        let stale_session_snapshot = SecuritySnapshot::new_with_local_peer_credentials(
             active.pair(),
             functions.clone(),
             vec![
@@ -418,6 +464,7 @@ async fn persists_recovers_revokes_and_disables_execute_authority() -> TestResul
             ],
             vec![],
             vec![ExecuteGrant::new(ROLE, function)],
+            vec![LocalPeerCredential::new(USER_UID, USER)],
         )?;
         kernel
             .replace_security_snapshot(&stale_session_snapshot)
@@ -438,7 +485,7 @@ async fn persists_recovers_revokes_and_disables_execute_authority() -> TestResul
             "kernel CLIENT gate returned the wrong stale-session denial",
         )?;
 
-        let disabled = SecuritySnapshot::new(
+        let disabled = SecuritySnapshot::new_with_local_peer_credentials(
             active.pair(),
             functions,
             vec![
@@ -448,6 +495,7 @@ async fn persists_recovers_revokes_and_disables_execute_authority() -> TestResul
             ],
             vec![RoleMembership::new(ROLE, USER)],
             vec![],
+            vec![LocalPeerCredential::new(USER_UID, USER)],
         )?;
         kernel.replace_security_snapshot(&disabled).await?;
         let final_snapshot = PostgresKernel::new(database.config()?)
@@ -457,6 +505,21 @@ async fn persists_recovers_revokes_and_disables_execute_authority() -> TestResul
             final_snapshot.bind_authenticated_session(USER, vec![ROLE])
                 == Err(SessionBindingError::DisabledSessionPrincipal),
             "reconnected snapshot re-enabled a disabled principal",
+        )?;
+        let disabled_peer_error = kernel
+            .authenticate_local_peer(USER_UID)
+            .await
+            .expect_err("disabled mapped principal must fail authentication");
+        require(
+            matches!(
+                disabled_peer_error,
+                PostgresKernelError::LocalPeerAuthentication(
+                    LocalPeerAuthenticationError::InvalidPrincipal(
+                        SessionBindingError::DisabledSessionPrincipal
+                    )
+                )
+            ),
+            "disabled mapped principal returned the wrong authentication error",
         )?;
         let disabled_error = kernel
             .evaluate_client_function(&user_session, function)
