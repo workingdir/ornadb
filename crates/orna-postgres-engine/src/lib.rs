@@ -38,6 +38,7 @@ mod embedded {
 
     impl std::error::Error for EngineError {}
 
+    /// An owned absolute path that is safe to pass to a linked PostgreSQL entry.
     #[derive(Debug, Clone)]
     pub struct AbsolutePath(CString);
 
@@ -58,6 +59,7 @@ mod embedded {
         }
     }
 
+    /// Writable, contiguous argument storage retained for one linked PostgreSQL entry.
     #[derive(Debug)]
     pub struct LinkedArguments {
         storage: Vec<u8>,
@@ -106,6 +108,7 @@ mod embedded {
         }
     }
 
+    /// A configured process-local handle to the linked PostgreSQL engine.
     #[derive(Debug)]
     pub struct EmbeddedEngine {
         _private: (),
