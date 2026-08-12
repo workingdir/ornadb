@@ -181,7 +181,8 @@ def select_input(source_root: Path, build_root: Path, relative: str) -> bytes:
         raise SystemExit(f"build and source support inputs differ: {relative}")
     if build_content is not None:
         return build_content
-    assert source_content is not None
+    if source_content is None:
+        raise SystemExit(f"support source selection failed: {relative}")
     return source_content
 
 
