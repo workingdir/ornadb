@@ -5,7 +5,7 @@ use std::{
     env,
     ffi::{CString, OsStr, OsString},
     fmt, fs,
-    io::{self, Cursor, Read, Seek, SeekFrom, Write},
+    io::{self, Read, Seek, SeekFrom, Write},
     os::{
         fd::AsRawFd,
         unix::{
@@ -35,6 +35,9 @@ use sha2::{Digest, Sha256};
 use tokio_postgres::{Config, NoTls};
 
 use crate::{OpenStandardDatabaseError, open_standard_database};
+
+#[path = "support_fs.rs"]
+mod support_fs;
 
 const INSTANCE_NAME: &str = "default";
 const STATE_ROOT: &str = "/var/lib/orna/instances/default";
@@ -1249,29 +1252,22 @@ struct SupportManifest {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SupportMember {
-    length: u64,
+pub(super) struct SupportMember {
+    pub(super) length: u64,
     mode: String,
-    path: String,
-    sha256: String,
+    pub(super) path: String,
+    pub(super) sha256: String,
     #[serde(rename = "type")]
     member_type: String,
 }
 
 /// Materialises the support bundle when `root` is absent, or verifies an existing tree.
 ///
-/// The caller owns the parent directory and the instance lock. This function never removes an
-/// existing tree. It accepts only the exact data inventory embedded in this executable.
+/// The caller owns the parent directory and the instance lock. This function reverifies a complete
+/// tree and rebuilds an invalid tree from the exact data inventory embedded in this executable.
 pub fn materialise_support_data(root: &Path) -> Result<MaterialisedSupport, EmbeddedHostError> {
     let manifest = parse_support_manifest()?;
-    match fs::symlink_metadata(root) {
-        Ok(_) => verify_materialised_tree(root, &manifest.members)?,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            materialise_new_tree(root, &manifest.members)?;
-            verify_materialised_tree(root, &manifest.members)?;
-        }
-        Err(error) => return Err(error.into()),
-    }
+    support_fs::materialise_support_tree(root, &manifest.members, SUPPORT_ARCHIVE)?;
 
     Ok(MaterialisedSupport {
         root: root.to_owned(),
@@ -1665,217 +1661,9 @@ fn validate_member(member: &SupportMember) -> Result<(), EmbeddedHostError> {
     Ok(())
 }
 
-fn materialise_new_tree(root: &Path, members: &[SupportMember]) -> Result<(), EmbeddedHostError> {
-    let parent = root.parent().ok_or(EmbeddedHostError::InvalidSupportPath)?;
-    require_private_directory(parent)?;
-    fs::create_dir(root)?;
-    fs::set_permissions(root, fs::Permissions::from_mode(0o700))?;
-
-    let mut archive = tar::Archive::new(Cursor::new(SUPPORT_ARCHIVE));
-    let mut entries = archive.entries()?;
-    for expected in members {
-        let mut entry = entries
-            .next()
-            .ok_or(EmbeddedHostError::SupportMismatch("bundle is incomplete"))??;
-        let header = entry.header();
-        let path = entry
-            .path()?
-            .to_str()
-            .ok_or(EmbeddedHostError::InvalidSupportManifest)?
-            .to_owned();
-        if path != expected.path
-            || !header.entry_type().is_file()
-            || header.mode()? != 0o600
-            || header.uid()? != 0
-            || header.gid()? != 0
-            || header.size()? != expected.length
-        {
-            return Err(EmbeddedHostError::SupportMismatch(
-                "bundle metadata is not accepted",
-            ));
-        }
-
-        let destination = root.join(&expected.path);
-        let directory = destination
-            .parent()
-            .ok_or(EmbeddedHostError::InvalidSupportPath)?;
-        create_private_directories(root, directory)?;
-        let temporary = destination.with_file_name(format!(
-            "{}.orna-support-tmp",
-            destination
-                .file_name()
-                .and_then(|name| name.to_str())
-                .ok_or(EmbeddedHostError::InvalidSupportManifest)?
-        ));
-        let mut output = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&temporary)?;
-        let (length, digest) = stream_digest(&mut entry, Some(&mut output))?;
-        output.set_permissions(fs::Permissions::from_mode(0o600))?;
-        output.sync_all()?;
-        drop(output);
-        if length != expected.length || digest != expected.sha256 {
-            return Err(EmbeddedHostError::SupportMismatch(
-                "bundle member bytes are not accepted",
-            ));
-        }
-        fs::rename(&temporary, &destination)?;
-        sync_directory(directory)?;
-    }
-    if entries.next().transpose()?.is_some() {
-        return Err(EmbeddedHostError::SupportMismatch(
-            "bundle has an additional member",
-        ));
-    }
-    sync_directory(root)?;
-    sync_directory(parent)?;
-    Ok(())
-}
-
-fn create_private_directories(root: &Path, directory: &Path) -> Result<(), EmbeddedHostError> {
-    let relative = directory
-        .strip_prefix(root)
-        .map_err(|_| EmbeddedHostError::InvalidSupportPath)?;
-    let mut current = root.to_owned();
-    for component in relative.components() {
-        let Component::Normal(component) = component else {
-            return Err(EmbeddedHostError::InvalidSupportPath);
-        };
-        current.push(component);
-        match fs::create_dir(&current) {
-            Ok(()) => {
-                fs::set_permissions(&current, fs::Permissions::from_mode(0o700))?;
-                sync_directory(
-                    current
-                        .parent()
-                        .ok_or(EmbeddedHostError::InvalidSupportPath)?,
-                )?;
-            }
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                require_private_directory(&current)?;
-            }
-            Err(error) => return Err(error.into()),
-        }
-    }
-    Ok(())
-}
-
-fn verify_materialised_tree(
-    root: &Path,
-    members: &[SupportMember],
-) -> Result<(), EmbeddedHostError> {
-    require_private_directory(root)?;
-    let expected = members
-        .iter()
-        .map(|member| member.path.clone())
-        .collect::<BTreeSet<_>>();
-    let mut actual = BTreeSet::new();
-    collect_tree_paths(root, root, &mut actual)?;
-    if actual != expected {
-        return Err(EmbeddedHostError::SupportMismatch(
-            "materialised inventory is not accepted",
-        ));
-    }
-
-    let owner = effective_identity();
-    for member in members {
-        let path = root.join(&member.path);
-        let metadata = fs::symlink_metadata(&path)?;
-        if !metadata.file_type().is_file()
-            || metadata.nlink() != 1
-            || metadata.mode() & 0o7777 != 0o600
-            || (metadata.uid(), metadata.gid()) != owner
-            || metadata.len() != member.length
-        {
-            return Err(EmbeddedHostError::SupportMismatch(
-                "materialised member metadata is not accepted",
-            ));
-        }
-        let mut file = fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc_o_nofollow())
-            .open(path)?;
-        let (_, digest) = stream_digest(&mut file, None)?;
-        if digest != member.sha256 {
-            return Err(EmbeddedHostError::SupportMismatch(
-                "materialised member digest is not accepted",
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn collect_tree_paths(
-    root: &Path,
-    directory: &Path,
-    paths: &mut BTreeSet<String>,
-) -> Result<(), EmbeddedHostError> {
-    for entry in fs::read_dir(directory)? {
-        let entry = entry?;
-        let path = entry.path();
-        let metadata = fs::symlink_metadata(&path)?;
-        if metadata.file_type().is_dir() {
-            require_private_directory(&path)?;
-            collect_tree_paths(root, &path, paths)?;
-        } else if metadata.file_type().is_file() {
-            let relative = path
-                .strip_prefix(root)
-                .map_err(|_| EmbeddedHostError::InvalidSupportPath)?
-                .to_str()
-                .ok_or(EmbeddedHostError::InvalidSupportPath)?
-                .to_owned();
-            paths.insert(relative);
-        } else {
-            return Err(EmbeddedHostError::SupportMismatch(
-                "materialised tree contains a link or special file",
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn require_private_directory(path: &Path) -> Result<(), EmbeddedHostError> {
-    let metadata = fs::symlink_metadata(path)?;
-    let owner = effective_identity();
-    if !metadata.file_type().is_dir()
-        || metadata.mode() & 0o7777 != 0o700
-        || (metadata.uid(), metadata.gid()) != owner
-    {
-        return Err(EmbeddedHostError::SupportMismatch(
-            "support directory metadata is not accepted",
-        ));
-    }
-    Ok(())
-}
-
 fn sync_directory(path: &Path) -> Result<(), EmbeddedHostError> {
     fs::File::open(path)?.sync_all()?;
     Ok(())
-}
-
-fn stream_digest(
-    input: &mut impl Read,
-    mut output: Option<&mut fs::File>,
-) -> Result<(u64, String), EmbeddedHostError> {
-    let mut digest = Sha256::new();
-    let mut length = 0_u64;
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let count = input.read(&mut buffer)?;
-        if count == 0 {
-            break;
-        }
-        if let Some(output) = output.as_deref_mut() {
-            output.write_all(&buffer[..count])?;
-        }
-        digest.update(&buffer[..count]);
-        length = length
-            .checked_add(count as u64)
-            .ok_or(EmbeddedHostError::SupportMismatch("member is too large"))?;
-    }
-    Ok((length, digest_hex(digest.finalize())))
 }
 
 fn hex_digest(bytes: &[u8]) -> String {
@@ -1964,15 +1752,45 @@ mod tests {
     }
 
     #[test]
-    fn rejects_changed_materialised_support() {
+    fn rebuilds_changed_materialised_support() {
         let parent = TestRoot::new();
         let root = parent.0.join("support");
         materialise_support_data(&root).expect("materialise support");
         fs::write(root.join("postgres.bki"), b"changed").expect("tamper test member");
-        assert!(matches!(
-            materialise_support_data(&root),
-            Err(EmbeddedHostError::SupportMismatch(_))
-        ));
+        materialise_support_data(&root).expect("rebuild support");
+        let manifest = parse_support_manifest().expect("support manifest");
+        let postgres_bki = manifest
+            .members
+            .iter()
+            .find(|member| member.path == "postgres.bki")
+            .expect("postgres.bki member");
+        assert_eq!(
+            hex_digest(&fs::read(root.join("postgres.bki")).expect("read rebuilt member")),
+            postgres_bki.sha256
+        );
+    }
+
+    #[test]
+    fn rebuilds_a_linked_support_tree_without_following_the_link() {
+        use std::os::unix::fs::symlink;
+
+        let parent = TestRoot::new();
+        let root = parent.0.join("support");
+        materialise_support_data(&root).expect("materialise support");
+        let outside = parent.0.join("outside");
+        fs::write(&outside, b"outside").expect("write outside file");
+        fs::remove_file(root.join("postgres.bki")).expect("remove support member");
+        symlink(&outside, root.join("postgres.bki")).expect("link support member");
+
+        materialise_support_data(&root).expect("rebuild linked support");
+
+        assert_eq!(fs::read(&outside).expect("read outside file"), b"outside");
+        assert!(
+            fs::symlink_metadata(root.join("postgres.bki"))
+                .expect("rebuilt member metadata")
+                .file_type()
+                .is_file()
+        );
     }
 
     #[test]
