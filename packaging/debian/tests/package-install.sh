@@ -1,5 +1,6 @@
 #!/bin/bash
 set -euo pipefail
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 repository_root=$(cd "$(dirname "$0")/../../.." && pwd -P)
 package=${1:-"${repository_root}/target/debian-package/orna_0.1.0-1_amd64.deb"}
@@ -23,6 +24,7 @@ docker build --platform linux/amd64 --provenance=false --tag "${image}" \
 docker run --rm --interactive --network=none --platform linux/amd64 \
     --volume "${package}:/proof/orna.deb:ro" \
     "${image}" /bin/bash -euo pipefail -s <<'TEST'
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 package=/proof/orna.deb
 ready='format = 1
 state = "ready"'
