@@ -81,6 +81,12 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../migrations/0010_local_peer_credentials.sql"),
         data_step: None,
     },
+    Migration {
+        version: 11,
+        name: "protected security audit",
+        sql: include_str!("../migrations/0011_security_audit.sql"),
+        data_step: None,
+    },
 ];
 const MIGRATION_DATA_STEP_SEPARATOR: &[u8] = b"\0orna.kernel.migration-step\0";
 const CANONICAL_HASH_V1_EMPTY_SEED_STEP: &[u8] = b"canonical-hash-v1-empty-seed/v1";
@@ -759,7 +765,7 @@ mod tests {
             validated_migration_registry()
                 .expect("registry is valid")
                 .len(),
-            10
+            11
         );
         assert_eq!(MIGRATIONS[0].version, 1);
         assert_eq!(MIGRATIONS[1].version, 2);
@@ -771,15 +777,18 @@ mod tests {
         assert_eq!(MIGRATIONS[7].version, 8);
         assert_eq!(MIGRATIONS[8].version, 9);
         assert_eq!(MIGRATIONS[9].version, 10);
+        assert_eq!(MIGRATIONS[10].version, 11);
         assert_eq!(MIGRATIONS[5].name, "definition reference write evidence");
         assert_eq!(MIGRATIONS[6].name, "standard catalogue type storage");
         assert_eq!(MIGRATIONS[7].name, "resolved value type storage");
         assert_eq!(MIGRATIONS[8].name, "security decision snapshot");
         assert_eq!(MIGRATIONS[9].name, "local peer credentials");
+        assert_eq!(MIGRATIONS[10].name, "protected security audit");
         assert!(MIGRATIONS[6].data_step.is_none());
         assert!(MIGRATIONS[7].data_step.is_none());
         assert!(MIGRATIONS[8].data_step.is_none());
         assert!(MIGRATIONS[9].data_step.is_none());
+        assert!(MIGRATIONS[10].data_step.is_none());
     }
 
     #[tokio::test]
