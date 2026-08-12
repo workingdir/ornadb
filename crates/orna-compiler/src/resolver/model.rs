@@ -1074,9 +1074,11 @@ impl CheckedServerFunctionReturnColumn {
 pub enum CheckedDefinitionReferenceTarget {
     /// A checked object type.
     ObjectType(CheckedTypeId),
+    /// A checked named value type.
+    ValueType(CheckedTypeId),
     /// A checked field on an object type.
     Field {
-        /// The owning checked object type.
+        /// The owning checked object or record value type.
         owner: CheckedTypeId,
         /// The checked field identity.
         field: CheckedFieldId,
