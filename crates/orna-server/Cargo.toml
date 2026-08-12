@@ -10,7 +10,7 @@ name = "orna"
 path = "src/main.rs"
 
 [dependencies]
-nix = { version = "0.31.3", features = ["fs", "process", "signal", "term"] }
+nix = { version = "0.31.3", features = ["fs", "process", "signal", "term", "user"] }
 orna-kernel-postgres = { path = "../orna-kernel-postgres" }
 orna-postgres-engine = { path = "../orna-postgres-engine", features = ["embedded"] }
 orna-standard = { path = "../orna-standard" }
