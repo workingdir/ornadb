@@ -13,8 +13,9 @@ use std::{error::Error, fmt};
 
 use orna_core::{
     ObjectId, TypeId,
+    catalogue::CatalogueSnapshot,
     types::{ResolvedType, StandardScalar},
-    value::{RuntimeFloat, RuntimeValue},
+    value::{EnumValue, EnumValueError, RuntimeFloat, RuntimeValue},
 };
 use orna_standard::{
     BIGINT_TYPE_ID, BINARY_LARGE_OBJECT_TYPE_ID, BOOLEAN_TYPE_ID, CHARACTER_LARGE_OBJECT_TYPE_ID,
@@ -22,6 +23,7 @@ use orna_standard::{
 };
 
 const MARKER: &[u8; 4] = b"ORV1";
+const CATALOGUE_MARKER: &[u8; 4] = b"ORV2";
 const HEADER_LENGTH: usize = 25;
 const NULL_SCALAR_TAG: u8 = 0x00;
 const NULL_REFERENCE_TAG: u8 = 0x01;
@@ -32,6 +34,8 @@ const FLOAT_TAG: u8 = 0x05;
 const TEXT_TAG: u8 = 0x06;
 const BYTES_TAG: u8 = 0x07;
 const REFERENCE_TAG: u8 = 0x08;
+const NULL_ENUM_TAG: u8 = 0x09;
+const ENUM_TAG: u8 = 0x0a;
 const PAYLOAD_LIMIT: usize = 16 * 1024 * 1024;
 const SUPPORTED_SCALAR_TYPES: [(TypeId, StandardScalar); 6] = [
     (BOOLEAN_TYPE_ID, StandardScalar::Boolean),
@@ -117,6 +121,18 @@ pub enum ValueCodecError {
         /// The stable scalar identity used as a reference target.
         target: TypeId,
     },
+    /// The active catalogue does not contain the supplied enum type.
+    InactiveEnumType {
+        /// The inactive enum type identity.
+        enum_type: TypeId,
+    },
+    /// The active enum type does not declare the encoded exact label.
+    UndeclaredEnumLabel {
+        /// The active enum type identity.
+        enum_type: TypeId,
+        /// The undeclared label.
+        label: String,
+    },
 }
 
 impl fmt::Display for ValueCodecError {
@@ -152,6 +168,12 @@ impl fmt::Display for ValueCodecError {
             Self::InvalidUtf8 => formatter.write_str("text payload is not valid UTF-8"),
             Self::StandardTypeAsReference { .. } => {
                 formatter.write_str("stable standard scalar cannot be a reference target")
+            }
+            Self::InactiveEnumType { .. } => {
+                formatter.write_str("enum type is not active for the canonical value")
+            }
+            Self::UndeclaredEnumLabel { .. } => {
+                formatter.write_str("enum label is not declared by the active type")
             }
         }
     }
@@ -217,6 +239,43 @@ pub fn encode_value(value: &RuntimeValue) -> Result<Vec<u8>, ValueCodecError> {
     }
 }
 
+/// Encodes one runtime value against the active catalogue as canonical
+/// version-2 bytes.
+///
+/// Version 2 retains every version-1 tag and payload unchanged under the
+/// `ORV2` marker. It adds catalogue enum values and typed enum nulls.
+///
+/// # Errors
+///
+/// Returns [`ValueCodecError`] when the value violates the version-1 rules or
+/// when an enum type or label is absent from the active catalogue.
+pub fn encode_catalogue_value(
+    catalogue: &CatalogueSnapshot,
+    value: &RuntimeValue,
+) -> Result<Vec<u8>, ValueCodecError> {
+    match value {
+        RuntimeValue::Enum(value) => {
+            validate_enum_value(catalogue, value.enum_type(), value.label())?;
+            encode_variable(ENUM_TAG, value.enum_type(), value.label().as_bytes())
+                .map(with_catalogue_marker)
+        }
+        RuntimeValue::Null(value) if value.resolved_type().value_type().is_some() => {
+            let enum_type = value
+                .resolved_type()
+                .value_type()
+                .expect("value type checked");
+            require_active_enum_type(catalogue, enum_type)?;
+            Ok(encode_with_marker(
+                CATALOGUE_MARKER,
+                NULL_ENUM_TAG,
+                enum_type,
+                &[],
+            ))
+        }
+        _ => encode_value(value).map(with_catalogue_marker),
+    }
+}
+
 /// Decodes one complete canonical version-1 runtime value.
 ///
 /// # Errors
@@ -227,7 +286,44 @@ pub fn encode_value(value: &RuntimeValue) -> Result<Vec<u8>, ValueCodecError> {
 /// declared payload, invalid UTF-8, or stable scalar identity used as a
 /// reference target. It never returns a partial value.
 pub fn decode_value(encoded: &[u8]) -> Result<RuntimeValue, ValueCodecError> {
-    let (tag, type_id, payload) = decode_envelope(encoded)?;
+    let (tag, type_id, payload) = decode_envelope(encoded, MARKER)?;
+    decode_non_enum_value(tag, type_id, payload)
+}
+
+/// Decodes one complete canonical version-2 value against the active
+/// catalogue.
+///
+/// # Errors
+///
+/// Returns [`ValueCodecError`] for every invalid version-1 byte shape and when
+/// an enum type or exact label is absent from the active catalogue.
+pub fn decode_catalogue_value(
+    catalogue: &CatalogueSnapshot,
+    encoded: &[u8],
+) -> Result<RuntimeValue, ValueCodecError> {
+    let (tag, type_id, payload) = decode_envelope(encoded, CATALOGUE_MARKER)?;
+    match tag {
+        NULL_ENUM_TAG => {
+            require_empty_payload(tag, payload)?;
+            require_active_enum_type(catalogue, type_id)?;
+            RuntimeValue::null(ResolvedType::value(type_id))
+                .map_err(|_| ValueCodecError::UnsupportedValue)
+        }
+        ENUM_TAG => {
+            require_payload_limit(payload.len())?;
+            let label = std::str::from_utf8(payload).map_err(|_| ValueCodecError::InvalidUtf8)?;
+            let value = validate_enum_value(catalogue, type_id, label)?;
+            Ok(RuntimeValue::Enum(value))
+        }
+        _ => decode_non_enum_value(tag, type_id, payload),
+    }
+}
+
+fn decode_non_enum_value(
+    tag: u8,
+    type_id: TypeId,
+    payload: &[u8],
+) -> Result<RuntimeValue, ValueCodecError> {
     match tag {
         NULL_SCALAR_TAG => {
             require_empty_payload(tag, payload)?;
@@ -307,12 +403,21 @@ pub fn decode_value(encoded: &[u8]) -> Result<RuntimeValue, ValueCodecError> {
 }
 
 fn encode(tag: u8, type_id: TypeId, payload: &[u8]) -> Vec<u8> {
+    encode_with_marker(MARKER, tag, type_id, payload)
+}
+
+fn encode_with_marker(marker: &[u8; 4], tag: u8, type_id: TypeId, payload: &[u8]) -> Vec<u8> {
     let mut encoded = Vec::with_capacity(HEADER_LENGTH + payload.len());
-    encoded.extend_from_slice(MARKER);
+    encoded.extend_from_slice(marker);
     encoded.push(tag);
     encoded.extend_from_slice(&type_id.to_bytes());
     encoded.extend_from_slice(&(payload.len() as u32).to_be_bytes());
     encoded.extend_from_slice(payload);
+    encoded
+}
+
+fn with_catalogue_marker(mut encoded: Vec<u8>) -> Vec<u8> {
+    encoded[..CATALOGUE_MARKER.len()].copy_from_slice(CATALOGUE_MARKER);
     encoded
 }
 
@@ -332,13 +437,16 @@ fn require_payload_limit(actual: usize) -> Result<(), ValueCodecError> {
     }
 }
 
-fn decode_envelope(encoded: &[u8]) -> Result<(u8, TypeId, &[u8]), ValueCodecError> {
+fn decode_envelope<'a>(
+    encoded: &'a [u8],
+    marker: &[u8; 4],
+) -> Result<(u8, TypeId, &'a [u8]), ValueCodecError> {
     if encoded.len() < HEADER_LENGTH {
         return Err(ValueCodecError::TruncatedHeader {
             actual: encoded.len(),
         });
     }
-    if &encoded[..MARKER.len()] != MARKER {
+    if &encoded[..marker.len()] != marker {
         return Err(ValueCodecError::InvalidMarker);
     }
     let tag = encoded[4];
@@ -354,6 +462,32 @@ fn decode_envelope(encoded: &[u8]) -> Result<(u8, TypeId, &[u8]), ValueCodecErro
         return Err(ValueCodecError::TrailingBytes { declared, actual });
     }
     Ok((tag, type_id, &encoded[HEADER_LENGTH..]))
+}
+
+fn require_active_enum_type(
+    catalogue: &CatalogueSnapshot,
+    enum_type: TypeId,
+) -> Result<(), ValueCodecError> {
+    catalogue
+        .enum_type_by_id(enum_type)
+        .map(|_| ())
+        .ok_or(ValueCodecError::InactiveEnumType { enum_type })
+}
+
+fn validate_enum_value(
+    catalogue: &CatalogueSnapshot,
+    enum_type: TypeId,
+    label: &str,
+) -> Result<EnumValue, ValueCodecError> {
+    EnumValue::new(catalogue, enum_type, label).map_err(|error| match error {
+        EnumValueError::UnknownType { enum_type } => {
+            ValueCodecError::InactiveEnumType { enum_type }
+        }
+        EnumValueError::UndeclaredLabel { enum_type, label } => {
+            ValueCodecError::UndeclaredEnumLabel { enum_type, label }
+        }
+        _ => ValueCodecError::UnsupportedValue,
+    })
 }
 
 fn require_type(tag: u8, actual: TypeId, expected: TypeId) -> Result<(), ValueCodecError> {
@@ -412,9 +546,12 @@ fn require_fixed_payload<const LENGTH: usize>(
 #[cfg(test)]
 mod tests {
     use orna_core::{
-        ObjectId,
+        CatalogueRevisionId, ObjectId, SchemaId,
+        catalogue::{
+            CatalogueSnapshot, EnumTypeDefinition, QualifiedSemanticName, SchemaDefinition,
+        },
         types::{ResolvedType, StandardScalar},
-        value::RuntimeFloat,
+        value::{EnumValue, RuntimeFloat},
     };
     use orna_standard::{
         BIGINT_TYPE_ID, BINARY_LARGE_OBJECT_TYPE_ID, BOOLEAN_TYPE_ID,
@@ -423,6 +560,27 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
+
+    const ENUM_TYPE: TypeId = TypeId::from_bytes([0x43; 16]);
+
+    fn enum_catalogue(labels: &[&str]) -> CatalogueSnapshot {
+        CatalogueSnapshot::new_with_enum_types(
+            CatalogueRevisionId::from_bytes([0x44; 16]),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes([0x45; 16]),
+                QualifiedSemanticName::new(["crm"]).unwrap(),
+            )],
+            vec![],
+            vec![],
+            vec![EnumTypeDefinition::new(
+                ENUM_TYPE,
+                QualifiedSemanticName::new(["crm", "stage"]).unwrap(),
+                labels.iter().copied(),
+            )],
+            vec![],
+        )
+        .unwrap()
+    }
 
     #[test]
     fn public_frame_payload_limit_matches_the_wire_contract() {
@@ -442,6 +600,93 @@ mod tests {
             Ok(expected.clone())
         );
         assert_eq!(decode_value(&expected), Ok(RuntimeValue::Boolean(true)));
+    }
+
+    #[test]
+    fn catalogue_codec_has_exact_enum_bytes_and_preserves_version_one_closure() {
+        let catalogue = enum_catalogue(&["lead", "owner's"]);
+        let value = RuntimeValue::Enum(EnumValue::new(&catalogue, ENUM_TYPE, "owner's").unwrap());
+        let mut expected = b"ORV2".to_vec();
+        expected.push(0x0a);
+        expected.extend_from_slice(&ENUM_TYPE.to_bytes());
+        expected.extend_from_slice(&7_u32.to_be_bytes());
+        expected.extend_from_slice(b"owner's");
+
+        assert_eq!(
+            encode_catalogue_value(&catalogue, &value),
+            Ok(expected.clone())
+        );
+        assert_eq!(
+            decode_catalogue_value(&catalogue, &expected),
+            Ok(value.clone())
+        );
+        assert_eq!(encode_value(&value), Err(ValueCodecError::UnsupportedValue));
+        assert_eq!(decode_value(&expected), Err(ValueCodecError::InvalidMarker));
+    }
+
+    #[test]
+    fn catalogue_codec_round_trips_enum_null_and_legacy_values_as_version_two() {
+        let catalogue = enum_catalogue(&["lead"]);
+        let null = RuntimeValue::null(ResolvedType::value(ENUM_TYPE)).unwrap();
+        let expected_null = encoded_catalogue_value(0x09, ENUM_TYPE, &[]);
+        assert_eq!(
+            encode_catalogue_value(&catalogue, &null),
+            Ok(expected_null.clone())
+        );
+        assert_eq!(decode_catalogue_value(&catalogue, &expected_null), Ok(null));
+
+        let boolean = RuntimeValue::Boolean(true);
+        let expected_boolean = encoded_catalogue_value(0x02, BOOLEAN_TYPE_ID, &[1]);
+        assert_eq!(
+            encode_catalogue_value(&catalogue, &boolean),
+            Ok(expected_boolean.clone())
+        );
+        assert_eq!(
+            decode_catalogue_value(&catalogue, &expected_boolean),
+            Ok(boolean)
+        );
+    }
+
+    #[test]
+    fn catalogue_codec_rejects_stale_unknown_and_mismatched_enum_labels() {
+        let original = enum_catalogue(&["lead", "qualified"]);
+        let active = enum_catalogue(&["lead", "customer"]);
+        let stale = RuntimeValue::Enum(EnumValue::new(&original, ENUM_TYPE, "qualified").unwrap());
+        assert_eq!(
+            encode_catalogue_value(&active, &stale),
+            Err(ValueCodecError::UndeclaredEnumLabel {
+                enum_type: ENUM_TYPE,
+                label: String::from("qualified"),
+            })
+        );
+
+        let unknown = TypeId::from_bytes([0x46; 16]);
+        assert_eq!(
+            decode_catalogue_value(&active, &encoded_catalogue_value(0x0a, unknown, b"lead")),
+            Err(ValueCodecError::InactiveEnumType { enum_type: unknown })
+        );
+        assert_eq!(
+            decode_catalogue_value(
+                &active,
+                &encoded_catalogue_value(0x0a, ENUM_TYPE, b"qualified")
+            ),
+            Err(ValueCodecError::UndeclaredEnumLabel {
+                enum_type: ENUM_TYPE,
+                label: String::from("qualified"),
+            })
+        );
+        assert_eq!(
+            decode_catalogue_value(&active, &encoded_catalogue_value(0x0a, ENUM_TYPE, &[0xff])),
+            Err(ValueCodecError::InvalidUtf8)
+        );
+        assert_eq!(
+            decode_catalogue_value(&active, &encoded_catalogue_value(0x09, ENUM_TYPE, b"lead")),
+            Err(ValueCodecError::WrongPayloadLength {
+                tag: 0x09,
+                expected: 0,
+                actual: 4,
+            })
+        );
     }
 
     #[test]
@@ -788,6 +1033,22 @@ mod tests {
             encoded.extend_from_slice(&payload);
             let _ = decode_value(&encoded);
         }
+
+        #[test]
+        fn arbitrary_version_two_envelopes_never_panic(
+            tag in any::<u8>(),
+            type_bytes in any::<[u8; 16]>(),
+            declared in any::<u32>(),
+            payload in prop::collection::vec(any::<u8>(), 0..=4_096),
+        ) {
+            let catalogue = enum_catalogue(&["lead", "qualified"]);
+            let mut encoded = b"ORV2".to_vec();
+            encoded.push(tag);
+            encoded.extend_from_slice(&type_bytes);
+            encoded.extend_from_slice(&declared.to_be_bytes());
+            encoded.extend_from_slice(&payload);
+            let _ = decode_catalogue_value(&catalogue, &encoded);
+        }
     }
 
     fn encoded_value(tag: u8, type_id: TypeId, payload: &[u8]) -> Vec<u8> {
@@ -796,6 +1057,12 @@ mod tests {
         encoded.extend_from_slice(&type_id.to_bytes());
         encoded.extend_from_slice(&(payload.len() as u32).to_be_bytes());
         encoded.extend_from_slice(payload);
+        encoded
+    }
+
+    fn encoded_catalogue_value(tag: u8, type_id: TypeId, payload: &[u8]) -> Vec<u8> {
+        let mut encoded = encoded_value(tag, type_id, payload);
+        encoded[..4].copy_from_slice(b"ORV2");
         encoded
     }
 }
