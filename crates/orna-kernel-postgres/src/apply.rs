@@ -1251,6 +1251,80 @@ async fn persist_semantics(
             .await
             .map_err(PostgresKernelError::Database)?;
     }
+    for record_type in candidate.candidate().record_value_types() {
+        let schema = schema_for_name(candidate.candidate(), record_type.name())?;
+        let type_origin = origin(
+            candidate.origins(),
+            DefinitionIdentity::ValueType(record_type.id()),
+        )?;
+        transaction
+            .execute(
+                "INSERT INTO _orna_kernel.catalogue_record_value_types
+                    (catalogue_revision_id, type_id, schema_id, name_parts,
+                     value_kind, mutability, persistence,
+                     source_unit_id, source_start, source_end)
+                 VALUES ($1, $2, $3, $4, 'record', 'immutable', 'persistable',
+                         $5, $6, $7)",
+                &[
+                    &bytes(catalogue),
+                    &bytes(record_type.id()),
+                    &bytes(schema),
+                    &record_type.name().parts(),
+                    &bytes(type_origin.source_unit()),
+                    &i64::from(type_origin.byte_start()),
+                    &i64::from(type_origin.byte_end()),
+                ],
+            )
+            .await
+            .map_err(PostgresKernelError::Database)?;
+
+        for field in record_type.fields() {
+            let TypeColumns {
+                kind,
+                scalar,
+                target,
+                value_type,
+                standard_library_revision,
+                enum_type,
+            } = encoder.type_columns(field.resolved_type(), false)?;
+            if scalar.is_some() || target.is_some() || !matches!(kind, "value" | "enum") {
+                return Err(invariant(
+                    "record value fields must use one supported standard value or application enum type",
+                ));
+            }
+            let field_origin = origin(
+                candidate.origins(),
+                DefinitionIdentity::Field {
+                    owner: record_type.id(),
+                    field: field.id(),
+                },
+            )?;
+            transaction
+                .execute(
+                    "INSERT INTO _orna_kernel.catalogue_record_value_fields
+                        (catalogue_revision_id, owner_type_id, field_id, name, ordinal,
+                         type_kind, value_type_id, value_standard_library_revision_id,
+                         enum_type_id, source_unit_id, source_start, source_end)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+                    &[
+                        &bytes(catalogue),
+                        &bytes(record_type.id()),
+                        &bytes(field.id()),
+                        &field.name(),
+                        &i64::from(field.ordinal()),
+                        &kind,
+                        &value_type.map(bytes),
+                        &standard_library_revision.map(bytes),
+                        &enum_type.map(bytes),
+                        &bytes(field_origin.source_unit()),
+                        &i64::from(field_origin.byte_start()),
+                        &i64::from(field_origin.byte_end()),
+                    ],
+                )
+                .await
+                .map_err(PostgresKernelError::Database)?;
+        }
+    }
     for object in candidate.candidate().object_types() {
         let schema = schema_for_name(candidate.candidate(), object.name())?;
         let origin = origin(
