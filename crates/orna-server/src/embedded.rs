@@ -473,16 +473,7 @@ fn parse_installed_instance_manifest(
 
 /// Verifies and retains the package and instance facts for a private host client.
 pub fn inspect_ready_embedded_host() -> Result<ReadyEmbeddedHost, EmbeddedHostError> {
-    verify_current_distribution().map_err(|_| EmbeddedHostError::InvalidDistributionManifest)?;
-    validate_embedded_engine_manifest()?;
     let service = require_service_identity()?;
-    require_file_bytes(
-        Path::new(CONFIGURATION_PATH),
-        0,
-        0,
-        0o644,
-        CONFIGURATION_BYTES,
-    )?;
     let package_lock = open_verified_lock(
         Path::new(PACKAGE_LOCK_PATH),
         0,
@@ -499,6 +490,13 @@ pub fn inspect_ready_embedded_host() -> Result<ReadyEmbeddedHost, EmbeddedHostEr
         PACKAGE_STATE_BYTES,
     )
     .map_err(|_| EmbeddedHostError::InvalidPackageState)?;
+    require_file_bytes(
+        Path::new(CONFIGURATION_PATH),
+        0,
+        0,
+        0o644,
+        CONFIGURATION_BYTES,
+    )?;
 
     let paths = EmbeddedHostPaths::production();
     require_directory(paths.state_root(), service.uid, service.gid, 0o700)?;
@@ -519,9 +517,7 @@ pub fn inspect_ready_embedded_host() -> Result<ReadyEmbeddedHost, EmbeddedHostEr
         0o600,
     )?;
     let ready = parse_ready_record(&ready)?;
-    if ready.engine != EmbeddedEngineIdentity::current().as_str()
-        || ready.generation != GENERATION_NAME
-        || ready.executable_sha256 != hex_digest(&fs::read("/proc/self/exe")?)
+    if ready.generation != GENERATION_NAME
         || !process_exists(ready.server_pid)
         || !process_exists(ready.postmaster_pid)
     {
@@ -534,10 +530,19 @@ pub fn inspect_ready_embedded_host() -> Result<ReadyEmbeddedHost, EmbeddedHostEr
         service.gid,
         0o600,
     )?;
-    if manifest != instance_manifest_bytes(&EmbeddedEngineIdentity::current(), true)
-        || hex_digest(&manifest) != ready.instance_manifest_sha256
-    {
+    let installed = parse_installed_instance_manifest(&manifest)
+        .map_err(|_| EmbeddedHostError::InvalidInstanceState)?;
+    if !installed.activation_committed || hex_digest(&manifest) != ready.instance_manifest_sha256 {
         return Err(EmbeddedHostError::InvalidInstanceState);
+    }
+    verify_current_distribution().map_err(|_| EmbeddedHostError::InvalidDistributionManifest)?;
+    validate_embedded_engine_manifest()?;
+    let current_engine = EmbeddedEngineIdentity::current();
+    if ready.engine != current_engine.as_str()
+        || installed.engine != current_engine.as_str()
+        || ready.executable_sha256 != hex_digest(&fs::read("/proc/self/exe")?)
+    {
+        return Err(EmbeddedHostError::InvalidEngineManifest);
     }
 
     Ok(ReadyEmbeddedHost {
