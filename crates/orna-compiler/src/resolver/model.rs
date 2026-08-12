@@ -739,7 +739,7 @@ pub(super) struct CheckedEnumType {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct CheckedRecordValueField {
+pub(crate) struct CheckedRecordValueField {
     pub(super) id: CheckedFieldId,
     pub(super) name: String,
     pub(super) ordinal: u32,
@@ -747,12 +747,52 @@ pub(super) struct CheckedRecordValueField {
     pub(super) location: SourceLocation,
 }
 
+impl CheckedRecordValueField {
+    pub(crate) const fn id(&self) -> CheckedFieldId {
+        self.id
+    }
+
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub(crate) const fn ordinal(&self) -> u32 {
+        self.ordinal
+    }
+
+    pub(crate) const fn semantic_type(&self) -> SemanticType<CheckedTypeId> {
+        self.semantic_type
+    }
+
+    pub(crate) fn location(&self) -> &SourceLocation {
+        &self.location
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct CheckedRecordValueType {
+pub(crate) struct CheckedRecordValueType {
     pub(super) id: CheckedTypeId,
     pub(super) name: QualifiedSemanticName,
     pub(super) fields: Vec<CheckedRecordValueField>,
     pub(super) location: SourceLocation,
+}
+
+impl CheckedRecordValueType {
+    pub(crate) const fn id(&self) -> CheckedTypeId {
+        self.id
+    }
+
+    pub(crate) fn name(&self) -> &QualifiedSemanticName {
+        &self.name
+    }
+
+    pub(crate) fn fields(&self) -> &[CheckedRecordValueField] {
+        &self.fields
+    }
+
+    pub(crate) fn location(&self) -> &SourceLocation {
+        &self.location
+    }
 }
 
 /// One accepted field-name transition bound to a stable checked identity.
@@ -831,6 +871,11 @@ impl CheckedBundle {
                 &enum_type.location,
             )
         })
+    }
+
+    /// Returns submitted record value definitions in source order.
+    pub(crate) fn record_value_types(&self) -> &[CheckedRecordValueType] {
+        &self.record_value_types
     }
 
     /// Returns submitted checked SERVER functions in source order.
@@ -1777,12 +1822,10 @@ impl StandardApplicationCheckReport {
     /// Returns the crate-private data required for durable standard preparation.
     ///
     /// This deliberately exposes neither a legacy report nor a checked bundle
-    /// outside the compiler crate. Record definitions keep this view closed
-    /// until their separate preparation step is installed.
+    /// outside the compiler crate.
     pub(crate) fn preparation_view(&self) -> Option<StandardApplicationPreparationView<'_>> {
         self.checked_bundle
             .as_ref()
-            .filter(|bundle| bundle.inner.record_value_types.is_empty())
             .map(StandardApplicationPreparationView::new)
     }
 
