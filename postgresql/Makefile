@@ -10,8 +10,12 @@ PATCH_ROOT := $(CURDIR)/patches/18.4
 CONTAINERFILE := $(CURDIR)/Containerfile
 SUPPORT_BUILDER := $(CURDIR)/support_bundle.py
 MANIFEST_BUILDER := $(CURDIR)/engine_manifest.py
+LIFECYCLE_PROBE := $(CURDIR)/lifecycle_probe.c
 IMAGE := orna-postgresql-engine:debian12-amd64-1
 SOURCE_DATE_EPOCH := 1778528675
+LIFECYCLE_UID := 61018
+LIFECYCLE_GID := 61018
+LIFECYCLE_PORT := 65432
 
 CONFIGURE_FLAGS := \
 	--build=x86_64-linux-gnu \
@@ -47,7 +51,7 @@ CONFIGURE_FLAGS := \
 	--without-llvm \
 	--with-zlib
 
-.PHONY: help verify-inputs prepare-source build-image archives support-data manifest update-source
+.PHONY: help verify-inputs prepare-source build-image archives support-data lifecycle manifest update-source
 
 help:
 	@printf '%s\n' \
@@ -57,6 +61,7 @@ help:
 		'  make -C postgresql prepare-source TARGET_ROOT=<absolute-repo-target-path>' \
 		'  make -C postgresql archives TARGET_ROOT=<absolute-repo-target-path>' \
 		'  make -C postgresql support-data TARGET_ROOT=<absolute-repo-target-path>' \
+		'  make -C postgresql lifecycle TARGET_ROOT=<absolute-repo-target-path>' \
 		'  make -C postgresql manifest TARGET_ROOT=<absolute-repo-target-path>' \
 		'  make -C postgresql update-source POSTGRESQL_REF=<full-commit>'
 
@@ -72,16 +77,16 @@ verify-inputs:
 		printf '%s\n' '[postgresql] error: the upstream checkout is not clean' >&2; exit 1; }; \
 	git -C "$(REPOSITORY_ROOT)" ls-files --error-unmatch -- \
 		postgresql/Makefile postgresql/Containerfile \
-		postgresql/support_bundle.py postgresql/engine_manifest.py \
+		postgresql/support_bundle.py postgresql/engine_manifest.py postgresql/lifecycle_probe.c \
 		postgresql/overlays/18.4 postgresql/patches/18.4 >/dev/null; \
 	[[ -z "$$(git -C "$(REPOSITORY_ROOT)" ls-files --others --exclude-standard -- \
 		postgresql/Makefile postgresql/Containerfile \
-		postgresql/support_bundle.py postgresql/engine_manifest.py \
+		postgresql/support_bundle.py postgresql/engine_manifest.py postgresql/lifecycle_probe.c \
 		postgresql/overlays/18.4 postgresql/patches/18.4)" ]] || { \
 		printf '%s\n' '[postgresql] error: the integration input contains an untracked file' >&2; exit 1; }; \
 	git -C "$(REPOSITORY_ROOT)" diff --quiet -- \
 		postgresql/Makefile postgresql/Containerfile \
-		postgresql/support_bundle.py postgresql/engine_manifest.py \
+		postgresql/support_bundle.py postgresql/engine_manifest.py postgresql/lifecycle_probe.c \
 		postgresql/overlays/18.4 postgresql/patches/18.4 || { \
 		printf '%s\n' '[postgresql] error: the integration input differs from the Git index' >&2; exit 1; }; \
 	[[ -z "$$(find "$(OVERLAY_ROOT)" -mindepth 1 ! -type d ! -type f -print -quit)" ]] || { \
@@ -259,7 +264,55 @@ archives: prepare-source build-image
 
 support-data: archives
 
-manifest: support-data
+lifecycle: archives
+	@target_root="$$(cd '$(TARGET_ROOT)' && pwd -P)"; \
+	docker run --rm --network=none --platform linux/amd64 --user 0:0 \
+		--volume "$${target_root}:/proof:rw" \
+		--volume "$(LIFECYCLE_PROBE):/input/lifecycle_probe.c:ro" \
+		"$(IMAGE)" bash -euo pipefail -c '\
+		export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; \
+		if awk -F: '\''$$1 == "orna_kernel" || $$3 == $(LIFECYCLE_UID) { found = 1 } END { exit !found }'\'' /etc/passwd; then \
+			printf "%s\n" "[postgresql] error: lifecycle passwd identity collides" >&2; exit 1; \
+		fi; \
+		if awk -F: '\''$$1 == "orna_kernel" || $$3 == $(LIFECYCLE_GID) { found = 1 } END { exit !found }'\'' /etc/group; then \
+			printf "%s\n" "[postgresql] error: lifecycle group identity collides" >&2; exit 1; \
+		fi; \
+		printf "%s\n" "orna_kernel:x:$(LIFECYCLE_GID):" >> /etc/group; \
+		printf "%s\n" "orna_kernel:x:$(LIFECYCLE_UID):$(LIFECYCLE_GID)::/nonexistent:/usr/sbin/nologin" >> /etc/passwd; \
+		rm -rf -- /proof/lifecycle; \
+		install -d -m 0700 /proof/lifecycle /proof/lifecycle/support \
+			/proof/lifecycle/pgdata /proof/lifecycle/socket; \
+		umask 077; \
+		tar --extract --file=/proof/output/embedded-postgresql-support.tar \
+			--directory=/proof/lifecycle/support --no-same-owner --no-same-permissions; \
+		test -z "$$(find /proof/lifecycle/support -mindepth 1 ! -type d ! -type f -print -quit)"; \
+		find /proof/lifecycle/support -type d -exec chmod 0700 {} +; \
+		find /proof/lifecycle/support -type f -exec chmod 0600 {} +; \
+		chown -R $(LIFECYCLE_UID):$(LIFECYCLE_GID) /proof/lifecycle; \
+		gcc -D_GNU_SOURCE -std=c11 -Wall -Wextra -Werror -Wl,--build-id=none \
+			-o /proof/lifecycle/lifecycle-probe /input/lifecycle_probe.c \
+			/proof/output/liborna_postgres18_initdb.a \
+			/proof/output/liborna_postgres18_backend.a -lz -lm; \
+		env -i PATH="$${PATH}" LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC0 \
+			/proof/lifecycle/lifecycle-probe \
+			/proof/lifecycle/support /proof/lifecycle/pgdata /proof/lifecycle/socket \
+			$(LIFECYCLE_UID) $(LIFECYCLE_GID) $(LIFECYCLE_PORT) \
+			/proof/lifecycle/embedded-initialisation-report.json \
+			>/proof/lifecycle/probe.stdout 2>/proof/lifecycle/markers; \
+		test ! -s /proof/lifecycle/probe.stdout; \
+		printf "%s\n" preload-complete reference-entry-start reference-entry-complete \
+			hostile-entry-start hostile-entry-complete initdb-start initdb-complete \
+			postmaster-start pgwire-ready query-complete postmaster-sigint complete \
+			> /proof/lifecycle/expected-markers; \
+		cmp /proof/lifecycle/expected-markers /proof/lifecycle/markers; \
+		install -m 0644 /proof/lifecycle/embedded-initialisation-report.json \
+			/proof/output/embedded-initialisation-report.json; \
+		install -m 0644 /proof/lifecycle/embedded-initialisation-report.json.stdout \
+			/proof/output/embedded-initialisation.stdout; \
+		rm -rf -- /proof/lifecycle'; \
+	printf '%s\n' "[postgresql] linked lifecycle passed below $${target_root}/output"
+
+manifest: lifecycle
 	@python3 "$(MANIFEST_BUILDER)" "$(REPOSITORY_ROOT)" "$(TARGET_ROOT)" "$(IMAGE)"
 	@printf '%s\n' "[postgresql] recorded build evidence below $(TARGET_ROOT)/output"
 
