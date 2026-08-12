@@ -49,3 +49,5 @@ source-of-truth or authority rules.
   [Local Sessions Authenticate with Unix Peer Credentials](0023-local-peer-authentication.md)
 * **work ADR 0024:**
   [Security Decisions Append Protected Audit Records](0024-protected-security-audit.md)
+* **work ADR 0025:**
+  [Canonical Runtime Values Use One Binary Codec](0025-canonical-runtime-value-codec.md)
