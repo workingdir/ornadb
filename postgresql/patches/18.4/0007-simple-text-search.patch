@@ -1,0 +1,25 @@
+diff -U0 -Nr a/src/bin/initdb/initdb.c b/src/bin/initdb/initdb.c
+--- a/src/bin/initdb/initdb.c
++++ b/src/bin/initdb/initdb.c
+@@ -183,0 +184 @@
++#ifndef ORNA_EMBEDDED_INITDB_ENTRY
+@@ -184,0 +186 @@
++#endif
+@@ -2983,0 +2986 @@
++#ifndef ORNA_EMBEDDED_INITDB_ENTRY
+@@ -2984,0 +2988 @@
++#endif
+@@ -3011,0 +3016 @@
++#ifndef ORNA_EMBEDDED_INITDB_ENTRY
+@@ -3012,0 +3018 @@
++#endif
+@@ -3023,0 +3030,3 @@
++#ifdef ORNA_EMBEDDED_INITDB_ENTRY
++	default_text_search_config = "simple";
++#else
+@@ -3048,0 +3058 @@
++#endif
+@@ -3325,0 +3336 @@
++#ifndef ORNA_EMBEDDED_INITDB_ENTRY
+@@ -3326,0 +3338 @@
++#endif
