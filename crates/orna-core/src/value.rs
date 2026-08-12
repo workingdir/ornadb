@@ -7,8 +7,9 @@
 use std::{error::Error, fmt};
 
 use crate::{
-    ObjectId, ParameterId, TypeId,
+    FieldId, ObjectId, ParameterId, TypeId,
     catalogue::CatalogueSnapshot,
+    revision::{ActiveDatabaseRevision, record_value_field_runtime_type},
     types::{ResolvedType, StandardScalar},
 };
 
@@ -34,6 +35,8 @@ pub enum RuntimeValue {
     Reference { target: TypeId, object: ObjectId },
     /// A catalogue-validated enum value.
     Enum(EnumValue),
+    /// A catalogue-validated named immutable record value.
+    Record(RecordValue),
 }
 
 impl RuntimeValue {
@@ -55,6 +58,7 @@ impl RuntimeValue {
             Self::Bytes(_) => ResolvedType::scalar(StandardScalar::BinaryLargeObject),
             Self::Reference { target, .. } => ResolvedType::reference(*target),
             Self::Enum(value) => ResolvedType::named(value.enum_type),
+            Self::Record(value) => ResolvedType::named(value.record_type),
         }
     }
 
@@ -63,6 +67,210 @@ impl RuntimeValue {
         matches!(self, Self::Null(_))
     }
 }
+
+/// One named immutable record value validated against an active catalogue.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecordValue {
+    record_type: TypeId,
+    fields: Vec<RuntimeValue>,
+}
+
+impl RecordValue {
+    /// Validates a complete named field set and stores values in declaration order.
+    pub fn new(
+        active: &ActiveDatabaseRevision,
+        record_type: TypeId,
+        fields: impl IntoIterator<Item = (String, RuntimeValue)>,
+    ) -> Result<Self, RecordValueError> {
+        let catalogue = active.catalogue();
+        let definition = catalogue
+            .record_value_type_by_id(record_type)
+            .ok_or(RecordValueError::UnknownType { record_type })?;
+        let standard = active
+            .catalogue_hash_context()
+            .standard()
+            .expect("admitted record catalogue must have a verified standard context")
+            .catalogue();
+        let mut ordered = vec![None; definition.fields().len()];
+
+        for (name, value) in fields {
+            let field = definition
+                .field_by_name(&name)
+                .ok_or(RecordValueError::UnknownField { record_type, name })?;
+            let index = usize::try_from(field.ordinal())
+                .expect("validated record field ordinal must fit usize");
+            if ordered[index].is_some() {
+                return Err(RecordValueError::DuplicateField {
+                    record_type,
+                    field: field.id(),
+                });
+            }
+            if value.is_null() {
+                return Err(RecordValueError::NullField {
+                    record_type,
+                    field: field.id(),
+                });
+            }
+            let expected =
+                record_value_field_runtime_type(catalogue, standard, field.resolved_type()).ok_or(
+                    RecordValueError::UnsupportedFieldType {
+                        record_type,
+                        field: field.id(),
+                        resolved_type: field.resolved_type(),
+                    },
+                )?;
+            let actual = value.resolved_type();
+            if actual != expected || matches!(value, RuntimeValue::Record(_)) {
+                return Err(RecordValueError::FieldTypeMismatch {
+                    record_type,
+                    field: field.id(),
+                    expected,
+                    actual,
+                });
+            }
+            if let RuntimeValue::Enum(enum_value) = &value {
+                let active_enum = catalogue
+                    .enum_type_by_id(enum_value.enum_type())
+                    .or_else(|| standard.enum_type_by_id(enum_value.enum_type()));
+                if !active_enum.is_some_and(|enum_type| {
+                    enum_type
+                        .labels()
+                        .iter()
+                        .any(|label| label == enum_value.label())
+                }) {
+                    return Err(RecordValueError::InactiveEnumLabel {
+                        record_type,
+                        field: field.id(),
+                        enum_type: enum_value.enum_type(),
+                        label: enum_value.label().to_owned(),
+                    });
+                }
+            }
+            ordered[index] = Some(value);
+        }
+
+        let fields = definition
+            .fields()
+            .iter()
+            .zip(ordered)
+            .map(|(field, value)| {
+                value.ok_or(RecordValueError::MissingField {
+                    record_type,
+                    field: field.id(),
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
+            record_type,
+            fields,
+        })
+    }
+
+    /// Returns the stable identity of the nominal record type.
+    pub const fn record_type(&self) -> TypeId {
+        self.record_type
+    }
+
+    /// Returns values in declaration ordinal order.
+    pub fn fields(&self) -> &[RuntimeValue] {
+        &self.fields
+    }
+}
+
+/// An error from validating a named immutable record value.
+#[non_exhaustive]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RecordValueError {
+    /// The active catalogue does not contain the supplied record type.
+    UnknownType {
+        /// The unknown record type identity.
+        record_type: TypeId,
+    },
+    /// The active record type does not declare the supplied exact field name.
+    UnknownField {
+        /// The active record type identity.
+        record_type: TypeId,
+        /// The unknown exact field name.
+        name: String,
+    },
+    /// One declared field was supplied more than once.
+    DuplicateField {
+        /// The active record type identity.
+        record_type: TypeId,
+        /// The duplicated field identity.
+        field: FieldId,
+    },
+    /// One required declared field was not supplied.
+    MissingField {
+        /// The active record type identity.
+        record_type: TypeId,
+        /// The missing field identity.
+        field: FieldId,
+    },
+    /// A record field was supplied as a typed null value.
+    NullField {
+        /// The active record type identity.
+        record_type: TypeId,
+        /// The field that received NULL.
+        field: FieldId,
+    },
+    /// A declared field type is not available through the selected context.
+    UnsupportedFieldType {
+        /// The active record type identity.
+        record_type: TypeId,
+        /// The unsupported field identity.
+        field: FieldId,
+        /// The unsupported declared type.
+        resolved_type: ResolvedType,
+    },
+    /// A field value does not have the exact declared runtime type.
+    FieldTypeMismatch {
+        /// The active record type identity.
+        record_type: TypeId,
+        /// The mismatched field identity.
+        field: FieldId,
+        /// The runtime type required by the declaration.
+        expected: ResolvedType,
+        /// The runtime type supplied by the caller.
+        actual: ResolvedType,
+    },
+    /// An enum field label is not present in the active enum definition.
+    InactiveEnumLabel {
+        /// The active record type identity.
+        record_type: TypeId,
+        /// The enum field identity.
+        field: FieldId,
+        /// The active enum type identity.
+        enum_type: TypeId,
+        /// The inactive label supplied by the caller.
+        label: String,
+    },
+}
+
+impl fmt::Display for RecordValueError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnknownType { .. } => formatter.write_str("record value type is not active"),
+            Self::UnknownField { .. } => {
+                formatter.write_str("record field is not declared by the active type")
+            }
+            Self::DuplicateField { .. } => formatter.write_str("record field is duplicated"),
+            Self::MissingField { .. } => formatter.write_str("record field is missing"),
+            Self::NullField { .. } => formatter.write_str("record field cannot be NULL"),
+            Self::UnsupportedFieldType { .. } => {
+                formatter.write_str("record field type is not available in the active context")
+            }
+            Self::FieldTypeMismatch { .. } => {
+                formatter.write_str("record field value has a type mismatch")
+            }
+            Self::InactiveEnumLabel { .. } => {
+                formatter.write_str("record enum field label is not active")
+            }
+        }
+    }
+}
+
+impl Error for RecordValueError {}
 
 /// One enum label validated against an active catalogue snapshot.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -157,6 +365,10 @@ impl FunctionArgument {
             | RuntimeValue::Bytes(_)
             | RuntimeValue::Reference { .. }
             | RuntimeValue::Enum(_) => Ok(Self { parameter, value }),
+            RuntimeValue::Record(value) => Err(FunctionArgumentError::RecordValueRequiresCodec {
+                parameter,
+                record_type: value.record_type(),
+            }),
         }
     }
 
@@ -182,12 +394,22 @@ pub enum FunctionArgumentError {
         /// The resolved type carried by the null value.
         resolved_type: ResolvedType,
     },
+    /// A record value cannot enter function transport before its codec is accepted.
+    RecordValueRequiresCodec {
+        /// The parameter identity supplied with the record value.
+        parameter: ParameterId,
+        /// The record type carried by the value.
+        record_type: TypeId,
+    },
 }
 
 impl fmt::Display for FunctionArgumentError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NullValue { .. } => formatter.write_str("function argument value cannot be NULL"),
+            Self::RecordValueRequiresCodec { .. } => {
+                formatter.write_str("record function argument requires the record value codec")
+            }
         }
     }
 }
@@ -324,6 +546,13 @@ impl ResultRows {
                 });
             }
             for (column_index, (column, value)) in columns.iter().zip(&row.values).enumerate() {
+                if let RuntimeValue::Record(value) = value {
+                    return Err(ResultRowsError::RecordValueRequiresCodec {
+                        row: row_index,
+                        column: column_index,
+                        record_type: value.record_type(),
+                    });
+                }
                 if value.is_null() && !column.nullable {
                     return Err(ResultRowsError::NullInNonNullableColumn {
                         row: row_index,
@@ -389,6 +618,15 @@ pub enum ResultRowsError {
         expected: ResolvedType,
         actual: ResolvedType,
     },
+    /// A record value cannot enter SERVER results before its codec is accepted.
+    RecordValueRequiresCodec {
+        /// The zero-based result row index.
+        row: usize,
+        /// The zero-based result column index.
+        column: usize,
+        /// The record type carried by the value.
+        record_type: TypeId,
+    },
 }
 
 impl fmt::Display for ResultRowsError {
@@ -427,6 +665,10 @@ impl fmt::Display for ResultRowsError {
             } => write!(
                 formatter,
                 "result row {row} column {column} has a type mismatch"
+            ),
+            Self::RecordValueRequiresCodec { row, column, .. } => write!(
+                formatter,
+                "result row {row} column {column} requires the record value codec"
             ),
         }
     }
@@ -482,15 +724,224 @@ mod tests {
     use super::*;
 
     use crate::{
-        CatalogueRevisionId, SchemaId,
+        CatalogueRevisionId, FieldId, SchemaId, SourceBundleId, SourceRevisionId, SourceUnitId,
+        StandardLibraryRevisionId, TypeId,
+        canonical_hash::{
+            calculate_standard_library_digest_for_test, catalogue_digest_with_context,
+            source_bundle_digest, source_revision_record_digest, source_unit_content_digest,
+            verify_standard_library_snapshot,
+        },
         catalogue::{
-            CatalogueSnapshot, EnumTypeDefinition, QualifiedSemanticName, SchemaDefinition,
+            CatalogueSnapshot, EnumTypeDefinition, QualifiedSemanticName,
+            RecordValueFieldDefinition, RecordValueTypeDefinition, SchemaDefinition,
+            ValueTypeDefinition, ValueTypeMutability, ValueTypePersistence,
+        },
+        revision::{
+            ActiveDatabaseRevision, ActiveDatabaseRevisionInput, ActiveRevisionContent,
+            CatalogueHashContext, DefinitionIdentity, DefinitionOrigin, RevisionPair, Sha256Digest,
+            SourceOrigin, StandardLibraryDigestVersion, StandardLibrarySnapshot,
+            StoredSourceRevision, StoredSourceUnit,
         },
     };
 
     const TARGET: TypeId = TypeId::from_bytes([0x41; 16]);
     const OBJECT: ObjectId = ObjectId::from_bytes([0x42; 16]);
     const ENUM_TYPE: TypeId = TypeId::from_bytes([0x43; 16]);
+    const RECORD_TYPE: TypeId = TypeId::from_bytes([0x47; 16]);
+    const STANDARD_BOOLEAN: TypeId = TypeId::from_bytes([0x48; 16]);
+    const ENABLED_FIELD: FieldId = FieldId::from_bytes([0x59; 16]);
+    const STAGE_FIELD: FieldId = FieldId::from_bytes([0x5a; 16]);
+
+    fn active_record_revision() -> ActiveDatabaseRevision {
+        active_record_revision_with_type(RECORD_TYPE)
+    }
+
+    fn active_record_revision_with_type(record_type: TypeId) -> ActiveDatabaseRevision {
+        let standard_unit_content = "CREATE SCHEMA std; CREATE TYPE std.boolean;";
+        let standard_unit = StoredSourceUnit::new(
+            SourceUnitId::from_bytes([0x50; 16]),
+            0,
+            "std/types.orna",
+            standard_unit_content,
+            source_unit_content_digest(standard_unit_content).unwrap(),
+        )
+        .unwrap();
+        let standard_bundle_hash =
+            source_bundle_digest(std::slice::from_ref(&standard_unit)).unwrap();
+        let standard_source = StoredSourceRevision::new(
+            SourceBundleId::from_bytes([0x51; 16]),
+            SourceRevisionId::from_bytes([0x52; 16]),
+            None,
+            vec![standard_unit],
+            standard_bundle_hash,
+            source_revision_record_digest(
+                SourceBundleId::from_bytes([0x51; 16]),
+                None,
+                standard_bundle_hash,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let standard_schema = SchemaId::from_bytes([0x53; 16]);
+        let standard_catalogue = CatalogueSnapshot::new_with_types(
+            CatalogueRevisionId::from_bytes([0x54; 16]),
+            vec![SchemaDefinition::new(
+                standard_schema,
+                QualifiedSemanticName::new(["std"]).unwrap(),
+            )],
+            vec![],
+            vec![ValueTypeDefinition::primitive(
+                STANDARD_BOOLEAN,
+                QualifiedSemanticName::new(["std", "boolean"]).unwrap(),
+                ValueTypeMutability::Immutable,
+                ValueTypePersistence::Persistable,
+                "orna.kernel.value.boolean@1",
+            )],
+            vec![],
+        )
+        .unwrap();
+        let standard_origins = vec![
+            DefinitionOrigin::new(
+                DefinitionIdentity::Schema(standard_schema),
+                SourceOrigin::new(SourceUnitId::from_bytes([0x50; 16]), 0, 1).unwrap(),
+            ),
+            DefinitionOrigin::new(
+                DefinitionIdentity::ValueType(STANDARD_BOOLEAN),
+                SourceOrigin::new(SourceUnitId::from_bytes([0x50; 16]), 1, 2).unwrap(),
+            ),
+        ];
+        let provisional_standard = StandardLibrarySnapshot::new(
+            StandardLibraryRevisionId::from_bytes([0x55; 16]),
+            StandardLibraryDigestVersion::Version1,
+            standard_source.clone(),
+            "orna.language/1",
+            standard_catalogue.clone(),
+            standard_origins.clone(),
+            Sha256Digest::from_bytes([0x56; 32]),
+        )
+        .unwrap();
+        let standard_digest =
+            calculate_standard_library_digest_for_test(&provisional_standard).unwrap();
+        let standard = verify_standard_library_snapshot(
+            StandardLibrarySnapshot::new(
+                provisional_standard.revision(),
+                provisional_standard.digest_version(),
+                standard_source,
+                provisional_standard.language_version(),
+                standard_catalogue,
+                standard_origins,
+                standard_digest,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        let application_schema = SchemaId::from_bytes([0x57; 16]);
+        let catalogue_revision = CatalogueRevisionId::from_bytes([0x58; 16]);
+        let catalogue = CatalogueSnapshot::new_with_record_value_types(
+            catalogue_revision,
+            vec![SchemaDefinition::new(
+                application_schema,
+                QualifiedSemanticName::new(["crm"]).unwrap(),
+            )],
+            vec![],
+            vec![],
+            vec![EnumTypeDefinition::new(
+                ENUM_TYPE,
+                QualifiedSemanticName::new(["crm", "stage"]).unwrap(),
+                ["lead", "qualified"],
+            )],
+            vec![RecordValueTypeDefinition::new(
+                record_type,
+                QualifiedSemanticName::new(["crm", "status"]).unwrap(),
+                vec![
+                    RecordValueFieldDefinition::new(
+                        ENABLED_FIELD,
+                        "enabled",
+                        0,
+                        ResolvedType::value(STANDARD_BOOLEAN),
+                    ),
+                    RecordValueFieldDefinition::new(
+                        STAGE_FIELD,
+                        "stage",
+                        1,
+                        ResolvedType::named(ENUM_TYPE),
+                    ),
+                ],
+            )],
+            vec![],
+        )
+        .unwrap();
+        let context = CatalogueHashContext::version_two(standard);
+        let application_content = "abcde";
+        let application_unit = StoredSourceUnit::new(
+            SourceUnitId::from_bytes([0x63; 16]),
+            0,
+            "app/types.orna",
+            application_content,
+            source_unit_content_digest(application_content).unwrap(),
+        )
+        .unwrap();
+        let application_bundle_hash =
+            source_bundle_digest(std::slice::from_ref(&application_unit)).unwrap();
+        let application_source_revision = SourceRevisionId::from_bytes([0x64; 16]);
+        let application_source = StoredSourceRevision::new(
+            SourceBundleId::from_bytes([0x65; 16]),
+            application_source_revision,
+            None,
+            vec![application_unit],
+            application_bundle_hash,
+            source_revision_record_digest(
+                SourceBundleId::from_bytes([0x65; 16]),
+                None,
+                application_bundle_hash,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let source_unit = SourceUnitId::from_bytes([0x63; 16]);
+        let origins = vec![
+            DefinitionOrigin::new(
+                DefinitionIdentity::Schema(application_schema),
+                SourceOrigin::new(source_unit, 0, 1).unwrap(),
+            ),
+            DefinitionOrigin::new(
+                DefinitionIdentity::ValueType(ENUM_TYPE),
+                SourceOrigin::new(source_unit, 1, 2).unwrap(),
+            ),
+            DefinitionOrigin::new(
+                DefinitionIdentity::ValueType(record_type),
+                SourceOrigin::new(source_unit, 2, 3).unwrap(),
+            ),
+            DefinitionOrigin::new(
+                DefinitionIdentity::Field {
+                    owner: record_type,
+                    field: ENABLED_FIELD,
+                },
+                SourceOrigin::new(source_unit, 3, 4).unwrap(),
+            ),
+            DefinitionOrigin::new(
+                DefinitionIdentity::Field {
+                    owner: record_type,
+                    field: STAGE_FIELD,
+                },
+                SourceOrigin::new(source_unit, 4, 5).unwrap(),
+            ),
+        ];
+        let catalogue_hash =
+            catalogue_digest_with_context(&context, &catalogue, &[], &[], &origins, &[]).unwrap();
+        ActiveDatabaseRevision::new_with_catalogue_hash_context(
+            ActiveDatabaseRevisionInput::new(
+                RevisionPair::new(application_source_revision, catalogue_revision),
+                application_source,
+                catalogue,
+                catalogue_hash,
+                ActiveRevisionContent::new(vec![], vec![], origins, vec![]),
+            ),
+            context,
+        )
+        .unwrap()
+    }
 
     fn enum_catalogue(labels: &[&str]) -> CatalogueSnapshot {
         CatalogueSnapshot::new_with_enum_types(
@@ -513,6 +964,218 @@ mod tests {
 
     fn column(name: &str, resolved_type: ResolvedType, nullable: bool) -> ResultColumn {
         ResultColumn::new(name, resolved_type, nullable).unwrap()
+    }
+
+    #[test]
+    fn record_values_validate_named_fields_and_store_declaration_order() {
+        let active = active_record_revision();
+        let stage =
+            RuntimeValue::Enum(EnumValue::new(active.catalogue(), ENUM_TYPE, "qualified").unwrap());
+
+        let record = RecordValue::new(
+            &active,
+            RECORD_TYPE,
+            [
+                (String::from("stage"), stage.clone()),
+                (String::from("enabled"), RuntimeValue::Boolean(true)),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(record.record_type(), RECORD_TYPE);
+        assert_eq!(
+            record.fields(),
+            &[RuntimeValue::Boolean(true), stage.clone()]
+        );
+        assert_eq!(
+            RuntimeValue::Record(record).resolved_type(),
+            ResolvedType::named(RECORD_TYPE)
+        );
+    }
+
+    #[test]
+    fn record_values_require_an_active_nominal_type_and_exact_field_names() {
+        let active = active_record_revision();
+        let unknown_type = TypeId::from_bytes([0x60; 16]);
+        assert_eq!(
+            RecordValue::new(&active, unknown_type, Vec::<(String, RuntimeValue)>::new(),),
+            Err(RecordValueError::UnknownType {
+                record_type: unknown_type,
+            })
+        );
+
+        assert_eq!(
+            RecordValue::new(
+                &active,
+                RECORD_TYPE,
+                [(String::from("Enabled"), RuntimeValue::Boolean(true))],
+            ),
+            Err(RecordValueError::UnknownField {
+                record_type: RECORD_TYPE,
+                name: String::from("Enabled"),
+            })
+        );
+    }
+
+    #[test]
+    fn record_values_require_every_declared_field_exactly_once() {
+        let active = active_record_revision();
+        assert_eq!(
+            RecordValue::new(
+                &active,
+                RECORD_TYPE,
+                [(String::from("enabled"), RuntimeValue::Boolean(true))],
+            ),
+            Err(RecordValueError::MissingField {
+                record_type: RECORD_TYPE,
+                field: STAGE_FIELD,
+            })
+        );
+
+        assert_eq!(
+            RecordValue::new(
+                &active,
+                RECORD_TYPE,
+                [
+                    (String::from("enabled"), RuntimeValue::Boolean(true)),
+                    (String::from("enabled"), RuntimeValue::Boolean(false)),
+                ],
+            ),
+            Err(RecordValueError::DuplicateField {
+                record_type: RECORD_TYPE,
+                field: ENABLED_FIELD,
+            })
+        );
+    }
+
+    #[test]
+    fn record_values_reject_null_wrong_type_and_stale_enum_fields() {
+        let active = active_record_revision();
+        assert_eq!(
+            RecordValue::new(
+                &active,
+                RECORD_TYPE,
+                [(
+                    String::from("enabled"),
+                    RuntimeValue::null(ResolvedType::scalar(StandardScalar::Boolean)).unwrap(),
+                )],
+            ),
+            Err(RecordValueError::NullField {
+                record_type: RECORD_TYPE,
+                field: ENABLED_FIELD,
+            })
+        );
+
+        assert_eq!(
+            RecordValue::new(
+                &active,
+                RECORD_TYPE,
+                [(String::from("enabled"), RuntimeValue::Integer(1))],
+            ),
+            Err(RecordValueError::FieldTypeMismatch {
+                record_type: RECORD_TYPE,
+                field: ENABLED_FIELD,
+                expected: ResolvedType::scalar(StandardScalar::Boolean),
+                actual: ResolvedType::scalar(StandardScalar::Integer),
+            })
+        );
+
+        let stale_catalogue = enum_catalogue(&["retired"]);
+        let stale =
+            RuntimeValue::Enum(EnumValue::new(&stale_catalogue, ENUM_TYPE, "retired").unwrap());
+        assert_eq!(
+            RecordValue::new(
+                &active,
+                RECORD_TYPE,
+                [
+                    (String::from("enabled"), RuntimeValue::Boolean(true)),
+                    (String::from("stage"), stale),
+                ],
+            ),
+            Err(RecordValueError::InactiveEnumLabel {
+                record_type: RECORD_TYPE,
+                field: STAGE_FIELD,
+                enum_type: ENUM_TYPE,
+                label: String::from("retired"),
+            })
+        );
+    }
+
+    #[test]
+    fn record_values_cannot_enter_server_transport_before_the_codec() {
+        let active = active_record_revision();
+        let record = RecordValue::new(
+            &active,
+            RECORD_TYPE,
+            [
+                (String::from("enabled"), RuntimeValue::Boolean(true)),
+                (
+                    String::from("stage"),
+                    RuntimeValue::Enum(
+                        EnumValue::new(active.catalogue(), ENUM_TYPE, "lead").unwrap(),
+                    ),
+                ),
+            ],
+        )
+        .unwrap();
+        let parameter = ParameterId::from_bytes([0x61; 16]);
+        assert_eq!(
+            FunctionArgument::new(parameter, RuntimeValue::Record(record.clone())),
+            Err(FunctionArgumentError::RecordValueRequiresCodec {
+                parameter,
+                record_type: RECORD_TYPE,
+            })
+        );
+        assert_eq!(
+            ResultRows::new(
+                [column("status", ResolvedType::named(RECORD_TYPE), false)],
+                [ResultRow::new([RuntimeValue::Record(record)])],
+            ),
+            Err(ResultRowsError::RecordValueRequiresCodec {
+                row: 0,
+                column: 0,
+                record_type: RECORD_TYPE,
+            })
+        );
+    }
+
+    #[test]
+    fn record_value_equality_is_nominal_and_bound_to_one_active_revision() {
+        let active = active_record_revision();
+        let fields = || {
+            [
+                (String::from("enabled"), RuntimeValue::Boolean(true)),
+                (
+                    String::from("stage"),
+                    RuntimeValue::Enum(
+                        EnumValue::new(active.catalogue(), ENUM_TYPE, "lead").unwrap(),
+                    ),
+                ),
+            ]
+        };
+        let record = RecordValue::new(&active, RECORD_TYPE, fields()).unwrap();
+        assert_eq!(
+            RecordValue::new(&active, RECORD_TYPE, fields()).unwrap(),
+            record
+        );
+
+        let other_type = TypeId::from_bytes([0x62; 16]);
+        let other_active = active_record_revision_with_type(other_type);
+        let other = RecordValue::new(
+            &other_active,
+            other_type,
+            [
+                (String::from("enabled"), RuntimeValue::Boolean(true)),
+                (
+                    String::from("stage"),
+                    RuntimeValue::Enum(
+                        EnumValue::new(other_active.catalogue(), ENUM_TYPE, "lead").unwrap(),
+                    ),
+                ),
+            ],
+        )
+        .unwrap();
+        assert_ne!(record, other);
     }
 
     #[test]
