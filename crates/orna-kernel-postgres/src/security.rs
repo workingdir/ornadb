@@ -9,8 +9,9 @@ use orna_core::{
     security::{
         AuthenticatedSession, ExecuteDecision, ExecuteGrant, InvocationTarget,
         LocalPeerAuthenticationError, LocalPeerCredential, Principal, PrincipalKind,
-        PrincipalStatus, RoleMembership, SecurityAuditDecision, SecurityAuditEvent,
-        SecuritySnapshot, SessionBindingError,
+        PrincipalStatus, RoleMembership, SecurityAuditDecision, SecurityAuditDenial,
+        SecurityAuditEvent, SecurityAuditKind, SecurityAuditOutcome, SecuritySnapshot,
+        SessionBindingError,
     },
 };
 use tokio_postgres::{IsolationLevel, Row, Transaction, types::FromSqlOwned};
@@ -22,6 +23,11 @@ use crate::{
 
 impl PostgresKernel {
     /// Authenticates a kernel-supplied Linux peer UID with no selected roles.
+    ///
+    /// The operation appends and commits one protected audit record before it
+    /// returns either the authenticated session or an expected typed denial.
+    /// Database insertion, commit, or session shutdown failure replaces the
+    /// authentication result with a kernel failure.
     pub async fn authenticate_local_peer(
         &self,
         uid: u32,
@@ -32,23 +38,38 @@ impl PostgresKernel {
                 .client
                 .build_transaction()
                 .isolation_level(IsolationLevel::RepeatableRead)
-                .read_only(true)
                 .start()
                 .await
                 .map_err(PostgresKernelError::Database)?;
             require_current_migrations(&transaction).await?;
             let security = recover_security_snapshot(&transaction).await?;
-            let authenticated = security
-                .authenticate_local_peer(uid)
-                .map_err(PostgresKernelError::LocalPeerAuthentication)?;
+            let mapped_principal = security
+                .local_peer_credentials()
+                .find(|credential| credential.uid() == uid)
+                .map(LocalPeerCredential::principal);
+            let authentication = security.authenticate_local_peer(uid);
+            let decision = match &authentication {
+                Ok(session) => SecurityAuditDecision::authentication_allowed(session),
+                Err(reason) => SecurityAuditDecision::authentication_denied(
+                    mapped_principal,
+                    *reason,
+                )
+                .map_err(|_| PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel security snapshot",
+                    record: "local peer authentication".to_owned(),
+                    rule: "mapped principal evidence must agree with the authentication result",
+                })?,
+            };
+            append_authentication_audit_event(&transaction, decision).await?;
             transaction
                 .commit()
                 .await
                 .map_err(PostgresKernelError::Database)?;
-            Ok(authenticated)
+            Ok(authentication)
         }
         .await;
-        finish_security_session(operation, database_session.shutdown().await)
+        finish_security_session(operation, database_session.shutdown().await)?
+            .map_err(PostgresKernelError::LocalPeerAuthentication)
     }
 
     /// Authorises and evaluates one CLIENT function against one active snapshot.
@@ -181,6 +202,45 @@ fn finish_security_session<T>(
         (Ok(value), Ok(())) => Ok(value),
         (Err(error), _) | (Ok(_), Err(error)) => Err(error),
     }
+}
+
+async fn append_authentication_audit_event(
+    transaction: &Transaction<'_>,
+    decision: SecurityAuditDecision,
+) -> Result<(), PostgresKernelError> {
+    let event = SecurityAuditEventId::new();
+    if decision.kind() != SecurityAuditKind::Authentication {
+        return Err(PostgresKernelError::DurableInvariant {
+            relation: "_orna_kernel.security_audit_events",
+            record: event.canonical(),
+            rule: "authentication append requires an authentication decision",
+        });
+    }
+    let event_id = event.to_bytes().to_vec();
+    let outcome = match decision.outcome() {
+        SecurityAuditOutcome::Allowed => "allowed",
+        SecurityAuditOutcome::Denied => "denied",
+    };
+    let session_principal = decision
+        .session_principal()
+        .map(|principal| principal.to_bytes().to_vec());
+    let denial_reason = match decision.denial() {
+        None => None,
+        Some(SecurityAuditDenial::Authentication(reason)) => {
+            Some(encode_authentication_audit_denial(reason))
+        }
+        Some(SecurityAuditDenial::Execute(_)) => unreachable!("kind checked above"),
+    };
+    transaction
+        .execute(
+            "INSERT INTO _orna_kernel.security_audit_events
+                 (event_id, event_kind, outcome, session_principal_id, denial_reason)
+             VALUES ($1, 'authentication', $2, $3, $4)",
+            &[&event_id, &outcome, &session_principal, &denial_reason],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?;
+    Ok(())
 }
 
 async fn lock_active_revision(
@@ -662,6 +722,36 @@ fn decode_authentication_audit_denial(
     }
 }
 
+fn encode_authentication_audit_denial(reason: LocalPeerAuthenticationError) -> &'static str {
+    match reason {
+        LocalPeerAuthenticationError::UnknownUid => "authentication_unknown_uid",
+        LocalPeerAuthenticationError::InvalidPrincipal(
+            SessionBindingError::UnknownSessionPrincipal,
+        ) => "authentication_unknown_session_principal",
+        LocalPeerAuthenticationError::InvalidPrincipal(
+            SessionBindingError::DisabledSessionPrincipal,
+        ) => "authentication_disabled_session_principal",
+        LocalPeerAuthenticationError::InvalidPrincipal(
+            SessionBindingError::RoleCannotAuthenticate,
+        ) => "authentication_role_cannot_authenticate",
+        LocalPeerAuthenticationError::InvalidPrincipal(
+            SessionBindingError::DuplicateActiveRole,
+        ) => "authentication_duplicate_active_role",
+        LocalPeerAuthenticationError::InvalidPrincipal(SessionBindingError::UnknownActiveRole) => {
+            "authentication_unknown_active_role"
+        }
+        LocalPeerAuthenticationError::InvalidPrincipal(SessionBindingError::DisabledActiveRole) => {
+            "authentication_disabled_active_role"
+        }
+        LocalPeerAuthenticationError::InvalidPrincipal(
+            SessionBindingError::ActivePrincipalIsNotRole,
+        ) => "authentication_active_principal_is_not_role",
+        LocalPeerAuthenticationError::InvalidPrincipal(
+            SessionBindingError::UnreachableActiveRole,
+        ) => "authentication_unreachable_active_role",
+    }
+}
+
 fn decode_execute_audit_denial(
     value: String,
     record: &str,
@@ -876,6 +966,7 @@ mod tests {
             ),
         ];
         for (stored, expected) in authentication {
+            assert_eq!(encode_authentication_audit_denial(expected), stored);
             assert_eq!(
                 decode_authentication_audit_denial(stored.to_owned(), "41")
                     .expect("closed authentication reason must decode"),
@@ -911,6 +1002,26 @@ mod tests {
                 ref record,
                 rule: "EXECUTE denial reason is unsupported",
             }) if record == "44"
+        ));
+    }
+
+    #[test]
+    fn denied_authentication_does_not_hide_session_shutdown_failure() {
+        let operation: Result<Result<(), LocalPeerAuthenticationError>, PostgresKernelError> =
+            Ok(Err(LocalPeerAuthenticationError::UnknownUid));
+        let shutdown = PostgresKernelError::DurableInvariant {
+            relation: "test session",
+            record: "shutdown".to_owned(),
+            rule: "driver failed during shutdown",
+        };
+
+        assert!(matches!(
+            finish_security_session(operation, Err(shutdown)),
+            Err(PostgresKernelError::DurableInvariant {
+                relation: "test session",
+                ref record,
+                rule: "driver failed during shutdown",
+            }) if record == "shutdown"
         ));
     }
 }
