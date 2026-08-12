@@ -1286,8 +1286,13 @@ async fn persist_semantics(
                 value_type,
                 standard_library_revision,
                 enum_type,
+                record_type: nested_record_type,
             } = encoder.type_columns(field.resolved_type(), false)?;
-            if scalar.is_some() || target.is_some() || !matches!(kind, "value" | "enum") {
+            if scalar.is_some()
+                || target.is_some()
+                || nested_record_type.is_some()
+                || !matches!(kind, "value" | "enum")
+            {
                 return Err(invariant(
                     "record value fields must use one supported standard value or application enum type",
                 ));
@@ -1359,6 +1364,7 @@ async fn persist_semantics(
                 value_type,
                 standard_library_revision,
                 enum_type,
+                record_type,
             } = encoder.type_columns(field.resolved_type(), false)?;
             let delete = on_delete(field.on_delete());
             let origin = origin(
@@ -1373,9 +1379,10 @@ async fn persist_semantics(
                     "INSERT INTO _orna_kernel.catalogue_fields
                     (catalogue_revision_id, owner_type_id, field_id, name, ordinal,
                      type_kind, scalar_type, target_type_id, value_type_id,
-                     value_standard_library_revision_id, enum_type_id, nullable, is_unique,
+                     value_standard_library_revision_id, enum_type_id, record_type_id,
+                     nullable, is_unique,
                      default_expression_id, on_delete, source_unit_id, source_start, source_end)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)",
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)",
                     &[
                         &bytes(catalogue),
                         &bytes(object.id()),
@@ -1388,6 +1395,7 @@ async fn persist_semantics(
                         &value_type.map(bytes),
                         &standard_library_revision.map(bytes),
                         &enum_type.map(bytes),
+                        &record_type.map(bytes),
                         &field.nullable(),
                         &field.unique(),
                         &field.default_expression().map(bytes),
@@ -1416,29 +1424,39 @@ async fn persist_functions(
             candidate.origins(),
             DefinitionIdentity::Function(function.id()),
         )?;
-        let (shape, kind, scalar, target, value_type, standard_library_revision, enum_type) =
-            match function.return_type() {
-                FunctionReturn::Single(value) => {
-                    let TypeColumns {
-                        kind,
-                        scalar,
-                        target,
-                        value_type,
-                        standard_library_revision,
-                        enum_type,
-                    } = encoder.type_columns(*value, true)?;
-                    (
-                        "single",
-                        Some(kind),
-                        scalar,
-                        target,
-                        value_type,
-                        standard_library_revision,
-                        enum_type,
-                    )
-                }
-                FunctionReturn::Rows(_) => ("rows", None, None, None, None, None, None),
-            };
+        let (
+            shape,
+            kind,
+            scalar,
+            target,
+            value_type,
+            standard_library_revision,
+            enum_type,
+            record_type,
+        ) = match function.return_type() {
+            FunctionReturn::Single(value) => {
+                let TypeColumns {
+                    kind,
+                    scalar,
+                    target,
+                    value_type,
+                    standard_library_revision,
+                    enum_type,
+                    record_type,
+                } = encoder.type_columns(*value, true)?;
+                (
+                    "single",
+                    Some(kind),
+                    scalar,
+                    target,
+                    value_type,
+                    standard_library_revision,
+                    enum_type,
+                    record_type,
+                )
+            }
+            FunctionReturn::Rows(_) => ("rows", None, None, None, None, None, None, None),
+        };
         transaction
             .execute(
                 "INSERT INTO _orna_kernel.catalogue_functions
@@ -1446,9 +1464,9 @@ async fn persist_functions(
                  security_mode, transaction_mode, volatility, return_shape,
                  return_type_kind, return_scalar_type, return_target_type_id,
                  return_value_type_id, return_standard_library_revision_id,
-                 return_enum_type_id,
+                 return_enum_type_id, return_record_type_id,
                  current_function_revision_id, source_unit_id, source_start, source_end)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)",
                 &[
                     &bytes(catalogue),
                     &bytes(function.id()),
@@ -1465,6 +1483,7 @@ async fn persist_functions(
                     &value_type.map(bytes),
                     &standard_library_revision.map(bytes),
                     &enum_type.map(bytes),
+                    &record_type.map(bytes),
                     &bytes(function.current_revision()),
                     &bytes(function_origin.source_unit()),
                     &i64::from(function_origin.byte_start()),
@@ -1481,6 +1500,7 @@ async fn persist_functions(
                 value_type,
                 standard_library_revision,
                 enum_type,
+                record_type,
             } = encoder.type_columns(parameter.resolved_type(), false)?;
             let origin = origin(
                 candidate.origins(),
@@ -1494,9 +1514,10 @@ async fn persist_functions(
                     "INSERT INTO _orna_kernel.catalogue_function_parameters
                     (catalogue_revision_id, function_id, parameter_id, name, ordinal,
                      type_kind, scalar_type, target_type_id, value_type_id,
-                     value_standard_library_revision_id, enum_type_id, default_expression_id,
+                     value_standard_library_revision_id, enum_type_id, record_type_id,
+                     default_expression_id,
                      source_unit_id, source_start, source_end)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)",
                     &[
                         &bytes(catalogue),
                         &bytes(function.id()),
@@ -1509,6 +1530,7 @@ async fn persist_functions(
                         &value_type.map(bytes),
                         &standard_library_revision.map(bytes),
                         &enum_type.map(bytes),
+                        &record_type.map(bytes),
                         &parameter.default_expression().map(bytes),
                         &bytes(origin.source_unit()),
                         &i64::from(origin.byte_start()),
@@ -1527,6 +1549,7 @@ async fn persist_functions(
                     value_type,
                     standard_library_revision,
                     enum_type,
+                    record_type,
                 } = encoder.type_columns(column.resolved_type(), false)?;
                 let origin = origin(
                     candidate.origins(),
@@ -1540,9 +1563,9 @@ async fn persist_functions(
                         "INSERT INTO _orna_kernel.catalogue_function_return_columns
                         (catalogue_revision_id, function_id, name, ordinal, type_kind,
                          scalar_type, target_type_id, value_type_id,
-                         value_standard_library_revision_id, enum_type_id,
+                         value_standard_library_revision_id, enum_type_id, record_type_id,
                          source_unit_id, source_start, source_end)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
                         &[
                             &bytes(catalogue),
                             &bytes(function.id()),
@@ -1554,6 +1577,7 @@ async fn persist_functions(
                             &value_type.map(bytes),
                             &standard_library_revision.map(bytes),
                             &enum_type.map(bytes),
+                            &record_type.map(bytes),
                             &bytes(origin.source_unit()),
                             &i64::from(origin.byte_start()),
                             &i64::from(origin.byte_end()),
@@ -1625,6 +1649,7 @@ async fn persist_revisions_and_references(
             owner_function,
             standard_library_revision,
             enum_catalogue_revision,
+            record_catalogue_revision,
         ) = encoder.reference_columns(reference)?;
         let reference_kind = reference_kind(reference.kind())?;
         let source = reference.source_origin();
@@ -1634,9 +1659,10 @@ async fn persist_revisions_and_references(
                 (catalogue_revision_id, source_function_id, source_function_revision_id,
                  ordinal, target_definition_id, target_kind, target_owner_type_id,
                  target_owner_function_id, target_standard_library_revision_id,
-                 target_enum_catalogue_revision_id, reference_kind, source_subobject_id,
+                 target_enum_catalogue_revision_id, target_record_catalogue_revision_id,
+                 reference_kind, source_subobject_id,
                  source_unit_id, source_start, source_end)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NULL, $12, $13, $14)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NULL, $13, $14, $15)",
                 &[
                     &bytes(catalogue),
                     &bytes(reference.source_function()),
@@ -1648,6 +1674,7 @@ async fn persist_revisions_and_references(
                     &owner_function,
                     &standard_library_revision,
                     &enum_catalogue_revision,
+                    &record_catalogue_revision,
                     &reference_kind,
                     &bytes(source.source_unit()),
                     &i64::from(source.byte_start()),
@@ -1906,6 +1933,7 @@ struct TypeColumns {
     value_type: Option<TypeId>,
     standard_library_revision: Option<StandardLibraryRevisionId>,
     enum_type: Option<TypeId>,
+    record_type: Option<TypeId>,
 }
 
 /// The one context-aware PostgreSQL projection for candidate type and reference
@@ -1945,6 +1973,7 @@ impl<'a> CandidateEncoder<'a> {
                 value_type: None,
                 standard_library_revision: None,
                 enum_type: None,
+                record_type: None,
             });
         }
         if let Some(value) = value.named_type() {
@@ -1956,6 +1985,18 @@ impl<'a> CandidateEncoder<'a> {
                     value_type: None,
                     standard_library_revision: None,
                     enum_type: Some(value),
+                    record_type: None,
+                });
+            }
+            if self.catalogue.record_value_type_by_id(value).is_some() {
+                return Ok(TypeColumns {
+                    kind: "record",
+                    scalar: None,
+                    target: None,
+                    value_type: None,
+                    standard_library_revision: None,
+                    enum_type: None,
+                    record_type: Some(value),
                 });
             }
             return Ok(TypeColumns {
@@ -1965,6 +2006,7 @@ impl<'a> CandidateEncoder<'a> {
                 value_type: None,
                 standard_library_revision: None,
                 enum_type: None,
+                record_type: None,
             });
         }
         if let Some(target) = value.reference_target() {
@@ -1975,6 +2017,7 @@ impl<'a> CandidateEncoder<'a> {
                 value_type: None,
                 standard_library_revision: None,
                 enum_type: None,
+                record_type: None,
             });
         }
         if let Some(value_type) = value.value_type() {
@@ -1988,6 +2031,7 @@ impl<'a> CandidateEncoder<'a> {
                 value_type: Some(value_type),
                 standard_library_revision: Some(standard_library_revision),
                 enum_type: None,
+                record_type: None,
             });
         }
         Err(invariant(
@@ -2000,13 +2044,25 @@ impl<'a> CandidateEncoder<'a> {
         value: DefinitionReferenceTarget,
     ) -> Result<ReferenceTargetColumns, PostgresKernelError> {
         if let DefinitionReferenceTarget::ObjectType(id) = value {
-            return Ok(("object_type", bytes(id), None, None, None, None));
+            return Ok(("object_type", bytes(id), None, None, None, None, None));
         }
         if let DefinitionReferenceTarget::ValueType(id) = value {
             if self.catalogue.enum_type_by_id(id).is_some() {
                 return Ok((
                     "enum_type",
                     bytes(id),
+                    None,
+                    None,
+                    None,
+                    Some(bytes(self.catalogue.revision())),
+                    None,
+                ));
+            }
+            if self.catalogue.record_value_type_by_id(id).is_some() {
+                return Ok((
+                    "record_type",
+                    bytes(id),
+                    None,
                     None,
                     None,
                     None,
@@ -2023,13 +2079,22 @@ impl<'a> CandidateEncoder<'a> {
                 None,
                 Some(bytes(standard_library_revision)),
                 None,
+                None,
             ));
         }
         if let DefinitionReferenceTarget::Field { owner, field } = value {
-            return Ok(("field", bytes(field), Some(bytes(owner)), None, None, None));
+            return Ok((
+                "field",
+                bytes(field),
+                Some(bytes(owner)),
+                None,
+                None,
+                None,
+                None,
+            ));
         }
         if let DefinitionReferenceTarget::Function(id) = value {
-            return Ok(("function", bytes(id), None, None, None, None));
+            return Ok(("function", bytes(id), None, None, None, None, None));
         }
         if let DefinitionReferenceTarget::Parameter { owner, parameter } = value {
             return Ok((
@@ -2039,10 +2104,11 @@ impl<'a> CandidateEncoder<'a> {
                 Some(bytes(owner)),
                 None,
                 None,
+                None,
             ));
         }
         if let DefinitionReferenceTarget::Expression(id) = value {
-            return Ok(("expression", bytes(id), None, None, None, None));
+            return Ok(("expression", bytes(id), None, None, None, None, None));
         }
         Err(invariant(
             "definition reference target is not supported by PostgreSQL persistence",
@@ -2060,6 +2126,7 @@ impl<'a> CandidateEncoder<'a> {
             owner_function,
             standard_library_revision,
             enum_catalogue_revision,
+            record_catalogue_revision,
         ) = self.reference_target(reference.target())?;
         Ok((
             target,
@@ -2068,6 +2135,7 @@ impl<'a> CandidateEncoder<'a> {
             owner_function,
             standard_library_revision,
             enum_catalogue_revision,
+            record_catalogue_revision,
         ))
     }
 }
@@ -2193,6 +2261,7 @@ type ReferenceTargetColumns = (
     Option<Vec<u8>>,
     Option<Vec<u8>>,
     Option<Vec<u8>>,
+    Option<Vec<u8>>,
 );
 
 #[cfg(test)]
@@ -2228,6 +2297,7 @@ type ReferenceInsertColumns = (
     Option<Vec<u8>>,
     Option<Vec<u8>>,
     Option<Vec<u8>>,
+    Option<Vec<u8>>,
 );
 
 #[cfg(test)]
@@ -2241,7 +2311,8 @@ mod tests {
         },
         catalogue::{
             CatalogueSnapshot, EnumTypeDefinition, FieldDefinition, FunctionTransaction,
-            ObjectTypeDefinition, QualifiedSemanticName, SchemaDefinition,
+            ObjectTypeDefinition, QualifiedSemanticName, RecordValueFieldDefinition,
+            RecordValueTypeDefinition, SchemaDefinition,
         },
         physical::{PhysicalPlanError, plan_physical_changes},
         revision::{
@@ -2614,6 +2685,7 @@ mod tests {
                 value_type: Some(preflight_value_type()),
                 standard_library_revision: Some(standard.revision()),
                 enum_type: None,
+                record_type: None,
             }
         );
     }
@@ -2635,6 +2707,7 @@ mod tests {
                 value_type: None,
                 standard_library_revision: None,
                 enum_type: None,
+                record_type: None,
             }
         );
         assert_eq!(
@@ -2646,6 +2719,7 @@ mod tests {
             (
                 "object_type",
                 preflight_object_type().to_bytes().to_vec(),
+                None,
                 None,
                 None,
                 None,
@@ -2670,14 +2744,16 @@ mod tests {
                 None,
                 Some(standard.revision().to_bytes().to_vec()),
                 None,
+                None,
             )
         );
     }
 
     #[test]
-    fn candidate_encoder_separates_application_enums_from_other_named_types() {
+    fn candidate_encoder_separates_application_named_types() {
         let enum_type = TypeId::from_bytes([0x61; 16]);
-        let catalogue = CatalogueSnapshot::new_with_enum_types(
+        let record_type = TypeId::from_bytes([0x64; 16]);
+        let catalogue = CatalogueSnapshot::new_with_record_value_types(
             CatalogueRevisionId::from_bytes([0x62; 16]),
             vec![SchemaDefinition::new(
                 SchemaId::from_bytes([0x63; 16]),
@@ -2689,6 +2765,16 @@ mod tests {
                 enum_type,
                 QualifiedSemanticName::new(["app", "stage"]).unwrap(),
                 ["lead", "customer"],
+            )],
+            vec![RecordValueTypeDefinition::new(
+                record_type,
+                QualifiedSemanticName::new(["app", "status"]).unwrap(),
+                vec![RecordValueFieldDefinition::new(
+                    FieldId::from_bytes([0x65; 16]),
+                    "stage",
+                    0,
+                    ResolvedType::named(enum_type),
+                )],
             )],
             Vec::new(),
         )
@@ -2711,6 +2797,7 @@ mod tests {
                 value_type: None,
                 standard_library_revision: None,
                 enum_type: Some(enum_type),
+                record_type: None,
             }
         );
         assert_eq!(
@@ -2720,6 +2807,35 @@ mod tests {
             (
                 "enum_type",
                 enum_type.to_bytes().to_vec(),
+                None,
+                None,
+                None,
+                Some(catalogue.revision().to_bytes().to_vec()),
+                None,
+            )
+        );
+        assert_eq!(
+            encoder
+                .type_columns(ResolvedType::named(record_type), false)
+                .unwrap(),
+            TypeColumns {
+                kind: "record",
+                scalar: None,
+                target: None,
+                value_type: None,
+                standard_library_revision: None,
+                enum_type: None,
+                record_type: Some(record_type),
+            }
+        );
+        assert_eq!(
+            encoder
+                .reference_target(DefinitionReferenceTarget::ValueType(record_type))
+                .unwrap(),
+            (
+                "record_type",
+                record_type.to_bytes().to_vec(),
+                None,
                 None,
                 None,
                 None,
