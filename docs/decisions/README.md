@@ -59,3 +59,5 @@ source-of-truth or authority rules.
   [The Local Raw Socket Negotiates Before Protected Dispatch](0028-authenticated-local-raw-socket.md)
 * **work ADR 0029:**
   [Enum Types Are Ordered Catalogue Values](0029-catalogue-enum-value-types.md)
+* **work ADR 0030:**
+  [One Authenticated, Authorised, Audited SERVER SELECT](0030-authenticated-server-select.md)
