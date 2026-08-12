@@ -4195,6 +4195,9 @@ impl IdentityMap {
             CheckedDefinitionReferenceTarget::ObjectType(id) => {
                 DefinitionReferenceTarget::ObjectType(self.type_id(id)?)
             }
+            CheckedDefinitionReferenceTarget::ValueType(id) => {
+                DefinitionReferenceTarget::ValueType(self.type_id(id)?)
+            }
             CheckedDefinitionReferenceTarget::Field { owner, field } => {
                 DefinitionReferenceTarget::Field {
                     owner: self.type_id(owner)?,
@@ -6104,6 +6107,29 @@ mod tests {
         assert!(same_member_multiset(&[1_u8, 2, 2, 3], &[3, 2, 1, 2]));
         assert!(!same_member_multiset(&[1_u8, 2, 2, 3], &[3, 2, 1, 4]));
         assert!(!same_member_multiset(&[1_u8, 2, 2, 3], &[3, 2, 1, 1]));
+    }
+
+    #[test]
+    fn checked_value_type_reference_maps_to_its_durable_identity() {
+        let checked = CheckedTypeId::Existing(TypeId::from_bytes([0x70; 16]));
+        let durable = TypeId::from_bytes([0x71; 16]);
+        let mut identities = IdentityMap::default();
+        identities.types.insert(checked, durable);
+
+        assert_eq!(
+            identities
+                .reference_target(CheckedDefinitionReferenceTarget::ValueType(checked))
+                .unwrap(),
+            DefinitionReferenceTarget::ValueType(durable)
+        );
+        assert!(matches!(
+            identities.reference_target(CheckedDefinitionReferenceTarget::ValueType(
+                CheckedTypeId::Existing(TypeId::from_bytes([0x72; 16]))
+            )),
+            Err(PrepareError::InvalidCheckedBundle {
+                reason: "checked type has no durable identity"
+            })
+        ));
     }
 
     #[test]
