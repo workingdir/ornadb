@@ -12,7 +12,7 @@ use orna_core::{
     catalogue::CatalogueSnapshotError,
     physical::PhysicalPlanError,
     revision::{CatalogueHashVersion, RevisionInvariantError, RevisionPair},
-    security::{ExecuteDenial, SecuritySnapshotError},
+    security::{ExecuteDenial, LocalPeerAuthenticationError, SecuritySnapshotError},
 };
 use orna_standard::StandardUpgradeIdentity;
 
@@ -152,6 +152,8 @@ pub enum PostgresKernelError {
     },
     /// An authorised CLIENT function could not be evaluated.
     ClientExecution(ClientExecutionError),
+    /// A kernel-supplied local peer UID could not establish an Orna session.
+    LocalPeerAuthentication(LocalPeerAuthenticationError),
     /// The candidate was prepared against a revision pair that is no longer active.
     ExpectedBaseMismatch {
         /// The base pair carried by the candidate.
@@ -266,6 +268,9 @@ impl fmt::Display for PostgresKernelError {
             Self::ClientExecution(error) => {
                 write!(formatter, "CLIENT function execution failed: {error}")
             }
+            Self::LocalPeerAuthentication(error) => {
+                write!(formatter, "local peer authentication failed: {error}")
+            }
             Self::ExpectedBaseMismatch { .. } => {
                 formatter.write_str("expected revision pair is not active")
             }
@@ -320,6 +325,7 @@ impl Error for PostgresKernelError {
             Self::CatalogueSnapshot(error) => Some(error),
             Self::SecuritySnapshot(error) => Some(error),
             Self::ClientExecution(error) => Some(error),
+            Self::LocalPeerAuthentication(error) => Some(error),
             Self::PhysicalPlan(error) => Some(error),
             Self::ServerSelect(error) => Some(error),
             Self::ServerInsert(error) => Some(error),
@@ -350,7 +356,7 @@ mod tests {
         catalogue::CatalogueSnapshotError,
         physical::PhysicalPlanError,
         revision::{CatalogueHashVersion, RevisionInvariantError, RevisionPair},
-        security::ExecuteDenial,
+        security::{ExecuteDenial, LocalPeerAuthenticationError},
     };
 
     use super::{PostgresKernel, PostgresKernelError};
@@ -474,6 +480,23 @@ mod tests {
                 reason: ExecuteDenial::MissingExecuteGrant,
             } if actual_pair == pair && actual_function == function
         ));
+    }
+
+    #[test]
+    fn local_peer_authentication_error_remains_a_typed_source() {
+        let error =
+            PostgresKernelError::LocalPeerAuthentication(LocalPeerAuthenticationError::UnknownUid);
+
+        assert_eq!(
+            error.to_string(),
+            "local peer authentication failed: local peer credential is unknown"
+        );
+        let source = error.source().expect("authentication failure has a source");
+        assert_eq!(
+            source.downcast_ref::<LocalPeerAuthenticationError>(),
+            Some(&LocalPeerAuthenticationError::UnknownUid)
+        );
+        assert!(source.source().is_none());
     }
 
     #[test]
