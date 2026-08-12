@@ -22,7 +22,10 @@ use crate::{
     CatalogueRevisionId, ExpressionId, FieldId, FunctionId, FunctionRevisionId, ParameterId,
     SchemaId, SourceBundleId, SourceRevisionId, SourceUnitId, StandardLibraryRevisionId,
     TypeBindingId, TypeId,
-    catalogue::{CatalogueSnapshot, FunctionDomain, FunctionReturn},
+    catalogue::{
+        CatalogueSnapshot, FunctionDomain, FunctionReturn, ValueTypeDefinition, ValueTypeKind,
+        ValueTypeMutability, ValueTypePersistence,
+    },
     types::{ResolvedType, StandardScalar},
 };
 
@@ -604,9 +607,9 @@ pub enum DefinitionIdentity {
     ValueType(TypeId),
     /// A direct type-name binding.
     TypeBinding(TypeBindingId),
-    /// A field owned by an object type.
+    /// A field owned by an object or record value type.
     Field {
-        /// The stable object-type identity.
+        /// The stable owning type identity.
         owner: TypeId,
         /// The stable field identity.
         field: FieldId,
@@ -1588,7 +1591,8 @@ impl DeployableRevision {
 pub fn validate_persistable_catalogue(
     revision: &DeployableRevision,
 ) -> Result<(), RevisionInvariantError> {
-    validate_resolved_type_slots(revision.catalogue_hash_context(), revision.candidate())
+    validate_resolved_type_slots(revision.catalogue_hash_context(), revision.candidate())?;
+    validate_record_value_field_types(revision.catalogue_hash_context(), revision.candidate())
 }
 
 fn validate_source_units(units: &[StoredSourceUnit]) -> Result<(), RevisionInvariantError> {
@@ -1905,6 +1909,7 @@ fn validate_resolved_type_slots(
         for field in object_type.fields() {
             validate_resolved_type_slot(
                 context,
+                catalogue,
                 DefinitionIdentity::Field {
                     owner: object_type.id(),
                     field: field.id(),
@@ -1918,6 +1923,7 @@ fn validate_resolved_type_slots(
         for parameter in function.parameters() {
             validate_resolved_type_slot(
                 context,
+                catalogue,
                 DefinitionIdentity::Parameter {
                     owner: function.id(),
                     parameter: parameter.id(),
@@ -1931,6 +1937,7 @@ fn validate_resolved_type_slots(
                 for column in columns {
                     validate_resolved_type_slot(
                         context,
+                        catalogue,
                         DefinitionIdentity::FunctionReturnColumn {
                             owner: function.id(),
                             ordinal: column.ordinal(),
@@ -1941,6 +1948,7 @@ fn validate_resolved_type_slots(
             }
             FunctionReturn::Single(resolved_type) => validate_resolved_type_slot(
                 context,
+                catalogue,
                 DefinitionIdentity::Function(function.id()),
                 *resolved_type,
             )?,
@@ -1952,9 +1960,20 @@ fn validate_resolved_type_slots(
 
 fn validate_resolved_type_slot(
     context: &CatalogueHashContext,
+    catalogue: &CatalogueSnapshot,
     identity: DefinitionIdentity,
     resolved_type: ResolvedType,
 ) -> Result<(), RevisionInvariantError> {
+    if let ResolvedType::Named(record_value_type) = resolved_type
+        && catalogue
+            .record_value_type_by_id(record_value_type)
+            .is_some()
+    {
+        return Err(RevisionInvariantError::RecordValueSlotRequiresCodec {
+            identity,
+            record_value_type,
+        });
+    }
     match resolved_type {
         ResolvedType::Scalar(scalar) => {
             if matches!(context, CatalogueHashContext::Version2 { .. }) {
@@ -1999,8 +2018,11 @@ fn validate_catalogue_hash_context_coherence(
     origins: &[DefinitionOrigin],
     references: &[DefinitionReference],
 ) -> Result<(), RevisionInvariantError> {
-    reject_record_value_types_without_hash_contract(catalogue)?;
+    if matches!(context, CatalogueHashContext::Version1) {
+        reject_record_value_types_for_version_one(catalogue)?;
+    }
     validate_resolved_type_slots(context, catalogue)?;
+    validate_record_value_field_types(context, catalogue)?;
     match context {
         CatalogueHashContext::Version1 => {
             validate_catalogue_hash_context_version_one(catalogue, revisions, origins, references)
@@ -2011,17 +2033,74 @@ fn validate_catalogue_hash_context_coherence(
     }
 }
 
-fn reject_record_value_types_without_hash_contract(
+fn reject_record_value_types_for_version_one(
     catalogue: &CatalogueSnapshot,
 ) -> Result<(), RevisionInvariantError> {
     if let Some(record_value_type) = catalogue.record_value_types().first() {
         return Err(
-            RevisionInvariantError::RecordValueTypeHashContractNotImplemented {
+            RevisionInvariantError::RecordValueTypeRequiresCatalogueHashVersionTwo {
                 record_value_type: record_value_type.id(),
             },
         );
     }
     Ok(())
+}
+
+fn validate_record_value_field_types(
+    context: &CatalogueHashContext,
+    catalogue: &CatalogueSnapshot,
+) -> Result<(), RevisionInvariantError> {
+    let CatalogueHashContext::Version2 { standard } = context else {
+        return Ok(());
+    };
+    for record_value_type in catalogue.record_value_types() {
+        for field in record_value_type.fields() {
+            if !record_value_field_type_is_supported(
+                catalogue,
+                standard.catalogue(),
+                field.resolved_type(),
+            ) {
+                return Err(RevisionInvariantError::UnsupportedRecordValueFieldType {
+                    record_value_type: record_value_type.id(),
+                    field: field.id(),
+                    resolved_type: field.resolved_type(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn record_value_field_type_is_supported(
+    catalogue: &CatalogueSnapshot,
+    standard: &CatalogueSnapshot,
+    resolved_type: ResolvedType,
+) -> bool {
+    match resolved_type {
+        ResolvedType::Value(value_type) => standard
+            .value_type_by_id(value_type)
+            .is_some_and(accepted_record_primitive),
+        ResolvedType::Named(enum_type) => {
+            catalogue.enum_type_by_id(enum_type).is_some()
+                || standard.enum_type_by_id(enum_type).is_some()
+        }
+        ResolvedType::Scalar(_) | ResolvedType::Reference { .. } => false,
+    }
+}
+
+pub(crate) fn accepted_record_primitive(value_type: &ValueTypeDefinition) -> bool {
+    value_type.kind() == ValueTypeKind::Primitive
+        && value_type.mutability() == ValueTypeMutability::Immutable
+        && value_type.persistence() == ValueTypePersistence::Persistable
+        && matches!(
+            value_type.representation_contract(),
+            "orna.kernel.value.boolean@1"
+                | "orna.kernel.value.integer@1"
+                | "orna.kernel.value.bigint@1"
+                | "orna.kernel.value.float@1"
+                | "orna.kernel.value.character-large-object@1"
+                | "orna.kernel.value.binary-large-object@1"
+        )
 }
 
 fn validate_catalogue_hash_context_version_one(
@@ -2271,6 +2350,15 @@ fn expected_definition_identities(
             .iter()
             .map(|enum_type| DefinitionIdentity::ValueType(enum_type.id())),
     );
+    for record_value_type in catalogue.record_value_types() {
+        identities.push(DefinitionIdentity::ValueType(record_value_type.id()));
+        identities.extend(record_value_type.fields().iter().map(|field| {
+            DefinitionIdentity::Field {
+                owner: record_value_type.id(),
+                field: field.id(),
+            }
+        }));
+    }
     identities.extend(
         catalogue
             .type_bindings()
@@ -2311,13 +2399,21 @@ fn definition_exists(
         DefinitionIdentity::Schema(id) => catalogue.schema_by_id(id).is_some(),
         DefinitionIdentity::ObjectType(id) => catalogue.object_type_by_id(id).is_some(),
         DefinitionIdentity::ValueType(id) => {
-            catalogue.value_type_by_id(id).is_some() || catalogue.enum_type_by_id(id).is_some()
+            catalogue.value_type_by_id(id).is_some()
+                || catalogue.enum_type_by_id(id).is_some()
+                || catalogue.record_value_type_by_id(id).is_some()
         }
         DefinitionIdentity::TypeBinding(id) => catalogue.type_binding_by_id(id).is_some(),
-        DefinitionIdentity::Field { owner, field } => catalogue
-            .object_type_by_id(owner)
-            .and_then(|object_type| object_type.field_by_id(field))
-            .is_some(),
+        DefinitionIdentity::Field { owner, field } => {
+            catalogue
+                .object_type_by_id(owner)
+                .and_then(|object_type| object_type.field_by_id(field))
+                .is_some()
+                || catalogue
+                    .record_value_type_by_id(owner)
+                    .and_then(|record_value_type| record_value_type.field_by_id(field))
+                    .is_some()
+        }
         DefinitionIdentity::Function(id) => catalogue.function_by_id(id).is_some(),
         DefinitionIdentity::Parameter { owner, parameter } => catalogue
             .function_by_id(owner)
@@ -2340,6 +2436,18 @@ fn reference_target_exists(
     expression_ids: &HashSet<ExpressionId>,
     target: DefinitionReferenceTarget,
 ) -> bool {
+    if let DefinitionReferenceTarget::Field { owner, field } = target {
+        return catalogue
+            .object_type_by_id(owner)
+            .and_then(|object_type| object_type.field_by_id(field))
+            .is_some()
+            || standard.is_some_and(|standard| {
+                standard
+                    .object_type_by_id(owner)
+                    .and_then(|object_type| object_type.field_by_id(field))
+                    .is_some()
+            });
+    }
     let identity = target.into();
     definition_exists(catalogue, expression_ids, identity)
         || standard.is_some_and(|standard| definition_exists(standard, expression_ids, identity))
@@ -2459,6 +2567,13 @@ pub enum RevisionInvariantError {
         /// The absent durable standard value-type identity.
         value_type: TypeId,
     },
+    /// A durable or executable slot uses a record before its value codec exists.
+    RecordValueSlotRequiresCodec {
+        /// The catalogue slot containing the record type.
+        identity: DefinitionIdentity,
+        /// The record value type requiring a codec.
+        record_value_type: TypeId,
+    },
     /// A version-2 function semantic hash was paired with a version-1 catalogue hash.
     FunctionSemanticHashVersionRequiresCatalogueHashVersionTwo {
         /// The function whose immutable revision uses the newer contract.
@@ -2471,10 +2586,19 @@ pub enum RevisionInvariantError {
         /// The incompatible value-type definition.
         value_type: TypeId,
     },
-    /// A record value type was admitted before its canonical hash contract exists.
-    RecordValueTypeHashContractNotImplemented {
-        /// The record value type that cannot yet enter a durable revision.
+    /// A record value type was paired with a version-1 catalogue hash.
+    RecordValueTypeRequiresCatalogueHashVersionTwo {
+        /// The incompatible record value type.
         record_value_type: TypeId,
+    },
+    /// A record field uses a resolved type outside the initial record family.
+    UnsupportedRecordValueFieldType {
+        /// The record value type owning the field.
+        record_value_type: TypeId,
+        /// The rejected record field.
+        field: FieldId,
+        /// The unsupported resolved type.
+        resolved_type: ResolvedType,
     },
     /// A type-name binding was paired with a version-1 catalogue hash.
     TypeBindingRequiresCatalogueHashVersionTwo {
@@ -2703,13 +2827,20 @@ impl fmt::Display for RevisionInvariantError {
             }
             ResolvedValueTypeNotInPinnedStandard { .. } => formatter
                 .write_str("resolved value type is absent from the pinned standard library"),
+            RecordValueSlotRequiresCodec { .. } => {
+                formatter.write_str("record value slots require the record value codec")
+            }
             FunctionSemanticHashVersionRequiresCatalogueHashVersionTwo { .. } => formatter
                 .write_str("function semantic hash version 2 requires catalogue hash version 2"),
             ValueTypeDefinitionRequiresCatalogueHashVersionTwo { .. } => {
                 formatter.write_str("value types require catalogue hash version 2")
             }
-            RecordValueTypeHashContractNotImplemented { .. } => formatter
-                .write_str("record value types require an implemented catalogue hash contract"),
+            RecordValueTypeRequiresCatalogueHashVersionTwo { .. } => {
+                formatter.write_str("record value types require catalogue hash version 2")
+            }
+            UnsupportedRecordValueFieldType { .. } => {
+                formatter.write_str("record value field has an unsupported resolved type")
+            }
             TypeBindingRequiresCatalogueHashVersionTwo { .. } => {
                 formatter.write_str("type-name bindings require catalogue hash version 2")
             }
@@ -3612,24 +3743,111 @@ mod tests {
         .unwrap()
     }
 
-    #[test]
-    fn record_value_types_fail_closed_at_every_revision_admission_boundary() {
+    fn catalogue_with_record_value_slot() -> CatalogueSnapshot {
         let record_value_type = TypeId::from_bytes(id::<76>());
-        let expected =
-            RevisionInvariantError::RecordValueTypeHashContractNotImplemented { record_value_type };
+        CatalogueSnapshot::new_with_functions_and_record_value_types(
+            CatalogueRevisionId::from_bytes(id::<7>()),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes(id::<8>()),
+                QualifiedSemanticName::new(["crm"]).unwrap(),
+            )],
+            vec![ObjectTypeDefinition::new(
+                TypeId::from_bytes(id::<80>()),
+                QualifiedSemanticName::new(["crm", "contact"]).unwrap(),
+                vec![FieldDefinition::new(
+                    FieldId::from_bytes(id::<81>()),
+                    "status",
+                    0,
+                    ResolvedType::named(record_value_type),
+                    false,
+                    false,
+                    None,
+                    None,
+                )],
+            )],
+            vec![],
+            vec![],
+            vec![RecordValueTypeDefinition::new(
+                record_value_type,
+                QualifiedSemanticName::new(["crm", "status"]).unwrap(),
+                vec![RecordValueFieldDefinition::new(
+                    FieldId::from_bytes(id::<77>()),
+                    "active",
+                    0,
+                    ResolvedType::value(TypeId::from_bytes(id::<71>())),
+                )],
+            )],
+            vec![],
+            vec![],
+        )
+        .unwrap()
+    }
 
-        for context in [CatalogueHashContext::version_one(), standard_context()] {
-            assert_eq!(
-                validate_catalogue_hash_context_coherence(
-                    &context,
-                    &record_value_type_catalogue(),
-                    &[],
-                    &[],
-                    &[],
+    fn record_value_type_origins() -> Vec<DefinitionOrigin> {
+        let source = SourceUnitId::from_bytes(id::<3>());
+        vec![
+            DefinitionOrigin::new(
+                DefinitionIdentity::Schema(SchemaId::from_bytes(id::<8>())),
+                SourceOrigin::new(source, 0, 1).unwrap(),
+            ),
+            DefinitionOrigin::new(
+                DefinitionIdentity::ValueType(TypeId::from_bytes(id::<76>())),
+                SourceOrigin::new(source, 1, 2).unwrap(),
+            ),
+            DefinitionOrigin::new(
+                DefinitionIdentity::Field {
+                    owner: TypeId::from_bytes(id::<76>()),
+                    field: FieldId::from_bytes(id::<77>()),
+                },
+                SourceOrigin::new(source, 2, 3).unwrap(),
+            ),
+        ]
+    }
+
+    #[test]
+    fn record_value_types_require_version_two_at_every_revision_admission_boundary() {
+        let record_value_type = TypeId::from_bytes(id::<76>());
+        let expected = RevisionInvariantError::RecordValueTypeRequiresCatalogueHashVersionTwo {
+            record_value_type,
+        };
+
+        assert_eq!(
+            validate_catalogue_hash_context_coherence(
+                &CatalogueHashContext::version_one(),
+                &record_value_type_catalogue(),
+                &[],
+                &[],
+                &[],
+            ),
+            Err(expected.clone())
+        );
+        assert!(
+            validate_catalogue_hash_context_coherence(
+                &standard_context(),
+                &record_value_type_catalogue(),
+                &[],
+                &[],
+                &[],
+            )
+            .is_ok()
+        );
+        let version_two_source = source(None);
+        let version_two_catalogue = record_value_type_catalogue();
+        let version_two_pair =
+            RevisionPair::new(version_two_source.id(), version_two_catalogue.revision());
+        assert!(
+            ActiveDatabaseRevision::new_with_catalogue_hash_context(
+                ActiveDatabaseRevisionInput::new(
+                    version_two_pair,
+                    version_two_source,
+                    version_two_catalogue,
+                    digest::<7>(),
+                    ActiveRevisionContent::new(vec![], vec![], record_value_type_origins(), vec![]),
                 ),
-                Err(expected.clone())
-            );
-        }
+                standard_context(),
+            )
+            .is_ok()
+        );
 
         let active_source = source(None);
         let catalogue = record_value_type_catalogue();
@@ -3652,6 +3870,26 @@ mod tests {
         let expected_base = RevisionPair::new(
             SourceRevisionId::from_bytes(id::<78>()),
             CatalogueRevisionId::from_bytes(id::<79>()),
+        );
+        assert!(
+            DeployableRevision::new_with_catalogue_hash_context(
+                DeployableRevisionInput::new(
+                    expected_base,
+                    source(Some(expected_base.source())),
+                    expected_base.catalogue(),
+                    record_value_type_catalogue(),
+                    digest::<7>(),
+                    DeployableRevisionContent::new(
+                        record_value_type_origins(),
+                        vec![],
+                        vec![],
+                        vec![],
+                    )
+                    .with_current_function_revisions(vec![]),
+                ),
+                standard_context(),
+            )
+            .is_ok()
         );
         assert_eq!(
             DeployableRevision::new(
@@ -3687,8 +3925,166 @@ mod tests {
         );
         assert_eq!(
             expected.to_string(),
-            "record value types require an implemented catalogue hash contract"
+            "record value types require catalogue hash version 2"
         );
+        let identities = expected_definition_identities(&record_value_type_catalogue(), &[]);
+        assert!(identities.contains(&DefinitionIdentity::ValueType(record_value_type)));
+        assert!(identities.contains(&DefinitionIdentity::Field {
+            owner: record_value_type,
+            field: FieldId::from_bytes(id::<77>()),
+        }));
+    }
+
+    #[test]
+    fn record_value_types_cannot_enter_runtime_or_storage_slots_before_the_codec() {
+        assert_eq!(
+            validate_catalogue_hash_context_coherence(
+                &standard_context(),
+                &catalogue_with_record_value_slot(),
+                &[],
+                &[],
+                &[],
+            ),
+            Err(RevisionInvariantError::RecordValueSlotRequiresCodec {
+                identity: DefinitionIdentity::Field {
+                    owner: TypeId::from_bytes(id::<80>()),
+                    field: FieldId::from_bytes(id::<81>()),
+                },
+                record_value_type: TypeId::from_bytes(id::<76>()),
+            })
+        );
+    }
+
+    #[test]
+    fn record_value_field_type_policy_is_closed_and_uses_pinned_standard_primitives() {
+        let accepted_contracts = [
+            "orna.kernel.value.boolean@1",
+            "orna.kernel.value.integer@1",
+            "orna.kernel.value.bigint@1",
+            "orna.kernel.value.float@1",
+            "orna.kernel.value.character-large-object@1",
+            "orna.kernel.value.binary-large-object@1",
+        ];
+        let accepted_values = accepted_contracts
+            .iter()
+            .enumerate()
+            .map(|(index, contract)| {
+                ValueTypeDefinition::primitive(
+                    TypeId::from_bytes([index as u8 + 1; 16]),
+                    QualifiedSemanticName::new(["std", "types", *contract]).unwrap(),
+                    ValueTypeMutability::Immutable,
+                    ValueTypePersistence::Persistable,
+                    *contract,
+                )
+            })
+            .collect::<Vec<_>>();
+        let standard = CatalogueSnapshot::new_with_types(
+            CatalogueRevisionId::from_bytes(id::<90>()),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes(id::<91>()),
+                QualifiedSemanticName::new(["std", "types"]).unwrap(),
+            )],
+            vec![],
+            accepted_values,
+            vec![],
+        )
+        .unwrap();
+        let application = empty_catalogue();
+        for index in 0..accepted_contracts.len() {
+            assert!(record_value_field_type_is_supported(
+                &application,
+                &standard,
+                ResolvedType::value(TypeId::from_bytes([index as u8 + 1; 16])),
+            ));
+        }
+
+        for contract in [
+            "orna.kernel.value.decimal@1",
+            "orna.kernel.value.uuid@1",
+            "orna.kernel.value.date@1",
+            "orna.kernel.value.time@1",
+            "orna.kernel.value.timestamp@1",
+            "orna.kernel.value.duration@1",
+            "orna.kernel.value.void@1",
+            "orna.kernel.value.custom@1",
+        ] {
+            assert!(!accepted_record_primitive(&ValueTypeDefinition::primitive(
+                TypeId::from_bytes(id::<92>()),
+                QualifiedSemanticName::new(["std", "types", "excluded"]).unwrap(),
+                ValueTypeMutability::Immutable,
+                ValueTypePersistence::Persistable,
+                contract,
+            )));
+        }
+
+        let application_primitive = TypeId::from_bytes(id::<93>());
+        let application_enum = TypeId::from_bytes(id::<94>());
+        let standard_enum = TypeId::from_bytes(id::<95>());
+        let application = CatalogueSnapshot::new_with_enum_types(
+            CatalogueRevisionId::from_bytes(id::<96>()),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes(id::<97>()),
+                QualifiedSemanticName::new(["app"]).unwrap(),
+            )],
+            vec![],
+            vec![ValueTypeDefinition::primitive(
+                application_primitive,
+                QualifiedSemanticName::new(["app", "flag"]).unwrap(),
+                ValueTypeMutability::Immutable,
+                ValueTypePersistence::Persistable,
+                "orna.kernel.value.boolean@1",
+            )],
+            vec![EnumTypeDefinition::new(
+                application_enum,
+                QualifiedSemanticName::new(["app", "phase"]).unwrap(),
+                ["new"],
+            )],
+            vec![],
+        )
+        .unwrap();
+        let standard = CatalogueSnapshot::new_with_enum_types(
+            CatalogueRevisionId::from_bytes(id::<98>()),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes(id::<99>()),
+                QualifiedSemanticName::new(["std"]).unwrap(),
+            )],
+            vec![],
+            vec![],
+            vec![EnumTypeDefinition::new(
+                standard_enum,
+                QualifiedSemanticName::new(["std", "phase"]).unwrap(),
+                ["new"],
+            )],
+            vec![],
+        )
+        .unwrap();
+        assert!(!record_value_field_type_is_supported(
+            &application,
+            &standard,
+            ResolvedType::value(application_primitive),
+        ));
+        assert!(record_value_field_type_is_supported(
+            &application,
+            &standard,
+            ResolvedType::named(application_enum),
+        ));
+        assert!(record_value_field_type_is_supported(
+            &application,
+            &standard,
+            ResolvedType::named(standard_enum),
+        ));
+        for unsupported in [
+            ResolvedType::value(TypeId::from_bytes(id::<100>())),
+            ResolvedType::named(TypeId::from_bytes(id::<101>())),
+            ResolvedType::scalar(StandardScalar::Boolean),
+            ResolvedType::reference(TypeId::from_bytes(id::<102>())),
+        ] {
+            assert!(!record_value_field_type_is_supported(
+                &application,
+                &standard,
+                unsupported,
+            ));
+        }
     }
 
     #[test]
