@@ -10,18 +10,18 @@ implemented, reviewed, committed, and pushed.
   archive inputs without producing a PostgreSQL executable or shared object.
 - [x] Select the embedded process, resource, shell, upgrade, error, command,
   lifecycle, and complete proof contracts.
-- [ ] Create the public Orna-owned PostgreSQL fork and add its official 18.4
-  base as an inactive `third_party/postgresql` submodule.
-- [ ] Import every accepted PostgreSQL change as one signed linear fork commit
-  touching at most three files, advancing only the superproject gitlink after
-  each green commit.
-- [ ] Add the native Make-based, read-only submodule build beside the selected
-  legacy proof and bind its toolchain, signer, source tree, support data,
+- [ ] Pin the exact unmodified upstream PostgreSQL 18.4 commit as the
+  `third_party/postgresql` submodule.
+- [ ] Add the top-level `postgresql/` module with reviewed added-file overlays,
+  the five sparse existing-file patches, and one explicit source-update target.
+- [ ] Add the Make-based prepared-source build beside the selected legacy proof
+  and bind its toolchain, upstream tree, overlays, patches, support data,
   lifecycle probe, and verifier.
-- [ ] Prove exact legacy/native archive, support, symbol, licence, and entry
-  evidence parity while independently running the native lifecycle twice.
-- [ ] Cut over atomically to the native build, delete the legacy builder entry
-  point, then remove the inert recipe and patch files in small commits.
+- [ ] Prove exact legacy/prepared-source archive, support, symbol, licence, and
+  entry evidence parity while independently running the new lifecycle twice.
+- [ ] Cut over atomically to `postgresql/Makefile`, delete the legacy builder
+  entry point, then remove the inert `packaging/postgresql` prototype files in
+  small commits.
 - [x] Accept the offline `orna source check <file.orna>` contract.
 - [ ] Add the Orna-owned instance model, cluster initialisation, private Unix
   socket authentication, and foreground PostgreSQL supervision.
