@@ -9,7 +9,7 @@ use orna_compiler::{
 };
 use orna_core::{
     CatalogueRevisionId, ExpressionId, FieldId, FunctionId, FunctionRevisionId, ParameterId,
-    SchemaId, SourceBundleId, SourceRevisionId, SourceUnitId, TypeId,
+    PrincipalId, SchemaId, SourceBundleId, SourceRevisionId, SourceUnitId, TypeId,
     canonical_hash::{
         CanonicalHashError, artifact_payload_digest, catalogue_digest,
         catalogue_digest_with_context, function_declaration_digest, function_semantic_digest,
@@ -29,6 +29,11 @@ use orna_core::{
         ExpressionArtifact, FunctionRevisionRecord, FunctionSemanticHashVersion,
         RevisionInvariantError, RevisionPair, SourceOrigin, StoredSourceUnit,
         VerifiedStandardLibrarySnapshot,
+    },
+    security::{
+        ExecuteDecision, ExecuteDenial, ExecuteGrant, InvocationTarget, Principal, PrincipalKind,
+        PrincipalStatus, RoleMembership, SecuritySnapshot, SecuritySnapshotError,
+        SessionBindingError,
     },
     types::{ResolvedType, StandardScalar},
     value::RuntimeValue,
@@ -204,6 +209,262 @@ async fn recovers_and_evaluates_a_standard_boolean_client_function() -> TestResu
         )?;
         require_no_session_leaks(&database).await?;
         Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn persists_recovers_revokes_and_disables_execute_authority() -> TestResult<()> {
+    const USER: PrincipalId = PrincipalId::from_bytes([0x31; 16]);
+    const ROLE: PrincipalId = PrincipalId::from_bytes([0x32; 16]);
+    const SERVICE: PrincipalId = PrincipalId::from_bytes([0x33; 16]);
+    const OTHER_ROLE: PrincipalId = PrincipalId::from_bytes([0x34; 16]);
+
+    with_test_database(|database| async move {
+        let kernel = kernel(&database)?;
+        kernel.bootstrap().await?;
+        let empty_security = kernel.recover_security_snapshot().await?;
+        require(
+            empty_security.bind_authenticated_session(USER, vec![])
+                == Err(SessionBindingError::UnknownSessionPrincipal),
+            "empty bootstrap invented a security principal",
+        )?;
+        let empty = kernel.recover().await?;
+        let schema_bundle =
+            orna_core::source::SourceBundle::new([orna_core::source::SourceUnit::new(
+                "main.orna",
+                STANDARD_CLIENT_SCHEMA_SOURCE,
+            )])?;
+        let schema_report = check(&schema_bundle, empty.catalogue());
+        require(
+            schema_report.diagnostics().is_empty(),
+            "security fixture schema did not compile",
+        )?;
+        let version_one = kernel
+            .apply(&prepare(&schema_report, empty.pair(), &empty)?)
+            .await?;
+        let upgrade = orna_standard::prepare_standard_upgrade(&version_one)?;
+        let version_two = kernel.apply_standard_upgrade(&upgrade).await?;
+        let active = kernel
+            .apply(&standard_client_candidate(
+                STANDARD_CLIENT_TRUE_SOURCE,
+                &version_two,
+                &upgrade,
+            )?)
+            .await?;
+        let function = require_standard_client_execution(&active, &upgrade, true)?.function;
+        let functions = active
+            .catalogue()
+            .functions()
+            .iter()
+            .map(|definition| definition.id())
+            .collect::<Vec<_>>();
+
+        let granted = SecuritySnapshot::new(
+            active.pair(),
+            functions.clone(),
+            vec![
+                Principal::new(USER, PrincipalKind::User, PrincipalStatus::Active),
+                Principal::new(ROLE, PrincipalKind::Role, PrincipalStatus::Active),
+                Principal::new(SERVICE, PrincipalKind::Service, PrincipalStatus::Active),
+            ],
+            vec![RoleMembership::new(ROLE, USER)],
+            vec![
+                ExecuteGrant::new(ROLE, function),
+                ExecuteGrant::new(SERVICE, function),
+            ],
+        )?;
+        kernel.replace_security_snapshot(&granted).await?;
+
+        let recovered = PostgresKernel::new(database.config()?)
+            .recover_security_snapshot()
+            .await?;
+        let user_session = recovered.bind_authenticated_session(USER, vec![ROLE])?;
+        let service_session = recovered.bind_authenticated_session(SERVICE, vec![])?;
+        let target = InvocationTarget::new(function, active.pair());
+        require(
+            matches!(
+                recovered.authorise_execute(&user_session, target),
+                ExecuteDecision::Allowed(ref evidence)
+                    if evidence.authorising_principal() == ROLE
+            ) && matches!(
+                recovered.authorise_execute(&service_session, target),
+                ExecuteDecision::Allowed(ref evidence)
+                    if evidence.authorising_principal() == SERVICE
+            ),
+            "recovered direct or selected-role EXECUTE authority changed",
+        )?;
+
+        let stale_pair = RevisionPair::new(
+            SourceRevisionId::from_bytes([0x35; 16]),
+            CatalogueRevisionId::from_bytes([0x36; 16]),
+        );
+        let stale = SecuritySnapshot::new(
+            stale_pair,
+            functions.clone(),
+            granted.principals().collect(),
+            granted.memberships().collect(),
+            granted.execute_grants().collect(),
+        )?;
+        let stale_error = kernel
+            .replace_security_snapshot(&stale)
+            .await
+            .expect_err("stale security replacement must fail");
+        require(
+            matches!(
+                stale_error,
+                PostgresKernelError::SecurityRevisionMismatch {
+                    expected,
+                    active: locked,
+                } if expected == stale_pair && locked == active.pair()
+            ),
+            "stale security replacement returned the wrong typed error",
+        )?;
+        let after_stale = kernel.recover_security_snapshot().await?;
+        require(
+            matches!(
+                after_stale.authorise_execute(&service_session, target),
+                ExecuteDecision::Allowed(ref evidence)
+                    if evidence.authorising_principal() == SERVICE
+            ),
+            "stale security replacement changed durable grants",
+        )?;
+
+        let revoked = SecuritySnapshot::new(
+            active.pair(),
+            functions.clone(),
+            vec![
+                Principal::new(USER, PrincipalKind::User, PrincipalStatus::Active),
+                Principal::new(ROLE, PrincipalKind::Role, PrincipalStatus::Active),
+                Principal::new(SERVICE, PrincipalKind::Service, PrincipalStatus::Active),
+            ],
+            vec![RoleMembership::new(ROLE, USER)],
+            vec![],
+        )?;
+        kernel.replace_security_snapshot(&revoked).await?;
+        let reconnected = PostgresKernel::new(database.config()?)
+            .recover_security_snapshot()
+            .await?;
+        require(
+            reconnected.authorise_execute(&user_session, target)
+                == ExecuteDecision::Denied(ExecuteDenial::MissingExecuteGrant),
+            "reconnected snapshot retained a revoked EXECUTE grant",
+        )?;
+
+        let disabled = SecuritySnapshot::new(
+            active.pair(),
+            functions,
+            vec![
+                Principal::new(USER, PrincipalKind::User, PrincipalStatus::Disabled),
+                Principal::new(ROLE, PrincipalKind::Role, PrincipalStatus::Active),
+                Principal::new(SERVICE, PrincipalKind::Service, PrincipalStatus::Active),
+            ],
+            vec![RoleMembership::new(ROLE, USER)],
+            vec![],
+        )?;
+        kernel.replace_security_snapshot(&disabled).await?;
+        let final_snapshot = PostgresKernel::new(database.config()?)
+            .recover_security_snapshot()
+            .await?;
+        require(
+            final_snapshot.bind_authenticated_session(USER, vec![ROLE])
+                == Err(SessionBindingError::DisabledSessionPrincipal),
+            "reconnected snapshot re-enabled a disabled principal",
+        )?;
+
+        let session = database.open().await?;
+        let unknown_function = FunctionId::from_bytes([0x37; 16]);
+        let tamper_result = session
+            .client()
+            .execute(
+                "INSERT INTO _orna_kernel.security_execute_grants
+                     (grantee_id, function_id)
+                 VALUES ($1, $2)",
+                &[
+                    &USER.to_bytes().to_vec(),
+                    &unknown_function.to_bytes().to_vec(),
+                ],
+            )
+            .await
+            .map(|_| ())
+            .map_err(Into::into);
+        finish_session(
+            tamper_result,
+            session.shutdown().await,
+            "unknown grant tamper",
+        )?;
+        let unknown_error = kernel
+            .recover_security_snapshot()
+            .await
+            .expect_err("unknown durable function grant must fail recovery");
+        require(
+            matches!(
+                unknown_error,
+                PostgresKernelError::SecuritySnapshot(SecuritySnapshotError::UnknownGrantFunction)
+            ),
+            "unknown durable function grant returned the wrong typed error",
+        )?;
+        let session = database.open().await?;
+        let retained: i64 = session
+            .client()
+            .query_one(
+                "SELECT count(*)
+                 FROM _orna_kernel.security_execute_grants
+                 WHERE function_id = $1",
+                &[&unknown_function.to_bytes().to_vec()],
+            )
+            .await?
+            .get(0);
+        finish_session(
+            require(retained == 1, "rejected unknown grant tamper was repaired"),
+            session.shutdown().await,
+            "unknown grant retention check",
+        )?;
+
+        let session = database.open().await?;
+        let cycle_result = async {
+            session
+                .client()
+                .execute(
+                    "DELETE FROM _orna_kernel.security_execute_grants
+                     WHERE function_id = $1",
+                    &[&unknown_function.to_bytes().to_vec()],
+                )
+                .await?;
+            session
+                .client()
+                .execute(
+                    "INSERT INTO _orna_kernel.security_principals (id, kind, status)
+                     VALUES ($1, 'role', 'active')",
+                    &[&OTHER_ROLE.to_bytes().to_vec()],
+                )
+                .await?;
+            session
+                .client()
+                .execute(
+                    "INSERT INTO _orna_kernel.security_role_memberships
+                         (role_id, member_id)
+                     VALUES ($1, $2), ($2, $1)",
+                    &[&ROLE.to_bytes().to_vec(), &OTHER_ROLE.to_bytes().to_vec()],
+                )
+                .await?;
+            Ok(())
+        }
+        .await;
+        finish_session(cycle_result, session.shutdown().await, "role cycle tamper")?;
+        let cycle_error = kernel
+            .recover_security_snapshot()
+            .await
+            .expect_err("durable role cycle must fail recovery");
+        require(
+            matches!(
+                cycle_error,
+                PostgresKernelError::SecuritySnapshot(SecuritySnapshotError::CyclicRoleMembership)
+            ),
+            "durable role cycle returned the wrong typed error",
+        )?;
+        require_no_session_leaks(&database).await
     })
     .await
 }

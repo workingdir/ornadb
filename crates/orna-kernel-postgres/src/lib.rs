@@ -10,6 +10,7 @@ use orna_core::{
     catalogue::CatalogueSnapshotError,
     physical::PhysicalPlanError,
     revision::{CatalogueHashVersion, RevisionInvariantError, RevisionPair},
+    security::SecuritySnapshotError,
 };
 use orna_standard::StandardUpgradeIdentity;
 
@@ -21,6 +22,7 @@ mod bootstrap;
 mod decode;
 mod physical;
 mod recovery;
+mod security;
 mod server_execution;
 mod server_mutation_execution;
 mod server_runtime;
@@ -126,6 +128,17 @@ pub enum PostgresKernelError {
     CandidateRevisionInvariant(RevisionInvariantError),
     /// Reconstructed semantic definitions do not form a valid catalogue.
     CatalogueSnapshot(CatalogueSnapshotError),
+    /// Recovered security records do not form a valid decision snapshot.
+    SecuritySnapshot(SecuritySnapshotError),
+    /// A security replacement targets a revision other than the active pair.
+    SecurityRevisionMismatch {
+        /// The revision carried by the replacement snapshot.
+        expected: RevisionPair,
+        /// The revision locked by the replacement transaction.
+        active: RevisionPair,
+    },
+    /// A security replacement does not bind the complete active function set.
+    SecurityFunctionSetMismatch,
     /// The candidate was prepared against a revision pair that is no longer active.
     ExpectedBaseMismatch {
         /// The base pair carried by the candidate.
@@ -225,6 +238,15 @@ impl fmt::Display for PostgresKernelError {
             Self::CatalogueSnapshot(error) => {
                 write!(formatter, "recovered catalogue snapshot failed: {error}")
             }
+            Self::SecuritySnapshot(error) => {
+                write!(formatter, "recovered security snapshot failed: {error}")
+            }
+            Self::SecurityRevisionMismatch { .. } => {
+                formatter.write_str("security snapshot revision pair is not active")
+            }
+            Self::SecurityFunctionSetMismatch => {
+                formatter.write_str("security snapshot does not contain the active function set")
+            }
             Self::ExpectedBaseMismatch { .. } => {
                 formatter.write_str("expected revision pair is not active")
             }
@@ -277,6 +299,7 @@ impl Error for PostgresKernelError {
             Self::RevisionInvariant(error) => Some(error),
             Self::CandidateRevisionInvariant(error) => Some(error),
             Self::CatalogueSnapshot(error) => Some(error),
+            Self::SecuritySnapshot(error) => Some(error),
             Self::PhysicalPlan(error) => Some(error),
             Self::ServerSelect(error) => Some(error),
             Self::ServerInsert(error) => Some(error),
@@ -289,6 +312,8 @@ impl Error for PostgresKernelError {
             | Self::StandardContextTransitionRequired { .. }
             | Self::StandardContextMismatch { .. }
             | Self::ReservedStandardIdentity { .. }
+            | Self::SecurityRevisionMismatch { .. }
+            | Self::SecurityFunctionSetMismatch
             | Self::DurableInvariant { .. } => None,
         }
     }
