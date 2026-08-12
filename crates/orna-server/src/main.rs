@@ -27,7 +27,7 @@ fn main() -> ExitCode {
             }
         },
         Command::BackendShell => match orna_server::run_backend_shell() {
-            Ok(never) => match never {},
+            Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 write_stderr_line(&error.to_string());
                 ExitCode::from(1)
