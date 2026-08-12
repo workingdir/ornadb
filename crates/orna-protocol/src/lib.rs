@@ -4,8 +4,9 @@ mod frame;
 
 pub use frame::{
     CallArgument, CallFailure, Channel, ClientAction, ClientFrame, ConnectionError, Event,
-    EventRecord, FrameCodecError, ProtocolConnection, RawCall, ServerAction, ServerFrame,
-    decode_client_frame, decode_server_frame, encode_client_frame, encode_server_frame,
+    EventRecord, FrameCodecError, MAX_FRAME_PAYLOAD_LENGTH, ProtocolConnection, RawCall,
+    ServerAction, ServerFrame, decode_client_frame, decode_server_frame, encode_client_frame,
+    encode_server_frame,
 };
 
 use std::{error::Error, fmt};
@@ -422,6 +423,11 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
+
+    #[test]
+    fn public_frame_payload_limit_matches_the_wire_contract() {
+        assert_eq!(MAX_FRAME_PAYLOAD_LENGTH, 16 * 1024 * 1024 + 64);
+    }
 
     #[test]
     fn boolean_has_exact_golden_bytes_and_round_trips() {
