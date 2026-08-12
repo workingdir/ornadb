@@ -140,15 +140,75 @@ PostgreSQL rows or composites.
 ## Codec and protocol boundary
 
 Runtime record values cannot use `ORV1` or `ORV2`. Both accepted codecs remain
-closed and continue to reject them. Before record codec implementation, this
-ADR must be amended with the exact version-3 byte contract, including:
+closed and continue to reject them. Canonical value codec version 3 retains
+the ADR 0025 envelope, size limit, and exact tag and payload semantics for all
+version-1 values. It also retains both ADR 0029 enum tags and their exact
+payload semantics. It changes the marker to `ORV3` and adds this one tag:
 
-* the `ORV3` marker and one closed record tag;
-* the outer record `TypeId` and field count;
-* declaration-order entries containing `FieldId`, encoded length, and one
-  complete version-3 field value;
-* the retained total value-size bound; and
-* the zero nested-record depth of this slice.
+```text
+0x0b  named record value
+```
+
+The version-3 record envelope is:
+
+```text
+offset  size  field
+0       4     ASCII `ORV3`
+4       1     record tag `0x0b`
+5       16    record TypeId bytes
+21      4     unsigned record-payload length, big-endian
+25      n     record payload
+```
+
+The record payload is:
+
+```text
+size  field
+4     unsigned field count, big-endian
+for each field in declaration order:
+16    FieldId bytes
+4     unsigned complete field-value length, big-endian
+n     one complete ORV3 field value, including its 25-byte envelope
+```
+
+No field name, ordinal, catalogue hash, or revision identity occurs in the
+bytes. The declaration order and stable field identities bind the payload to
+the active nominal definition. The field count must equal the active
+definition's field count. Each entry `FieldId` must equal the active field at
+that ordinal. A duplicate, missing, unknown, or reordered field therefore
+fails closed.
+
+Each complete field value uses `ORV3`, not `ORV1` or `ORV2`. Its tag, stable
+type identity, payload, and canonical numeric rules are unchanged from the
+corresponding version-2 value. Its encoded length includes its complete
+25-byte envelope and must equal the exact bytes consumed. A record tag is not
+valid in a field value. This enforces zero nested-record depth. A null or
+reference value also fails because the initial record field family accepts
+only the six non-null standard scalar values and active enum values.
+
+Version-3 encoding and decoding both require one immutable
+`ActiveDatabaseRevision`. Encoding revalidates the record `TypeId`, active
+field sequence, and every field value. A record created against a different
+active revision cannot cross this boundary unless it remains valid against
+the supplied revision. Decoding validates the envelope and each entry before
+it constructs the value through the checked active-revision constructor. It
+never creates an unchecked or partial record.
+
+The outer payload length remains limited to 16 MiB. The four-byte field count,
+every entry header, and every complete field value are part of that limit. A
+field-value length must be at least 25 and cannot exceed the bytes that remain
+in the outer payload. Its nested payload length plus 25 must equal the declared
+field-value length. Before allocation, the decoder checks that the field count
+matches the active definition and that the payload can contain at least that
+many 45-byte entries. All length addition, subtraction, and conversion uses
+checked arithmetic. Truncation, trailing bytes, an oversized payload, an
+impossible count or length, and any inner or outer canonical-value error fail
+closed.
+
+`ORV3` accepts only the closed tags `0x00` through `0x0b`. `ORV1` accepts only
+its existing version-1 tags. `ORV2` accepts only its existing version-2 tags.
+Each decoder accepts only its exact marker. All version-1 and version-2 bytes
+and rejection rules remain exact.
 
 The corresponding frame amendment must define protocol 3.0 and `ORF3` before
 a socket can carry record values. Protocols 1.0 and 2.0 remain byte-exact.
@@ -177,8 +237,18 @@ Tests must prove:
   types, origins, mutability, and persistence;
 * runtime construction requires the active nominal definition and exact
   complete field set; and
-* versions 1 and 2 reject record runtime values before any version-3 support
-  is accepted.
+* versions 1 and 2 reject record runtime values and `ORV3` bytes;
+* version 3 preserves exact version-2 scalar and enum shapes under the `ORV3`
+  marker;
+* exact version-3 golden bytes and a round trip preserve a record `TypeId`,
+  declaration-order `FieldId` values, and complete scalar and enum fields;
+* version-3 encoding rejects a record that is stale or incompatible with the
+  supplied active revision;
+* version-3 decoding rejects a wrong record type, field count, field identity,
+  field order, field type, enum label, marker, tag, nested record, null field,
+  reference field, length, truncation, trailing bytes, and oversized payload;
+  and
+* decoding arbitrary version-3 bytes never panics or returns a partial value.
 
 Normal format, strict Clippy, rustdoc, diff, similarity, workspace, and focused
 live PostgreSQL gates remain required.
@@ -199,7 +269,8 @@ live PostgreSQL gates remain required.
    in separate migration, source, and focused-test commits.
 7. Add checked runtime record values and compiler construction in separate
    commits.
-8. Amend this ADR with exact version-3 codec bytes before changing the codec.
+8. Add the exact version-3 codec defined by this ADR without changing the
+   version-1 or version-2 interfaces or bytes.
 9. Amend this ADR with exact protocol-3 frames before changing raw frames.
 10. Add canonical by-value storage and one SERVER result proof only after the
     codec and recovery paths are green.
