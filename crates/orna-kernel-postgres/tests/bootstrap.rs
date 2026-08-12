@@ -43,6 +43,7 @@ const EXPECTED_KERNEL_TABLES: &[&str] = &[
     "function_revisions",
     "schema_migrations",
     "security_execute_grants",
+    "security_local_peer_credentials",
     "security_principals",
     "security_role_memberships",
     "source_bundles",
@@ -99,6 +100,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         9,
         "security decision snapshot",
         include_str!("../migrations/0009_security_snapshot.sql"),
+    ),
+    (
+        10,
+        "local peer credentials",
+        include_str!("../migrations/0010_local_peer_credentials.sql"),
     ),
 ];
 const MIGRATION_DATA_STEP_SEPARATOR: &[u8] = b"\0orna.kernel.migration-step\0";
@@ -293,22 +299,48 @@ fn security_snapshot_migration_checksum_binds_exact_sql_bytes() {
 }
 
 #[test]
+fn local_peer_credential_migration_checksum_binds_exact_sql_bytes() {
+    assert_eq!(
+        hex_bytes(expected_migration_checksum(10, MIGRATIONS[9].2)),
+        "0c6d158eb85209c8d0413e3871c5f56840936026f4f80d1325c079d3723e9099"
+    );
+}
+
+#[test]
 fn security_snapshot_migration_is_the_registered_version_nine() -> TestResult<()> {
+    let (version, name, sql) = MIGRATIONS[8];
+
+    require(
+        version == 9,
+        format!("security snapshot migration is version {version}"),
+    )?;
+    require(
+        name == "security decision snapshot",
+        format!("security snapshot migration has unexpected name {name:?}"),
+    )?;
+    require(
+        sql.contains("CREATE TABLE _orna_kernel.security_principals"),
+        "security migration does not create the principal table",
+    )
+}
+
+#[test]
+fn local_peer_credential_migration_is_the_registered_version_ten() -> TestResult<()> {
     let Some((version, name, sql)) = MIGRATIONS.last() else {
         return Err(failure("migration registry is empty"));
     };
 
     require(
-        *version == 9,
+        *version == 10,
         format!("last migration is version {version}"),
     )?;
     require(
-        *name == "security decision snapshot",
+        *name == "local peer credentials",
         format!("last migration has unexpected name {name:?}"),
     )?;
     require(
-        sql.contains("CREATE TABLE _orna_kernel.security_principals"),
-        "security migration does not create the principal table",
+        sql.contains("CREATE TABLE _orna_kernel.security_local_peer_credentials"),
+        "local peer credential migration does not create its protected table",
     )
 }
 
@@ -422,8 +454,8 @@ async fn bootstrap_upgrades_v5_write_reference_evidence_without_mutating_semanti
 
         let after = snapshot_upgrade_state(&database).await?;
         require(
-            after.migrations.len() == 9 && after.migrations[..5] == before.migrations[..],
-            format!("v6-v9 changed prior migration records: {:?}", after.migrations),
+            after.migrations.len() == 10 && after.migrations[..5] == before.migrations[..],
+            format!("v6-v10 changed prior migration records: {:?}", after.migrations),
         )?;
         require(
             after.migrations[5]
@@ -460,6 +492,15 @@ async fn bootstrap_upgrades_v5_write_reference_evidence_without_mutating_semanti
                     expected_migration_checksum(9, MIGRATIONS[8].2),
                 ),
             format!("v9 migration record is not exact: {:?}", after.migrations[8]),
+        )?;
+        require(
+            after.migrations[9]
+                == (
+                    10,
+                    "local peer credentials".to_owned(),
+                    expected_migration_checksum(10, MIGRATIONS[9].2),
+                ),
+            format!("v10 migration record is not exact: {:?}", after.migrations[9]),
         )?;
         require(
             after.active_pair == before.active_pair,
@@ -547,7 +588,7 @@ async fn bootstrap_upgrades_registered_v6_without_standard_rows() -> TestResult<
 
         let after = snapshot_upgrade_state(&database).await?;
         require(
-            after.migrations.len() == 9
+            after.migrations.len() == 10
                 && after.migrations[..6] == before.migrations[..]
                 && after.migrations[6]
                     == (
@@ -574,6 +615,15 @@ async fn bootstrap_upgrades_registered_v6_without_standard_rows() -> TestResult<
                     expected_migration_checksum(9, MIGRATIONS[8].2),
                 ),
             format!("v9 migration record is not exact: {:?}", after.migrations[8]),
+        )?;
+        require(
+            after.migrations[9]
+                == (
+                    10,
+                    "local peer credentials".to_owned(),
+                    expected_migration_checksum(10, MIGRATIONS[9].2),
+                ),
+            format!("v10 migration record is not exact: {:?}", after.migrations[9]),
         )?;
         require(
             after.active_pair == before.active_pair
@@ -649,7 +699,7 @@ async fn bootstrap_upgrades_registered_v7_without_resolved_value_rows() -> TestR
         let after_surface = snapshot_catalogue_surface(&database).await?;
         let after_target_fks = snapshot_application_target_foreign_keys(&database).await?;
         require(
-            after.migrations.len() == 9
+            after.migrations.len() == 10
                 && after.migrations[..7] == before.migrations[..]
                 && after.migrations[7]
                     == (
@@ -662,6 +712,12 @@ async fn bootstrap_upgrades_registered_v7_without_resolved_value_rows() -> TestR
                         9,
                         "security decision snapshot".to_owned(),
                         expected_migration_checksum(9, MIGRATIONS[8].2),
+                    )
+                && after.migrations[9]
+                    == (
+                        10,
+                        "local peer credentials".to_owned(),
+                        expected_migration_checksum(10, MIGRATIONS[9].2),
                     ),
             format!("v7 upgrade produced unexpected migrations: {:?}", after.migrations),
         )?;
@@ -976,7 +1032,7 @@ async fn bootstrap_rejects_tampered_gapped_and_newer_migration_history() -> Test
         Sha256::digest(MIGRATIONS[1].2.as_bytes()).to_vec(),
     )
     .await?;
-    reject_migration_history(9, "future migration", vec![0; 32]).await
+    reject_migration_history(11, "future migration", vec![0; 32]).await
 }
 
 async fn inspect_bootstrap_state(database: &TestDatabase) -> TestResult<()> {
@@ -1113,6 +1169,15 @@ async fn inspect_security_snapshot_schema(client: &Client) -> TestResult<()> {
         ],
     )
     .await?;
+    inspect_columns(
+        client,
+        "security_local_peer_credentials",
+        &[
+            ("uid", "bigint", "int8", "NO", Some("")),
+            ("principal_id", "bytea", "bytea", "NO", Some("")),
+        ],
+    )
+    .await?;
 
     for (table, constraint, expected) in [
         (
@@ -1155,9 +1220,29 @@ async fn inspect_security_snapshot_schema(client: &Client) -> TestResult<()> {
             "security_execute_grants_grantee_fk",
             "FOREIGN KEY (grantee_id)",
         ),
+        (
+            "security_local_peer_credentials",
+            "security_local_peer_credentials_principal_key",
+            "UNIQUE (principal_id)",
+        ),
+        (
+            "security_local_peer_credentials",
+            "security_local_peer_credentials_principal_fk",
+            "FOREIGN KEY (principal_id)",
+        ),
     ] {
         require_constraint(client, table, constraint, expected).await?;
     }
+    let uid_range = constraint_definition(
+        client,
+        "security_local_peer_credentials",
+        "security_local_peer_credentials_uid_range",
+    )
+    .await?;
+    require(
+        uid_range.contains("uid >= 0") && uid_range.contains("uid <= '4294967295'::bigint"),
+        format!("local peer UID range is not exact: {uid_range:?}"),
+    )?;
     require_index(
         client,
         "security_role_memberships_member_index",
@@ -1175,6 +1260,7 @@ async fn inspect_security_snapshot_schema(client: &Client) -> TestResult<()> {
         "security_principals",
         "security_role_memberships",
         "security_execute_grants",
+        "security_local_peer_credentials",
     ] {
         for privilege in [
             "SELECT",
