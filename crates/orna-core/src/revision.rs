@@ -447,7 +447,10 @@ impl StandardLibrarySnapshot {
         if language_version.is_empty() {
             return Err(RevisionInvariantError::EmptyStandardLibraryLanguageVersion { revision });
         }
-        if !catalogue.object_types().is_empty() || !catalogue.functions().is_empty() {
+        if !catalogue.object_types().is_empty()
+            || !catalogue.record_value_types().is_empty()
+            || !catalogue.functions().is_empty()
+        {
             return Err(RevisionInvariantError::UnsupportedStandardLibraryDefinition { revision });
         }
         validate_origins(&source, &catalogue, &[], &origins)?;
@@ -1996,6 +1999,7 @@ fn validate_catalogue_hash_context_coherence(
     origins: &[DefinitionOrigin],
     references: &[DefinitionReference],
 ) -> Result<(), RevisionInvariantError> {
+    reject_record_value_types_without_hash_contract(catalogue)?;
     validate_resolved_type_slots(context, catalogue)?;
     match context {
         CatalogueHashContext::Version1 => {
@@ -2005,6 +2009,19 @@ fn validate_catalogue_hash_context_coherence(
             validate_catalogue_hash_context_version_two(revisions, references)
         }
     }
+}
+
+fn reject_record_value_types_without_hash_contract(
+    catalogue: &CatalogueSnapshot,
+) -> Result<(), RevisionInvariantError> {
+    if let Some(record_value_type) = catalogue.record_value_types().first() {
+        return Err(
+            RevisionInvariantError::RecordValueTypeHashContractNotImplemented {
+                record_value_type: record_value_type.id(),
+            },
+        );
+    }
+    Ok(())
 }
 
 fn validate_catalogue_hash_context_version_one(
@@ -2454,6 +2471,11 @@ pub enum RevisionInvariantError {
         /// The incompatible value-type definition.
         value_type: TypeId,
     },
+    /// A record value type was admitted before its canonical hash contract exists.
+    RecordValueTypeHashContractNotImplemented {
+        /// The record value type that cannot yet enter a durable revision.
+        record_value_type: TypeId,
+    },
     /// A type-name binding was paired with a version-1 catalogue hash.
     TypeBindingRequiresCatalogueHashVersionTwo {
         /// The incompatible direct binding.
@@ -2686,6 +2708,8 @@ impl fmt::Display for RevisionInvariantError {
             ValueTypeDefinitionRequiresCatalogueHashVersionTwo { .. } => {
                 formatter.write_str("value types require catalogue hash version 2")
             }
+            RecordValueTypeHashContractNotImplemented { .. } => formatter
+                .write_str("record value types require an implemented catalogue hash contract"),
             TypeBindingRequiresCatalogueHashVersionTwo { .. } => {
                 formatter.write_str("type-name bindings require catalogue hash version 2")
             }
@@ -2804,8 +2828,9 @@ mod tests {
         catalogue::{
             EnumTypeDefinition, FieldDefinition, FunctionDefinition, FunctionDomain,
             FunctionReturn, FunctionReturnColumnDefinition, FunctionSecurity, FunctionVolatility,
-            ObjectTypeDefinition, ParameterDefinition, QualifiedSemanticName, SchemaDefinition,
-            TypeBinding, ValueTypeDefinition, ValueTypeMutability, ValueTypePersistence,
+            ObjectTypeDefinition, ParameterDefinition, QualifiedSemanticName,
+            RecordValueFieldDefinition, RecordValueTypeDefinition, SchemaDefinition, TypeBinding,
+            ValueTypeDefinition, ValueTypeMutability, ValueTypePersistence,
         },
         types::{ResolvedType, StandardScalar},
     };
@@ -3560,6 +3585,110 @@ mod tests {
             vec![],
         )
         .unwrap()
+    }
+
+    fn record_value_type_catalogue() -> CatalogueSnapshot {
+        CatalogueSnapshot::new_with_record_value_types(
+            CatalogueRevisionId::from_bytes(id::<7>()),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes(id::<8>()),
+                QualifiedSemanticName::new(["crm"]).unwrap(),
+            )],
+            vec![],
+            vec![],
+            vec![],
+            vec![RecordValueTypeDefinition::new(
+                TypeId::from_bytes(id::<76>()),
+                QualifiedSemanticName::new(["crm", "status"]).unwrap(),
+                vec![RecordValueFieldDefinition::new(
+                    FieldId::from_bytes(id::<77>()),
+                    "active",
+                    0,
+                    ResolvedType::value(TypeId::from_bytes(id::<71>())),
+                )],
+            )],
+            vec![],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn record_value_types_fail_closed_at_every_revision_admission_boundary() {
+        let record_value_type = TypeId::from_bytes(id::<76>());
+        let expected =
+            RevisionInvariantError::RecordValueTypeHashContractNotImplemented { record_value_type };
+
+        for context in [CatalogueHashContext::version_one(), standard_context()] {
+            assert_eq!(
+                validate_catalogue_hash_context_coherence(
+                    &context,
+                    &record_value_type_catalogue(),
+                    &[],
+                    &[],
+                    &[],
+                ),
+                Err(expected.clone())
+            );
+        }
+
+        let active_source = source(None);
+        let catalogue = record_value_type_catalogue();
+        let pair = RevisionPair::new(active_source.id(), catalogue.revision());
+        assert_eq!(
+            ActiveDatabaseRevision::new(
+                pair,
+                active_source,
+                catalogue,
+                digest::<7>(),
+                vec![],
+                vec![],
+                vec![],
+                vec![],
+            )
+            .unwrap_err(),
+            expected.clone()
+        );
+
+        let expected_base = RevisionPair::new(
+            SourceRevisionId::from_bytes(id::<78>()),
+            CatalogueRevisionId::from_bytes(id::<79>()),
+        );
+        assert_eq!(
+            DeployableRevision::new(
+                expected_base,
+                source(Some(expected_base.source())),
+                expected_base.catalogue(),
+                record_value_type_catalogue(),
+                digest::<7>(),
+                vec![],
+                vec![],
+                vec![],
+                vec![],
+            )
+            .unwrap_err(),
+            expected.clone()
+        );
+
+        let standard_revision = StandardLibraryRevisionId::from_bytes(id::<74>());
+        assert_eq!(
+            StandardLibrarySnapshot::new(
+                standard_revision,
+                StandardLibraryDigestVersion::Version1,
+                source(None),
+                "orna.language/1",
+                record_value_type_catalogue(),
+                vec![],
+                digest::<75>(),
+            )
+            .unwrap_err(),
+            RevisionInvariantError::UnsupportedStandardLibraryDefinition {
+                revision: standard_revision,
+            }
+        );
+        assert_eq!(
+            expected.to_string(),
+            "record value types require an implemented catalogue hash contract"
+        );
     }
 
     #[test]
