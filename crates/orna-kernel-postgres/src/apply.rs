@@ -1225,6 +1225,32 @@ async fn persist_semantics(
             .await
             .map_err(PostgresKernelError::Database)?;
     }
+    for enum_type in candidate.candidate().enum_types() {
+        let schema = schema_for_name(candidate.candidate(), enum_type.name())?;
+        let origin = origin(
+            candidate.origins(),
+            DefinitionIdentity::ValueType(enum_type.id()),
+        )?;
+        transaction
+            .execute(
+                "INSERT INTO _orna_kernel.catalogue_enum_types
+                    (catalogue_revision_id, type_id, schema_id, name_parts, labels,
+                     source_unit_id, source_start, source_end)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                &[
+                    &bytes(catalogue),
+                    &bytes(enum_type.id()),
+                    &bytes(schema),
+                    &enum_type.name().parts(),
+                    &enum_type.labels(),
+                    &bytes(origin.source_unit()),
+                    &i64::from(origin.byte_start()),
+                    &i64::from(origin.byte_end()),
+                ],
+            )
+            .await
+            .map_err(PostgresKernelError::Database)?;
+    }
     for object in candidate.candidate().object_types() {
         let schema = schema_for_name(candidate.candidate(), object.name())?;
         let origin = origin(
