@@ -3,7 +3,12 @@
 //! A snapshot contains resolved definitions for one active catalogue revision.
 //! It does not contain source syntax, physical storage state, or backend types.
 
-use std::{collections::HashMap, error::Error, fmt, hash::Hash};
+use std::{
+    collections::{HashMap, HashSet},
+    error::Error,
+    fmt,
+    hash::Hash,
+};
 
 use crate::{
     CatalogueRevisionId, ExpressionId, FieldId, FunctionId, FunctionRevisionId, ParameterId,
@@ -13,9 +18,9 @@ use crate::{
 mod types;
 
 pub use types::{
-    PreludeTypeName, PreludeTypeNameError, TypeBinding, TypeBindingError, TypeBindingKind,
-    TypeDefinition, TypeDefinitionKind, TypeLookupName, ValueTypeDefinition, ValueTypeKind,
-    ValueTypeMutability, ValueTypePersistence,
+    EnumTypeDefinition, PreludeTypeName, PreludeTypeNameError, TypeBinding, TypeBindingError,
+    TypeBindingKind, TypeDefinition, TypeDefinitionKind, TypeLookupName, ValueTypeDefinition,
+    ValueTypeKind, ValueTypeMutability, ValueTypePersistence,
 };
 
 /// A resolved, qualified semantic name.
@@ -501,6 +506,9 @@ pub struct CatalogueSnapshot {
     value_types: Vec<ValueTypeDefinition>,
     value_type_indices_by_name: HashMap<QualifiedSemanticName, usize>,
     value_type_indices_by_id: HashMap<TypeId, usize>,
+    enum_types: Vec<EnumTypeDefinition>,
+    enum_type_indices_by_name: HashMap<QualifiedSemanticName, usize>,
+    enum_type_indices_by_id: HashMap<TypeId, usize>,
     type_bindings: Vec<TypeBinding>,
     type_binding_indices_by_name: HashMap<TypeLookupName, usize>,
     type_binding_indices_by_id: HashMap<TypeBindingId, usize>,
@@ -572,18 +580,63 @@ impl CatalogueSnapshot {
         type_bindings: Vec<TypeBinding>,
         functions: Vec<FunctionDefinition>,
     ) -> Result<Self, CatalogueSnapshotError> {
+        Self::new_with_functions_and_enum_types(
+            revision,
+            schemas,
+            object_types,
+            value_types,
+            Vec::new(),
+            type_bindings,
+            functions,
+        )
+    }
+
+    /// Validates and creates a snapshot with every catalogue type category.
+    pub fn new_with_enum_types(
+        revision: CatalogueRevisionId,
+        schemas: Vec<SchemaDefinition>,
+        object_types: Vec<ObjectTypeDefinition>,
+        value_types: Vec<ValueTypeDefinition>,
+        enum_types: Vec<EnumTypeDefinition>,
+        type_bindings: Vec<TypeBinding>,
+    ) -> Result<Self, CatalogueSnapshotError> {
+        Self::new_with_functions_and_enum_types(
+            revision,
+            schemas,
+            object_types,
+            value_types,
+            enum_types,
+            type_bindings,
+            Vec::new(),
+        )
+    }
+
+    /// Validates and creates a snapshot with functions and every type category.
+    pub fn new_with_functions_and_enum_types(
+        revision: CatalogueRevisionId,
+        schemas: Vec<SchemaDefinition>,
+        object_types: Vec<ObjectTypeDefinition>,
+        value_types: Vec<ValueTypeDefinition>,
+        enum_types: Vec<EnumTypeDefinition>,
+        type_bindings: Vec<TypeBinding>,
+        functions: Vec<FunctionDefinition>,
+    ) -> Result<Self, CatalogueSnapshotError> {
         let mut schema_indices_by_name = HashMap::with_capacity(schemas.len());
         let mut schema_indices_by_id = HashMap::with_capacity(schemas.len());
         let mut object_type_indices_by_name = HashMap::with_capacity(object_types.len());
         let mut object_type_indices_by_id = HashMap::with_capacity(object_types.len());
         let mut value_type_indices_by_name = HashMap::with_capacity(value_types.len());
         let mut value_type_indices_by_id = HashMap::with_capacity(value_types.len());
+        let mut enum_type_indices_by_name = HashMap::with_capacity(enum_types.len());
+        let mut enum_type_indices_by_id = HashMap::with_capacity(enum_types.len());
         let mut type_binding_indices_by_name = HashMap::with_capacity(type_bindings.len());
         let mut type_binding_indices_by_id = HashMap::with_capacity(type_bindings.len());
-        let mut type_ids_by_qualified_name =
-            HashMap::with_capacity(object_types.len() + value_types.len() + type_bindings.len());
+        let mut type_ids_by_qualified_name = HashMap::with_capacity(
+            object_types.len() + value_types.len() + enum_types.len() + type_bindings.len(),
+        );
         let mut type_ids_by_prelude_name = HashMap::with_capacity(type_bindings.len());
-        let mut primary_type_ids = HashMap::with_capacity(object_types.len() + value_types.len());
+        let mut primary_type_ids =
+            HashMap::with_capacity(object_types.len() + value_types.len() + enum_types.len());
         let mut function_indices_by_name = HashMap::with_capacity(functions.len());
         let mut function_indices_by_id = HashMap::with_capacity(functions.len());
 
@@ -698,6 +751,64 @@ impl CatalogueSnapshot {
             }
         }
 
+        for (type_index, enum_type) in enum_types.iter().enumerate() {
+            if enum_type.labels().is_empty() {
+                return Err(CatalogueSnapshotError::EmptyEnumTypeLabels {
+                    enum_type: enum_type.id(),
+                });
+            }
+            let mut labels = HashSet::with_capacity(enum_type.labels().len());
+            for label in enum_type.labels() {
+                if !labels.insert(label) {
+                    return Err(CatalogueSnapshotError::DuplicateEnumTypeLabel {
+                        enum_type: enum_type.id(),
+                        label: label.clone(),
+                    });
+                }
+            }
+
+            if enum_type_indices_by_name
+                .insert(enum_type.name().clone(), type_index)
+                .is_some()
+            {
+                return Err(CatalogueSnapshotError::DuplicateEnumTypeName {
+                    name: enum_type.name().clone(),
+                });
+            }
+            if enum_type_indices_by_id
+                .insert(enum_type.id(), type_index)
+                .is_some()
+            {
+                return Err(CatalogueSnapshotError::DuplicateEnumTypeId { id: enum_type.id() });
+            }
+            if type_ids_by_qualified_name
+                .insert(enum_type.name().clone(), enum_type.id())
+                .is_some()
+            {
+                return Err(CatalogueSnapshotError::DuplicateTypeName {
+                    name: TypeLookupName::qualified(enum_type.name().clone()),
+                });
+            }
+            if primary_type_ids
+                .insert(enum_type.id(), enum_type.name().clone())
+                .is_some()
+            {
+                return Err(CatalogueSnapshotError::DuplicateTypeId { id: enum_type.id() });
+            }
+
+            let namespace = namespace_of(enum_type.name()).ok_or(
+                CatalogueSnapshotError::EnumTypeHasNoSchema {
+                    enum_type: enum_type.id(),
+                },
+            )?;
+            if !schema_indices_by_name.contains_key(&namespace) {
+                return Err(CatalogueSnapshotError::EnumTypeSchemaNotDeclared {
+                    enum_type: enum_type.id(),
+                    schema: namespace,
+                });
+            }
+        }
+
         for (binding_index, binding) in type_bindings.iter().enumerate() {
             if type_binding_indices_by_name
                 .insert(binding.name().clone(), binding_index)
@@ -803,6 +914,9 @@ impl CatalogueSnapshot {
             value_types,
             value_type_indices_by_name,
             value_type_indices_by_id,
+            enum_types,
+            enum_type_indices_by_name,
+            enum_type_indices_by_id,
             type_bindings,
             type_binding_indices_by_name,
             type_binding_indices_by_id,
@@ -879,6 +993,25 @@ impl CatalogueSnapshot {
             .map(|index| &self.value_types[*index])
     }
 
+    /// Returns enum type definitions in their snapshot order.
+    pub fn enum_types(&self) -> &[EnumTypeDefinition] {
+        &self.enum_types
+    }
+
+    /// Finds an enum type by its exact canonical qualified name.
+    pub fn enum_type_by_name(&self, name: &QualifiedSemanticName) -> Option<&EnumTypeDefinition> {
+        self.enum_type_indices_by_name
+            .get(name)
+            .map(|index| &self.enum_types[*index])
+    }
+
+    /// Finds an enum type by its stable identity.
+    pub fn enum_type_by_id(&self, id: TypeId) -> Option<&EnumTypeDefinition> {
+        self.enum_type_indices_by_id
+            .get(&id)
+            .map(|index| &self.enum_types[*index])
+    }
+
     /// Returns direct type bindings in their snapshot order.
     pub fn type_bindings(&self) -> &[TypeBinding] {
         &self.type_bindings
@@ -911,6 +1044,7 @@ impl CatalogueSnapshot {
         self.object_type_by_id(id)
             .map(TypeDefinition::Object)
             .or_else(|| self.value_type_by_id(id).map(TypeDefinition::Value))
+            .or_else(|| self.enum_type_by_id(id).map(TypeDefinition::Enum))
     }
 
     /// Finds a primary type definition through its exact name or direct binding.
@@ -1161,6 +1295,40 @@ pub enum CatalogueSnapshotError {
         /// The repeated identity.
         id: TypeId,
     },
+    /// More than one enum type has the same resolved qualified name.
+    DuplicateEnumTypeName {
+        /// The repeated name.
+        name: QualifiedSemanticName,
+    },
+    /// More than one enum type has the same stable identity.
+    DuplicateEnumTypeId {
+        /// The repeated identity.
+        id: TypeId,
+    },
+    /// An enum type has no labels.
+    EmptyEnumTypeLabels {
+        /// The invalid enum type identity.
+        enum_type: TypeId,
+    },
+    /// An enum type contains a repeated decoded label.
+    DuplicateEnumTypeLabel {
+        /// The invalid enum type identity.
+        enum_type: TypeId,
+        /// The repeated label.
+        label: String,
+    },
+    /// An enum type has no namespace that can refer to a declared schema.
+    EnumTypeHasNoSchema {
+        /// The invalid enum type identity.
+        enum_type: TypeId,
+    },
+    /// An enum type refers to an undeclared exact namespace.
+    EnumTypeSchemaNotDeclared {
+        /// The enum type identity.
+        enum_type: TypeId,
+        /// The missing exact schema name.
+        schema: QualifiedSemanticName,
+    },
     /// A value type has no versioned representation contract.
     EmptyValueTypeRepresentationContract {
         /// The invalid value type identity.
@@ -1406,6 +1574,25 @@ impl fmt::Display for CatalogueSnapshotError {
             Self::DuplicateValueTypeId { id } => {
                 write!(formatter, "duplicate value type identity {id}")
             }
+            Self::DuplicateEnumTypeName { name } => {
+                write!(formatter, "duplicate enum type name {name}")
+            }
+            Self::DuplicateEnumTypeId { id } => {
+                write!(formatter, "duplicate enum type identity {id}")
+            }
+            Self::EmptyEnumTypeLabels { enum_type } => {
+                write!(formatter, "enum type {enum_type} has no labels")
+            }
+            Self::DuplicateEnumTypeLabel { enum_type, label } => {
+                write!(formatter, "enum type {enum_type} repeats label {label:?}")
+            }
+            Self::EnumTypeHasNoSchema { enum_type } => {
+                write!(formatter, "enum type {enum_type} has no declared schema")
+            }
+            Self::EnumTypeSchemaNotDeclared { enum_type, schema } => write!(
+                formatter,
+                "enum type {enum_type} refers to undeclared schema {schema}"
+            ),
             Self::EmptyValueTypeRepresentationContract { value_type } => write!(
                 formatter,
                 "value type {value_type} has an empty representation contract"
@@ -1597,12 +1784,12 @@ impl Error for CatalogueSnapshotError {}
 #[cfg(test)]
 mod tests {
     use crate::catalogue::{
-        CatalogueSnapshot, CatalogueSnapshotError, FieldDefinition, FunctionDefinition,
-        FunctionDomain, FunctionReturn, FunctionReturnColumnDefinition, FunctionSecurity,
-        FunctionTransaction, FunctionVolatility, ObjectTypeDefinition, OnDeleteAction,
-        ParameterDefinition, PreludeTypeName, QualifiedSemanticName, SchemaDefinition,
-        SemanticNameError, TypeBinding, TypeBindingKind, TypeDefinitionKind, TypeLookupName,
-        ValueTypeDefinition, ValueTypeMutability, ValueTypePersistence,
+        CatalogueSnapshot, CatalogueSnapshotError, EnumTypeDefinition, FieldDefinition,
+        FunctionDefinition, FunctionDomain, FunctionReturn, FunctionReturnColumnDefinition,
+        FunctionSecurity, FunctionTransaction, FunctionVolatility, ObjectTypeDefinition,
+        OnDeleteAction, ParameterDefinition, PreludeTypeName, QualifiedSemanticName,
+        SchemaDefinition, SemanticNameError, TypeBinding, TypeBindingKind, TypeDefinitionKind,
+        TypeLookupName, ValueTypeDefinition, ValueTypeMutability, ValueTypePersistence,
     };
     use crate::{
         CatalogueRevisionId, ExpressionId, FieldId, FunctionId, FunctionRevisionId, ParameterId,
@@ -1805,6 +1992,138 @@ mod tests {
             TypeBindingKind::Qualified
         );
         assert_eq!(catalogue.object_types(), &[]);
+    }
+
+    #[test]
+    fn snapshot_resolves_ordered_enum_types_in_the_shared_type_namespace() {
+        let stage = TypeId::from_bytes([1; 16]);
+        let enum_type = EnumTypeDefinition::new(
+            stage,
+            name(&["crm", "stage"]),
+            ["lead", "owner's", "customer"],
+        );
+        let alias = TypeBinding::qualified(name(&["crm", "stage_alias"]), stage).unwrap();
+        let catalogue = CatalogueSnapshot::new_with_enum_types(
+            CatalogueRevisionId::from_bytes([7; 16]),
+            vec![schema(1, &["crm"])],
+            vec![],
+            vec![],
+            vec![enum_type],
+            vec![alias],
+        )
+        .unwrap();
+
+        let definition = catalogue
+            .type_definition_by_name(&TypeLookupName::qualified(name(&["crm", "stage"])))
+            .unwrap();
+        assert_eq!(definition.id(), stage);
+        assert_eq!(definition.kind(), TypeDefinitionKind::Enum);
+        assert_eq!(definition.as_enum(), catalogue.enum_type_by_id(stage));
+        assert_eq!(
+            definition.as_enum().unwrap().labels(),
+            &["lead", "owner's", "customer"]
+        );
+        assert_eq!(catalogue.enum_types().len(), 1);
+        assert_eq!(
+            catalogue.type_id_by_name(&TypeLookupName::qualified(name(&["crm", "stage_alias"]))),
+            Some(stage)
+        );
+    }
+
+    #[test]
+    fn snapshot_rejects_invalid_enum_labels_and_shared_type_collisions() {
+        let stage = TypeId::from_bytes([1; 16]);
+        let build = |enum_type| {
+            CatalogueSnapshot::new_with_enum_types(
+                CatalogueRevisionId::from_bytes([7; 16]),
+                vec![schema(1, &["crm"])],
+                vec![],
+                vec![],
+                vec![enum_type],
+                vec![],
+            )
+        };
+
+        assert_eq!(
+            build(EnumTypeDefinition::new(
+                stage,
+                name(&["crm", "stage"]),
+                Vec::<String>::new(),
+            ))
+            .unwrap_err(),
+            CatalogueSnapshotError::EmptyEnumTypeLabels { enum_type: stage }
+        );
+        assert_eq!(
+            build(EnumTypeDefinition::new(
+                stage,
+                name(&["crm", "stage"]),
+                ["lead", "lead"],
+            ))
+            .unwrap_err(),
+            CatalogueSnapshotError::DuplicateEnumTypeLabel {
+                enum_type: stage,
+                label: "lead".to_owned(),
+            }
+        );
+
+        let enum_type = EnumTypeDefinition::new(stage, name(&["crm", "stage"]), ["lead"]);
+        let error = CatalogueSnapshot::new_with_enum_types(
+            CatalogueRevisionId::from_bytes([7; 16]),
+            vec![schema(1, &["crm"])],
+            vec![object(2, &["crm", "stage"], vec![])],
+            vec![],
+            vec![enum_type],
+            vec![],
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            CatalogueSnapshotError::DuplicateTypeName {
+                name: TypeLookupName::qualified(name(&["crm", "stage"])),
+            }
+        );
+
+        let enum_type = EnumTypeDefinition::new(stage, name(&["crm", "stage"]), ["lead"]);
+        let value_type = ValueTypeDefinition::primitive(
+            TypeId::from_bytes([2; 16]),
+            name(&["crm", "stage"]),
+            ValueTypeMutability::Immutable,
+            ValueTypePersistence::Persistable,
+            "orna.kernel.value.stage@1",
+        );
+        let error = CatalogueSnapshot::new_with_enum_types(
+            CatalogueRevisionId::from_bytes([7; 16]),
+            vec![schema(1, &["crm"])],
+            vec![],
+            vec![value_type],
+            vec![enum_type],
+            vec![],
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            CatalogueSnapshotError::DuplicateTypeName {
+                name: TypeLookupName::qualified(name(&["crm", "stage"])),
+            }
+        );
+
+        let enum_type = EnumTypeDefinition::new(stage, name(&["crm", "stage"]), ["lead"]);
+        let binding = TypeBinding::qualified(name(&["crm", "stage"]), stage).unwrap();
+        let error = CatalogueSnapshot::new_with_enum_types(
+            CatalogueRevisionId::from_bytes([7; 16]),
+            vec![schema(1, &["crm"])],
+            vec![],
+            vec![],
+            vec![enum_type],
+            vec![binding],
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            CatalogueSnapshotError::DuplicateTypeName {
+                name: TypeLookupName::qualified(name(&["crm", "stage"])),
+            }
+        );
     }
 
     #[test]

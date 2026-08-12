@@ -16,8 +16,10 @@ const TYPE_BINDING_ID_DOMAIN: &[u8] = b"ornadb.id/type-binding/v1\0";
 pub enum TypeDefinitionKind {
     /// A type with durable object identities and fields.
     Object,
-    /// A type whose values have no inherent object identity.
+    /// A value type backed by a kernel representation contract.
     Value,
+    /// An ordered set of declared labels.
+    Enum,
 }
 
 /// The representation category of a value type.
@@ -44,6 +46,44 @@ pub enum ValueTypePersistence {
 pub enum ValueTypeMutability {
     /// Values have immutable value semantics.
     Immutable,
+}
+
+/// One immutable, persistable enum value type.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EnumTypeDefinition {
+    id: TypeId,
+    name: QualifiedSemanticName,
+    labels: Vec<String>,
+}
+
+impl EnumTypeDefinition {
+    /// Creates an enum type with labels in their semantic declaration order.
+    pub fn new(
+        id: TypeId,
+        name: QualifiedSemanticName,
+        labels: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self {
+            id,
+            name,
+            labels: labels.into_iter().map(Into::into).collect(),
+        }
+    }
+
+    /// Returns this type's stable identity.
+    pub const fn id(&self) -> TypeId {
+        self.id
+    }
+
+    /// Returns this type's canonical qualified name.
+    pub fn name(&self) -> &QualifiedSemanticName {
+        &self.name
+    }
+
+    /// Returns labels in their semantic declaration order.
+    pub fn labels(&self) -> &[String] {
+        &self.labels
+    }
 }
 
 /// One resolved catalogue value type.
@@ -110,7 +150,7 @@ impl ValueTypeDefinition {
 /// A definition in the public catalogue type family.
 ///
 /// A catalogue snapshot owns definitions. This view preserves that ownership
-/// and provides one common interface for object and value categories.
+/// and provides one common interface for object, value, and enum categories.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TypeDefinition<'a> {
@@ -118,6 +158,8 @@ pub enum TypeDefinition<'a> {
     Object(&'a ObjectTypeDefinition),
     /// A value type.
     Value(&'a ValueTypeDefinition),
+    /// An enum value type.
+    Enum(&'a EnumTypeDefinition),
 }
 
 impl<'a> TypeDefinition<'a> {
@@ -126,6 +168,7 @@ impl<'a> TypeDefinition<'a> {
         match self {
             Self::Object(definition) => definition.id(),
             Self::Value(definition) => definition.id(),
+            Self::Enum(definition) => definition.id(),
         }
     }
 
@@ -134,6 +177,7 @@ impl<'a> TypeDefinition<'a> {
         match self {
             Self::Object(definition) => definition.name(),
             Self::Value(definition) => definition.name(),
+            Self::Enum(definition) => definition.name(),
         }
     }
 
@@ -142,6 +186,7 @@ impl<'a> TypeDefinition<'a> {
         match self {
             Self::Object(_) => TypeDefinitionKind::Object,
             Self::Value(_) => TypeDefinitionKind::Value,
+            Self::Enum(_) => TypeDefinitionKind::Enum,
         }
     }
 
@@ -149,15 +194,23 @@ impl<'a> TypeDefinition<'a> {
     pub const fn as_object(self) -> Option<&'a ObjectTypeDefinition> {
         match self {
             Self::Object(definition) => Some(definition),
-            Self::Value(_) => None,
+            Self::Value(_) | Self::Enum(_) => None,
         }
     }
 
     /// Returns this definition as a value type, when it is one.
     pub const fn as_value(self) -> Option<&'a ValueTypeDefinition> {
         match self {
-            Self::Object(_) => None,
+            Self::Object(_) | Self::Enum(_) => None,
             Self::Value(definition) => Some(definition),
+        }
+    }
+
+    /// Returns this definition as an enum type, when it is one.
+    pub const fn as_enum(self) -> Option<&'a EnumTypeDefinition> {
+        match self {
+            Self::Object(_) | Self::Value(_) => None,
+            Self::Enum(definition) => Some(definition),
         }
     }
 }
