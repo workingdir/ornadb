@@ -645,9 +645,9 @@ pub enum DefinitionReferenceTarget {
     ObjectType(TypeId),
     /// A catalogue value type.
     ValueType(TypeId),
-    /// A stable field owned by an object type.
+    /// A stable field owned by an object or record value type.
     Field {
-        /// The stable object-type identity.
+        /// The stable owning type identity.
         owner: TypeId,
         /// The stable field identity.
         field: FieldId,
@@ -961,7 +961,7 @@ pub enum DefinitionReferenceKind {
     Expression,
     /// A mutation writes an object of the target object type.
     WriteObject,
-    /// A mutation writes one owner-qualified object field.
+    /// A mutation writes one owner-qualified object or record value field.
     WriteField,
 }
 
@@ -2449,11 +2449,19 @@ fn reference_target_exists(
             .object_type_by_id(owner)
             .and_then(|object_type| object_type.field_by_id(field))
             .is_some()
+            || catalogue
+                .record_value_type_by_id(owner)
+                .and_then(|record_value_type| record_value_type.field_by_id(field))
+                .is_some()
             || standard.is_some_and(|standard| {
                 standard
                     .object_type_by_id(owner)
                     .and_then(|object_type| object_type.field_by_id(field))
                     .is_some()
+                    || standard
+                        .record_value_type_by_id(owner)
+                        .and_then(|record_value_type| record_value_type.field_by_id(field))
+                        .is_some()
             });
     }
     let identity = target.into();
@@ -3739,6 +3747,30 @@ mod tests {
             vec![],
         )
         .unwrap()
+    }
+
+    #[test]
+    fn revision_references_accept_exact_record_value_fields() {
+        let catalogue = record_value_type_catalogue();
+        let target = DefinitionReferenceTarget::Field {
+            owner: TypeId::from_bytes(id::<76>()),
+            field: FieldId::from_bytes(id::<77>()),
+        };
+        assert!(reference_target_exists(
+            &catalogue,
+            None,
+            &HashSet::new(),
+            target,
+        ));
+        assert!(!reference_target_exists(
+            &catalogue,
+            None,
+            &HashSet::new(),
+            DefinitionReferenceTarget::Field {
+                owner: TypeId::from_bytes(id::<76>()),
+                field: FieldId::from_bytes(id::<78>()),
+            },
+        ));
     }
 
     fn catalogue_with_record_value_slot() -> CatalogueSnapshot {
