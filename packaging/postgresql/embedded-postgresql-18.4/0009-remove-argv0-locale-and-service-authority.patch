@@ -1,6 +1,6 @@
-diff -U0 -Nr a/src/backend/main/main.c b/src/backend/main/main.c
---- a/src/backend/main/main.c	2026-08-11 22:45:38.545385419 +0100
-+++ b/src/backend/main/main.c	2026-08-11 22:51:07.343008844 +0100
+diff -U3 -Nr a/src/backend/main/main.c b/src/backend/main/main.c
+--- a/src/backend/main/main.c
++++ b/src/backend/main/main.c
 @@ -75,0 +76,4 @@
 +#ifdef ORNA_EMBEDDED_ENTRY
 +	int			clear_pglocaledir_result;
@@ -15,14 +15,29 @@ diff -U0 -Nr a/src/backend/main/main.c b/src/backend/main/main.c
 +		setlocale(LC_ALL, "C.UTF-8") == NULL)
 +		return 1;
 +#endif
-@@ -79,0 +92,3 @@
+@@ -80,3 +92,6 @@
+-
+-	reached_main = true;
+-
 +#ifdef ORNA_EMBEDDED_ENTRY
 +	strlcpy(my_exec_path, "/usr/bin/orna", MAXPGPATH);
 +#endif
-@@ -129,0 +145 @@
++
++	reached_main = true;
++
+@@ -127,5 +142,7 @@
+-	/*
+-	 * Set up locale information
+-	 */
+-	set_pglocale_pgservice(argv[0], PG_TEXTDOMAIN("postgres"));
+-
++	/*
++	 * Set up locale information
++	 */
 +#ifndef ORNA_EMBEDDED_ENTRY
-@@ -130,0 +147 @@
++	set_pglocale_pgservice(argv[0], PG_TEXTDOMAIN("postgres"));
 +#endif
++
 diff -U0 -Nr a/src/bin/initdb/initdb.c b/src/bin/initdb/initdb.c
 --- a/src/bin/initdb/initdb.c	2026-08-11 22:45:38.560588882 +0100
 +++ b/src/bin/initdb/initdb.c	2026-08-11 22:45:51.881491448 +0100

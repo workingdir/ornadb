@@ -40,7 +40,7 @@ sha256 = "425713cf275b52ee1cceb4fbf10bcae166a59f39806386dcc57dc738c681afbd"
 
 [[patches]]
 path = "embedded-postgresql-18.4/0009-remove-argv0-locale-and-service-authority.patch"
-sha256 = "e0c5cbee7fb150a39a2aac024142e214f307caf85368d7e1b5c605046374720a"
+sha256 = "acba50d10a754b351a5fb33804ede992c8079a0a95402277cb18c226c3716304"
 
 [postgresql]
 version = "18.4"
