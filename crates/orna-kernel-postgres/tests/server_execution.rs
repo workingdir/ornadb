@@ -619,6 +619,48 @@ async fn authenticated_server_select_commits_allowed_and_denied_execute_decision
             target,
             None,
         )?;
+
+        let session = database.open().await?;
+        session
+            .client()
+            .batch_execute(
+                "ALTER TABLE _orna_kernel.security_audit_events
+                 ADD CONSTRAINT reject_authenticated_server_audit
+                 CHECK (false) NOT VALID",
+            )
+            .await?;
+        session.shutdown().await?;
+        let audit_failure = kernel
+            .execute_authenticated_server_select(&selected_session, function.id(), &[])
+            .await;
+        let session = database.open().await?;
+        session
+            .client()
+            .batch_execute(
+                "ALTER TABLE _orna_kernel.security_audit_events
+                 DROP CONSTRAINT reject_authenticated_server_audit",
+            )
+            .await?;
+        session.shutdown().await?;
+        let error = audit_failure.expect_err("rejected audit insert must fail SERVER SELECT");
+        require(
+            matches!(
+                error,
+                PostgresKernelError::Database(ref source)
+                    if source.as_db_error().and_then(|error| error.constraint())
+                        == Some("reject_authenticated_server_audit")
+            ),
+            "authenticated SERVER SELECT hid its audit insert failure",
+        )?;
+        let after_failure = kernel.recover_security_audit_events().await?;
+        require(
+            after_failure
+                .iter()
+                .filter(|event| event.decision().kind() == SecurityAuditKind::Execute)
+                .count()
+                == 9,
+            "failed authenticated SERVER audit inserted a decision",
+        )?;
         Ok(())
     })
     .await
