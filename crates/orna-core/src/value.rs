@@ -54,7 +54,7 @@ impl RuntimeValue {
             Self::Text(_) => ResolvedType::scalar(StandardScalar::CharacterLargeObject),
             Self::Bytes(_) => ResolvedType::scalar(StandardScalar::BinaryLargeObject),
             Self::Reference { target, .. } => ResolvedType::reference(*target),
-            Self::Enum(value) => ResolvedType::value(value.enum_type),
+            Self::Enum(value) => ResolvedType::named(value.enum_type),
         }
     }
 
@@ -463,6 +463,7 @@ fn require_supported_runtime_type(resolved_type: ResolvedType) -> Result<(), Res
 const fn supports_runtime_value(resolved_type: ResolvedType) -> bool {
     resolved_type.reference_target().is_some()
         || resolved_type.value_type().is_some()
+        || resolved_type.named_type().is_some()
         || matches!(
             resolved_type.legacy_scalar(),
             Some(
@@ -548,7 +549,7 @@ mod tests {
         assert_eq!(value.label(), "owner's");
         assert_eq!(
             RuntimeValue::Enum(value.clone()).resolved_type(),
-            ResolvedType::value(ENUM_TYPE)
+            ResolvedType::named(ENUM_TYPE)
         );
         assert_eq!(value, value.clone());
 
@@ -575,7 +576,7 @@ mod tests {
     #[test]
     fn result_rows_accept_exact_enum_values_and_typed_nulls() {
         let catalogue = enum_catalogue(&["lead", "qualified"]);
-        let enum_type = ResolvedType::value(ENUM_TYPE);
+        let enum_type = ResolvedType::named(ENUM_TYPE);
         let value = RuntimeValue::Enum(EnumValue::new(&catalogue, ENUM_TYPE, "qualified").unwrap());
         let rows = ResultRows::new(
             [
@@ -731,7 +732,6 @@ mod tests {
             ResolvedType::scalar(StandardScalar::Timestamp),
             ResolvedType::scalar(StandardScalar::Duration),
             ResolvedType::scalar(StandardScalar::Void),
-            ResolvedType::named(TARGET),
         ] {
             assert_eq!(
                 ResultColumn::new("unsupported", resolved_type, false),

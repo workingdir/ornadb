@@ -260,11 +260,11 @@ pub fn encode_catalogue_value(
             encode_variable(ENUM_TAG, value.enum_type(), value.label().as_bytes())
                 .map(with_catalogue_marker)
         }
-        RuntimeValue::Null(value) if value.resolved_type().value_type().is_some() => {
+        RuntimeValue::Null(value) if value.resolved_type().named_type().is_some() => {
             let enum_type = value
                 .resolved_type()
-                .value_type()
-                .expect("value type checked");
+                .named_type()
+                .expect("named type checked");
             require_active_enum_type(catalogue, enum_type)?;
             Ok(encode_with_marker(
                 CATALOGUE_MARKER,
@@ -307,7 +307,7 @@ pub fn decode_catalogue_value(
         NULL_ENUM_TAG => {
             require_empty_payload(tag, payload)?;
             require_active_enum_type(catalogue, type_id)?;
-            RuntimeValue::null(ResolvedType::value(type_id))
+            RuntimeValue::null(ResolvedType::named(type_id))
                 .map_err(|_| ValueCodecError::UnsupportedValue)
         }
         ENUM_TAG => {
@@ -628,7 +628,7 @@ mod tests {
     #[test]
     fn catalogue_codec_round_trips_enum_null_and_legacy_values_as_version_two() {
         let catalogue = enum_catalogue(&["lead"]);
-        let null = RuntimeValue::null(ResolvedType::value(ENUM_TYPE)).unwrap();
+        let null = RuntimeValue::null(ResolvedType::named(ENUM_TYPE)).unwrap();
         let expected_null = encoded_catalogue_value(0x09, ENUM_TYPE, &[]);
         assert_eq!(
             encode_catalogue_value(&catalogue, &null),
