@@ -7,10 +7,11 @@ use crate::{
     MutationValue, NamePart, NullOrdering, ObjectFieldDeclaration, ObjectSource,
     ObjectTypeDeclaration, OnDeletePolicy, OrderingDirection, OrderingExpression, Parse,
     PrimitiveValueTypeDeclaration, PrimitiveValueTypePersistence, QualifiedName, QueryExpression,
-    RowsColumnDeclaration, SchemaDeclaration, SelectQuantifier, SelectQuery, ServerFunctionBody,
-    ServerFunctionDeclaration, ServerFunctionParameter, SourceSlice, SourceSpan, SqlDeleteBody,
-    SqlInsertBody, SqlQueryBody, SqlUpdateBody, StandardLargeObjectKind, SyntaxTree,
-    TypeExportDeclaration, TypeExportTarget, TypeSpecification, UpdateAssignment, UpdateStatement,
+    RecordValueTypeDeclaration, RowsColumnDeclaration, SchemaDeclaration, SelectQuantifier,
+    SelectQuery, ServerFunctionBody, ServerFunctionDeclaration, ServerFunctionParameter,
+    SourceSlice, SourceSpan, SqlDeleteBody, SqlInsertBody, SqlQueryBody, SqlUpdateBody,
+    StandardLargeObjectKind, SyntaxTree, TypeExportDeclaration, TypeExportTarget,
+    TypeSpecification, UpdateAssignment, UpdateStatement, ValueFieldDeclaration,
     lexer::{Token, TokenKind, lex},
 };
 
@@ -54,6 +55,7 @@ pub(crate) enum SyntaxKind {
     ClientFunctionReturnType,
     ClientBooleanReturnBody,
     ExportTypeStatement,
+    ValueField,
 }
 
 impl From<SyntaxKind> for rowan::SyntaxKind {
@@ -107,6 +109,7 @@ impl Language for OrnaLanguage {
             34 => SyntaxKind::ClientFunctionReturnType,
             35 => SyntaxKind::ClientBooleanReturnBody,
             36 => SyntaxKind::ExportTypeStatement,
+            37 => SyntaxKind::ValueField,
             _ => panic!("unknown Orna syntax kind"),
         }
     }
@@ -129,6 +132,7 @@ struct Parser<'source> {
     schemas: Vec<SchemaDeclaration>,
     object_types: Vec<ObjectTypeDeclaration>,
     enum_types: Vec<EnumTypeDeclaration>,
+    record_value_types: Vec<RecordValueTypeDeclaration>,
     primitive_value_types: Vec<PrimitiveValueTypeDeclaration>,
     type_exports: Vec<TypeExportDeclaration>,
     field_renames: Vec<FieldRenameDeclaration>,
@@ -148,6 +152,7 @@ impl<'source> Parser<'source> {
             schemas: Vec::new(),
             object_types: Vec::new(),
             enum_types: Vec::new(),
+            record_value_types: Vec::new(),
             primitive_value_types: Vec::new(),
             type_exports: Vec::new(),
             field_renames: Vec::new(),
@@ -186,6 +191,7 @@ impl<'source> Parser<'source> {
             schemas: self.schemas,
             object_types: self.object_types,
             enum_types: self.enum_types,
+            record_value_types: self.record_value_types,
             primitive_value_types: self.primitive_value_types,
             type_exports: self.type_exports,
             field_renames: self.field_renames,
@@ -1242,7 +1248,15 @@ impl<'source> Parser<'source> {
         } else if self.take_word("ENUM").is_some() {
             self.parse_create_enum_type_body(statement_start, name);
         } else if self.take_word("VALUE").is_some() {
-            self.parse_create_primitive_value_type_body(statement_start, name);
+            self.skip_trivia();
+            if self
+                .current()
+                .is_some_and(|token| token.kind == TokenKind::LeftParenthesis)
+            {
+                self.parse_create_record_value_type_body(statement_start, name);
+            } else {
+                self.parse_create_primitive_value_type_body(statement_start, name);
+            }
         } else {
             self.error_current("ORNA0001", "expected OBJECT, ENUM, or VALUE after AS");
             self.recover_statement();
@@ -1465,6 +1479,56 @@ impl<'source> Parser<'source> {
         }
     }
 
+    fn parse_create_record_value_type_body(
+        &mut self,
+        statement_start: usize,
+        name: Option<QualifiedName>,
+    ) {
+        if self
+            .expect_kind(TokenKind::LeftParenthesis, "expected '(' after AS VALUE")
+            .is_none()
+        {
+            self.recover_statement();
+            return;
+        }
+        let Some(fields) = self.parse_value_fields() else {
+            self.recover_statement();
+            return;
+        };
+
+        self.skip_trivia();
+        let Some(immutable) = self.expect_word_token("IMMUTABLE") else {
+            self.recover_statement();
+            return;
+        };
+        self.skip_trivia();
+        let Some(persistable) = self.expect_word_token("PERSISTABLE") else {
+            self.recover_statement();
+            return;
+        };
+        self.skip_trivia();
+        let Some(semicolon) = self.expect_kind(
+            TokenKind::Semicolon,
+            "expected ';' after record value type declaration",
+        ) else {
+            self.recover_statement();
+            return;
+        };
+
+        if let Some(name) = name {
+            self.record_value_types.push(RecordValueTypeDeclaration {
+                name,
+                fields,
+                immutable_span: immutable.span(),
+                persistable_span: persistable.span(),
+                span: SourceSpan {
+                    start: statement_start,
+                    end: semicolon.end,
+                },
+            });
+        }
+    }
+
     fn parse_export_type_statement(&mut self) {
         let statement_start = self.current().expect("EXPORT token exists").range.start;
         self.builder
@@ -1623,6 +1687,104 @@ impl<'source> Parser<'source> {
                 self.bump();
             }
         }
+    }
+
+    fn parse_value_fields(&mut self) -> Option<Vec<ValueFieldDeclaration>> {
+        let mut fields = Vec::new();
+
+        self.skip_trivia();
+        if self
+            .current()
+            .is_some_and(|token| token.kind == TokenKind::RightParenthesis)
+        {
+            self.error_current(
+                "ORNA0001",
+                "record value type must declare at least one field",
+            );
+            return None;
+        }
+
+        loop {
+            let field = self.parse_value_field(fields.len())?;
+            fields.push(field);
+            self.skip_trivia();
+
+            if self
+                .current()
+                .is_some_and(|token| token.kind == TokenKind::RightParenthesis)
+            {
+                self.bump();
+                return Some(fields);
+            }
+            if self
+                .current()
+                .is_some_and(|token| token.kind == TokenKind::Comma)
+            {
+                self.bump();
+                self.skip_trivia();
+                if self
+                    .current()
+                    .is_some_and(|token| token.kind == TokenKind::RightParenthesis)
+                {
+                    self.bump();
+                    return Some(fields);
+                }
+                continue;
+            }
+
+            let message = if self.current().is_none()
+                || self
+                    .current()
+                    .is_some_and(|token| token.kind == TokenKind::Semicolon)
+            {
+                "expected ')' after record value fields"
+            } else {
+                "expected ',' or ')' after record value field"
+            };
+            self.error_current("ORNA0001", message);
+            return None;
+        }
+    }
+
+    fn parse_value_field(&mut self, order: usize) -> Option<ValueFieldDeclaration> {
+        self.builder.start_node(SyntaxKind::ValueField.into());
+        let result = (|| {
+            let name = self.expect_identifier("expected a record value field name")?;
+            let field_start = name.span.start;
+            self.skip_trivia();
+            if self.current().is_some_and(|token| token.is_word("REF")) {
+                self.error_current("ORNA0001", "record value fields cannot use REF");
+                return None;
+            }
+            let type_specification =
+                self.parse_type_specification_with_message("expected a record value field type")?;
+            let field_end = type_specification.span().end;
+            self.skip_trivia();
+            if self.current().is_some_and(|token| {
+                token.is_word("DEFAULT")
+                    || token.is_word("CHECK")
+                    || token.is_word("DOCUMENTATION")
+                    || token.is_word("NULL")
+                    || token.is_word("NOT")
+                    || token.is_word("UNIQUE")
+                    || token.is_word("ON")
+                    || token.is_word("PRIMARY")
+            }) {
+                self.error_current("ORNA0001", "record value fields do not accept modifiers");
+                return None;
+            }
+            Some(ValueFieldDeclaration {
+                name,
+                order,
+                type_specification,
+                span: SourceSpan {
+                    start: field_start,
+                    end: field_end,
+                },
+            })
+        })();
+        self.builder.finish_node();
+        result
     }
 
     fn parse_object_field(&mut self, order: usize) -> Option<ObjectFieldDeclaration> {
