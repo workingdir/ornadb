@@ -799,6 +799,13 @@ linked initialisation and postmaster lifecycle proof is green on the new path.
 Each row is one buildable, reviewable Conventional Commit. Each commit changes
 only the exact one to three files listed in that row.
 
+A change only to patch hunk context is a representation correction, not an
+embedded-engine change, when `--fuzz=0` application produces a byte-identical
+final source tree and every deterministic output remains byte-identical. The
+recipe and embedded manifest bind the new patch digest, but the embedded
+identity does not advance. Any applied source or deterministic-output byte
+change fails this exception and requires a new identity.
+
 ### Completed prototype history
 
 These completed rows record how the one-ELF boundary and native seams were
@@ -832,6 +839,7 @@ prototype history and are not current source or build authority.
 | `fix(postgres): reject x32 syscall aliases` | `packaging/postgresql/embedded-postgresql-18.4/0002-embedded-runtime-capabilities-and-seccomp.patch`; `packaging/postgresql/embedded-build.toml`; `packaging/postgresql/build-embedded.sh` | Apply the same x32-first denial to the still-selected legacy patch authority, update its digest, advance the embedded identity to `.2`, and prove in a fresh filtered child that an x32-numbered harmless syscall returns `EPERM` before the legacy build is reproduced twice. |
 | `fix(ci): run the legacy embedded proof` | `.github/workflows/postgresql-embedded.yml` | Watch the complete ordered patch-series directory, pass one explicit absolute repository-local output root to the still-selected legacy builder, and upload that exact verified evidence root. |
 | `chore(postgres): advance runtime capabilities` | `third_party/postgresql` | Advance the gitlink by only `feat(embedded): add runtime capabilities` after its ordinary build gate passes. |
+| `build(postgres): stabilise legacy argv0 patch` | `packaging/postgresql/embedded-postgresql-18.4/0009-remove-argv0-locale-and-service-authority.patch`; `packaging/postgresql/embedded-build.toml` | Rewrite only patch `0009` backend hunk context against stable source anchors, update its digest, and prove with `--fuzz=0` that it applies after both the accepted unguarded patch `0002` and the forthcoming guarded form. Require the current series to produce the same final source tree and deterministic outputs, and retain embedded identity `.2`. |
 | `fix(postgres): guard legacy embedded entry setup` | `packaging/postgresql/embedded-postgresql-18.4/0002-embedded-runtime-capabilities-and-seccomp.patch`; `packaging/postgresql/embedded-build.toml`; `packaging/postgresql/build-embedded.sh` | Add the same `ORNA_EMBEDDED_ENTRY` guard to the still-selected legacy patch authority, update its digest, advance the embedded identity from `.2` to `.3`, prove that the ordinary `main` object has no Orna runtime reference, and reproduce the full selected legacy proof twice before the fork linkage commit. The later native recipe inherits identity `.3`. |
 | `chore(postgres): advance runtime linkage` | `third_party/postgresql` | Advance the gitlink by only `build(embedded): link runtime capabilities` after its ordinary and private-target gates pass. |
 | `chore(postgres): advance fixed postmaster paths` | `third_party/postgresql` | Advance the gitlink by only `fix(embedded): use fixed postmaster support paths` after its ordinary build gate passes. |
