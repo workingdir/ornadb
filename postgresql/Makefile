@@ -11,6 +11,7 @@ CONTAINERFILE := $(CURDIR)/Containerfile
 SUPPORT_BUILDER := $(CURDIR)/support_bundle.py
 MANIFEST_BUILDER := $(CURDIR)/engine_manifest.py
 LIFECYCLE_PROBE := $(CURDIR)/lifecycle_probe.c
+LIFECYCLE_VERIFIER := $(CURDIR)/verify_lifecycle.py
 IMAGE := orna-postgresql-engine:debian12-amd64-1
 SOURCE_DATE_EPOCH := 1778528675
 LIFECYCLE_UID := 61018
@@ -51,7 +52,7 @@ CONFIGURE_FLAGS := \
 	--without-llvm \
 	--with-zlib
 
-.PHONY: help verify-inputs prepare-source build-image archives support-data lifecycle manifest update-source
+.PHONY: help verify-inputs prepare-source build-image archives support-data lifecycle verify-lifecycle manifest update-source
 
 help:
 	@printf '%s\n' \
@@ -62,6 +63,7 @@ help:
 		'  make -C postgresql archives TARGET_ROOT=<absolute-repo-target-path>' \
 		'  make -C postgresql support-data TARGET_ROOT=<absolute-repo-target-path>' \
 		'  make -C postgresql lifecycle TARGET_ROOT=<absolute-repo-target-path>' \
+		'  make -C postgresql verify-lifecycle TARGET_ROOT=<absolute-repo-target-path>' \
 		'  make -C postgresql manifest TARGET_ROOT=<absolute-repo-target-path>' \
 		'  make -C postgresql update-source POSTGRESQL_REF=<full-commit>'
 
@@ -78,15 +80,18 @@ verify-inputs:
 	git -C "$(REPOSITORY_ROOT)" ls-files --error-unmatch -- \
 		postgresql/Makefile postgresql/Containerfile \
 		postgresql/support_bundle.py postgresql/engine_manifest.py postgresql/lifecycle_probe.c \
+		postgresql/verify_lifecycle.py \
 		postgresql/overlays/18.4 postgresql/patches/18.4 >/dev/null; \
 	[[ -z "$$(git -C "$(REPOSITORY_ROOT)" ls-files --others --exclude-standard -- \
 		postgresql/Makefile postgresql/Containerfile \
 		postgresql/support_bundle.py postgresql/engine_manifest.py postgresql/lifecycle_probe.c \
+		postgresql/verify_lifecycle.py \
 		postgresql/overlays/18.4 postgresql/patches/18.4)" ]] || { \
 		printf '%s\n' '[postgresql] error: the integration input contains an untracked file' >&2; exit 1; }; \
 	git -C "$(REPOSITORY_ROOT)" diff --quiet -- \
 		postgresql/Makefile postgresql/Containerfile \
 		postgresql/support_bundle.py postgresql/engine_manifest.py postgresql/lifecycle_probe.c \
+		postgresql/verify_lifecycle.py \
 		postgresql/overlays/18.4 postgresql/patches/18.4 || { \
 		printf '%s\n' '[postgresql] error: the integration input differs from the Git index' >&2; exit 1; }; \
 	[[ -z "$$(find "$(OVERLAY_ROOT)" -mindepth 1 ! -type d ! -type f -print -quit)" ]] || { \
@@ -269,6 +274,7 @@ lifecycle: archives
 	docker run --rm --network=none --platform linux/amd64 --user 0:0 \
 		--volume "$${target_root}:/proof:rw" \
 		--volume "$(LIFECYCLE_PROBE):/input/lifecycle_probe.c:ro" \
+		--volume "$(LIFECYCLE_VERIFIER):/input/verify_lifecycle.py:ro" \
 		"$(IMAGE)" bash -euo pipefail -c '\
 		export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; \
 		if awk -F: '\''$$1 == "orna_kernel" || $$3 == $(LIFECYCLE_UID) { found = 1 } END { exit !found }'\'' /etc/passwd; then \
@@ -290,11 +296,13 @@ lifecycle: archives
 		find /proof/lifecycle/support -type f -exec chmod 0600 {} +; \
 		chown -R $(LIFECYCLE_UID):$(LIFECYCLE_GID) /proof/lifecycle; \
 		gcc -D_GNU_SOURCE -std=c11 -Wall -Wextra -Werror -Wl,--build-id=none \
-			-o /proof/lifecycle/lifecycle-probe /input/lifecycle_probe.c \
+			-o /proof/tmp/lifecycle-probe /input/lifecycle_probe.c \
 			/proof/output/liborna_postgres18_initdb.a \
 			/proof/output/liborna_postgres18_backend.a -lz -lm; \
 		env -i PATH="$${PATH}" LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC0 \
-			/proof/lifecycle/lifecycle-probe \
+			strace -ff -qq -s 4096 -o /proof/lifecycle/lifecycle.strace \
+			-e trace=%process,%file,%memory,%network,seccomp,prctl,write \
+			/proof/tmp/lifecycle-probe \
 			/proof/lifecycle/support /proof/lifecycle/pgdata /proof/lifecycle/socket \
 			$(LIFECYCLE_UID) $(LIFECYCLE_GID) $(LIFECYCLE_PORT) \
 			/proof/lifecycle/embedded-initialisation-report.json \
@@ -305,12 +313,35 @@ lifecycle: archives
 			postmaster-start pgwire-ready query-complete postmaster-sigint complete \
 			> /proof/lifecycle/expected-markers; \
 		cmp /proof/lifecycle/expected-markers /proof/lifecycle/markers; \
+		python3 /input/verify_lifecycle.py /proof/lifecycle/lifecycle.strace \
+			/proof/lifecycle/markers \
+			/proof/lifecycle/embedded-initialisation-report.json \
+			/proof/lifecycle/embedded-initialisation-report.json.stdout \
+			/proof/tmp/lifecycle-probe; \
 		install -m 0644 /proof/lifecycle/embedded-initialisation-report.json \
 			/proof/output/embedded-initialisation-report.json; \
 		install -m 0644 /proof/lifecycle/embedded-initialisation-report.json.stdout \
 			/proof/output/embedded-initialisation.stdout; \
+		chown --reference=/proof/output /proof/tmp/lifecycle-probe; \
+		chmod 0500 /proof/tmp/lifecycle-probe; \
 		rm -rf -- /proof/lifecycle'; \
 	printf '%s\n' "[postgresql] linked lifecycle passed below $${target_root}/output"
+
+verify-lifecycle:
+	@target_root='$(TARGET_ROOT)'; \
+	[[ "$${target_root}" == "$(REPOSITORY_ROOT)/target/"* ]] || { \
+		printf '%s\n' '[postgresql] error: TARGET_ROOT must be an absolute path below the repository target directory' >&2; exit 1; }; \
+	mkdir -p -- "$${target_root}"; \
+	one="$${target_root}/build-one"; two="$${target_root}/build-two"; \
+	$(MAKE) lifecycle TARGET_ROOT="$${one}"; \
+	$(MAKE) lifecycle TARGET_ROOT="$${two}"; \
+	cmp <(find "$${one}/output" -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort) \
+		<(find "$${two}/output" -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort); \
+	while IFS= read -r name; do \
+		cmp "$${one}/output/$${name}" "$${two}/output/$${name}"; \
+	done < <(find "$${one}/output" -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort); \
+	cmp "$${one}/tmp/lifecycle-probe" "$${two}/tmp/lifecycle-probe"; \
+	printf '%s\n' "[postgresql] linked lifecycle reproduced twice below $${target_root}"
 
 manifest: lifecycle
 	@python3 "$(MANIFEST_BUILDER)" "$(REPOSITORY_ROOT)" "$(TARGET_ROOT)" "$(IMAGE)"
