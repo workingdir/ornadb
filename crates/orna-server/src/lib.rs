@@ -11,7 +11,7 @@ pub use embedded::{
     inspect_ready_embedded_host, materialise_support_data, private_database_config,
     run_embedded_server, start_embedded_postmaster,
 };
-pub use upgrade::EmbeddedUpgradeError;
+pub use upgrade::{EmbeddedUpgradeError, run_embedded_upgrade};
 
 use std::fmt;
 
