@@ -598,6 +598,17 @@ async fn execute_transaction(
     test_barrier: Option<&SelectTestBarrier>,
 ) -> Result<ServerSelectResult, PostgresKernelError> {
     let active = configure_and_recover(transaction).await?;
+    execute_recovered_server_select(transaction, &active, function_id, arguments, test_barrier)
+        .await
+}
+
+async fn execute_recovered_server_select(
+    transaction: &Transaction<'_>,
+    active: &ActiveDatabaseRevision,
+    function_id: FunctionId,
+    arguments: &[FunctionArgument],
+    test_barrier: Option<&SelectTestBarrier>,
+) -> Result<ServerSelectResult, PostgresKernelError> {
     let function = active
         .catalogue()
         .functions()
@@ -612,7 +623,7 @@ async fn execute_transaction(
     let context = ServerSelectContext::new(active.pair(), function_id, function.current_revision());
     pause_after_recovery(test_barrier).await;
     let result =
-        execute_active_transaction(transaction, &active, function, context, arguments).await;
+        execute_active_transaction(transaction, active, function, context, arguments).await;
     result.map_err(|error| contextualize(context, error))
 }
 
@@ -633,25 +644,7 @@ pub(crate) async fn execute_authorised_server_select(
             active: active.pair(),
         }));
     }
-    let function = active
-        .catalogue()
-        .functions()
-        .iter()
-        .find(|function| function.id() == target.function())
-        .ok_or_else(|| {
-            server_error(ServerSelectError::FunctionNotActive {
-                pair: active.pair(),
-                function: target.function(),
-            })
-        })?;
-    let context = ServerSelectContext::new(
-        active.pair(),
-        target.function(),
-        function.current_revision(),
-    );
-    execute_active_transaction(transaction, active, function, context, arguments)
-        .await
-        .map_err(|error| contextualize(context, error))
+    execute_recovered_server_select(transaction, active, target.function(), arguments, None).await
 }
 
 #[cfg(feature = "test-hooks")]
