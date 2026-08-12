@@ -6,9 +6,18 @@ use std::{
     fmt,
     future::Future,
     io::{self, Write},
-    os::unix::net::UnixStream as StandardUnixStream,
+    net::Shutdown,
+    os::unix::{
+        fs::{FileTypeExt, MetadataExt, PermissionsExt},
+        net::{UnixListener as StandardUnixListener, UnixStream as StandardUnixStream},
+    },
+    path::{Path, PathBuf},
     pin::Pin,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread,
     time::Duration,
 };
 
@@ -25,7 +34,7 @@ use tokio::{
         UnixStream,
         unix::{OwnedReadHalf, OwnedWriteHalf},
     },
-    sync::{OwnedSemaphorePermit, Semaphore, mpsc},
+    sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch},
     task::{JoinError, JoinSet},
     time::{Instant, timeout_at},
 };
@@ -39,6 +48,8 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const FRAME_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const SHARED_PAYLOAD_BYTES: usize = 256 * 1024 * 1024;
 const KERNEL_OPERATION_LIMIT: usize = 64;
+const CONNECTION_LIMIT: usize = 64;
+const SOCKET_NAME: &str = "orna.sock";
 
 /// Listener-wide admission resources for authenticated local raw calls.
 #[derive(Clone)]
@@ -165,6 +176,346 @@ impl Error for LocalRawSocketError {
     }
 }
 
+impl LocalRawSocketError {
+    const fn is_infrastructure_failure(&self) -> bool {
+        matches!(
+            self,
+            Self::DispatchTask { .. } | Self::ConnectionTask { .. }
+        )
+    }
+}
+
+/// A failure in the fixed local raw-socket listener lifecycle.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum LocalRawSocketServerError {
+    /// The fixed runtime directory or public socket has hostile metadata.
+    InvalidSocketState,
+    /// The listener or one connection worker failed outside a client error.
+    Infrastructure {
+        /// The trusted listener or worker failure.
+        source: LocalRawSocketError,
+    },
+    /// The dedicated listener thread panicked.
+    ListenerThread,
+    /// A host socket or filesystem operation failed.
+    Io {
+        /// The host I/O failure.
+        source: io::Error,
+    },
+}
+
+impl fmt::Display for LocalRawSocketServerError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::InvalidSocketState => "local raw socket state is invalid",
+            Self::Infrastructure { .. } => "local raw socket infrastructure failed",
+            Self::ListenerThread => "local raw socket listener thread failed",
+            Self::Io { .. } => "local raw socket host I/O failed",
+        })
+    }
+}
+
+impl Error for LocalRawSocketServerError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Infrastructure { source } => Some(source),
+            Self::Io { source } => Some(source),
+            Self::InvalidSocketState | Self::ListenerThread => None,
+        }
+    }
+}
+
+impl From<io::Error> for LocalRawSocketServerError {
+    fn from(source: io::Error) -> Self {
+        Self::Io { source }
+    }
+}
+
+/// One verified fixed local raw listener and all of its connection workers.
+pub struct LocalRawSocketServer {
+    shutdown: watch::Sender<bool>,
+    thread: Option<thread::JoinHandle<Result<(), LocalRawSocketServerError>>>,
+    healthy: Arc<AtomicBool>,
+    socket_path: PathBuf,
+    socket_present: bool,
+    uid: u32,
+    gid: u32,
+}
+
+struct BoundSocketCleanup {
+    path: PathBuf,
+    active: bool,
+}
+
+impl Drop for BoundSocketCleanup {
+    fn drop(&mut self) {
+        if self.active {
+            let _ = std::fs::remove_file(&self.path);
+            if let Some(parent) = self.path.parent() {
+                let _ = std::fs::File::open(parent).and_then(|directory| directory.sync_all());
+            }
+        }
+    }
+}
+
+impl LocalRawSocketServer {
+    /// Reports whether the listener thread remains live.
+    pub fn is_healthy(&self) -> bool {
+        self.healthy.load(Ordering::SeqCst)
+            && self
+                .thread
+                .as_ref()
+                .is_some_and(|thread| !thread.is_finished())
+    }
+
+    /// Stops acceptance, drains every connection, and removes the public socket.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed listener, worker, socket-state, or host I/O failure after
+    /// attempting the complete ordered cleanup.
+    pub fn stop(mut self) -> Result<(), LocalRawSocketServerError> {
+        let result = self.stop_inner();
+        self.thread = None;
+        result
+    }
+
+    fn stop_inner(&mut self) -> Result<(), LocalRawSocketServerError> {
+        let _ = self.shutdown.send(true);
+        let listener = match self.thread.take() {
+            Some(thread) => match thread.join() {
+                Ok(result) => result,
+                Err(_) => Err(LocalRawSocketServerError::ListenerThread),
+            },
+            None => Ok(()),
+        };
+        let removal = if self.socket_present {
+            let removal = remove_verified_socket(&self.socket_path, self.uid, self.gid);
+            if removal.is_ok() {
+                self.socket_present = false;
+            }
+            removal
+        } else {
+            Ok(())
+        };
+        listener?;
+        removal
+    }
+}
+
+impl Drop for LocalRawSocketServer {
+    fn drop(&mut self) {
+        let _ = self.stop_inner();
+    }
+}
+
+/// Starts the fixed `orna.sock` listener below a verified runtime directory.
+///
+/// The caller must hold the exclusive instance lock for this handle's complete
+/// lifetime. No supplied value can select the socket filename, identity,
+/// protocol limits, or dispatch authority.
+///
+/// # Errors
+///
+/// Returns a typed socket-state, host I/O, or listener-thread startup failure.
+pub fn start_local_raw_socket(
+    runtime_directory: &Path,
+    kernel: PostgresKernel,
+) -> Result<LocalRawSocketServer, LocalRawSocketServerError> {
+    // SAFETY: these calls only read the current process credentials.
+    let uid = unsafe { nix::libc::geteuid() };
+    // SAFETY: these calls only read the current process credentials.
+    let gid = unsafe { nix::libc::getegid() };
+    require_runtime_directory(runtime_directory, uid, gid)?;
+    let socket_path = runtime_directory.join(SOCKET_NAME);
+    remove_stale_socket(&socket_path, uid, gid)?;
+    let listener = StandardUnixListener::bind(&socket_path)?;
+    let mut cleanup = BoundSocketCleanup {
+        path: socket_path.clone(),
+        active: true,
+    };
+    std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o666))?;
+    require_socket(&socket_path, uid, gid)?;
+    sync_directory(runtime_directory)?;
+    listener.set_nonblocking(true)?;
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let listener = {
+        let _runtime_context = runtime.enter();
+        tokio::net::UnixListener::from_std(listener)?
+    };
+    let (shutdown, shutdown_receiver) = watch::channel(false);
+    let resources = LocalRawSocketResources::new();
+    let listener_shutdown = shutdown.clone();
+    let healthy = Arc::new(AtomicBool::new(true));
+    let listener_health = Arc::clone(&healthy);
+    let listener_thread = thread::Builder::new()
+        .name("orna-raw-socket".to_owned())
+        .spawn(move || {
+            runtime.block_on(run_listener(
+                listener,
+                kernel,
+                resources,
+                listener_shutdown,
+                shutdown_receiver,
+                listener_health,
+            ))
+        })?;
+    cleanup.active = false;
+    Ok(LocalRawSocketServer {
+        shutdown,
+        thread: Some(listener_thread),
+        healthy,
+        socket_path,
+        socket_present: true,
+        uid,
+        gid,
+    })
+}
+
+async fn run_listener(
+    listener: tokio::net::UnixListener,
+    kernel: PostgresKernel,
+    resources: LocalRawSocketResources,
+    shutdown_signal: watch::Sender<bool>,
+    mut shutdown: watch::Receiver<bool>,
+    healthy: Arc<AtomicBool>,
+) -> Result<(), LocalRawSocketServerError> {
+    let connections = Arc::new(Semaphore::new(CONNECTION_LIMIT));
+    let mut workers = JoinSet::new();
+    let mut result = loop {
+        tokio::select! {
+            _ = wait_for_shutdown(&mut shutdown) => break Ok(()),
+            accepted = listener.accept() => {
+                let (stream, _) = match accepted {
+                    Ok(accepted) => accepted,
+                    Err(source) => break Err(source.into()),
+                };
+                let Ok(connection_permit) = Arc::clone(&connections).try_acquire_owned() else {
+                    drop(stream);
+                    continue;
+                };
+                let stream = match stream.into_std() {
+                    Ok(stream) => stream,
+                    Err(source) => break Err(source.into()),
+                };
+                let kernel = kernel.clone();
+                let resources = resources.clone();
+                let connection_shutdown = shutdown.clone();
+                workers.spawn(async move {
+                    let _connection_permit = connection_permit;
+                    serve_local_raw_stream_until_shutdown(
+                        kernel,
+                        stream,
+                        resources,
+                        connection_shutdown,
+                    )
+                    .await
+                });
+            }
+            completed = workers.join_next(), if !workers.is_empty() => {
+                match completed {
+                    Some(Ok(Err(source))) if source.is_infrastructure_failure() => {
+                        break Err(LocalRawSocketServerError::Infrastructure { source });
+                    }
+                    Some(Err(source)) => {
+                        break Err(LocalRawSocketServerError::Infrastructure {
+                            source: LocalRawSocketError::ConnectionTask { source },
+                        });
+                    }
+                    Some(Ok(Ok(()) | Err(_))) | None => {}
+                }
+            }
+        }
+    };
+
+    if result.is_err() {
+        let _ = shutdown_signal.send(true);
+    }
+    healthy.store(false, Ordering::SeqCst);
+    drop(listener);
+
+    while let Some(completed) = workers.join_next().await {
+        match completed {
+            Ok(Err(source)) if source.is_infrastructure_failure() && result.is_ok() => {
+                result = Err(LocalRawSocketServerError::Infrastructure { source });
+            }
+            Err(source) if result.is_ok() => {
+                result = Err(LocalRawSocketServerError::Infrastructure {
+                    source: LocalRawSocketError::ConnectionTask { source },
+                });
+            }
+            Ok(Ok(()) | Err(_)) | Err(_) => {}
+        }
+    }
+    result
+}
+
+fn require_runtime_directory(
+    path: &Path,
+    uid: u32,
+    gid: u32,
+) -> Result<(), LocalRawSocketServerError> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_dir()
+        || metadata.uid() != uid
+        || metadata.gid() != gid
+        || metadata.mode() & 0o7777 != 0o711
+    {
+        return Err(LocalRawSocketServerError::InvalidSocketState);
+    }
+    Ok(())
+}
+
+fn require_socket(path: &Path, uid: u32, gid: u32) -> Result<(), LocalRawSocketServerError> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_socket()
+        || metadata.uid() != uid
+        || metadata.gid() != gid
+        || metadata.mode() & 0o7777 != 0o666
+        || metadata.nlink() != 1
+    {
+        return Err(LocalRawSocketServerError::InvalidSocketState);
+    }
+    Ok(())
+}
+
+fn remove_stale_socket(path: &Path, uid: u32, gid: u32) -> Result<(), LocalRawSocketServerError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => {
+            require_socket(path, uid, gid)?;
+            std::fs::remove_file(path)?;
+            sync_directory(
+                path.parent()
+                    .ok_or(LocalRawSocketServerError::InvalidSocketState)?,
+            )
+        }
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(source.into()),
+    }
+}
+
+fn remove_verified_socket(
+    path: &Path,
+    uid: u32,
+    gid: u32,
+) -> Result<(), LocalRawSocketServerError> {
+    require_socket(path, uid, gid)?;
+    std::fs::remove_file(path)?;
+    sync_directory(
+        path.parent()
+            .ok_or(LocalRawSocketServerError::InvalidSocketState)?,
+    )
+}
+
+fn sync_directory(path: &Path) -> Result<(), LocalRawSocketServerError> {
+    std::fs::File::open(path)?.sync_all()?;
+    Ok(())
+}
+
 /// Negotiates, authenticates, and drives one connected local raw stream.
 ///
 /// The actual Unix peer is the sole authentication input. The supplied stream
@@ -183,7 +534,34 @@ pub async fn serve_local_raw_stream(
     stream: StandardUnixStream,
     resources: LocalRawSocketResources,
 ) -> Result<(), LocalRawSocketError> {
-    run_owned_connection(async move { negotiate_and_drive(kernel, stream, resources).await }).await
+    let (shutdown_guard, shutdown) = watch::channel(false);
+    run_owned_connection_with_shutdown_guard(shutdown_guard, async move {
+        negotiate_and_drive(kernel, stream, resources, shutdown).await
+    })
+    .await
+}
+
+pub(super) async fn serve_local_raw_stream_until_shutdown(
+    kernel: PostgresKernel,
+    stream: StandardUnixStream,
+    resources: LocalRawSocketResources,
+    shutdown: watch::Receiver<bool>,
+) -> Result<(), LocalRawSocketError> {
+    run_owned_connection(async move {
+        let shutdown_stream = stream
+            .try_clone()
+            .map_err(|source| LocalRawSocketError::Io { source })?;
+        let mut socket_shutdown = shutdown.clone();
+        let shutdown_task = tokio::spawn(async move {
+            wait_for_shutdown(&mut socket_shutdown).await;
+            let _ = shutdown_stream.shutdown(Shutdown::Both);
+        });
+        let result = negotiate_and_drive(kernel, stream, resources, shutdown).await;
+        shutdown_task.abort();
+        let _ = shutdown_task.await;
+        result
+    })
+    .await
 }
 
 async fn run_owned_connection<F>(connection: F) -> Result<(), LocalRawSocketError>
@@ -195,10 +573,36 @@ where
         .map_err(|source| LocalRawSocketError::ConnectionTask { source })?
 }
 
+async fn run_owned_connection_with_shutdown_guard<F>(
+    shutdown_guard: watch::Sender<bool>,
+    connection: F,
+) -> Result<(), LocalRawSocketError>
+where
+    F: Future<Output = Result<(), LocalRawSocketError>> + Send + 'static,
+{
+    run_owned_connection(async move {
+        let _shutdown_guard = shutdown_guard;
+        connection.await
+    })
+    .await
+}
+
+async fn wait_for_shutdown(shutdown: &mut watch::Receiver<bool>) {
+    loop {
+        if *shutdown.borrow_and_update() {
+            return;
+        }
+        if shutdown.changed().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
 async fn negotiate_and_drive(
     kernel: PostgresKernel,
     stream: StandardUnixStream,
     resources: LocalRawSocketResources,
+    mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), LocalRawSocketError> {
     let peer_stream = stream
         .try_clone()
@@ -210,13 +614,18 @@ async fn negotiate_and_drive(
         UnixStream::from_std(stream).map_err(|source| LocalRawSocketError::Io { source })?;
 
     let mut hello = [0_u8; CLIENT_HELLO.len()];
-    read_exact_before(
-        &mut stream,
-        &mut hello,
-        Instant::now() + HANDSHAKE_TIMEOUT,
-        LocalRawSocketError::HandshakeTimeout,
-    )
-    .await?;
+    if *shutdown.borrow() {
+        return Ok(());
+    }
+    tokio::select! {
+        result = read_exact_before(
+            &mut stream,
+            &mut hello,
+            Instant::now() + HANDSHAKE_TIMEOUT,
+            LocalRawSocketError::HandshakeTimeout,
+        ) => result?,
+        _ = wait_for_shutdown(&mut shutdown) => return Ok(()),
+    }
     if hello != CLIENT_HELLO {
         return Err(LocalRawSocketError::InvalidHello);
     }
@@ -226,12 +635,21 @@ async fn negotiate_and_drive(
         .await
         .map_err(|source| LocalRawSocketError::Authentication { source })?;
     drop(authentication_permit);
-    stream
-        .write_all(&SERVER_ACK)
-        .await
-        .map_err(|source| LocalRawSocketError::Io { source })?;
+    if *shutdown.borrow() {
+        return Ok(());
+    }
+    if !write_all_until_shutdown(&mut stream, &SERVER_ACK, &mut shutdown).await? {
+        return Ok(());
+    }
 
-    drive_authenticated_stream(RawDispatchService { kernel }, session, stream, resources).await
+    drive_authenticated_stream_until_shutdown(
+        RawDispatchService { kernel },
+        session,
+        stream,
+        resources,
+        shutdown,
+    )
+    .await
 }
 
 struct PayloadReservation {
@@ -297,11 +715,27 @@ struct UnstartedDispatch {
     defer_once: bool,
 }
 
+#[cfg(test)]
 async fn drive_authenticated_stream<D: DispatchService>(
     dispatcher: D,
     session: AuthenticatedSession,
     stream: UnixStream,
     resources: LocalRawSocketResources,
+) -> Result<(), LocalRawSocketError> {
+    let (shutdown_guard, shutdown) = watch::channel(false);
+    let result =
+        drive_authenticated_stream_until_shutdown(dispatcher, session, stream, resources, shutdown)
+            .await;
+    drop(shutdown_guard);
+    result
+}
+
+async fn drive_authenticated_stream_until_shutdown<D: DispatchService>(
+    dispatcher: D,
+    session: AuthenticatedSession,
+    stream: UnixStream,
+    resources: LocalRawSocketResources,
+    mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), LocalRawSocketError> {
     let (reader, mut writer) = stream.into_split();
     let (frame_sender, mut frame_receiver) = mpsc::channel(64);
@@ -313,21 +747,28 @@ async fn drive_authenticated_stream<D: DispatchService>(
     let mut tasks = JoinSet::<(u64, DispatchCompletion)>::new();
     let mut unstarted = VecDeque::<UnstartedDispatch>::new();
     let result = loop {
-        if let Err(error) = flush_pending(&mut connection, &mut pending, &mut writer).await {
-            break Err(error);
+        match flush_pending(&mut connection, &mut pending, &mut writer, &mut shutdown).await {
+            Ok(true) => {}
+            Ok(false) => break Ok(()),
+            Err(error) => break Err(error),
         }
 
         enum Next {
             Frame(Result<Option<IncomingFrame>, LocalRawSocketError>),
             Completion(Option<Result<(u64, DispatchCompletion), JoinError>>),
+            Shutdown,
             Start,
         }
 
+        if *shutdown.borrow() {
+            break Ok(());
+        }
         let next = if let Some(dispatch) = unstarted.front_mut() {
             if dispatch.defer_once {
                 dispatch.defer_once = false;
                 tokio::select! {
                     biased;
+                    _ = wait_for_shutdown(&mut shutdown) => Next::Shutdown,
                     frame = frame_receiver.recv() => Next::Frame(frame.unwrap_or(Ok(None))),
                     () = tokio::task::yield_now() => Next::Start,
                 }
@@ -335,9 +776,13 @@ async fn drive_authenticated_stream<D: DispatchService>(
                 Next::Start
             }
         } else if tasks.is_empty() {
-            Next::Frame(frame_receiver.recv().await.unwrap_or(Ok(None)))
+            tokio::select! {
+                _ = wait_for_shutdown(&mut shutdown) => Next::Shutdown,
+                frame = frame_receiver.recv() => Next::Frame(frame.unwrap_or(Ok(None))),
+            }
         } else {
             tokio::select! {
+                _ = wait_for_shutdown(&mut shutdown) => Next::Shutdown,
                 frame = frame_receiver.recv() => {
                     Next::Frame(frame.unwrap_or(Ok(None)))
                 }
@@ -349,7 +794,7 @@ async fn drive_authenticated_stream<D: DispatchService>(
 
         match next {
             Next::Frame(Ok(Some(incoming))) => {
-                if let Err(error) = handle_client_frame(
+                match handle_client_frame(
                     incoming,
                     &dispatcher,
                     &session,
@@ -360,10 +805,13 @@ async fn drive_authenticated_stream<D: DispatchService>(
                     &mut pending,
                     &mut unstarted,
                     &mut writer,
+                    &mut shutdown,
                 )
                 .await
                 {
-                    break Err(error);
+                    Ok(true) => {}
+                    Ok(false) => break Ok(()),
+                    Err(error) => break Err(error),
                 }
             }
             Next::Frame(Ok(None)) => break Ok(()),
@@ -383,6 +831,7 @@ async fn drive_authenticated_stream<D: DispatchService>(
                 break Err(LocalRawSocketError::DispatchTask { source });
             }
             Next::Completion(None) => {}
+            Next::Shutdown => break Ok(()),
             Next::Start => {
                 start_one_dispatch(&mut unstarted, &mut tasks);
             }
@@ -419,7 +868,8 @@ async fn handle_client_frame<D: DispatchService>(
     pending: &mut BTreeMap<u64, DispatchCompletion>,
     unstarted: &mut VecDeque<UnstartedDispatch>,
     socket: &mut OwnedWriteHalf,
-) -> Result<(), LocalRawSocketError> {
+    shutdown: &mut watch::Receiver<bool>,
+) -> Result<bool, LocalRawSocketError> {
     let stream_id = client_stream(&incoming.frame);
     let retains_payload = matches!(
         incoming.frame,
@@ -458,7 +908,9 @@ async fn handle_client_frame<D: DispatchService>(
             let frame = connection
                 .apply(accepted)
                 .map_err(|source| LocalRawSocketError::Connection { source })?;
-            write_server_frame(socket, &frame).await?;
+            if !write_server_frame(socket, &frame, shutdown).await? {
+                return Ok(false);
+            }
         }
         Some(ClientAction::Cancel { stream, .. }) => {
             dispatcher.cancelled(stream);
@@ -471,11 +923,13 @@ async fn handle_client_frame<D: DispatchService>(
         }
         Some(ClientAction::Send(frame)) => {
             retained_payload.remove(&stream_id);
-            write_server_frame(socket, &frame).await?;
+            if !write_server_frame(socket, &frame, shutdown).await? {
+                return Ok(false);
+            }
         }
         None => {}
     }
-    Ok(())
+    Ok(true)
 }
 
 fn start_one_dispatch(
@@ -494,7 +948,8 @@ async fn flush_pending(
     connection: &mut ProtocolConnection,
     pending: &mut BTreeMap<u64, DispatchCompletion>,
     stream: &mut OwnedWriteHalf,
-) -> Result<(), LocalRawSocketError> {
+    shutdown: &mut watch::Receiver<bool>,
+) -> Result<bool, LocalRawSocketError> {
     let stream_ids: Vec<_> = pending.keys().copied().collect();
     for stream_id in stream_ids {
         loop {
@@ -511,7 +966,9 @@ async fn flush_pending(
                 Err(ConnectionError::InsufficientCredit { .. }) => break,
                 Err(source) => return Err(LocalRawSocketError::Connection { source }),
             };
-            write_server_frame(stream, &frame).await?;
+            if !write_server_frame(stream, &frame, shutdown).await? {
+                return Ok(false);
+            }
             pending
                 .get_mut(&stream_id)
                 .expect("pending completion exists")
@@ -519,7 +976,7 @@ async fn flush_pending(
                 .pop_front();
         }
     }
-    Ok(())
+    Ok(true)
 }
 
 fn spawn_frame_reader(
@@ -617,13 +1074,28 @@ async fn read_exact_before<R: AsyncRead + Unpin>(
 async fn write_server_frame(
     stream: &mut OwnedWriteHalf,
     frame: &ServerFrame,
-) -> Result<(), LocalRawSocketError> {
+    shutdown: &mut watch::Receiver<bool>,
+) -> Result<bool, LocalRawSocketError> {
     let encoded =
         encode_server_frame(frame).map_err(|source| LocalRawSocketError::Frame { source })?;
-    stream
-        .write_all(&encoded)
-        .await
-        .map_err(|source| LocalRawSocketError::Io { source })
+    write_all_until_shutdown(stream, &encoded, shutdown).await
+}
+
+async fn write_all_until_shutdown<W: tokio::io::AsyncWrite + Unpin>(
+    stream: &mut W,
+    bytes: &[u8],
+    shutdown: &mut watch::Receiver<bool>,
+) -> Result<bool, LocalRawSocketError> {
+    if *shutdown.borrow() {
+        return Ok(false);
+    }
+    tokio::select! {
+        result = stream.write_all(bytes) => {
+            result.map_err(|source| LocalRawSocketError::Io { source })?;
+            Ok(true)
+        }
+        _ = wait_for_shutdown(shutdown) => Ok(false),
+    }
 }
 
 fn report_private_dispatch_source(source: &orna_kernel_postgres::PostgresKernelError) {
@@ -647,7 +1119,10 @@ const fn client_stream(frame: &ClientFrame) -> u64 {
 #[cfg(test)]
 mod tests {
     use std::{
+        fs,
         future::poll_fn,
+        os::unix::net::UnixStream as BlockingUnixStream,
+        path::PathBuf,
         str::FromStr,
         sync::{
             Arc,
@@ -978,6 +1453,122 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn server_shutdown_stops_reads_but_drains_accepted_work() {
+        let dispatcher = GatedDispatch::new();
+        let polled = Arc::clone(&dispatcher.polled);
+        let resources = LocalRawSocketResources::new();
+        let (shutdown_sender, shutdown) = watch::channel(false);
+        let (server, mut client) = UnixStream::pair().expect("Unix stream pair");
+        let mut server_task = tokio::spawn(drive_authenticated_stream_until_shutdown(
+            dispatcher.clone(),
+            test_session(),
+            server,
+            resources,
+            shutdown,
+        ));
+
+        shutdown_sender.send(false).expect("false signal");
+        send_parameter_free_call(&mut client, 1).await;
+        assert!(matches!(
+            read_server_frame(&mut client).await,
+            ServerFrame::CallAccepted { stream: 1, .. }
+        ));
+        shutdown_sender.send(true).expect("shutdown signal");
+        assert!(
+            timeout(Duration::from_millis(25), &mut server_task)
+                .await
+                .is_err(),
+            "shutdown returned before protected work drained"
+        );
+        assert!(polled.load(Ordering::SeqCst));
+
+        dispatcher.release.notify_one();
+        server_task
+            .await
+            .expect("connection task")
+            .expect("ordered shutdown");
+        let mut byte = [0_u8; 1];
+        assert_eq!(client.read(&mut byte).await.expect("shutdown EOF"), 0);
+    }
+
+    #[tokio::test]
+    async fn server_shutdown_interrupts_a_blocked_socket_write() {
+        let (mut writer, _reader) = tokio::io::duplex(1);
+        let (shutdown_sender, mut shutdown) = watch::channel(false);
+        let mut write = tokio::spawn(async move {
+            write_all_until_shutdown(&mut writer, &[1, 2], &mut shutdown).await
+        });
+        tokio::task::yield_now().await;
+
+        shutdown_sender.send(false).expect("false signal");
+        assert!(
+            timeout(Duration::from_millis(25), &mut write)
+                .await
+                .is_err(),
+            "a false value incorrectly signalled shutdown"
+        );
+
+        shutdown_sender.send(true).expect("shutdown signal");
+        assert!(!write.await.expect("write task").expect("shutdown write"));
+    }
+
+    #[test]
+    fn fixed_listener_replaces_only_a_verified_stale_socket_and_drains_connections() {
+        let runtime_directory = listener_test_directory();
+        let _ = fs::remove_dir_all(&runtime_directory);
+        fs::create_dir_all(&runtime_directory).expect("runtime directory");
+        fs::set_permissions(&runtime_directory, fs::Permissions::from_mode(0o711))
+            .expect("runtime directory mode");
+        let socket_path = runtime_directory.join(SOCKET_NAME);
+        let stale = StandardUnixListener::bind(&socket_path).expect("stale socket");
+        fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o666))
+            .expect("stale socket mode");
+        drop(stale);
+
+        let server = start_local_raw_socket(&runtime_directory, unavailable_kernel())
+            .expect("fixed listener starts");
+        assert!(server.is_healthy());
+        let metadata = fs::symlink_metadata(&socket_path).expect("public socket metadata");
+        assert!(metadata.file_type().is_socket());
+        assert_eq!(metadata.mode() & 0o7777, 0o666);
+        assert_eq!(metadata.nlink(), 1);
+
+        let clients: Vec<_> = (0..CONNECTION_LIMIT)
+            .map(|_| BlockingUnixStream::connect(&socket_path).expect("admitted connection"))
+            .collect();
+        std::thread::sleep(Duration::from_millis(25));
+        let mut rejected = BlockingUnixStream::connect(&socket_path).expect("capacity connection");
+        rejected
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("capacity timeout");
+        let mut byte = [0_u8; 1];
+        assert_eq!(
+            std::io::Read::read(&mut rejected, &mut byte).expect("capacity close"),
+            0
+        );
+
+        drop(clients);
+        server.stop().expect("ordered listener stop");
+        assert!(!socket_path.exists());
+
+        fs::write(&socket_path, b"hostile").expect("hostile socket path");
+        fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o666))
+            .expect("hostile path mode");
+        assert!(matches!(
+            start_local_raw_socket(&runtime_directory, unavailable_kernel()),
+            Err(LocalRawSocketServerError::InvalidSocketState)
+        ));
+        fs::remove_file(&socket_path).expect("hostile path cleanup");
+        fs::remove_dir(&runtime_directory).expect("runtime directory cleanup");
+    }
+
+    fn listener_test_directory() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target")
+            .join(format!("raw-socket-listener-{}", std::process::id()))
+    }
+
+    #[tokio::test]
     async fn shared_dispatch_limit_rejects_a_second_connection_before_acceptance() {
         let resources = LocalRawSocketResources::new();
         let held: Vec<_> = (1..KERNEL_OPERATION_LIMIT)
@@ -1104,7 +1695,8 @@ mod tests {
         let completion_witness = Arc::clone(&completed);
         let owned_resources = resources.clone();
         let owned_dispatch = gated.clone();
-        let owned = run_owned_connection(async move {
+        let (shutdown_guard, _shutdown) = watch::channel(false);
+        let owned = run_owned_connection_with_shutdown_guard(shutdown_guard, async move {
             let result =
                 drive_authenticated_stream(owned_dispatch, test_session(), server, owned_resources)
                     .await;

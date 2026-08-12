@@ -16,7 +16,10 @@ pub use embedded::{
 };
 pub use local_auth::{LocalAuthenticationError, authenticate_local_stream};
 pub use raw_client_dispatch::{RawClientDispatch, RawClientDispatchResult};
-pub use raw_socket::{LocalRawSocketError, LocalRawSocketResources, serve_local_raw_stream};
+pub use raw_socket::{
+    LocalRawSocketError, LocalRawSocketResources, LocalRawSocketServer, LocalRawSocketServerError,
+    serve_local_raw_stream, start_local_raw_socket,
+};
 pub use upgrade::{EmbeddedUpgradeError, run_embedded_upgrade};
 
 use std::fmt;
