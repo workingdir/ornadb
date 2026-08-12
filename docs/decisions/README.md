@@ -51,3 +51,5 @@ source-of-truth or authority rules.
   [Security Decisions Append Protected Audit Records](0024-protected-security-audit.md)
 * **work ADR 0025:**
   [Canonical Runtime Values Use One Binary Codec](0025-canonical-runtime-value-codec.md)
+* **work ADR 0026:**
+  [Raw Calls Use a Bounded Framed State Machine](0026-raw-call-frame-state-machine.md)
