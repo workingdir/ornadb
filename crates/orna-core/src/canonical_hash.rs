@@ -1672,10 +1672,18 @@ fn reference_target_exists(
         return catalogue
             .object_type_by_id(owner)
             .is_some_and(|object_type| object_type.field_by_id(field).is_some())
+            || catalogue
+                .record_value_type_by_id(owner)
+                .is_some_and(|record_value_type| record_value_type.field_by_id(field).is_some())
             || standard.is_some_and(|standard| {
                 standard
                     .object_type_by_id(owner)
                     .is_some_and(|object_type| object_type.field_by_id(field).is_some())
+                    || standard
+                        .record_value_type_by_id(owner)
+                        .is_some_and(|record_value_type| {
+                            record_value_type.field_by_id(field).is_some()
+                        })
             });
     }
     let identity = target.into();
@@ -3989,7 +3997,7 @@ mod tests {
     }
 
     #[test]
-    fn version_two_record_origins_are_complete_and_fields_are_not_reference_targets() {
+    fn version_two_record_origins_are_complete_and_exact_fields_are_reference_targets() {
         let context = CatalogueHashContext::version_two(verified_standard_snapshot(false));
         let catalogue = catalogue_with_record_value_type();
         let origins = record_value_origins();
@@ -4015,13 +4023,22 @@ mod tests {
         }
 
         let expressions = HashMap::new();
-        assert!(!reference_target_exists(
+        assert!(reference_target_exists(
             &catalogue,
             None,
             &expressions,
             DefinitionReferenceTarget::Field {
                 owner: TypeId::from_bytes(id::<42>()),
                 field: FieldId::from_bytes(id::<43>()),
+            },
+        ));
+        assert!(!reference_target_exists(
+            &catalogue,
+            None,
+            &expressions,
+            DefinitionReferenceTarget::Field {
+                owner: TypeId::from_bytes(id::<42>()),
+                field: FieldId::from_bytes(id::<44>()),
             },
         ));
     }
