@@ -137,7 +137,7 @@ record by value. Actual object-field storage waits for the canonical record
 codec. It must use canonical Orna value bytes rather than identity-bearing
 PostgreSQL rows or composites.
 
-## Codec and protocol boundary
+## Codec boundary
 
 Runtime record values cannot use `ORV1` or `ORV2`. Both accepted codecs remain
 closed and continue to reject them. Canonical value codec version 3 retains
@@ -179,12 +179,17 @@ that ordinal. A duplicate, missing, unknown, or reordered field therefore
 fails closed.
 
 Each complete field value uses `ORV3`, not `ORV1` or `ORV2`. Its tag, stable
-type identity, payload, and canonical numeric rules are unchanged from the
-corresponding version-2 value. Its encoded length includes its complete
-25-byte envelope and must equal the exact bytes consumed. A record tag is not
-valid in a field value. This enforces zero nested-record depth. A null or
-reference value also fails because the initial record field family accepts
-only the six non-null standard scalar values and active enum values.
+type identity, payload, and canonical numeric rules come from the active field
+definition. An accepted standard scalar uses the tag and payload rules for its
+pinned representation contract, while its envelope carries the exact
+`ResolvedType::Value` identity from the verified standard snapshot. An enum
+uses its exact active application or verified standard `TypeId` and label. The
+field-value length includes its complete 25-byte envelope and must equal the
+exact bytes consumed. A record tag is not valid in a field value. This
+enforces zero nested-record depth. A null or reference value also fails because
+the initial record field family accepts only the six non-null standard scalar
+values and active enum values. Top-level version-3 scalar and application-enum
+values retain their exact version-2 type identities and payload shapes.
 
 Version-3 encoding and decoding both require one immutable
 `ActiveDatabaseRevision`. Encoding revalidates the record `TypeId`, active
@@ -210,10 +215,64 @@ its existing version-1 tags. `ORV2` accepts only its existing version-2 tags.
 Each decoder accepts only its exact marker. All version-1 and version-2 bytes
 and rejection rules remain exact.
 
-The corresponding frame amendment must define protocol 3.0 and `ORF3` before
-a socket can carry record values. Protocols 1.0 and 2.0 remain byte-exact.
-Catalogue metadata, runtime construction, codec bytes, and frame negotiation
-are separate commits and authorities.
+## Protocol 3.0 frame boundary
+
+Protocol 3.0 retains the exact twelve-byte ADR 0028 hello and ACK shapes. The
+client hello is:
+
+```text
+offset  size  value
+0       4     ASCII `ORNA`
+4       1     client HELLO `0x01`
+5       1     flags, exactly zero
+6       2     protocol major, unsigned big-endian, exactly `3`
+8       2     protocol minor, unsigned big-endian, exactly `0`
+10      2     reserved, exactly zero
+```
+
+The server ACK has the same bytes except offset 4 is `0x81`. A protocol-3 ACK
+means authentication succeeded and one immutable `ActiveDatabaseRevision` is
+bound to the connection's value codec. The client cannot supply or select that
+revision. Authentication and complete active-revision recovery both succeed
+before the adapter writes the ACK. Recovery failure closes the connection
+without an ACK.
+
+After the ACK, protocol 3.0 uses the exact ADR 0026 frame envelope with marker
+`ORF3`:
+
+```text
+offset  size  field
+0       4     ASCII `ORF3`
+4       1     ADR 0026 frame tag
+5       1     flags, exactly zero
+6       8     stream number, unsigned big-endian
+14      4     unsigned payload length, big-endian
+18      n     payload
+```
+
+Every client and server frame tag, direction, flag, stream rule, field order,
+fixed payload, event shape, failure value, channel, size limit, state
+transition, flow-control rule, cancellation rule, and connection resource
+bound remains exact from ADR 0026. `CALL_ARGUMENT` contains its existing
+16-byte `ParameterId` followed by one complete `ORV3` value. A canonical-value
+event contains one complete `ORV3` value. No other payload changes.
+
+The active-revision frame encoder and decoder use the same immutable
+`ActiveDatabaseRevision` as the ORV3 codec. They revalidate record and enum
+values through that revision. The connection-local revision is decoding and
+encoding context only. Protected dispatch still recovers and pins its
+transactional active revision, and it rejects an argument that is stale
+against that revision before execution.
+
+Protocol 1.0 accepts only `ORF1` frames containing `ORV1`. Protocol 2.0 accepts
+only `ORF2` frames containing `ORV2`. Protocol 3.0 accepts only `ORF3` frames
+containing `ORV3`. Each frame decoder rejects the other two markers, and each
+value decoder rejects the other two value markers. The local adapter accepts
+only the exact three hello values for major versions 1, 2, and 3 with minor
+version zero. Protocols 1.0 and 2.0 remain byte-exact.
+
+Catalogue metadata, runtime construction, codec bytes, frame bytes, and socket
+negotiation remain separate commits and authorities.
 
 ## Required proof
 
@@ -236,7 +295,7 @@ Tests must prove:
 * apply, recovery, and verification preserve exact identities, names, order,
   types, origins, mutability, and persistence;
 * runtime construction requires the active nominal definition and exact
-  complete field set; and
+  complete field set;
 * versions 1 and 2 reject record runtime values and `ORV3` bytes;
 * version 3 preserves exact version-2 scalar and enum shapes under the `ORV3`
   marker;
@@ -248,7 +307,21 @@ Tests must prove:
   field order, field type, enum label, marker, tag, nested record, null field,
   reference field, length, truncation, trailing bytes, and oversized payload;
   and
-* decoding arbitrary version-3 bytes never panics or returns a partial value.
+* decoding arbitrary version-3 bytes never panics or returns a partial value;
+* the exact version-1, version-2, and version-3 hello and ACK values select only
+  their matching frame codecs, while every other major version and every
+  non-zero flag, minor, or reserved value fails closed;
+* exact `ORF3` golden client argument and server value-event frames carry a
+  mixed scalar-and-enum record without changing any non-value frame bytes;
+* every protocol-3 client and server frame round-trips through the
+  active-revision interface;
+* `ORF1`, `ORF2`, and `ORF3` reject each other's markers and embedded value
+  markers;
+* protocol-3 frame encoding and decoding reject a value that is stale against
+  the connection's active revision; and
+* the authenticated adapter recovers the complete active revision before its
+  protocol-3 ACK and still revalidates arguments against the transactional
+  revision at protected dispatch.
 
 Normal format, strict Clippy, rustdoc, diff, similarity, workspace, and focused
 live PostgreSQL gates remain required.
@@ -271,7 +344,9 @@ live PostgreSQL gates remain required.
    commits.
 8. Add the exact version-3 codec defined by this ADR without changing the
    version-1 or version-2 interfaces or bytes.
-9. Amend this ADR with exact protocol-3 frames before changing raw frames.
+9. Add the exact protocol-3 frame codec defined by this ADR without changing
+   version-1 or version-2 frame interfaces, bytes, or state transitions. Add
+   socket negotiation in a later adapter commit.
 10. Add canonical by-value storage and one SERVER result proof only after the
     codec and recovery paths are green.
 11. Index this ADR and mark the record checklist row complete only after all
