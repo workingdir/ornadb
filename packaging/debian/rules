@@ -93,6 +93,8 @@ build:
 		'rust_path_remap = "<repository>=$(RUST_PATH_REMAP)"' \
 		'rust_link_flags = "$(RUST_LINK_FLAGS)"' \
 		"embedded_engine_manifest_sha256 = \"$${engine_sha}\"" \
+		'accepted_predecessor_engines = []' \
+		'supported_forward_edges = []' \
 		"executable_sha256 = \"$${executable_sha}\"" \
 		>"$(PAYLOAD_ROOT)/usr/share/orna/distribution-manifest.toml"; \
 	find "$(PAYLOAD_ROOT)" -exec touch -h -d '@$(SOURCE_DATE_EPOCH)' -- {} +
