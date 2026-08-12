@@ -1179,6 +1179,7 @@ impl CandidateResolvedType {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MappedEvidenceTarget {
     Value(TypeId),
+    Named(TypeId),
     ObjectReference(TypeId),
     Unknown,
 }
@@ -1211,6 +1212,12 @@ fn candidate_from_mapped_evidence(
         && target == actual
     {
         return Ok(CandidateResolvedType::Reference(target));
+    }
+    if let CandidateResolvedType::Named(target) = candidate
+        && let MappedEvidenceTarget::Named(actual) = evidence
+        && target == actual
+    {
+        return Ok(CandidateResolvedType::Named(target));
     }
     Err(invalid_checked_declaration_type_evidence())
 }
@@ -1372,6 +1379,7 @@ fn rebind_function_definition_revision(
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum EvidenceTarget {
     Value(TypeId),
+    Named(CheckedTypeId),
     ObjectReference(CheckedTypeId),
     Unknown,
 }
@@ -1387,6 +1395,8 @@ impl EvidenceUse {
     fn from_type_use(type_use: &crate::CheckedApplicationTypeUse) -> Self {
         let target = if let Some(value) = type_use.value() {
             EvidenceTarget::Value(value.type_id())
+        } else if let Some(target) = type_use.named_type() {
+            EvidenceTarget::Named(target)
         } else if let Some(reference) = type_use.object_reference() {
             EvidenceTarget::ObjectReference(reference.target())
         } else {
@@ -1689,7 +1699,7 @@ impl SignatureEvidence {
                         );
                     }
                 }
-                EvidenceTarget::ObjectReference(_) => {}
+                EvidenceTarget::Named(_) | EvidenceTarget::ObjectReference(_) => {}
                 EvidenceTarget::Unknown => {
                     return Err(
                         PrepareStandardApplicationError::FunctionTypeReferenceMismatch {
@@ -4775,6 +4785,10 @@ impl<'a> CandidateBuilder<'a> {
     ) -> Result<MappedEvidenceTarget, PrepareError> {
         match evidence {
             EvidenceTarget::Value(type_id) => Ok(MappedEvidenceTarget::Value(type_id)),
+            EvidenceTarget::Named(target) => self
+                .identities
+                .type_id(target)
+                .map(MappedEvidenceTarget::Named),
             EvidenceTarget::ObjectReference(target) => self
                 .identities
                 .type_id(target)
@@ -5728,6 +5742,16 @@ impl<'a> CandidateBuilder<'a> {
                             self.source.origin(&signature_slot.location)?,
                         ));
                     }
+                    EvidenceTarget::Named(target) => {
+                        references.push(DefinitionReference::new(
+                            function,
+                            revision,
+                            ordinal,
+                            DefinitionReferenceTarget::ValueType(self.identities.type_id(target)?),
+                            DefinitionReferenceKind::NamedType,
+                            self.source.origin(&signature_slot.location)?,
+                        ));
+                    }
                     EvidenceTarget::ObjectReference(target) => {
                         let target = CheckedDefinitionReferenceTarget::ObjectType(target);
                         let Some(index) = remaining_references.iter().position(|reference| {
@@ -5987,6 +6011,7 @@ mod tests {
     fn mapped_candidate_type_selection_is_closed_and_retains_standard_identity() {
         let standard_id = TypeId::from_bytes([0x91; 16]);
         let reference_id = TypeId::from_bytes([0x92; 16]);
+        let named_id = TypeId::from_bytes([0x93; 16]);
 
         assert_eq!(
             CandidateResolvedType::from_compatibility(ResolvedType::scalar(
@@ -6005,6 +6030,14 @@ mod tests {
                 type_id: standard_id,
                 compatibility: StandardScalar::Boolean,
             }
+        );
+        assert_eq!(
+            candidate_from_mapped_evidence(
+                ResolvedType::named(named_id),
+                Some(MappedEvidenceTarget::Named(named_id)),
+            )
+            .unwrap(),
+            CandidateResolvedType::Named(named_id)
         );
         assert_eq!(
             candidate_from_mapped_evidence(
@@ -6036,6 +6069,14 @@ mod tests {
         }
 
         for (compatibility, evidence) in [
+            (
+                ResolvedType::Named(TypeId::from_bytes([0x96; 16])),
+                MappedEvidenceTarget::Named(named_id),
+            ),
+            (
+                ResolvedType::scalar(StandardScalar::Boolean),
+                MappedEvidenceTarget::Named(named_id),
+            ),
             (
                 ResolvedType::Named(TypeId::from_bytes([0x96; 16])),
                 MappedEvidenceTarget::Value(standard_id),
