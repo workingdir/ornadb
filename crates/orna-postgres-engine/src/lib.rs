@@ -15,10 +15,14 @@ mod embedded {
         fn orna_postgres18_set_support_root(absolute_root: *const c_char) -> i32;
     }
 
+    /// A rejected typed input to the embedded PostgreSQL C boundary.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum EngineError {
+        /// A path is relative, too long, or contains a NUL byte.
         InvalidAbsolutePath,
+        /// An entry argument is empty, invalid, or contains a NUL byte.
         InvalidArgument,
+        /// The linked engine did not accept the process-local support root.
         SupportRootRejected,
     }
 
@@ -38,6 +42,7 @@ mod embedded {
     pub struct AbsolutePath(CString);
 
     impl AbsolutePath {
+        /// Validates and owns one absolute path for a linked C entry.
         pub fn new(path: &Path) -> Result<Self, EngineError> {
             let bytes = path.as_os_str().as_bytes();
             if !path.is_absolute() || bytes.len() >= 4096 {
@@ -60,6 +65,7 @@ mod embedded {
     }
 
     impl LinkedArguments {
+        /// Copies an argument vector into one bounded, contiguous writable buffer.
         pub fn new<I, S>(arguments: I) -> Result<Self, EngineError>
         where
             I: IntoIterator<Item = S>,
@@ -145,9 +151,13 @@ mod embedded {
         }
     }
 
+    /// The verified data-only PostgreSQL support archive embedded in Orna.
     pub const SUPPORT_ARCHIVE: &[u8] = include_bytes!(env!("ORNA_POSTGRES_SUPPORT_BUNDLE"));
+    /// The exhaustive member manifest for [`SUPPORT_ARCHIVE`].
     pub const SUPPORT_MANIFEST: &[u8] = include_bytes!(env!("ORNA_POSTGRES_SUPPORT_MANIFEST"));
+    /// The build evidence that identifies the linked PostgreSQL engine.
     pub const ENGINE_MANIFEST: &[u8] = include_bytes!(env!("ORNA_POSTGRES_ENGINE_MANIFEST"));
+    /// The PostgreSQL licence bytes shipped with the embedded engine.
     pub const POSTGRESQL_LICENCE: &[u8] = include_bytes!(env!("ORNA_POSTGRES_LICENSE"));
 
     #[cfg(test)]

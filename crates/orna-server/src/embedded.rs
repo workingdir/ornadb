@@ -96,22 +96,27 @@ impl EmbeddedHostPaths {
         }
     }
 
+    /// Returns the fixed managed instance name.
     pub fn instance_name(&self) -> &'static str {
         INSTANCE_NAME
     }
 
+    /// Returns the durable state root for the default instance.
     pub fn state_root(&self) -> &Path {
         &self.state_root
     }
 
+    /// Returns the private runtime root for the default instance.
     pub fn runtime_root(&self) -> &Path {
         &self.runtime_root
     }
 
+    /// Returns the private Unix-socket directory.
     pub fn socket_directory(&self) -> &Path {
         &self.socket_directory
     }
 
+    /// Returns the data-only support root selected by the engine identity.
     pub fn support_root(&self) -> &Path {
         &self.support_root
     }
@@ -155,6 +160,7 @@ pub struct ReadyEmbeddedHost {
 }
 
 impl ReadyEmbeddedHost {
+    /// Returns the fixed peer-authenticated database connection configuration.
     pub fn config(&self) -> &Config {
         &self.config
     }
@@ -852,10 +858,12 @@ pub struct MaterialisedSupport {
 }
 
 impl MaterialisedSupport {
+    /// Returns the verified runtime support root.
     pub fn root(&self) -> &Path {
         &self.root
     }
 
+    /// Returns the number of verified support members.
     pub const fn member_count(&self) -> usize {
         self.member_count
     }
@@ -865,25 +873,45 @@ impl MaterialisedSupport {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum EmbeddedHostError {
+    /// A private PostgreSQL connection failed.
     Database(tokio_postgres::Error),
+    /// The linked embedded-engine boundary rejected an input.
     Engine(EngineError),
+    /// The process does not have the exact Orna service identity.
     InvalidServiceIdentity,
+    /// Package state or its lock does not match the accepted shape.
     InvalidPackageState,
+    /// Instance state, readiness, or its lock does not match the accepted shape.
     InvalidInstanceState,
+    /// The embedded support manifest is malformed or internally inconsistent.
     InvalidSupportManifest,
+    /// A support member path is not a safe relative path.
     InvalidSupportPath,
+    /// A linked PostgreSQL entry was requested after another thread existed.
     MultipleThreads,
+    /// The linked initialiser returned a non-zero status.
     InitialiserExited(i32),
+    /// A signal stopped the linked initialiser.
     InitialiserSignalled(i32),
+    /// The supervisor could not reap the linked initialiser.
     InitialiserWait,
+    /// The linked postmaster returned a non-zero status.
     PostmasterExited(i32),
+    /// A signal stopped the linked postmaster unexpectedly.
     PostmasterSignalled(i32),
+    /// The supervisor could not control or reap the linked postmaster.
     PostmasterWait,
+    /// The linked postmaster did not accept a complete private query in time.
     ReadinessTimeout,
+    /// The private asynchronous runtime could not start or complete.
     Runtime(io::Error),
+    /// Supervisor signal setup failed.
     Signal,
+    /// Kernel bootstrap or accepted-standard recovery failed.
     Standard(OpenStandardDatabaseError),
+    /// Materialised support data differs from its embedded manifest.
     SupportMismatch(&'static str),
+    /// A host filesystem operation failed.
     Io(io::Error),
 }
 
@@ -1107,6 +1135,7 @@ pub struct EmbeddedPostmaster {
 }
 
 impl EmbeddedPostmaster {
+    /// Returns the direct child process identifier while the postmaster is live.
     pub fn pid(&self) -> u32 {
         self.child
             .expect("a stopped postmaster has no public lifetime")
