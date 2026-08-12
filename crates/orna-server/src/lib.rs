@@ -10,8 +10,9 @@ mod embedded;
 pub use backend_shell::{BackendShellError, run_backend_shell};
 pub use embedded::{
     EmbeddedEngineIdentity, EmbeddedHostError, EmbeddedHostPaths, EmbeddedPostmaster,
-    MaterialisedSupport, initialise_embedded_cluster, materialise_support_data,
-    private_database_config, run_embedded_server, start_embedded_postmaster,
+    MaterialisedSupport, ReadyEmbeddedHost, initialise_embedded_cluster,
+    inspect_ready_embedded_host, materialise_support_data, private_database_config,
+    run_embedded_server, start_embedded_postmaster,
 };
 
 use std::{env, ffi::OsString, fmt, string::FromUtf8Error};
