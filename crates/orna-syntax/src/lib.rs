@@ -64,7 +64,7 @@ pub struct SchemaDeclaration {
     pub span: SourceSpan,
 }
 
-/// A type written in an object field declaration.
+/// A type written in an object field, record value field, or function shape.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypeSpecification {
     /// A named type, including source spellings such as `TEXT` and `BOOL`.
@@ -662,6 +662,34 @@ pub struct EnumTypeDeclaration {
     pub span: SourceSpan,
 }
 
+/// A field in a parsed named record value type declaration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValueFieldDeclaration {
+    /// The field name as written in source.
+    pub name: NamePart,
+    /// The zero-based source order of the field within its record type.
+    pub order: usize,
+    /// The type written for the field.
+    pub type_specification: TypeSpecification,
+    /// The span from the field name through its type.
+    pub span: SourceSpan,
+}
+
+/// A parsed `CREATE TYPE ... AS VALUE (...) IMMUTABLE PERSISTABLE` declaration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordValueTypeDeclaration {
+    /// The declared record value type name.
+    pub name: QualifiedName,
+    /// The record fields in source order.
+    pub fields: Vec<ValueFieldDeclaration>,
+    /// The span of the required `IMMUTABLE` keyword.
+    pub immutable_span: SourceSpan,
+    /// The span of the required `PERSISTABLE` keyword.
+    pub persistable_span: SourceSpan,
+    /// The declaration span, including its terminating semicolon.
+    pub span: SourceSpan,
+}
+
 /// The persistence selected for a primitive value type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrimitiveValueTypePersistence {
@@ -764,6 +792,7 @@ pub struct Parse {
     schemas: Vec<SchemaDeclaration>,
     object_types: Vec<ObjectTypeDeclaration>,
     enum_types: Vec<EnumTypeDeclaration>,
+    record_value_types: Vec<RecordValueTypeDeclaration>,
     primitive_value_types: Vec<PrimitiveValueTypeDeclaration>,
     type_exports: Vec<TypeExportDeclaration>,
     field_renames: Vec<FieldRenameDeclaration>,
@@ -797,6 +826,11 @@ impl Parse {
         &self.enum_types
     }
 
+    /// Return successfully parsed record value type declarations in source order.
+    pub fn record_value_types(&self) -> &[RecordValueTypeDeclaration] {
+        &self.record_value_types
+    }
+
     /// Return successfully parsed primitive value type declarations in source order.
     pub fn primitive_value_types(&self) -> &[PrimitiveValueTypeDeclaration] {
         &self.primitive_value_types
@@ -825,10 +859,10 @@ impl Parse {
 
 /// Parse one Orna source unit.
 ///
-/// The parser recognises schema declarations, object and enum type
-/// declarations, primitive value type declarations, type export declarations,
-/// field rename declarations, and function declarations. It keeps all source
-/// bytes in its CST, including bytes in malformed statements.
+/// The parser recognises schema declarations, object, enum, record value, and
+/// primitive value type declarations, type export declarations, field rename
+/// declarations, and function declarations. It keeps all source bytes in its
+/// CST, including bytes in malformed statements.
 pub fn parse(source: &str) -> Parse {
     parser::parse(source)
 }
@@ -931,6 +965,191 @@ mod tests {
 
         assert_eq!(parsed.diagnostics().len(), 1);
         assert!(parsed.enum_types().is_empty());
+        assert_eq!(parsed.schemas().len(), 1);
+        assert_eq!(parsed.schemas()[0].name.parts[0].text, "later");
+    }
+
+    #[test]
+    fn parses_immutable_record_value_type_losslessly() {
+        let source = "CREATE TYPE example.point AS VALUE (\n    x INT,\n    /* ordinate */ y INTEGER,\n)\nIMMUTABLE\nPERSISTABLE;";
+        let parsed = parse(source);
+
+        assert!(parsed.diagnostics().is_empty());
+        assert_eq!(parsed.syntax().text(), source);
+        let declaration = &parsed.record_value_types()[0];
+        assert_eq!(declaration.name.parts[0].text, "example");
+        assert_eq!(declaration.name.parts[1].text, "point");
+        assert_eq!(declaration.fields.len(), 2);
+        assert_eq!(declaration.fields[0].name.text, "x");
+        assert_eq!(declaration.fields[0].order, 0);
+        assert_eq!(declaration.fields[1].name.text, "y");
+        assert_eq!(declaration.fields[1].order, 1);
+        assert_eq!(
+            declaration.fields[1].span,
+            SourceSpan {
+                start: source.find("y INTEGER").unwrap(),
+                end: source.find("y INTEGER").unwrap() + "y INTEGER".len(),
+            }
+        );
+        assert_eq!(
+            declaration.immutable_span.start,
+            source.find("IMMUTABLE").unwrap()
+        );
+        assert_eq!(
+            declaration.immutable_span.end,
+            source.find("IMMUTABLE").unwrap() + "IMMUTABLE".len()
+        );
+        assert_eq!(
+            declaration.persistable_span.start,
+            source.find("PERSISTABLE").unwrap()
+        );
+        assert_eq!(
+            declaration.persistable_span.end,
+            source.find("PERSISTABLE").unwrap() + "PERSISTABLE".len()
+        );
+        assert_eq!(
+            declaration.span,
+            SourceSpan {
+                start: 0,
+                end: source.len()
+            }
+        );
+
+        let without_trailing_comma =
+            parse("CREATE TYPE example.point AS VALUE (x INT) IMMUTABLE PERSISTABLE;");
+        assert!(without_trailing_comma.diagnostics().is_empty());
+        assert_eq!(
+            without_trailing_comma.record_value_types()[0].fields.len(),
+            1
+        );
+    }
+
+    #[test]
+    fn reports_closed_record_value_type_diagnostics() {
+        let cases = [
+            (
+                "CREATE TYPE app.empty AS VALUE () IMMUTABLE PERSISTABLE;",
+                "record value type must declare at least one field",
+                ")",
+                false,
+            ),
+            (
+                "CREATE TYPE app.point AS VALUE (x INT y INT) IMMUTABLE PERSISTABLE;",
+                "expected ',' or ')' after record value field",
+                "y",
+                false,
+            ),
+            (
+                "CREATE TYPE app.point AS VALUE (x INT;",
+                "expected ')' after record value fields",
+                ";",
+                false,
+            ),
+            (
+                "CREATE TYPE app.point AS VALUE (x INT) PERSISTABLE IMMUTABLE;",
+                "expected keyword IMMUTABLE",
+                "PERSISTABLE",
+                false,
+            ),
+            (
+                "CREATE TYPE app.point AS VALUE (x INT) IMMUTABLE;",
+                "expected keyword PERSISTABLE",
+                ";",
+                false,
+            ),
+            (
+                "CREATE TYPE app.point AS VALUE (x REF app.object) IMMUTABLE PERSISTABLE;",
+                "record value fields cannot use REF",
+                "REF",
+                false,
+            ),
+            (
+                "CREATE TYPE app.point AS VALUE (x INT NOT NULL) IMMUTABLE PERSISTABLE;",
+                "record value fields do not accept modifiers",
+                "NOT",
+                false,
+            ),
+            (
+                "CREATE TYPE app.point AS VALUE (x INT NULL) IMMUTABLE PERSISTABLE;",
+                "record value fields do not accept modifiers",
+                "NULL",
+                false,
+            ),
+            (
+                "CREATE TYPE app.point AS VALUE (x INT DEFAULT 0) IMMUTABLE PERSISTABLE;",
+                "record value fields do not accept modifiers",
+                "DEFAULT",
+                false,
+            ),
+            (
+                "CREATE TYPE app.point AS VALUE (x INT CHECK true) IMMUTABLE PERSISTABLE;",
+                "record value fields do not accept modifiers",
+                "CHECK",
+                false,
+            ),
+            (
+                "CREATE TYPE app.point AS VALUE (x INT DOCUMENTATION 'x') IMMUTABLE PERSISTABLE;",
+                "record value fields do not accept modifiers",
+                "DOCUMENTATION",
+                false,
+            ),
+            (
+                "CREATE TYPE app.point AS VALUE (x INT) IMMUTABLE IMMUTABLE PERSISTABLE;",
+                "expected keyword PERSISTABLE",
+                "IMMUTABLE",
+                true,
+            ),
+            (
+                "CREATE TYPE app.point AS VALUE (x INT) IMMUTABLE PERSISTABLE PERSISTABLE;",
+                "expected ';' after record value type declaration",
+                "PERSISTABLE",
+                true,
+            ),
+            (
+                "CREATE TYPE app.point AS VALUE (x INT) IMMUTABLE PERSISTABLE EXTRA;",
+                "expected ';' after record value type declaration",
+                "EXTRA",
+                false,
+            ),
+            (
+                "CREATE TYPE app.point AS VALUE (x INT) IMMUTABLE PERSISTABLE",
+                "expected ';' after record value type declaration",
+                "",
+                false,
+            ),
+        ];
+
+        for (source, message, offending, use_last_occurrence) in cases {
+            let parsed = parse(source);
+            assert!(parsed.record_value_types().is_empty(), "{source}");
+            assert_eq!(parsed.diagnostics().len(), 1, "{source}");
+            assert_eq!(parsed.diagnostics()[0].message, message, "{source}");
+            let start = if use_last_occurrence {
+                source.rfind(offending).unwrap()
+            } else if offending.is_empty() {
+                source.len()
+            } else {
+                source.find(offending).unwrap()
+            };
+            assert_eq!(
+                parsed.diagnostics()[0].span,
+                SourceSpan {
+                    start,
+                    end: start + offending.len(),
+                },
+                "{source}"
+            );
+            assert_eq!(parsed.syntax().text(), source, "{source}");
+        }
+    }
+
+    #[test]
+    fn recovers_after_invalid_record_value_type() {
+        let source = "CREATE TYPE app.point AS VALUE (x INT NOT NULL) IMMUTABLE PERSISTABLE; CREATE SCHEMA later;";
+        let parsed = parse(source);
+
+        assert_eq!(parsed.diagnostics().len(), 1);
+        assert!(parsed.record_value_types().is_empty());
         assert_eq!(parsed.schemas().len(), 1);
         assert_eq!(parsed.schemas()[0].name.parts[0].text, "later");
     }
