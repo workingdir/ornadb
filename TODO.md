@@ -55,8 +55,10 @@ separate release action.
 
 - [x] Complete the first verified CLIENT Boolean function path.
 - [ ] Add the accepted invocation, authorisation, and public protocol slices.
-- [ ] Extend catalogue-backed types beyond the standard primitive set through
-  separate accepted decisions for enum, record, and opaque value types.
+- [x] Extend catalogue-backed types with accepted enum identity, syntax,
+  catalogue, storage, codec, protocol, and first SERVER execution slices.
+- [ ] Add a separately accepted record value type.
+- [ ] Add a separately accepted opaque value type.
 
 ## Completed foundations
 
