@@ -15,6 +15,7 @@
 #include <sys/prctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/time.h>
 #include <sys/types.h>
 #include <sys/un.h>
@@ -24,7 +25,12 @@
 
 extern int orna_postgres18_entry(int argc, char *argv[]);
 extern int orna_postgres18_initdb_entry(const char *data_directory);
+extern int orna_postgres18_install_exec_filter(void);
 extern int orna_postgres18_set_support_root(const char *absolute_root);
+
+#ifndef __X32_SYSCALL_BIT
+#error "the lifecycle proof requires x86-64 x32 syscall definitions"
+#endif
 
 #define ARRAY_LENGTH(array) (sizeof(array) / sizeof((array)[0]))
 #define MAX_FRAME_SIZE (1024U * 1024U)
@@ -89,6 +95,35 @@ marker(const char *message)
 	if (write(STDERR_FILENO, message, length) != (ssize_t) length ||
 		write(STDERR_FILENO, "\n", 1) != 1)
 		fail("could not write a lifecycle marker");
+}
+
+static void
+verify_x32_rejection(void)
+{
+	pid_t child;
+	pid_t waited;
+	int status;
+
+	child = fork();
+	if (child < 0)
+		fail("could not fork the x32 filter proof");
+	if (child == 0)
+	{
+		errno = 0;
+		if (orna_postgres18_install_exec_filter() != 0 ||
+			syscall(__X32_SYSCALL_BIT | __NR_getpid) != -1 || errno != EPERM)
+			_exit(1);
+		_exit(0);
+	}
+	do
+	{
+		waited = waitpid(child, &status, 0);
+	} while (waited < 0 && errno == EINTR);
+	if (waited != child || !WIFEXITED(status) || WEXITSTATUS(status) != 0)
+	{
+		errno = 0;
+		fail("the x32 syscall alias was not rejected with EPERM");
+	}
 }
 
 static unsigned long
@@ -957,7 +992,8 @@ write_report(const char *path, bool escalated)
 		"  \"one_executable\": true,\n"
 		"  \"postmaster_clean_stop\": true,\n"
 		"  \"postmaster_sigquit_escalation\": false,\n"
-		"  \"support_members\": 620\n"
+		"  \"support_members\": 620,\n"
+		"  \"x32_syscall_rejected\": true\n"
 		"}\n";
 	static const char report_with_escalation[] =
 		"{\n"
@@ -968,7 +1004,8 @@ write_report(const char *path, bool escalated)
 		"  \"one_executable\": true,\n"
 		"  \"postmaster_clean_stop\": true,\n"
 		"  \"postmaster_sigquit_escalation\": true,\n"
-		"  \"support_members\": 620\n"
+		"  \"support_members\": 620,\n"
+		"  \"x32_syscall_rejected\": true\n"
 		"}\n";
 	const char *content = escalated ? report_with_escalation : report_without_escalation;
 	int descriptor = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
@@ -1075,6 +1112,7 @@ main(int argc, char *argv[])
 		fail("support tree does not contain the accepted member count");
 	}
 	marker("preload-complete");
+	verify_x32_rejection();
 	drop_identity(uid, gid);
 
 	join_path(reference_stdout, sizeof(reference_stdout), report_path, ".stdout");

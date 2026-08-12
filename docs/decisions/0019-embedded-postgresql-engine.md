@@ -47,7 +47,13 @@ database cluster, write-ahead log (WAL), generated configuration, locks,
 readiness state, and other durable database files. These files are data, not a
 PostgreSQL program distribution.
 
-The signed Orna distribution is the only production distribution authority.
+The authenticated Orna Debian package is the only production distribution
+authority. Repository metadata authenticates the package before installation;
+after installation, the root-owned package inventory and root-owned
+distribution manifest are the local authority. The manifest is an integrity
+binding for the exact final ELF and embedded-engine manifest, not a second
+detached-signature scheme. A process with root authority is outside this
+threat boundary.
 Unmodified upstream PostgreSQL source is checked out at
 `third_party/postgresql` as a Git submodule of
 `https://github.com/postgres/postgres.git`. The superproject gitlink pins the
@@ -122,7 +128,7 @@ or signing authority.
 A later Orna distribution manifest must bind that embedded-engine manifest to
 the exact Rust toolchain, `Cargo.lock`, Rust linker flags, Rust path remapping,
 and final Orna ELF. The later package gate must prove identical final Orna ELF
-bytes and bind those bytes to the signed Orna distribution. The embedded build
+bytes and bind those bytes to the authenticated Orna package. The embedded build
 and final Orna build consume these authorities in that order. Neither manifest
 is a separate PostgreSQL runtime acceptance or signing authority.
 
@@ -470,8 +476,8 @@ remain accepted with these substitutions:
 * the linked initialiser replaces `initdb`; and
 * no fixed PostgreSQL `PATH`, loader path, or executable handle exists.
 
-`orna server run` verifies the signed Orna distribution and the embedded
-engine manifest before it opens instance data. It materialises and verifies
+`orna server run` verifies the root-owned installed distribution evidence and
+the embedded engine manifest before it opens instance data. It materialises and verifies
 support data before initialisation or postmaster entry. It reports ready only
 after PostgreSQL readiness, kernel bootstrap, accepted-standard installation,
 migrations, canonical recovery, durable activation commit, and ready-record
@@ -581,7 +587,14 @@ no-automatic-repair rules.
 
 ### Same-major releases
 
-A same-major Orna release embeds only the candidate PostgreSQL code. Its signed
+The first release accepts no predecessor engine and declares no forward edge.
+For that release, `orna server upgrade` must prove the current-engine no-op and
+reject every other recorded engine before any PostgreSQL entry. The durable
+transition below becomes mandatory in the first later distribution whose
+manifest names an accepted predecessor and exact forward edge; it must not be
+simulated with a fabricated first-release predecessor.
+
+A same-major Orna release embeds only the candidate PostgreSQL code. Its
 distribution manifest binds the candidate embedded-engine manifest, the exact
 accepted predecessor engine identities, the supported forward edges, and the
 final Orna ELF.
@@ -702,7 +715,7 @@ After global command-shape validation, checks occur in this exact order:
 
 The first six checks map in order to the first six diagnostic lines above. A
 completed or no-op transition at check 6 exits `0`. A predecessor outside the
-signed forward edges, a missing required source engine, or a downgrade uses
+manifest-declared forward edges, a missing required source engine, or a downgrade uses
 the sixth line. A role exit, signal, malformed response, interrupted
 transition, migration failure, candidate recovery failure, or durable-write
 failure after the role boundary uses the final line. A malformed or
@@ -725,7 +738,8 @@ fresh network-disabled Debian 12 amd64 machine:
 * final Orna ELF bytes and the embedded support bundle are reproduced twice
   and bound through the embedded-engine and distribution manifests;
 * initialisation, bootstrap, normal service, private kernel work, backend
-  shell, same-major upgrade, shutdown, and restart execute no PostgreSQL
+  shell, the current-engine upgrade no-op, unsupported-engine rejection,
+  shutdown, and restart execute no PostgreSQL
   program or shared object and perform no runtime download;
 * every PostgreSQL-role PID maps to the installed Orna inode, and exactly one
   thread exists before every direct linked-entry fork;
@@ -755,7 +769,8 @@ fresh network-disabled Debian 12 amd64 machine:
   transaction exclusion, leaves the service stopped, and installs no helper;
 * source check does not enter a PostgreSQL, package, support-data, instance,
   network, or process path; and
-* same-major fault injection preserves every forward-only boundary. A later
+* when a distribution first declares a same-major predecessor edge,
+  same-major fault injection preserves every forward-only boundary. A later
   two-major package adds symbol-disjointness, separate source and candidate
   support roots, supervisor-brokered role requests, one-role-per-process,
   copy-only, pre-commit rollback, and post-commit rollback-rejection proof.
@@ -870,8 +885,8 @@ prototype history and are not current source or build authority.
 | `feat(server): own package maintenance` | `crates/orna-server/src/package_maintenance.rs`; `crates/orna-server/src/main.rs`; `crates/orna-server/tests/package_maintenance.rs` | Implement argument-and-value selection followed by the exact root gate, clean-environment verification, shared public-command locks, state bytes, atomic persistence, first-install creation, and no-instance or PostgreSQL boundary without a helper executable. |
 | `feat(server): replace psql with a native shell` | `crates/orna-server/src/backend_shell.rs`; `crates/orna-server/src/main.rs`; `crates/orna-server/tests/backend_shell.rs` | Replace URL, `PATH`, and process replacement with the ready-host private Unix socket, native simple-query terminal framing, cancellation, rendering, package-lock lifetime, and exact diagnostics from ADR 0014. |
 | `test(postgres): reject executable SQL paths` | `crates/orna-server/tests/embedded_sql_guard.rs` | Through kernel and shell sessions, prove every forbidden utility and function form fails before file, catalogue, event-trigger, fork, or mapping effects and cannot be bypassed by prepared, nested, role-changed, or multi-statement SQL. |
-| `feat(server): add embedded engine upgrade` | `crates/orna-server/src/embedded.rs`; `crates/orna-server/src/upgrade.rs`; `crates/orna-server/src/main.rs` | Implement no-argument stopped-service same-major transition, typed control inspection, forward-only durable re-entry, candidate recovery, and activation hand-off without an external tool. |
-| `test(server): prove embedded upgrade transitions` | `crates/orna-server/tests/embedded_upgrade.rs` | Prove no-op, unsupported predecessor, every same-major interruption boundary, post-open forward-only behaviour, candidate recovery, exact diagnostics, and no external execution. |
+| `feat(server): add embedded engine upgrade` | `crates/orna-server/src/embedded.rs`; `crates/orna-server/src/upgrade.rs`; `crates/orna-server/src/main.rs` | Implement the no-argument stopped-service boundary, typed control inspection, current-engine no-op, and rejection of every undeclared predecessor without an external tool. Add forward-only durable re-entry, candidate recovery, and activation hand-off only with the first manifest-declared predecessor edge. |
+| `test(server): prove embedded upgrade transitions` | `crates/orna-server/tests/embedded_upgrade.rs` | For the first release, prove no-op, unsupported predecessor, exact diagnostics, and no external execution. With the first accepted predecessor, additionally prove every same-major interruption boundary, post-open forward-only behaviour, and candidate recovery. |
 | `build(debian): define the managed embedded service` | `packaging/debian/orna.sysusers`; `packaging/debian/orna.tmpfiles`; `packaging/debian/orna.service` | Create the locked account and runtime roots and apply notify, mixed-kill, timeout, cgroup, and rate-limited restart rules. |
 | `build(debian): define the one-executable package` | `packaging/debian/control`; `packaging/debian/rules`; `packaging/debian/orna.install` | Reproduce and bind the final Orna ELF, install only `/usr/bin/orna` plus non-executable configuration, licence, manifest, service, and maintainer data, and reject every PostgreSQL executable, shared object, archive, object, or helper copy. |
 | `build(debian): drive the package protocol` | `packaging/debian/preinst`; `packaging/debian/prerm`; `packaging/debian/postinst` | Encode retained dpkg ordering by clearing the pinned loader-variable set with shell builtins, replacing the script through absolute `/usr/bin/env -i`, and supplying only the private selector. Perform no data transition and leave the service stopped. |
