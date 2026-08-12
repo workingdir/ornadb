@@ -1,5 +1,5 @@
 format = 1
-identity = "postgresql-18.4-debian12-amd64-orna-embedded.2"
+identity = "postgresql-18.4-debian12-amd64-orna-embedded.3"
 target = "debian12-amd64"
 platform = "linux/amd64"
 source_date_epoch = 1778528675
@@ -12,7 +12,7 @@ sha256 = "64a6a6136365f48c5c3de05da0dc003f3bd4b7d35e7b44ec33c75bba0e832fd2"
 
 [[patches]]
 path = "embedded-postgresql-18.4/0002-embedded-runtime-capabilities-and-seccomp.patch"
-sha256 = "b014e1c5a022b03e8f549297a657a68cdb2128f93ab6250c3e91cc093e656aff"
+sha256 = "c4e89d35cc6b8d71351687856b89b666b621d27b07774f0852dc26eb4c99d1f9"
 
 [[patches]]
 path = "embedded-postgresql-18.4/0003-fixed-postmaster-support-paths.patch"
