@@ -53,3 +53,5 @@ source-of-truth or authority rules.
   [Canonical Runtime Values Use One Binary Codec](0025-canonical-runtime-value-codec.md)
 * **work ADR 0026:**
   [Raw Calls Use a Bounded Framed State Machine](0026-raw-call-frame-state-machine.md)
+* **work ADR 0027:**
+  [Raw CLIENT Dispatch Preserves the Protected Kernel Gate](0027-raw-client-dispatch.md)
