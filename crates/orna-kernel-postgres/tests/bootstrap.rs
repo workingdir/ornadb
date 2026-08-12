@@ -42,6 +42,7 @@ const EXPECTED_KERNEL_TABLES: &[&str] = &[
     "function_artifacts",
     "function_revisions",
     "schema_migrations",
+    "security_audit_events",
     "security_execute_grants",
     "security_local_peer_credentials",
     "security_principals",
@@ -105,6 +106,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         10,
         "local peer credentials",
         include_str!("../migrations/0010_local_peer_credentials.sql"),
+    ),
+    (
+        11,
+        "protected security audit",
+        include_str!("../migrations/0011_security_audit.sql"),
     ),
 ];
 const MIGRATION_DATA_STEP_SEPARATOR: &[u8] = b"\0orna.kernel.migration-step\0";
@@ -307,6 +313,14 @@ fn local_peer_credential_migration_checksum_binds_exact_sql_bytes() {
 }
 
 #[test]
+fn protected_security_audit_migration_checksum_binds_exact_sql_bytes() {
+    assert_eq!(
+        hex_bytes(expected_migration_checksum(11, MIGRATIONS[10].2)),
+        "54288defeebde1621805eed6ac0b2653669a658938e6c707f0665d430d639575"
+    );
+}
+
+#[test]
 fn security_snapshot_migration_is_the_registered_version_nine() -> TestResult<()> {
     let (version, name, sql) = MIGRATIONS[8];
 
@@ -326,21 +340,39 @@ fn security_snapshot_migration_is_the_registered_version_nine() -> TestResult<()
 
 #[test]
 fn local_peer_credential_migration_is_the_registered_version_ten() -> TestResult<()> {
+    let (version, name, sql) = MIGRATIONS[9];
+
+    require(
+        version == 10,
+        format!("local peer credential migration is version {version}"),
+    )?;
+    require(
+        name == "local peer credentials",
+        format!("local peer credential migration has unexpected name {name:?}"),
+    )?;
+    require(
+        sql.contains("CREATE TABLE _orna_kernel.security_local_peer_credentials"),
+        "local peer credential migration does not create its protected table",
+    )
+}
+
+#[test]
+fn protected_security_audit_is_the_registered_version_eleven() -> TestResult<()> {
     let Some((version, name, sql)) = MIGRATIONS.last() else {
         return Err(failure("migration registry is empty"));
     };
 
     require(
-        *version == 10,
+        *version == 11,
         format!("last migration is version {version}"),
     )?;
     require(
-        *name == "local peer credentials",
+        *name == "protected security audit",
         format!("last migration has unexpected name {name:?}"),
     )?;
     require(
-        sql.contains("CREATE TABLE _orna_kernel.security_local_peer_credentials"),
-        "local peer credential migration does not create its protected table",
+        sql.contains("CREATE TABLE _orna_kernel.security_audit_events"),
+        "protected security audit migration does not create its table",
     )
 }
 
@@ -454,8 +486,8 @@ async fn bootstrap_upgrades_v5_write_reference_evidence_without_mutating_semanti
 
         let after = snapshot_upgrade_state(&database).await?;
         require(
-            after.migrations.len() == 10 && after.migrations[..5] == before.migrations[..],
-            format!("v6-v10 changed prior migration records: {:?}", after.migrations),
+            after.migrations.len() == 11 && after.migrations[..5] == before.migrations[..],
+            format!("v6-v11 changed prior migration records: {:?}", after.migrations),
         )?;
         require(
             after.migrations[5]
@@ -501,6 +533,15 @@ async fn bootstrap_upgrades_v5_write_reference_evidence_without_mutating_semanti
                     expected_migration_checksum(10, MIGRATIONS[9].2),
                 ),
             format!("v10 migration record is not exact: {:?}", after.migrations[9]),
+        )?;
+        require(
+            after.migrations[10]
+                == (
+                    11,
+                    "protected security audit".to_owned(),
+                    expected_migration_checksum(11, MIGRATIONS[10].2),
+                ),
+            format!("v11 migration record is not exact: {:?}", after.migrations[10]),
         )?;
         require(
             after.active_pair == before.active_pair,
@@ -588,7 +629,7 @@ async fn bootstrap_upgrades_registered_v6_without_standard_rows() -> TestResult<
 
         let after = snapshot_upgrade_state(&database).await?;
         require(
-            after.migrations.len() == 10
+            after.migrations.len() == 11
                 && after.migrations[..6] == before.migrations[..]
                 && after.migrations[6]
                     == (
@@ -624,6 +665,15 @@ async fn bootstrap_upgrades_registered_v6_without_standard_rows() -> TestResult<
                     expected_migration_checksum(10, MIGRATIONS[9].2),
                 ),
             format!("v10 migration record is not exact: {:?}", after.migrations[9]),
+        )?;
+        require(
+            after.migrations[10]
+                == (
+                    11,
+                    "protected security audit".to_owned(),
+                    expected_migration_checksum(11, MIGRATIONS[10].2),
+                ),
+            format!("v11 migration record is not exact: {:?}", after.migrations[10]),
         )?;
         require(
             after.active_pair == before.active_pair
@@ -699,7 +749,7 @@ async fn bootstrap_upgrades_registered_v7_without_resolved_value_rows() -> TestR
         let after_surface = snapshot_catalogue_surface(&database).await?;
         let after_target_fks = snapshot_application_target_foreign_keys(&database).await?;
         require(
-            after.migrations.len() == 10
+            after.migrations.len() == 11
                 && after.migrations[..7] == before.migrations[..]
                 && after.migrations[7]
                     == (
@@ -718,6 +768,12 @@ async fn bootstrap_upgrades_registered_v7_without_resolved_value_rows() -> TestR
                         10,
                         "local peer credentials".to_owned(),
                         expected_migration_checksum(10, MIGRATIONS[9].2),
+                    )
+                && after.migrations[10]
+                    == (
+                        11,
+                        "protected security audit".to_owned(),
+                        expected_migration_checksum(11, MIGRATIONS[10].2),
                     ),
             format!("v7 upgrade produced unexpected migrations: {:?}", after.migrations),
         )?;
@@ -1032,7 +1088,7 @@ async fn bootstrap_rejects_tampered_gapped_and_newer_migration_history() -> Test
         Sha256::digest(MIGRATIONS[1].2.as_bytes()).to_vec(),
     )
     .await?;
-    reject_migration_history(11, "future migration", vec![0; 32]).await
+    reject_migration_history(12, "future migration", vec![0; 32]).await
 }
 
 async fn inspect_bootstrap_state(database: &TestDatabase) -> TestResult<()> {
@@ -1178,6 +1234,37 @@ async fn inspect_security_snapshot_schema(client: &Client) -> TestResult<()> {
         ],
     )
     .await?;
+    inspect_columns(
+        client,
+        "security_audit_events",
+        &[
+            ("sequence", "bigint", "int8", "NO", None),
+            ("event_id", "bytea", "bytea", "NO", Some("")),
+            (
+                "recorded_at",
+                "timestamp without time zone",
+                "timestamp",
+                "NO",
+                None,
+            ),
+            ("event_kind", "text", "text", "NO", Some("")),
+            ("outcome", "text", "text", "NO", Some("")),
+            ("session_principal_id", "bytea", "bytea", "YES", Some("")),
+            ("effective_principal_id", "bytea", "bytea", "YES", Some("")),
+            (
+                "authorising_principal_id",
+                "bytea",
+                "bytea",
+                "YES",
+                Some(""),
+            ),
+            ("function_id", "bytea", "bytea", "YES", Some("")),
+            ("source_revision_id", "bytea", "bytea", "YES", Some("")),
+            ("catalogue_revision_id", "bytea", "bytea", "YES", Some("")),
+            ("denial_reason", "text", "text", "YES", Some("")),
+        ],
+    )
+    .await?;
 
     for (table, constraint, expected) in [
         (
@@ -1230,6 +1317,41 @@ async fn inspect_security_snapshot_schema(client: &Client) -> TestResult<()> {
             "security_local_peer_credentials_principal_fk",
             "FOREIGN KEY (principal_id)",
         ),
+        (
+            "security_audit_events",
+            "security_audit_events_event_id_key",
+            "UNIQUE (event_id)",
+        ),
+        (
+            "security_audit_events",
+            "security_audit_events_identity_lengths",
+            "octet_length(event_id) = 16",
+        ),
+        (
+            "security_audit_events",
+            "security_audit_events_kind_check",
+            "event_kind = ANY",
+        ),
+        (
+            "security_audit_events",
+            "security_audit_events_outcome_check",
+            "outcome = ANY",
+        ),
+        (
+            "security_audit_events",
+            "security_audit_events_revision_pair_check",
+            "(source_revision_id IS NULL) = (catalogue_revision_id IS NULL)",
+        ),
+        (
+            "security_audit_events",
+            "security_audit_events_denial_reason_check",
+            "authentication_unknown_uid",
+        ),
+        (
+            "security_audit_events",
+            "security_audit_events_shape_check",
+            "event_kind = 'authentication'::text",
+        ),
     ] {
         require_constraint(client, table, constraint, expected).await?;
     }
@@ -1256,7 +1378,30 @@ async fn inspect_security_snapshot_schema(client: &Client) -> TestResult<()> {
     )
     .await?;
 
+    let identity = client
+        .query_one(
+            "SELECT is_identity, identity_generation
+             FROM information_schema.columns
+             WHERE table_schema = '_orna_kernel'
+               AND table_name = 'security_audit_events'
+               AND column_name = 'sequence'",
+            &[],
+        )
+        .await?;
+    require(
+        value::<String>(&identity, 0)? == "YES" && value::<String>(&identity, 1)? == "ALWAYS",
+        "security audit sequence is not an always-generated identity",
+    )?;
+    require_count(
+        client,
+        "_orna_kernel.security_audit_events",
+        "SELECT count(*) FROM _orna_kernel.security_audit_events",
+        0,
+    )
+    .await?;
+
     for table in [
+        "security_audit_events",
         "security_principals",
         "security_role_memberships",
         "security_execute_grants",
@@ -1285,6 +1430,23 @@ async fn inspect_security_snapshot_schema(client: &Client) -> TestResult<()> {
                 format!("PUBLIC has {privilege} on protected table {relation}"),
             )?;
         }
+    }
+
+    for privilege in ["USAGE", "SELECT", "UPDATE"] {
+        let row = client
+            .query_one(
+                "SELECT has_sequence_privilege(
+                    'public',
+                    '_orna_kernel.security_audit_events_sequence_seq',
+                    $1
+                 )",
+                &[&privilege],
+            )
+            .await?;
+        require(
+            !value::<bool>(&row, 0)?,
+            format!("PUBLIC has {privilege} on the protected audit sequence"),
+        )?;
     }
 
     Ok(())
