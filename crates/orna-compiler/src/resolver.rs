@@ -4355,6 +4355,10 @@ fn diagnostic(
 mod tests {
     use std::{cell::Cell, error::Error};
 
+    use orna_artifact::server_mutation_plan::{
+        MutationExpressionKind as ServerMutationExpressionKind, RECORD_INSERT_FORMAT_VERSION,
+        RecordFieldExpressionKind as ServerRecordFieldExpressionKind, ServerMutationPlan,
+    };
     use orna_core::{
         CatalogueRevisionId, ExpressionId, FieldId, FunctionId, FunctionRevisionId, ParameterId,
         SchemaId, SourceBundleId, SourceRevisionId, SourceUnitId, StandardLibraryRevisionId,
@@ -4928,7 +4932,7 @@ mod tests {
     }
 
     #[test]
-    fn checks_record_constructor_identities_in_declaration_order_and_stops_before_artifact() {
+    fn checks_record_constructor_identities_in_declaration_order_and_prepares_artifact() {
         let verified = verified_standard_library_for_relational_test();
         let standard = check_standard_library_source(&verified).unwrap();
         let active = empty_version_two_active(&verified);
@@ -5071,13 +5075,47 @@ mod tests {
             ]
         );
 
+        let prepared = prepare_standard_application(&report, active.pair(), &active).unwrap();
+        let candidate = prepared.candidate();
+        let durable_record = candidate
+            .record_value_type_by_name(&QualifiedSemanticName::new(["app", "flags"]).unwrap())
+            .unwrap();
+        let durable_object = candidate
+            .object_type_by_name(&QualifiedSemanticName::new(["app", "item"]).unwrap())
+            .unwrap();
+        let revision = &prepared.new_function_revisions()[0];
+        assert_eq!(revision.artifact().version(), RECORD_INSERT_FORMAT_VERSION);
+        let artifact = ServerMutationPlan::decode(revision.artifact().payload()).unwrap();
+        assert_eq!(artifact.target(), durable_object.id());
+        assert_eq!(artifact.assignments().len(), 1);
+        assert_eq!(artifact.assignments()[0].owner(), durable_object.id());
+        assert_eq!(
+            artifact.assignments()[0].field(),
+            durable_object.fields()[0].id()
+        );
+        let ServerMutationExpressionKind::RecordConstructor { fields } =
+            artifact.assignments()[0].expression().kind()
+        else {
+            panic!("prepared INSERT value must be a record constructor");
+        };
+        assert_eq!(
+            artifact.assignments()[0].expression().resolved_type(),
+            ResolvedType::named(durable_record.id())
+        );
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].owner(), durable_record.id());
+        assert_eq!(fields[0].field(), durable_record.fields()[0].id());
         assert!(matches!(
-            prepare_standard_application(&report, active.pair(), &active),
-            Err(PrepareStandardApplicationError::Prepare {
-                source: PrepareError::InvalidCheckedBundle {
-                    reason: "record constructor mutation artifact encoding is not implemented"
-                }
-            })
+            fields[0].kind(),
+            ServerRecordFieldExpressionKind::BooleanLiteral { value: true }
+        ));
+        assert_eq!(fields[1].owner(), durable_record.id());
+        assert_eq!(fields[1].field(), durable_record.fields()[1].id());
+        assert!(matches!(
+            fields[1].kind(),
+            ServerRecordFieldExpressionKind::Parameter { owner, parameter }
+                if *owner == candidate.functions()[0].id()
+                    && *parameter == candidate.functions()[0].parameters()[0].id()
         ));
     }
 
@@ -5129,9 +5167,9 @@ mod tests {
 
     #[test]
     fn record_constructor_accepts_an_exact_active_enum_parameter() {
-        let standard =
-            check_standard_library_source(&verified_standard_library_for_relational_test())
-                .unwrap();
+        let verified = verified_standard_library_for_relational_test();
+        let standard = check_standard_library_source(&verified).unwrap();
+        let active = empty_version_two_active(&verified);
         let source = "CREATE SCHEMA app;\n\
             CREATE TYPE app.phase AS ENUM ('new', 'done');\n\
             CREATE TYPE app.status AS VALUE (phase app.phase) IMMUTABLE PERSISTABLE;\n\
@@ -5139,8 +5177,10 @@ mod tests {
             CREATE SERVER FUNCTION app.create(p_phase app.phase) RETURNS ROWS (item REF app.item)\n\
             TRANSACTION ATOMIC AS INSERT INTO app.item AS made (status)\n\
             VALUES (app.status{phase: p_phase}) RETURNING REF(made);";
+        let context =
+            StandardApplicationCheckContext::try_new(active.catalogue(), &standard).unwrap();
         let report =
-            check_new_application(&bundle([("enum_constructor.orna", source)]), &standard).unwrap();
+            check_standard_application(&bundle([("enum_constructor.orna", source)]), &context);
 
         assert_eq!(report.diagnostics(), &[]);
         let raw = report.preparation_view().unwrap();
@@ -5156,6 +5196,29 @@ mod tests {
             fields[0].value_type().semantic_type(),
             SemanticType::Named(enum_type)
         );
+
+        let prepared = prepare_standard_application(&report, active.pair(), &active).unwrap();
+        let candidate = prepared.candidate();
+        let durable_enum = candidate
+            .enum_type_by_name(&QualifiedSemanticName::new(["app", "phase"]).unwrap())
+            .unwrap();
+        let revision = &prepared.new_function_revisions()[0];
+        let artifact = ServerMutationPlan::decode(revision.artifact().payload()).unwrap();
+        let ServerMutationExpressionKind::RecordConstructor { fields } =
+            artifact.assignments()[0].expression().kind()
+        else {
+            panic!("prepared INSERT value must be a record constructor");
+        };
+        assert_eq!(
+            fields[0].resolved_type(),
+            ResolvedType::named(durable_enum.id())
+        );
+        assert!(matches!(
+            fields[0].kind(),
+            ServerRecordFieldExpressionKind::Parameter { owner, parameter }
+                if *owner == candidate.functions()[0].id()
+                    && *parameter == candidate.functions()[0].parameters()[0].id()
+        ));
     }
 
     #[test]
