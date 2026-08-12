@@ -2,6 +2,7 @@
 
 mod backend_shell;
 mod embedded;
+mod upgrade;
 
 pub use backend_shell::{BackendShellError, run_backend_shell};
 pub use embedded::{
@@ -10,6 +11,7 @@ pub use embedded::{
     inspect_ready_embedded_host, materialise_support_data, private_database_config,
     run_embedded_server, start_embedded_postmaster,
 };
+pub use upgrade::EmbeddedUpgradeError;
 
 use std::fmt;
 
