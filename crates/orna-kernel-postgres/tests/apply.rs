@@ -54,6 +54,9 @@ const BASIC_CHANGED_SOURCE: &str = "CREATE SCHEMA app;\n\
 
 const STANDARD_APPLICATION_SOURCE: &str = "CREATE SCHEMA app;\n";
 
+const ENUM_APPLICATION_SOURCE: &str = "CREATE SCHEMA app;\n\
+    CREATE TYPE app.stage AS ENUM ('lead', 'owner''s', 'customer');\n";
+
 const STANDARD_UPGRADE_V1_SOURCE: &str = "CREATE SCHEMA app;\n\
     CREATE TYPE app.item AS OBJECT (done BOOLEAN NOT NULL);\n\
     CREATE SERVER FUNCTION app.read()\n\
@@ -347,6 +350,85 @@ async fn applies_the_standard_upgrade_then_reuses_normal_version_two_apply() -> 
             "reconnect changed current or historical function revision facts",
         )?;
         require_recovered_snapshot(&second_candidate, &restarted)
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn applies_and_recovers_ordered_catalogue_enum_labels() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = kernel(&database)?;
+        kernel.bootstrap().await?;
+        let empty = kernel.recover().await?;
+        let version_one_candidate = candidate(STANDARD_APPLICATION_SOURCE, &empty)?;
+        let version_one = kernel.apply(&version_one_candidate).await?;
+        let upgrade = orna_standard::prepare_standard_upgrade(&version_one)
+            .map_err(|error| failure(format!("standard upgrade preparation failed: {error}")))?;
+        let version_two = kernel.apply_standard_upgrade(&upgrade).await?;
+        let candidate =
+            standard_application_candidate(ENUM_APPLICATION_SOURCE, &version_two, &upgrade)?;
+        let expected = candidate
+            .candidate()
+            .enum_types()
+            .first()
+            .ok_or_else(|| failure("enum candidate did not contain its declaration"))?;
+        let expected_schema = candidate
+            .candidate()
+            .schemas()
+            .first()
+            .ok_or_else(|| failure("enum candidate did not contain its schema"))?;
+        let expected_origin = candidate
+            .origins()
+            .iter()
+            .find(|origin| origin.identity() == DefinitionIdentity::ValueType(expected.id()))
+            .ok_or_else(|| failure("enum candidate did not contain its source origin"))?;
+
+        let applied = kernel.apply(&candidate).await?;
+        require_recovered_snapshot(&candidate, &applied)?;
+
+        let session = database.open().await?;
+        let row = session
+            .client()
+            .query_one(
+                "SELECT type_id, schema_id, name_parts, labels,
+                        source_unit_id, source_start, source_end
+                 FROM _orna_kernel.catalogue_enum_types
+                 WHERE catalogue_revision_id = $1",
+                &[&candidate.candidate().revision().to_bytes().to_vec()],
+            )
+            .await?;
+        let postgres_enum_count: i64 = session
+            .client()
+            .query_one(
+                "SELECT count(*)
+                 FROM pg_catalog.pg_type AS type
+                 JOIN pg_catalog.pg_namespace AS namespace
+                   ON namespace.oid = type.typnamespace
+                 WHERE type.typtype = 'e'
+                   AND namespace.nspname IN ('_orna_kernel', '_orna_data')",
+                &[],
+            )
+            .await?
+            .try_get(0)?;
+        require(
+            row.try_get::<_, Vec<u8>>(0)? == expected.id().to_bytes().to_vec()
+                && row.try_get::<_, Vec<u8>>(1)? == expected_schema.id().to_bytes().to_vec()
+                && row.try_get::<_, Vec<String>>(2)? == expected.name().parts()
+                && row.try_get::<_, Vec<String>>(3)? == expected.labels()
+                && row.try_get::<_, Vec<u8>>(4)?
+                    == expected_origin.source().source_unit().to_bytes().to_vec()
+                && row.try_get::<_, i64>(5)? == i64::from(expected_origin.source().byte_start())
+                && row.try_get::<_, i64>(6)? == i64::from(expected_origin.source().byte_end())
+                && postgres_enum_count == 0,
+            "enum apply did not preserve the exact protected catalogue row",
+        )?;
+        session.shutdown().await?;
+
+        let restarted = named_kernel(&database, "orna-enum-restart")?
+            .recover()
+            .await?;
+        require_recovered_snapshot(&candidate, &restarted)
     })
     .await
 }
@@ -1723,6 +1805,7 @@ fn same_recovered(left: &ActiveDatabaseRevision, right: &ActiveDatabaseRevision)
         && left.catalogue().revision() == right.catalogue().revision()
         && left.catalogue().schemas() == right.catalogue().schemas()
         && left.catalogue().object_types() == right.catalogue().object_types()
+        && left.catalogue().enum_types() == right.catalogue().enum_types()
         && left.catalogue().functions() == right.catalogue().functions()
         && left.catalogue_hash() == right.catalogue_hash()
         && left.expressions() == right.expressions()
@@ -2839,6 +2922,10 @@ fn require_recovered_snapshot(
             && same_members(
                 active.catalogue().object_types(),
                 candidate.candidate().object_types(),
+            )
+            && same_members(
+                active.catalogue().enum_types(),
+                candidate.candidate().enum_types(),
             )
             && same_members(
                 active.catalogue().functions(),
