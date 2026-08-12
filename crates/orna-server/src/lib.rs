@@ -5,8 +5,13 @@
 //! original text so later host operations do not need a second parser.
 
 mod backend_shell;
+mod embedded;
 
 pub use backend_shell::{BackendShellError, run_backend_shell};
+pub use embedded::{
+    EmbeddedEngineIdentity, EmbeddedHostError, EmbeddedHostPaths, MaterialisedSupport,
+    materialise_support_data,
+};
 
 use std::{env, ffi::OsString, fmt, string::FromUtf8Error};
 
