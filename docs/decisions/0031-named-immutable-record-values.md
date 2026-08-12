@@ -186,11 +186,14 @@ live PostgreSQL gates remain required.
 
 1. Accept this named immutable record boundary.
 2. Add the lossless record declaration to `orna-syntax` in two files.
-3. Add the lossless record constructor in a separate two-file syntax commit.
-4. Add semantic record definitions, shared namespace checks, and conditional
+3. Add semantic record definitions, shared namespace checks, and conditional
    version-2 catalogue hashing in at most three `orna-core` files.
-5. Resolve record definitions, then prepare their stable identities, in
+4. Resolve record definitions, then prepare their stable identities, in
    separate compiler commits of at most three files.
+5. Before accepting record construction in source, amend this ADR to name the
+   first compiler-supported expression host and its closed expression subset.
+   Then add the lossless constructor to that real host in a separate two-file
+   syntax commit. A standalone fragment parser is not accepted.
 6. Register protected record-definition storage, then add apply and recovery
    in separate migration, source, and focused-test commits.
 7. Add checked runtime record values and compiler construction in separate
@@ -204,6 +207,11 @@ live PostgreSQL gates remain required.
 
 Each implementation commit changes one to three files, uses a signed
 conventional commit, and keeps the repository buildable.
+
+This decision does not broaden ADR 0015's closed Boolean-literal CLIENT body
+(`RETURN TRUE` or `RETURN FALSE`). The current relational SQL expression
+parser is not a general Orna expression host. Until the required host
+amendment, no accepted source position constructs a record value.
 
 ## `sys.invoke` boundary
 
