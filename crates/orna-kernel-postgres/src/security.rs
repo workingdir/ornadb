@@ -5,8 +5,8 @@ use orna_core::{
     FunctionId, PrincipalId,
     revision::{ActiveDatabaseRevision, RevisionPair},
     security::{
-        AuthenticatedSession, ExecuteDecision, ExecuteGrant, InvocationTarget, Principal,
-        PrincipalKind, PrincipalStatus, RoleMembership, SecuritySnapshot,
+        AuthenticatedSession, ExecuteDecision, ExecuteGrant, InvocationTarget, LocalPeerCredential,
+        Principal, PrincipalKind, PrincipalStatus, RoleMembership, SecuritySnapshot,
     },
 };
 use tokio_postgres::{IsolationLevel, Row, Transaction};
@@ -17,6 +17,36 @@ use crate::{
 };
 
 impl PostgresKernel {
+    /// Authenticates a kernel-supplied Linux peer UID with no selected roles.
+    pub async fn authenticate_local_peer(
+        &self,
+        uid: u32,
+    ) -> Result<AuthenticatedSession, PostgresKernelError> {
+        let mut database_session = self.open().await?;
+        let operation = async {
+            let transaction = database_session
+                .client
+                .build_transaction()
+                .isolation_level(IsolationLevel::RepeatableRead)
+                .read_only(true)
+                .start()
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            require_current_migrations(&transaction).await?;
+            let security = recover_security_snapshot(&transaction).await?;
+            let authenticated = security
+                .authenticate_local_peer(uid)
+                .map_err(PostgresKernelError::LocalPeerAuthentication)?;
+            transaction
+                .commit()
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            Ok(authenticated)
+        }
+        .await;
+        finish_security_session(operation, database_session.shutdown().await)
+    }
+
     /// Authorises and evaluates one CLIENT function against one active snapshot.
     pub async fn evaluate_client_function(
         &self,
@@ -196,7 +226,8 @@ async fn replace_security_rows(
 ) -> Result<(), PostgresKernelError> {
     transaction
         .batch_execute(
-            "DELETE FROM _orna_kernel.security_execute_grants;
+            "DELETE FROM _orna_kernel.security_local_peer_credentials;
+             DELETE FROM _orna_kernel.security_execute_grants;
              DELETE FROM _orna_kernel.security_role_memberships;
              DELETE FROM _orna_kernel.security_principals;",
         )
@@ -212,6 +243,18 @@ async fn replace_security_rows(
                 "INSERT INTO _orna_kernel.security_principals (id, kind, status)
                  VALUES ($1, $2, $3)",
                 &[&id, &kind, &status],
+            )
+            .await
+            .map_err(PostgresKernelError::Database)?;
+    }
+    for credential in snapshot.local_peer_credentials() {
+        let uid = i64::from(credential.uid());
+        let principal = credential.principal().to_bytes().to_vec();
+        transaction
+            .execute(
+                "INSERT INTO _orna_kernel.security_local_peer_credentials (uid, principal_id)
+                 VALUES ($1, $2)",
+                &[&uid, &principal],
             )
             .await
             .map_err(PostgresKernelError::Database)?;
@@ -263,9 +306,17 @@ async fn recover_security_snapshot_for_active(
     let principals = load_principals(transaction).await?;
     let memberships = load_memberships(transaction).await?;
     let grants = load_grants(transaction).await?;
+    let local_peer_credentials = load_local_peer_credentials(transaction).await?;
 
-    SecuritySnapshot::new(active.pair(), functions, principals, memberships, grants)
-        .map_err(PostgresKernelError::SecuritySnapshot)
+    SecuritySnapshot::new_with_local_peer_credentials(
+        active.pair(),
+        functions,
+        principals,
+        memberships,
+        grants,
+        local_peer_credentials,
+    )
+    .map_err(PostgresKernelError::SecuritySnapshot)
 }
 
 async fn load_principals(
@@ -364,6 +415,44 @@ async fn load_grants(
                     "security grant function identity is not exactly 16 bytes",
                 )?),
             ))
+        })
+        .collect()
+}
+
+async fn load_local_peer_credentials(
+    transaction: &Transaction<'_>,
+) -> Result<Vec<LocalPeerCredential>, PostgresKernelError> {
+    transaction
+        .query(
+            "SELECT uid, principal_id
+             FROM _orna_kernel.security_local_peer_credentials
+             ORDER BY uid",
+            &[],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?
+        .iter()
+        .map(|row| {
+            let stored_uid: i64 = row.try_get("uid").map_err(|source| {
+                row_decode(
+                    "_orna_kernel.security_local_peer_credentials",
+                    "selected row".to_owned(),
+                    "uid",
+                    source,
+                )
+            })?;
+            let uid =
+                u32::try_from(stored_uid).map_err(|_| PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.security_local_peer_credentials",
+                    record: stored_uid.to_string(),
+                    rule: "local peer UID must fit the unsigned 32-bit range",
+                })?;
+            let principal = PrincipalId::from_bytes(exact_id(
+                row,
+                "principal_id",
+                "local peer principal identity is not exactly 16 bytes",
+            )?);
+            Ok(LocalPeerCredential::new(uid, principal))
         })
         .collect()
 }
