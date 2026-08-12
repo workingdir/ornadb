@@ -35,6 +35,33 @@ The initial enum slice does not add implicit conversion to or from text. A
 typed enum value can cross the canonical value codec only with its exact
 `TypeId` and label. A stale, unknown, or mismatched label fails closed.
 
+## Canonical codec boundary
+
+Enum values use canonical value codec version 2. Version 1 remains closed and
+continues to reject enum values and the `ORV2` marker. Version 2 retains the
+ADR 0025 envelope, size limit, and exact tag and payload semantics for every
+version-1 value, but uses the marker `ORV2`. It adds these tags:
+
+```text
+0x09  null enum value
+0x0a  enum label
+```
+
+Both tags carry the enum `TypeId` in the envelope. A null enum has an empty
+payload. A non-null enum payload is the exact UTF-8 label bytes. No ordinal,
+name, display value, or revision identifier occurs on the wire.
+
+Version-2 encoding and decoding both require the active catalogue snapshot.
+The supplied `TypeId` must resolve to an active enum definition. A non-null
+label must occur exactly in that definition. Encoding revalidates an existing
+runtime value, so a value created under an older catalogue cannot cross the
+boundary after its label is removed or changed. Decoding never constructs an
+unchecked enum value.
+
+The version-1 raw-call frames remain unchanged until their authenticated
+execution path supplies the active catalogue to a version-2 frame boundary.
+An unauthenticated or catalogue-free decoder cannot accept enum bytes.
+
 ## Syntax boundary
 
 The lossless parser records:
@@ -80,8 +107,10 @@ Tests must prove:
   reordered;
 * prepare, apply, recovery, and verification preserve the exact `TypeId`,
   revision, label bytes, and order; and
-* the canonical codec rejects a label whose type or active declaration does
-  not match.
+* version-2 golden bytes and typed nulls retain the exact enum `TypeId`;
+* version 1 rejects version-2 bytes and enum runtime values; and
+* version-2 encoding and decoding reject a label whose type or active
+  declaration does not match.
 
 Normal format, strict Clippy, rustdoc, diff, similarity, workspace, and focused
 live PostgreSQL gates remain required.
