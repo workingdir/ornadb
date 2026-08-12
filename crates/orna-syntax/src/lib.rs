@@ -420,6 +420,8 @@ pub enum MutationValue {
         /// The exact source spelling of the literal.
         source: SourceSlice,
     },
+    /// A named record constructed in one SERVER INSERT value position.
+    RecordConstructor(RecordConstructor),
 }
 
 impl MutationValue {
@@ -428,6 +430,54 @@ impl MutationValue {
         match self {
             Self::Parameter(name) => &name.span,
             Self::BooleanLiteral { source, .. } | Self::NullLiteral { source } => &source.span,
+            Self::RecordConstructor(constructor) => &constructor.span,
+        }
+    }
+}
+
+/// One lossless named record constructor in a SERVER INSERT value position.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordConstructor {
+    /// The nominal record type as written before the opening brace.
+    pub record_type: QualifiedName,
+    /// The constructor fields in source order.
+    pub fields: Vec<RecordConstructorField>,
+    /// The span from the record type through the closing brace.
+    pub span: SourceSpan,
+}
+
+/// One named field supplied by a record constructor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordConstructorField {
+    /// The field name as written before the colon.
+    pub name: NamePart,
+    /// The closed source value supplied for the field.
+    pub value: RecordConstructorFieldValue,
+    /// The span from the field name through its value.
+    pub span: SourceSpan,
+}
+
+/// The closed field expressions accepted by the first record constructor host.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecordConstructorFieldValue {
+    /// A bare declared SERVER function parameter name.
+    Parameter(NamePart),
+    /// A Boolean literal, retaining its exact source spelling.
+    BooleanLiteral {
+        /// The Boolean value selected by the source text.
+        value: bool,
+        /// The exact source spelling of the literal.
+        source: SourceSlice,
+    },
+}
+
+impl RecordConstructorFieldValue {
+    /// Return the complete source span for this field value.
+    pub fn span(&self) -> &SourceSpan {
+        match self {
+            Self::Parameter(parameter) => &parameter.span,
+            Self::BooleanLiteral { source, .. } => &source.span,
         }
     }
 }
@@ -874,8 +924,9 @@ mod tests {
     use super::{
         FunctionReturnType, FunctionSecurity, FunctionTransaction, FunctionVolatility, InsertValue,
         MutationValue, NullOrdering, OnDeletePolicy, OrderingDirection,
-        PrimitiveValueTypePersistence, QueryExpression, SelectQuantifier, ServerFunctionBody,
-        SourceSpan, StandardLargeObjectKind, TypeExportTarget, TypeSpecification, parse,
+        PrimitiveValueTypePersistence, QueryExpression, RecordConstructorFieldValue,
+        SelectQuantifier, ServerFunctionBody, SourceSpan, StandardLargeObjectKind,
+        TypeExportTarget, TypeSpecification, parse,
     };
 
     #[test]
@@ -2619,6 +2670,149 @@ mod tests {
         assert_eq!(
             &source[insert.returning_ref_span.start..insert.returning_ref_span.end],
             "rEf( /* before close */ r /* after */ )"
+        );
+    }
+
+    #[test]
+    fn parses_record_constructors_in_insert_values_losslessly() {
+        let source = "CREATE SERVER FUNCTION tasks.create(p_x INT, p_stage tasks.stage) RETURNS ROWS (result REF tasks.item) AS INSERT INTO tasks.item AS made (point) VALUES (tasks.point{stage: p_stage, /* reordered */ x: p_x, ready: TRUE,}) RETURNING REF(made);";
+        let parsed = parse(source);
+
+        assert!(
+            parsed.diagnostics().is_empty(),
+            "{:?}",
+            parsed.diagnostics()
+        );
+        assert_eq!(parsed.syntax().text(), source);
+        let insert = &parsed.server_functions()[0]
+            .body
+            .as_sql_insert()
+            .expect("the function must have an INSERT body")
+            .insert;
+        let InsertValue::RecordConstructor(constructor) = &insert.values[0] else {
+            panic!("the INSERT value must be a record constructor");
+        };
+        assert_eq!(constructor.record_type.parts[0].text, "tasks");
+        assert_eq!(constructor.record_type.parts[1].text, "point");
+        assert_eq!(constructor.fields.len(), 3);
+        assert_eq!(constructor.fields[0].name.text, "stage");
+        assert!(matches!(
+            &constructor.fields[0].value,
+            RecordConstructorFieldValue::Parameter(parameter) if parameter.text == "p_stage"
+        ));
+        assert_eq!(constructor.fields[1].name.text, "x");
+        assert!(matches!(
+            &constructor.fields[1].value,
+            RecordConstructorFieldValue::Parameter(parameter) if parameter.text == "p_x"
+        ));
+        assert_eq!(constructor.fields[2].name.text, "ready");
+        assert!(matches!(
+            &constructor.fields[2].value,
+            RecordConstructorFieldValue::BooleanLiteral { value: true, source }
+                if source.text == "TRUE"
+        ));
+        let constructor_start = source.find("tasks.point{").unwrap();
+        let constructor_end = source.find("}) RETURNING").unwrap() + 1;
+        assert_eq!(
+            constructor.span,
+            SourceSpan {
+                start: constructor_start,
+                end: constructor_end,
+            }
+        );
+        assert_eq!(insert.values[0].span(), &constructor.span);
+        assert_eq!(
+            constructor.fields[1].span,
+            SourceSpan {
+                start: source.find("x: p_x").unwrap(),
+                end: source.find("p_x, ready").unwrap() + "p_x".len(),
+            }
+        );
+    }
+
+    #[test]
+    fn record_constructor_diagnostics_close_the_initial_expression_subset() {
+        let cases = [
+            (
+                "tasks.point{x: NULL}",
+                "record constructor fields accept only a declared parameter, TRUE, or FALSE",
+                "NULL",
+            ),
+            (
+                "tasks.point{x: make_x()}",
+                "record constructor fields do not support function calls",
+                "(",
+            ),
+            (
+                "tasks.point{x: other.value}",
+                "record constructor fields do not support field paths or qualified values",
+                ".",
+            ),
+            (
+                "tasks.point{x: tasks.inner{x: p_x}}",
+                "record constructor fields do not support nested record constructors",
+                "{x: p_x}",
+            ),
+            (
+                "tasks.point{x: p_x, X: p_x}",
+                "record constructor field x appears more than once",
+                "X: p_x",
+            ),
+        ];
+
+        for (value, message, marker) in cases {
+            let source = format!(
+                "CREATE SERVER FUNCTION tasks.bad(p_x INT) RETURNS ROWS (result REF tasks.item) AS INSERT INTO tasks.item AS made (point) VALUES ({value}) RETURNING REF(made);"
+            );
+            let parsed = parse(&source);
+            assert!(parsed.server_functions().is_empty(), "{value}");
+            assert_eq!(parsed.diagnostics().len(), 1, "{value}");
+            assert_eq!(parsed.diagnostics()[0].code, "ORNA0001", "{value}");
+            assert_eq!(parsed.diagnostics()[0].message, message, "{value}");
+            let value_start = source.find(value).unwrap();
+            let marker_start = value_start + value.rfind(marker).unwrap();
+            assert_eq!(parsed.diagnostics()[0].span.start, marker_start, "{value}");
+        }
+    }
+
+    #[test]
+    fn update_values_do_not_accept_record_constructors() {
+        let source = "CREATE SERVER FUNCTION tasks.update(p_item REF tasks.item, p_x INT) RETURNS ROWS (result REF tasks.item) AS UPDATE tasks.item AS item SET point = tasks.point{x: p_x} WHERE REF(item) = p_item RETURNING REF(item);";
+        let parsed = parse(source);
+
+        assert!(parsed.server_functions().is_empty());
+        assert_eq!(parsed.diagnostics().len(), 1);
+        assert_eq!(
+            parsed.diagnostics()[0].message,
+            "this UPDATE does not support record constructors in UPDATE values; expected a declared parameter name by itself"
+        );
+        assert_eq!(
+            parsed.diagnostics()[0].span.start,
+            source.find('{').unwrap()
+        );
+    }
+
+    #[test]
+    fn empty_record_constructor_recovers_to_a_later_function() {
+        let source = "CREATE SERVER FUNCTION tasks.bad() RETURNS ROWS (result REF tasks.item) AS INSERT INTO tasks.item AS made (point) VALUES (tasks.point{}) RETURNING REF(made);\n\
+            CREATE SERVER FUNCTION tasks.good(p_x INT) RETURNS ROWS (result REF tasks.item) AS INSERT INTO tasks.item AS made (point) VALUES (p_x) RETURNING REF(made);";
+        let parsed = parse(source);
+
+        assert_eq!(parsed.syntax().text(), source);
+        assert_eq!(parsed.server_functions().len(), 1);
+        assert_eq!(parsed.server_functions()[0].name.parts[1].text, "good");
+        assert_eq!(parsed.diagnostics().len(), 1);
+        assert_eq!(
+            parsed.diagnostics()[0].message,
+            "record constructor must supply at least one field"
+        );
+        let close = source.find("{}").unwrap() + 1;
+        assert_eq!(
+            parsed.diagnostics()[0].span,
+            SourceSpan {
+                start: close,
+                end: close + 1,
+            }
         );
     }
 
