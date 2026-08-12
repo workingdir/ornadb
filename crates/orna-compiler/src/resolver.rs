@@ -4247,8 +4247,8 @@ mod tests {
         SchemaId, SourceBundleId, SourceRevisionId, SourceUnitId, StandardLibraryRevisionId,
         TypeId,
         canonical_hash::{
-            source_bundle_digest, source_revision_record_digest, source_unit_content_digest,
-            verify_standard_library_snapshot,
+            catalogue_digest_with_context, source_bundle_digest, source_revision_record_digest,
+            source_unit_content_digest, verify_standard_library_snapshot,
         },
         catalogue::{
             CatalogueSnapshot, CatalogueSnapshotError, EnumTypeDefinition, FieldDefinition,
@@ -4259,9 +4259,11 @@ mod tests {
             ValueTypeMutability, ValueTypePersistence,
         },
         revision::{
-            DefinitionIdentity, DefinitionOrigin, DefinitionReferenceKind, Sha256Digest,
-            SourceOrigin, StandardLibraryDigestVersion, StandardLibrarySnapshot,
-            StoredSourceRevision, StoredSourceUnit,
+            ActiveDatabaseRevision, ActiveDatabaseRevisionInput, ActiveRevisionContent,
+            CatalogueHashContext, DefinitionIdentity, DefinitionOrigin, DefinitionReferenceKind,
+            DeployableRevision, RevisionPair, Sha256Digest, SourceOrigin,
+            StandardLibraryDigestVersion, StandardLibrarySnapshot, StoredSourceRevision,
+            StoredSourceUnit,
         },
         source::{SourceBundle, SourceUnit},
         types::{ResolvedType, StandardScalar},
@@ -4279,7 +4281,10 @@ mod tests {
         check_standard_library_source, checked_standard_library_with_contract_overrides_for_test,
         location, reconcile_standard_source, sort_standard_type_uses, supports_record_value_scalar,
     };
-    use crate::{ParsedSourceUnit, parse_bundle};
+    use crate::{
+        ParsedSourceUnit, PrepareError, PrepareStandardApplicationError, parse_bundle,
+        prepare_standard_application,
+    };
 
     const STANDARD_SOURCE: &str = "CREATE SCHEMA std;CREATE SCHEMA std.types;CREATE TYPE std.types.BOOLEAN AS VALUE PRIMITIVE KERNEL CONTRACT 'orna.kernel.value.boolean@1' IMMUTABLE PERSISTABLE;EXPORT TYPE std.types.BOOLEAN AS std.BOOLEAN;EXPORT TYPE std.BOOLEAN TO PRELUDE AS BOOLEAN;";
     const TWO_TYPE_STANDARD_SOURCE: &str = "CREATE SCHEMA std.types;CREATE SCHEMA std;CREATE TYPE std.types.INTEGER AS VALUE PRIMITIVE KERNEL CONTRACT 'int@1' IMMUTABLE TRANSIENT;CREATE TYPE std.types.BOOLEAN AS VALUE PRIMITIVE KERNEL CONTRACT 'boolean@1' IMMUTABLE PERSISTABLE;EXPORT TYPE std.INTEGER TO PRELUDE AS INTEGER;EXPORT TYPE std.types.INTEGER AS std.INTEGER;EXPORT TYPE std.BOOLEAN TO PRELUDE AS BOOLEAN;EXPORT TYPE std.types.BOOLEAN AS std.BOOLEAN;";
@@ -4778,7 +4783,7 @@ mod tests {
         let report = check_new_application(&source, &standard).unwrap();
 
         assert_eq!(report.diagnostics(), &[]);
-        assert!(report.preparation_view().is_none());
+        assert!(report.preparation_view().is_some());
         let checked = report.checked_bundle().unwrap();
         let records = checked.record_value_types().collect::<Vec<_>>();
         assert_eq!(records.len(), 1);
@@ -4806,6 +4811,162 @@ mod tests {
         );
         assert!(fields.iter().all(|field| field.id().is_provisional()));
         assert_eq!(checked.uses().len(), 2);
+    }
+
+    #[test]
+    fn prepares_and_replays_record_value_identities_with_exact_evidence() {
+        let verified = verified_standard_library_for_relational_test();
+        let standard = check_standard_library_source(&verified).unwrap();
+        let initial = empty_version_two_active(&verified);
+        let source = "CREATE SCHEMA app;\nCREATE TYPE app.phase AS ENUM ('new', 'done');\nCREATE TYPE app.status AS VALUE (active BOOLEAN, phase app.phase) IMMUTABLE PERSISTABLE;";
+        let bundle = bundle([("records.orna", source)]);
+        let context =
+            StandardApplicationCheckContext::try_new(initial.catalogue(), &standard).unwrap();
+        let report = check_standard_application(&bundle, &context);
+        assert_eq!(report.diagnostics(), &[]);
+
+        let checked = report.checked_bundle().unwrap();
+        let checked_record = checked.record_value_types().next().unwrap();
+        let checked_fields = checked_record.fields().collect::<Vec<_>>();
+        let prepared = prepare_standard_application(&report, initial.pair(), &initial).unwrap();
+        let record = &prepared.candidate().record_value_types()[0];
+        let enum_type = &prepared.candidate().enum_types()[0];
+        assert_eq!(record.name().to_string(), "app.status");
+        assert_eq!(record.fields().len(), 2);
+        assert_eq!(
+            record.fields()[0].resolved_type(),
+            ResolvedType::Value(TypeId::from_bytes([3; 16]))
+        );
+        assert_eq!(
+            record.fields()[1].resolved_type(),
+            ResolvedType::Named(enum_type.id())
+        );
+        let unit = prepared.source().units()[0].id();
+        assert!(prepared.origins().iter().any(|origin| {
+            origin.identity() == DefinitionIdentity::ValueType(record.id())
+                && origin.source()
+                    == SourceOrigin::new(
+                        unit,
+                        u32::try_from(checked_record.location().span().start()).unwrap(),
+                        u32::try_from(checked_record.location().span().end()).unwrap(),
+                    )
+                    .unwrap()
+        }));
+        for (checked_field, field) in checked_fields.iter().zip(record.fields()) {
+            assert!(prepared.origins().iter().any(|origin| {
+                origin.identity()
+                    == DefinitionIdentity::Field {
+                        owner: record.id(),
+                        field: field.id(),
+                    }
+                    && origin.source()
+                        == SourceOrigin::new(
+                            unit,
+                            u32::try_from(checked_field.location().span().start()).unwrap(),
+                            u32::try_from(checked_field.location().span().end()).unwrap(),
+                        )
+                        .unwrap()
+            }));
+        }
+
+        let record_id = record.id();
+        let field_ids = record
+            .fields()
+            .iter()
+            .map(|field| field.id())
+            .collect::<Vec<_>>();
+        let active = active_from_prepared(&prepared);
+        let context =
+            StandardApplicationCheckContext::try_new(active.catalogue(), &standard).unwrap();
+        let replay_report = check_standard_application(&bundle, &context);
+        assert_eq!(replay_report.diagnostics(), &[]);
+        let replay = prepare_standard_application(&replay_report, active.pair(), &active).unwrap();
+        let replay_record = &replay.candidate().record_value_types()[0];
+        assert_eq!(replay_record.id(), record_id);
+        assert_eq!(
+            replay_record
+                .fields()
+                .iter()
+                .map(|field| field.id())
+                .collect::<Vec<_>>(),
+            field_ids
+        );
+
+        let mut hostile = report.clone();
+        let boolean_index = hostile
+            .checked_bundle()
+            .unwrap()
+            .uses()
+            .iter()
+            .position(|type_use| type_use.value().is_some())
+            .unwrap();
+        assert!(
+            hostile.replace_value_type_id_for_test(boolean_index, TypeId::from_bytes([0xef; 16]),)
+        );
+        assert!(matches!(
+            prepare_standard_application(&hostile, initial.pair(), &initial),
+            Err(
+                PrepareStandardApplicationError::DeclarationTypeEvidenceMismatch {
+                    kind: CheckedTypeUseKind::Field { .. },
+                }
+            )
+        ));
+    }
+
+    #[test]
+    fn record_value_preparation_rejects_every_deferred_existing_shape_change() {
+        let verified = verified_standard_library_for_relational_test();
+        let standard = check_standard_library_source(&verified).unwrap();
+        let initial = empty_version_two_active(&verified);
+        let original = "CREATE SCHEMA app; CREATE TYPE app.phase AS ENUM ('new', 'done'); CREATE TYPE app.status AS VALUE (active BOOLEAN, phase app.phase) IMMUTABLE PERSISTABLE;";
+        let original_bundle = bundle([("records.orna", original)]);
+        let context =
+            StandardApplicationCheckContext::try_new(initial.catalogue(), &standard).unwrap();
+        let report = check_standard_application(&original_bundle, &context);
+        let prepared = prepare_standard_application(&report, initial.pair(), &initial).unwrap();
+        let active = active_from_prepared(&prepared);
+
+        for (source, reason) in [
+            (
+                "CREATE SCHEMA app; CREATE TYPE app.phase AS ENUM ('new', 'done'); CREATE TYPE app.status AS VALUE (active BOOLEAN, phase app.phase, extra BOOLEAN) IMMUTABLE PERSISTABLE;",
+                "record value field addition or removal is not supported",
+            ),
+            (
+                "CREATE SCHEMA app; CREATE TYPE app.phase AS ENUM ('new', 'done'); CREATE TYPE app.status AS VALUE (active BOOLEAN) IMMUTABLE PERSISTABLE;",
+                "record value field addition or removal is not supported",
+            ),
+            (
+                "CREATE SCHEMA app; CREATE TYPE app.phase AS ENUM ('new', 'done'); CREATE TYPE app.status AS VALUE (phase app.phase, active BOOLEAN) IMMUTABLE PERSISTABLE;",
+                "record value field reordering is not supported",
+            ),
+            (
+                "CREATE SCHEMA app; CREATE TYPE app.phase AS ENUM ('new', 'done'); CREATE TYPE app.status AS VALUE (active app.phase, phase app.phase) IMMUTABLE PERSISTABLE;",
+                "record value field type change is not supported",
+            ),
+            (
+                "CREATE SCHEMA app; CREATE TYPE app.phase AS ENUM ('new', 'done'); CREATE TYPE app.status AS VALUE (enabled BOOLEAN, phase app.phase) IMMUTABLE PERSISTABLE;",
+                "record value field replacement is not supported",
+            ),
+            (
+                "CREATE SCHEMA app; CREATE TYPE app.phase AS ENUM ('new', 'done'); CREATE TYPE app.state AS VALUE (active BOOLEAN, phase app.phase) IMMUTABLE PERSISTABLE;",
+                "existing record value type is absent from the candidate catalogue",
+            ),
+            (
+                "CREATE SCHEMA app; CREATE TYPE app.phase AS ENUM ('new', 'done');",
+                "existing record value type is absent from the candidate catalogue",
+            ),
+        ] {
+            let context =
+                StandardApplicationCheckContext::try_new(active.catalogue(), &standard).unwrap();
+            let report = check_standard_application(&bundle([("records.orna", source)]), &context);
+            assert_eq!(report.diagnostics(), &[], "{source}");
+            assert!(matches!(
+                prepare_standard_application(&report, active.pair(), &active),
+                Err(PrepareStandardApplicationError::Prepare {
+                    source: PrepareError::InvalidCheckedBundle { reason: actual },
+                }) if actual == reason
+            ));
+        }
     }
 
     #[test]
@@ -5170,6 +5331,77 @@ mod tests {
         .unwrap();
 
         verify_standard_library_snapshot(snapshot).unwrap()
+    }
+
+    fn empty_version_two_active(
+        standard: &orna_core::revision::VerifiedStandardLibrarySnapshot,
+    ) -> ActiveDatabaseRevision {
+        let source_unit = StoredSourceUnit::new(
+            SourceUnitId::from_bytes([0x41; 16]),
+            0,
+            "active.orna",
+            "",
+            source_unit_content_digest("").unwrap(),
+        )
+        .unwrap();
+        let bundle_hash = source_bundle_digest(std::slice::from_ref(&source_unit)).unwrap();
+        let source = StoredSourceRevision::new(
+            SourceBundleId::from_bytes([0x42; 16]),
+            SourceRevisionId::from_bytes([0x43; 16]),
+            None,
+            vec![source_unit],
+            bundle_hash,
+            source_revision_record_digest(
+                SourceBundleId::from_bytes([0x42; 16]),
+                None,
+                bundle_hash,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let catalogue = CatalogueSnapshot::new_with_types(
+            CatalogueRevisionId::from_bytes([0x44; 16]),
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        )
+        .unwrap();
+        let context = CatalogueHashContext::version_two(standard.clone());
+        let catalogue_hash =
+            catalogue_digest_with_context(&context, &catalogue, &[], &[], &[], &[]).unwrap();
+        ActiveDatabaseRevision::new_with_catalogue_hash_context(
+            ActiveDatabaseRevisionInput::new(
+                RevisionPair::new(source.id(), catalogue.revision()),
+                source,
+                catalogue,
+                catalogue_hash,
+                ActiveRevisionContent::new(Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+            ),
+            context,
+        )
+        .unwrap()
+    }
+
+    fn active_from_prepared(prepared: &DeployableRevision) -> ActiveDatabaseRevision {
+        ActiveDatabaseRevision::new_with_catalogue_hash_context(
+            ActiveDatabaseRevisionInput::new(
+                prepared.candidate_pair(),
+                prepared.source().clone(),
+                prepared.candidate().clone(),
+                prepared.catalogue_hash(),
+                ActiveRevisionContent::new(
+                    prepared.expressions().to_vec(),
+                    prepared
+                        .current_function_revisions()
+                        .map_or_else(Vec::new, ToOwned::to_owned),
+                    prepared.origins().to_vec(),
+                    prepared.references().to_vec(),
+                ),
+            ),
+            prepared.catalogue_hash_context().clone(),
+        )
+        .unwrap()
     }
 
     fn expression_use<'a>(

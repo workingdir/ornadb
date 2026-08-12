@@ -43,7 +43,8 @@ use orna_core::{
         CatalogueSnapshot, CatalogueSnapshotError, EnumTypeDefinition, FieldDefinition,
         FunctionDefinition, FunctionDomain, FunctionReturn, FunctionReturnColumnDefinition,
         FunctionSecurity, FunctionTransaction, FunctionVolatility, ObjectTypeDefinition,
-        ParameterDefinition, QualifiedSemanticName, SchemaDefinition,
+        ParameterDefinition, QualifiedSemanticName, RecordValueFieldDefinition,
+        RecordValueTypeDefinition, SchemaDefinition,
     },
     revision::{
         ActiveDatabaseRevision, CatalogueHashContext, DefinitionIdentity, DefinitionOrigin,
@@ -783,6 +784,12 @@ fn active_std_namespace_occupant(catalogue: &CatalogueSnapshot) -> Option<Qualif
                 .iter()
                 .map(|enum_type| enum_type.name()),
         )
+        .chain(
+            catalogue
+                .record_value_types()
+                .iter()
+                .map(|record_value_type| record_value_type.name()),
+        )
         .find(|name| name_starts_std(name))
         .cloned()
         .or_else(|| {
@@ -888,6 +895,15 @@ pub(crate) fn active_reserved_standard_identity(
                 .any(|reserved| reserved.id() == enum_type.id())
         {
             return Some(StandardUpgradeIdentity::Type(enum_type.id()));
+        }
+    }
+    for record_value_type in catalogue.record_value_types() {
+        if snapshot
+            .catalogue()
+            .type_definition_by_id(record_value_type.id())
+            .is_some()
+        {
+            return Some(StandardUpgradeIdentity::Type(record_value_type.id()));
         }
     }
     for binding in catalogue.type_bindings() {
@@ -3431,6 +3447,15 @@ fn checked_locations(checked: &CheckedBundle) -> Vec<&SourceLocation> {
     for (_, _, _, location) in checked.enum_types() {
         locations.push(location);
     }
+    for record_value_type in checked.record_value_types() {
+        locations.push(record_value_type.location());
+        locations.extend(
+            record_value_type
+                .fields()
+                .iter()
+                .map(|field| field.location()),
+        );
+    }
     for function in checked.server_functions() {
         locations.push(function.location());
         locations.extend(function.parameters().iter().map(|value| value.location()));
@@ -3826,6 +3851,41 @@ impl IdentityMap {
             )?;
         }
 
+        for record_value_type in checked.record_value_types() {
+            let type_id = match record_value_type.id() {
+                CheckedTypeId::Existing(id) => id,
+                CheckedTypeId::Provisional(_) if allow_provisional => allocations.type_id(),
+                CheckedTypeId::Provisional(_) => {
+                    return Err(PrepareError::InvalidCheckedBundle {
+                        reason: "matched active source contains a provisional record value type",
+                    });
+                }
+            };
+            insert_unique(
+                &mut result.types,
+                record_value_type.id(),
+                type_id,
+                "duplicate checked record value type",
+            )?;
+            for field in record_value_type.fields() {
+                let field_id = match field.id() {
+                    CheckedFieldId::Existing(id) => id,
+                    CheckedFieldId::Provisional(_) if allow_provisional => FieldId::new(),
+                    CheckedFieldId::Provisional(_) => {
+                        return Err(PrepareError::InvalidCheckedBundle {
+                            reason: "matched active source contains a provisional record value field",
+                        });
+                    }
+                };
+                insert_consistent(
+                    &mut result.fields,
+                    field.id(),
+                    field_id,
+                    "checked record value field identity maps inconsistently",
+                )?;
+            }
+        }
+
         match function_identities {
             None => {
                 for function in checked.server_functions() {
@@ -4023,6 +4083,41 @@ impl IdentityMap {
                 .is_some_and(|base| base.name() == name);
             if !matches {
                 return Err(existing_mismatch(DefinitionIdentity::ValueType(id)));
+            }
+        }
+
+        for record_value_type in checked.record_value_types() {
+            let owner = match record_value_type.id() {
+                CheckedTypeId::Existing(id) => {
+                    let matches = active
+                        .catalogue()
+                        .record_value_type_by_id(id)
+                        .is_some_and(|base| base.name() == record_value_type.name());
+                    if !matches {
+                        return Err(existing_mismatch(DefinitionIdentity::ValueType(id)));
+                    }
+                    Some(id)
+                }
+                CheckedTypeId::Provisional(_) => None,
+            };
+            for field in record_value_type.fields() {
+                let CheckedFieldId::Existing(id) = field.id() else {
+                    continue;
+                };
+                let owner = owner.ok_or(PrepareError::InvalidCheckedBundle {
+                    reason: "existing checked record value field belongs to a provisional type",
+                })?;
+                let matches = active
+                    .catalogue()
+                    .record_value_type_by_id(owner)
+                    .and_then(|base| base.field_by_id(id))
+                    .is_some_and(|base| base.name() == field.name());
+                if !matches {
+                    return Err(existing_mismatch(DefinitionIdentity::Field {
+                        owner,
+                        field: id,
+                    }));
+                }
             }
         }
 
@@ -4513,6 +4608,7 @@ fn catalogue_matches(left: &CatalogueSnapshot, right: &CatalogueSnapshot) -> boo
         && same_member_multiset(left.object_types(), right.object_types())
         && same_member_multiset(left.value_types(), right.value_types())
         && same_member_multiset(left.enum_types(), right.enum_types())
+        && same_member_multiset(left.record_value_types(), right.record_value_types())
         && same_member_multiset(left.type_bindings(), right.type_bindings())
         && same_member_multiset(left.functions(), right.functions())
 }
@@ -4724,6 +4820,8 @@ impl<'a> CandidateBuilder<'a> {
         let schemas = self.build_schemas()?;
         let object_types = self.build_object_types()?;
         let enum_types = self.build_enum_types()?;
+        let record_value_types = self.build_record_value_types()?;
+        self.validate_record_value_evolution(&record_value_types)?;
         self.build_functions(&object_types.compatibility)?;
         if self
             .declaration_evidence
@@ -4735,12 +4833,13 @@ impl<'a> CandidateBuilder<'a> {
             });
         }
 
-        let catalogue = CatalogueSnapshot::new_with_functions_and_enum_types(
+        let catalogue = CatalogueSnapshot::new_with_functions_and_record_value_types(
             self.catalogue_revision,
             schemas,
             object_types.durable,
             Vec::new(),
             enum_types,
+            record_value_types,
             Vec::new(),
             self.functions,
         )?;
@@ -4920,6 +5019,96 @@ impl<'a> CandidateBuilder<'a> {
             .into_iter()
             .map(|(enum_type, _)| enum_type)
             .collect())
+    }
+
+    fn build_record_value_types(&mut self) -> Result<Vec<RecordValueTypeDefinition>, PrepareError> {
+        let mut record_value_types = Vec::with_capacity(self.checked.record_value_types().len());
+        for checked_type in self.checked.record_value_types() {
+            let type_id = self.identities.type_id(checked_type.id())?;
+            let mut fields = Vec::with_capacity(checked_type.fields().len());
+            for checked_field in checked_type.fields() {
+                let field_id = self.identities.field(checked_field.id())?;
+                let resolved_type = self.declaration_type(
+                    checked_field.semantic_type(),
+                    crate::CheckedTypeUseKind::Field {
+                        owner: checked_type.id(),
+                        field: checked_field.id(),
+                    },
+                    true,
+                    CandidateTypeProjection::Durable,
+                )?;
+                fields.push(RecordValueFieldDefinition::new(
+                    field_id,
+                    checked_field.name(),
+                    checked_field.ordinal(),
+                    resolved_type,
+                ));
+                self.push_origin(
+                    DefinitionIdentity::Field {
+                        owner: type_id,
+                        field: field_id,
+                    },
+                    checked_field.location(),
+                )?;
+            }
+            record_value_types.push(RecordValueTypeDefinition::new(
+                type_id,
+                checked_type.name().clone(),
+                fields,
+            ));
+            self.push_origin(
+                DefinitionIdentity::ValueType(type_id),
+                checked_type.location(),
+            )?;
+        }
+        Ok(record_value_types)
+    }
+
+    fn validate_record_value_evolution(
+        &self,
+        candidate: &[RecordValueTypeDefinition],
+    ) -> Result<(), PrepareError> {
+        for active in self.active.catalogue().record_value_types() {
+            let candidate = candidate
+                .iter()
+                .find(|record_value_type| record_value_type.id() == active.id())
+                .ok_or(PrepareError::InvalidCheckedBundle {
+                    reason: "existing record value type is absent from the candidate catalogue",
+                })?;
+            if candidate.name() != active.name() {
+                return Err(PrepareError::InvalidCheckedBundle {
+                    reason: "record value type rename is not supported",
+                });
+            }
+            if candidate.fields().len() != active.fields().len() {
+                return Err(PrepareError::InvalidCheckedBundle {
+                    reason: "record value field addition or removal is not supported",
+                });
+            }
+            for active_field in active.fields() {
+                let candidate_field = candidate.field_by_id(active_field.id()).ok_or(
+                    PrepareError::InvalidCheckedBundle {
+                        reason: "record value field replacement is not supported",
+                    },
+                )?;
+                if candidate_field.name() != active_field.name() {
+                    return Err(PrepareError::InvalidCheckedBundle {
+                        reason: "record value field rename is not supported",
+                    });
+                }
+                if candidate_field.ordinal() != active_field.ordinal() {
+                    return Err(PrepareError::InvalidCheckedBundle {
+                        reason: "record value field reordering is not supported",
+                    });
+                }
+                if candidate_field.resolved_type() != active_field.resolved_type() {
+                    return Err(PrepareError::InvalidCheckedBundle {
+                        reason: "record value field type change is not supported",
+                    });
+                }
+            }
+        }
+        Ok(())
     }
 
     fn record_object_type_metadata(&mut self) -> Result<(), PrepareError> {
