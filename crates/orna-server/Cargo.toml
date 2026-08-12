@@ -14,6 +14,7 @@ nix = { version = "0.31.3", features = ["fs", "process", "signal", "term", "user
 orna-kernel-postgres = { path = "../orna-kernel-postgres" }
 orna-postgres-engine = { path = "../orna-postgres-engine", features = ["embedded"] }
 orna-standard = { path = "../orna-standard" }
+rustix = { version = "1.1.4", features = ["fs"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
