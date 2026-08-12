@@ -1,5 +1,6 @@
-#!/bin/sh
-set -eu
+#!/bin/bash
+set -euo pipefail
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 
 unset GLIBC_TUNABLES LD_AUDIT LD_DEBUG LD_DEBUG_OUTPUT LD_DYNAMIC_WEAK
 unset LD_ASSUME_KERNEL LD_BIND_NOT LD_BIND_NOW LD_HWCAP_MASK LD_LIBRARY_PATH
