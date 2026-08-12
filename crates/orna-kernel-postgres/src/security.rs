@@ -60,7 +60,7 @@ impl PostgresKernel {
                     rule: "mapped principal evidence must agree with the authentication result",
                 })?,
             };
-            append_authentication_audit_event(&transaction, decision).await?;
+            append_security_audit_event(&transaction, decision).await?;
             transaction
                 .commit()
                 .await
@@ -73,6 +73,11 @@ impl PostgresKernel {
     }
 
     /// Authorises and evaluates one CLIENT function against one active snapshot.
+    ///
+    /// The operation appends and commits the protected `EXECUTE` decision
+    /// before it returns a value, a typed denial, or a pure evaluator failure.
+    /// Database insertion, commit, or session shutdown failure replaces that
+    /// operation result with a kernel failure.
     pub async fn evaluate_client_function(
         &self,
         authenticated_session: &AuthenticatedSession,
@@ -84,7 +89,6 @@ impl PostgresKernel {
                 .client
                 .build_transaction()
                 .isolation_level(IsolationLevel::RepeatableRead)
-                .read_only(true)
                 .start()
                 .await
                 .map_err(PostgresKernelError::Database)?;
@@ -92,26 +96,38 @@ impl PostgresKernel {
             let active = recover_active_revision(&transaction).await?;
             let security = recover_security_snapshot_for_active(&transaction, &active).await?;
             let target = InvocationTarget::new(function, active.pair());
-            let authorisation = match security.authorise_execute(authenticated_session, target) {
-                ExecuteDecision::Allowed(authorisation) => authorisation,
+            let (decision, execution) = match security
+                .authorise_execute(authenticated_session, target)
+            {
+                ExecuteDecision::Allowed(authorisation) => {
+                    let decision = SecurityAuditDecision::execute_allowed(&authorisation);
+                    let execution = evaluate_authorised_client_function(&active, &authorisation)
+                        .map_err(PostgresKernelError::ClientExecution);
+                    (decision, execution)
+                }
                 ExecuteDecision::Denied(reason) => {
-                    return Err(PostgresKernelError::ClientExecuteDenied {
+                    let decision = SecurityAuditDecision::execute_denied(
+                        authenticated_session,
+                        target,
+                        reason,
+                    );
+                    let execution = Err(PostgresKernelError::ClientExecuteDenied {
                         pair: active.pair(),
                         function,
                         reason,
                     });
+                    (decision, execution)
                 }
             };
-            let result = evaluate_authorised_client_function(&active, &authorisation)
-                .map_err(PostgresKernelError::ClientExecution)?;
+            append_security_audit_event(&transaction, decision).await?;
             transaction
                 .commit()
                 .await
                 .map_err(PostgresKernelError::Database)?;
-            Ok(result)
+            Ok(execution)
         }
         .await;
-        finish_security_session(operation, database_session.shutdown().await)
+        finish_security_session(operation, database_session.shutdown().await)?
     }
 
     /// Recovers the security decision snapshot for the active revision.
@@ -204,19 +220,16 @@ fn finish_security_session<T>(
     }
 }
 
-async fn append_authentication_audit_event(
+async fn append_security_audit_event(
     transaction: &Transaction<'_>,
     decision: SecurityAuditDecision,
 ) -> Result<(), PostgresKernelError> {
     let event = SecurityAuditEventId::new();
-    if decision.kind() != SecurityAuditKind::Authentication {
-        return Err(PostgresKernelError::DurableInvariant {
-            relation: "_orna_kernel.security_audit_events",
-            record: event.canonical(),
-            rule: "authentication append requires an authentication decision",
-        });
-    }
     let event_id = event.to_bytes().to_vec();
+    let kind = match decision.kind() {
+        SecurityAuditKind::Authentication => "authentication",
+        SecurityAuditKind::Execute => "execute",
+    };
     let outcome = match decision.outcome() {
         SecurityAuditOutcome::Allowed => "allowed",
         SecurityAuditOutcome::Denied => "denied",
@@ -224,19 +237,46 @@ async fn append_authentication_audit_event(
     let session_principal = decision
         .session_principal()
         .map(|principal| principal.to_bytes().to_vec());
+    let effective_principal = decision
+        .effective_principal()
+        .map(|principal| principal.to_bytes().to_vec());
+    let authorising_principal = decision
+        .authorising_principal()
+        .map(|principal| principal.to_bytes().to_vec());
+    let (function, source_revision, catalogue_revision) = match decision.target() {
+        Some(target) => (
+            Some(target.function().to_bytes().to_vec()),
+            Some(target.revision().source().to_bytes().to_vec()),
+            Some(target.revision().catalogue().to_bytes().to_vec()),
+        ),
+        None => (None, None, None),
+    };
     let denial_reason = match decision.denial() {
         None => None,
         Some(SecurityAuditDenial::Authentication(reason)) => {
             Some(encode_authentication_audit_denial(reason))
         }
-        Some(SecurityAuditDenial::Execute(_)) => unreachable!("kind checked above"),
+        Some(SecurityAuditDenial::Execute(reason)) => Some(encode_execute_audit_denial(reason)),
     };
     transaction
         .execute(
             "INSERT INTO _orna_kernel.security_audit_events
-                 (event_id, event_kind, outcome, session_principal_id, denial_reason)
-             VALUES ($1, 'authentication', $2, $3, $4)",
-            &[&event_id, &outcome, &session_principal, &denial_reason],
+                 (event_id, event_kind, outcome, session_principal_id,
+                  effective_principal_id, authorising_principal_id, function_id,
+                  source_revision_id, catalogue_revision_id, denial_reason)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+            &[
+                &event_id,
+                &kind,
+                &outcome,
+                &session_principal,
+                &effective_principal,
+                &authorising_principal,
+                &function,
+                &source_revision,
+                &catalogue_revision,
+                &denial_reason,
+            ],
         )
         .await
         .map_err(PostgresKernelError::Database)?;
@@ -770,6 +810,17 @@ fn decode_execute_audit_denial(
     }
 }
 
+fn encode_execute_audit_denial(reason: orna_core::security::ExecuteDenial) -> &'static str {
+    use orna_core::security::ExecuteDenial;
+
+    match reason {
+        ExecuteDenial::InvalidSession => "execute_invalid_session",
+        ExecuteDenial::UnknownFunction => "execute_unknown_function",
+        ExecuteDenial::RevisionMismatch => "execute_revision_mismatch",
+        ExecuteDenial::MissingExecuteGrant => "execute_missing_grant",
+    }
+}
+
 fn require_audit_value<T>(
     value: Option<T>,
     record: &str,
@@ -980,6 +1031,7 @@ mod tests {
             ("execute_revision_mismatch", ExecuteDenial::RevisionMismatch),
             ("execute_missing_grant", ExecuteDenial::MissingExecuteGrant),
         ] {
+            assert_eq!(encode_execute_audit_denial(expected), stored);
             assert_eq!(
                 decode_execute_audit_denial(stored.to_owned(), "42")
                     .expect("closed EXECUTE reason must decode"),
@@ -1006,7 +1058,7 @@ mod tests {
     }
 
     #[test]
-    fn denied_authentication_does_not_hide_session_shutdown_failure() {
+    fn expected_security_result_does_not_hide_session_shutdown_failure() {
         let operation: Result<Result<(), LocalPeerAuthenticationError>, PostgresKernelError> =
             Ok(Err(LocalPeerAuthenticationError::UnknownUid));
         let shutdown = PostgresKernelError::DurableInvariant {
@@ -1015,6 +1067,29 @@ mod tests {
             rule: "driver failed during shutdown",
         };
 
+        assert!(matches!(
+            finish_security_session(operation, Err(shutdown)),
+            Err(PostgresKernelError::DurableInvariant {
+                relation: "test session",
+                ref record,
+                rule: "driver failed during shutdown",
+            }) if record == "shutdown"
+        ));
+
+        let operation: Result<Result<(), PostgresKernelError>, PostgresKernelError> =
+            Ok(Err(PostgresKernelError::ClientExecuteDenied {
+                pair: RevisionPair::new(
+                    SourceRevisionId::from_bytes([0x11; 16]),
+                    CatalogueRevisionId::from_bytes([0x12; 16]),
+                ),
+                function: FunctionId::from_bytes([0x13; 16]),
+                reason: ExecuteDenial::MissingExecuteGrant,
+            }));
+        let shutdown = PostgresKernelError::DurableInvariant {
+            relation: "test session",
+            record: "shutdown".to_owned(),
+            rule: "driver failed during shutdown",
+        };
         assert!(matches!(
             finish_security_session(operation, Err(shutdown)),
             Err(PostgresKernelError::DurableInvariant {
