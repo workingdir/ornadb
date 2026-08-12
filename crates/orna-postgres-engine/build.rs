@@ -26,6 +26,7 @@ fn main() {
         "cargo:rerun-if-changed={}",
         repository.join("third_party/postgresql").display()
     );
+    println!("cargo:rerun-if-env-changed=ORNA_POSTGRES_ENGINE_OUTPUT");
 
     if env::var_os("CARGO_FEATURE_EMBEDDED").is_none() {
         return;
@@ -33,18 +34,26 @@ fn main() {
     assert_eq!(env::var("CARGO_CFG_TARGET_OS").as_deref(), Ok("linux"));
     assert_eq!(env::var("CARGO_CFG_TARGET_ARCH").as_deref(), Ok("x86_64"));
 
-    let output_directory = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));
-    let target_root = output_directory.join("postgresql");
-    let status = Command::new("make")
-        .arg("-C")
-        .arg(repository.join("postgresql"))
-        .arg("manifest")
-        .arg(format!("TARGET_ROOT={}", target_root.display()))
-        .status()
-        .expect("could not start the embedded PostgreSQL build");
-    assert!(status.success(), "embedded PostgreSQL build failed");
-
-    let output = target_root.join("output");
+    let output = if let Some(prebuilt) = env::var_os("ORNA_POSTGRES_ENGINE_OUTPUT") {
+        let prebuilt = PathBuf::from(prebuilt);
+        assert!(
+            prebuilt.is_absolute(),
+            "prebuilt engine output is not absolute"
+        );
+        prebuilt
+    } else {
+        let output_directory = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));
+        let target_root = output_directory.join("postgresql");
+        let status = Command::new("make")
+            .arg("-C")
+            .arg(repository.join("postgresql"))
+            .arg("manifest")
+            .arg(format!("TARGET_ROOT={}", target_root.display()))
+            .status()
+            .expect("could not start the embedded PostgreSQL build");
+        assert!(status.success(), "embedded PostgreSQL build failed");
+        target_root.join("output")
+    };
     for name in [
         "liborna_postgres18_initdb.a",
         "liborna_postgres18_backend.a",
