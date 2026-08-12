@@ -18,10 +18,12 @@ diff -U0 -Nr a/src/backend/Makefile b/src/backend/Makefile
 diff -U0 -Nr a/src/backend/main/main.c b/src/backend/main/main.c
 --- a/src/backend/main/main.c
 +++ b/src/backend/main/main.c
-@@ -76,0 +77,4 @@
+@@ -76,0 +77,6 @@
++#ifdef ORNA_EMBEDDED_ENTRY
 +	if (orna_postgres18_support_root() == NULL ||
 +		orna_postgres18_install_exec_filter() != 0)
 +		return 1;
++#endif
 +
 diff -U0 -Nr a/src/backend/main/orna_embedded.c b/src/backend/main/orna_embedded.c
 --- a/src/backend/main/orna_embedded.c

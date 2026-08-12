@@ -68,7 +68,7 @@ if set(recipe) != expected_top_level:
     raise SystemExit("embedded recipe has unexpected top-level keys")
 if recipe["format"] != 1:
     raise SystemExit("embedded recipe format must be 1")
-if recipe["identity"] != "postgresql-18.4-debian12-amd64-orna-embedded.2":
+if recipe["identity"] != "postgresql-18.4-debian12-amd64-orna-embedded.3":
     raise SystemExit("embedded recipe identity is not accepted")
 if recipe["target"] != "debian12-amd64" or recipe["platform"] != "linux/amd64":
     raise SystemExit("embedded recipe target must be Debian 12 amd64")
@@ -908,6 +908,8 @@ container_build() {
     local zlib_archive="/build/zlib-source.tar.gz"
     local zlib_source="/build/zlib-source"
     local backend_archive_path
+    local ordinary_main_object
+    local ordinary_main_undefined_symbols="/build/ordinary-main-undefined-symbols.txt"
     local initializer_archive_path
     local initializer_directory
     local initializer_rename_map
@@ -955,6 +957,7 @@ container_build() {
     # shellcheck disable=SC1091
     source /build/recipe.environment
     backend_archive_path="${build_root}/src/backend/${STATIC_ARCHIVE_NAME}"
+    ordinary_main_object="${build_root}/src/backend/main/main.o"
     initializer_directory="${build_root}/src/bin/initdb"
     initializer_archive_path="${initializer_directory}/${INITIALIZER_ARCHIVE_NAME}"
     initializer_rename_map="${initializer_directory}/${INITIALIZER_RENAME_MAP_PATH}"
@@ -1030,6 +1033,15 @@ container_build() {
         make -C "${build_root}/src/backend" -j"${BUILD_JOBS}" \
             ORNA_EMBEDDED_ZLIB_ARCHIVE="${ZLIB_PREFIX}/lib/libz.a" \
             orna_postgres18_lifecycle_archives
+    [[ -f "${ordinary_main_object}" ]] \
+        || fail "ordinary PostgreSQL main object was not produced"
+    LC_ALL=C nm --extern-only --undefined-only "${ordinary_main_object}" \
+        >"${ordinary_main_undefined_symbols}" \
+        || fail "could not inspect the ordinary PostgreSQL main object"
+    if awk '$NF ~ /^orna_postgres18_/ { found = 1 } END { exit !found }' \
+        "${ordinary_main_undefined_symbols}"; then
+        fail "ordinary PostgreSQL main object references an Orna runtime symbol"
+    fi
     env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH_VALUE}" \
         "${RECIPE_BUILD_ENVIRONMENT[@]}" \
         make -C "${build_root}/src/timezone" -j"${BUILD_JOBS}" zic
