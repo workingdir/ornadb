@@ -1,0 +1,11 @@
+Package: orna
+Version: 0.1.0-1
+Section: database
+Priority: optional
+Architecture: amd64
+Maintainer: Kieran Drewett <kieran@drewett.dev>
+Depends: libc6 (>= 2.36), libgcc-s1, systemd
+Homepage: https://github.com/workingdir/ornadb
+Description: OrnaDB database server
+ OrnaDB is a typed database server with a statically linked private
+ PostgreSQL engine. The package installs one product executable.
