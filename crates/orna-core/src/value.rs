@@ -365,7 +365,7 @@ impl FunctionArgument {
             | RuntimeValue::Bytes(_)
             | RuntimeValue::Reference { .. }
             | RuntimeValue::Enum(_) => Ok(Self { parameter, value }),
-            RuntimeValue::Record(value) => Err(FunctionArgumentError::RecordValueRequiresCodec {
+            RuntimeValue::Record(value) => Err(FunctionArgumentError::RecordValueNotAccepted {
                 parameter,
                 record_type: value.record_type(),
             }),
@@ -394,8 +394,8 @@ pub enum FunctionArgumentError {
         /// The resolved type carried by the null value.
         resolved_type: ResolvedType,
     },
-    /// A record value cannot enter function transport before its codec is accepted.
-    RecordValueRequiresCodec {
+    /// A record value is outside the current executable argument subset.
+    RecordValueNotAccepted {
         /// The parameter identity supplied with the record value.
         parameter: ParameterId,
         /// The record type carried by the value.
@@ -407,8 +407,8 @@ impl fmt::Display for FunctionArgumentError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NullValue { .. } => formatter.write_str("function argument value cannot be NULL"),
-            Self::RecordValueRequiresCodec { .. } => {
-                formatter.write_str("record function argument requires the record value codec")
+            Self::RecordValueNotAccepted { .. } => {
+                formatter.write_str("record function arguments are not accepted")
             }
         }
     }
@@ -546,13 +546,6 @@ impl ResultRows {
                 });
             }
             for (column_index, (column, value)) in columns.iter().zip(&row.values).enumerate() {
-                if let RuntimeValue::Record(value) = value {
-                    return Err(ResultRowsError::RecordValueRequiresCodec {
-                        row: row_index,
-                        column: column_index,
-                        record_type: value.record_type(),
-                    });
-                }
                 if value.is_null() && !column.nullable {
                     return Err(ResultRowsError::NullInNonNullableColumn {
                         row: row_index,
@@ -618,15 +611,6 @@ pub enum ResultRowsError {
         expected: ResolvedType,
         actual: ResolvedType,
     },
-    /// A record value cannot enter SERVER results before its codec is accepted.
-    RecordValueRequiresCodec {
-        /// The zero-based result row index.
-        row: usize,
-        /// The zero-based result column index.
-        column: usize,
-        /// The record type carried by the value.
-        record_type: TypeId,
-    },
 }
 
 impl fmt::Display for ResultRowsError {
@@ -665,10 +649,6 @@ impl fmt::Display for ResultRowsError {
             } => write!(
                 formatter,
                 "result row {row} column {column} has a type mismatch"
-            ),
-            Self::RecordValueRequiresCodec { row, column, .. } => write!(
-                formatter,
-                "result row {row} column {column} requires the record value codec"
             ),
         }
     }
@@ -1102,7 +1082,7 @@ mod tests {
     }
 
     #[test]
-    fn record_values_cannot_enter_server_transport_before_the_codec() {
+    fn record_values_enter_server_results_but_not_the_argument_subset() {
         let active = active_record_revision();
         let record = RecordValue::new(
             &active,
@@ -1121,22 +1101,18 @@ mod tests {
         let parameter = ParameterId::from_bytes([0x61; 16]);
         assert_eq!(
             FunctionArgument::new(parameter, RuntimeValue::Record(record.clone())),
-            Err(FunctionArgumentError::RecordValueRequiresCodec {
+            Err(FunctionArgumentError::RecordValueNotAccepted {
                 parameter,
                 record_type: RECORD_TYPE,
             })
         );
-        assert_eq!(
-            ResultRows::new(
-                [column("status", ResolvedType::named(RECORD_TYPE), false)],
-                [ResultRow::new([RuntimeValue::Record(record)])],
-            ),
-            Err(ResultRowsError::RecordValueRequiresCodec {
-                row: 0,
-                column: 0,
-                record_type: RECORD_TYPE,
-            })
-        );
+        let expected = RuntimeValue::Record(record);
+        let rows = ResultRows::new(
+            [column("status", ResolvedType::named(RECORD_TYPE), false)],
+            [ResultRow::new([expected.clone()])],
+        )
+        .unwrap();
+        assert_eq!(rows.rows()[0].values(), &[expected]);
     }
 
     #[test]
