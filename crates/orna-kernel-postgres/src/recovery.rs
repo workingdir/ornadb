@@ -11,8 +11,9 @@ use orna_core::{
     },
     catalogue::{
         CatalogueSnapshot, EnumTypeDefinition, FieldDefinition, ObjectTypeDefinition,
-        OnDeleteAction, PreludeTypeName, QualifiedSemanticName, SchemaDefinition, TypeBinding,
-        TypeBindingKind, ValueTypeDefinition, ValueTypeMutability, ValueTypePersistence,
+        OnDeleteAction, PreludeTypeName, QualifiedSemanticName, RecordValueFieldDefinition,
+        RecordValueTypeDefinition, SchemaDefinition, TypeBinding, TypeBindingKind,
+        ValueTypeDefinition, ValueTypeMutability, ValueTypePersistence,
     },
     revision::{
         ActiveDatabaseRevision, ActiveDatabaseRevisionInput, ActiveRevisionContent,
@@ -109,6 +110,19 @@ struct RecoveredEnumType {
     origin: DefinitionOrigin,
 }
 
+struct RecoveredRecordValueType {
+    id: TypeId,
+    schema: SchemaId,
+    name: QualifiedSemanticName,
+    origin: DefinitionOrigin,
+}
+
+struct RecoveredRecordValueField {
+    owner: TypeId,
+    definition: RecordValueFieldDefinition,
+    origin: DefinitionOrigin,
+}
+
 struct RecoveredField {
     owner: TypeId,
     definition: FieldDefinition,
@@ -129,10 +143,11 @@ struct RecoveredCatalogueSemantics {
 impl PostgresKernel {
     /// Reconstructs and validates the complete active durable database revision.
     ///
-    /// This recovery slice supports schemas, object types, fields, expression
-    /// artifacts, compiler-deployable functions, immutable function history,
-    /// and active definition references. It fails closed on any semantic,
-    /// source, hash-chain, or physical-layout state it cannot prove complete.
+    /// This recovery slice supports schemas, object and record value types,
+    /// fields, expression artifacts, compiler-deployable functions, immutable
+    /// function history, and active definition references. It fails closed on
+    /// any semantic, source, hash-chain, or physical-layout state it cannot
+    /// prove complete.
     pub async fn recover(&self) -> Result<ActiveDatabaseRevision, PostgresKernelError> {
         let mut session = self.open().await?;
         let recovery_result = recover_client(&mut session.client).await;
@@ -1531,6 +1546,215 @@ fn decode_enum_type(
     })
 }
 
+async fn load_record_value_types(
+    transaction: &Transaction<'_>,
+    catalogue: CatalogueRevisionId,
+) -> Result<Vec<RecoveredRecordValueType>, PostgresKernelError> {
+    let rows = transaction
+        .query(
+            "SELECT catalogue_revision_id, type_id, schema_id, name_parts,
+                    value_kind, mutability, persistence,
+                    source_unit_id, source_start, source_end
+             FROM _orna_kernel.catalogue_record_value_types
+             WHERE catalogue_revision_id = $1
+             ORDER BY type_id",
+            &[&catalogue.to_bytes().to_vec()],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?;
+
+    rows.iter()
+        .enumerate()
+        .map(|(index, row)| decode_record_value_type(row, index, catalogue))
+        .collect()
+}
+
+fn decode_record_value_type(
+    row: &Row,
+    row_index: usize,
+    expected_catalogue: CatalogueRevisionId,
+) -> Result<RecoveredRecordValueType, PostgresKernelError> {
+    const RELATION: &str = "_orna_kernel.catalogue_record_value_types";
+    let row_record = DurableRecord::new(RELATION, format!("row={row_index}"));
+    require_catalogue_identity(row, &row_record, expected_catalogue, "record value type")?;
+    let id = TypeId::from_bytes(identity_bytes(
+        row_record.column(
+            row,
+            "type_id",
+            "record value type identity must be 16 bytes",
+        )?,
+        &row_record,
+        "record value type identity must be 16 bytes",
+    )?);
+    let record = DurableRecord::new(RELATION, id.canonical());
+    let schema = SchemaId::from_bytes(identity_bytes(
+        record.column(
+            row,
+            "schema_id",
+            "record value schema identity must be 16 bytes",
+        )?,
+        &record,
+        "record value schema identity must be 16 bytes",
+    )?);
+    let name_parts: Vec<String> = record.column(
+        row,
+        "name_parts",
+        "record value name parts must be an exact PostgreSQL text array",
+    )?;
+    let name = QualifiedSemanticName::new(name_parts).map_err(|_| {
+        record.invariant("record value name parts must form one exact semantic name")
+    })?;
+    for (column, expected, rule) in [
+        ("value_kind", "record", "record value kind must be record"),
+        (
+            "mutability",
+            "immutable",
+            "record value mutability must be immutable",
+        ),
+        (
+            "persistence",
+            "persistable",
+            "record value persistence must be persistable",
+        ),
+    ] {
+        let actual: String = record.column(row, column, rule)?;
+        if actual != expected {
+            return Err(record.invariant(rule));
+        }
+    }
+    let origin = decode_origin(row, &record, DefinitionIdentity::ValueType(id))?;
+
+    Ok(RecoveredRecordValueType {
+        id,
+        schema,
+        name,
+        origin,
+    })
+}
+
+async fn load_record_value_fields(
+    transaction: &Transaction<'_>,
+    catalogue: CatalogueRevisionId,
+    catalogue_hash_context: &CatalogueHashContext,
+) -> Result<BTreeMap<TypeId, Vec<RecoveredRecordValueField>>, PostgresKernelError> {
+    let rows = transaction
+        .query(
+            "SELECT catalogue_revision_id, owner_type_id, field_id, name, ordinal,
+                    type_kind, value_type_id, value_standard_library_revision_id,
+                    enum_type_id, source_unit_id, source_start, source_end
+             FROM _orna_kernel.catalogue_record_value_fields
+             WHERE catalogue_revision_id = $1
+             ORDER BY owner_type_id, ordinal, field_id",
+            &[&catalogue.to_bytes().to_vec()],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?;
+
+    let mut fields = BTreeMap::<TypeId, Vec<RecoveredRecordValueField>>::new();
+    for (index, row) in rows.iter().enumerate() {
+        let field = decode_record_value_field(row, index, catalogue, catalogue_hash_context)?;
+        fields.entry(field.owner).or_default().push(field);
+    }
+    Ok(fields)
+}
+
+fn decode_record_value_field(
+    row: &Row,
+    row_index: usize,
+    expected_catalogue: CatalogueRevisionId,
+    catalogue_hash_context: &CatalogueHashContext,
+) -> Result<RecoveredRecordValueField, PostgresKernelError> {
+    const RELATION: &str = "_orna_kernel.catalogue_record_value_fields";
+    let row_record = DurableRecord::new(RELATION, format!("row={row_index}"));
+    require_catalogue_identity(row, &row_record, expected_catalogue, "record value field")?;
+    let owner = TypeId::from_bytes(identity_bytes(
+        row_record.column(
+            row,
+            "owner_type_id",
+            "record value field owner identity must be 16 bytes",
+        )?,
+        &row_record,
+        "record value field owner identity must be 16 bytes",
+    )?);
+    let id = FieldId::from_bytes(identity_bytes(
+        row_record.column(
+            row,
+            "field_id",
+            "record value field identity must be 16 bytes",
+        )?,
+        &row_record,
+        "record value field identity must be 16 bytes",
+    )?);
+    let record = DurableRecord::new(
+        RELATION,
+        format!("owner={} field={}", owner.canonical(), id.canonical()),
+    );
+    let name: String = record.column(row, "name", "record value field name must be text")?;
+    if name.is_empty() {
+        return Err(record.invariant("record value field name must not be empty"));
+    }
+    let ordinal = u32_from_i64(
+        record.column(row, "ordinal", "record value field ordinal must fit u32")?,
+        &record,
+        "record value field ordinal must fit u32",
+    )?;
+    let kind: Option<String> = record.column(
+        row,
+        "type_kind",
+        "record value field kind must be value or enum",
+    )?;
+    let value_type = optional_identity_bytes(
+        record.column(
+            row,
+            "value_type_id",
+            "record value field standard type identity must be null or 16 bytes",
+        )?,
+        &record,
+        "record value field standard type identity must be null or 16 bytes",
+    )?
+    .map(TypeId::from_bytes);
+    let standard_library_revision = optional_identity_bytes(
+        record.column(
+            row,
+            "value_standard_library_revision_id",
+            "record value field standard revision must be null or 16 bytes",
+        )?,
+        &record,
+        "record value field standard revision must be null or 16 bytes",
+    )?
+    .map(StandardLibraryRevisionId::from_bytes);
+    let enum_type = optional_identity_bytes(
+        record.column(
+            row,
+            "enum_type_id",
+            "record value field enum identity must be null or 16 bytes",
+        )?,
+        &record,
+        "record value field enum identity must be null or 16 bytes",
+    )?
+    .map(TypeId::from_bytes);
+    let resolved_type = decode_resolved_type_tuple(
+        ResolvedTypeTuple {
+            kind,
+            scalar: None,
+            target: None,
+            value_type,
+            standard_library_revision,
+            enum_type,
+        },
+        catalogue_hash_context,
+        &record,
+        LegacyResolvedTypeTupleMember::Field,
+    )?;
+    let origin = decode_origin(row, &record, DefinitionIdentity::Field { owner, field: id })?;
+
+    Ok(RecoveredRecordValueField {
+        owner,
+        definition: RecordValueFieldDefinition::new(id, name, ordinal, resolved_type),
+        origin,
+    })
+}
+
 async fn load_fields(
     transaction: &Transaction<'_>,
     catalogue: CatalogueRevisionId,
@@ -2304,7 +2528,9 @@ async fn load_catalogue_semantics(
         load_schemas(transaction, catalogue).await?,
         load_object_types(transaction, catalogue).await?,
         load_enum_types(transaction, catalogue).await?,
+        load_record_value_types(transaction, catalogue).await?,
         load_fields(transaction, catalogue, catalogue_hash_context).await?,
+        load_record_value_fields(transaction, catalogue, catalogue_hash_context).await?,
         load_expressions(transaction, catalogue).await?,
         functions,
         function_origins,
@@ -2317,7 +2543,9 @@ fn assemble_catalogue_semantics(
     schemas: Vec<RecoveredSchema>,
     objects: Vec<RecoveredObjectType>,
     enum_types: Vec<RecoveredEnumType>,
+    record_value_types: Vec<RecoveredRecordValueType>,
     mut fields: BTreeMap<TypeId, Vec<RecoveredField>>,
+    mut record_value_fields: BTreeMap<TypeId, Vec<RecoveredRecordValueField>>,
     expressions: Vec<RecoveredExpression>,
     functions: Vec<functions::RecoveredFunction>,
     mut function_origins: Vec<DefinitionOrigin>,
@@ -2400,6 +2628,51 @@ fn assemble_catalogue_semantics(
         enum_definitions.push(enum_type.definition);
     }
 
+    let mut record_value_definitions = Vec::with_capacity(record_value_types.len());
+    for record_value_type in record_value_types {
+        let record = DurableRecord::new(
+            "_orna_kernel.catalogue_record_value_types",
+            record_value_type.id.canonical(),
+        );
+        let schema_name = schema_names.get(&record_value_type.schema).ok_or_else(|| {
+            record.invariant("record value stored schema identity must identify a recovered schema")
+        })?;
+        let parts = record_value_type.name.parts();
+        let namespace = parts
+            .get(..parts.len().saturating_sub(1))
+            .filter(|parts| !parts.is_empty())
+            .ok_or_else(|| {
+                record.invariant("record value qualified name must contain a schema namespace")
+            })?;
+        if namespace != schema_name.parts() {
+            return Err(record.invariant(
+                "record value stored schema identity must equal the schema named by its namespace",
+            ));
+        }
+
+        let recovered_fields = record_value_fields
+            .remove(&record_value_type.id)
+            .unwrap_or_default();
+        let mut definitions = Vec::with_capacity(recovered_fields.len());
+        for field in recovered_fields {
+            origins.push(field.origin);
+            definitions.push(field.definition);
+        }
+        origins.push(record_value_type.origin);
+        record_value_definitions.push(RecordValueTypeDefinition::new(
+            record_value_type.id,
+            record_value_type.name,
+            definitions,
+        ));
+    }
+    if let Some((owner, _)) = record_value_fields.first_key_value() {
+        return Err(DurableRecord::new(
+            "_orna_kernel.catalogue_record_value_fields",
+            format!("owner={}", owner.canonical()),
+        )
+        .invariant("every recovered record field owner must be an active record value type"));
+    }
+
     let mut expression_artifacts = Vec::with_capacity(expressions.len());
     for expression in expressions {
         origins.push(expression.origin);
@@ -2429,12 +2702,13 @@ fn assemble_catalogue_semantics(
         function_definitions.push(function.definition);
     }
     origins.append(&mut function_origins);
-    let catalogue = CatalogueSnapshot::new_with_functions_and_enum_types(
+    let catalogue = CatalogueSnapshot::new_with_functions_and_record_value_types(
         catalogue_id,
         schemas,
         object_definitions,
         Vec::new(),
         enum_definitions,
+        record_value_definitions,
         Vec::new(),
         function_definitions,
     )
@@ -2662,18 +2936,23 @@ fn validate_field_links(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use orna_core::{
-        CatalogueRevisionId, SourceBundleId, SourceRevisionId, SourceUnitId,
+        CatalogueRevisionId, FieldId, SchemaId, SourceBundleId, SourceRevisionId, SourceUnitId,
         StandardLibraryRevisionId, TypeId,
         canonical_hash::{
             catalogue_digest, source_bundle_digest, source_revision_record_digest,
             source_unit_content_digest,
         },
         catalogue::{
-            CatalogueSnapshot, EnumTypeDefinition, QualifiedSemanticName, SchemaDefinition,
+            CatalogueSnapshot, EnumTypeDefinition, QualifiedSemanticName,
+            RecordValueFieldDefinition, SchemaDefinition,
         },
-        revision::StoredSourceUnit,
-        revision::{CatalogueHashContext, CatalogueHashVersion},
+        revision::{
+            CatalogueHashContext, CatalogueHashVersion, DefinitionIdentity, DefinitionOrigin,
+            SourceOrigin, StoredSourceUnit,
+        },
         types::{ResolvedType, StandardScalar},
     };
 
@@ -2681,10 +2960,121 @@ mod tests {
 
     use super::{
         LegacyResolvedTypeTupleMember, RecoveredCatalogueSemantics, RecoveredFunctionState,
-        RecoveredRevisionHeader, ResolvedTypeTuple, assemble_revision,
+        RecoveredRecordValueField, RecoveredRecordValueType, RecoveredRevisionHeader,
+        RecoveredSchema, ResolvedTypeTuple, assemble_catalogue_semantics, assemble_revision,
         decode_catalogue_hash_version, decode_legacy_resolved_type_tuple,
         decode_legacy_resolved_type_tuple_kind, decode_resolved_type_tuple, validate_function_type,
     };
+
+    fn test_origin(identity: DefinitionIdentity, start: u32) -> DefinitionOrigin {
+        DefinitionOrigin::new(
+            identity,
+            SourceOrigin::new(SourceUnitId::from_bytes([0x91; 16]), start, start + 1)
+                .expect("test source origin"),
+        )
+    }
+
+    #[test]
+    fn assembles_record_value_definitions_fields_and_origins() {
+        let catalogue = CatalogueRevisionId::from_bytes([0x92; 16]);
+        let schema_id = SchemaId::from_bytes([0x93; 16]);
+        let record_id = TypeId::from_bytes([0x94; 16]);
+        let first_field = FieldId::from_bytes([0x95; 16]);
+        let second_field = FieldId::from_bytes([0x96; 16]);
+        let enum_id = TypeId::from_bytes([0x97; 16]);
+        let schema_identity = DefinitionIdentity::Schema(schema_id);
+        let record_identity = DefinitionIdentity::ValueType(record_id);
+        let first_identity = DefinitionIdentity::Field {
+            owner: record_id,
+            field: first_field,
+        };
+        let second_identity = DefinitionIdentity::Field {
+            owner: record_id,
+            field: second_field,
+        };
+        let assembled = assemble_catalogue_semantics(
+            catalogue,
+            vec![RecoveredSchema {
+                definition: SchemaDefinition::new(
+                    schema_id,
+                    QualifiedSemanticName::new(["app"]).expect("schema name"),
+                ),
+                origin: test_origin(schema_identity, 0),
+            }],
+            Vec::new(),
+            vec![super::RecoveredEnumType {
+                schema: schema_id,
+                definition: EnumTypeDefinition::new(
+                    enum_id,
+                    QualifiedSemanticName::new(["app", "stage"]).expect("enum name"),
+                    ["open", "closed"],
+                ),
+                origin: test_origin(DefinitionIdentity::ValueType(enum_id), 1),
+            }],
+            vec![RecoveredRecordValueType {
+                id: record_id,
+                schema: schema_id,
+                name: QualifiedSemanticName::new(["app", "status"]).expect("record name"),
+                origin: test_origin(record_identity, 4),
+            }],
+            BTreeMap::new(),
+            BTreeMap::from([(
+                record_id,
+                vec![
+                    RecoveredRecordValueField {
+                        owner: record_id,
+                        definition: RecordValueFieldDefinition::new(
+                            first_field,
+                            "enabled",
+                            0,
+                            ResolvedType::value(TypeId::from_bytes([0x98; 16])),
+                        ),
+                        origin: test_origin(first_identity, 2),
+                    },
+                    RecoveredRecordValueField {
+                        owner: record_id,
+                        definition: RecordValueFieldDefinition::new(
+                            second_field,
+                            "stage",
+                            1,
+                            ResolvedType::named(enum_id),
+                        ),
+                        origin: test_origin(second_identity, 3),
+                    },
+                ],
+            )]),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .expect("record catalogue semantics");
+
+        let record = assembled
+            .catalogue
+            .record_value_type_by_id(record_id)
+            .expect("recovered record");
+        assert_eq!(record.fields().len(), 2);
+        assert_eq!(record.fields()[0].id(), first_field);
+        assert_eq!(record.fields()[1].id(), second_field);
+        assert!(
+            assembled
+                .origins
+                .iter()
+                .any(|origin| origin.identity() == record_identity)
+        );
+        assert!(
+            assembled
+                .origins
+                .iter()
+                .any(|origin| origin.identity() == first_identity)
+        );
+        assert!(
+            assembled
+                .origins
+                .iter()
+                .any(|origin| origin.identity() == second_identity)
+        );
+    }
 
     #[test]
     fn catalogue_hash_version_decoder_accepts_only_durable_versions() {
