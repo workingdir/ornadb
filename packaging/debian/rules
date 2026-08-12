@@ -1,0 +1,130 @@
+#!/usr/bin/make -f
+
+SHELL := /bin/bash
+.SHELLFLAGS := -euo pipefail -c
+.DEFAULT_GOAL := package
+.NOTPARALLEL:
+
+REPOSITORY_ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/../..)
+TARGET_ROOT ?= $(REPOSITORY_ROOT)/target/debian-package
+PAYLOAD_ROOT := $(TARGET_ROOT)/payload
+PACKAGE_ROOT := $(TARGET_ROOT)/root
+BUILD_ONE := $(TARGET_ROOT)/build-one
+BUILD_TWO := $(TARGET_ROOT)/build-two
+PACKAGE := $(TARGET_ROOT)/orna_0.1.0-1_amd64.deb
+SOURCE_DATE_EPOCH := 1778528675
+RUST_PATH_REMAP := /usr/src/orna
+RUST_LINK_FLAGS := -C link-arg=-Wl,--build-id=none
+RUSTFLAGS := --remap-path-prefix=$(REPOSITORY_ROOT)=$(RUST_PATH_REMAP) $(RUST_LINK_FLAGS)
+
+.PHONY: build package verify clean
+
+build:
+	@target_name='$(notdir $(TARGET_ROOT))'; \
+	[[ "$(dir $(TARGET_ROOT))" == "$(REPOSITORY_ROOT)/target/" \
+		&& "$${target_name}" =~ ^[a-z0-9][a-z0-9.-]*$$ ]] || { \
+		printf '%s\n' '[debian] error: TARGET_ROOT must be one safe direct child of the repository target directory' >&2; exit 1; }; \
+	rm -rf -- "$(TARGET_ROOT)"; \
+	mkdir -m 0700 -p -- "$(TARGET_ROOT)"; \
+	for build_root in "$(BUILD_ONE)" "$(BUILD_TWO)"; do \
+		env -i \
+			PATH="$$PATH" HOME="$$HOME" \
+			CARGO_HOME="$${CARGO_HOME:-$$HOME/.cargo}" \
+			CARGO_INCREMENTAL=0 CARGO_TARGET_DIR="$${build_root}" \
+			LANG=C.UTF-8 LC_ALL=C.UTF-8 RUSTFLAGS='$(RUSTFLAGS)' \
+			SOURCE_DATE_EPOCH='$(SOURCE_DATE_EPOCH)' TZ=UTC0 \
+			cargo build --frozen --offline --release \
+				--manifest-path "$(REPOSITORY_ROOT)/Cargo.toml" \
+				--package orna-server --bin orna; \
+	done; \
+	strip --strip-debug -- "$(BUILD_ONE)/release/orna" "$(BUILD_TWO)/release/orna"; \
+	cmp -- "$(BUILD_ONE)/release/orna" "$(BUILD_TWO)/release/orna"; \
+	mapfile -t engine_one < <(find "$(BUILD_ONE)/release/build" -type f \
+		-path '*/out/postgresql/output/embedded-engine-manifest.json' -print); \
+	mapfile -t engine_two < <(find "$(BUILD_TWO)/release/build" -type f \
+		-path '*/out/postgresql/output/embedded-engine-manifest.json' -print); \
+	mapfile -t licence_one < <(find "$(BUILD_ONE)/release/build" -type f \
+		-path '*/out/postgresql/output/POSTGRESQL-LICENSE' -print); \
+	mapfile -t licence_two < <(find "$(BUILD_TWO)/release/build" -type f \
+		-path '*/out/postgresql/output/POSTGRESQL-LICENSE' -print); \
+	[[ "$${#engine_one[@]}" -eq 1 && "$${#engine_two[@]}" -eq 1 \
+		&& "$${#licence_one[@]}" -eq 1 && "$${#licence_two[@]}" -eq 1 ]] || { \
+		printf '%s\n' '[debian] error: embedded build evidence is not unique' >&2; exit 1; }; \
+	cmp -- "$${engine_one[0]}" "$${engine_two[0]}"; \
+	cmp -- "$${licence_one[0]}" "$${licence_two[0]}"; \
+	install -D -m 0755 -- "$(BUILD_ONE)/release/orna" "$(PAYLOAD_ROOT)/usr/bin/orna"; \
+	install -D -m 0644 -- "$${engine_one[0]}" \
+		"$(PAYLOAD_ROOT)/usr/share/orna/embedded-engine-manifest.json"; \
+	install -D -m 0644 -- "$${licence_one[0]}" \
+		"$(PAYLOAD_ROOT)/usr/share/doc/orna/POSTGRESQL-LICENSE"; \
+	install -D -m 0644 -- "$(REPOSITORY_ROOT)/packaging/debian/orna.service" \
+		"$(PAYLOAD_ROOT)/usr/lib/systemd/system/orna.service"; \
+	install -D -m 0644 -- "$(REPOSITORY_ROOT)/packaging/debian/orna.sysusers" \
+		"$(PAYLOAD_ROOT)/usr/lib/sysusers.d/orna.conf"; \
+	install -D -m 0644 -- "$(REPOSITORY_ROOT)/packaging/debian/orna.tmpfiles" \
+		"$(PAYLOAD_ROOT)/usr/lib/tmpfiles.d/orna.conf"; \
+	install -D -m 0644 /dev/null "$(PAYLOAD_ROOT)/etc/orna/instances/default.toml"; \
+	printf '%s\n' 'format = 1' 'instance = "default"' \
+		>"$(PAYLOAD_ROOT)/etc/orna/instances/default.toml"; \
+	rustc_version="$$(rustc --version)"; cargo_version="$$(cargo --version)"; \
+	lock_sha="$$(sha256sum "$(REPOSITORY_ROOT)/Cargo.lock" | awk '{ print $$1 }')"; \
+	engine_sha="$$(sha256sum "$${engine_one[0]}" | awk '{ print $$1 }')"; \
+	executable_sha="$$(sha256sum "$(PAYLOAD_ROOT)/usr/bin/orna" | awk '{ print $$1 }')"; \
+	install -D -m 0644 /dev/null \
+		"$(PAYLOAD_ROOT)/usr/share/orna/distribution-manifest.toml"; \
+	printf '%s\n' \
+		'format = 1' \
+		"rustc = \"$${rustc_version}\"" \
+		"cargo = \"$${cargo_version}\"" \
+		"cargo_lock_sha256 = \"$${lock_sha}\"" \
+		'rust_path_remap = "<repository>=$(RUST_PATH_REMAP)"' \
+		'rust_link_flags = "$(RUST_LINK_FLAGS)"' \
+		"embedded_engine_manifest_sha256 = \"$${engine_sha}\"" \
+		"executable_sha256 = \"$${executable_sha}\"" \
+		>"$(PAYLOAD_ROOT)/usr/share/orna/distribution-manifest.toml"; \
+	find "$(PAYLOAD_ROOT)" -exec touch -h -d '@$(SOURCE_DATE_EPOCH)' -- {} +
+
+package: build
+	@mkdir -m 0755 -p -- "$(PACKAGE_ROOT)/DEBIAN"; \
+	install -m 0644 -- "$(REPOSITORY_ROOT)/packaging/debian/control" \
+		"$(PACKAGE_ROOT)/DEBIAN/control"; \
+	while IFS= read -r relative; do \
+		[[ -n "$${relative}" && "$${relative}" != \#* ]] || continue; \
+		source="$(PAYLOAD_ROOT)/$${relative}"; destination="$(PACKAGE_ROOT)/$${relative}"; \
+		[[ -f "$${source}" && ! -L "$${source}" ]] || { \
+			printf '%s\n' "[debian] error: missing payload input: $${relative}" >&2; exit 1; }; \
+		install -D -m "$$(stat -c '%a' "$${source}")" -- "$${source}" "$${destination}"; \
+	done <"$(REPOSITORY_ROOT)/packaging/debian/orna.install"; \
+	find "$(PACKAGE_ROOT)" -exec touch -h -d '@$(SOURCE_DATE_EPOCH)' -- {} +; \
+	SOURCE_DATE_EPOCH='$(SOURCE_DATE_EPOCH)' dpkg-deb --root-owner-group \
+		--build "$(PACKAGE_ROOT)" "$(PACKAGE)"; \
+	$(MAKE) -f "$(REPOSITORY_ROOT)/packaging/debian/rules" verify \
+		TARGET_ROOT="$(TARGET_ROOT)"
+
+verify:
+	@[[ -f "$(PACKAGE)" ]] || { printf '%s\n' '[debian] error: package is absent' >&2; exit 1; }; \
+	mapfile -t installed < <(find "$(PACKAGE_ROOT)" -type f \
+		! -path '*/DEBIAN/*' -printf '%P\n' | LC_ALL=C sort); \
+	mapfile -t expected < <(sed '/^$$/d; /^#/d' \
+		"$(REPOSITORY_ROOT)/packaging/debian/orna.install" | LC_ALL=C sort); \
+	[[ "$${installed[*]}" == "$${expected[*]}" ]] || { \
+		printf '%s\n' '[debian] error: package payload inventory is not exact' >&2; exit 1; }; \
+	mapfile -t executable_payload < <(find "$(PACKAGE_ROOT)" -type f -perm /111 \
+		! -path '*/DEBIAN/*' -printf '%P\n'); \
+	[[ "$${#executable_payload[@]}" -eq 1 \
+		&& "$${executable_payload[0]}" == 'usr/bin/orna' ]] || { \
+		printf '%s\n' '[debian] error: product payload is not one executable' >&2; exit 1; }; \
+	[[ -z "$$(find "$(PACKAGE_ROOT)" -type f \
+		\( -name '*.so' -o -name '*.so.*' -o -name '*.a' -o -name '*.o' \
+		-o -name postgres -o -name initdb -o -name psql -o -name pg_upgrade \) -print -quit)" ]] || { \
+		printf '%s\n' '[debian] error: PostgreSQL runtime artefact entered the package' >&2; exit 1; }; \
+	readelf --dynamic "$(PACKAGE_ROOT)/usr/bin/orna" >"$(TARGET_ROOT)/orna.dynamic"; \
+	! grep -Eqi 'NEEDED.*(libpq|libz|postgres)' "$(TARGET_ROOT)/orna.dynamic" || { \
+		printf '%s\n' '[debian] error: Orna has a dynamic PostgreSQL dependency' >&2; exit 1; }; \
+	printf '%s\n' "[debian] verified one-executable package $(PACKAGE)"
+
+clean:
+	@target_name='$(notdir $(TARGET_ROOT))'; \
+	[[ "$(dir $(TARGET_ROOT))" == "$(REPOSITORY_ROOT)/target/" \
+		&& "$${target_name}" =~ ^[a-z0-9][a-z0-9.-]*$$ ]] || exit 1
+	@rm -rf -- "$(TARGET_ROOT)"

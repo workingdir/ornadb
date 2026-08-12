@@ -1,0 +1,8 @@
+etc/orna/instances/default.toml
+usr/bin/orna
+usr/lib/systemd/system/orna.service
+usr/lib/sysusers.d/orna.conf
+usr/lib/tmpfiles.d/orna.conf
+usr/share/doc/orna/POSTGRESQL-LICENSE
+usr/share/orna/distribution-manifest.toml
+usr/share/orna/embedded-engine-manifest.json
