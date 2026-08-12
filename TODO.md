@@ -13,7 +13,7 @@ implemented, reviewed, committed, and pushed.
 - [x] Pin the exact unmodified upstream PostgreSQL 18.4 commit as the
   `third_party/postgresql` submodule.
 - [x] Add the top-level `postgresql/` module with reviewed added-file overlays,
-  the five sparse existing-file patches, and one explicit source-update target.
+  the six sparse existing-file patches, and one explicit source-update target.
 - [ ] Add the Make-based prepared-source build beside the selected legacy proof
   and bind its toolchain, upstream tree, overlays, patches, support data,
   lifecycle probe, and verifier.
