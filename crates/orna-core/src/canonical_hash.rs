@@ -45,12 +45,14 @@ const FUNCTION_SEMANTIC_V2_DOMAIN: &[u8] = b"ornadb.hash/function-semantic/v2\0"
 const STANDARD_LIBRARY_DOMAIN: &[u8] = b"ornadb.hash/standard-library/v1\0";
 const ARTIFACT_PAYLOAD_DOMAIN: &[u8] = b"ornadb.hash/artifact-payload/v1\0";
 
-/// One typed fact that cannot be represented by an older catalogue hash contract.
+/// One typed fact that cannot be represented by the selected catalogue hash contract.
 #[non_exhaustive]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CatalogueHashFact {
     /// One value-type definition.
     ValueTypeDefinition(TypeId),
+    /// One named record-value definition.
+    RecordValueTypeDefinition(TypeId),
     /// One enum-type definition.
     EnumTypeDefinition(TypeId),
     /// One direct type-name binding.
@@ -320,6 +322,11 @@ impl fmt::Display for CanonicalHashError {
                 CatalogueHashFact::ValueTypeDefinition(_) => write!(
                     formatter,
                     "catalogue hash version {} cannot include value types; use catalogue hash version 2",
+                    version.to_u32()
+                ),
+                CatalogueHashFact::RecordValueTypeDefinition(_) => write!(
+                    formatter,
+                    "catalogue hash version {} cannot include record value types until their hash contract is implemented",
                     version.to_u32()
                 ),
                 CatalogueHashFact::EnumTypeDefinition(_) => write!(
@@ -920,6 +927,12 @@ fn validate_catalogue_version_facts(
     origins: &[DefinitionOrigin],
     references: &[DefinitionReference],
 ) -> Result<(), CanonicalHashError> {
+    if let Some(record_value_type) = catalogue.record_value_types().first() {
+        return Err(CanonicalHashError::CatalogueFactUnsupportedByHashVersion {
+            version,
+            fact: CatalogueHashFact::RecordValueTypeDefinition(record_value_type.id()),
+        });
+    }
     match version {
         CatalogueHashVersion::Version1 => {
             if let Some(enum_type) = catalogue.enum_types().first() {
@@ -2083,8 +2096,8 @@ mod tests {
         CatalogueRevisionId,
         catalogue::{
             EnumTypeDefinition, FieldDefinition, FunctionReturnColumnDefinition, PreludeTypeName,
-            SchemaDefinition, TypeBinding, ValueTypeDefinition, ValueTypeMutability,
-            ValueTypePersistence,
+            RecordValueFieldDefinition, RecordValueTypeDefinition, SchemaDefinition, TypeBinding,
+            ValueTypeDefinition, ValueTypeMutability, ValueTypePersistence,
         },
         revision::{CatalogueHashContext, SourceOrigin},
         types::{ResolvedType, StandardScalar},
@@ -2304,6 +2317,31 @@ mod tests {
             vec![schema],
             vec![object_type],
             vec![function],
+        )
+        .unwrap()
+    }
+
+    fn catalogue_with_record_value_type() -> CatalogueSnapshot {
+        CatalogueSnapshot::new_with_record_value_types(
+            CatalogueRevisionId::from_bytes(id::<40>()),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes(id::<41>()),
+                QualifiedSemanticName::new(["crm"]).unwrap(),
+            )],
+            vec![],
+            vec![],
+            vec![],
+            vec![RecordValueTypeDefinition::new(
+                TypeId::from_bytes(id::<42>()),
+                QualifiedSemanticName::new(["crm", "status"]).unwrap(),
+                vec![RecordValueFieldDefinition::new(
+                    FieldId::from_bytes(id::<43>()),
+                    "active",
+                    0,
+                    ResolvedType::value(standard_boolean_id()),
+                )],
+            )],
+            vec![],
         )
         .unwrap()
     }
@@ -3412,6 +3450,35 @@ mod tests {
             }
             .to_string(),
             "function semantic hash version 1 cannot include value-type references; use function semantic hash version 2"
+        );
+    }
+
+    #[test]
+    fn record_value_types_fail_closed_until_their_hash_contract_is_implemented() {
+        let catalogue = catalogue_with_record_value_type();
+        let expected_fact =
+            CatalogueHashFact::RecordValueTypeDefinition(TypeId::from_bytes(id::<42>()));
+
+        assert_eq!(
+            catalogue_digest(&catalogue, &[], &[], &[], &[]),
+            Err(CanonicalHashError::CatalogueFactUnsupportedByHashVersion {
+                version: CatalogueHashVersion::Version1,
+                fact: expected_fact.clone(),
+            })
+        );
+        assert_eq!(
+            catalogue_digest_with_context(
+                &CatalogueHashContext::version_two(verified_standard_snapshot(false)),
+                &catalogue,
+                &[],
+                &[],
+                &[],
+                &[],
+            ),
+            Err(CanonicalHashError::CatalogueFactUnsupportedByHashVersion {
+                version: CatalogueHashVersion::Version2,
+                fact: expected_fact,
+            })
         );
     }
 
