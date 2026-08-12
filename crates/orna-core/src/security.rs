@@ -3,7 +3,7 @@
 #![deny(missing_docs)]
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     error::Error,
     fmt,
 };
@@ -61,7 +61,7 @@ impl Principal {
 }
 
 /// A directed membership from one principal to a containing role.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct RoleMembership {
     role: PrincipalId,
     member: PrincipalId,
@@ -85,7 +85,7 @@ impl RoleMembership {
 }
 
 /// A function-specific `EXECUTE` grant.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ExecuteGrant {
     grantee: PrincipalId,
     function: FunctionId,
@@ -299,15 +299,15 @@ pub enum ExecuteDecision {
 #[derive(Clone, Debug)]
 pub struct SecuritySnapshot {
     revision: RevisionPair,
-    functions: HashSet<FunctionId>,
-    principals: HashMap<PrincipalId, Principal>,
+    functions: BTreeSet<FunctionId>,
+    principals: BTreeMap<PrincipalId, Principal>,
     memberships: Vec<RoleMembership>,
-    grants: HashSet<ExecuteGrant>,
+    grants: BTreeSet<ExecuteGrant>,
 }
 
 fn role_graph_has_cycle(
     memberships: &[RoleMembership],
-    principals: &HashMap<PrincipalId, Principal>,
+    principals: &BTreeMap<PrincipalId, Principal>,
 ) -> bool {
     fn visit(
         role: PrincipalId,
@@ -360,14 +360,14 @@ impl SecuritySnapshot {
         memberships: Vec<RoleMembership>,
         grants: Vec<ExecuteGrant>,
     ) -> Result<Self, SecuritySnapshotError> {
-        let mut known_functions = HashSet::new();
+        let mut known_functions = BTreeSet::new();
         for function in functions {
             if !known_functions.insert(function) {
                 return Err(SecuritySnapshotError::DuplicateFunction);
             }
         }
 
-        let mut principals_by_id = HashMap::new();
+        let mut principals_by_id = BTreeMap::new();
         for principal in principals {
             if principals_by_id.insert(principal.id, principal).is_some() {
                 return Err(SecuritySnapshotError::DuplicatePrincipal);
@@ -400,7 +400,7 @@ impl SecuritySnapshot {
             return Err(SecuritySnapshotError::CyclicRoleMembership);
         }
 
-        let mut validated_grants = HashSet::new();
+        let mut validated_grants = BTreeSet::new();
         for grant in grants {
             if !validated_grants.insert(grant) {
                 return Err(SecuritySnapshotError::DuplicateExecuteGrant);
@@ -420,6 +420,31 @@ impl SecuritySnapshot {
             memberships: validated_memberships,
             grants: validated_grants,
         })
+    }
+
+    /// Returns the active revision pair that this snapshot authorises.
+    pub const fn revision(&self) -> RevisionPair {
+        self.revision
+    }
+
+    /// Iterates over known functions in canonical identity order.
+    pub fn functions(&self) -> impl Iterator<Item = FunctionId> + '_ {
+        self.functions.iter().copied()
+    }
+
+    /// Iterates over principals in canonical identity order.
+    pub fn principals(&self) -> impl Iterator<Item = Principal> + '_ {
+        self.principals.values().copied()
+    }
+
+    /// Iterates over membership edges ordered by member and then role.
+    pub fn memberships(&self) -> impl Iterator<Item = RoleMembership> + '_ {
+        self.memberships.iter().copied()
+    }
+
+    /// Iterates over `EXECUTE` grants ordered by grantee and function.
+    pub fn execute_grants(&self) -> impl Iterator<Item = ExecuteGrant> + '_ {
+        self.grants.iter().copied()
     }
 
     /// Binds trusted authentication state to this snapshot.
@@ -984,6 +1009,45 @@ mod tests {
         assert_eq!(
             disabled.authorise_execute(&session, InvocationTarget::new(FUNCTION, REVISION)),
             ExecuteDecision::Denied(ExecuteDenial::InvalidSession)
+        );
+    }
+
+    #[test]
+    fn snapshot_exposes_canonical_persistence_records() {
+        let snapshot = SecuritySnapshot::new(
+            REVISION,
+            vec![OTHER_FUNCTION, FUNCTION],
+            vec![
+                active(ROLE, PrincipalKind::Role),
+                active(USER, PrincipalKind::User),
+            ],
+            vec![RoleMembership::new(ROLE, USER)],
+            vec![
+                ExecuteGrant::new(ROLE, OTHER_FUNCTION),
+                ExecuteGrant::new(USER, FUNCTION),
+            ],
+        )
+        .expect("valid persistence snapshot");
+
+        assert_eq!(snapshot.revision(), REVISION);
+        assert_eq!(
+            snapshot.functions().collect::<Vec<_>>(),
+            vec![FUNCTION, OTHER_FUNCTION]
+        );
+        assert_eq!(
+            snapshot.principals().map(Principal::id).collect::<Vec<_>>(),
+            vec![USER, ROLE]
+        );
+        assert_eq!(
+            snapshot.memberships().collect::<Vec<_>>(),
+            vec![RoleMembership::new(ROLE, USER)]
+        );
+        assert_eq!(
+            snapshot.execute_grants().collect::<Vec<_>>(),
+            vec![
+                ExecuteGrant::new(USER, FUNCTION),
+                ExecuteGrant::new(ROLE, OTHER_FUNCTION),
+            ]
         );
     }
 }
