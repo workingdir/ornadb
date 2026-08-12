@@ -10,9 +10,9 @@ use orna_core::{
         source_revision_digest, source_unit_content_digest, verify_standard_library_snapshot,
     },
     catalogue::{
-        CatalogueSnapshot, FieldDefinition, ObjectTypeDefinition, OnDeleteAction, PreludeTypeName,
-        QualifiedSemanticName, SchemaDefinition, TypeBinding, TypeBindingKind, ValueTypeDefinition,
-        ValueTypeMutability, ValueTypePersistence,
+        CatalogueSnapshot, EnumTypeDefinition, FieldDefinition, ObjectTypeDefinition,
+        OnDeleteAction, PreludeTypeName, QualifiedSemanticName, SchemaDefinition, TypeBinding,
+        TypeBindingKind, ValueTypeDefinition, ValueTypeMutability, ValueTypePersistence,
     },
     revision::{
         ActiveDatabaseRevision, ActiveDatabaseRevisionInput, ActiveRevisionContent,
@@ -100,6 +100,12 @@ struct RecoveredObjectType {
     id: TypeId,
     schema: SchemaId,
     name: QualifiedSemanticName,
+    origin: DefinitionOrigin,
+}
+
+struct RecoveredEnumType {
+    schema: SchemaId,
+    definition: EnumTypeDefinition,
     origin: DefinitionOrigin,
 }
 
@@ -1463,6 +1469,68 @@ fn decode_object_type(
     })
 }
 
+async fn load_enum_types(
+    transaction: &Transaction<'_>,
+    catalogue: CatalogueRevisionId,
+) -> Result<Vec<RecoveredEnumType>, PostgresKernelError> {
+    let rows = transaction
+        .query(
+            "SELECT catalogue_revision_id, type_id, schema_id, name_parts, labels,
+                    source_unit_id, source_start, source_end
+             FROM _orna_kernel.catalogue_enum_types
+             WHERE catalogue_revision_id = $1
+             ORDER BY type_id",
+            &[&catalogue.to_bytes().to_vec()],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?;
+
+    rows.iter()
+        .enumerate()
+        .map(|(index, row)| decode_enum_type(row, index, catalogue))
+        .collect()
+}
+
+fn decode_enum_type(
+    row: &Row,
+    row_index: usize,
+    expected_catalogue: CatalogueRevisionId,
+) -> Result<RecoveredEnumType, PostgresKernelError> {
+    const RELATION: &str = "_orna_kernel.catalogue_enum_types";
+    let row_record = DurableRecord::new(RELATION, format!("row={row_index}"));
+    require_catalogue_identity(row, &row_record, expected_catalogue, "enum type")?;
+    let id = TypeId::from_bytes(identity_bytes(
+        row_record.column(row, "type_id", "enum type identity must be 16 bytes")?,
+        &row_record,
+        "enum type identity must be 16 bytes",
+    )?);
+    let record = DurableRecord::new(RELATION, id.canonical());
+    let schema = SchemaId::from_bytes(identity_bytes(
+        record.column(row, "schema_id", "enum schema identity must be 16 bytes")?,
+        &record,
+        "enum schema identity must be 16 bytes",
+    )?);
+    let name_parts: Vec<String> = record.column(
+        row,
+        "name_parts",
+        "enum name parts must be an exact PostgreSQL text array",
+    )?;
+    let name = QualifiedSemanticName::new(name_parts)
+        .map_err(|_| record.invariant("enum name parts must form one exact semantic name"))?;
+    let labels: Vec<String> = record.column(
+        row,
+        "labels",
+        "enum labels must be one exact PostgreSQL text array",
+    )?;
+    let origin = decode_origin(row, &record, DefinitionIdentity::ValueType(id))?;
+
+    Ok(RecoveredEnumType {
+        schema,
+        definition: EnumTypeDefinition::new(id, name, labels),
+        origin,
+    })
+}
+
 async fn load_fields(
     transaction: &Transaction<'_>,
     catalogue: CatalogueRevisionId,
@@ -2205,6 +2273,7 @@ async fn load_catalogue_semantics(
         catalogue,
         load_schemas(transaction, catalogue).await?,
         load_object_types(transaction, catalogue).await?,
+        load_enum_types(transaction, catalogue).await?,
         load_fields(transaction, catalogue, catalogue_hash_context).await?,
         load_expressions(transaction, catalogue).await?,
         functions,
@@ -2217,6 +2286,7 @@ fn assemble_catalogue_semantics(
     catalogue_id: CatalogueRevisionId,
     schemas: Vec<RecoveredSchema>,
     objects: Vec<RecoveredObjectType>,
+    enum_types: Vec<RecoveredEnumType>,
     mut fields: BTreeMap<TypeId, Vec<RecoveredField>>,
     expressions: Vec<RecoveredExpression>,
     functions: Vec<functions::RecoveredFunction>,
@@ -2275,6 +2345,31 @@ fn assemble_catalogue_semantics(
         .invariant("every recovered field owner must be an active object type"));
     }
 
+    let mut enum_definitions = Vec::with_capacity(enum_types.len());
+    for enum_type in enum_types {
+        let record = DurableRecord::new(
+            "_orna_kernel.catalogue_enum_types",
+            enum_type.definition.id().canonical(),
+        );
+        let schema_name = schema_names.get(&enum_type.schema).ok_or_else(|| {
+            record.invariant("enum stored schema identity must identify a recovered schema")
+        })?;
+        let parts = enum_type.definition.name().parts();
+        let namespace = parts
+            .get(..parts.len().saturating_sub(1))
+            .filter(|parts| !parts.is_empty())
+            .ok_or_else(|| {
+                record.invariant("enum qualified name must contain a schema namespace")
+            })?;
+        if namespace != schema_name.parts() {
+            return Err(record.invariant(
+                "enum stored schema identity must equal the schema named by its namespace",
+            ));
+        }
+        origins.push(enum_type.origin);
+        enum_definitions.push(enum_type.definition);
+    }
+
     let mut expression_artifacts = Vec::with_capacity(expressions.len());
     for expression in expressions {
         origins.push(expression.origin);
@@ -2304,10 +2399,13 @@ fn assemble_catalogue_semantics(
         function_definitions.push(function.definition);
     }
     origins.append(&mut function_origins);
-    let catalogue = CatalogueSnapshot::new_with_functions(
+    let catalogue = CatalogueSnapshot::new_with_functions_and_enum_types(
         catalogue_id,
         schemas,
         object_definitions,
+        Vec::new(),
+        enum_definitions,
+        Vec::new(),
         function_definitions,
     )
     .map_err(PostgresKernelError::CatalogueSnapshot)?;
