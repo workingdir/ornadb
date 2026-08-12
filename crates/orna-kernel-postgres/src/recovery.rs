@@ -1542,6 +1542,7 @@ async fn load_fields(
                 "SELECT catalogue_revision_id, owner_type_id, field_id, name, ordinal,
                         type_kind, scalar_type, target_type_id,
                         value_type_id, value_standard_library_revision_id,
+                        enum_type_id,
                         nullable, is_unique, default_expression_id, on_delete,
                         source_unit_id, source_start, source_end
                  FROM _orna_kernel.catalogue_fields
@@ -1603,16 +1604,16 @@ impl LegacyResolvedTypeTupleMember {
     const fn value_tuple_rule(self) -> &'static str {
         match self {
             Self::Field => {
-                "field type kind, scalar type, target identity, value type identity, and standard library revision must form one exact supported tuple"
+                "field type kind, scalar type, target identity, value type identity, standard library revision, and enum type identity must form one exact supported tuple"
             }
             Self::Parameter => {
-                "parameter type columns, value type identity, and standard library revision must form one exact resolved type tuple"
+                "parameter type columns, value type identity, standard library revision, and enum type identity must form one exact resolved type tuple"
             }
             Self::ReturnColumn => {
-                "return column type columns, value type identity, and standard library revision must form one exact resolved type tuple"
+                "return column type columns, value type identity, standard library revision, and enum type identity must form one exact resolved type tuple"
             }
             Self::SingleReturn => {
-                "function return type columns, value type identity, and standard library revision must form one exact resolved type tuple"
+                "function return type columns, value type identity, standard library revision, and enum type identity must form one exact resolved type tuple"
             }
         }
     }
@@ -1638,7 +1639,7 @@ pub(super) enum LegacyResolvedTypeTupleKind {
     Reference,
 }
 
-/// The five stored columns that describe one version-2 resolved type.
+/// The six stored columns that describe one version-2 resolved type.
 ///
 /// This is the only recovery projection that combines legacy type columns with
 /// a standard value identity and its standard-library revision pin.
@@ -1648,6 +1649,7 @@ pub(super) struct ResolvedTypeTuple {
     pub(super) target: Option<TypeId>,
     pub(super) value_type: Option<TypeId>,
     pub(super) standard_library_revision: Option<StandardLibraryRevisionId>,
+    pub(super) enum_type: Option<TypeId>,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -1742,13 +1744,27 @@ pub(super) fn decode_resolved_type_tuple(
         record.invariant("resolved value type tuple requires a version 2 catalogue context")
     })?;
 
+    if tuple.kind.as_deref() == Some("enum") {
+        let Some(enum_type) = tuple.enum_type else {
+            return Err(record.invariant(member.value_tuple_rule()));
+        };
+        if tuple.scalar.is_some()
+            || tuple.target.is_some()
+            || tuple.value_type.is_some()
+            || tuple.standard_library_revision.is_some()
+        {
+            return Err(record.invariant(member.value_tuple_rule()));
+        }
+        return Ok(ResolvedType::named(enum_type));
+    }
+
     if tuple.kind.as_deref() == Some("value") {
         let (Some(value_type), Some(standard_library_revision)) =
             (tuple.value_type, tuple.standard_library_revision)
         else {
             return Err(record.invariant(member.value_tuple_rule()));
         };
-        if tuple.scalar.is_some() || tuple.target.is_some() {
+        if tuple.scalar.is_some() || tuple.target.is_some() || tuple.enum_type.is_some() {
             return Err(record.invariant(member.value_tuple_rule()));
         }
         if standard_library_revision != standard.revision() {
@@ -1764,7 +1780,10 @@ pub(super) fn decode_resolved_type_tuple(
         return Ok(ResolvedType::value(value_type));
     }
 
-    if tuple.value_type.is_some() || tuple.standard_library_revision.is_some() {
+    if tuple.value_type.is_some()
+        || tuple.standard_library_revision.is_some()
+        || tuple.enum_type.is_some()
+    {
         return Err(record.invariant(member.value_tuple_rule()));
     }
     let kind = decode_legacy_resolved_type_tuple_kind(tuple.kind.as_deref(), record, member)?;
@@ -1930,7 +1949,7 @@ fn decode_version_two_field_type_columns(
     let kind: Option<String> = record.column(
         row,
         "type_kind",
-        "field type kind must be scalar, named, reference, or value",
+        "field type kind must be scalar, named, reference, value, or enum",
     )?;
     let scalar: Option<String> = record.column(
         row,
@@ -1967,6 +1986,16 @@ fn decode_version_two_field_type_columns(
         "field value type standard library revision identity must be null or 16 bytes",
     )?
     .map(StandardLibraryRevisionId::from_bytes);
+    let enum_type = optional_identity_bytes(
+        record.column(
+            row,
+            "enum_type_id",
+            "field enum type identity must be null or 16 bytes",
+        )?,
+        record,
+        "field enum type identity must be null or 16 bytes",
+    )?
+    .map(TypeId::from_bytes);
     decode_resolved_type_tuple(
         ResolvedTypeTuple {
             kind,
@@ -1974,6 +2003,7 @@ fn decode_version_two_field_type_columns(
             target,
             value_type,
             standard_library_revision,
+            enum_type,
         },
         catalogue_hash_context,
         record,
@@ -2715,6 +2745,7 @@ mod tests {
                     target: None,
                     value_type: Some(value_type),
                     standard_library_revision: Some(standard.revision()),
+                    enum_type: None,
                 },
                 &context,
                 &record,
@@ -2724,6 +2755,57 @@ mod tests {
 
             assert_eq!(resolved_type, ResolvedType::value(value_type));
         }
+    }
+
+    #[test]
+    fn resolved_enum_tuple_uses_only_the_application_enum_identity() {
+        let standard = orna_standard::verify_standard_library_snapshot(
+            orna_standard::retained_standard_library_snapshot()
+                .expect("retained standard snapshot"),
+        )
+        .expect("verified retained standard snapshot");
+        let context = CatalogueHashContext::version_two(standard);
+        let enum_type = TypeId::from_bytes([0xa3; 16]);
+        let record = DurableRecord::new("_orna_kernel.catalogue_fields", "enum-tuple");
+
+        assert_eq!(
+            decode_resolved_type_tuple(
+                ResolvedTypeTuple {
+                    kind: Some("enum".to_owned()),
+                    scalar: None,
+                    target: None,
+                    value_type: None,
+                    standard_library_revision: None,
+                    enum_type: Some(enum_type),
+                },
+                &context,
+                &record,
+                LegacyResolvedTypeTupleMember::Field,
+            )
+            .expect("enum tuple"),
+            ResolvedType::named(enum_type)
+        );
+
+        assert!(matches!(
+            decode_resolved_type_tuple(
+                ResolvedTypeTuple {
+                    kind: Some("enum".to_owned()),
+                    scalar: None,
+                    target: Some(enum_type),
+                    value_type: None,
+                    standard_library_revision: None,
+                    enum_type: Some(enum_type),
+                },
+                &context,
+                &record,
+                LegacyResolvedTypeTupleMember::Field,
+            ),
+            Err(PostgresKernelError::DurableInvariant {
+                relation: "_orna_kernel.catalogue_fields",
+                record: failed_record,
+                rule: "field type kind, scalar type, target identity, value type identity, standard library revision, and enum type identity must form one exact supported tuple",
+            }) if failed_record == "enum-tuple"
+        ));
     }
 
     #[test]
@@ -2749,6 +2831,7 @@ mod tests {
                 target: None,
                 value_type: Some(value_type),
                 standard_library_revision: None,
+                enum_type: None,
             },
             &context,
             &record,
@@ -2759,7 +2842,7 @@ mod tests {
             Err(PostgresKernelError::DurableInvariant {
                 relation: "_orna_kernel.catalogue_fields",
                 record: failed_record,
-                rule: "field type kind, scalar type, target identity, value type identity, and standard library revision must form one exact supported tuple",
+                rule: "field type kind, scalar type, target identity, value type identity, standard library revision, and enum type identity must form one exact supported tuple",
             }) if failed_record == "value-tuple-order"
         ));
 
@@ -2772,6 +2855,7 @@ mod tests {
                 target: None,
                 value_type: Some(value_type),
                 standard_library_revision: Some(wrong_pin),
+                enum_type: None,
             },
             &context,
             &record,
@@ -2800,6 +2884,7 @@ mod tests {
                 target: None,
                 value_type: Some(missing_value_type),
                 standard_library_revision: Some(standard.revision()),
+                enum_type: None,
             },
             &context,
             &record,
@@ -2852,6 +2937,7 @@ mod tests {
                         target: None,
                         value_type: None,
                         standard_library_revision: None,
+                        enum_type: None,
                     },
                     &context,
                     &record,
@@ -2871,6 +2957,7 @@ mod tests {
                     target: Some(target),
                     value_type: None,
                     standard_library_revision: None,
+                    enum_type: None,
                 },
                 &context,
                 &record,
@@ -2887,6 +2974,7 @@ mod tests {
                     target: Some(target),
                     value_type: None,
                     standard_library_revision: None,
+                    enum_type: None,
                 },
                 &context,
                 &record,
