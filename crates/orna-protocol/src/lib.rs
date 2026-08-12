@@ -547,16 +547,28 @@ fn require_fixed_payload<const LENGTH: usize>(
 #[cfg(test)]
 mod tests {
     use orna_core::{
-        CatalogueRevisionId, ObjectId, SchemaId,
+        CatalogueRevisionId, FieldId, ObjectId, SchemaId, SourceBundleId, SourceRevisionId,
+        SourceUnitId,
+        canonical_hash::{
+            catalogue_digest_with_context, source_bundle_digest, source_revision_record_digest,
+            source_unit_content_digest,
+        },
         catalogue::{
-            CatalogueSnapshot, EnumTypeDefinition, QualifiedSemanticName, SchemaDefinition,
+            CatalogueSnapshot, EnumTypeDefinition, QualifiedSemanticName,
+            RecordValueFieldDefinition, RecordValueTypeDefinition, SchemaDefinition,
+        },
+        revision::{
+            ActiveDatabaseRevision, ActiveDatabaseRevisionInput, ActiveRevisionContent,
+            CatalogueHashContext, DefinitionIdentity, DefinitionOrigin, RevisionPair, SourceOrigin,
+            StoredSourceRevision, StoredSourceUnit,
         },
         types::{ResolvedType, StandardScalar},
-        value::{EnumValue, RuntimeFloat},
+        value::{EnumValue, RecordValue, RuntimeFloat},
     };
     use orna_standard::{
         BIGINT_TYPE_ID, BINARY_LARGE_OBJECT_TYPE_ID, BOOLEAN_TYPE_ID,
         CHARACTER_LARGE_OBJECT_TYPE_ID, FLOAT_TYPE_ID, INTEGER_TYPE_ID, STANDARD_TYPE_IDS,
+        retained_standard_library_snapshot, verify_standard_library_snapshot,
     };
     use proptest::prelude::*;
 
@@ -579,6 +591,94 @@ mod tests {
                 labels.iter().copied(),
             )],
             vec![],
+        )
+        .unwrap()
+    }
+
+    fn active_record_revision() -> ActiveDatabaseRevision {
+        let record_type = TypeId::from_bytes([0x47; 16]);
+        let record_field = FieldId::from_bytes([0x48; 16]);
+        let schema = SchemaId::from_bytes([0x49; 16]);
+        let catalogue_revision = CatalogueRevisionId::from_bytes([0x4a; 16]);
+        let catalogue = CatalogueSnapshot::new_with_record_value_types(
+            catalogue_revision,
+            vec![SchemaDefinition::new(
+                schema,
+                QualifiedSemanticName::new(["crm"]).unwrap(),
+            )],
+            vec![],
+            vec![],
+            vec![],
+            vec![RecordValueTypeDefinition::new(
+                record_type,
+                QualifiedSemanticName::new(["crm", "flag"]).unwrap(),
+                vec![RecordValueFieldDefinition::new(
+                    record_field,
+                    "enabled",
+                    0,
+                    ResolvedType::value(BOOLEAN_TYPE_ID),
+                )],
+            )],
+            vec![],
+        )
+        .unwrap();
+        let source_unit_id = SourceUnitId::from_bytes([0x4b; 16]);
+        let source_unit = StoredSourceUnit::new(
+            source_unit_id,
+            0,
+            "app/types.orna",
+            "ab",
+            source_unit_content_digest("ab").unwrap(),
+        )
+        .unwrap();
+        let bundle_hash = source_bundle_digest(std::slice::from_ref(&source_unit)).unwrap();
+        let source_revision = SourceRevisionId::from_bytes([0x4c; 16]);
+        let source = StoredSourceRevision::new(
+            SourceBundleId::from_bytes([0x4d; 16]),
+            source_revision,
+            None,
+            vec![source_unit],
+            bundle_hash,
+            source_revision_record_digest(
+                SourceBundleId::from_bytes([0x4d; 16]),
+                None,
+                bundle_hash,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let origins = vec![
+            DefinitionOrigin::new(
+                DefinitionIdentity::Schema(schema),
+                SourceOrigin::new(source_unit_id, 0, 1).unwrap(),
+            ),
+            DefinitionOrigin::new(
+                DefinitionIdentity::ValueType(record_type),
+                SourceOrigin::new(source_unit_id, 1, 2).unwrap(),
+            ),
+            DefinitionOrigin::new(
+                DefinitionIdentity::Field {
+                    owner: record_type,
+                    field: record_field,
+                },
+                SourceOrigin::new(source_unit_id, 1, 2).unwrap(),
+            ),
+        ];
+        let standard =
+            verify_standard_library_snapshot(retained_standard_library_snapshot().unwrap())
+                .unwrap();
+        let context = CatalogueHashContext::version_two(standard);
+        let catalogue_hash =
+            catalogue_digest_with_context(&context, &catalogue, &[], &[], &origins, &[]).unwrap();
+        ActiveDatabaseRevision::new_with_catalogue_hash_context(
+            ActiveDatabaseRevisionInput::new(
+                RevisionPair::new(source_revision, catalogue_revision),
+                source,
+                catalogue,
+                catalogue_hash,
+                ActiveRevisionContent::new(vec![], vec![], origins, vec![]),
+            ),
+            context,
         )
         .unwrap()
     }
@@ -623,6 +723,26 @@ mod tests {
         );
         assert_eq!(encode_value(&value), Err(ValueCodecError::UnsupportedValue));
         assert_eq!(decode_value(&expected), Err(ValueCodecError::InvalidMarker));
+    }
+
+    #[test]
+    fn version_one_and_two_codecs_reject_record_runtime_values() {
+        let active = active_record_revision();
+        let record_type = active.catalogue().record_value_types()[0].id();
+        let value = RuntimeValue::Record(
+            RecordValue::new(
+                &active,
+                record_type,
+                [(String::from("enabled"), RuntimeValue::Boolean(true))],
+            )
+            .unwrap(),
+        );
+
+        assert_eq!(encode_value(&value), Err(ValueCodecError::UnsupportedValue));
+        assert_eq!(
+            encode_catalogue_value(active.catalogue(), &value),
+            Err(ValueCodecError::UnsupportedValue)
+        );
     }
 
     #[test]
