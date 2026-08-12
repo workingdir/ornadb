@@ -57,3 +57,5 @@ source-of-truth or authority rules.
   [Raw CLIENT Dispatch Preserves the Protected Kernel Gate](0027-raw-client-dispatch.md)
 * **work ADR 0028:**
   [The Local Raw Socket Negotiates Before Protected Dispatch](0028-authenticated-local-raw-socket.md)
+* **work ADR 0029:**
+  [Enum Types Are Ordered Catalogue Values](0029-catalogue-enum-value-types.md)
