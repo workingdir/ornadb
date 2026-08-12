@@ -63,9 +63,8 @@ build:
 		"$(PAYLOAD_ROOT)/usr/lib/sysusers.d/orna.conf"; \
 	install -D -m 0644 -- "$(REPOSITORY_ROOT)/packaging/debian/orna.tmpfiles" \
 		"$(PAYLOAD_ROOT)/usr/lib/tmpfiles.d/orna.conf"; \
-	install -D -m 0644 /dev/null "$(PAYLOAD_ROOT)/etc/orna/instances/default.toml"; \
-	printf '%s\n' 'format = 1' 'instance = "default"' \
-		>"$(PAYLOAD_ROOT)/etc/orna/instances/default.toml"; \
+	install -D -m 0644 -- "$(REPOSITORY_ROOT)/packaging/debian/default.toml" \
+		"$(PAYLOAD_ROOT)/etc/orna/instances/default.toml"; \
 	rustc_version="$$(rustc --version)"; cargo_version="$$(cargo --version)"; \
 	lock_sha="$$(sha256sum "$(REPOSITORY_ROOT)/Cargo.lock" | awk '{ print $$1 }')"; \
 	engine_sha="$$(sha256sum "$${engine_one[0]}" | awk '{ print $$1 }')"; \
@@ -88,6 +87,12 @@ package: build
 	@mkdir -m 0755 -p -- "$(PACKAGE_ROOT)/DEBIAN"; \
 	install -m 0644 -- "$(REPOSITORY_ROOT)/packaging/debian/control" \
 		"$(PACKAGE_ROOT)/DEBIAN/control"; \
+	printf '%s\n' '/etc/orna/instances/default.toml' \
+		>"$(PACKAGE_ROOT)/DEBIAN/conffiles"; \
+	for script in preinst prerm postinst; do \
+		install -m 0755 -- "$(REPOSITORY_ROOT)/packaging/debian/$${script}" \
+			"$(PACKAGE_ROOT)/DEBIAN/$${script}"; \
+	done; \
 	while IFS= read -r relative; do \
 		[[ -n "$${relative}" && "$${relative}" != \#* ]] || continue; \
 		source="$(PAYLOAD_ROOT)/$${relative}"; destination="$(PACKAGE_ROOT)/$${relative}"; \
@@ -103,6 +108,14 @@ package: build
 
 verify:
 	@[[ -f "$(PACKAGE)" ]] || { printf '%s\n' '[debian] error: package is absent' >&2; exit 1; }; \
+	mapfile -t control_files < <(find "$(PACKAGE_ROOT)/DEBIAN" -maxdepth 1 \
+		-type f -printf '%f\n' | LC_ALL=C sort); \
+	[[ "$${control_files[*]}" == 'conffiles control postinst preinst prerm' ]] || { \
+		printf '%s\n' '[debian] error: package control inventory is not exact' >&2; exit 1; }; \
+	mapfile -t control_scripts < <(find "$(PACKAGE_ROOT)/DEBIAN" -maxdepth 1 \
+		-type f -perm /111 -printf '%f\n' | LC_ALL=C sort); \
+	[[ "$${control_scripts[*]}" == 'postinst preinst prerm' ]] || { \
+		printf '%s\n' '[debian] error: package control-script inventory is not exact' >&2; exit 1; }; \
 	mapfile -t installed < <(find "$(PACKAGE_ROOT)" -type f \
 		! -path '*/DEBIAN/*' -printf '%P\n' | LC_ALL=C sort); \
 	mapfile -t expected < <(sed '/^$$/d; /^#/d' \
