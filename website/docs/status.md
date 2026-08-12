@@ -8,21 +8,26 @@ description: Implemented repository work, locked decisions, current proposals, o
 This page separates what exists from what is designed. It summarises the repository delivery checklist and the canonical v0.2 design status.
 
 :::warning Development status
-OrnaDB is under active development. There is no released executable and no installable `orna` CLI yet. Nothing on this site is available to install today.
+OrnaDB is under active development. The repository builds and verifies a local
+Debian package, but no public release is available to install today.
 :::
 
 ## Implemented repository work
 
-These items are implemented, reviewed, committed, and pushed in the working repository:
+These items are implemented, reviewed, committed, and verified locally in the
+working repository:
 
 | Item | Status |
 |---|---|
-| Offline `orna source check <file.orna>` contract | ACCEPTED |
+| Offline `orna source check <file.orna>` | IMPLEMENTED |
 | SERVER query and mutation slices through required unique reference fields | IMPLEMENTED |
+| First verified Boolean CLIENT function path | IMPLEMENTED |
 | Stable catalogue value-type and binding identities | IMPLEMENTED |
 | Versioned standard-library and catalogue hashes without changing version-1 bytes | IMPLEMENTED |
 | Source-independent standard type manifest | IMPLEMENTED |
-| One-executable embedded PostgreSQL boundary | ACCEPTED |
+| Orna-owned instance, initialisation, private socket, and foreground supervision | IMPLEMENTED |
+| Native `orna server backend-shell` | IMPLEMENTED |
+| One-executable Debian package with embedded PostgreSQL | IMPLEMENTED |
 
 These are contract and design slices in the repository. They do not yet form a usable product.
 
@@ -30,11 +35,6 @@ These are contract and design slices in the repository. They do not yet form a u
 
 | Area | Item |
 |---|---|
-| Source checking | executable `orna source check <file.orna>` behaviour |
-| Instance model | Orna-owned instance, cluster initialisation, private socket authentication |
-| Embedded server | `orna server backend-shell` and the private SQL console |
-| Packaging | Debian package with one `/usr/bin/orna` and embedded PostgreSQL |
-| CLIENT path | first verified CLIENT function path |
 | Protocol | invocation, authorisation, and public protocol slices |
 | Types | enum, record, and opaque value types beyond the standard primitives |
 
