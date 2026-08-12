@@ -21,7 +21,9 @@ use orna_artifact::{
         FieldAssignment as ServerMutationFieldAssignment,
         LANGUAGE_VERSION_IDENTITY as SERVER_MUTATION_PLAN_LANGUAGE_VERSION,
         MutationExpression as ServerMutationExpression,
-        MutationExpressionKind as ServerMutationExpressionKind, MutationSelector, ServerDeletePlan,
+        MutationExpressionKind as ServerMutationExpressionKind, MutationSelector,
+        RecordFieldExpression as ServerRecordFieldExpression,
+        RecordFieldExpressionKind as ServerRecordFieldExpressionKind, ServerDeletePlan,
         ServerMutationPlan, ServerMutationPlanError,
     },
     server_plan::{
@@ -44,7 +46,8 @@ use orna_core::{
         FunctionDefinition, FunctionDomain, FunctionReturn, FunctionReturnColumnDefinition,
         FunctionSecurity, FunctionTransaction, FunctionVolatility, ObjectTypeDefinition,
         ParameterDefinition, QualifiedSemanticName, RecordValueFieldDefinition,
-        RecordValueTypeDefinition, SchemaDefinition,
+        RecordValueTypeDefinition, SchemaDefinition, ValueTypeKind, ValueTypeMutability,
+        ValueTypePersistence,
     },
     revision::{
         ActiveDatabaseRevision, CatalogueHashContext, DefinitionIdentity, DefinitionOrigin,
@@ -66,7 +69,10 @@ use crate::{
     StandardApplicationContextError, check_standard_application,
 };
 use crate::{
-    mutation::{DeletePlanIr, MutationExpressionKind, MutationOperation, MutationPlanIr},
+    mutation::{
+        DeletePlanIr, MutationExpressionKind, MutationOperation, MutationPlanIr,
+        MutationRecordFieldExpressionKind,
+    },
     relational::{supports_server_select_distinct, supports_server_select_equality},
     resolver::{
         CheckedFieldRename, REQUIRED_UNIQUE_REFERENCE_MESSAGE, supports_required_unique_reference,
@@ -2024,18 +2030,11 @@ fn server_mutation_plan(
     plan: &MutationPlanIr<TypeId, FieldId, FunctionId, ParameterId>,
     function: &FunctionDefinition,
     object_types: &[ObjectTypeDefinition],
+    enum_types: &[EnumTypeDefinition],
+    record_value_types: &[RecordValueTypeDefinition],
+    standard: Option<&CatalogueSnapshot>,
     references: &[(DefinitionReferenceKind, DefinitionReferenceTarget)],
 ) -> Result<ServerMutationPlan, PrepareError> {
-    if plan.assignments().iter().any(|assignment| {
-        matches!(
-            assignment.expression().kind(),
-            MutationExpressionKind::RecordConstructor { .. }
-        )
-    }) {
-        return Err(PrepareError::InvalidCheckedBundle {
-            reason: "record constructor mutation artifact encoding is not implemented",
-        });
-    }
     let target = object_types
         .iter()
         .find(|object_type| object_type.id() == plan.target_object())
@@ -2048,11 +2047,14 @@ fn server_mutation_plan(
         });
     }
 
-    validate_mutation_parameters(function, object_types)?;
-    let assignments = validate_mutation_assignments(
+    validate_mutation_parameters_with_catalogue(function, object_types, enum_types, standard)?;
+    let assignments = validate_mutation_assignments_with_catalogue(
         plan.assignments(),
         target,
         function,
+        enum_types,
+        record_value_types,
+        standard,
         matches!(plan.operation(), MutationOperation::Insert),
     )?;
     validate_reference_sequence(
@@ -2694,6 +2696,15 @@ fn validate_mutation_parameters(
     function: &FunctionDefinition,
     object_types: &[ObjectTypeDefinition],
 ) -> Result<(), PrepareError> {
+    validate_mutation_parameters_with_catalogue(function, object_types, &[], None)
+}
+
+fn validate_mutation_parameters_with_catalogue(
+    function: &FunctionDefinition,
+    object_types: &[ObjectTypeDefinition],
+    enum_types: &[EnumTypeDefinition],
+    standard: Option<&CatalogueSnapshot>,
+) -> Result<(), PrepareError> {
     for parameter in function.parameters() {
         if parameter.default_expression().is_some() {
             return Err(PrepareError::InvalidCheckedBundle {
@@ -2728,9 +2739,14 @@ fn validate_mutation_parameters(
                 reason: "mutation parameter REF target is absent from the candidate catalogue",
             });
         }
-        if resolved_type.named_type().is_some() {
+        if let Some(type_id) = resolved_type.named_type() {
+            if enum_types.iter().any(|enum_type| enum_type.id() == type_id)
+                || standard.is_some_and(|standard| standard.enum_type_by_id(type_id).is_some())
+            {
+                continue;
+            }
             return Err(PrepareError::InvalidCheckedBundle {
-                reason: "mutation parameter has an unsupported runtime type",
+                reason: "mutation parameter named type is not an active enum",
             });
         }
         if resolved_type.value_type().is_some() {
@@ -2745,10 +2761,31 @@ fn validate_mutation_parameters(
     Ok(())
 }
 
+#[cfg(test)]
 fn validate_mutation_assignments(
     assignments: &[crate::mutation::MutationAssignment<TypeId, FieldId, FunctionId, ParameterId>],
     target: &ObjectTypeDefinition,
     function: &FunctionDefinition,
+    require_all_non_nullable_fields: bool,
+) -> Result<Vec<ServerMutationFieldAssignment>, PrepareError> {
+    validate_mutation_assignments_with_catalogue(
+        assignments,
+        target,
+        function,
+        &[],
+        &[],
+        None,
+        require_all_non_nullable_fields,
+    )
+}
+
+fn validate_mutation_assignments_with_catalogue(
+    assignments: &[crate::mutation::MutationAssignment<TypeId, FieldId, FunctionId, ParameterId>],
+    target: &ObjectTypeDefinition,
+    function: &FunctionDefinition,
+    enum_types: &[EnumTypeDefinition],
+    record_value_types: &[RecordValueTypeDefinition],
+    standard: Option<&CatalogueSnapshot>,
     require_all_non_nullable_fields: bool,
 ) -> Result<Vec<ServerMutationFieldAssignment>, PrepareError> {
     let mut durable_assignments = Vec::with_capacity(assignments.len());
@@ -2770,7 +2807,14 @@ fn validate_mutation_assignments(
                 reason: "mutation assigns one target field more than once",
             });
         }
-        let expression = server_mutation_expression(assignment.expression(), function, field)?;
+        let expression = server_mutation_expression(
+            assignment.expression(),
+            function,
+            field,
+            enum_types,
+            record_value_types,
+            standard,
+        )?;
         durable_assignments.push(ServerMutationFieldAssignment::new(
             assignment.owner(),
             assignment.field(),
@@ -2791,9 +2835,12 @@ fn validate_mutation_assignments(
 }
 
 fn server_mutation_expression(
-    expression: &crate::mutation::MutationExpression<TypeId, FunctionId, ParameterId>,
+    expression: &crate::mutation::MutationExpression<TypeId, FunctionId, ParameterId, FieldId>,
     function: &FunctionDefinition,
     field: &FieldDefinition,
+    enum_types: &[EnumTypeDefinition],
+    record_value_types: &[RecordValueTypeDefinition],
+    standard: Option<&CatalogueSnapshot>,
 ) -> Result<ServerMutationExpression, PrepareError> {
     let expected_type = resolved_type_from_semantic(expression.value_type().semantic_type());
     let expected_nullable = expression.value_type().nullable();
@@ -2855,10 +2902,46 @@ fn server_mutation_expression(
             }
             ServerMutationExpression::typed_null(expected_type)?
         }
-        MutationExpressionKind::RecordConstructor { .. } => {
-            return Err(PrepareError::InvalidCheckedBundle {
-                reason: "record constructor mutation artifact encoding is not implemented",
-            });
+        MutationExpressionKind::RecordConstructor {
+            record_type,
+            fields,
+        } => {
+            if field.nullable() {
+                return Err(PrepareError::InvalidCheckedBundle {
+                    reason: "record constructor targets a nullable object field",
+                });
+            }
+            if expected_nullable || expected_type != ResolvedType::Named(*record_type) {
+                return Err(PrepareError::InvalidCheckedBundle {
+                    reason: "record constructor type facts differ from its target field",
+                });
+            }
+            let definition = record_value_types
+                .iter()
+                .find(|definition| definition.id() == *record_type)
+                .ok_or(PrepareError::InvalidCheckedBundle {
+                    reason: "record constructor type is absent from the candidate catalogue",
+                })?;
+            if fields.len() != definition.fields().len() {
+                return Err(PrepareError::InvalidCheckedBundle {
+                    reason: "record constructor field count differs from its candidate definition",
+                });
+            }
+            let fields = fields
+                .iter()
+                .zip(definition.fields())
+                .map(|(checked, durable)| {
+                    server_record_field_expression(
+                        checked,
+                        durable,
+                        *record_type,
+                        function,
+                        enum_types,
+                        standard,
+                    )
+                })
+                .collect::<Result<Vec<_>, PrepareError>>()?;
+            ServerMutationExpression::record_constructor(*record_type, fields)?
         }
     };
 
@@ -2899,6 +2982,61 @@ fn server_mutation_expression(
                 });
             }
         }
+        ServerMutationExpressionKind::RecordConstructor { fields } => {
+            let MutationExpressionKind::RecordConstructor {
+                record_type,
+                fields: checked_fields,
+            } = expression.kind()
+            else {
+                return Err(PrepareError::InvalidCheckedBundle {
+                    reason: "mutation artifact record expression differs from checked facts",
+                });
+            };
+            if artifact_expression.resolved_type() != ResolvedType::Named(*record_type)
+                || fields.len() != checked_fields.len()
+            {
+                return Err(PrepareError::InvalidCheckedBundle {
+                    reason: "mutation artifact record expression differs from checked facts",
+                });
+            }
+            for (artifact, checked) in fields.iter().zip(checked_fields) {
+                if artifact.owner() != checked.owner()
+                    || artifact.field() != checked.field()
+                    || artifact.resolved_type()
+                        != resolved_type_from_semantic(checked.value_type().semantic_type())
+                {
+                    return Err(PrepareError::InvalidCheckedBundle {
+                        reason: "mutation artifact record field differs from checked facts",
+                    });
+                }
+                let kind_matches = match (artifact.kind(), checked.kind()) {
+                    (
+                        ServerRecordFieldExpressionKind::Parameter {
+                            owner: artifact_owner,
+                            parameter: artifact_parameter,
+                        },
+                        MutationRecordFieldExpressionKind::ParameterRead {
+                            owner: checked_owner,
+                            parameter: checked_parameter,
+                        },
+                    ) => artifact_owner == checked_owner && artifact_parameter == checked_parameter,
+                    (
+                        ServerRecordFieldExpressionKind::BooleanLiteral {
+                            value: artifact_value,
+                        },
+                        MutationRecordFieldExpressionKind::BooleanLiteral {
+                            value: checked_value,
+                        },
+                    ) => artifact_value == checked_value,
+                    _ => false,
+                };
+                if !kind_matches {
+                    return Err(PrepareError::InvalidCheckedBundle {
+                        reason: "mutation artifact record field expression differs from checked facts",
+                    });
+                }
+            }
+        }
         _ => {
             return Err(PrepareError::InvalidCheckedBundle {
                 reason: "mutation artifact has an unsupported expression kind",
@@ -2906,6 +3044,142 @@ fn server_mutation_expression(
         }
     }
     Ok(artifact_expression)
+}
+
+fn server_record_field_expression(
+    checked: &crate::mutation::MutationRecordFieldExpression<
+        TypeId,
+        FieldId,
+        FunctionId,
+        ParameterId,
+    >,
+    durable: &RecordValueFieldDefinition,
+    record_type: TypeId,
+    function: &FunctionDefinition,
+    enum_types: &[EnumTypeDefinition],
+    standard: Option<&CatalogueSnapshot>,
+) -> Result<ServerRecordFieldExpression, PrepareError> {
+    if checked.owner() != record_type || checked.field() != durable.id() {
+        return Err(PrepareError::InvalidCheckedBundle {
+            reason: "record constructor field identity or order differs from its candidate definition",
+        });
+    }
+    let checked_semantic = checked.value_type().semantic_type();
+    let artifact = match checked.kind() {
+        MutationRecordFieldExpressionKind::ParameterRead { owner, parameter } => {
+            if *owner != function.id() {
+                return Err(PrepareError::InvalidCheckedBundle {
+                    reason: "record constructor parameter owner differs from its enclosing function",
+                });
+            }
+            let parameter = function.parameter_by_id(*parameter).ok_or(
+                PrepareError::InvalidCheckedBundle {
+                    reason: "record constructor parameter is absent from its enclosing function",
+                },
+            )?;
+            if parameter.default_expression().is_some()
+                || parameter.resolved_type() != resolved_type_from_semantic(checked_semantic)
+            {
+                return Err(PrepareError::InvalidCheckedBundle {
+                    reason: "record constructor parameter type differs from checked facts",
+                });
+            }
+            validate_record_child_type(
+                checked_semantic,
+                checked.value_type().standard_value_type(),
+                durable.resolved_type(),
+                enum_types,
+                standard,
+            )?;
+            ServerRecordFieldExpression::parameter(
+                record_type,
+                durable.id(),
+                *owner,
+                parameter.id(),
+                parameter.resolved_type(),
+            )?
+        }
+        MutationRecordFieldExpressionKind::BooleanLiteral { value } => {
+            validate_record_child_type(
+                checked_semantic,
+                checked.value_type().standard_value_type(),
+                durable.resolved_type(),
+                enum_types,
+                standard,
+            )?;
+            if checked_semantic != SemanticType::Scalar(StandardScalar::Boolean) {
+                return Err(PrepareError::InvalidCheckedBundle {
+                    reason: "record constructor Boolean child has inconsistent type facts",
+                });
+            }
+            ServerRecordFieldExpression::boolean_literal(record_type, durable.id(), *value)
+        }
+    };
+    if artifact.owner() != record_type
+        || artifact.field() != durable.id()
+        || artifact.resolved_type() != resolved_type_from_semantic(checked_semantic)
+    {
+        return Err(PrepareError::InvalidCheckedBundle {
+            reason: "record constructor artifact field differs from checked facts",
+        });
+    }
+    Ok(artifact)
+}
+
+fn validate_record_child_type(
+    checked_semantic: SemanticType<TypeId>,
+    checked_standard: Option<TypeId>,
+    durable: ResolvedType,
+    enum_types: &[EnumTypeDefinition],
+    standard: Option<&CatalogueSnapshot>,
+) -> Result<(), PrepareError> {
+    match (checked_semantic, checked_standard, durable) {
+        (SemanticType::Scalar(scalar), Some(checked_standard), ResolvedType::Value(durable_id))
+            if checked_standard == durable_id
+                && standard.is_some_and(|standard| {
+                    standard
+                        .value_type_by_id(durable_id)
+                        .and_then(accepted_record_standard_scalar)
+                        == Some(scalar)
+                }) =>
+        {
+            Ok(())
+        }
+        (SemanticType::Named(checked), None, ResolvedType::Named(durable_id))
+            if checked == durable_id
+                && (enum_types
+                    .iter()
+                    .any(|enum_type| enum_type.id() == durable_id)
+                    || standard.is_some_and(|standard| {
+                        standard.enum_type_by_id(durable_id).is_some()
+                    })) =>
+        {
+            Ok(())
+        }
+        _ => Err(PrepareError::InvalidCheckedBundle {
+            reason: "record constructor child type differs from its durable candidate field",
+        }),
+    }
+}
+
+fn accepted_record_standard_scalar(
+    value_type: &orna_core::catalogue::ValueTypeDefinition,
+) -> Option<StandardScalar> {
+    if value_type.kind() != ValueTypeKind::Primitive
+        || value_type.mutability() != ValueTypeMutability::Immutable
+        || value_type.persistence() != ValueTypePersistence::Persistable
+    {
+        return None;
+    }
+    match value_type.representation_contract() {
+        "orna.kernel.value.boolean@1" => Some(StandardScalar::Boolean),
+        "orna.kernel.value.integer@1" => Some(StandardScalar::Integer),
+        "orna.kernel.value.bigint@1" => Some(StandardScalar::BigInt),
+        "orna.kernel.value.float@1" => Some(StandardScalar::Float),
+        "orna.kernel.value.character-large-object@1" => Some(StandardScalar::CharacterLargeObject),
+        "orna.kernel.value.binary-large-object@1" => Some(StandardScalar::BinaryLargeObject),
+        _ => None,
+    }
 }
 
 fn mutation_reference_sequence(
@@ -2925,16 +3199,46 @@ fn mutation_reference_sequence(
                 field: assignment.field(),
             },
         ));
-        if let MutationExpressionKind::ParameterRead { owner, parameter } =
-            assignment.expression().kind()
-        {
-            references.push((
-                DefinitionReferenceKind::ParameterRead,
-                DefinitionReferenceTarget::Parameter {
-                    owner: *owner,
-                    parameter: *parameter,
-                },
-            ));
+        match assignment.expression().kind() {
+            MutationExpressionKind::ParameterRead { owner, parameter } => {
+                references.push((
+                    DefinitionReferenceKind::ParameterRead,
+                    DefinitionReferenceTarget::Parameter {
+                        owner: *owner,
+                        parameter: *parameter,
+                    },
+                ));
+            }
+            MutationExpressionKind::RecordConstructor {
+                record_type,
+                fields,
+            } => {
+                references.push((
+                    DefinitionReferenceKind::NamedType,
+                    DefinitionReferenceTarget::ValueType(*record_type),
+                ));
+                for field in fields {
+                    references.push((
+                        DefinitionReferenceKind::WriteField,
+                        DefinitionReferenceTarget::Field {
+                            owner: field.owner(),
+                            field: field.field(),
+                        },
+                    ));
+                    if let MutationRecordFieldExpressionKind::ParameterRead { owner, parameter } =
+                        field.kind()
+                    {
+                        references.push((
+                            DefinitionReferenceKind::ParameterRead,
+                            DefinitionReferenceTarget::Parameter {
+                                owner: *owner,
+                                parameter: *parameter,
+                            },
+                        ));
+                    }
+                }
+            }
+            MutationExpressionKind::BooleanLiteral { .. } | MutationExpressionKind::TypedNull => {}
         }
     }
     if let MutationOperation::Update {
@@ -4840,7 +5144,11 @@ impl<'a> CandidateBuilder<'a> {
         let enum_types = self.build_enum_types()?;
         let record_value_types = self.build_record_value_types()?;
         self.validate_record_value_evolution(&record_value_types)?;
-        self.build_functions(&object_types.compatibility)?;
+        self.build_functions(
+            &object_types.compatibility,
+            &enum_types,
+            &record_value_types,
+        )?;
         if self
             .declaration_evidence
             .as_ref()
@@ -5187,6 +5495,8 @@ impl<'a> CandidateBuilder<'a> {
     fn build_functions(
         &mut self,
         object_types: &[ObjectTypeDefinition],
+        enum_types: &[EnumTypeDefinition],
+        record_value_types: &[RecordValueTypeDefinition],
     ) -> Result<(), PrepareError> {
         let standard_owners = self
             .mode
@@ -5208,7 +5518,7 @@ impl<'a> CandidateBuilder<'a> {
 
         let Some(standard_owners) = standard_owners else {
             for checked in self.checked.server_functions() {
-                self.build_server_function(checked, object_types)?;
+                self.build_server_function(checked, object_types, enum_types, record_value_types)?;
             }
             return Ok(());
         };
@@ -5225,7 +5535,12 @@ impl<'a> CandidateBuilder<'a> {
                         .ok_or(PrepareError::InvalidCheckedBundle {
                             reason: "checked standard function owners do not match declaration evidence",
                         })?;
-                    self.build_server_function(&checked, object_types)?;
+                    self.build_server_function(
+                        &checked,
+                        object_types,
+                        enum_types,
+                        record_value_types,
+                    )?;
                 }
                 FunctionDomain::Client => {
                     let validated = self.validated_client(owner)?.clone();
@@ -5283,6 +5598,8 @@ impl<'a> CandidateBuilder<'a> {
                         &checked,
                         &compatibility_definition,
                         &object_types.compatibility,
+                        &[],
+                        &[],
                     )?;
                     let definition = self.function_definition(
                         &checked,
@@ -5408,6 +5725,8 @@ impl<'a> CandidateBuilder<'a> {
         &mut self,
         checked: &crate::CheckedServerFunction,
         object_types: &[ObjectTypeDefinition],
+        enum_types: &[EnumTypeDefinition],
+        record_value_types: &[RecordValueTypeDefinition],
     ) -> Result<(), PrepareError> {
         let function_id = self.identities.function(checked.id())?;
         let initial_revision = self.initial_function_revision(checked.id(), function_id)?;
@@ -5423,8 +5742,13 @@ impl<'a> CandidateBuilder<'a> {
             false,
             CandidateTypeProjection::Durable,
         )?;
-        let prepared_artifact =
-            self.server_artifact(checked, &compatibility_definition, object_types)?;
+        let prepared_artifact = self.server_artifact(
+            checked,
+            &compatibility_definition,
+            object_types,
+            enum_types,
+            record_value_types,
+        )?;
         let initial_references =
             self.function_references(checked, function_id, initial_revision)?;
         let (revision_id, current_revision) =
@@ -5798,6 +6122,8 @@ impl<'a> CandidateBuilder<'a> {
         checked: &crate::CheckedServerFunction,
         function: &FunctionDefinition,
         object_types: &[ObjectTypeDefinition],
+        enum_types: &[EnumTypeDefinition],
+        record_value_types: &[RecordValueTypeDefinition],
     ) -> Result<PreparedFunctionArtifact, PrepareError> {
         if let Some(checked_plan) = checked.identity_selected_query_plan() {
             let plan = checked_plan.try_map_identities(
@@ -5872,7 +6198,19 @@ impl<'a> CandidateBuilder<'a> {
                 |id| self.identities.function(id),
                 |id| self.identities.parameter(id),
             )?;
-            let plan = server_mutation_plan(&plan, function, object_types, &references)?;
+            let context = self.mode.catalogue_hash_context();
+            let standard = context
+                .standard()
+                .map(VerifiedStandardLibrarySnapshot::catalogue);
+            let plan = server_mutation_plan(
+                &plan,
+                function,
+                object_types,
+                enum_types,
+                record_value_types,
+                standard,
+                &references,
+            )?;
             (plan.format_version(), plan.encode()?)
         } else {
             let checked_plan = checked
@@ -6113,7 +6451,8 @@ mod tests {
     use crate::{
         check,
         mutation::{
-            MutationAssignment, MutationExpression, MutationExpressionKind, MutationValueType,
+            MutationAssignment, MutationExpression, MutationExpressionKind,
+            MutationRecordFieldExpression, MutationRecordFieldExpressionKind, MutationValueType,
         },
     };
 
@@ -10039,6 +10378,90 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn record_constructor_preparation_rejects_a_nullable_object_field() {
+        let boolean_id = TypeId::from_bytes([0x91; 16]);
+        let record_id = TypeId::from_bytes([0x92; 16]);
+        let record_field_id = FieldId::from_bytes([0x93; 16]);
+        let standard = CatalogueSnapshot::new_with_types(
+            CatalogueRevisionId::from_bytes([0x94; 16]),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes([0x95; 16]),
+                semantic_name(&["std"]),
+            )],
+            vec![],
+            vec![orna_core::catalogue::ValueTypeDefinition::primitive(
+                boolean_id,
+                semantic_name(&["std", "boolean"]),
+                ValueTypeMutability::Immutable,
+                ValueTypePersistence::Persistable,
+                "orna.kernel.value.boolean@1",
+            )],
+            vec![],
+        )
+        .unwrap();
+        let record = RecordValueTypeDefinition::new(
+            record_id,
+            semantic_name(&["tasks", "flags"]),
+            vec![RecordValueFieldDefinition::new(
+                record_field_id,
+                "active",
+                0,
+                ResolvedType::value(boolean_id),
+            )],
+        );
+        let target_field = FieldDefinition::new(
+            FieldId::from_bytes([0x96; 16]),
+            "flags",
+            0,
+            ResolvedType::named(record_id),
+            true,
+            false,
+            None,
+            None,
+        );
+        let function = FunctionDefinition::new(
+            FunctionId::from_bytes([0x97; 16]),
+            semantic_name(&["tasks", "create"]),
+            FunctionDomain::Server,
+            vec![],
+            FunctionReturn::Rows(vec![]),
+            FunctionRevisionId::from_bytes([0x98; 16]),
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::Atomic),
+            FunctionVolatility::Volatile,
+        );
+        let boolean_type =
+            MutationValueType::new(SemanticType::scalar(StandardScalar::Boolean), false)
+                .with_standard_value_type(boolean_id);
+        let expression = MutationExpression::new(
+            MutationExpressionKind::RecordConstructor {
+                record_type: record_id,
+                fields: vec![MutationRecordFieldExpression::new(
+                    record_id,
+                    record_field_id,
+                    MutationRecordFieldExpressionKind::BooleanLiteral { value: true },
+                    boolean_type,
+                )],
+            },
+            MutationValueType::new(SemanticType::Named(record_id), false),
+        );
+
+        assert!(matches!(
+            server_mutation_expression(
+                &expression,
+                &function,
+                &target_field,
+                &[],
+                std::slice::from_ref(&record),
+                Some(&standard),
+            ),
+            Err(PrepareError::InvalidCheckedBundle {
+                reason: "record constructor targets a nullable object field"
+            })
+        ));
     }
 
     #[test]
