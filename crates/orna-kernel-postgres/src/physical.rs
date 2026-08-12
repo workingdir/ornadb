@@ -108,6 +108,7 @@ fn field_definition(field: &CreateField) -> Result<String, PostgresKernelError> 
     let column = field_name(field.field_id());
     let storage_type = match field.field_type() {
         PhysicalFieldType::Scalar(scalar) => scalar_storage_type(scalar)?,
+        PhysicalFieldType::Enum(_) => "text",
         PhysicalFieldType::Reference { .. } => "bytea",
     };
     let nullability = if field.nullable() { "" } else { " NOT NULL" };
@@ -179,8 +180,8 @@ mod tests {
             source_unit_content_digest,
         },
         catalogue::{
-            CatalogueSnapshot, FieldDefinition, ObjectTypeDefinition, QualifiedSemanticName,
-            SchemaDefinition,
+            CatalogueSnapshot, EnumTypeDefinition, FieldDefinition, ObjectTypeDefinition,
+            QualifiedSemanticName, SchemaDefinition,
         },
         physical::plan_physical_changes,
         revision::{
@@ -479,6 +480,58 @@ mod tests {
         assert_eq!(scalar_statements.references, value_statements.references);
     }
 
+    #[test]
+    fn lowers_catalogue_enum_fields_to_text_without_reference_constraints() {
+        let standard = orna_standard::verify_standard_library_snapshot(
+            orna_standard::retained_standard_library_snapshot()
+                .expect("retained standard-library snapshot"),
+        )
+        .expect("verified standard-library snapshot");
+        let active = empty_active_with_context(CatalogueHashContext::version_two(standard));
+        let enum_type = TypeId::from_bytes([0x51; 16]);
+        let object = TypeId::from_bytes([0x52; 16]);
+        let field = FieldId::from_bytes([0x53; 16]);
+        let candidate = candidate_with_objects_and_enums(
+            &active,
+            vec![ObjectTypeDefinition::new(
+                object,
+                semantic_name(&["private_words", "enum_holder"]),
+                vec![FieldDefinition::new(
+                    field,
+                    "stage",
+                    0,
+                    ResolvedType::named(enum_type),
+                    false,
+                    false,
+                    None,
+                    None,
+                )],
+            )],
+            vec![EnumTypeDefinition::new(
+                enum_type,
+                semantic_name(&["private_words", "stage"]),
+                ["lead", "qualified"],
+            )],
+        );
+        let statements = lower_physical_plan(
+            &plan_physical_changes(&active, &candidate).expect("enum physical plan"),
+        )
+        .expect("enum PostgreSQL statements");
+
+        assert_eq!(statements.references, Vec::<String>::new());
+        assert_eq!(
+            statements.creates[0],
+            concat!(
+                "CREATE TABLE _orna_data.t_52525252525252525252525252525252 (\n",
+                "    _orna_object_id bytea NOT NULL,\n",
+                "    CONSTRAINT pk_52525252525252525252525252525252 PRIMARY KEY (_orna_object_id),\n",
+                "    CONSTRAINT ck_52525252525252525252525252525252_object_id CHECK (octet_length(_orna_object_id) = 16),\n",
+                "    f_53535353535353535353535353535353 text NOT NULL\n",
+                ");"
+            )
+        );
+    }
+
     fn empty_active() -> ActiveDatabaseRevision {
         empty_active_with_context(CatalogueHashContext::version_one())
     }
@@ -518,11 +571,22 @@ mod tests {
         active: &ActiveDatabaseRevision,
         object_types: Vec<ObjectTypeDefinition>,
     ) -> DeployableRevision {
+        candidate_with_objects_and_enums(active, object_types, Vec::new())
+    }
+
+    fn candidate_with_objects_and_enums(
+        active: &ActiveDatabaseRevision,
+        object_types: Vec<ObjectTypeDefinition>,
+        enum_types: Vec<EnumTypeDefinition>,
+    ) -> DeployableRevision {
         let schema = SchemaDefinition::new(SchemaId::new(), semantic_name(&["private_words"]));
-        let catalogue = CatalogueSnapshot::new(
+        let catalogue = CatalogueSnapshot::new_with_enum_types(
             CatalogueRevisionId::new(),
             vec![schema.clone()],
             object_types,
+            Vec::new(),
+            enum_types,
+            Vec::new(),
         )
         .unwrap();
 
@@ -568,6 +632,9 @@ mod tests {
                 )
             }));
         }
+        origins.extend(catalogue.enum_types().iter().map(|enum_type| {
+            DefinitionOrigin::new(DefinitionIdentity::ValueType(enum_type.id()), source_origin)
+        }));
         let context = active.catalogue_hash_context().clone();
         let catalogue_hash =
             catalogue_digest_with_context(&context, &catalogue, &[], &[], &origins, &[]).unwrap();
