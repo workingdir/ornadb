@@ -28,6 +28,7 @@ docker run --rm --interactive --network=none --platform linux/amd64 \
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 package=/proof/orna.deb
 ready=/run/orna/default/ready
+public_socket=/run/orna/default/orna.sock
 instance=/var/lib/orna/instances/default
 manifest="${instance}/instance.toml"
 
@@ -56,6 +57,7 @@ stop_server() {
     kill -INT "${process}"
     wait "${process}" || fail 'server did not stop cleanly'
     [[ ! -e "${ready}" ]] || fail 'server retained readiness after stop'
+    [[ ! -e "${public_socket}" ]] || fail 'server retained public socket after stop'
 }
 
 require_one_executable_tree() {
@@ -166,13 +168,21 @@ set -e
     'orna: the default Orna instance is not installed' ]] ||
     fail 'absent-instance diagnostic changed'
 
-install -d -o orna -g orna -m 0700 /run/orna/default
+install -d -o orna -g orna -m 0711 /run/orna/default
 /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin \
     /usr/bin/setpriv --reuid="${orna_uid}" --regid="${orna_gid}" --clear-groups -- \
     /usr/bin/orna server run >/work/server.stdout 2>/work/server.stderr &
 server_process=$!
 wait_ready "${server_process}"
 require_one_executable_tree
+[[ "$(stat -c '%U:%G %a %F' /run/orna/default)" == 'orna:orna 711 directory' ]] ||
+    fail 'public runtime-root metadata changed'
+[[ "$(stat -c '%U:%G %a %F %h' "${public_socket}")" == \
+    'orna:orna 666 socket 1' ]] || fail 'public raw socket metadata changed'
+[[ "$(stat -c '%U:%G %a %F' /run/orna/default/postgres)" == \
+    'orna:orna 700 directory' ]] || fail 'private PostgreSQL socket metadata changed'
+[[ "$(stat -c '%U:%G %a %F' "${ready}")" == 'orna:orna 600 regular file' ]] ||
+    fail 'private readiness metadata changed'
 
 set +e
 run_as_orna /usr/bin/orna server upgrade >/work/live-upgrade.stdout \
