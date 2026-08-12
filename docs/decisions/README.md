@@ -41,3 +41,5 @@ source-of-truth or authority rules.
 * **work ADR 0019:** [PostgreSQL Is Part of the Orna Executable](0019-embedded-postgresql-engine.md)
 * **work ADR 0020:**
   [Authenticated Sessions Authorise Pinned Function Execution](0020-authenticated-execute-decisions.md)
+* **work ADR 0021:**
+  [PostgreSQL Persists the Security Decision Snapshot](0021-durable-security-snapshot.md)
