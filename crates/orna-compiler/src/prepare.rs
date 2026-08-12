@@ -2026,6 +2026,16 @@ fn server_mutation_plan(
     object_types: &[ObjectTypeDefinition],
     references: &[(DefinitionReferenceKind, DefinitionReferenceTarget)],
 ) -> Result<ServerMutationPlan, PrepareError> {
+    if plan.assignments().iter().any(|assignment| {
+        matches!(
+            assignment.expression().kind(),
+            MutationExpressionKind::RecordConstructor { .. }
+        )
+    }) {
+        return Err(PrepareError::InvalidCheckedBundle {
+            reason: "record constructor mutation artifact encoding is not implemented",
+        });
+    }
     let target = object_types
         .iter()
         .find(|object_type| object_type.id() == plan.target_object())
@@ -2844,6 +2854,11 @@ fn server_mutation_expression(
                 });
             }
             ServerMutationExpression::typed_null(expected_type)?
+        }
+        MutationExpressionKind::RecordConstructor { .. } => {
+            return Err(PrepareError::InvalidCheckedBundle {
+                reason: "record constructor mutation artifact encoding is not implemented",
+            });
         }
     };
 
