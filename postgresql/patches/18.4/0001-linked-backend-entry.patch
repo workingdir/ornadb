@@ -1,0 +1,66 @@
+diff -U0 -Nr a/src/backend/Makefile b/src/backend/Makefile
+--- a/src/backend/Makefile
++++ b/src/backend/Makefile
+@@ -59,0 +60,38 @@
++# Build one deterministic flattened backend link input.  PostgreSQL normally
++# puts server archives in OBJS; flatten them before ar so this archive has no
++# nested archive member.
++ORNA_EMBEDDED_ARCHIVE = liborna_postgres18_backend.a
++ORNA_EMBEDDED_RELOCATABLE_OBJECT = liborna_postgres18_backend.o
++ORNA_EMBEDDED_ENTRY_OBJECT = main/orna_embedded_entry.o
++ORNA_EMBEDDED_RUNTIME_OBJECT = main/orna_embedded.o
++ORNA_EMBEDDED_BACKEND_OBJECTS = \
++	$(filter %.o,$(filter-out main/main.o,$(call expand_subsys,$(OBJS)))) \
++	$(ORNA_EMBEDDED_ENTRY_OBJECT) \
++	$(ORNA_EMBEDDED_RUNTIME_OBJECT)
++ORNA_EMBEDDED_SERVER_ARCHIVES = \
++	$(top_builddir)/src/common/libpgcommon_srv.a \
++	$(top_builddir)/src/port/libpgport_srv.a
++ORNA_EMBEDDED_ZLIB_ARCHIVE ?= /build/zlib/lib/libz.a
++ORNA_EMBEDDED_STATIC_ARCHIVES = $(ORNA_EMBEDDED_SERVER_ARCHIVES) $(ORNA_EMBEDDED_ZLIB_ARCHIVE)
++$(ORNA_EMBEDDED_ENTRY_OBJECT): $(srcdir)/main/main.c generated-headers
++	$(CC) $(CFLAGS) $(CPPFLAGS) -DORNA_EMBEDDED_ENTRY -c $(srcdir)/main/main.c -o $@
++
++$(ORNA_EMBEDDED_RUNTIME_OBJECT): $(srcdir)/main/orna_embedded.c generated-headers
++	$(CC) $(CFLAGS) $(CPPFLAGS) -c $(srcdir)/main/orna_embedded.c -o $@
++
++$(ORNA_EMBEDDED_RELOCATABLE_OBJECT): submake-libpgport generated-headers $(OBJS) \
++	$(ORNA_EMBEDDED_ENTRY_OBJECT) \
++	$(ORNA_EMBEDDED_RUNTIME_OBJECT)
++	$(CC) $(CFLAGS) $(LDFLAGS) -r -o $@ $(ORNA_EMBEDDED_BACKEND_OBJECTS) \
++		-Wl,--whole-archive $(ORNA_EMBEDDED_STATIC_ARCHIVES) -Wl,--no-whole-archive
++
++$(ORNA_EMBEDDED_ARCHIVE): $(ORNA_EMBEDDED_RELOCATABLE_OBJECT)
++	$(AR) rcD $@ $<
++	$(RANLIB) -D $@
++
++.PHONY: orna_postgres18_entry_probe
++orna_postgres18_entry_probe: $(ORNA_EMBEDDED_ARCHIVE)
++	test -n "$(ORNA_EMBEDDED_PROBE_SOURCE)" -a -n "$(ORNA_EMBEDDED_PROBE_OUTPUT)"
++	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $(ORNA_EMBEDDED_PROBE_OUTPUT) \
++		$(ORNA_EMBEDDED_PROBE_SOURCE) $(ORNA_EMBEDDED_ARCHIVE) $(LIBS)
++
+diff -U0 -Nr a/src/backend/main/main.c b/src/backend/main/main.c
+--- a/src/backend/main/main.c
++++ b/src/backend/main/main.c
+@@ -35,0 +36 @@
++#include "orna_embedded.h"
+@@ -71 +72 @@
+-main(int argc, char *argv[])
++orna_postgres18_entry(int argc, char *argv[])
+@@ -75,0 +77,6 @@
++#ifdef ORNA_EMBEDDED_ENTRY
++	if (orna_postgres18_support_root() == NULL ||
++		orna_postgres18_install_exec_filter() != 0)
++		return 1;
++#endif
++
+@@ -233,0 +241,8 @@
++
++#ifndef ORNA_EMBEDDED_ENTRY
++int
++main(int argc, char *argv[])
++{
++	return orna_postgres18_entry(argc, argv);
++}
++#endif
