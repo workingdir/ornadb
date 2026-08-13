@@ -186,7 +186,7 @@ async fn opens_reopens_and_rejects_tampered_standard_database() -> TestResult<()
 async fn dispatches_raw_client_calls_through_security_audit_and_evaluation() -> TestResult<()> {
     with_test_database(|database| async move {
         let kernel = kernel(&database)?;
-        let (active, client_function, server_function) =
+        let (active, _, client_function, server_function) =
             install_raw_client_fixture(&kernel).await?;
         let functions = active
             .catalogue()
@@ -402,7 +402,7 @@ async fn dispatches_raw_client_calls_through_security_audit_and_evaluation() -> 
         .await?;
         let audit_count = security_audit_count(&database).await?;
         let audit_failure = RawClientDispatch::new(
-            kernel,
+            kernel.clone(),
             revoked.bind_authenticated_session(RAW_CLIENT_USER, vec![])?,
             7,
             raw_call(client_function),
@@ -434,6 +434,48 @@ async fn dispatches_raw_client_calls_through_security_audit_and_evaluation() -> 
              DROP CONSTRAINT security_audit_events_dispatch_test_reject_execute",
         )
         .await?;
+        let record_call = RawCall {
+            function: client_function,
+            arguments: vec![orna_protocol::CallArgument {
+                parameter: orna_core::ParameterId::from_bytes([0x74; 16]),
+                value: raw_client_record(&active)?,
+            }],
+        };
+        let audit_count = security_audit_count(&database).await?;
+        run_database_statement(
+            &database,
+            "ALTER TABLE _orna_kernel.active_revision
+             RENAME TO active_revision_preflight_failure",
+        )
+        .await?;
+        let preflight_failure = RawClientDispatch::new(
+            kernel,
+            revoked.bind_authenticated_session(RAW_CLIENT_USER, vec![])?,
+            8,
+            record_call,
+        )
+        .finish()
+        .await;
+        run_database_statement(
+            &database,
+            "ALTER TABLE _orna_kernel.active_revision_preflight_failure
+             RENAME TO active_revision",
+        )
+        .await?;
+        require_dispatch_failure(
+            &preflight_failure,
+            8,
+            CallFailure::InternalFailure,
+            matches!(
+                preflight_failure.source(),
+                Some(PostgresKernelError::Database(_))
+            ),
+            "record preflight recovery failure did not retain its private kernel source",
+        )?;
+        require(
+            security_audit_count(&database).await? == audit_count,
+            "record preflight failure fabricated execute audit evidence",
+        )?;
         require_no_database_sessions(&database).await
     })
     .await
@@ -444,7 +486,8 @@ async fn dispatches_raw_client_calls_through_security_audit_and_evaluation() -> 
 async fn serves_the_actual_local_peer_through_the_raw_socket_protocol() -> TestResult<()> {
     with_test_database(|database| async move {
         let kernel = kernel(&database)?;
-        let (active, client_function, _) = install_raw_client_fixture(&kernel).await?;
+        let (active, standard_upgrade, client_function, _) =
+            install_raw_client_fixture(&kernel).await?;
         let functions = active
             .catalogue()
             .functions()
@@ -547,28 +590,7 @@ async fn serves_the_actual_local_peer_through_the_raw_socket_protocol() -> TestR
             "local raw socket protocol-2 operation",
         )?;
 
-        let record_type = active
-            .catalogue()
-            .record_value_types()
-            .first()
-            .ok_or_else(|| failure("raw CLIENT fixture is missing its record value type"))?;
-        let enum_type = active
-            .catalogue()
-            .enum_types()
-            .first()
-            .ok_or_else(|| failure("raw CLIENT fixture is missing its enum type"))?;
-        let record = RuntimeValue::Record(RecordValue::new(
-            &active,
-            record_type.id(),
-            [(
-                "stage".to_owned(),
-                RuntimeValue::Enum(EnumValue::new(
-                    active.catalogue(),
-                    enum_type.id(),
-                    "qualified",
-                )?),
-            )],
-        )?);
+        let record = raw_client_record(&active)?;
         let (server, client) = StandardUnixStream::pair()?;
         client.set_nonblocking(true)?;
         let mut client = UnixStream::from_std(client)?;
@@ -577,6 +599,7 @@ async fn serves_the_actual_local_peer_through_the_raw_socket_protocol() -> TestR
             server,
             LocalRawSocketResources::new(),
         ));
+        let mut current_pair = active.pair();
         let version_three_operation = async {
             client
                 .write_all(b"ORNA\x01\x00\x00\x03\x00\x00\x00\x00")
@@ -595,7 +618,7 @@ async fn serves_the_actual_local_peer_through_the_raw_socket_protocol() -> TestR
                 ClientFrame::CallArgument {
                     stream: 2,
                     parameter: orna_core::ParameterId::from_bytes([0x74; 16]),
-                    value: record,
+                    value: record.clone(),
                 },
                 ClientFrame::CallArgumentsComplete { stream: 2 },
             ] {
@@ -615,7 +638,63 @@ async fn serves_the_actual_local_peer_through_the_raw_socket_protocol() -> TestR
                         failure: CallFailure::TargetUnavailable,
                     },
                 "local raw socket did not retain the closed record-call dispatch boundary",
-            )
+            )?;
+
+            async {
+                let changed_source =
+                    RAW_CLIENT_FUNCTION_SOURCE.replace("'lead', 'qualified'", "'lead', 'stale'");
+                let changed_bundle =
+                    SourceBundle::new([SourceUnit::new("main.orna", changed_source)])?;
+                let changed_report = check_standard_application(
+                    &changed_bundle,
+                    &StandardApplicationCheckContext::try_new(
+                        active.catalogue(),
+                        standard_upgrade.checked_standard_library(),
+                    )?,
+                );
+                require(
+                    changed_report.diagnostics().is_empty(),
+                    "stale record preflight fixture did not compile",
+                )?;
+                let changed = kernel
+                    .apply(&prepare_standard_application(
+                        &changed_report,
+                        active.pair(),
+                        &active,
+                    )?)
+                    .await?;
+                current_pair = changed.pair();
+                for frame in [
+                    ClientFrame::CallRawStart {
+                        stream: 3,
+                        function: client_function,
+                    },
+                    ClientFrame::CallArgument {
+                        stream: 3,
+                        parameter: orna_core::ParameterId::from_bytes([0x74; 16]),
+                        value: record,
+                    },
+                    ClientFrame::CallArgumentsComplete { stream: 3 },
+                ] {
+                    send_active_protocol_frame(&mut client, &active, &frame).await?;
+                }
+                require(
+                    matches!(
+                        read_active_protocol_frame(&mut client, &active).await?,
+                        ServerFrame::CallAccepted { stream: 3, .. }
+                    ),
+                    "local raw socket did not accept the stale record call",
+                )?;
+                require(
+                    read_active_protocol_frame(&mut client, &active).await?
+                        == ServerFrame::CallFailed {
+                            stream: 3,
+                            failure: CallFailure::TargetUnavailable,
+                        },
+                    "local raw socket did not close stale record dispatch",
+                )
+            }
+            .await
         }
         .await;
         let shutdown = client.shutdown().await.map_err(Into::into);
@@ -646,7 +725,7 @@ async fn serves_the_actual_local_peer_through_the_raw_socket_protocol() -> TestR
         )?;
 
         let revoked = SecuritySnapshot::new(
-            active.pair(),
+            current_pair,
             functions,
             granted.principals().collect(),
             vec![],
@@ -782,6 +861,7 @@ async fn install_raw_client_fixture(
     kernel: &PostgresKernel,
 ) -> TestResult<(
     orna_core::revision::ActiveDatabaseRevision,
+    orna_standard::StandardUpgrade,
     FunctionId,
     FunctionId,
 )> {
@@ -829,7 +909,34 @@ async fn install_raw_client_fixture(
         .find(|function| function.name().parts() == ["app", "read"])
         .ok_or_else(|| failure("raw CLIENT fixture is missing its SERVER function"))?
         .id();
-    Ok((active, client, server))
+    Ok((active, standard_upgrade, client, server))
+}
+
+fn raw_client_record(
+    active: &orna_core::revision::ActiveDatabaseRevision,
+) -> TestResult<RuntimeValue> {
+    let record_type = active
+        .catalogue()
+        .record_value_types()
+        .first()
+        .ok_or_else(|| failure("raw CLIENT fixture is missing its record value type"))?;
+    let enum_type = active
+        .catalogue()
+        .enum_types()
+        .first()
+        .ok_or_else(|| failure("raw CLIENT fixture is missing its enum type"))?;
+    Ok(RuntimeValue::Record(RecordValue::new(
+        active,
+        record_type.id(),
+        [(
+            "stage".to_owned(),
+            RuntimeValue::Enum(EnumValue::new(
+                active.catalogue(),
+                enum_type.id(),
+                "qualified",
+            )?),
+        )],
+    )?))
 }
 
 async fn run_database_statement(database: &TestDatabase, statement: &str) -> TestResult<()> {
