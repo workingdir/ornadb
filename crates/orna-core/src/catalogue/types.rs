@@ -203,6 +203,17 @@ impl RecordValueFieldDefinition {
     pub const fn type_descriptor(&self) -> Option<&TypeDescriptor> {
         self.descriptor.as_ref()
     }
+
+    /// Returns this field's canonical descriptor.
+    ///
+    /// The optional accessor remains for compatibility during the migration.
+    /// Fields created through the accepted constructors always contain a
+    /// descriptor.
+    pub fn descriptor(&self) -> &TypeDescriptor {
+        self.descriptor
+            .as_ref()
+            .expect("record value field must have a descriptor")
+    }
 }
 
 /// A failure to construct a record field during flat-type migration.
@@ -791,6 +802,7 @@ mod tests {
                 ResolvedType::Scalar(_) => unreachable!(),
             };
             assert_eq!(definition.type_descriptor(), Some(&expected));
+            assert_eq!(definition.descriptor(), &expected);
         }
 
         let error = RecordValueFieldDefinition::try_new(
@@ -848,6 +860,27 @@ mod tests {
                 "constructed record field descriptors are not accepted"
             );
             assert!(std::error::Error::source(&error).is_none());
+        }
+    }
+
+    #[test]
+    fn record_field_descriptor_constructor_accepts_flat_descriptors() {
+        let field = FieldId::from_bytes([0x31; 16]);
+        let type_id = TypeId::from_bytes([0x32; 16]);
+
+        for descriptor in [
+            TypeDescriptor::named(type_id),
+            TypeDescriptor::reference(type_id),
+        ] {
+            let definition = RecordValueFieldDefinition::try_new_descriptor(
+                field,
+                "value",
+                0,
+                descriptor.clone(),
+            )
+            .unwrap();
+            assert_eq!(definition.descriptor(), &descriptor);
+            assert_eq!(definition.type_descriptor(), Some(&descriptor));
         }
     }
 
