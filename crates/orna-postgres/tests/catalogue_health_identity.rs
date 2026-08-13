@@ -1,3 +1,4 @@
+#[path = "../../orna-kernel-postgres/tests/support/mod.rs"]
 mod support;
 
 use orna_core::{
@@ -8,7 +9,7 @@ use orna_core::{
     },
     value::RuntimeValue,
 };
-use orna_kernel_postgres::{AuthenticatedRawCallResult, PostgresKernel, PostgresKernelError};
+use orna_postgres::{AuthenticatedRawCallResult, PostgresKernel, PostgresKernelError};
 use support::{TestResult, failure, with_test_database};
 
 const SERVICE_UID: u32 = 61_018;
