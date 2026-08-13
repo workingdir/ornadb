@@ -71,3 +71,7 @@ source-of-truth or authority rules.
   [Opaque Values Require Registered Canonical Codecs](0034-opaque-values-require-registered-codecs.md)
 * **work ADR 0035:**
   [Catalogue Health Is One Mandatory System Function](0035-mandatory-catalogue-health-function.md)
+* **work ADR 0036:**
+  [Constructed Types Use Canonical Recursive Descriptors](0036-canonical-constructed-type-descriptors.md)
+* **work ADR 0037:**
+  [PostgreSQL Uses One Private Rust Crate](0037-single-private-postgresql-crate.md)
