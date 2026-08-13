@@ -75,3 +75,5 @@ source-of-truth or authority rules.
   [Constructed Types Use Canonical Recursive Descriptors](0036-canonical-constructed-type-descriptors.md)
 * **work ADR 0037:**
   [PostgreSQL Uses One Private Rust Crate](0037-single-private-postgresql-crate.md)
+* **work ADR 0038:**
+  [Installed Source Apply Activates One Complete File](0038-installed-source-apply.md)
