@@ -145,6 +145,85 @@ cross-catalogue identity collisions, every wrong-category and missing-definition
 error, version-1 value and scalar failures, and unchanged legacy canonical
 bytes.
 
+### Record-field descriptor migration
+
+Step 5 changes `RecordValueFieldDefinition` so its sole final type carrier is a
+`TypeDescriptor`. It does not yet admit a constructed descriptor. The accepted
+record-field family remains exactly the family implemented by ADR 0031:
+
+* `Named(id)` for an application or pinned-standard enum; and
+* `Named(id)` for a pinned-standard immutable, persistable primitive using one
+  of the Boolean, integer, big integer, float, character-large-object, or
+  binary-large-object kernel contracts.
+
+An application record identity remains deferred to step 6. An application
+primitive or opaque value, a pinned-standard opaque value, `Reference`,
+`List`, `Set`, `Map`, `Option`, and `Stream` are rejected. `Stream` remains
+permanently unavailable as a record field. Catalogue-local validation rejects
+a non-`Named` descriptor and a locally disproven `Named` target before the
+snapshot is returned. Canonical-hash and revision validation then resolve every
+remaining `Named` identity through the active application catalogue and pinned
+verified standard snapshot in record-type order and field ordinal order.
+If the same identity is an accepted application enum and accepted pinned
+standard primitive, validation returns
+`AmbiguousRecordValueFieldType { record_value_type, field, type_id }` before it
+selects a tag. Its display is
+`record field type is present in both application and standard catalogues` and
+it has no source.
+
+Catalogue hash version 2 remains the only record-definition hash contract.
+Step 5 allocates no recursive descriptor hash tag. For the accepted flat
+descriptors, classification by the active hash context emits exactly the
+existing bytes:
+
+```text
+enum Named(id)                -> resolved-type tag 2, then the 16-byte TypeId
+standard primitive Named(id)  -> resolved-type tag 4, then the 16-byte TypeId
+```
+
+The conditional record section, record ordering, field identity, name, ordinal,
+and every surrounding byte remain unchanged. A constructed descriptor fails
+before canonical bytes are returned. A later step that admits `List`, `Map`,
+`Option`, or another constructor must first amend this decision with its exact
+recursive hash bytes and any required hash-version change.
+
+Catalogue, canonical-hash, and revision errors replace their record-field
+`ResolvedType` payload with the rejected `TypeDescriptor`; their existing
+owner, field, ordering, and display contract remains unchanged. The proof
+requires byte-identical existing record and record-free version-2 goldens,
+exact tag-2 and tag-4 field bytes, rejection of every other leaf category and
+all five constructors, cross-catalogue identity ambiguity before tag selection,
+and no partial catalogue, revision, or digest.
+
+The one-to-three-file, always-green migration uses this ordered bridge:
+
+1. Add a fallible flat compatibility constructor beside the existing
+   constructor. It accepts `Named`, `Value`, and `Reference`; `Scalar` returns
+   `LegacyScalar { scalar }` through a public, non-exhaustive
+   `RecordValueFieldConstructionError` before a field exists. That error
+   displays `legacy scalar cannot form a record field descriptor` and has no
+   source.
+2. Move existing producers to that fallible constructor in one-to-three-file
+   commits. The stored fact remains the old `ResolvedType`, so every intermediate
+   commit is behaviour- and byte-identical except that an already-invalid scalar
+   fails earlier.
+3. Move consumers to the descriptor view in one-to-three-file commits. During
+   this interval one private dual carrier deterministically derives `Named` from
+   `Named` or `Value` and `Reference` from `Reference`. No API accepts both facts,
+   so disagreement is unrepresentable. Active hash-context classification later
+   recovers the distinction between the old tag-2 and tag-4 leaves.
+4. After every consumer uses the descriptor, replace the stored fact with the
+   descriptor and add the descriptor-native constructor. It rejects every
+   constructor before a field exists while step 5 remains selected.
+5. Move producers to the descriptor-native constructor in bounded commits, then
+   remove the legacy field, constructors, accessor, compatibility projection,
+   and construction error before step 6 opens.
+
+The bridge is not a durable format, public catalogue promise, second hash
+authority, or permission to admit a descriptor-backed field in a catalogue
+early. Its proof includes the scalar and five constructor construction errors
+and the absence of a partial field.
+
 ## Source syntax
 
 The parser accepts the existing canonical EBNF recursively:
