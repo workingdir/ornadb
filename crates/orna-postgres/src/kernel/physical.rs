@@ -572,12 +572,15 @@ mod tests {
             vec![RecordValueTypeDefinition::new(
                 record_type,
                 semantic_name(&["private_words", "status"]),
-                vec![RecordValueFieldDefinition::new(
-                    FieldId::from_bytes([0x57; 16]),
-                    "active",
-                    0,
-                    ResolvedType::value(boolean),
-                )],
+                vec![
+                    RecordValueFieldDefinition::try_new(
+                        FieldId::from_bytes([0x57; 16]),
+                        "active",
+                        0,
+                        ResolvedType::value(boolean),
+                    )
+                    .unwrap(),
+                ],
             )],
         );
         let statements = lower_physical_plan(
