@@ -1,0 +1,15 @@
+[package]
+name = "orna-postgres"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+embedded = ["dep:orna-postgres-engine", "orna-postgres-engine/embedded"]
+test-hooks = ["orna-kernel-postgres/test-hooks"]
+
+[dependencies]
+orna-kernel-postgres = { path = "../orna-kernel-postgres" }
+orna-postgres-engine = { path = "../orna-postgres-engine", optional = true }
