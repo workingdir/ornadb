@@ -151,6 +151,13 @@ pub enum CanonicalHashError {
         /// The missing resolved standard value type identity.
         value_type: TypeId,
     },
+    /// A resolved catalogue slot names a transient opaque value type.
+    OpaqueValueTypeNotAcceptedInSlot {
+        /// The resolved catalogue slot that contains the opaque type.
+        identity: DefinitionIdentity,
+        /// The rejected opaque value type identity.
+        value_type: TypeId,
+    },
     /// A record field uses a resolved type outside the initial record family.
     UnsupportedRecordValueFieldType {
         /// The record value type owning the field.
@@ -328,6 +335,9 @@ impl fmt::Display for CanonicalHashError {
             }
             ResolvedValueTypeNotInPinnedStandard { .. } => formatter
                 .write_str("resolved value type is absent from the pinned standard library"),
+            OpaqueValueTypeNotAcceptedInSlot { .. } => {
+                formatter.write_str("opaque value type is not accepted in a catalogue slot")
+            }
             UnsupportedRecordValueFieldType { .. } => {
                 formatter.write_str("record value field has an unsupported resolved type")
             }
@@ -753,7 +763,7 @@ pub fn catalogue_digest_with_context(
     references: &[DefinitionReference],
 ) -> Result<Sha256Digest, CanonicalHashError> {
     if context.version() == CatalogueHashVersion::Version1 {
-        reject_record_value_types_for_version_one(catalogue)?;
+        reject_version_one_value_definitions(catalogue)?;
     }
     validate_resolved_type_slots(context, catalogue)?;
     validate_catalogue_version_facts(
@@ -928,11 +938,17 @@ fn validate_resolved_type_slot(
             },
         );
     }
-    if context
+    let Some(value_type_definition) = context
         .standard()
-        .is_some_and(|standard| standard.catalogue().value_type_by_id(value_type).is_none())
-    {
+        .and_then(|standard| standard.catalogue().value_type_by_id(value_type))
+    else {
         return Err(CanonicalHashError::ResolvedValueTypeNotInPinnedStandard {
+            identity,
+            value_type,
+        });
+    };
+    if value_type_definition.kind() == ValueTypeKind::Opaque {
+        return Err(CanonicalHashError::OpaqueValueTypeNotAcceptedInSlot {
             identity,
             value_type,
         });
@@ -940,13 +956,23 @@ fn validate_resolved_type_slot(
     Ok(())
 }
 
-fn reject_record_value_types_for_version_one(
+fn reject_version_one_value_definitions(
     catalogue: &CatalogueSnapshot,
 ) -> Result<(), CanonicalHashError> {
     if let Some(record_value_type) = catalogue.record_value_types().first() {
         return Err(CanonicalHashError::CatalogueFactUnsupportedByHashVersion {
             version: CatalogueHashVersion::Version1,
             fact: CatalogueHashFact::RecordValueTypeDefinition(record_value_type.id()),
+        });
+    }
+    if let Some(opaque) = catalogue
+        .value_types()
+        .iter()
+        .find(|value_type| value_type.kind() == ValueTypeKind::Opaque)
+    {
+        return Err(CanonicalHashError::CatalogueFactUnsupportedByHashVersion {
+            version: CatalogueHashVersion::Version1,
+            fact: CatalogueHashFact::ValueTypeDefinition(opaque.id()),
         });
     }
     Ok(())
@@ -1098,6 +1124,7 @@ fn encode_value_types(
         encoder.semantic_name(value_type.name())?;
         encoder.u8(match value_type.kind() {
             ValueTypeKind::Primitive => 1,
+            ValueTypeKind::Opaque => 2,
         });
         encoder.u8(match value_type.mutability() {
             ValueTypeMutability::Immutable => 1,
@@ -2682,20 +2709,15 @@ mod tests {
     }
 
     fn verified_standard_snapshot_with_extra_value(
-        value_type: TypeId,
+        value_type: ValueTypeDefinition,
     ) -> VerifiedStandardLibrarySnapshot {
         let base = standard_snapshot(false, None);
         let mut value_types = base.catalogue().value_types().to_vec();
-        value_types.push(ValueTypeDefinition::primitive(
-            value_type,
-            QualifiedSemanticName::new(["std", "types", "extra"]).unwrap(),
-            ValueTypeMutability::Immutable,
-            ValueTypePersistence::Persistable,
-            "orna.kernel.value.extra@1",
-        ));
+        let value_type_id = value_type.id();
+        value_types.push(value_type);
         let mut origins = base.origins().to_vec();
         origins.push(DefinitionOrigin::new(
-            DefinitionIdentity::ValueType(value_type),
+            DefinitionIdentity::ValueType(value_type_id),
             SourceOrigin::new(SourceUnitId::from_bytes(id::<22>()), 5, 6).unwrap(),
         ));
         let catalogue = CatalogueSnapshot::new_with_types(
@@ -3136,6 +3158,30 @@ mod tests {
     }
 
     #[test]
+    fn opaque_value_type_uses_the_exact_version_two_kind_byte() {
+        let value_type = ValueTypeDefinition::opaque(
+            TypeId::from_bytes(id::<96>()),
+            QualifiedSemanticName::new(["std", "example", "token"]).unwrap(),
+            "std.example.token@1",
+        );
+        let mut encoder = Encoder::new(&[]);
+
+        encode_value_types(&mut encoder, &[value_type], None).unwrap();
+
+        let mut expected = 1_u32.to_be_bytes().to_vec();
+        expected.extend_from_slice(&id::<96>());
+        expected.extend_from_slice(&3_u32.to_be_bytes());
+        for part in ["std", "example", "token"] {
+            expected.extend_from_slice(&(part.len() as u32).to_be_bytes());
+            expected.extend_from_slice(part.as_bytes());
+        }
+        expected.extend_from_slice(&[2, 1, 2]);
+        expected.extend_from_slice(&19_u32.to_be_bytes());
+        expected.extend_from_slice(b"std.example.token@1");
+        assert_eq!(encoder.bytes, expected);
+    }
+
+    #[test]
     fn resolved_value_hash_errors_have_exact_source_free_contracts() {
         let identity = DefinitionIdentity::Parameter {
             owner: FunctionId::from_bytes(id::<4>()),
@@ -3163,6 +3209,13 @@ mod tests {
                     value_type,
                 },
                 "resolved value type is absent from the pinned standard library",
+            ),
+            (
+                CanonicalHashError::OpaqueValueTypeNotAcceptedInSlot {
+                    identity,
+                    value_type,
+                },
+                "opaque value type is not accepted in a catalogue slot",
             ),
         ];
         for (error, display) in errors {
@@ -3381,7 +3434,13 @@ mod tests {
     #[test]
     fn version_two_resolved_value_accepts_a_present_non_golden_standard_id() {
         let value_type = TypeId::from_bytes(id::<95>());
-        let standard = verified_standard_snapshot_with_extra_value(value_type);
+        let standard = verified_standard_snapshot_with_extra_value(ValueTypeDefinition::primitive(
+            value_type,
+            QualifiedSemanticName::new(["std", "types", "extra"]).unwrap(),
+            ValueTypeMutability::Immutable,
+            ValueTypePersistence::Persistable,
+            "orna.kernel.value.extra@1",
+        ));
         let context = CatalogueHashContext::version_two(standard);
         let (catalogue, origins) = catalogue_with_application_types_version_two(false);
         let object = &catalogue.object_types()[0];
@@ -3421,6 +3480,107 @@ mod tests {
                 &references,
             )
             .is_ok()
+        );
+    }
+
+    #[test]
+    fn version_two_rejects_a_pinned_opaque_value_in_every_catalogue_slot() {
+        let opaque = TypeId::from_bytes(id::<96>());
+        let standard = verified_standard_snapshot_with_extra_value(ValueTypeDefinition::opaque(
+            opaque,
+            QualifiedSemanticName::new(["std", "types", "token"]).unwrap(),
+            "std.types.token@1",
+        ));
+        let context = CatalogueHashContext::version_two(standard);
+        let named = ResolvedType::named(TypeId::from_bytes(id::<2>()));
+        let cases = [
+            (
+                catalogue_with_resolved_slot_types(
+                    ResolvedType::value(opaque),
+                    named,
+                    FunctionReturn::Single(named),
+                    FunctionDomain::Client,
+                ),
+                DefinitionIdentity::Field {
+                    owner: TypeId::from_bytes(id::<2>()),
+                    field: FieldId::from_bytes(id::<3>()),
+                },
+            ),
+            (
+                catalogue_with_resolved_slot_types(
+                    named,
+                    ResolvedType::value(opaque),
+                    FunctionReturn::Single(named),
+                    FunctionDomain::Client,
+                ),
+                DefinitionIdentity::Parameter {
+                    owner: FunctionId::from_bytes(id::<4>()),
+                    parameter: ParameterId::from_bytes(id::<5>()),
+                },
+            ),
+            (
+                catalogue_with_resolved_slot_types(
+                    named,
+                    named,
+                    FunctionReturn::Single(ResolvedType::value(opaque)),
+                    FunctionDomain::Client,
+                ),
+                DefinitionIdentity::Function(FunctionId::from_bytes(id::<4>())),
+            ),
+            (
+                catalogue_with_resolved_slot_types(
+                    named,
+                    named,
+                    FunctionReturn::Rows(vec![FunctionReturnColumnDefinition::new(
+                        "token",
+                        0,
+                        ResolvedType::value(opaque),
+                    )]),
+                    FunctionDomain::Server,
+                ),
+                DefinitionIdentity::FunctionReturnColumn {
+                    owner: FunctionId::from_bytes(id::<4>()),
+                    ordinal: 0,
+                },
+            ),
+        ];
+
+        for (catalogue, identity) in cases {
+            assert_eq!(
+                validate_resolved_type_slots(&context, &catalogue),
+                Err(CanonicalHashError::OpaqueValueTypeNotAcceptedInSlot {
+                    identity,
+                    value_type: opaque,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn version_one_rejects_an_opaque_definition_before_slot_validation() {
+        let opaque = TypeId::from_bytes(id::<96>());
+        let catalogue = CatalogueSnapshot::new_with_types(
+            CatalogueRevisionId::from_bytes(id::<97>()),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes(id::<98>()),
+                QualifiedSemanticName::new(["std"]).unwrap(),
+            )],
+            vec![],
+            vec![ValueTypeDefinition::opaque(
+                opaque,
+                QualifiedSemanticName::new(["std", "token"]).unwrap(),
+                "std.token@1",
+            )],
+            vec![],
+        )
+        .unwrap();
+
+        assert_eq!(
+            catalogue_digest(&catalogue, &[], &[], &[], &[]),
+            Err(CanonicalHashError::CatalogueFactUnsupportedByHashVersion {
+                version: CatalogueHashVersion::Version1,
+                fact: CatalogueHashFact::ValueTypeDefinition(opaque),
+            })
         );
     }
 
