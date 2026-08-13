@@ -13,9 +13,7 @@ path = "src/main.rs"
 nix = { version = "0.31.3", features = ["fs", "process", "signal", "term", "user"] }
 orna-compiler = { path = "../orna-compiler" }
 orna-core = { path = "../orna-core" }
-orna-kernel-postgres = { path = "../orna-kernel-postgres" }
 orna-postgres = { path = "../orna-postgres", features = ["embedded"] }
-orna-postgres-engine = { path = "../orna-postgres-engine", features = ["embedded"] }
 orna-protocol = { path = "../orna-protocol" }
 orna-standard = { path = "../orna-standard" }
 rustix = { version = "1.1.4", features = ["fs"] }
@@ -29,5 +27,4 @@ tokio-postgres = "0.7.18"
 [dev-dependencies]
 orna-artifact = { path = "../orna-artifact" }
 orna-client = { path = "../orna-client" }
-orna-kernel-postgres = { path = "../orna-kernel-postgres", features = ["test-hooks"] }
 orna-postgres = { path = "../orna-postgres", features = ["test-hooks"] }
