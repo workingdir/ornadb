@@ -17,7 +17,7 @@ fn main() {
     let repository = crate_root
         .parent()
         .and_then(Path::parent)
-        .expect("engine crate must remain below crates/");
+        .expect("PostgreSQL crate must remain below crates/");
     println!(
         "cargo:rerun-if-changed={}",
         repository.join("postgresql").display()
