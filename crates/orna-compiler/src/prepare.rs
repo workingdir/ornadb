@@ -5363,12 +5363,17 @@ impl<'a> CandidateBuilder<'a> {
                     true,
                     CandidateTypeProjection::Durable,
                 )?;
-                fields.push(RecordValueFieldDefinition::new(
-                    field_id,
-                    checked_field.name(),
-                    checked_field.ordinal(),
-                    resolved_type,
-                ));
+                fields.push(
+                    RecordValueFieldDefinition::try_new(
+                        field_id,
+                        checked_field.name(),
+                        checked_field.ordinal(),
+                        resolved_type,
+                    )
+                    .map_err(|_| PrepareError::InvalidCheckedBundle {
+                        reason: "checked record field has no catalogue identity",
+                    })?,
+                );
                 self.push_origin(
                     DefinitionIdentity::Field {
                         owner: type_id,
@@ -10405,12 +10410,15 @@ mod tests {
         let record = RecordValueTypeDefinition::new(
             record_id,
             semantic_name(&["tasks", "flags"]),
-            vec![RecordValueFieldDefinition::new(
-                record_field_id,
-                "active",
-                0,
-                ResolvedType::value(boolean_id),
-            )],
+            vec![
+                RecordValueFieldDefinition::try_new(
+                    record_field_id,
+                    "active",
+                    0,
+                    ResolvedType::value(boolean_id),
+                )
+                .unwrap(),
+            ],
         );
         let target_field = FieldDefinition::new(
             FieldId::from_bytes([0x96; 16]),
