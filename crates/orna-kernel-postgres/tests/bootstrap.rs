@@ -88,7 +88,7 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
     (
         6,
         "definition reference write evidence",
-        include_str!("../migrations/0006_write_reference_evidence.sql"),
+        include_str!("../../orna-postgres/migrations/0006_write_reference_evidence.sql"),
     ),
     (
         7,
