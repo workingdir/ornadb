@@ -19,11 +19,11 @@ use orna_standard::StandardUpgradeIdentity;
 use tokio::task::{JoinError, JoinHandle};
 use tokio_postgres::{Client, Config, NoTls};
 
-#[path = "../../orna-kernel-postgres/src/apply.rs"]
+#[path = "kernel/apply.rs"]
 mod apply;
 #[path = "../../orna-kernel-postgres/src/bootstrap.rs"]
 mod bootstrap;
-#[path = "../../orna-kernel-postgres/src/decode.rs"]
+#[path = "kernel/decode.rs"]
 mod decode;
 #[path = "../../orna-kernel-postgres/src/physical.rs"]
 mod physical;
