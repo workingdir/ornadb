@@ -143,7 +143,7 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
     (
         17,
         "record value field reference targets",
-        include_str!("../migrations/0017_record_field_reference_targets.sql"),
+        include_str!("../../orna-postgres/migrations/0017_record_field_reference_targets.sql"),
     ),
     (
         18,

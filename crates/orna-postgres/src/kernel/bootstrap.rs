@@ -125,7 +125,7 @@ const MIGRATIONS: &[Migration] = &[
         version: 17,
         name: "record value field reference targets",
         sql: include_str!(
-            "../../../orna-kernel-postgres/migrations/0017_record_field_reference_targets.sql"
+            "../../migrations/0017_record_field_reference_targets.sql"
         ),
         data_step: None,
     },
