@@ -27,3 +27,4 @@ tokio-postgres = "0.7.18"
 
 [dev-dependencies]
 orna-client = { path = "../orna-client" }
+orna-kernel-postgres = { path = "../orna-kernel-postgres", features = ["test-hooks"] }
