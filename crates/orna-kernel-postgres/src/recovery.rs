@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
+#[path = "recovery/functions.rs"]
 mod functions;
 
 use orna_core::{
