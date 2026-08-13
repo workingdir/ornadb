@@ -3271,7 +3271,7 @@ mod tests {
             CatalogueHashContext, CatalogueHashVersion, DefinitionIdentity, DefinitionOrigin,
             SourceOrigin, StoredSourceUnit,
         },
-        types::{ResolvedType, StandardScalar},
+        types::{ResolvedType, StandardScalar, TypeDescriptor},
     };
 
     use crate::{PostgresKernelError, decode::DurableRecord};
@@ -3413,22 +3413,22 @@ mod tests {
                 vec![
                     RecoveredRecordValueField {
                         owner: record_id,
-                        definition: RecordValueFieldDefinition::try_new(
+                        definition: RecordValueFieldDefinition::try_new_descriptor(
                             first_field,
                             "enabled",
                             0,
-                            ResolvedType::value(TypeId::from_bytes([0x98; 16])),
+                            TypeDescriptor::named(TypeId::from_bytes([0x98; 16])),
                         )
                         .expect("record field"),
                         origin: test_origin(first_identity, 2),
                     },
                     RecoveredRecordValueField {
                         owner: record_id,
-                        definition: RecordValueFieldDefinition::try_new(
+                        definition: RecordValueFieldDefinition::try_new_descriptor(
                             second_field,
                             "stage",
                             1,
-                            ResolvedType::named(enum_id),
+                            TypeDescriptor::named(enum_id),
                         )
                         .expect("record field"),
                         origin: test_origin(second_identity, 3),

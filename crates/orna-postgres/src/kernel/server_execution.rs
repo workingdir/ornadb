@@ -2853,6 +2853,7 @@ mod tests {
             RecordValueFieldDefinition, RecordValueTypeDefinition, SchemaDefinition,
         },
         revision::CatalogueHashContext,
+        types::TypeDescriptor,
     };
 
     use super::*;
@@ -3013,11 +3014,11 @@ mod tests {
                 record,
                 name(&["record_test", "status"]),
                 vec![
-                    RecordValueFieldDefinition::try_new(
+                    RecordValueFieldDefinition::try_new_descriptor(
                         FieldId::from_bytes([0x7a; 16]),
                         "stage",
                         0,
-                        ResolvedType::named(enum_type),
+                        TypeDescriptor::named(enum_type),
                     )
                     .expect("record field"),
                 ],
