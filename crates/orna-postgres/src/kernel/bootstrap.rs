@@ -60,7 +60,7 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 7,
         name: "standard catalogue type storage",
-        sql: include_str!("../../../orna-kernel-postgres/migrations/0007_catalogue_types.sql"),
+        sql: include_str!("../../migrations/0007_catalogue_types.sql"),
         data_step: None,
     },
     Migration {
