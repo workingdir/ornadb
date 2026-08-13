@@ -8,7 +8,7 @@ license.workspace = true
 [dependencies]
 orna-artifact = { path = "../orna-artifact" }
 orna-core = { path = "../orna-core" }
+orna-standard = { path = "../orna-standard" }
 
 [dev-dependencies]
 orna-compiler = { path = "../orna-compiler" }
-orna-standard = { path = "../orna-standard" }
