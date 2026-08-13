@@ -20,12 +20,16 @@ use orna_protocol::encode_active_value;
 use tokio_postgres::{IsolationLevel, Row, Transaction, types::FromSqlOwned};
 
 use crate::{
-    PostgresKernel, PostgresKernelError,
+    PostgresKernel, PostgresKernelError, RawServerTargetError,
     bootstrap::require_current_migrations,
     recovery::recover_active_revision,
     server_execution::{
         ServerSelectResult, execute_authorised_server_select, into_raw_server_values,
         raw_server_target_is_unavailable, validate_raw_server_select_target,
+    },
+    server_mutation_execution::{
+        execute_authorised_raw_server_insert, raw_server_insert_target_is_selected,
+        raw_server_insert_target_is_unavailable,
     },
     server_runtime::configure_and_recover,
 };
@@ -54,8 +58,9 @@ impl PostgresKernel {
     ///
     /// The kernel authorises the exact active target before it selects the
     /// function domain. An allowed CLIENT target evaluates through the current
-    /// CLIENT evaluator. An allowed SERVER target must satisfy the closed
-    /// one-column raw SELECT boundary before it can return values.
+    /// CLIENT evaluator. An allowed SERVER target must satisfy either the
+    /// closed one-column raw SELECT boundary or the parameter-free raw INSERT
+    /// boundary before it can return values.
     pub async fn dispatch_authenticated_raw_call(
         &self,
         authenticated_session: &AuthenticatedSession,
@@ -157,37 +162,66 @@ impl PostgresKernel {
                                 .map_err(PostgresKernelError::ClientExecution)
                         }
                         Some(definition) if definition.domain() == FunctionDomain::Server => {
-                            let savepoint = transaction
-                                .savepoint("raw_server_select_execution")
-                                .await
-                                .map_err(PostgresKernelError::Database)?;
-                            let server = async {
-                                validate_raw_server_select_target(&active, function)?;
-                                let result = execute_authorised_server_select(
+                            if raw_server_insert_target_is_selected(&active, function) {
+                                let savepoint = transaction
+                                    .savepoint("raw_server_insert_execution")
+                                    .await
+                                    .map_err(PostgresKernelError::Database)?;
+                                let insert = execute_authorised_raw_server_insert(
                                     &savepoint,
                                     &active,
                                     &authorisation,
-                                    &[],
                                 )
-                                .await?;
-                                let values = into_raw_server_values(&active, function, result)?;
-                                Ok(AuthenticatedRawCallResult::Server(values))
-                            }
-                            .await;
-                            match server {
-                                Ok(result) => {
-                                    savepoint
-                                        .commit()
-                                        .await
-                                        .map_err(PostgresKernelError::Database)?;
-                                    Ok(result)
+                                .await;
+                                match insert {
+                                    Ok(value) => {
+                                        savepoint
+                                            .commit()
+                                            .await
+                                            .map_err(PostgresKernelError::Database)?;
+                                        Ok(AuthenticatedRawCallResult::Server(vec![value]))
+                                    }
+                                    Err(error) => {
+                                        savepoint
+                                            .rollback()
+                                            .await
+                                            .map_err(PostgresKernelError::Database)?;
+                                        Err(classify_raw_server_insert_error(error))
+                                    }
                                 }
-                                Err(error) => {
-                                    savepoint
-                                        .rollback()
-                                        .await
-                                        .map_err(PostgresKernelError::Database)?;
-                                    Err(classify_raw_server_error(error))
+                            } else {
+                                let savepoint = transaction
+                                    .savepoint("raw_server_select_execution")
+                                    .await
+                                    .map_err(PostgresKernelError::Database)?;
+                                let server = async {
+                                    validate_raw_server_select_target(&active, function)?;
+                                    let result = execute_authorised_server_select(
+                                        &savepoint,
+                                        &active,
+                                        &authorisation,
+                                        &[],
+                                    )
+                                    .await?;
+                                    let values = into_raw_server_values(&active, function, result)?;
+                                    Ok(AuthenticatedRawCallResult::Server(values))
+                                }
+                                .await;
+                                match server {
+                                    Ok(result) => {
+                                        savepoint
+                                            .commit()
+                                            .await
+                                            .map_err(PostgresKernelError::Database)?;
+                                        Ok(result)
+                                    }
+                                    Err(error) => {
+                                        savepoint
+                                            .rollback()
+                                            .await
+                                            .map_err(PostgresKernelError::Database)?;
+                                        Err(classify_raw_server_error(error))
+                                    }
                                 }
                             }
                         }
@@ -994,7 +1028,22 @@ fn finish_authenticated_server_select_session<T>(
 fn classify_raw_server_error(error: PostgresKernelError) -> PostgresKernelError {
     match error {
         PostgresKernelError::ServerSelect(source) if raw_server_target_is_unavailable(&source) => {
-            PostgresKernelError::RawServerTargetUnavailable { source }
+            PostgresKernelError::RawServerTargetUnavailable {
+                source: RawServerTargetError::Select(source),
+            }
+        }
+        error => error,
+    }
+}
+
+fn classify_raw_server_insert_error(error: PostgresKernelError) -> PostgresKernelError {
+    match error {
+        PostgresKernelError::ServerInsert(source)
+            if raw_server_insert_target_is_unavailable(&source) =>
+        {
+            PostgresKernelError::RawServerTargetUnavailable {
+                source: RawServerTargetError::Insert(source),
+            }
         }
         error => error,
     }
