@@ -1,6 +1,5 @@
 //! Live PostgreSQL tests for atomic single-row SERVER mutation execution.
 
-#[path = "../../orna-kernel-postgres/tests/support/mod.rs"]
 mod support;
 
 use std::{collections::BTreeSet, str::FromStr};

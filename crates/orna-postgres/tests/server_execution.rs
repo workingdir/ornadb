@@ -1,6 +1,5 @@
 //! Live PostgreSQL tests for the bounded active SERVER SELECT entry point.
 
-#[path = "../../orna-kernel-postgres/tests/support/mod.rs"]
 mod support;
 
 use std::str::FromStr;
