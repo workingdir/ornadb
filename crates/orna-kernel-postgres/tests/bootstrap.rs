@@ -78,7 +78,7 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
     (
         4,
         "canonical hash contract v1",
-        include_str!("../migrations/0004_canonical_hash_contract.sql"),
+        include_str!("../../orna-postgres/migrations/0004_canonical_hash_contract.sql"),
     ),
     (
         5,
