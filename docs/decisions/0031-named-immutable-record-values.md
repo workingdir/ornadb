@@ -347,6 +347,23 @@ encoding context only. Protected dispatch still recovers and pins its
 transactional active revision, and it rejects an argument that is stale
 against that revision before execution.
 
+The current ADR 0027 dispatcher still does not execute a call with arguments.
+One protocol-3 call that contains at least one record argument adds a closed
+preflight before that existing result. The kernel opens one read-only,
+`REPEATABLE READ` transaction, requires the current migrations, recovers one
+complete active revision, and canonically revalidates each record argument in
+argument order against that revision. It commits the read-only transaction
+and closes the session before the dispatcher completes.
+
+A valid or stale record call returns the same public `TARGET_UNAVAILABLE`
+result because no argument-bearing target is accepted yet. A stale value does
+not reach target execution. An operational migration, recovery, commit, or
+session-shutdown failure returns `INTERNAL_FAILURE` and retains its private
+kernel source. The preflight makes no target decision, appends no `EXECUTE`
+audit event, and cannot be presented as invocation. A non-empty call with no
+record value retains ADR 0027's no-PostgreSQL path. Existing cancellation
+rules still require an accepted preflight to finish.
+
 Protocol 1.0 accepts only `ORF1` frames containing `ORV1`. Protocol 2.0 accepts
 only `ORF2` frames containing `ORV2`. Protocol 3.0 accepts only `ORF3` frames
 containing `ORV3`. Each frame decoder rejects the other two markers, and each
@@ -408,8 +425,14 @@ Tests must prove:
 * protocol-3 frame encoding and decoding reject a value that is stale against
   the connection's active revision; and
 * the authenticated adapter recovers the complete active revision before its
-  protocol-3 ACK and still revalidates arguments against the transactional
-  revision at protected dispatch.
+  protocol-3 ACK, while the closed record-argument preflight revalidates each
+  record against a separately recovered transactional active revision before
+  returning `TARGET_UNAVAILABLE`;
+* a stale record fails that preflight without target execution or an
+  `EXECUTE` audit event;
+* an operational preflight failure becomes `INTERNAL_FAILURE` with a private
+  source; and
+* a non-empty call without a record retains the ADR 0027 no-PostgreSQL path.
 
 Normal format, strict Clippy, rustdoc, diff, similarity, workspace, and focused
 live PostgreSQL gates remain required.
@@ -435,7 +458,8 @@ live PostgreSQL gates remain required.
    version-1 or version-2 interfaces or bytes.
 9. Add the exact protocol-3 frame codec defined by this ADR without changing
    version-1 or version-2 frame interfaces, bytes, or state transitions. Add
-   socket negotiation in a later adapter commit.
+   socket negotiation in a later adapter commit, then add the closed
+   record-argument preflight without accepting target execution.
 10. Add canonical by-value storage and one SERVER result proof only after the
     codec and recovery paths are green.
 11. Add the record-constructor mutation artifact, compiler preparation, and
@@ -486,6 +510,12 @@ primitive value types, enum types, or opaque transient values.
 This decision extends work ADRs 0016, 0025, and 0029. It keeps their stable
 standard identities, codec-version closure, enum identity, and all existing
 canonical bytes unchanged.
+
+For one protocol-3 raw call that contains a record value, the closed preflight
+in this decision has precedence over ADR 0027's no-PostgreSQL rule for
+non-empty calls. The terminal `TARGET_UNAVAILABLE` result, lack of target
+execution and `EXECUTE` audit, redaction, cancellation, and every non-record
+path remain exact from ADR 0027.
 
 ADR 0006 remains limited to object fields. Its `ALTER TYPE ... RENAME FIELD`
 transition does not apply to record value fields. A later decision must define
