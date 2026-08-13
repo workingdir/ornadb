@@ -48,7 +48,7 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 5,
         name: "owner-qualified reference targets",
-        sql: include_str!("../../../orna-kernel-postgres/migrations/0005_owner_qualified_reference_targets.sql"),
+        sql: include_str!("../../migrations/0005_owner_qualified_reference_targets.sql"),
         data_step: None,
     },
     Migration {

@@ -83,7 +83,7 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
     (
         5,
         "owner-qualified reference targets",
-        include_str!("../migrations/0005_owner_qualified_reference_targets.sql"),
+        include_str!("../../orna-postgres/migrations/0005_owner_qualified_reference_targets.sql"),
     ),
     (
         6,
