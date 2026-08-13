@@ -4,12 +4,12 @@ mod frame;
 
 pub use frame::{
     CallArgument, CallFailure, Channel, ClientAction, ClientFrame, ConnectionError, Event,
-    EventRecord, FrameCodecError, MAX_FRAME_PAYLOAD_LENGTH, ProtocolConnection, RawCall,
-    ServerAction, ServerFrame, decode_active_client_frame, decode_active_server_frame,
-    decode_catalogue_client_frame, decode_catalogue_server_frame, decode_client_frame,
-    decode_server_frame, encode_active_client_frame, encode_active_server_frame,
-    encode_catalogue_client_frame, encode_catalogue_server_frame, encode_client_frame,
-    encode_server_frame,
+    EventRecord, FrameCodecError, MAX_CHANNEL_WINDOW, MAX_FRAME_PAYLOAD_LENGTH, ProtocolConnection,
+    RawCall, RawCallClient, RawCallClientError, RawCallClientResponse, ServerAction, ServerFrame,
+    decode_active_client_frame, decode_active_server_frame, decode_catalogue_client_frame,
+    decode_catalogue_server_frame, decode_client_frame, decode_server_frame,
+    encode_active_client_frame, encode_active_server_frame, encode_catalogue_client_frame,
+    encode_catalogue_server_frame, encode_client_frame, encode_server_frame,
 };
 
 use std::{error::Error, fmt};

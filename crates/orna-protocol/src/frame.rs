@@ -431,7 +431,8 @@ impl Error for ConnectionError {
 const MAX_LIVE_STREAMS: usize = 64;
 const MAX_ARGUMENTS: usize = 256;
 const MAX_ARGUMENT_BYTES: usize = MAX_FRAME_PAYLOAD_LENGTH;
-const MAX_WINDOW: u64 = 1024 * 1024 * 1024;
+/// The largest byte credit retained for one raw-call output channel.
+pub const MAX_CHANNEL_WINDOW: u64 = 1024 * 1024 * 1024;
 
 #[derive(Clone, Copy)]
 enum FrameVersion<'a> {
@@ -773,7 +774,7 @@ impl ProtocolConnection {
         let index = channel_index(channel);
         let next = state.windows[index]
             .checked_add(credit)
-            .filter(|value| *value <= MAX_WINDOW)
+            .filter(|value| *value <= MAX_CHANNEL_WINDOW)
             .ok_or(ConnectionError::WindowOverflow { stream, channel })?;
         self.streams
             .get_mut(&stream)
@@ -962,6 +963,263 @@ impl ProtocolConnection {
         }
         self.streams.remove(&stream);
         Ok(ServerFrame::CallCancelled { stream })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RawCallClientPhase {
+    AwaitingAcceptance,
+    Running,
+    Terminal,
+}
+
+/// The validated result of one server frame received by a raw-call client.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RawCallClientResponse {
+    /// The server accepted the call and assigned its invocation identity.
+    Accepted {
+        /// The server-assigned invocation identity.
+        invocation: InvocationId,
+    },
+    /// One non-empty ordered batch of canonical result values.
+    Values(Vec<RuntimeValue>),
+    /// The call completed successfully.
+    Completed,
+    /// The call returned one closed public failure.
+    Failed(CallFailure),
+    /// The requested cancellation completed.
+    Cancelled,
+}
+
+/// A protocol or state failure while receiving one raw-call result.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum RawCallClientError {
+    /// The encoded server frame is malformed or uses another codec marker.
+    Frame {
+        /// The frame codec failure.
+        source: FrameCodecError,
+    },
+    /// A frame names another stream.
+    WrongStream {
+        /// The required stream number.
+        expected: u64,
+        /// The received stream number.
+        actual: u64,
+    },
+    /// A frame is not valid in the current client phase.
+    WrongState,
+    /// An event batch uses a channel other than `RESULT_VALUES`.
+    WrongChannel {
+        /// The received channel.
+        actual: Channel,
+    },
+    /// A result batch contains a non-value event.
+    WrongEvent,
+    /// An event does not have the next contiguous sequence number.
+    WrongSequence {
+        /// The required next sequence number.
+        expected: u64,
+        /// The received sequence number.
+        actual: u64,
+    },
+    /// The contiguous event sequence cannot represent another value.
+    SequenceExhausted,
+    /// A result batch exceeds the remaining granted byte credit.
+    InsufficientCredit {
+        /// The remaining result-value credit.
+        available: u64,
+        /// The complete event-frame payload length.
+        required: u64,
+    },
+}
+
+impl fmt::Display for RawCallClientError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Frame { .. } => formatter.write_str("raw-call server frame is invalid"),
+            Self::WrongStream { .. } => {
+                formatter.write_str("raw-call server frame uses the wrong stream")
+            }
+            Self::WrongState => {
+                formatter.write_str("raw-call server frame is not valid in the current state")
+            }
+            Self::WrongChannel { .. } => {
+                formatter.write_str("raw-call server event uses the wrong channel")
+            }
+            Self::WrongEvent => formatter.write_str("raw-call server event is not a value"),
+            Self::WrongSequence { .. } => {
+                formatter.write_str("raw-call server event sequence is not contiguous")
+            }
+            Self::SequenceExhausted => {
+                formatter.write_str("raw-call server event sequence is exhausted")
+            }
+            Self::InsufficientCredit { .. } => {
+                formatter.write_str("raw-call server exceeded its result-value credit")
+            }
+        }
+    }
+}
+
+impl Error for RawCallClientError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Frame { source } => Some(source),
+            _ => None,
+        }
+    }
+}
+
+/// The bounded response state for one parameter-free protocol-1 raw call.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RawCallClient {
+    phase: RawCallClientPhase,
+    cancellation_requested: bool,
+    next_sequence: Option<u64>,
+    remaining_result_credit: u64,
+}
+
+impl RawCallClient {
+    /// Starts stream 1 and returns the exact initial client frames in wire order.
+    pub fn start(function: FunctionId) -> (Self, [ClientFrame; 3]) {
+        (
+            Self {
+                phase: RawCallClientPhase::AwaitingAcceptance,
+                cancellation_requested: false,
+                next_sequence: Some(1),
+                remaining_result_credit: MAX_CHANNEL_WINDOW,
+            },
+            [
+                ClientFrame::CallRawStart {
+                    stream: 1,
+                    function,
+                },
+                ClientFrame::WindowUpdate {
+                    stream: 1,
+                    channel: Channel::ResultValues,
+                    credit: MAX_CHANNEL_WINDOW,
+                },
+                ClientFrame::CallArgumentsComplete { stream: 1 },
+            ],
+        )
+    }
+
+    /// Requests cancellation once after stream 1 has been created.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RawCallClientError::WrongState`] after a prior cancellation
+    /// request or terminal result.
+    pub fn request_cancellation(&mut self) -> Result<ClientFrame, RawCallClientError> {
+        if self.phase == RawCallClientPhase::Terminal || self.cancellation_requested {
+            return Err(RawCallClientError::WrongState);
+        }
+        self.cancellation_requested = true;
+        Ok(ClientFrame::CallCancel { stream: 1 })
+    }
+
+    /// Decodes and validates one complete protocol-1 server frame.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RawCallClientError`] when the frame bytes, stream, phase,
+    /// channel, event kind, or sequence violate the closed client contract.
+    pub fn receive_encoded(
+        &mut self,
+        encoded: &[u8],
+    ) -> Result<RawCallClientResponse, RawCallClientError> {
+        let frame =
+            decode_server_frame(encoded).map_err(|source| RawCallClientError::Frame { source })?;
+        let event_payload_length = matches!(frame, ServerFrame::EventBatch { .. }).then(|| {
+            u64::try_from(encoded.len() - HEADER_LENGTH)
+                .expect("frame payload length is bounded by u32")
+        });
+        if let Some(required) = event_payload_length
+            && self.remaining_result_credit < required
+        {
+            return Err(RawCallClientError::InsufficientCredit {
+                available: self.remaining_result_credit,
+                required,
+            });
+        }
+        let response = self.receive(frame)?;
+        if let Some(required) = event_payload_length {
+            self.remaining_result_credit -= required;
+        }
+        Ok(response)
+    }
+
+    fn receive(&mut self, frame: ServerFrame) -> Result<RawCallClientResponse, RawCallClientError> {
+        let stream = server_frame_stream(&frame);
+        if stream != 1 {
+            return Err(RawCallClientError::WrongStream {
+                expected: 1,
+                actual: stream,
+            });
+        }
+        match frame {
+            ServerFrame::CallAccepted { invocation, .. }
+                if self.phase == RawCallClientPhase::AwaitingAcceptance =>
+            {
+                self.phase = RawCallClientPhase::Running;
+                Ok(RawCallClientResponse::Accepted { invocation })
+            }
+            ServerFrame::EventBatch {
+                channel, events, ..
+            } if self.phase == RawCallClientPhase::Running => {
+                if channel != Channel::ResultValues {
+                    return Err(RawCallClientError::WrongChannel { actual: channel });
+                }
+                let mut values = Vec::with_capacity(events.len());
+                let mut next_sequence = self.next_sequence;
+                for event in events {
+                    let Some(expected) = next_sequence else {
+                        return Err(RawCallClientError::SequenceExhausted);
+                    };
+                    if event.sequence != expected {
+                        return Err(RawCallClientError::WrongSequence {
+                            expected,
+                            actual: event.sequence,
+                        });
+                    }
+                    let Event::Value(value) = event.event else {
+                        return Err(RawCallClientError::WrongEvent);
+                    };
+                    values.push(value);
+                    next_sequence = expected.checked_add(1);
+                }
+                self.next_sequence = next_sequence;
+                Ok(RawCallClientResponse::Values(values))
+            }
+            ServerFrame::CallCompleted { .. } if self.phase == RawCallClientPhase::Running => {
+                self.phase = RawCallClientPhase::Terminal;
+                Ok(RawCallClientResponse::Completed)
+            }
+            ServerFrame::CallFailed { failure, .. }
+                if self.phase == RawCallClientPhase::Running =>
+            {
+                self.phase = RawCallClientPhase::Terminal;
+                Ok(RawCallClientResponse::Failed(failure))
+            }
+            ServerFrame::CallCancelled { .. }
+                if self.phase == RawCallClientPhase::Running && self.cancellation_requested =>
+            {
+                self.phase = RawCallClientPhase::Terminal;
+                Ok(RawCallClientResponse::Cancelled)
+            }
+            _ => Err(RawCallClientError::WrongState),
+        }
+    }
+}
+
+const fn server_frame_stream(frame: &ServerFrame) -> u64 {
+    match frame {
+        ServerFrame::CallAccepted { stream, .. }
+        | ServerFrame::EventBatch { stream, .. }
+        | ServerFrame::CallCompleted { stream }
+        | ServerFrame::CallFailed { stream, .. }
+        | ServerFrame::CallCancelled { stream } => *stream,
+        ServerFrame::Pong { .. } => 0,
     }
 }
 
@@ -2518,6 +2776,282 @@ mod tests {
     }
 
     #[test]
+    fn raw_call_client_starts_exactly_and_preserves_ordered_values() {
+        let function = FunctionId::from_bytes([0x11; 16]);
+        let invocation = InvocationId::from_bytes([0x22; 16]);
+        let (mut client, frames) = RawCallClient::start(function);
+        assert_eq!(
+            frames,
+            [
+                ClientFrame::CallRawStart {
+                    stream: 1,
+                    function,
+                },
+                ClientFrame::WindowUpdate {
+                    stream: 1,
+                    channel: Channel::ResultValues,
+                    credit: MAX_CHANNEL_WINDOW,
+                },
+                ClientFrame::CallArgumentsComplete { stream: 1 },
+            ]
+        );
+        assert_eq!(
+            client
+                .receive_encoded(
+                    &encode_server_frame(&ServerFrame::CallAccepted {
+                        stream: 1,
+                        invocation,
+                    })
+                    .unwrap(),
+                )
+                .unwrap(),
+            RawCallClientResponse::Accepted { invocation }
+        );
+        assert_eq!(
+            client
+                .receive_encoded(
+                    &encode_server_frame(&ServerFrame::EventBatch {
+                        stream: 1,
+                        channel: Channel::ResultValues,
+                        events: vec![
+                            EventRecord {
+                                sequence: 1,
+                                event: Event::Value(RuntimeValue::Boolean(true)),
+                            },
+                            EventRecord {
+                                sequence: 2,
+                                event: Event::Value(RuntimeValue::Integer(7)),
+                            },
+                        ],
+                    })
+                    .unwrap(),
+                )
+                .unwrap(),
+            RawCallClientResponse::Values(vec![
+                RuntimeValue::Boolean(true),
+                RuntimeValue::Integer(7),
+            ])
+        );
+        assert_eq!(
+            client
+                .receive_encoded(
+                    &encode_server_frame(&ServerFrame::CallCompleted { stream: 1 }).unwrap(),
+                )
+                .unwrap(),
+            RawCallClientResponse::Completed
+        );
+        assert_eq!(
+            client.receive_encoded(
+                &encode_server_frame(&ServerFrame::CallCompleted { stream: 1 }).unwrap()
+            ),
+            Err(RawCallClientError::WrongState)
+        );
+    }
+
+    #[test]
+    fn raw_call_client_closes_failures_and_cancellation() {
+        let function = FunctionId::from_bytes([0x11; 16]);
+        let invocation = InvocationId::from_bytes([0x22; 16]);
+        let accepted = encode_server_frame(&ServerFrame::CallAccepted {
+            stream: 1,
+            invocation,
+        })
+        .unwrap();
+
+        let (mut failed, _) = RawCallClient::start(function);
+        failed.receive_encoded(&accepted).unwrap();
+        assert_eq!(
+            failed
+                .receive_encoded(
+                    &encode_server_frame(&ServerFrame::CallFailed {
+                        stream: 1,
+                        failure: CallFailure::ExecuteDenied,
+                    })
+                    .unwrap(),
+                )
+                .unwrap(),
+            RawCallClientResponse::Failed(CallFailure::ExecuteDenied)
+        );
+
+        let (mut cancelled, _) = RawCallClient::start(function);
+        assert_eq!(
+            cancelled.request_cancellation().unwrap(),
+            ClientFrame::CallCancel { stream: 1 }
+        );
+        assert_eq!(
+            cancelled.request_cancellation(),
+            Err(RawCallClientError::WrongState)
+        );
+        cancelled.receive_encoded(&accepted).unwrap();
+        assert_eq!(
+            cancelled
+                .receive_encoded(
+                    &encode_server_frame(&ServerFrame::CallCancelled { stream: 1 }).unwrap(),
+                )
+                .unwrap(),
+            RawCallClientResponse::Cancelled
+        );
+    }
+
+    #[test]
+    fn raw_call_client_rejects_every_response_boundary() {
+        let function = FunctionId::from_bytes([0x11; 16]);
+        let invocation = InvocationId::from_bytes([0x22; 16]);
+        let accepted = |stream| {
+            encode_server_frame(&ServerFrame::CallAccepted { stream, invocation }).unwrap()
+        };
+        let event = |stream, channel, sequence, event| {
+            encode_server_frame(&ServerFrame::EventBatch {
+                stream,
+                channel,
+                events: vec![EventRecord { sequence, event }],
+            })
+            .unwrap()
+        };
+
+        let (mut client, _) = RawCallClient::start(function);
+        assert_eq!(
+            client.receive_encoded(&accepted(2)),
+            Err(RawCallClientError::WrongStream {
+                expected: 1,
+                actual: 2,
+            })
+        );
+        assert_eq!(
+            client.receive_encoded(&event(
+                1,
+                Channel::ResultValues,
+                1,
+                Event::Value(RuntimeValue::Boolean(true)),
+            )),
+            Err(RawCallClientError::WrongState)
+        );
+        client.receive_encoded(&accepted(1)).unwrap();
+        assert_eq!(
+            client.receive_encoded(&event(1, Channel::ResultBytes, 1, Event::Bytes(vec![1]),)),
+            Err(RawCallClientError::WrongChannel {
+                actual: Channel::ResultBytes,
+            })
+        );
+        assert_eq!(
+            client.receive_encoded(&event(
+                1,
+                Channel::ResultValues,
+                2,
+                Event::Value(RuntimeValue::Boolean(true)),
+            )),
+            Err(RawCallClientError::WrongSequence {
+                expected: 1,
+                actual: 2,
+            })
+        );
+        assert_eq!(
+            client.receive_encoded(&event(
+                1,
+                Channel::Diagnostic,
+                1,
+                Event::Failure(CallFailure::InternalFailure),
+            )),
+            Err(RawCallClientError::WrongChannel {
+                actual: Channel::Diagnostic,
+            })
+        );
+        assert_eq!(
+            client.receive_encoded(
+                &encode_server_frame(&ServerFrame::CallCancelled { stream: 1 }).unwrap()
+            ),
+            Err(RawCallClientError::WrongState)
+        );
+
+        let mut wrong_marker = accepted(1);
+        wrong_marker[..4].copy_from_slice(b"ORF2");
+        let (mut marker_client, _) = RawCallClient::start(function);
+        assert!(matches!(
+            marker_client.receive_encoded(&wrong_marker),
+            Err(RawCallClientError::Frame {
+                source: FrameCodecError::InvalidMarker,
+            })
+        ));
+    }
+
+    #[test]
+    fn raw_call_client_accepts_the_terminal_sequence_once() {
+        let function = FunctionId::from_bytes([0x11; 16]);
+        let invocation = InvocationId::from_bytes([0x22; 16]);
+        let (mut client, _) = RawCallClient::start(function);
+        client
+            .receive_encoded(
+                &encode_server_frame(&ServerFrame::CallAccepted {
+                    stream: 1,
+                    invocation,
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        client.next_sequence = Some(u64::MAX);
+        let terminal = encode_server_frame(&ServerFrame::EventBatch {
+            stream: 1,
+            channel: Channel::ResultValues,
+            events: vec![EventRecord {
+                sequence: u64::MAX,
+                event: Event::Value(RuntimeValue::Boolean(true)),
+            }],
+        })
+        .unwrap();
+        assert_eq!(
+            client.receive_encoded(&terminal).unwrap(),
+            RawCallClientResponse::Values(vec![RuntimeValue::Boolean(true)])
+        );
+        assert_eq!(
+            client.receive_encoded(&terminal),
+            Err(RawCallClientError::SequenceExhausted)
+        );
+    }
+
+    #[test]
+    fn raw_call_client_charges_the_exact_event_payload_credit() {
+        let function = FunctionId::from_bytes([0x11; 16]);
+        let invocation = InvocationId::from_bytes([0x22; 16]);
+        let accepted = encode_server_frame(&ServerFrame::CallAccepted {
+            stream: 1,
+            invocation,
+        })
+        .unwrap();
+        let event = encode_server_frame(&ServerFrame::EventBatch {
+            stream: 1,
+            channel: Channel::ResultValues,
+            events: vec![EventRecord {
+                sequence: 1,
+                event: Event::Value(RuntimeValue::Boolean(true)),
+            }],
+        })
+        .unwrap();
+        let required = u64::try_from(event.len() - HEADER_LENGTH).unwrap();
+
+        let (mut exact, _) = RawCallClient::start(function);
+        exact.receive_encoded(&accepted).unwrap();
+        exact.remaining_result_credit = required;
+        assert_eq!(
+            exact.receive_encoded(&event).unwrap(),
+            RawCallClientResponse::Values(vec![RuntimeValue::Boolean(true)])
+        );
+        assert_eq!(exact.remaining_result_credit, 0);
+
+        let (mut short, _) = RawCallClient::start(function);
+        short.receive_encoded(&accepted).unwrap();
+        short.remaining_result_credit = required - 1;
+        let before = short.clone();
+        assert_eq!(
+            short.receive_encoded(&event),
+            Err(RawCallClientError::InsufficientCredit {
+                available: required - 1,
+                required,
+            })
+        );
+        assert_eq!(short, before);
+    }
+
+    #[test]
     fn sixty_four_interleaved_streams_keep_all_call_state_independent() {
         let function = FunctionId::from_bytes([0x11; 16]);
         let mut connection = ProtocolConnection::new();
@@ -2684,7 +3218,7 @@ mod tests {
             .receive(ClientFrame::WindowUpdate {
                 stream: 1,
                 channel: Channel::Diagnostic,
-                credit: MAX_WINDOW,
+                credit: MAX_CHANNEL_WINDOW,
             })
             .unwrap();
         let before_overflow = connection.clone();
@@ -2927,7 +3461,10 @@ mod tests {
                 prop_assert!(connection.high_water_mark() >= observed_high_water);
                 observed_high_water = connection.high_water_mark();
                 for state in connection.streams.values() {
-                    prop_assert!(state.windows.iter().all(|window| *window <= MAX_WINDOW));
+                    prop_assert!(state
+                        .windows
+                        .iter()
+                        .all(|window| *window <= MAX_CHANNEL_WINDOW));
                     if let Phase::Receiving {
                         arguments,
                         argument_bytes,
