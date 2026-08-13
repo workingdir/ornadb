@@ -1,9 +1,9 @@
 //! Private PostgreSQL implementation for OrnaDB.
 //!
-//! During the package consolidation this crate forwards the existing linked
-//! engine and SQL kernel interfaces without changing their behaviour.
+//! The linked engine and private SQL kernel are internal modules of one owned
+//! PostgreSQL implementation.
 
-pub use orna_kernel_postgres::*;
+include!("kernel.rs");
 
 #[cfg(feature = "embedded")]
 mod engine;
