@@ -164,8 +164,8 @@ a non-`Named` descriptor and a locally disproven `Named` target before the
 snapshot is returned. Canonical-hash and revision validation then resolve every
 remaining `Named` identity through the active application catalogue and pinned
 verified standard snapshot in record-type order and field ordinal order.
-If the same identity is an accepted application enum and accepted pinned
-standard primitive, validation returns
+If the same identity is an accepted application enum and either a pinned
+standard enum or accepted pinned standard primitive, validation returns
 `AmbiguousRecordValueFieldType { record_value_type, field, type_id }` before it
 selects a tag. Its display is
 `record field type is present in both application and standard catalogues` and
@@ -210,8 +210,8 @@ The one public durable classification seam is
 Result<RecordValueFieldDescriptorClass, RecordValueFieldDescriptorError>`.
 It reads only the deployable candidate catalogue and the verified standard
 snapshot pinned in its catalogue-hash context. The public, non-exhaustive
-`RecordValueFieldDescriptorClass` has `Enum(TypeId)` and
-`StandardPrimitive(TypeId)`. The public, non-exhaustive
+`RecordValueFieldDescriptorClass` has `ApplicationEnum(TypeId)`,
+`StandardEnum(TypeId)`, and `StandardPrimitive(TypeId)`. The public, non-exhaustive
 `RecordValueFieldDescriptorError` has `StandardLibraryUnavailable`,
 `Unsupported`, and `Ambiguous { type_id }`. Their displays are, respectively,
 `deployable revision has no pinned standard library for record field classification`,
@@ -219,10 +219,13 @@ snapshot pinned in its catalogue-hash context. The public, non-exhaustive
 `record field type is present in both application and standard catalogues`.
 The error derives `Clone`, `Debug`, `Eq`, and `PartialEq`, implements `Error`,
 and has no source.
-PostgreSQL apply uses only this seam to select the existing enum/tag-2 or
-pinned-primitive/tag-4 durable tuple. Recovery reconstructs `Named(id)` only
-from those exact tuples and the catalogue-wide standard-library pin; it does
-not recreate a second classifier.
+PostgreSQL apply uses only this seam to select the application-enum,
+pinned-standard-enum, or pinned-primitive durable tuple. Both enum classes
+retain catalogue-hash tag 2; the primitive class retains tag 4. Durable
+standard enums carry the same exact standard-library revision pin as standard
+primitives. Recovery reconstructs `Named(id)` only from those exact tuples and
+the catalogue-wide standard-library pin; it does not recreate a second
+classifier.
 
 The one-to-three-file, always-green migration uses this ordered bridge:
 
