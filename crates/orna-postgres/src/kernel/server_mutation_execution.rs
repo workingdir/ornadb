@@ -20,6 +20,7 @@ use orna_core::{
         ActiveDatabaseRevision, DefinitionReferenceKind, DefinitionReferenceTarget,
         ExecutableArtifactKind, RevisionPair,
     },
+    security::AuthorisedInvocation,
     types::ResolvedType,
     value::{
         EnumValue, FunctionArgument, RecordValue, RecordValueError, ResultColumn, ResultRow,
@@ -1347,6 +1348,110 @@ async fn execute_mutation_transaction(
                 .map(ServerMutationResult::Delete)
                 .map_err(|error| delete_not_committed(context, error))
         }
+    }
+}
+
+/// Reports whether the pinned active artefact selects the narrow raw `INSERT` path.
+///
+/// This classification does not validate the target. Validation stays in the
+/// authorised execution entry so that a rejected target can roll back only the
+/// caller savepoint.
+pub(crate) fn raw_server_insert_target_is_selected(
+    active: &ActiveDatabaseRevision,
+    function_id: FunctionId,
+) -> bool {
+    let Some(function) = active.catalogue().function_by_id(function_id) else {
+        return false;
+    };
+    let Some(revision) = active.function_revisions().iter().find(|revision| {
+        revision.function() == function_id && revision.id() == function.current_revision()
+    }) else {
+        return false;
+    };
+    let artifact = revision.artifact();
+    function.domain() == FunctionDomain::Server
+        && artifact.kind() == ExecutableArtifactKind::Server
+        && artifact.format() == server_mutation_plan::FORMAT_IDENTITY
+        && matches!(
+            artifact.version(),
+            server_mutation_plan::INSERT_FORMAT_VERSION
+                | server_mutation_plan::RECORD_INSERT_FORMAT_VERSION
+        )
+}
+
+/// Executes one pinned parameter-free raw SERVER `INSERT` in the caller transaction.
+///
+/// The caller owns recovery, authorisation, audit, savepoint, and commit. This
+/// entry neither opens a session nor starts or commits a transaction.
+pub(crate) async fn execute_authorised_raw_server_insert(
+    transaction: &Transaction<'_>,
+    active: &ActiveDatabaseRevision,
+    authorisation: &AuthorisedInvocation,
+) -> Result<RuntimeValue, PostgresKernelError> {
+    let target = authorisation.target();
+    if target.revision() != active.pair() {
+        return Err(PostgresKernelError::DurableInvariant {
+            relation: "active catalogue",
+            record: target.function().canonical(),
+            rule: "raw INSERT authorisation target must match the active pair",
+        });
+    }
+    let function = active
+        .catalogue()
+        .function_by_id(target.function())
+        .ok_or_else(|| {
+            server_error(ServerInsertError::FunctionNotActive {
+                pair: active.pair(),
+                function: target.function(),
+            })
+        })?;
+    if !function.parameters().is_empty() {
+        return Err(server_error(ServerInsertError::Argument {
+            parameter: None,
+            rule: "raw SERVER INSERT calls must have zero parameters",
+        }));
+    }
+    let context = ServerInsertContext::new(
+        active.pair(),
+        target.function(),
+        function.current_revision(),
+    );
+    let (result, _) = execute_active_insert(transaction, active, function, context, &[])
+        .await
+        .map_err(|error| not_committed(context, error))?;
+    Ok(RuntimeValue::Reference {
+        target: result.target(),
+        object: result.object(),
+    })
+}
+
+/// Reports whether an INSERT failure is a closed raw target rejection.
+pub(crate) const fn raw_server_insert_target_is_unavailable(error: &ServerInsertError) -> bool {
+    match error {
+        ServerInsertError::NotCommitted { source, .. } => {
+            raw_server_insert_target_is_unavailable(source)
+        }
+        ServerInsertError::FunctionNotActive { .. }
+        | ServerInsertError::FunctionSignature { .. }
+        | ServerInsertError::Artifact { .. }
+        | ServerInsertError::PlanDecode(_)
+        | ServerInsertError::PlanInvariant { .. }
+        | ServerInsertError::ReferenceEvidence { .. }
+        | ServerInsertError::Argument { .. }
+        | ServerInsertError::ComplexityLimit { .. }
+        | ServerInsertError::ResultRows(_)
+        | ServerInsertError::RecordValue(_)
+        | ServerInsertError::ValueCodec(_)
+        | ServerInsertError::UniqueReferenceConflict { .. } => true,
+        ServerInsertError::Kernel { .. }
+        | ServerInsertError::Database { .. }
+        | ServerInsertError::CurrentRevision { .. }
+        | ServerInsertError::PreparedResult { .. }
+        | ServerInsertError::RowDecode { .. }
+        | ServerInsertError::ValueInvariant { .. }
+        | ServerInsertError::CommitRejected { .. }
+        | ServerInsertError::CommitOutcomeUnknown { .. }
+        | ServerInsertError::CommittedButShutdownFailed { .. } => false,
     }
 }
 
