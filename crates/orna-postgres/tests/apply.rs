@@ -31,6 +31,15 @@ use orna_core::{
     types::{ResolvedType, TypeDescriptorKind},
     value::RuntimeValue,
 };
+#[cfg(feature = "test-hooks")]
+use orna_core::{
+    catalogue::{
+        EnumTypeDefinition, QualifiedSemanticName, RecordValueFieldDefinition,
+        RecordValueTypeDefinition, SchemaDefinition, TypeBinding,
+    },
+    revision::DefinitionOrigin,
+    types::TypeDescriptor,
+};
 use orna_postgres::{PostgresKernel, PostgresKernelError};
 use support::{TestDatabase, TestResult, failure, with_test_database};
 
@@ -39,6 +48,12 @@ const BASIC_SOURCE: &str = "CREATE SCHEMA app;\n\
     CREATE SERVER FUNCTION app.list_widgets()\n\
     RETURNS ROWS (name TEXT)\n\
     AS SELECT widget.name FROM app.widget widget WHERE widget.active = FALSE;\n";
+
+#[cfg(feature = "test-hooks")]
+const FROZEN_STANDARD_ENUM_DIGEST: [u8; 32] = [
+    0xac, 0x5e, 0x03, 0x56, 0xb6, 0xb2, 0x5d, 0xae, 0x93, 0x07, 0x25, 0x3a, 0xba, 0x41, 0x57, 0x26,
+    0xd2, 0xa3, 0xc2, 0xb4, 0xa8, 0xe9, 0xe2, 0x9a, 0x71, 0xad, 0xdf, 0xd4, 0xc8, 0xa8, 0x0f, 0xd5,
+];
 
 const BASIC_SOURCE_ONLY_EDIT: &str = "-- source-only formatting edit\n\
     CREATE SCHEMA app;\n\n\
@@ -664,6 +679,171 @@ async fn applies_and_recovers_named_record_definitions() -> TestResult<()> {
 }
 
 #[tokio::test]
+#[cfg(feature = "test-hooks")]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn applies_and_reconnects_a_standard_enum_record_field() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel_instance = kernel(&database)?;
+        kernel_instance.bootstrap().await?;
+        let standard = verified_standard_enum_fixture()?;
+        let active = kernel_instance.recover().await?;
+        let candidate = standard_enum_record_candidate(&active, &standard)?;
+        let expected_record = candidate
+            .candidate()
+            .record_value_types()
+            .first()
+            .ok_or_else(|| failure("standard enum candidate has no record"))?;
+        let expected_field = expected_record
+            .fields()
+            .first()
+            .ok_or_else(|| failure("standard enum candidate has no record field"))?;
+        let expected_enum = standard
+            .catalogue()
+            .enum_types()
+            .first()
+            .ok_or_else(|| failure("standard enum fixture has no enum"))?;
+        let expected_enum_origin = standard
+            .origins()
+            .iter()
+            .find(|origin| origin.identity() == DefinitionIdentity::ValueType(expected_enum.id()))
+            .map(DefinitionOrigin::source)
+            .ok_or_else(|| failure("standard enum fixture has no enum origin"))?;
+        let expected_origin = candidate
+            .origins()
+            .iter()
+            .find(|origin| {
+                origin.identity()
+                    == DefinitionIdentity::Field {
+                        owner: expected_record.id(),
+                        field: expected_field.id(),
+                    }
+            })
+            .map(DefinitionOrigin::source)
+            .ok_or_else(|| failure("standard enum candidate has no field origin"))?;
+
+        let expected_binding = standard
+            .catalogue()
+            .type_bindings()
+            .first()
+            .ok_or_else(|| failure("standard enum fixture has no binding"))?;
+        let applied = kernel_instance
+            .apply_test_standard_upgrade(&candidate, &standard)
+            .await?;
+        require_recovered_snapshot(&candidate, &applied)?;
+
+        let session = database.open().await?;
+        let row = session
+            .client()
+            .query_one(
+                "SELECT field_id, name, ordinal, type_kind,
+                        value_type_id, value_standard_library_revision_id, enum_type_id,
+                        enum_standard_library_revision_id, standard_enum_type_id,
+                        source_unit_id, source_start, source_end
+                 FROM _orna_kernel.catalogue_record_value_fields
+                 WHERE catalogue_revision_id = $1 AND owner_type_id = $2",
+                &[
+                    &candidate.candidate().revision().to_bytes().to_vec(),
+                    &expected_record.id().to_bytes().to_vec(),
+                ],
+            )
+            .await?;
+        let postgres_type_count: i64 = session
+            .client()
+            .query_one(
+                "SELECT count(*)
+                 FROM pg_catalog.pg_type AS type
+                 JOIN pg_catalog.pg_namespace AS namespace
+                   ON namespace.oid = type.typnamespace
+                 WHERE type.typtype IN ('c', 'e')
+                   AND namespace.nspname IN ('_orna_kernel', '_orna_data')
+                   AND type.typname = ANY($1)",
+                &[&vec!["status", "mode"]],
+            )
+            .await?
+            .try_get(0)?;
+        let standard_enum = session
+            .client()
+            .query_one(
+                "SELECT name_parts, labels, source_unit_id, source_start, source_end
+                 FROM _orna_kernel.standard_catalogue_enum_types
+                 WHERE standard_library_revision_id = $1 AND type_id = $2",
+                &[
+                    &standard.revision().to_bytes().to_vec(),
+                    &expected_enum.id().to_bytes().to_vec(),
+                ],
+            )
+            .await?;
+        let standard_binding = session
+            .client()
+            .query_one(
+                "SELECT target_type_kind, target_type_id, target_enum_type_id
+                 FROM _orna_kernel.standard_catalogue_type_bindings
+                 WHERE standard_library_revision_id = $1 AND type_binding_id = $2",
+                &[
+                    &standard.revision().to_bytes().to_vec(),
+                    &expected_binding.id().to_bytes().to_vec(),
+                ],
+            )
+            .await?;
+        require(
+            row.try_get::<_, Vec<u8>>(0)? == expected_field.id().to_bytes().to_vec()
+                && row.try_get::<_, String>(1)? == "mode"
+                && row.try_get::<_, i64>(2)? == 0
+                && row.try_get::<_, String>(3)? == "enum"
+                && row.try_get::<_, Option<Vec<u8>>>(4)?.is_none()
+                && row.try_get::<_, Option<Vec<u8>>>(5)?.is_none()
+                && row.try_get::<_, Option<Vec<u8>>>(6)?.is_none()
+                && row.try_get::<_, Option<Vec<u8>>>(7)?
+                    == Some(standard.revision().to_bytes().to_vec())
+                && row.try_get::<_, Option<Vec<u8>>>(8)?
+                    == Some(expected_enum.id().to_bytes().to_vec())
+                && row.try_get::<_, Vec<u8>>(9)?
+                    == expected_origin.source_unit().to_bytes().to_vec()
+                && row.try_get::<_, i64>(10)? == i64::from(expected_origin.byte_start())
+                && row.try_get::<_, i64>(11)? == i64::from(expected_origin.byte_end())
+                && standard_enum.try_get::<_, Vec<String>>(0)? == expected_enum.name().parts()
+                && standard_enum.try_get::<_, Vec<String>>(1)? == expected_enum.labels()
+                && standard_enum.try_get::<_, Vec<u8>>(2)?
+                    == expected_enum_origin.source_unit().to_bytes().to_vec()
+                && standard_enum.try_get::<_, i64>(3)?
+                    == i64::from(expected_enum_origin.byte_start())
+                && standard_enum.try_get::<_, i64>(4)?
+                    == i64::from(expected_enum_origin.byte_end())
+                && standard_binding.try_get::<_, String>(0)? == "enum"
+                && standard_binding.try_get::<_, Option<Vec<u8>>>(1)?.is_none()
+                && standard_binding.try_get::<_, Option<Vec<u8>>>(2)?
+                    == Some(expected_enum.id().to_bytes().to_vec())
+                && postgres_type_count == 0,
+            "standard enum upgrade did not persist its definition, binding, and record tuple",
+        )?;
+        session.shutdown().await?;
+
+        let reconnected = kernel(&database)?.recover().await?;
+        require_recovered_snapshot(&candidate, &reconnected)?;
+        let recovered_standard = reconnected
+            .catalogue_hash_context()
+            .standard()
+            .ok_or_else(|| failure("reconnected record recovery returned no standard"))?;
+        let recovered_field = reconnected
+            .catalogue()
+            .record_value_type_by_id(expected_record.id())
+            .and_then(|record| record.fields().first())
+            .ok_or_else(|| failure("reconnected record recovery returned no field"))?;
+        require(
+            recovered_standard.revision() == standard.revision()
+                && recovered_standard.digest() == standard.digest()
+                && recovered_standard.catalogue().enum_types() == standard.catalogue().enum_types()
+                && recovered_standard.catalogue().type_bindings()
+                    == standard.catalogue().type_bindings()
+                && recovered_field.type_descriptor()
+                    == Some(&TypeDescriptor::named(expected_enum.id())),
+            "reconnected standard enum record recovery changed its pinned descriptor facts",
+        )
+    })
+    .await
+}
+
+#[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
 async fn prepares_standard_upgrade_from_postgres_recovered_version_one_members() -> TestResult<()> {
     with_test_database(|database| async move {
@@ -793,6 +973,134 @@ async fn rejects_an_inactive_standard_revision_collision_before_standard_writes(
         )?;
         session.shutdown().await
     })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn rejects_a_reserved_type_stored_as_an_inactive_standard_enum() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = kernel(&database)?;
+        kernel.bootstrap().await?;
+        let empty = kernel.recover().await?;
+        let version_one = kernel
+            .apply(&candidate(STANDARD_APPLICATION_SOURCE, &empty)?)
+            .await?;
+        let upgrade = orna_standard::prepare_standard_upgrade(&version_one)
+            .map_err(|error| failure(format!("standard upgrade preparation failed: {error}")))?;
+        let requested_type = orna_standard::BOOLEAN_TYPE_ID;
+        let hostile_revision = StandardLibraryRevisionId::from_bytes([0xe2; 16]);
+        let hostile_catalogue = CatalogueRevisionId::from_bytes([0xe3; 16]);
+        let hostile_schema = orna_core::SchemaId::from_bytes([0xe4; 16]);
+        let source_unit = version_one
+            .source()
+            .units()
+            .first()
+            .ok_or_else(|| failure("hostile enum collision fixture has no source unit"))?;
+
+        let session = database.open().await?;
+        session.client().batch_execute("BEGIN").await?;
+        session
+            .client()
+            .execute(
+                "INSERT INTO _orna_kernel.standard_library_revisions
+                    (id, source_revision_id, catalogue_revision_id, digest_version,
+                     language_version, content_hash, hash_algorithm)
+                 VALUES ($1, $2, $3, 1, 'orna.test/hostile-enum', $4, 'sha256')",
+                &[
+                    &hostile_revision.to_bytes().to_vec(),
+                    &version_one.source().id().to_bytes().to_vec(),
+                    &hostile_catalogue.to_bytes().to_vec(),
+                    &vec![0_u8; 32],
+                ],
+            )
+            .await?;
+        session
+            .client()
+            .execute(
+                "INSERT INTO _orna_kernel.standard_catalogue_schemas
+                    (standard_library_revision_id, schema_id, name_parts,
+                     source_unit_id, source_start, source_end)
+                 VALUES ($1, $2, ARRAY['hostile'], $3, 0, 1)",
+                &[
+                    &hostile_revision.to_bytes().to_vec(),
+                    &hostile_schema.to_bytes().to_vec(),
+                    &source_unit.id().to_bytes().to_vec(),
+                ],
+            )
+            .await?;
+        session
+            .client()
+            .execute(
+                "INSERT INTO _orna_kernel.standard_catalogue_enum_types
+                    (standard_library_revision_id, type_id, schema_id, name_parts, labels,
+                     source_unit_id, source_start, source_end)
+                 VALUES ($1, $2, $3, ARRAY['hostile', 'collision'], ARRAY['x'], $4, 0, 1)",
+                &[
+                    &hostile_revision.to_bytes().to_vec(),
+                    &requested_type.to_bytes().to_vec(),
+                    &hostile_schema.to_bytes().to_vec(),
+                    &source_unit.id().to_bytes().to_vec(),
+                ],
+            )
+            .await?;
+        session.client().batch_execute("COMMIT").await?;
+        session.shutdown().await?;
+        let before = baseline(&database, &version_one).await?;
+
+        let error = failed_apply_error(
+            kernel.apply_standard_upgrade(&upgrade).await,
+            "inactive standard enum identity collision unexpectedly allowed the upgrade",
+        )?;
+        match error {
+            PostgresKernelError::ReservedStandardIdentity {
+                identity: orna_standard::StandardUpgradeIdentity::Type(type_id),
+            } => require(
+                type_id == requested_type,
+                "inactive standard enum collision returned the wrong type identity",
+            )?,
+            error => {
+                return Err(failure(format!(
+                    "expected inactive standard enum type collision, got {error}"
+                )));
+            }
+        }
+        require_baseline(&database, &before, &kernel).await?;
+
+        let session = database.open().await?;
+        let hostile_count: i64 = session
+            .client()
+            .query_one(
+                "SELECT count(*) FROM _orna_kernel.standard_catalogue_enum_types
+                 WHERE standard_library_revision_id = $1 AND type_id = $2",
+                &[
+                    &hostile_revision.to_bytes().to_vec(),
+                    &requested_type.to_bytes().to_vec(),
+                ],
+            )
+            .await?
+            .try_get(0)?;
+        require(
+            hostile_count == 1,
+            "rejected standard enum collision changed its hostile durable row",
+        )?;
+        session.shutdown().await
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn rejects_reserved_types_stored_as_inactive_application_values() -> TestResult<()> {
+    reject_inactive_application_type_collision(
+        InactiveApplicationTypeKind::Enum,
+        orna_standard::BOOLEAN_TYPE_ID,
+    )
+    .await?;
+    reject_inactive_application_type_collision(
+        InactiveApplicationTypeKind::Record,
+        orna_standard::INTEGER_TYPE_ID,
+    )
     .await
 }
 
@@ -1666,7 +1974,8 @@ async fn require_standard_upgrade_storage(
         let bindings = session
             .client()
             .query(
-                "SELECT type_binding_id, kind, name_parts, target_type_id,
+                "SELECT type_binding_id, kind, name_parts, target_type_kind,
+                        target_type_id, target_enum_type_id,
                         source_unit_id, source_start, source_end
                  FROM _orna_kernel.standard_catalogue_type_bindings
                  WHERE standard_library_revision_id = $1 ORDER BY type_binding_id",
@@ -1698,13 +2007,29 @@ async fn require_standard_upgrade_storage(
             require(
                 row.try_get::<_, String>(1)? == kind
                     && row.try_get::<_, Vec<String>>(2)? == parts
-                    && row.try_get::<_, Vec<u8>>(3)? == binding.target().to_bytes()
-                    && row.try_get::<_, Vec<u8>>(4)? == origin.source_unit().to_bytes()
-                    && row.try_get::<_, i64>(5)? == i64::from(origin.byte_start())
-                    && row.try_get::<_, i64>(6)? == i64::from(origin.byte_end()),
+                    && row.try_get::<_, String>(3)? == "value"
+                    && row.try_get::<_, Option<Vec<u8>>>(4)?
+                        == Some(binding.target().to_bytes().to_vec())
+                    && row.try_get::<_, Option<Vec<u8>>>(5)?.is_none()
+                    && row.try_get::<_, Vec<u8>>(6)? == origin.source_unit().to_bytes()
+                    && row.try_get::<_, i64>(7)? == i64::from(origin.byte_start())
+                    && row.try_get::<_, i64>(8)? == i64::from(origin.byte_end()),
                 "standard type-binding row differs from the verified snapshot",
             )?;
         }
+        let standard_enum_count: i64 = session
+            .client()
+            .query_one(
+                "SELECT count(*) FROM _orna_kernel.standard_catalogue_enum_types
+                 WHERE standard_library_revision_id = $1",
+                &[&standard_revision],
+            )
+            .await?
+            .try_get(0)?;
+        require(
+            standard_enum_count == i64::try_from(standard.catalogue().enum_types().len())?,
+            "standard enum rows differ from the verified snapshot",
+        )?;
 
         let field_rows = session
             .client()
@@ -2477,6 +2802,337 @@ fn verified_empty_non_golden_standard()
     )?;
 
     Ok(verify_standard_library_snapshot(snapshot)?)
+}
+
+#[derive(Clone, Copy)]
+enum InactiveApplicationTypeKind {
+    Enum,
+    Record,
+}
+
+async fn reject_inactive_application_type_collision(
+    kind: InactiveApplicationTypeKind,
+    requested_type: TypeId,
+) -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = kernel(&database)?;
+        kernel.bootstrap().await?;
+        let empty = kernel.recover().await?;
+        let version_one = kernel
+            .apply(&candidate(STANDARD_APPLICATION_SOURCE, &empty)?)
+            .await?;
+        let upgrade = orna_standard::prepare_standard_upgrade(&version_one)
+            .map_err(|error| failure(format!("standard upgrade preparation failed: {error}")))?;
+        let discriminator: u8 = match kind {
+            InactiveApplicationTypeKind::Enum => 0xe5,
+            InactiveApplicationTypeKind::Record => 0xea,
+        };
+        let bundle = vec![discriminator; 16];
+        let unit = vec![discriminator + 1; 16];
+        let source = vec![discriminator + 2; 16];
+        let catalogue = vec![discriminator + 3; 16];
+        let schema = vec![discriminator + 4; 16];
+        let content_hash = vec![discriminator; 32];
+
+        let session = database.open().await?;
+        session.client().batch_execute("BEGIN").await?;
+        session
+            .client()
+            .execute(
+                "INSERT INTO _orna_kernel.source_bundles (id, content_hash)
+                 VALUES ($1, $2)",
+                &[&bundle, &content_hash],
+            )
+            .await?;
+        session
+            .client()
+            .execute(
+                "INSERT INTO _orna_kernel.source_units
+                    (id, bundle_id, ordinal, logical_path, content, content_hash)
+                 VALUES ($1, $2, 0, 'hostile/type.orna', 'hostile', $3)",
+                &[&unit, &bundle, &content_hash],
+            )
+            .await?;
+        session
+            .client()
+            .execute(
+                "INSERT INTO _orna_kernel.source_revisions
+                    (id, parent_source_revision_id, bundle_id, content_hash)
+                 VALUES ($1, $2, $3, $4)",
+                &[
+                    &source,
+                    &version_one.source().id().to_bytes().to_vec(),
+                    &bundle,
+                    &content_hash,
+                ],
+            )
+            .await?;
+        session
+            .client()
+            .execute(
+                "INSERT INTO _orna_kernel.catalogue_revisions
+                    (id, source_revision_id, parent_catalogue_revision_id, content_hash)
+                 VALUES ($1, $2, $3, $4)",
+                &[
+                    &catalogue,
+                    &source,
+                    &version_one.catalogue().revision().to_bytes().to_vec(),
+                    &content_hash,
+                ],
+            )
+            .await?;
+        session
+            .client()
+            .execute(
+                "INSERT INTO _orna_kernel.catalogue_schemas
+                    (catalogue_revision_id, schema_id, name_parts,
+                     source_unit_id, source_start, source_end)
+                 VALUES ($1, $2, ARRAY['hostile'], $3, 0, 1)",
+                &[&catalogue, &schema, &unit],
+            )
+            .await?;
+        let table = match kind {
+            InactiveApplicationTypeKind::Enum => "catalogue_enum_types",
+            InactiveApplicationTypeKind::Record => "catalogue_record_value_types",
+        };
+        match kind {
+            InactiveApplicationTypeKind::Enum => {
+                session
+                    .client()
+                    .execute(
+                        "INSERT INTO _orna_kernel.catalogue_enum_types
+                            (catalogue_revision_id, type_id, schema_id, name_parts, labels,
+                             source_unit_id, source_start, source_end)
+                         VALUES ($1, $2, $3, ARRAY['hostile', 'enum'], ARRAY['x'], $4, 0, 1)",
+                        &[
+                            &catalogue,
+                            &requested_type.to_bytes().to_vec(),
+                            &schema,
+                            &unit,
+                        ],
+                    )
+                    .await?;
+            }
+            InactiveApplicationTypeKind::Record => {
+                session
+                    .client()
+                    .execute(
+                        "INSERT INTO _orna_kernel.catalogue_record_value_types
+                            (catalogue_revision_id, type_id, schema_id, name_parts,
+                             value_kind, mutability, persistence,
+                             source_unit_id, source_start, source_end)
+                         VALUES ($1, $2, $3, ARRAY['hostile', 'record'],
+                                 'record', 'immutable', 'persistable', $4, 0, 1)",
+                        &[
+                            &catalogue,
+                            &requested_type.to_bytes().to_vec(),
+                            &schema,
+                            &unit,
+                        ],
+                    )
+                    .await?;
+            }
+        }
+        session.client().batch_execute("COMMIT").await?;
+        session.shutdown().await?;
+        let before = baseline(&database, &version_one).await?;
+
+        let error = failed_apply_error(
+            kernel.apply_standard_upgrade(&upgrade).await,
+            "inactive application type collision unexpectedly allowed the standard upgrade",
+        )?;
+        require(
+            error.to_string()
+                == "the database contains an identity reserved for the standard library"
+                && std::error::Error::source(&error).is_none(),
+            "inactive application type collision changed its exact source-free error contract",
+        )?;
+        match error {
+            PostgresKernelError::ReservedStandardIdentity {
+                identity: orna_standard::StandardUpgradeIdentity::Type(type_id),
+            } => require(
+                type_id == requested_type,
+                "inactive application collision returned the wrong type identity",
+            )?,
+            error => {
+                return Err(failure(format!(
+                    "expected inactive application type collision, got {error}"
+                )));
+            }
+        }
+        require_baseline(&database, &before, &kernel).await?;
+
+        let session = database.open().await?;
+        let preserved: i64 = session
+            .client()
+            .query_one(
+                &format!(
+                    "SELECT count(*) FROM _orna_kernel.{table}
+                     WHERE catalogue_revision_id = $1 AND type_id = $2"
+                ),
+                &[&catalogue, &requested_type.to_bytes().to_vec()],
+            )
+            .await?
+            .try_get(0)?;
+        require(
+            preserved == 1,
+            "rejected application type collision changed its hostile durable row",
+        )?;
+        session.shutdown().await
+    })
+    .await
+}
+
+#[cfg(feature = "test-hooks")]
+fn verified_standard_enum_fixture()
+-> TestResult<orna_core::revision::VerifiedStandardLibrarySnapshot> {
+    let unit = StoredSourceUnit::new(
+        SourceUnitId::from_bytes([0xc1; 16]),
+        0,
+        "std/enum.orna",
+        "standard enum fixture",
+        source_unit_content_digest("standard enum fixture")?,
+    )?;
+    let bundle = SourceBundleId::from_bytes([0xc2; 16]);
+    let bundle_hash = source_bundle_digest(std::slice::from_ref(&unit))?;
+    let source = StoredSourceRevision::new(
+        bundle,
+        SourceRevisionId::from_bytes([0xc3; 16]),
+        None,
+        vec![unit],
+        bundle_hash,
+        source_revision_record_digest(bundle, None, bundle_hash)?,
+    )?;
+    let schema = SchemaDefinition::new(
+        orna_core::SchemaId::from_bytes([0xc4; 16]),
+        QualifiedSemanticName::new(["std"])?,
+    );
+    let enum_type = EnumTypeDefinition::new(
+        TypeId::from_bytes([0xc5; 16]),
+        QualifiedSemanticName::new(["std", "mode"])?,
+        vec!["one".to_owned(), "two".to_owned()],
+    );
+    let binding = TypeBinding::qualified(
+        QualifiedSemanticName::new(["std", "mode_alias"])?,
+        enum_type.id(),
+    )?;
+    let source_unit = SourceUnitId::from_bytes([0xc1; 16]);
+    let origins = vec![
+        DefinitionOrigin::new(
+            DefinitionIdentity::Schema(schema.id()),
+            SourceOrigin::new(source_unit, 0, 1)?,
+        ),
+        DefinitionOrigin::new(
+            DefinitionIdentity::ValueType(enum_type.id()),
+            SourceOrigin::new(source_unit, 1, 2)?,
+        ),
+        DefinitionOrigin::new(
+            DefinitionIdentity::TypeBinding(binding.id()),
+            SourceOrigin::new(source_unit, 2, 3)?,
+        ),
+    ];
+    let catalogue = CatalogueSnapshot::new_with_enum_types(
+        CatalogueRevisionId::from_bytes([0xc6; 16]),
+        vec![schema],
+        vec![],
+        vec![],
+        vec![enum_type],
+        vec![binding],
+    )?;
+    let snapshot = StandardLibrarySnapshot::new(
+        StandardLibraryRevisionId::from_bytes([0xc7; 16]),
+        StandardLibraryDigestVersion::Version1,
+        source,
+        "orna.language/1",
+        catalogue,
+        origins,
+        Sha256Digest::from_bytes(FROZEN_STANDARD_ENUM_DIGEST),
+    )?;
+    Ok(verify_standard_library_snapshot(snapshot)?)
+}
+
+#[cfg(feature = "test-hooks")]
+fn standard_enum_record_candidate(
+    active: &ActiveDatabaseRevision,
+    standard: &orna_core::revision::VerifiedStandardLibrarySnapshot,
+) -> TestResult<DeployableRevision> {
+    let content = "standard enum record fixture";
+    let unit = StoredSourceUnit::new(
+        SourceUnitId::from_bytes([0xd1; 16]),
+        0,
+        "app/status.orna",
+        content,
+        source_unit_content_digest(content)?,
+    )?;
+    let bundle = SourceBundleId::from_bytes([0xd2; 16]);
+    let bundle_hash = source_bundle_digest(std::slice::from_ref(&unit))?;
+    let source = StoredSourceRevision::new(
+        bundle,
+        SourceRevisionId::from_bytes([0xd3; 16]),
+        Some(active.pair().source()),
+        vec![unit],
+        bundle_hash,
+        source_revision_record_digest(bundle, Some(active.pair().source()), bundle_hash)?,
+    )?;
+    let schema = SchemaDefinition::new(
+        orna_core::SchemaId::from_bytes([0xd4; 16]),
+        QualifiedSemanticName::new(["app"])?,
+    );
+    let enum_type = standard
+        .catalogue()
+        .enum_types()
+        .first()
+        .ok_or_else(|| failure("standard enum candidate has no pinned enum"))?;
+    let record_type = RecordValueTypeDefinition::new(
+        TypeId::from_bytes([0xd5; 16]),
+        QualifiedSemanticName::new(["app", "status"])?,
+        vec![RecordValueFieldDefinition::try_new_descriptor(
+            FieldId::from_bytes([0xd6; 16]),
+            "mode",
+            0,
+            TypeDescriptor::named(enum_type.id()),
+        )?],
+    );
+    let catalogue = CatalogueSnapshot::new_with_record_value_types(
+        CatalogueRevisionId::from_bytes([0xd7; 16]),
+        vec![schema.clone()],
+        vec![],
+        vec![],
+        vec![],
+        vec![record_type.clone()],
+        vec![],
+    )?;
+    let origin = SourceOrigin::new(
+        SourceUnitId::from_bytes([0xd1; 16]),
+        0,
+        u32::try_from(content.len())?,
+    )?;
+    let origins = vec![
+        DefinitionOrigin::new(DefinitionIdentity::Schema(schema.id()), origin),
+        DefinitionOrigin::new(DefinitionIdentity::ValueType(record_type.id()), origin),
+        DefinitionOrigin::new(
+            DefinitionIdentity::Field {
+                owner: record_type.id(),
+                field: record_type.fields()[0].id(),
+            },
+            origin,
+        ),
+    ];
+    let context = CatalogueHashContext::version_two(standard.clone());
+    let catalogue_hash =
+        catalogue_digest_with_context(&context, &catalogue, &[], &[], &origins, &[])?;
+    Ok(DeployableRevision::new_with_catalogue_hash_context(
+        DeployableRevisionInput::new(
+            active.pair(),
+            source,
+            active.pair().catalogue(),
+            catalogue,
+            catalogue_hash,
+            DeployableRevisionContent::new(origins, vec![], vec![], vec![])
+                .with_current_function_revisions(vec![]),
+        ),
+        context,
+    )?)
 }
 
 fn failed_apply_error(

@@ -125,7 +125,31 @@ impl PostgresKernel {
         upgrade: &StandardUpgrade,
     ) -> Result<ActiveDatabaseRevision, PostgresKernelError> {
         let mut session = self.open().await?;
-        let apply_result = apply_standard_upgrade_client(&mut session.client, upgrade).await;
+        let apply_result = apply_standard_upgrade_client(
+            &mut session.client,
+            upgrade.application_revision(),
+            upgrade.verified_standard_snapshot(),
+        )
+        .await;
+        let shutdown_result = session.shutdown().await;
+        match (apply_result, shutdown_result) {
+            (Ok(active), Ok(())) => Ok(active),
+            (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+        }
+    }
+
+    /// Installs a verified standard fixture through the production persistence
+    /// path while integration tests exercise catalogue shapes that the retained
+    /// standard library does not yet contain.
+    #[cfg(feature = "test-hooks")]
+    pub async fn apply_test_standard_upgrade(
+        &self,
+        candidate: &DeployableRevision,
+        standard: &VerifiedStandardLibrarySnapshot,
+    ) -> Result<ActiveDatabaseRevision, PostgresKernelError> {
+        let mut session = self.open().await?;
+        let apply_result =
+            apply_standard_upgrade_client(&mut session.client, candidate, standard).await;
         let shutdown_result = session.shutdown().await;
         match (apply_result, shutdown_result) {
             (Ok(active), Ok(())) => Ok(active),
@@ -161,7 +185,8 @@ async fn apply_client(
 
 async fn apply_standard_upgrade_client(
     client: &mut Client,
-    upgrade: &StandardUpgrade,
+    candidate: &DeployableRevision,
+    standard: &VerifiedStandardLibrarySnapshot,
 ) -> Result<ActiveDatabaseRevision, PostgresKernelError> {
     let transaction = client
         .build_transaction()
@@ -170,7 +195,7 @@ async fn apply_standard_upgrade_client(
         .start()
         .await
         .map_err(PostgresKernelError::Database)?;
-    let result = apply_standard_upgrade_transaction(&transaction, upgrade).await;
+    let result = apply_standard_upgrade_transaction(&transaction, candidate, standard).await;
     match result {
         Ok(active) => transaction
             .commit()
@@ -218,7 +243,8 @@ async fn apply_transaction(
 
 async fn apply_standard_upgrade_transaction(
     transaction: &Transaction<'_>,
-    upgrade: &StandardUpgrade,
+    candidate: &DeployableRevision,
+    standard: &VerifiedStandardLibrarySnapshot,
 ) -> Result<ActiveDatabaseRevision, PostgresKernelError> {
     establish_trusted_search_path(transaction).await?;
     let locked_pair = lock_active_pair(transaction).await?;
@@ -228,19 +254,30 @@ async fn apply_standard_upgrade_transaction(
             "locked active pair must recover as the same pair",
         ));
     }
-    let candidate = upgrade.application_revision();
     validate_expected_base(&active, candidate)?;
-    scan_reserved_standard_identities(transaction, &active, upgrade).await?;
+    let selected = candidate
+        .catalogue_hash_context()
+        .standard()
+        .ok_or_else(|| invariant("standard upgrade candidate must select a standard snapshot"))?;
+    if StandardContextIdentity::from_verified_snapshot(selected)
+        != StandardContextIdentity::from_verified_snapshot(standard)
+    {
+        return Err(invariant(
+            "standard upgrade candidate must select the supplied standard snapshot",
+        ));
+    }
+    scan_reserved_standard_identities(transaction, &active, standard).await?;
 
     let materialized = materialize(candidate, &active)?;
     let encoder = CandidateEncoder::new(candidate.catalogue_hash_context(), candidate.candidate());
+    validate_postgres_encodings(candidate, &encoder)?;
     apply_materialized_candidate(
         transaction,
         candidate,
         &active,
         &materialized,
         &encoder,
-        Some(upgrade.verified_standard_snapshot()),
+        Some(standard),
     )
     .await
 }
@@ -415,8 +452,9 @@ impl ReservedIdentityLists {
     }
 }
 
-fn upgrade_reserved_identities(upgrade: &StandardUpgrade) -> ReservedIdentityLists {
-    let snapshot = upgrade.verified_standard_snapshot();
+fn upgrade_reserved_identities(
+    snapshot: &VerifiedStandardLibrarySnapshot,
+) -> ReservedIdentityLists {
     let catalogue = snapshot.catalogue();
     let source = snapshot.source();
     let mut identities = ReservedIdentityLists::default();
@@ -452,6 +490,12 @@ fn upgrade_reserved_identities(upgrade: &StandardUpgrade) -> ReservedIdentityLis
         identities.types.push((
             StandardUpgradeIdentity::Type(value_type.id()),
             bytes(value_type.id()),
+        ));
+    }
+    for enum_type in catalogue.enum_types() {
+        identities.types.push((
+            StandardUpgradeIdentity::Type(enum_type.id()),
+            bytes(enum_type.id()),
         ));
     }
     for binding in catalogue.type_bindings() {
@@ -538,6 +582,18 @@ fn append_catalogue_reserved_identities(
             bytes(value_type.id()),
         ));
     }
+    for enum_type in catalogue.enum_types() {
+        identities.types.push((
+            StandardUpgradeIdentity::Type(enum_type.id()),
+            bytes(enum_type.id()),
+        ));
+    }
+    for record_type in catalogue.record_value_types() {
+        identities.types.push((
+            StandardUpgradeIdentity::Type(record_type.id()),
+            bytes(record_type.id()),
+        ));
+    }
     for binding in catalogue.type_bindings() {
         identities.type_bindings.push((
             StandardUpgradeIdentity::TypeBinding(binding.id()),
@@ -549,9 +605,9 @@ fn append_catalogue_reserved_identities(
 async fn scan_reserved_standard_identities(
     transaction: &Transaction<'_>,
     active: &ActiveDatabaseRevision,
-    upgrade: &StandardUpgrade,
+    standard: &VerifiedStandardLibrarySnapshot,
 ) -> Result<(), PostgresKernelError> {
-    let upgrade = upgrade_reserved_identities(upgrade);
+    let upgrade = upgrade_reserved_identities(standard);
     let active = active_visible_reserved_identities(active);
     let queries = [
         "SELECT id AS identity FROM _orna_kernel.standard_library_revisions
@@ -577,7 +633,13 @@ async fn scan_reserved_standard_identities(
         "SELECT identity FROM (
              SELECT type_id AS identity FROM _orna_kernel.catalogue_object_types
              UNION
+             SELECT type_id AS identity FROM _orna_kernel.catalogue_enum_types
+             UNION
+             SELECT type_id AS identity FROM _orna_kernel.catalogue_record_value_types
+             UNION
              SELECT type_id AS identity FROM _orna_kernel.standard_catalogue_value_types
+             UNION
+             SELECT type_id AS identity FROM _orna_kernel.standard_catalogue_enum_types
          ) AS identities
          WHERE identity = ANY($1) AND NOT (identity = ANY($2)) ORDER BY identity LIMIT 1",
         "SELECT type_binding_id AS identity FROM _orna_kernel.standard_catalogue_type_bindings
@@ -1088,24 +1150,71 @@ async fn persist_standard_library(
             .map_err(PostgresKernelError::Database)?;
     }
 
+    for enum_type in standard.catalogue().enum_types() {
+        let schema = schema_for_name(standard.catalogue(), enum_type.name())?;
+        let source = origin(
+            standard.origins(),
+            DefinitionIdentity::ValueType(enum_type.id()),
+        )?;
+        transaction
+            .execute(
+                "INSERT INTO _orna_kernel.standard_catalogue_enum_types
+                    (standard_library_revision_id, type_id, schema_id, name_parts, labels,
+                     source_unit_id, source_start, source_end)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                &[
+                    &bytes(standard.revision()),
+                    &bytes(enum_type.id()),
+                    &bytes(schema),
+                    &enum_type.name().parts(),
+                    &enum_type.labels(),
+                    &bytes(source.source_unit()),
+                    &i64::from(source.byte_start()),
+                    &i64::from(source.byte_end()),
+                ],
+            )
+            .await
+            .map_err(PostgresKernelError::Database)?;
+    }
+
     for binding in standard.catalogue().type_bindings() {
         let source = origin(
             standard.origins(),
             DefinitionIdentity::TypeBinding(binding.id()),
         )?;
         let (kind, name_parts) = standard_type_binding_name(binding.kind(), binding.name())?;
+        let (target_kind, value_target, enum_target) = if standard
+            .catalogue()
+            .value_type_by_id(binding.target())
+            .is_some()
+        {
+            ("value", Some(bytes(binding.target())), None)
+        } else if standard
+            .catalogue()
+            .enum_type_by_id(binding.target())
+            .is_some()
+        {
+            ("enum", None, Some(bytes(binding.target())))
+        } else {
+            return Err(invariant(
+                "standard type binding target must identify one standard value or enum type",
+            ));
+        };
         transaction
             .execute(
                 "INSERT INTO _orna_kernel.standard_catalogue_type_bindings
                     (standard_library_revision_id, type_binding_id, kind, name_parts,
-                     target_type_id, source_unit_id, source_start, source_end)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                     target_type_kind, target_type_id, target_enum_type_id,
+                     source_unit_id, source_start, source_end)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
                 &[
                     &bytes(standard.revision()),
                     &bytes(binding.id()),
                     &kind,
                     &name_parts,
-                    &bytes(binding.target()),
+                    &target_kind,
+                    &value_target,
+                    &enum_target,
                     &bytes(source.source_unit()),
                     &i64::from(source.byte_start()),
                     &i64::from(source.byte_end()),
@@ -1289,29 +1398,19 @@ async fn persist_semantics(
             .map_err(PostgresKernelError::Database)?;
 
         for field in record_type.fields() {
-            let TypeColumns {
+            let RecordValueFieldColumns {
                 kind,
-                scalar,
-                target,
                 value_type,
-                standard_library_revision,
-                enum_type,
-                record_type: nested_record_type,
+                value_standard_library_revision,
+                application_enum_type,
+                enum_standard_library_revision,
+                standard_enum_type,
             } = encoder.record_value_field_columns(
                 candidate,
                 field
                     .type_descriptor()
                     .expect("catalogue-validated record fields have descriptors"),
             )?;
-            if scalar.is_some()
-                || target.is_some()
-                || nested_record_type.is_some()
-                || !matches!(kind, "value" | "enum")
-            {
-                return Err(invariant(
-                    "record value fields must use one supported standard value or application enum type",
-                ));
-            }
             let field_origin = origin(
                 candidate.origins(),
                 DefinitionIdentity::Field {
@@ -1324,8 +1423,9 @@ async fn persist_semantics(
                     "INSERT INTO _orna_kernel.catalogue_record_value_fields
                         (catalogue_revision_id, owner_type_id, field_id, name, ordinal,
                          type_kind, value_type_id, value_standard_library_revision_id,
-                         enum_type_id, source_unit_id, source_start, source_end)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+                         enum_type_id, enum_standard_library_revision_id,
+                         standard_enum_type_id, source_unit_id, source_start, source_end)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
                     &[
                         &bytes(catalogue),
                         &bytes(record_type.id()),
@@ -1334,8 +1434,10 @@ async fn persist_semantics(
                         &i64::from(field.ordinal()),
                         &kind,
                         &value_type.map(bytes),
-                        &standard_library_revision.map(bytes),
-                        &enum_type.map(bytes),
+                        &value_standard_library_revision.map(bytes),
+                        &application_enum_type.map(bytes),
+                        &enum_standard_library_revision.map(bytes),
+                        &standard_enum_type.map(bytes),
                         &bytes(field_origin.source_unit()),
                         &i64::from(field_origin.byte_start()),
                         &i64::from(field_origin.byte_end()),
@@ -1957,6 +2059,16 @@ struct TypeColumns {
     record_type: Option<TypeId>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RecordValueFieldColumns {
+    kind: &'static str,
+    value_type: Option<TypeId>,
+    value_standard_library_revision: Option<StandardLibraryRevisionId>,
+    application_enum_type: Option<TypeId>,
+    enum_standard_library_revision: Option<StandardLibraryRevisionId>,
+    standard_enum_type: Option<TypeId>,
+}
+
 /// The one context-aware PostgreSQL projection for candidate type and reference
 /// storage. It preserves the version-one tuple exactly and uses the selected
 /// version-two standard pin only for durable value identities.
@@ -1985,25 +2097,37 @@ impl<'a> CandidateEncoder<'a> {
         &self,
         candidate: &DeployableRevision,
         descriptor: &TypeDescriptor,
-    ) -> Result<TypeColumns, PostgresKernelError> {
+    ) -> Result<RecordValueFieldColumns, PostgresKernelError> {
         let class = candidate
             .record_value_field_descriptor_class(descriptor)
             .map_err(|_| {
                 invariant("record value fields must use one supported standard value or enum type")
             })?;
         match class {
-            RecordValueFieldDescriptorClass::ApplicationEnum(type_id) => Ok(TypeColumns {
-                kind: "enum",
-                scalar: None,
-                target: None,
-                value_type: None,
-                standard_library_revision: None,
-                enum_type: Some(type_id),
-                record_type: None,
-            }),
-            RecordValueFieldDescriptorClass::StandardEnum(_) => Err(invariant(
-                "standard enum record fields require durable standard enum storage",
-            )),
+            RecordValueFieldDescriptorClass::ApplicationEnum(type_id) => {
+                Ok(RecordValueFieldColumns {
+                    kind: "enum",
+                    value_type: None,
+                    value_standard_library_revision: None,
+                    application_enum_type: Some(type_id),
+                    enum_standard_library_revision: None,
+                    standard_enum_type: None,
+                })
+            }
+            RecordValueFieldDescriptorClass::StandardEnum(type_id) => {
+                let standard_library_revision =
+                    self.standard_library_revision().ok_or_else(|| {
+                        invariant("record value field standard enum must retain its standard pin")
+                    })?;
+                Ok(RecordValueFieldColumns {
+                    kind: "enum",
+                    value_type: None,
+                    value_standard_library_revision: None,
+                    application_enum_type: None,
+                    enum_standard_library_revision: Some(standard_library_revision),
+                    standard_enum_type: Some(type_id),
+                })
+            }
             RecordValueFieldDescriptorClass::StandardPrimitive(type_id) => {
                 let standard_library_revision =
                     self.standard_library_revision().ok_or_else(|| {
@@ -2011,14 +2135,13 @@ impl<'a> CandidateEncoder<'a> {
                             "record value field standard primitive must retain its standard pin",
                         )
                     })?;
-                Ok(TypeColumns {
+                Ok(RecordValueFieldColumns {
                     kind: "value",
-                    scalar: None,
-                    target: None,
                     value_type: Some(type_id),
-                    standard_library_revision: Some(standard_library_revision),
-                    enum_type: None,
-                    record_type: None,
+                    value_standard_library_revision: Some(standard_library_revision),
+                    application_enum_type: None,
+                    enum_standard_library_revision: None,
+                    standard_enum_type: None,
                 })
             }
             _ => Err(invariant(
