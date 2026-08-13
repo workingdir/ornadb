@@ -266,6 +266,178 @@ authority, or permission to admit a descriptor-backed field in a catalogue
 early. Its proof includes the scalar and five constructor construction errors
 and the absence of a partial field.
 
+### Nested immutable application records
+
+Step 6 admits one additional record-field descriptor: `Named(id)` when `id`
+resolves to a `RecordValueTypeDefinition` in the same application catalogue.
+The field is a non-null immutable value stored by value. It does not admit a
+record from the pinned standard catalogue, an application primitive or opaque
+value, `Reference`, `List`, `Set`, `Map`, `Option`, or `Stream`.
+`RecordValueFieldDefinition::try_new_descriptor` continues to reject all five
+constructed descriptors before a field exists.
+
+Catalogue-local validation accepts a `Named` leaf only when it is a local enum,
+a local record, or is absent locally and may therefore be classified by the
+pinned standard snapshot. A local object, primitive, or opaque value rejects
+the snapshot. Contextual classification adds
+`RecordValueFieldDescriptorClass::ApplicationRecord(TypeId)`. It examines only
+the candidate or active application catalogue and the pinned verified standard
+snapshot. An application enum or record identity that is also an accepted
+pinned-standard enum or accepted pinned-standard primitive returns the existing
+`Ambiguous { type_id }` result before either provenance is selected. An absent
+or wrong-category leaf returns `Unsupported`. Standard catalogues still cannot
+contain record definitions.
+
+Application record dependencies form one directed graph. An edge runs from the
+record that owns a field to the application record named by that field. A
+record with no record-valued field has nesting depth zero; every such edge adds
+one. The graph must be acyclic and its longest path may contain at most 32
+edges. A 32-edge path is accepted and the edge that would make a path length 33
+fails.
+
+Validation is deterministic and completes in three phases before it returns
+canonical bytes or a revision. First, it classifies every field in record
+`TypeId` byte order and then field `(ordinal, FieldId)` order, returning the
+first unsupported or ambiguous field. Second, it traverses roots and outgoing
+application-record edges in those same orders with grey and black states; the
+first edge to a grey record returns:
+
+```text
+RecursiveRecordValueField {
+    record_value_type,
+    field,
+    nested_record_value_type,
+}
+```
+
+Third, over the now-proven acyclic graph, it again visits roots by `TypeId`
+byte order and outgoing edges by `(ordinal, FieldId)` order. It walks each root
+with a root-relative depth and returns the first traversed edge for which that
+depth becomes 33:
+
+```text
+RecordValueNestingTooDeep {
+    record_value_type,
+    field,
+    nested_record_value_type,
+    maximum: 32,
+    actual: 33,
+}
+```
+
+An implementation may memoise validated suffix depths, but that optimisation
+must not change the selected edge or error payload. The fixed displays are
+`record value fields must not form a recursive cycle`
+and `record value nesting exceeds the maximum depth`. Canonical-hash and
+revision validation share this algorithm and ordering. PostgreSQL apply and
+recovery admit a candidate only through the same revision validation. No phase
+returns partial classification, graph, revision, or digest evidence.
+
+Catalogue hash version 2 remains the only record-definition hash contract. It
+writes big-endian `00 00 00 02` immediately after the existing version-2
+domain. An application-record field emits exactly resolved-type tag `02`
+followed by the 16 `TypeId` bytes, the same shape as application and
+pinned-standard enum leaves. Accepted standard primitives remain tag `04` plus
+their 16-byte `TypeId`. The target record definition is encoded once in the
+existing sorted record-definition section and is never recursively inlined
+into its owner's field. Graph validation completes before hash encoding starts.
+Every previously accepted version-2 byte and golden remains exact.
+
+Runtime validity is relative to the supplied active revision, not to hidden
+creation provenance. `RecordValue` does not gain a stored revision identity.
+`RecordValue::new(active, ...)` recursively revalidates each nested
+`RuntimeValue::Record` against that same `ActiveDatabaseRevision`, including its
+nominal `TypeId`, complete declared field sequence, child types, and enum
+labels. A value constructed against an older revision is accepted only when
+that complete recursive validation still succeeds. A record value with the
+wrong nominal field type returns the existing `FieldTypeMismatch`. A nested
+record with the expected nominal type whose contents are not valid for the
+supplied revision returns:
+
+```text
+InactiveNestedRecord {
+    record_type,
+    field,
+    nested_record_type,
+}
+```
+
+Its display is `nested record field value is not active`. The validated
+catalogue graph bounds recursive runtime work independently of the value's
+source.
+
+ORV3 and ORV4 already have the required recursive byte shape because every
+record field contains one complete value envelope. Step 6 supersedes ADR 0031's
+zero-nested-record restriction without allocating ORV5. A nested field contains
+the same marker as its outer value, tag `0b`, the nested 16-byte `TypeId`, a
+big-endian `u32` payload length, and the existing record payload recursively.
+ORV3 therefore nests only complete ORV3 values and ORV4 nests only complete
+ORV4 values. The decoder removes `NestedRecordValue` as a rejection and
+recursively validates the nested envelope against the same active revision;
+the encoder performs the symmetric validation and encoding. Existing flat
+ORV3 and ORV4 bytes remain exact, ORV1 and ORV2 remain record-free, ORF3 and
+ORF4 continue to delegate to their matching value codec without a frame-byte
+change, and the existing 16 MiB enclosing payload limit remains authoritative.
+
+PostgreSQL migration `0021` adds nullable `record_type_id bytea` to
+`catalogue_record_value_fields` and extends `type_kind` with `record`. The
+`record` tuple requires only `record_type_id` to be non-null; every value,
+application-enum, standard-enum, and standard-library-provenance column is
+null. Existing `value` and `enum` tuple shapes remain exact and require
+`record_type_id` to be null. The new column has an exact 16-byte check and a
+deferrable, initially deferred foreign key from
+`(catalogue_revision_id, record_type_id)` to
+`catalogue_record_value_types(catalogue_revision_id, type_id)`.
+
+Apply projects `ApplicationRecord(id)` to that exact exclusive tuple. Recovery
+selects the column, rejects every partial or mixed tuple, reconstructs
+`Named(id)`, and completes the shared contextual classification and graph
+validation before it returns an active revision. The SQL foreign key proves
+same-revision identity integrity; core validation remains the authority for
+category, collision, cycle, and depth.
+
+The compiler resolves a submitted record name in a record field to the same
+checked or provisional identity and retains its type-use origin. Before durable
+identities exist, its diagnostic pass visits source units by ordinal, records
+in declaration order, and fields by ordinal. Core preparation and revision
+validation remain authoritative and use the durable `TypeId` byte ordering
+defined above.
+The cycle edge reports `ORNA0201` at its field type span with
+`record value fields must not form a recursive cycle through {qualified_name}`.
+The depth-33 edge reports `ORNA0201` at its field type span with
+`record value nesting exceeds 32 levels through {qualified_name}`. In both
+messages, `{qualified_name}` is the target record named by the rejected edge.
+Forward references and shared acyclic subgraphs remain accepted. Nested record
+constructors and every other previously closed position remain closed.
+
+Step 6 proof covers application-record classification and provenance
+collisions; direct and multi-record cycles; shared acyclic graphs; exact depths
+32 and 33; unchanged version-2 goldens and exact tag-2 field bytes; recursive
+runtime construction and stale-value revalidation; exact nested ORV3 and ORV4
+goldens plus malformed nested envelopes; unchanged earlier codecs and frames;
+and PostgreSQL migration, apply, recovery, corruption, and restart behaviour.
+
+The signed, always-green step-6 sequence is:
+
+1. `docs(types): define nested immutable record fields` changes this decision.
+2. `feat(types): validate nested record field graphs` changes catalogue and
+   revision code in at most three files.
+3. `feat(values): hash and construct nested record values` changes canonical
+   hashing and runtime values in at most three files.
+4. `feat(protocol): encode nested record values` changes the protocol codec in
+   one file.
+5. `feat(compiler): resolve nested record fields` changes resolver, checked
+   model, and preparation code in at most three files.
+6. `feat(postgres): store nested record field targets` changes migration 0021,
+   bootstrap registration, and its bootstrap test.
+7. `feat(postgres): apply nested record field targets` changes apply code and
+   its focused test.
+8. `feat(postgres): recover nested record field targets` changes recovery code
+   and its focused corruption and restart test.
+
+Every implementation and proof commit changes one to three files and retains
+the repository's signed, conventional, buildable history.
+
 ## Source syntax
 
 The parser accepts the existing canonical EBNF recursively:
@@ -365,7 +537,8 @@ required as each later position opens.
    while retaining all earlier golden bytes when no constructor is present.
 6. Admit nested immutable record values against one active revision.
 7. Define and implement canonical `OPTION`, `LIST`, and `MAP` runtime values.
-8. Amend the value and frame codec with their exact new version bytes.
+8. Amend the value and frame codec with the exact new version bytes for
+   `OPTION`, `LIST`, and `MAP`; nested records already use ORV3 and ORV4.
 9. Define and install the sealed Ring-1 invocation type family.
 10. Carry one complete canonical request to the stable `sys.invoke` function.
 11. Add `STREAM<sys.invoke.Event>` and the first canonical-result event path.
