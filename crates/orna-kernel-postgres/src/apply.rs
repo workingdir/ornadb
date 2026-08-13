@@ -1115,12 +1115,12 @@ fn standard_digest_version(
 }
 
 fn standard_value_kind(value: ValueTypeKind) -> Result<&'static str, PostgresKernelError> {
-    if matches!(value, ValueTypeKind::Primitive) {
-        Ok("primitive")
-    } else {
-        Err(invariant(
+    match value {
+        ValueTypeKind::Primitive => Ok("primitive"),
+        ValueTypeKind::Opaque => Ok("opaque"),
+        _ => Err(invariant(
             "standard value type kind is not supported by PostgreSQL persistence",
-        ))
+        )),
     }
 }
 
@@ -2392,7 +2392,7 @@ mod tests {
         catalogue::{
             CatalogueSnapshot, EnumTypeDefinition, FieldDefinition, FunctionTransaction,
             ObjectTypeDefinition, QualifiedSemanticName, RecordValueFieldDefinition,
-            RecordValueTypeDefinition, SchemaDefinition,
+            RecordValueTypeDefinition, SchemaDefinition, ValueTypeKind,
         },
         physical::{PhysicalPlanError, plan_physical_changes},
         revision::{
@@ -2411,7 +2411,7 @@ mod tests {
         TypeColumns, artifact_kind, first_active_reserved_identity,
         first_inactive_reserved_identity, function_transaction, guard_standard_context_transition,
         legacy_type_projection, materialize, positive_i32, positive_i64, reference_kind,
-        reference_target, scalar, type_columns, validate_candidate_preflight,
+        reference_target, scalar, standard_value_kind, type_columns, validate_candidate_preflight,
         validate_expected_base,
     };
     use crate::PostgresKernelError;
@@ -3253,6 +3253,18 @@ mod tests {
             ("reference", None, Some(target))
         );
         assert!(type_columns(ResolvedType::scalar(StandardScalar::Void), false).is_err());
+    }
+
+    #[test]
+    fn standard_value_kind_encoder_preserves_opaque_definitions() {
+        assert_eq!(
+            standard_value_kind(ValueTypeKind::Primitive).unwrap(),
+            "primitive"
+        );
+        assert_eq!(
+            standard_value_kind(ValueTypeKind::Opaque).unwrap(),
+            "opaque"
+        );
     }
 
     #[test]
