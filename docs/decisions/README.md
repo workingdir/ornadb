@@ -69,3 +69,5 @@ source-of-truth or authority rules.
   [Local Raw Recovery Calls Use Stable Function Identities](0033-local-raw-recovery-client.md)
 * **work ADR 0034:**
   [Opaque Values Require Registered Canonical Codecs](0034-opaque-values-require-registered-codecs.md)
+* **work ADR 0035:**
+  [Catalogue Health Is One Mandatory System Function](0035-mandatory-catalogue-health-function.md)
