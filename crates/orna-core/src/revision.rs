@@ -1992,13 +1992,20 @@ fn validate_resolved_type_slot(
                 );
             }
             CatalogueHashContext::Version2 { standard } => {
-                if standard.catalogue().value_type_by_id(value_type).is_none() {
+                let Some(value_type_definition) = standard.catalogue().value_type_by_id(value_type)
+                else {
                     return Err(
                         RevisionInvariantError::ResolvedValueTypeNotInPinnedStandard {
                             identity,
                             value_type,
                         },
                     );
+                };
+                if value_type_definition.kind() == ValueTypeKind::Opaque {
+                    return Err(RevisionInvariantError::OpaqueValueTypeNotAcceptedInSlot {
+                        identity,
+                        value_type,
+                    });
                 }
             }
         },
@@ -2016,7 +2023,7 @@ fn validate_catalogue_hash_context_coherence(
     references: &[DefinitionReference],
 ) -> Result<(), RevisionInvariantError> {
     if matches!(context, CatalogueHashContext::Version1) {
-        reject_record_value_types_for_version_one(catalogue)?;
+        reject_version_one_value_definitions(catalogue)?;
     }
     validate_resolved_type_slots(context, catalogue)?;
     validate_record_value_field_types(context, catalogue)?;
@@ -2030,13 +2037,24 @@ fn validate_catalogue_hash_context_coherence(
     }
 }
 
-fn reject_record_value_types_for_version_one(
+fn reject_version_one_value_definitions(
     catalogue: &CatalogueSnapshot,
 ) -> Result<(), RevisionInvariantError> {
     if let Some(record_value_type) = catalogue.record_value_types().first() {
         return Err(
             RevisionInvariantError::RecordValueTypeRequiresCatalogueHashVersionTwo {
                 record_value_type: record_value_type.id(),
+            },
+        );
+    }
+    if let Some(opaque) = catalogue
+        .value_types()
+        .iter()
+        .find(|value_type| value_type.kind() == ValueTypeKind::Opaque)
+    {
+        return Err(
+            RevisionInvariantError::ValueTypeDefinitionRequiresCatalogueHashVersionTwo {
+                value_type: opaque.id(),
             },
         );
     }
@@ -2583,6 +2601,13 @@ pub enum RevisionInvariantError {
         /// The absent durable standard value-type identity.
         value_type: TypeId,
     },
+    /// A catalogue slot uses a transient opaque value type.
+    OpaqueValueTypeNotAcceptedInSlot {
+        /// The catalogue slot containing the rejected opaque value.
+        identity: DefinitionIdentity,
+        /// The rejected opaque value type identity.
+        value_type: TypeId,
+    },
     /// A version-2 function semantic hash was paired with a version-1 catalogue hash.
     FunctionSemanticHashVersionRequiresCatalogueHashVersionTwo {
         /// The function whose immutable revision uses the newer contract.
@@ -2836,6 +2861,9 @@ impl fmt::Display for RevisionInvariantError {
             }
             ResolvedValueTypeNotInPinnedStandard { .. } => formatter
                 .write_str("resolved value type is absent from the pinned standard library"),
+            OpaqueValueTypeNotAcceptedInSlot { .. } => {
+                formatter.write_str("opaque value type is not accepted in a catalogue slot")
+            }
             FunctionSemanticHashVersionRequiresCatalogueHashVersionTwo { .. } => formatter
                 .write_str("function semantic hash version 2 requires catalogue hash version 2"),
             ValueTypeDefinitionRequiresCatalogueHashVersionTwo { .. } => {
@@ -3614,6 +3642,33 @@ mod tests {
     }
 
     fn standard_context() -> CatalogueHashContext {
+        standard_context_with_value_types(vec![standard_boolean_definition()])
+    }
+
+    fn standard_boolean_definition() -> ValueTypeDefinition {
+        ValueTypeDefinition::primitive(
+            TypeId::from_bytes(id::<71>()),
+            QualifiedSemanticName::new(["std", "boolean"]).unwrap(),
+            ValueTypeMutability::Immutable,
+            ValueTypePersistence::Persistable,
+            "orna.kernel.value.boolean@1",
+        )
+    }
+
+    fn opaque_standard_context() -> CatalogueHashContext {
+        standard_context_with_value_types(vec![
+            standard_boolean_definition(),
+            ValueTypeDefinition::opaque(
+                TypeId::from_bytes(id::<72>()),
+                QualifiedSemanticName::new(["std", "token"]).unwrap(),
+                "std.token@1",
+            ),
+        ])
+    }
+
+    fn standard_context_with_value_types(
+        value_types: Vec<ValueTypeDefinition>,
+    ) -> CatalogueHashContext {
         let unit = StoredSourceUnit::new(
             SourceUnitId::from_bytes(id::<3>()),
             0,
@@ -3633,13 +3688,10 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        let value_type = ValueTypeDefinition::primitive(
-            TypeId::from_bytes(id::<71>()),
-            QualifiedSemanticName::new(["std", "boolean"]).unwrap(),
-            ValueTypeMutability::Immutable,
-            ValueTypePersistence::Persistable,
-            "orna.kernel.value.boolean@1",
-        );
+        let value_type_ids = value_types
+            .iter()
+            .map(ValueTypeDefinition::id)
+            .collect::<Vec<_>>();
         let catalogue = CatalogueSnapshot::new_with_types(
             CatalogueRevisionId::from_bytes(id::<72>()),
             vec![SchemaDefinition::new(
@@ -3647,20 +3699,30 @@ mod tests {
                 QualifiedSemanticName::new(["std"]).unwrap(),
             )],
             vec![],
-            vec![value_type],
+            value_types,
             vec![],
         )
         .unwrap();
-        let origins = vec![
-            DefinitionOrigin::new(
-                DefinitionIdentity::Schema(SchemaId::from_bytes(id::<73>())),
-                SourceOrigin::new(SourceUnitId::from_bytes(id::<3>()), 0, 1).unwrap(),
-            ),
-            DefinitionOrigin::new(
-                DefinitionIdentity::ValueType(TypeId::from_bytes(id::<71>())),
-                SourceOrigin::new(SourceUnitId::from_bytes(id::<3>()), 1, 2).unwrap(),
-            ),
-        ];
+        let mut origins = vec![DefinitionOrigin::new(
+            DefinitionIdentity::Schema(SchemaId::from_bytes(id::<73>())),
+            SourceOrigin::new(SourceUnitId::from_bytes(id::<3>()), 0, 1).unwrap(),
+        )];
+        origins.extend(
+            value_type_ids
+                .into_iter()
+                .enumerate()
+                .map(|(index, value_type_id)| {
+                    DefinitionOrigin::new(
+                        DefinitionIdentity::ValueType(value_type_id),
+                        SourceOrigin::new(
+                            SourceUnitId::from_bytes(id::<3>()),
+                            index as u32 + 1,
+                            index as u32 + 2,
+                        )
+                        .unwrap(),
+                    )
+                }),
+        );
         let provisional = StandardLibrarySnapshot::new(
             StandardLibraryRevisionId::from_bytes(id::<74>()),
             StandardLibraryDigestVersion::Version1,
@@ -5475,6 +5537,171 @@ mod tests {
     }
 
     #[test]
+    fn version_two_rejects_a_pinned_opaque_value_in_every_catalogue_slot() {
+        let opaque = TypeId::from_bytes(id::<72>());
+        let named = ResolvedType::named(TypeId::from_bytes(id::<80>()));
+        let cases = [
+            (
+                resolved_type_slots_catalogue(
+                    ResolvedType::value(opaque),
+                    named,
+                    FunctionReturn::Single(named),
+                ),
+                DefinitionIdentity::Field {
+                    owner: TypeId::from_bytes(id::<80>()),
+                    field: FieldId::from_bytes(id::<81>()),
+                },
+            ),
+            (
+                resolved_type_slots_catalogue(
+                    named,
+                    ResolvedType::value(opaque),
+                    FunctionReturn::Single(named),
+                ),
+                DefinitionIdentity::Parameter {
+                    owner: FunctionId::from_bytes(id::<82>()),
+                    parameter: ParameterId::from_bytes(id::<83>()),
+                },
+            ),
+            (
+                resolved_type_slots_catalogue(
+                    named,
+                    named,
+                    FunctionReturn::Single(ResolvedType::value(opaque)),
+                ),
+                DefinitionIdentity::Function(FunctionId::from_bytes(id::<82>())),
+            ),
+            (
+                resolved_type_slots_catalogue(
+                    named,
+                    named,
+                    FunctionReturn::Rows(vec![FunctionReturnColumnDefinition::new(
+                        "token",
+                        0,
+                        ResolvedType::value(opaque),
+                    )]),
+                ),
+                DefinitionIdentity::FunctionReturnColumn {
+                    owner: FunctionId::from_bytes(id::<82>()),
+                    ordinal: 0,
+                },
+            ),
+        ];
+
+        for (catalogue, identity) in cases {
+            assert_eq!(
+                validate_resolved_type_slots(&opaque_standard_context(), &catalogue),
+                Err(RevisionInvariantError::OpaqueValueTypeNotAcceptedInSlot {
+                    identity,
+                    value_type: opaque,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn active_and_deployable_revisions_accept_a_standalone_pinned_opaque_definition() {
+        let active_source = source(None);
+        let active_catalogue = empty_catalogue();
+        let active = ActiveDatabaseRevision::new_with_catalogue_hash_context(
+            ActiveDatabaseRevisionInput::new(
+                RevisionPair::new(active_source.id(), active_catalogue.revision()),
+                active_source,
+                active_catalogue,
+                digest::<7>(),
+                ActiveRevisionContent::new(vec![], vec![], vec![], vec![]),
+            ),
+            opaque_standard_context(),
+        )
+        .unwrap();
+        let opaque = active
+            .catalogue_hash_context()
+            .standard()
+            .unwrap()
+            .catalogue()
+            .value_type_by_id(TypeId::from_bytes(id::<72>()))
+            .unwrap();
+        assert_eq!(opaque.kind(), ValueTypeKind::Opaque);
+
+        let expected = RevisionPair::new(
+            SourceRevisionId::from_bytes(id::<20>()),
+            CatalogueRevisionId::from_bytes(id::<21>()),
+        );
+        let deployable = DeployableRevision::new_with_catalogue_hash_context(
+            DeployableRevisionInput::new(
+                expected,
+                source(Some(expected.source())),
+                expected.catalogue(),
+                empty_catalogue(),
+                digest::<7>(),
+                DeployableRevisionContent::new(vec![], vec![], vec![], vec![])
+                    .with_current_function_revisions(vec![]),
+            ),
+            opaque_standard_context(),
+        )
+        .unwrap();
+        assert_eq!(
+            deployable
+                .catalogue_hash_context()
+                .standard()
+                .unwrap()
+                .catalogue()
+                .value_type_by_id(TypeId::from_bytes(id::<72>()))
+                .unwrap()
+                .kind(),
+            ValueTypeKind::Opaque
+        );
+    }
+
+    #[test]
+    fn version_one_rejects_an_opaque_definition_before_slot_validation() {
+        let opaque = TypeId::from_bytes(id::<72>());
+        let catalogue = CatalogueSnapshot::new_with_types(
+            CatalogueRevisionId::from_bytes(id::<7>()),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes(id::<8>()),
+                QualifiedSemanticName::new(["crm"]).unwrap(),
+            )],
+            vec![ObjectTypeDefinition::new(
+                TypeId::from_bytes(id::<80>()),
+                QualifiedSemanticName::new(["crm", "task"]).unwrap(),
+                vec![FieldDefinition::new(
+                    FieldId::from_bytes(id::<81>()),
+                    "value",
+                    0,
+                    ResolvedType::value(TypeId::from_bytes(id::<99>())),
+                    false,
+                    false,
+                    None,
+                    None,
+                )],
+            )],
+            vec![ValueTypeDefinition::opaque(
+                opaque,
+                QualifiedSemanticName::new(["crm", "token"]).unwrap(),
+                "crm.token@1",
+            )],
+            vec![],
+        )
+        .unwrap();
+
+        assert_eq!(
+            validate_catalogue_hash_context_coherence(
+                &CatalogueHashContext::version_one(),
+                &catalogue,
+                &[],
+                &[],
+                &[],
+            ),
+            Err(
+                RevisionInvariantError::ValueTypeDefinitionRequiresCatalogueHashVersionTwo {
+                    value_type: opaque,
+                }
+            )
+        );
+    }
+
+    #[test]
     fn constructors_reject_version_two_scalars_in_each_durable_slot_order() {
         let pinned = ResolvedType::value(TypeId::from_bytes(id::<71>()));
         let scalar = ResolvedType::scalar(StandardScalar::Boolean);
@@ -5637,6 +5864,13 @@ mod tests {
                     value_type,
                 },
                 "resolved value type is absent from the pinned standard library",
+            ),
+            (
+                RevisionInvariantError::OpaqueValueTypeNotAcceptedInSlot {
+                    identity,
+                    value_type,
+                },
+                "opaque value type is not accepted in a catalogue slot",
             ),
         ];
 

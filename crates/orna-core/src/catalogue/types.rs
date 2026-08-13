@@ -28,6 +28,8 @@ pub enum TypeDefinitionKind {
 pub enum ValueTypeKind {
     /// A value represented by one kernel primitive contract.
     Primitive,
+    /// A nominal value whose canonical payload requires a registered codec.
+    Opaque,
 }
 
 /// Whether a value type can be stored durably.
@@ -206,10 +208,44 @@ impl ValueTypeDefinition {
         persistence: ValueTypePersistence,
         representation_contract: impl Into<String>,
     ) -> Self {
+        Self::new(
+            id,
+            name,
+            ValueTypeKind::Primitive,
+            mutability,
+            persistence,
+            representation_contract,
+        )
+    }
+
+    /// Creates an immutable, transient opaque value type.
+    pub fn opaque(
+        id: TypeId,
+        name: QualifiedSemanticName,
+        representation_contract: impl Into<String>,
+    ) -> Self {
+        Self::new(
+            id,
+            name,
+            ValueTypeKind::Opaque,
+            ValueTypeMutability::Immutable,
+            ValueTypePersistence::Transient,
+            representation_contract,
+        )
+    }
+
+    fn new(
+        id: TypeId,
+        name: QualifiedSemanticName,
+        kind: ValueTypeKind,
+        mutability: ValueTypeMutability,
+        persistence: ValueTypePersistence,
+        representation_contract: impl Into<String>,
+    ) -> Self {
         Self {
             id,
             name,
-            kind: ValueTypeKind::Primitive,
+            kind,
             mutability,
             persistence,
             representation_contract: representation_contract.into(),
@@ -256,7 +292,7 @@ impl ValueTypeDefinition {
 pub enum TypeDefinition<'a> {
     /// A durable object type.
     Object(&'a ObjectTypeDefinition),
-    /// A primitive value type.
+    /// A primitive or opaque value type.
     Value(&'a ValueTypeDefinition),
     /// A named immutable record value type.
     RecordValue(&'a RecordValueTypeDefinition),
@@ -303,7 +339,7 @@ impl<'a> TypeDefinition<'a> {
         }
     }
 
-    /// Returns this definition as a primitive value type, when it is one.
+    /// Returns this definition as a primitive or opaque value type, when it is one.
     pub const fn as_value(self) -> Option<&'a ValueTypeDefinition> {
         match self {
             Self::Object(_) | Self::RecordValue(_) | Self::Enum(_) => None,
@@ -313,7 +349,22 @@ impl<'a> TypeDefinition<'a> {
 
     /// Returns this definition as a primitive value type, when it is one.
     pub const fn as_primitive_value(self) -> Option<&'a ValueTypeDefinition> {
-        self.as_value()
+        match self {
+            Self::Value(definition) if matches!(definition.kind(), ValueTypeKind::Primitive) => {
+                Some(definition)
+            }
+            Self::Object(_) | Self::Value(_) | Self::RecordValue(_) | Self::Enum(_) => None,
+        }
+    }
+
+    /// Returns this definition as an opaque value type, when it is one.
+    pub const fn as_opaque_value(self) -> Option<&'a ValueTypeDefinition> {
+        match self {
+            Self::Value(definition) if matches!(definition.kind(), ValueTypeKind::Opaque) => {
+                Some(definition)
+            }
+            Self::Object(_) | Self::Value(_) | Self::RecordValue(_) | Self::Enum(_) => None,
+        }
     }
 
     /// Returns this definition as a record value type, when it is one.
@@ -603,7 +654,10 @@ impl std::error::Error for PreludeTypeNameError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{PreludeTypeName, PreludeTypeNameError, TypeBinding, TypeBindingKind};
+    use super::{
+        PreludeTypeName, PreludeTypeNameError, TypeBinding, TypeBindingKind, TypeDefinition,
+        ValueTypeDefinition, ValueTypeKind, ValueTypeMutability, ValueTypePersistence,
+    };
     use crate::{TypeId, catalogue::QualifiedSemanticName};
 
     #[test]
@@ -649,5 +703,27 @@ mod tests {
                 Err(PreludeTypeNameError::InvalidWord { index })
             );
         }
+    }
+
+    #[test]
+    fn opaque_value_definition_preserves_its_closed_contract() {
+        let id = TypeId::from_bytes([0x34; 16]);
+        let name = QualifiedSemanticName::new(["std", "example", "token"]).unwrap();
+        let definition = ValueTypeDefinition::opaque(id, name.clone(), "std.example.token@1");
+
+        assert_eq!(definition.id(), id);
+        assert_eq!(definition.name(), &name);
+        assert_eq!(definition.kind(), ValueTypeKind::Opaque);
+        assert_eq!(definition.mutability(), ValueTypeMutability::Immutable);
+        assert_eq!(definition.persistence(), ValueTypePersistence::Transient);
+        assert_eq!(definition.representation_contract(), "std.example.token@1");
+        assert_eq!(
+            TypeDefinition::Value(&definition).as_opaque_value(),
+            Some(&definition)
+        );
+        assert_eq!(
+            TypeDefinition::Value(&definition).as_primitive_value(),
+            None
+        );
     }
 }
