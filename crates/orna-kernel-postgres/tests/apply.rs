@@ -1628,10 +1628,10 @@ async fn require_standard_upgrade_storage(
             )?;
             require(
                 row.try_get::<_, String>(3)?
-                    == if matches!(value_type.kind(), ValueTypeKind::Primitive) {
-                        "primitive"
-                    } else {
-                        "unsupported"
+                    == match value_type.kind() {
+                        ValueTypeKind::Primitive => "primitive",
+                        ValueTypeKind::Opaque => "opaque",
+                        _ => "unsupported",
                     }
                     && row.try_get::<_, String>(4)?
                         == if matches!(value_type.mutability(), ValueTypeMutability::Immutable) {
