@@ -118,7 +118,7 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
     (
         12,
         "catalogue enum type storage",
-        include_str!("../migrations/0012_catalogue_enum_types.sql"),
+        include_str!("../../orna-postgres/migrations/0012_catalogue_enum_types.sql"),
     ),
     (
         13,

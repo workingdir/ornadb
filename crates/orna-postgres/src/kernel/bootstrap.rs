@@ -90,7 +90,7 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 12,
         name: "catalogue enum type storage",
-        sql: include_str!("../../../orna-kernel-postgres/migrations/0012_catalogue_enum_types.sql"),
+        sql: include_str!("../../migrations/0012_catalogue_enum_types.sql"),
         data_step: None,
     },
     Migration {
