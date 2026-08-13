@@ -148,7 +148,7 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
     (
         18,
         "disjoint field reference targets",
-        include_str!("../migrations/0018_disjoint_field_reference_targets.sql"),
+        include_str!("../../orna-postgres/migrations/0018_disjoint_field_reference_targets.sql"),
     ),
     (
         19,
