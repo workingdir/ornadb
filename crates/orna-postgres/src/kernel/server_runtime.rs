@@ -439,12 +439,15 @@ mod tests {
             vec![RecordValueTypeDefinition::new(
                 record_type,
                 QualifiedSemanticName::new(["app", "flag"]).unwrap(),
-                vec![RecordValueFieldDefinition::new(
-                    FieldId::from_bytes([0x58; 16]),
-                    "stage",
-                    0,
-                    ResolvedType::named(enum_type),
-                )],
+                vec![
+                    RecordValueFieldDefinition::try_new(
+                        FieldId::from_bytes([0x58; 16]),
+                        "stage",
+                        0,
+                        ResolvedType::named(enum_type),
+                    )
+                    .expect("record field"),
+                ],
             )],
             Vec::new(),
         )

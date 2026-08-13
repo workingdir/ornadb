@@ -3012,12 +3012,15 @@ mod tests {
             vec![RecordValueTypeDefinition::new(
                 record,
                 name(&["record_test", "status"]),
-                vec![RecordValueFieldDefinition::new(
-                    FieldId::from_bytes([0x7a; 16]),
-                    "stage",
-                    0,
-                    ResolvedType::named(enum_type),
-                )],
+                vec![
+                    RecordValueFieldDefinition::try_new(
+                        FieldId::from_bytes([0x7a; 16]),
+                        "stage",
+                        0,
+                        ResolvedType::named(enum_type),
+                    )
+                    .expect("record field"),
+                ],
             )],
             vec![],
         )
