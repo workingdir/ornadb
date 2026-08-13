@@ -4,7 +4,10 @@ use std::{
     process::ExitCode,
 };
 
-use orna_core::FunctionId;
+use orna_core::{
+    FunctionId,
+    security::{CATALOGUE_HEALTH_FUNCTION_ID, CATALOGUE_HEALTH_FUNCTION_NAME},
+};
 use orna_protocol::CallFailure;
 
 mod package_maintenance;
@@ -123,9 +126,13 @@ where
             if args.next().is_some() {
                 return None;
             }
-            FunctionId::from_canonical(&function)
-                .ok()
-                .map(Command::RawCall)
+            if function == CATALOGUE_HEALTH_FUNCTION_NAME {
+                Some(Command::RawCall(CATALOGUE_HEALTH_FUNCTION_ID))
+            } else {
+                FunctionId::from_canonical(&function)
+                    .ok()
+                    .map(Command::RawCall)
+            }
         }
         _ => None,
     }
@@ -193,9 +200,20 @@ mod tests {
             parse_command(arguments(&["orna", "raw-call", &canonical])),
             Some(Command::RawCall(function))
         );
+        let health = CATALOGUE_HEALTH_FUNCTION_ID;
+        assert_eq!(
+            parse_command(arguments(&["orna", "raw-call", "sys.catalog.health"])),
+            Some(Command::RawCall(health))
+        );
+        assert_eq!(
+            parse_command(arguments(&["orna", "raw-call", &health.canonical()])),
+            Some(Command::RawCall(health))
+        );
         for values in [
             vec!["orna", "raw-call"],
-            vec!["orna", "raw-call", "sys.catalog.health"],
+            vec!["orna", "raw-call", "sys.catalog.HEALTH"],
+            vec!["orna", "raw-call", "sys.catalog.health.extra"],
+            vec!["orna", "raw-call", "sys.catalog.health "],
             vec!["orna", "raw-call", "function:not-an-id"],
             vec!["orna", "raw-call", &canonical, "extra"],
         ] {
