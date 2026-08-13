@@ -2477,12 +2477,15 @@ mod tests {
             vec![RecordValueTypeDefinition::new(
                 TypeId::from_bytes(id::<42>()),
                 QualifiedSemanticName::new(["crm", "status"]).unwrap(),
-                vec![RecordValueFieldDefinition::new(
-                    FieldId::from_bytes(id::<43>()),
-                    "active",
-                    0,
-                    ResolvedType::value(standard_boolean_id()),
-                )],
+                vec![
+                    RecordValueFieldDefinition::try_new(
+                        FieldId::from_bytes(id::<43>()),
+                        "active",
+                        0,
+                        ResolvedType::value(standard_boolean_id()),
+                    )
+                    .unwrap(),
+                ],
             )],
             vec![],
         )
@@ -2516,12 +2519,15 @@ mod tests {
             vec![RecordValueTypeDefinition::new(
                 record_value_type,
                 QualifiedSemanticName::new(["crm", "status"]).unwrap(),
-                vec![RecordValueFieldDefinition::new(
-                    FieldId::from_bytes(id::<43>()),
-                    "active",
-                    0,
-                    ResolvedType::value(standard_boolean_id()),
-                )],
+                vec![
+                    RecordValueFieldDefinition::try_new(
+                        FieldId::from_bytes(id::<43>()),
+                        "active",
+                        0,
+                        ResolvedType::value(standard_boolean_id()),
+                    )
+                    .unwrap(),
+                ],
             )],
             vec![],
             vec![FunctionDefinition::new(
@@ -2581,29 +2587,34 @@ mod tests {
                 first_record,
                 QualifiedSemanticName::new(["crm", "status"]).unwrap(),
                 vec![
-                    RecordValueFieldDefinition::new(
+                    RecordValueFieldDefinition::try_new(
                         FieldId::from_bytes(id::<43>()),
                         "active",
                         0,
                         ResolvedType::value(standard_boolean_id()),
-                    ),
-                    RecordValueFieldDefinition::new(
+                    )
+                    .unwrap(),
+                    RecordValueFieldDefinition::try_new(
                         FieldId::from_bytes(id::<44>()),
                         "phase",
                         1,
                         ResolvedType::named(enum_type),
-                    ),
+                    )
+                    .unwrap(),
                 ],
             ),
             RecordValueTypeDefinition::new(
                 second_record,
                 QualifiedSemanticName::new(["crm", "marker"]).unwrap(),
-                vec![RecordValueFieldDefinition::new(
-                    FieldId::from_bytes(id::<49>()),
-                    "value",
-                    0,
-                    ResolvedType::value(standard_boolean_id()),
-                )],
+                vec![
+                    RecordValueFieldDefinition::try_new(
+                        FieldId::from_bytes(id::<49>()),
+                        "value",
+                        0,
+                        ResolvedType::value(standard_boolean_id()),
+                    )
+                    .unwrap(),
+                ],
             ),
         ];
         if reverse {
@@ -4231,12 +4242,15 @@ mod tests {
             vec![RecordValueTypeDefinition::new(
                 TypeId::from_bytes(id::<42>()),
                 QualifiedSemanticName::new(["crm", "status"]).unwrap(),
-                vec![RecordValueFieldDefinition::new(
-                    FieldId::from_bytes(id::<43>()),
-                    "phase",
-                    0,
-                    ResolvedType::named(enum_type),
-                )],
+                vec![
+                    RecordValueFieldDefinition::try_new(
+                        FieldId::from_bytes(id::<43>()),
+                        "phase",
+                        0,
+                        ResolvedType::named(enum_type),
+                    )
+                    .unwrap(),
+                ],
             )],
             vec![],
         )
