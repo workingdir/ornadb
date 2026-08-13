@@ -4,10 +4,13 @@ use std::{
     process::ExitCode,
 };
 
+use orna_core::FunctionId;
+use orna_protocol::CallFailure;
+
 mod package_maintenance;
 mod source_check;
 
-const USAGE: &str = "Usage:\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna source check <file.orna>";
+const USAGE: &str = "Usage:\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna source check <file.orna>\n  orna raw-call <canonical-function-id>";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Command {
@@ -15,6 +18,7 @@ enum Command {
     BackendShell,
     Upgrade,
     SourceCheck(String),
+    RawCall(FunctionId),
 }
 
 fn main() -> ExitCode {
@@ -67,6 +71,25 @@ fn main() -> ExitCode {
                 }
             }
         }
+        Command::RawCall(function) => match orna_server::run_local_raw_call(function) {
+            Ok(orna_server::LocalRawCallOutcome::Completed) => ExitCode::SUCCESS,
+            Ok(orna_server::LocalRawCallOutcome::Failed(failure)) => {
+                write_stderr_line(&format!("raw call failed: {}", failure_name(failure)));
+                ExitCode::from(1)
+            }
+            Ok(orna_server::LocalRawCallOutcome::Cancelled) => ExitCode::from(6),
+            Err(
+                error @ (orna_server::LocalRawCallError::Connection
+                | orna_server::LocalRawCallError::Negotiation),
+            ) => {
+                write_stderr_line(&error.to_string());
+                ExitCode::from(3)
+            }
+            Err(error) => {
+                write_stderr_line(&error.to_string());
+                ExitCode::from(7)
+            }
+        },
     }
 }
 
@@ -95,7 +118,25 @@ where
             (args.next().is_none() && valid_source_path(&path))
                 .then_some(Command::SourceCheck(path))
         }
+        Some(value) if value == OsStr::new("raw-call") => {
+            let function = args.next()?.into_string().ok()?;
+            if args.next().is_some() {
+                return None;
+            }
+            FunctionId::from_canonical(&function)
+                .ok()
+                .map(Command::RawCall)
+        }
         _ => None,
+    }
+}
+
+const fn failure_name(failure: CallFailure) -> &'static str {
+    match failure {
+        CallFailure::ExecuteDenied => "EXECUTE_DENIED",
+        CallFailure::TargetUnavailable => "TARGET_UNAVAILABLE",
+        CallFailure::ClientEvaluationFailed => "CLIENT_EVALUATION_FAILED",
+        CallFailure::InternalFailure => "INTERNAL_FAILURE",
     }
 }
 
@@ -141,6 +182,41 @@ mod tests {
         assert_eq!(
             parse_command(arguments(&["orna", "source", "check", "app.orna"])),
             Some(Command::SourceCheck("app.orna".to_owned()))
+        );
+    }
+
+    #[test]
+    fn accepts_one_exact_canonical_raw_call_identity() {
+        let function = FunctionId::from_bytes([0x11; 16]);
+        let canonical = function.canonical();
+        assert_eq!(
+            parse_command(arguments(&["orna", "raw-call", &canonical])),
+            Some(Command::RawCall(function))
+        );
+        for values in [
+            vec!["orna", "raw-call"],
+            vec!["orna", "raw-call", "sys.catalog.health"],
+            vec!["orna", "raw-call", "function:not-an-id"],
+            vec!["orna", "raw-call", &canonical, "extra"],
+        ] {
+            assert_eq!(parse_command(arguments(&values)), None, "{values:?}");
+        }
+    }
+
+    #[test]
+    fn public_call_failure_names_are_exact() {
+        assert_eq!(failure_name(CallFailure::ExecuteDenied), "EXECUTE_DENIED");
+        assert_eq!(
+            failure_name(CallFailure::TargetUnavailable),
+            "TARGET_UNAVAILABLE"
+        );
+        assert_eq!(
+            failure_name(CallFailure::ClientEvaluationFailed),
+            "CLIENT_EVALUATION_FAILED"
+        );
+        assert_eq!(
+            failure_name(CallFailure::InternalFailure),
+            "INTERNAL_FAILURE"
         );
     }
 
@@ -225,7 +301,7 @@ mod tests {
     fn usage_diagnostic_is_exact() {
         assert_eq!(
             USAGE,
-            "Usage:\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna source check <file.orna>"
+            "Usage:\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna source check <file.orna>\n  orna raw-call <canonical-function-id>"
         );
     }
 }
