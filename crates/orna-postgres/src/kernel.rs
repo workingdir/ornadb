@@ -35,9 +35,9 @@ mod security;
 mod server_execution;
 #[path = "../../orna-kernel-postgres/src/server_mutation_execution.rs"]
 mod server_mutation_execution;
-#[path = "../../orna-kernel-postgres/src/server_runtime.rs"]
+#[path = "kernel/server_runtime.rs"]
 mod server_runtime;
-#[path = "../../orna-kernel-postgres/src/storage.rs"]
+#[path = "kernel/storage.rs"]
 mod storage;
 
 pub use apply::StandardContextIdentity;
