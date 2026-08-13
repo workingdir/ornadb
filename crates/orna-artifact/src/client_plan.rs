@@ -1,4 +1,4 @@
-//! Canonical `orna.client-plan` artefact format, version 1.
+//! Canonical `orna.client-plan` artefact formats, versions 1 and 2.
 //!
 //! The first CLIENT function slice has one operation: return a non-null
 //! BOOLEAN constant. The complete encoding is:
@@ -10,27 +10,120 @@
 //! value: u8 = 0|1
 //! ```
 //!
+//! Version 2 returns one registered opaque value:
+//!
+//! ```text
+//! magic[8] = ORNACP\0\0
+//! version: u32 big-endian = 2
+//! operation: u8 = 2
+//! type: TypeId[16]
+//! payload length: u32 big-endian = 16
+//! canonical payload[16]
+//! ```
+//!
 //! The format contains no source text, source locations, Orna names, or
 //! backend values.
 
 use std::fmt;
 
+use orna_core::TypeId;
+
 /// The stable public identity of this artefact format.
 pub const FORMAT_IDENTITY: &str = "orna.client-plan";
 /// The Orna language version whose semantics this artefact executes.
 pub const LANGUAGE_VERSION_IDENTITY: &str = "orna.language/1";
-/// The only supported client-plan artefact version.
+/// The client-plan version that returns one Boolean constant.
 pub const FORMAT_VERSION: u32 = 1;
+/// The client-plan version that returns one registered opaque value.
+pub const OPAQUE_FORMAT_VERSION: u32 = 2;
 /// The exact first eight bytes of every client-plan artefact.
 pub const MAGIC: [u8; 8] = *b"ORNACP\0\0";
 
 const RETURN_BOOLEAN_OPERATION: u8 = 1;
+const RETURN_OPAQUE_OPERATION: u8 = 2;
 const ENCODED_LENGTH: usize = MAGIC.len() + size_of::<u32>() + 2;
+const OPAQUE_PAYLOAD_LENGTH: usize = 16;
+const OPAQUE_ENCODED_LENGTH: usize =
+    MAGIC.len() + size_of::<u32>() + 1 + 16 + size_of::<u32>() + OPAQUE_PAYLOAD_LENGTH;
 
 /// A checked CLIENT plan that returns one Boolean constant.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ClientPlan {
     returned_boolean: bool,
+}
+
+/// A checked version-2 CLIENT plan that returns one registered opaque value.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OpaqueClientPlan {
+    opaque_type: TypeId,
+    canonical_payload: [u8; OPAQUE_PAYLOAD_LENGTH],
+}
+
+impl OpaqueClientPlan {
+    /// Creates a checked plan from one nominal type and complete canonical payload.
+    pub const fn return_opaque(
+        opaque_type: TypeId,
+        canonical_payload: [u8; OPAQUE_PAYLOAD_LENGTH],
+    ) -> Self {
+        Self {
+            opaque_type,
+            canonical_payload,
+        }
+    }
+
+    /// Returns the canonical artefact version for this plan.
+    pub const fn format_version(&self) -> u32 {
+        OPAQUE_FORMAT_VERSION
+    }
+
+    /// Returns the nominal opaque value-type identity.
+    pub const fn opaque_type(&self) -> TypeId {
+        self.opaque_type
+    }
+
+    /// Returns the complete canonical opaque payload.
+    pub const fn canonical_payload(&self) -> &[u8; OPAQUE_PAYLOAD_LENGTH] {
+        &self.canonical_payload
+    }
+
+    /// Encodes this plan into its exact version-2 bytes.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(OPAQUE_ENCODED_LENGTH);
+        bytes.extend_from_slice(&MAGIC);
+        bytes.extend_from_slice(&OPAQUE_FORMAT_VERSION.to_be_bytes());
+        bytes.push(RETURN_OPAQUE_OPERATION);
+        bytes.extend_from_slice(&self.opaque_type.to_bytes());
+        bytes.extend_from_slice(&(OPAQUE_PAYLOAD_LENGTH as u32).to_be_bytes());
+        bytes.extend_from_slice(&self.canonical_payload);
+        debug_assert_eq!(bytes.len(), OPAQUE_ENCODED_LENGTH);
+        bytes
+    }
+
+    /// Decodes exactly one canonical version-2 opaque client-plan artefact.
+    pub fn decode(bytes: &[u8]) -> Result<Self, ClientPlanError> {
+        let mut reader = Reader::new(bytes);
+        if reader.array::<8>()? != MAGIC {
+            return Err(ClientPlanError::InvalidMagic);
+        }
+        let version = reader.u32()?;
+        if version != OPAQUE_FORMAT_VERSION {
+            return Err(ClientPlanError::UnsupportedVersion(version));
+        }
+        let operation = reader.u8()?;
+        if operation != RETURN_OPAQUE_OPERATION {
+            return Err(ClientPlanError::InvalidOperation(operation));
+        }
+        let opaque_type = TypeId::from_bytes(reader.array()?);
+        let payload_length = reader.u32()?;
+        if payload_length != OPAQUE_PAYLOAD_LENGTH as u32 {
+            return Err(ClientPlanError::InvalidOpaquePayloadLength {
+                actual: payload_length,
+            });
+        }
+        let canonical_payload = reader.array()?;
+        reader.require_finished()?;
+        Ok(Self::return_opaque(opaque_type, canonical_payload))
+    }
 }
 
 impl ClientPlan {
@@ -90,14 +183,19 @@ impl ClientPlan {
 #[non_exhaustive]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ClientPlanError {
-    /// The artefact does not start with the version-1 magic bytes.
+    /// The artefact does not start with the shared client-plan magic bytes.
     InvalidMagic,
     /// The artefact version is not supported.
     UnsupportedVersion(u32),
-    /// The operation tag is not defined by version 1.
+    /// The operation tag is not defined by the selected artefact version.
     InvalidOperation(u8),
     /// The Boolean payload is not zero or one.
     InvalidBoolean(u8),
+    /// A version-2 opaque payload length is not exactly sixteen bytes.
+    InvalidOpaquePayloadLength {
+        /// The non-canonical length from the artefact.
+        actual: u32,
+    },
     /// The artefact ends before a complete value can be read.
     Truncated,
     /// The artefact contains bytes after a complete value.
@@ -118,6 +216,10 @@ impl fmt::Display for ClientPlanError {
             Self::InvalidBoolean(value) => {
                 write!(formatter, "invalid client-plan Boolean byte {value}")
             }
+            Self::InvalidOpaquePayloadLength { actual } => write!(
+                formatter,
+                "invalid client-plan opaque payload length {actual}"
+            ),
             Self::Truncated => formatter.write_str("truncated orna.client-plan artefact"),
             Self::TrailingBytes => {
                 formatter.write_str("trailing bytes after orna.client-plan artefact")
@@ -180,6 +282,11 @@ mod tests {
 
     const TRUE_BYTES: [u8; ENCODED_LENGTH] = *b"ORNACP\0\0\0\0\0\x01\x01\x01";
     const FALSE_BYTES: [u8; ENCODED_LENGTH] = *b"ORNACP\0\0\0\0\0\x01\x01\0";
+    const OPAQUE_TYPE: TypeId = TypeId::from_bytes([0x42; 16]);
+    const OPAQUE_PAYLOAD: [u8; OPAQUE_PAYLOAD_LENGTH] = [
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee,
+        0xff,
+    ];
 
     #[test]
     fn encodes_exact_golden_true_and_false_bytes() {
@@ -196,6 +303,66 @@ mod tests {
             assert_eq!(decoded.format_version(), FORMAT_VERSION);
             assert_eq!(decoded.returned_boolean(), value);
         }
+    }
+
+    #[test]
+    fn opaque_plan_has_exact_version_two_bytes_and_round_trips() {
+        let plan = OpaqueClientPlan::return_opaque(OPAQUE_TYPE, OPAQUE_PAYLOAD);
+        let mut expected = b"ORNACP\0\0\0\0\0\x02\x02".to_vec();
+        expected.extend_from_slice(&OPAQUE_TYPE.to_bytes());
+        expected.extend_from_slice(&16_u32.to_be_bytes());
+        expected.extend_from_slice(&OPAQUE_PAYLOAD);
+
+        assert_eq!(expected.len(), 49);
+        assert_eq!(plan.encode(), expected);
+        assert_eq!(OpaqueClientPlan::decode(&expected), Ok(plan));
+        assert_eq!(plan.format_version(), OPAQUE_FORMAT_VERSION);
+        assert_eq!(plan.opaque_type(), OPAQUE_TYPE);
+        assert_eq!(plan.canonical_payload(), &OPAQUE_PAYLOAD);
+    }
+
+    #[test]
+    fn client_plan_versions_remain_mutually_closed() {
+        let opaque = OpaqueClientPlan::return_opaque(OPAQUE_TYPE, OPAQUE_PAYLOAD).encode();
+        assert_eq!(
+            ClientPlan::decode(&opaque),
+            Err(ClientPlanError::UnsupportedVersion(OPAQUE_FORMAT_VERSION))
+        );
+        assert_eq!(
+            OpaqueClientPlan::decode(&TRUE_BYTES),
+            Err(ClientPlanError::UnsupportedVersion(FORMAT_VERSION))
+        );
+        for length in 0..OPAQUE_ENCODED_LENGTH {
+            assert_eq!(
+                OpaqueClientPlan::decode(&opaque[..length]),
+                Err(ClientPlanError::Truncated),
+                "opaque prefix length {length} must be truncated"
+            );
+        }
+    }
+
+    #[test]
+    fn opaque_plan_rejects_operation_length_and_trailing_corruption() {
+        let encoded = OpaqueClientPlan::return_opaque(OPAQUE_TYPE, OPAQUE_PAYLOAD).encode();
+
+        let mut wrong_operation = encoded.clone();
+        wrong_operation[12] = RETURN_BOOLEAN_OPERATION;
+        assert_eq!(
+            OpaqueClientPlan::decode(&wrong_operation),
+            Err(ClientPlanError::InvalidOperation(RETURN_BOOLEAN_OPERATION))
+        );
+        let mut wrong_length = encoded.clone();
+        wrong_length[29..33].copy_from_slice(&15_u32.to_be_bytes());
+        assert_eq!(
+            OpaqueClientPlan::decode(&wrong_length),
+            Err(ClientPlanError::InvalidOpaquePayloadLength { actual: 15 })
+        );
+        let mut trailing = encoded;
+        trailing.push(0);
+        assert_eq!(
+            OpaqueClientPlan::decode(&trailing),
+            Err(ClientPlanError::TrailingBytes)
+        );
     }
 
     #[test]
@@ -265,6 +432,10 @@ mod tests {
             (
                 ClientPlanError::InvalidBoolean(3),
                 "invalid client-plan Boolean byte 3",
+            ),
+            (
+                ClientPlanError::InvalidOpaquePayloadLength { actual: 15 },
+                "invalid client-plan opaque payload length 15",
             ),
             (
                 ClientPlanError::Truncated,
