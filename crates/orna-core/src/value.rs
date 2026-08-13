@@ -12,10 +12,8 @@ use crate::{
         CatalogueSnapshot, QualifiedSemanticName, ValueTypeKind, ValueTypeMutability,
         ValueTypePersistence,
     },
-    revision::{
-        ActiveDatabaseRevision, VerifiedStandardLibrarySnapshot, record_value_field_runtime_type,
-    },
-    types::{ResolvedType, StandardScalar},
+    revision::{ActiveDatabaseRevision, VerifiedStandardLibrarySnapshot},
+    types::{ResolvedType, StandardScalar, TypeDescriptor},
 };
 
 const MAX_OPAQUE_CODEC_PAYLOAD_LENGTH: usize = 16 * 1024 * 1024;
@@ -483,14 +481,16 @@ impl RecordValue {
                     field: field.id(),
                 });
             }
-            let expected =
-                record_value_field_runtime_type(catalogue, standard, field.resolved_type()).ok_or(
-                    RecordValueError::UnsupportedFieldType {
-                        record_type,
-                        field: field.id(),
-                        resolved_type: field.resolved_type(),
-                    },
-                )?;
+            let descriptor = field
+                .type_descriptor()
+                .expect("active record fields have descriptors");
+            let expected = active
+                .record_value_field_descriptor_runtime_type(descriptor)
+                .ok_or_else(|| RecordValueError::UnsupportedFieldType {
+                    record_type,
+                    field: field.id(),
+                    descriptor: descriptor.clone(),
+                })?;
             let actual = value.resolved_type();
             if actual != expected || matches!(value, RuntimeValue::Record(_)) {
                 return Err(RecordValueError::FieldTypeMismatch {
@@ -592,8 +592,8 @@ pub enum RecordValueError {
         record_type: TypeId,
         /// The unsupported field identity.
         field: FieldId,
-        /// The unsupported declared type.
-        resolved_type: ResolvedType,
+        /// The unsupported declared descriptor.
+        descriptor: TypeDescriptor,
     },
     /// A field value does not have the exact declared runtime type.
     FieldTypeMismatch {
