@@ -787,6 +787,7 @@ struct IncomingFrame {
 struct DispatchCompletion {
     actions: VecDeque<ServerAction>,
     cancellation: ServerAction,
+    _guards: Option<DispatchGuards>,
 }
 
 struct StartedDispatch {
@@ -820,6 +821,7 @@ impl DispatchService for RawDispatchService {
             DispatchCompletion {
                 actions: result.into_actions().into(),
                 cancellation,
+                _guards: None,
             }
         });
         StartedDispatch { accepted, future }
@@ -970,14 +972,10 @@ async fn drive_versioned_authenticated_stream_until_shutdown<D: DispatchService>
             Next::Frame(Ok(None)) => break Ok(()),
             Next::Frame(Err(error)) => break Err(error),
             Next::Completion(Some(Ok((stream_id, completion)))) => {
-                let completion = if cancelled.remove(&stream_id) {
-                    DispatchCompletion {
-                        actions: VecDeque::from([completion.cancellation.clone()]),
-                        cancellation: completion.cancellation,
-                    }
-                } else {
-                    completion
-                };
+                let mut completion = completion;
+                if cancelled.remove(&stream_id) {
+                    completion.actions = VecDeque::from([completion.cancellation.clone()]);
+                }
                 pending.insert(stream_id, completion);
             }
             Next::Completion(Some(Err(source))) => {
@@ -1092,8 +1090,8 @@ fn start_one_dispatch(
 ) {
     let dispatch = unstarted.pop_front().expect("unstarted dispatch exists");
     tasks.spawn(async move {
-        let completion = dispatch.future.await;
-        drop(dispatch.guards);
+        let mut completion = dispatch.future.await;
+        completion._guards = Some(dispatch.guards);
         (dispatch.stream, completion)
     });
 }
@@ -1388,6 +1386,7 @@ mod tests {
                 DispatchCompletion {
                     actions: actions.iter().cloned().collect(),
                     cancellation: ServerAction::Cancelled { stream },
+                    _guards: None,
                 }
             });
             StartedDispatch {
@@ -1439,6 +1438,7 @@ mod tests {
                     DispatchCompletion {
                         actions: VecDeque::from([ServerAction::Completed { stream }]),
                         cancellation: ServerAction::Cancelled { stream },
+                        _guards: None,
                     }
                 }),
             }
@@ -1975,6 +1975,77 @@ mod tests {
             resources.kernel_operations.available_permits(),
             KERNEL_OPERATION_LIMIT
         );
+    }
+
+    #[tokio::test]
+    async fn completed_dispatch_retains_guards_until_flow_control_delivers_it() {
+        let resources = LocalRawSocketResources::new();
+        let dispatcher = TestDispatch::new(vec![
+            ServerAction::Events {
+                stream: 1,
+                events: vec![Event::Value(RuntimeValue::Boolean(true))],
+            },
+            ServerAction::Completed { stream: 1 },
+        ]);
+        let witness = dispatcher.clone();
+        let (server, mut client) = UnixStream::pair().expect("Unix stream pair");
+        let server_task = tokio::spawn(drive_authenticated_stream(
+            dispatcher,
+            test_session(),
+            server,
+            resources.clone(),
+        ));
+        send_parameter_free_call(&mut client, 1).await;
+        assert!(matches!(
+            read_server_frame(&mut client).await,
+            ServerFrame::CallAccepted { stream: 1, .. }
+        ));
+        while !witness.polled.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            resources.kernel_operations.available_permits(),
+            KERNEL_OPERATION_LIMIT - 1
+        );
+        assert!(resources.payload.available_permits() < SHARED_PAYLOAD_BYTES);
+
+        send_client_frame(
+            &mut client,
+            &ClientFrame::WindowUpdate {
+                stream: 1,
+                channel: Channel::ResultValues,
+                credit: 1024,
+            },
+        )
+        .await;
+        assert!(matches!(
+            read_server_frame(&mut client).await,
+            ServerFrame::EventBatch { stream: 1, .. }
+        ));
+        assert_eq!(
+            read_server_frame(&mut client).await,
+            ServerFrame::CallCompleted { stream: 1 }
+        );
+        for _ in 0..16 {
+            if resources.kernel_operations.available_permits() == KERNEL_OPERATION_LIMIT {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            resources.kernel_operations.available_permits(),
+            KERNEL_OPERATION_LIMIT
+        );
+        assert_eq!(resources.payload.available_permits(), SHARED_PAYLOAD_BYTES);
+
+        client.shutdown().await.expect("client shutdown");
+        server_task
+            .await
+            .expect("connection task")
+            .expect("connection closes");
     }
 
     #[tokio::test]
