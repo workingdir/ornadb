@@ -13,7 +13,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-const USAGE: &[u8] = b"Usage:\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna raw-call <canonical-function-id>\n";
+const USAGE: &[u8] = b"Usage:\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna security grant-execute <canonical-function-id>\n  orna raw-call <canonical-function-id>\n";
 const TERMINAL_REQUIRED: &[u8] = b"orna: backend-shell must be run in an interactive terminal\n";
 const SERVICE_ACCOUNT_REQUIRED: &[u8] =
     b"orna: backend-shell must run as the orna service account\n";
