@@ -766,6 +766,25 @@ pub struct PrimitiveValueTypeDeclaration {
     pub span: SourceSpan,
 }
 
+/// A parsed privileged `CREATE TYPE ... AS VALUE OPAQUE` declaration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpaqueValueTypeDeclaration {
+    /// The declared opaque value type name.
+    pub name: QualifiedName,
+    /// The exact codec contract string literal, including apostrophes.
+    pub kernel_contract: SourceSlice,
+    /// The span of the required `OPAQUE` keyword.
+    pub opaque_span: SourceSpan,
+    /// The span of the `KERNEL CONTRACT` modifier.
+    pub kernel_contract_modifier_span: SourceSpan,
+    /// The span of the required `IMMUTABLE` keyword.
+    pub immutable_span: SourceSpan,
+    /// The span of the required `TRANSIENT` keyword.
+    pub transient_span: SourceSpan,
+    /// The declaration span, including its terminating semicolon.
+    pub span: SourceSpan,
+}
+
 /// The destination selected by a privileged type export.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypeExportTarget {
@@ -844,6 +863,7 @@ pub struct Parse {
     enum_types: Vec<EnumTypeDeclaration>,
     record_value_types: Vec<RecordValueTypeDeclaration>,
     primitive_value_types: Vec<PrimitiveValueTypeDeclaration>,
+    opaque_value_types: Vec<OpaqueValueTypeDeclaration>,
     type_exports: Vec<TypeExportDeclaration>,
     field_renames: Vec<FieldRenameDeclaration>,
     server_functions: Vec<ServerFunctionDeclaration>,
@@ -884,6 +904,11 @@ impl Parse {
     /// Return successfully parsed primitive value type declarations in source order.
     pub fn primitive_value_types(&self) -> &[PrimitiveValueTypeDeclaration] {
         &self.primitive_value_types
+    }
+
+    /// Return successfully parsed opaque value type declarations in source order.
+    pub fn opaque_value_types(&self) -> &[OpaqueValueTypeDeclaration] {
+        &self.opaque_value_types
     }
 
     /// Return successfully parsed type export declarations in source order.
@@ -1276,6 +1301,84 @@ mod tests {
                 source.rfind("OBJECT").unwrap() + "OBJECT".len()
             );
             assert_eq!(modifier_span.start, source.rfind("TO").unwrap());
+        }
+    }
+
+    #[test]
+    fn parses_opaque_value_type_losslessly() {
+        let source = "CREATE TYPE std.example.token AS VALUE OPAQUE KERNEL CONTRACT 'std.example.token@1' IMMUTABLE TRANSIENT;";
+        let parsed = parse(source);
+
+        assert!(parsed.diagnostics().is_empty());
+        assert_eq!(parsed.syntax().text(), source);
+        let declaration = &parsed.opaque_value_types()[0];
+        assert_eq!(declaration.name.parts[0].text, "std");
+        assert_eq!(declaration.name.parts[2].text, "token");
+        assert_eq!(declaration.kernel_contract.text, "'std.example.token@1'");
+        assert_eq!(
+            declaration.opaque_span.start,
+            source.find("OPAQUE").unwrap()
+        );
+        assert_eq!(
+            declaration.kernel_contract_modifier_span,
+            SourceSpan {
+                start: source.find("KERNEL").unwrap(),
+                end: source.find("CONTRACT").unwrap() + "CONTRACT".len(),
+            }
+        );
+        assert_eq!(
+            declaration.immutable_span.start,
+            source.find("IMMUTABLE").unwrap()
+        );
+        assert_eq!(
+            declaration.transient_span.start,
+            source.find("TRANSIENT").unwrap()
+        );
+        assert_eq!(declaration.span.end, source.len());
+    }
+
+    #[test]
+    fn rejects_every_malformed_opaque_value_shape_and_recovers() {
+        let cases = [
+            (
+                "CREATE TYPE std.bad AS VALUE OPAQUE CONTRACT 'std.bad@1' IMMUTABLE TRANSIENT;",
+                "expected KERNEL after OPAQUE",
+            ),
+            (
+                "CREATE TYPE std.bad AS VALUE OPAQUE KERNEL 'std.bad@1' IMMUTABLE TRANSIENT;",
+                "expected CONTRACT after KERNEL",
+            ),
+            (
+                "CREATE TYPE std.bad AS VALUE OPAQUE KERNEL CONTRACT IMMUTABLE TRANSIENT;",
+                "expected a string literal after KERNEL CONTRACT",
+            ),
+            (
+                "CREATE TYPE std.bad AS VALUE OPAQUE KERNEL CONTRACT 'std.bad@1' TRANSIENT;",
+                "expected IMMUTABLE after opaque codec contract",
+            ),
+            (
+                "CREATE TYPE std.bad AS VALUE OPAQUE KERNEL CONTRACT 'std.bad@1' IMMUTABLE PERSISTABLE;",
+                "expected TRANSIENT after IMMUTABLE",
+            ),
+            (
+                "CREATE TYPE std.bad AS VALUE OPAQUE KERNEL CONTRACT 'std.bad@1' IMMUTABLE TRANSIENT EXTRA;",
+                "expected ';' after opaque value type declaration",
+            ),
+            (
+                "CREATE TYPE std.bad AS VALUE OPAQUE KERNEL CONTRACT 'std.bad@1' IMMUTABLE TRANSIENT",
+                "expected ';' after opaque value type declaration",
+            ),
+        ];
+
+        for (invalid, message) in cases {
+            let source = format!("{invalid} CREATE SCHEMA later;");
+            let parsed = parse(&source);
+            assert!(parsed.opaque_value_types().is_empty(), "{invalid}");
+            assert_eq!(parsed.diagnostics().len(), 1, "{invalid}");
+            assert_eq!(parsed.diagnostics()[0].message, message, "{invalid}");
+            assert_eq!(parsed.schemas().len(), 1, "{invalid}");
+            assert_eq!(parsed.schemas()[0].name.parts[0].text, "later");
+            assert_eq!(parsed.syntax().text(), source);
         }
     }
 
