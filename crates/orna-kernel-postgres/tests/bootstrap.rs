@@ -68,7 +68,7 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
     (
         2,
         "revision catalogue integrity",
-        include_str!("../migrations/0002_revisions.sql"),
+        include_str!("../../orna-postgres/migrations/0002_revisions.sql"),
     ),
     (
         3,

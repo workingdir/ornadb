@@ -30,7 +30,7 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 2,
         name: "revision catalogue integrity",
-        sql: include_str!("../../../orna-kernel-postgres/migrations/0002_revisions.sql"),
+        sql: include_str!("../../migrations/0002_revisions.sql"),
         data_step: None,
     },
     Migration {
