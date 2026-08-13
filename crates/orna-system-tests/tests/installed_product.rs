@@ -19,12 +19,10 @@
 //! 8. restart the installed server and invoke the raw SELECT again to prove
 //!    the row persists.
 //!
-//! The test is ignored by default so ordinary gates stay green. It is
-//! expected to fail (RED) until the ADR 0038 commands exist in the installed
-//! executable: `orna source apply`, `orna security grant-execute`, and the
-//! parameter-free raw INSERT dispatch are not implemented at the ADR docs
-//! commit. Run it explicitly with `ORNA_SYSTEM_TEST_DEBIAN_PACKAGE` pointing
-//! at an absolute current `.deb`.
+//! The test is ignored by default so ordinary gates stay green. The Debian
+//! package workflow runs it against the reproduced package by setting
+//! `ORNA_SYSTEM_TEST_DEBIAN_PACKAGE` and invoking the ignored test exactly,
+//! so the workflow fails closed if the installed product path regresses.
 
 use std::fmt;
 use std::fs;
