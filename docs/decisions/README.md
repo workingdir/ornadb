@@ -67,3 +67,5 @@ source-of-truth or authority rules.
   [Raw Calls Dispatch One-Column SERVER SELECTs](0032-raw-server-select-dispatch.md)
 * **work ADR 0033:**
   [Local Raw Recovery Calls Use Stable Function Identities](0033-local-raw-recovery-client.md)
+* **work ADR 0034:**
+  [Opaque Values Require Registered Canonical Codecs](0034-opaque-values-require-registered-codecs.md)
