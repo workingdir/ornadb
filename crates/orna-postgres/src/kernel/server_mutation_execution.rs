@@ -2290,11 +2290,7 @@ fn validate_record_constructor(
             ));
         }
         let runtime_type = active
-            .record_value_field_descriptor_runtime_type(
-                declared
-                    .type_descriptor()
-                    .expect("active record fields have descriptors"),
-            )
+            .record_value_field_descriptor_runtime_type(declared.descriptor())
             .ok_or_else(|| plan_invariant("record constructor field type must be active"))?;
         if !runtime_types_match(
             active.catalogue_hash_context(),

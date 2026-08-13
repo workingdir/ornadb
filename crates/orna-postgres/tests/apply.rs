@@ -591,18 +591,12 @@ async fn applies_and_recovers_named_record_definitions() -> TestResult<()> {
             )
             .await?
             .try_get(0)?;
-        let expected_value_type = match expected.fields()[0]
-            .type_descriptor()
-            .map(|descriptor| descriptor.kind())
-        {
-            Some(TypeDescriptorKind::Named(type_id)) => type_id.to_bytes().to_vec(),
+        let expected_value_type = match expected.fields()[0].descriptor().kind() {
+            TypeDescriptorKind::Named(type_id) => type_id.to_bytes().to_vec(),
             _ => return Err(failure("record value field has no named descriptor")),
         };
-        let expected_enum_type = match expected.fields()[1]
-            .type_descriptor()
-            .map(|descriptor| descriptor.kind())
-        {
-            Some(TypeDescriptorKind::Named(type_id)) => type_id.to_bytes().to_vec(),
+        let expected_enum_type = match expected.fields()[1].descriptor().kind() {
+            TypeDescriptorKind::Named(type_id) => type_id.to_bytes().to_vec(),
             _ => return Err(failure("record enum field has no named descriptor")),
         };
         require(
@@ -835,8 +829,7 @@ async fn applies_and_reconnects_a_standard_enum_record_field() -> TestResult<()>
                 && recovered_standard.catalogue().enum_types() == standard.catalogue().enum_types()
                 && recovered_standard.catalogue().type_bindings()
                     == standard.catalogue().type_bindings()
-                && recovered_field.type_descriptor()
-                    == Some(&TypeDescriptor::named(expected_enum.id())),
+                && recovered_field.descriptor() == &TypeDescriptor::named(expected_enum.id()),
             "reconnected standard enum record recovery changed its pinned descriptor facts",
         )
     })
