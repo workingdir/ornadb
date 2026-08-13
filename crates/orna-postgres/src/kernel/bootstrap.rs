@@ -54,7 +54,7 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 6,
         name: "definition reference write evidence",
-        sql: include_str!("../../../orna-kernel-postgres/migrations/0006_write_reference_evidence.sql"),
+        sql: include_str!("../../migrations/0006_write_reference_evidence.sql"),
         data_step: None,
     },
     Migration {
