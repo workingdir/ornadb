@@ -113,6 +113,22 @@ impl RecordValueFieldDefinition {
         }
     }
 
+    /// Creates a record field through the bounded flat-type migration seam.
+    ///
+    /// Catalogue and active-revision validation still decide whether the
+    /// resolved named or reference category is accepted in a record field.
+    pub fn try_new(
+        id: FieldId,
+        name: impl Into<String>,
+        ordinal: u32,
+        resolved_type: ResolvedType,
+    ) -> Result<Self, RecordValueFieldConstructionError> {
+        if let ResolvedType::Scalar(scalar) = resolved_type {
+            return Err(RecordValueFieldConstructionError::LegacyScalar { scalar });
+        }
+        Ok(Self::new(id, name, ordinal, resolved_type))
+    }
+
     /// Returns this field's stable identity.
     pub const fn id(&self) -> FieldId {
         self.id
@@ -133,6 +149,29 @@ impl RecordValueFieldDefinition {
         self.resolved_type
     }
 }
+
+/// A failure to construct a record field during flat-type migration.
+#[non_exhaustive]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RecordValueFieldConstructionError {
+    /// A legacy representation scalar has no catalogue identity.
+    LegacyScalar {
+        /// The rejected compatibility representation.
+        scalar: crate::types::StandardScalar,
+    },
+}
+
+impl fmt::Display for RecordValueFieldConstructionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::LegacyScalar { .. } => {
+                formatter.write_str("legacy scalar cannot form a record field descriptor")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RecordValueFieldConstructionError {}
 
 /// One named immutable, persistable record value type.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -655,10 +694,53 @@ impl std::error::Error for PreludeTypeNameError {}
 #[cfg(test)]
 mod tests {
     use super::{
-        PreludeTypeName, PreludeTypeNameError, TypeBinding, TypeBindingKind, TypeDefinition,
+        PreludeTypeName, PreludeTypeNameError, RecordValueFieldConstructionError,
+        RecordValueFieldDefinition, TypeBinding, TypeBindingKind, TypeDefinition,
         ValueTypeDefinition, ValueTypeKind, ValueTypeMutability, ValueTypePersistence,
     };
-    use crate::{TypeId, catalogue::QualifiedSemanticName};
+    use crate::{
+        FieldId, TypeId,
+        catalogue::QualifiedSemanticName,
+        types::{ResolvedType, StandardScalar},
+    };
+
+    #[test]
+    fn record_field_flat_constructor_preserves_identified_types_and_rejects_legacy_scalars() {
+        let field = FieldId::from_bytes([0x21; 16]);
+        let type_id = TypeId::from_bytes([0x22; 16]);
+
+        for resolved_type in [
+            ResolvedType::named(type_id),
+            ResolvedType::value(type_id),
+            ResolvedType::reference(type_id),
+        ] {
+            let definition =
+                RecordValueFieldDefinition::try_new(field, "value", 0, resolved_type).unwrap();
+            assert_eq!(definition.id(), field);
+            assert_eq!(definition.name(), "value");
+            assert_eq!(definition.ordinal(), 0);
+            assert_eq!(definition.resolved_type(), resolved_type);
+        }
+
+        let error = RecordValueFieldDefinition::try_new(
+            field,
+            "value",
+            0,
+            ResolvedType::scalar(StandardScalar::Boolean),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            RecordValueFieldConstructionError::LegacyScalar {
+                scalar: StandardScalar::Boolean,
+            }
+        );
+        assert_eq!(
+            error.to_string(),
+            "legacy scalar cannot form a record field descriptor"
+        );
+        assert!(std::error::Error::source(&error).is_none());
+    }
 
     #[test]
     fn qualified_binding_identity_uses_the_versioned_name_contract() {
