@@ -680,12 +680,15 @@ mod tests {
             vec![RecordValueTypeDefinition::new(
                 record_type,
                 name(&["demo", "status"]),
-                vec![RecordValueFieldDefinition::new(
-                    SECOND_FIELD,
-                    "active",
-                    0,
-                    ResolvedType::value(TypeId::from_bytes([0xa4; 16])),
-                )],
+                vec![
+                    RecordValueFieldDefinition::try_new(
+                        SECOND_FIELD,
+                        "active",
+                        0,
+                        ResolvedType::value(TypeId::from_bytes([0xa4; 16])),
+                    )
+                    .unwrap(),
+                ],
             )],
             vec![],
             vec![],
