@@ -26,7 +26,11 @@
 //! 12. apply the checked-in false fixture, prove the active revisions change
 //!     while the function identities stay stable, insert a third object, and
 //!     prove the three stored rows decode as one FALSE and two TRUE values,
-//!     byte-order-independent, across another restart.
+//!     byte-order-independent, across another restart;
+//! 13. reapply the original fixture, prove the revisions advance again while
+//!     the function identities and grants stay stable, insert a fourth
+//!     object, and prove the four stored rows decode as one FALSE and three
+//!     TRUE values, byte-order-independent, across another restart.
 //!
 //! The test is ignored by default so ordinary gates stay green. The Debian
 //! package workflow runs it against the reproduced package by setting
@@ -917,7 +921,11 @@ impl std::error::Error for Error {
 /// * semantic apply activates new revisions while the function identities
 ///   and grants stay stable and existing rows are preserved;
 /// * a third row with FALSE decodes with the two existing TRUE rows as one
-///   unordered FALSE and two TRUE values, across another restart.
+///   unordered FALSE and two TRUE values, across another restart;
+/// * reversion to the original fixture reactivates the original function
+///   behaviour with stable identities and grants, retains all rows, and the
+///   four rows decode as one unordered FALSE and three TRUE values across
+///   another restart.
 #[test]
 #[ignore = "requires Docker, ORNA_SYSTEM_TEST_DEBIAN_PACKAGE, and the ADR 0038 commands in the installed orna executable"]
 fn installed_source_apply_grants_raw_insert_and_persists_across_restart() {
@@ -1183,5 +1191,108 @@ fn installed_source_apply_grants_raw_insert_and_persists_across_restart() {
         three_after,
         [false, true, true],
         "restart must preserve the same unordered Boolean multiset"
+    );
+
+    // Reapply the original fixture: reversion reactivates TRUE behaviour.
+    machine
+        .write_fixture(&fixture)
+        .expect("replace the fixture with the original source");
+    let reverted = machine
+        .run_as_orna(&["source", "apply", FIXTURE_PATH])
+        .expect("run installed source apply on the original fixture");
+    let reverted = require_success("orna source apply reverted", reverted)
+        .expect("reverted source apply must succeed");
+    let reverted_document =
+        parse_apply_document(&reverted.stdout).expect("reverted source apply JSON must parse");
+    assert_ne!(
+        reverted_document.source_revision, false_document.source_revision,
+        "reversion must advance the source revision again"
+    );
+    assert_ne!(
+        reverted_document.catalogue_revision, false_document.catalogue_revision,
+        "reversion must advance the catalogue revision again"
+    );
+    assert_eq!(
+        reverted_document
+            .function_id(&["product_test", "create_probe"])
+            .expect("reverted apply must report create_probe"),
+        create_probe,
+        "reversion must keep the create_probe identity"
+    );
+    assert_eq!(
+        reverted_document
+            .function_id(&["product_test", "read_probes"])
+            .expect("reverted apply must report read_probes"),
+        read_probes,
+        "reversion must keep the read_probes identity"
+    );
+
+    // No new grant: the original grants survive the reversion.
+    let fourth = machine
+        .run_as_orna(&["raw-call", create_probe])
+        .expect("run raw insert call after the reversion");
+    let fourth = require_success("orna raw-call create_probe after the reversion", fourth)
+        .expect("raw insert after the reversion must succeed");
+    let fourth_reference = parse_reference_envelope(&fourth.stdout)
+        .expect("raw insert after the reversion must return one ORV reference");
+    assert!(
+        fourth_reference.type_id != [0; 16] && !fourth_reference.object_is_zero(),
+        "the fourth inserted object reference must name a real row"
+    );
+    assert_ne!(
+        fourth_reference.object, reference.object,
+        "the fourth raw INSERT must create a distinct object"
+    );
+    assert_ne!(
+        fourth_reference.object, second_reference.object,
+        "the fourth raw INSERT must create a distinct object"
+    );
+    assert_ne!(
+        fourth_reference.object, third_reference.object,
+        "the fourth raw INSERT must create a distinct object"
+    );
+
+    // Four stored rows emit the unordered Boolean multiset TRUE, TRUE, TRUE, FALSE.
+    let four_rows = machine
+        .run_as_orna(&["raw-call", read_probes])
+        .expect("run raw select call after the fourth insert");
+    let four_rows = require_success("orna raw-call read_probes four rows", four_rows)
+        .expect("raw select after the fourth insert must succeed");
+    assert!(
+        four_rows.stderr.is_empty(),
+        "raw select after the fourth insert must keep standard error empty"
+    );
+    let mut four_values = decode_boolean_envelopes(&four_rows.stdout)
+        .expect("four rows must decode as complete Boolean envelopes");
+    let mut expected_four = vec![true, true, true, false];
+    four_values.sort();
+    expected_four.sort();
+    assert_eq!(
+        four_values, expected_four,
+        "four rows must hold the unordered Boolean multiset TRUE, TRUE, TRUE, FALSE"
+    );
+
+    // Restart again and require the same unordered four-value multiset.
+    machine
+        .restart_server()
+        .expect("installed server must restart cleanly after the reversion");
+    let four_rows_after = machine
+        .run_as_orna(&["raw-call", read_probes])
+        .expect("run raw select call after the reversion restart");
+    let four_rows_after = require_success(
+        "orna raw-call read_probes after the reversion restart",
+        four_rows_after,
+    )
+    .expect("raw select after the reversion restart must succeed");
+    assert!(
+        four_rows_after.stderr.is_empty(),
+        "raw select after the reversion restart must keep standard error empty"
+    );
+    let mut four_values_after = decode_boolean_envelopes(&four_rows_after.stdout)
+        .expect("reversion restart rows must decode as complete Boolean envelopes");
+    four_values_after.sort();
+    assert_eq!(
+        four_values_after, expected_four,
+        "restart must preserve the unordered four-value Boolean multiset"
     );
 }
