@@ -25,7 +25,7 @@ mod apply;
 mod bootstrap;
 #[path = "kernel/decode.rs"]
 mod decode;
-#[path = "../../orna-kernel-postgres/src/physical.rs"]
+#[path = "kernel/physical.rs"]
 mod physical;
 #[path = "../../orna-kernel-postgres/src/recovery.rs"]
 mod recovery;
