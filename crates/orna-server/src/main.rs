@@ -11,6 +11,7 @@ use orna_core::{
 use orna_protocol::CallFailure;
 
 mod package_maintenance;
+mod security_admin;
 mod source_check;
 
 const USAGE: &str = "Usage:\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna raw-call <canonical-function-id>";
@@ -22,6 +23,7 @@ enum Command {
     Upgrade,
     SourceCheck(String),
     SourceApply(String),
+    SecurityGrantExecute(FunctionId),
     RawCall(FunctionId),
 }
 
@@ -104,6 +106,15 @@ fn main() -> ExitCode {
                 ExitCode::from(1)
             }
         },
+        Command::SecurityGrantExecute(function) => {
+            match security_admin::run_installed_security_grant(function) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    write_stderr_line(&error.to_string());
+                    ExitCode::from(1)
+                }
+            }
+        }
         Command::RawCall(function) => match orna_server::run_local_raw_call(function) {
             Ok(orna_server::LocalRawCallOutcome::Completed) => ExitCode::SUCCESS,
             Ok(orna_server::LocalRawCallOutcome::Failed(failure)) => {
@@ -164,6 +175,18 @@ where
                     .ok()
                     .map(Command::RawCall)
             }
+        }
+        Some(value) if value == OsStr::new("security") => {
+            if args.next().as_deref() != Some(OsStr::new("grant-execute")) {
+                return None;
+            }
+            let function = args.next()?.into_string().ok()?;
+            if args.next().is_some() {
+                return None;
+            }
+            FunctionId::from_canonical(&function)
+                .ok()
+                .map(Command::SecurityGrantExecute)
         }
         _ => None,
     }
@@ -258,6 +281,21 @@ mod tests {
         ] {
             assert_eq!(parse_command(arguments(&values)), None, "{values:?}");
         }
+    }
+
+    #[test]
+    fn accepts_one_exact_security_grant_execute_identity() {
+        let function = FunctionId::from_bytes([0x33; 16]);
+        let canonical = function.canonical();
+        assert_eq!(
+            parse_command(arguments(&[
+                "orna",
+                "security",
+                "grant-execute",
+                &canonical
+            ])),
+            Some(Command::SecurityGrantExecute(function))
+        );
     }
 
     #[test]
@@ -359,6 +397,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn rejects_invalid_security_grant_execute_shapes() {
+        let canonical = FunctionId::from_bytes([0x33; 16]).canonical();
+        for values in [
+            vec!["orna", "security"],
+            vec!["orna", "security", "grant-execute"],
+            vec!["orna", "security", "grant"],
+            vec!["orna", "security", "revoke-execute", &canonical],
+            vec!["orna", "security", "grant-execute", "function:not-an-id"],
+            vec!["orna", "security", "grant-execute", "sys.catalog.health"],
+            vec!["orna", "security", "grant-execute", &canonical, "extra"],
+        ] {
+            assert_eq!(parse_command(arguments(&values)), None, "{values:?}");
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn rejects_non_unicode_tokens() {
@@ -386,6 +440,23 @@ mod tests {
                 OsString::from("orna"),
                 OsString::from("source"),
                 OsString::from("apply"),
+                non_unicode,
+            ]),
+            None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_non_unicode_security_grant_execute_identity() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let non_unicode = OsString::from_vec(b"function:\xff".to_vec());
+        assert_eq!(
+            parse_command(vec![
+                OsString::from("orna"),
+                OsString::from("security"),
+                OsString::from("grant-execute"),
                 non_unicode,
             ]),
             None
