@@ -108,7 +108,7 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
     (
         10,
         "local peer credentials",
-        include_str!("../migrations/0010_local_peer_credentials.sql"),
+        include_str!("../../orna-postgres/migrations/0010_local_peer_credentials.sql"),
     ),
     (
         11,
