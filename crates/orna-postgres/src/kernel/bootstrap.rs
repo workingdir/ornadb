@@ -66,7 +66,7 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 8,
         name: "resolved value type storage",
-        sql: include_str!("../../../orna-kernel-postgres/migrations/0008_resolved_value_types.sql"),
+        sql: include_str!("../../migrations/0008_resolved_value_types.sql"),
         data_step: None,
     },
     Migration {
