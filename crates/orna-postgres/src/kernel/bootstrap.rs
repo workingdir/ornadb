@@ -84,7 +84,7 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 11,
         name: "protected security audit",
-        sql: include_str!("../../../orna-kernel-postgres/migrations/0011_security_audit.sql"),
+        sql: include_str!("../../migrations/0011_security_audit.sql"),
         data_step: None,
     },
     Migration {
