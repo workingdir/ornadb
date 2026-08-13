@@ -42,7 +42,7 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 4,
         name: "canonical hash contract v1",
-        sql: include_str!("../../../orna-kernel-postgres/migrations/0004_canonical_hash_contract.sql"),
+        sql: include_str!("../../migrations/0004_canonical_hash_contract.sql"),
         data_step: Some(MigrationDataStep::CanonicalHashV1EmptySeed),
     },
     Migration {
