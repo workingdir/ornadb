@@ -32,6 +32,7 @@ mod storage;
 
 pub use apply::StandardContextIdentity;
 pub use bootstrap::ActiveRevision;
+pub use security::RecordArgumentPreflight;
 pub use server_execution::{ServerSelectContext, ServerSelectError, ServerSelectResult};
 pub use server_mutation_execution::{
     ServerDeleteCommitState, ServerDeleteContext, ServerDeleteError, ServerDeleteResult,
