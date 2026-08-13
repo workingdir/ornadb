@@ -62,6 +62,12 @@ selection. It produces the same committed denied audit and typed denial as the
 existing protected operations. The adapter cannot use domain selection as a
 function-existence oracle.
 
+The unified operation returns `RawExecuteDenied { pair, function, reason }`
+for every denied decision. This typed kernel error does not claim a CLIENT or
+SERVER domain before domain selection. It carries the same active pair,
+function, and existing `ExecuteDenial` evidence as the domain-specific direct
+operations. The raw adapter maps it to the same public `EXECUTE_DENIED` value.
+
 An allowed CLIENT decision evaluates through the existing authorised CLIENT
 entry. The audit append and evaluation retain the current CLIENT transaction,
 commit, and shutdown semantics.
@@ -121,7 +127,7 @@ The public mapping is:
 ```text
 kernel outcome                              public call outcome
 CLIENT or SERVER value result               value events and completion
-ClientExecuteDenied or ServerExecuteDenied  EXECUTE_DENIED
+RawExecuteDenied                            EXECUTE_DENIED
 ClientExecution                             CLIENT_EVALUATION_FAILED
 unsupported raw SERVER target shape         TARGET_UNAVAILABLE
 pure SERVER target validation failure       TARGET_UNAVAILABLE
@@ -155,8 +161,8 @@ Tests must prove:
   function at the SERVER executor, enum or record output, and every unknown
   future runtime value fail closed before a public value event;
 * an unknown function and missing, stale, or invalid session produce the exact
-  redacted denied outcome and one committed denied audit without domain
-  probing or private data SQL;
+  redacted denied outcome, private `RawExecuteDenied` evidence, and one
+  committed denied audit without domain probing or private data SQL;
 * domain selection, decision, audit, revision, target execution, and result
   all use one repeatable-read snapshot during a concurrent active revision or
   security change;
