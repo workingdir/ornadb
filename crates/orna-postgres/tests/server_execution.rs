@@ -28,9 +28,7 @@ use orna_core::{
         SecurityAuditOutcome, SecuritySnapshot,
     },
 };
-use orna_postgres::{
-    PostgresKernel, PostgresKernelError, ServerSelectError, ServerSelectResult,
-};
+use orna_postgres::{PostgresKernel, PostgresKernelError, ServerSelectError, ServerSelectResult};
 use orna_protocol::{ValueCodecError, encode_active_value};
 use orna_standard::{
     BIGINT_TYPE_ID, BINARY_LARGE_OBJECT_TYPE_ID, BOOLEAN_TYPE_ID, CHARACTER_LARGE_OBJECT_TYPE_ID,
