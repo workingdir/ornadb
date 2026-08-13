@@ -6,6 +6,7 @@ mod local_auth;
 mod raw_call;
 mod raw_client_dispatch;
 mod raw_socket;
+mod source_apply;
 mod upgrade;
 
 pub use backend_shell::{BackendShellError, run_backend_shell};
@@ -21,6 +22,10 @@ pub use raw_client_dispatch::{RawClientDispatch, RawClientDispatchResult};
 pub use raw_socket::{
     LocalRawSocketError, LocalRawSocketResources, LocalRawSocketServer, LocalRawSocketServerError,
     serve_local_raw_stream, start_local_raw_socket,
+};
+pub use source_apply::{
+    InstalledSourceApplyDiagnostics, InstalledSourceApplyError, InstalledSourceApplyHostFailure,
+    InstalledSourceApplyOutcome, InstalledSourceApplySuccess, run_installed_source_apply,
 };
 pub use upgrade::{EmbeddedUpgradeError, run_embedded_upgrade};
 
