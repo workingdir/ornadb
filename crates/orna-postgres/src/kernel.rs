@@ -20,25 +20,25 @@ use tokio::task::{JoinError, JoinHandle};
 use tokio_postgres::{Client, Config, NoTls};
 
 #[path = "kernel/apply.rs"]
-mod apply;
+pub(crate) mod apply;
 #[path = "kernel/bootstrap.rs"]
-mod bootstrap;
+pub(crate) mod bootstrap;
 #[path = "kernel/decode.rs"]
-mod decode;
+pub(crate) mod decode;
 #[path = "kernel/physical.rs"]
-mod physical;
+pub(crate) mod physical;
 #[path = "kernel/recovery.rs"]
-mod recovery;
+pub(crate) mod recovery;
 #[path = "kernel/security.rs"]
-mod security;
+pub(crate) mod security;
 #[path = "kernel/server_execution.rs"]
-mod server_execution;
+pub(crate) mod server_execution;
 #[path = "kernel/server_mutation_execution.rs"]
-mod server_mutation_execution;
+pub(crate) mod server_mutation_execution;
 #[path = "kernel/server_runtime.rs"]
-mod server_runtime;
+pub(crate) mod server_runtime;
 #[path = "kernel/storage.rs"]
-mod storage;
+pub(crate) mod storage;
 
 pub use apply::StandardContextIdentity;
 pub use bootstrap::ActiveRevision;
