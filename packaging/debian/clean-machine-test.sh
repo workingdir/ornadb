@@ -168,6 +168,38 @@ set -e
     'orna: the default Orna instance is not installed' ]] ||
     fail 'absent-instance diagnostic changed'
 
+# Source check is a pure offline compiler check. It runs as the orna service
+# account before any server process starts. No instance, ready file, or public
+# socket exists yet, and the checks must not create one.
+chmod 0711 /work
+printf '%s' 'CREATE SCHEMA app; CREATE TYPE app.task AS OBJECT (done BOOLEAN NOT NULL);' \
+    >/work/valid.orna
+printf '%s' 'CREATE SCHEMA ;' >/work/invalid.orna
+set +e
+run_as_orna /usr/bin/orna source check /work/valid.orna \
+    >/work/source-valid.stdout 2>/work/source-valid.stderr
+source_valid_status=$?
+set -e
+[[ "${source_valid_status}" -eq 0 && ! -s /work/source-valid.stdout \
+    && ! -s /work/source-valid.stderr ]] ||
+    fail 'valid source check did not pass cleanly'
+set +e
+run_as_orna /usr/bin/orna source check /work/invalid.orna \
+    >/work/source-invalid.stdout 2>/work/source-invalid.stderr
+source_invalid_status=$?
+set -e
+[[ "${source_invalid_status}" -eq 1 && ! -s /work/source-invalid.stdout ]] ||
+    fail 'invalid source check did not fail closed'
+[[ "$(cat /work/source-invalid.stderr)" == \
+    '/work/invalid.orna:14..15: ORNA0001: expected a schema name after CREATE SCHEMA' ]] ||
+    fail 'source-check diagnostic changed'
+[[ ! -e /var/lib/orna/instances/default ]] ||
+    fail 'source check reached instance creation'
+[[ ! -e /run/orna/default/ready && ! -e /run/orna/default/orna.sock ]] ||
+    fail 'source check created a runtime artefact'
+# Restore the private work-directory mode for the rest of the lifecycle.
+chmod 0700 /work
+
 install -d -o orna -g orna -m 0711 /run/orna/default
 /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin \
     /usr/bin/setpriv --reuid="${orna_uid}" --regid="${orna_gid}" --clear-groups -- \
