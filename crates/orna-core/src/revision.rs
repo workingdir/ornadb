@@ -1339,6 +1339,24 @@ impl ActiveDatabaseRevision {
         record_value_field_runtime_type(&self.catalogue, standard, resolved_type)
     }
 
+    /// Resolves one admitted record-field descriptor to its executable runtime type.
+    ///
+    /// The active application catalogue and its pinned verified standard
+    /// snapshot are the only classification authority.
+    pub fn record_value_field_descriptor_runtime_type(
+        &self,
+        descriptor: &TypeDescriptor,
+    ) -> Option<ResolvedType> {
+        let standard = self.catalogue_hash_context.standard()?.catalogue();
+        match classify_record_value_field_descriptor(&self.catalogue, standard, descriptor).ok()? {
+            RecordValueFieldDescriptorClass::Enum(type_id) => Some(ResolvedType::named(type_id)),
+            RecordValueFieldDescriptorClass::StandardPrimitive(type_id) => standard
+                .value_type_by_id(type_id)
+                .and_then(accepted_record_scalar)
+                .map(ResolvedType::scalar),
+        }
+    }
+
     /// Returns expression artifacts by durable record order.
     pub fn expressions(&self) -> &[ExpressionArtifact] {
         &self.expressions
