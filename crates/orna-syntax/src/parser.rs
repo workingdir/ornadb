@@ -5,14 +5,15 @@ use crate::{
     Diagnostic, EnumLabelDeclaration, EnumTypeDeclaration, FieldRenameDeclaration,
     FunctionReturnType, FunctionSecurity, FunctionTransaction, FunctionVolatility, InsertStatement,
     MutationValue, NamePart, NullOrdering, ObjectFieldDeclaration, ObjectSource,
-    ObjectTypeDeclaration, OnDeletePolicy, OrderingDirection, OrderingExpression, Parse,
-    PrimitiveValueTypeDeclaration, PrimitiveValueTypePersistence, QualifiedName, QueryExpression,
-    RecordConstructor, RecordConstructorField, RecordConstructorFieldValue,
-    RecordValueTypeDeclaration, RowsColumnDeclaration, SchemaDeclaration, SelectQuantifier,
-    SelectQuery, ServerFunctionBody, ServerFunctionDeclaration, ServerFunctionParameter,
-    SourceSlice, SourceSpan, SqlDeleteBody, SqlInsertBody, SqlQueryBody, SqlUpdateBody,
-    StandardLargeObjectKind, SyntaxTree, TypeExportDeclaration, TypeExportTarget,
-    TypeSpecification, UpdateAssignment, UpdateStatement, ValueFieldDeclaration,
+    ObjectTypeDeclaration, OnDeletePolicy, OpaqueValueTypeDeclaration, OrderingDirection,
+    OrderingExpression, Parse, PrimitiveValueTypeDeclaration, PrimitiveValueTypePersistence,
+    QualifiedName, QueryExpression, RecordConstructor, RecordConstructorField,
+    RecordConstructorFieldValue, RecordValueTypeDeclaration, RowsColumnDeclaration,
+    SchemaDeclaration, SelectQuantifier, SelectQuery, ServerFunctionBody,
+    ServerFunctionDeclaration, ServerFunctionParameter, SourceSlice, SourceSpan, SqlDeleteBody,
+    SqlInsertBody, SqlQueryBody, SqlUpdateBody, StandardLargeObjectKind, SyntaxTree,
+    TypeExportDeclaration, TypeExportTarget, TypeSpecification, UpdateAssignment, UpdateStatement,
+    ValueFieldDeclaration,
     lexer::{Token, TokenKind, lex},
 };
 
@@ -135,6 +136,7 @@ struct Parser<'source> {
     enum_types: Vec<EnumTypeDeclaration>,
     record_value_types: Vec<RecordValueTypeDeclaration>,
     primitive_value_types: Vec<PrimitiveValueTypeDeclaration>,
+    opaque_value_types: Vec<OpaqueValueTypeDeclaration>,
     type_exports: Vec<TypeExportDeclaration>,
     field_renames: Vec<FieldRenameDeclaration>,
     server_functions: Vec<ServerFunctionDeclaration>,
@@ -155,6 +157,7 @@ impl<'source> Parser<'source> {
             enum_types: Vec::new(),
             record_value_types: Vec::new(),
             primitive_value_types: Vec::new(),
+            opaque_value_types: Vec::new(),
             type_exports: Vec::new(),
             field_renames: Vec::new(),
             server_functions: Vec::new(),
@@ -194,6 +197,7 @@ impl<'source> Parser<'source> {
             enum_types: self.enum_types,
             record_value_types: self.record_value_types,
             primitive_value_types: self.primitive_value_types,
+            opaque_value_types: self.opaque_value_types,
             type_exports: self.type_exports,
             field_renames: self.field_renames,
             server_functions: self.server_functions,
@@ -1255,6 +1259,8 @@ impl<'source> Parser<'source> {
                 .is_some_and(|token| token.kind == TokenKind::LeftParenthesis)
             {
                 self.parse_create_record_value_type_body(statement_start, name);
+            } else if self.current().is_some_and(|token| token.is_word("OPAQUE")) {
+                self.parse_create_opaque_value_type_body(statement_start, name);
             } else {
                 self.parse_create_primitive_value_type_body(statement_start, name);
             }
@@ -1406,37 +1412,11 @@ impl<'source> Parser<'source> {
             self.recover_statement();
             return;
         }
-        self.skip_trivia();
-        let Some(kernel) = self.expect_word_token("KERNEL") else {
-            self.recover_statement();
-            return;
-        };
-        self.skip_trivia();
-        let Some(contract) = self.expect_word_token("CONTRACT") else {
-            self.recover_statement();
-            return;
-        };
-        let kernel_contract_modifier_span = SourceSpan {
-            start: kernel.range.start,
-            end: contract.range.end,
-        };
-        self.skip_trivia();
-        let Some(contract_literal) = self
-            .current()
-            .cloned()
-            .filter(|token| token.kind == TokenKind::StringLiteral)
+        let Some((kernel_contract, kernel_contract_modifier_span)) =
+            self.parse_kernel_contract("expected keyword KERNEL", "expected keyword CONTRACT")
         else {
-            self.error_current(
-                "ORNA0001",
-                "expected a string literal after KERNEL CONTRACT",
-            );
             self.recover_statement();
             return;
-        };
-        self.bump();
-        let kernel_contract = SourceSlice {
-            text: contract_literal.text.to_owned(),
-            span: contract_literal.span(),
         };
         self.skip_trivia();
         if !self.expect_word("IMMUTABLE") {
@@ -1478,6 +1458,101 @@ impl<'source> Parser<'source> {
                     },
                 });
         }
+    }
+
+    fn parse_create_opaque_value_type_body(
+        &mut self,
+        statement_start: usize,
+        name: Option<QualifiedName>,
+    ) {
+        self.skip_trivia();
+        let Some(opaque) = self.take_word("OPAQUE") else {
+            self.error_current("ORNA0001", "expected OPAQUE after AS VALUE");
+            self.recover_statement();
+            return;
+        };
+        let Some((kernel_contract, kernel_contract_modifier_span)) = self.parse_kernel_contract(
+            "expected KERNEL after OPAQUE",
+            "expected CONTRACT after KERNEL",
+        ) else {
+            self.recover_statement();
+            return;
+        };
+        self.skip_trivia();
+        let Some(immutable) = self.take_word("IMMUTABLE") else {
+            self.error_current("ORNA0001", "expected IMMUTABLE after opaque codec contract");
+            self.recover_statement();
+            return;
+        };
+        self.skip_trivia();
+        let Some(transient) = self.take_word("TRANSIENT") else {
+            self.error_current("ORNA0001", "expected TRANSIENT after IMMUTABLE");
+            self.recover_statement();
+            return;
+        };
+        self.skip_trivia();
+        let Some(semicolon) = self.expect_kind(
+            TokenKind::Semicolon,
+            "expected ';' after opaque value type declaration",
+        ) else {
+            self.recover_statement();
+            return;
+        };
+        if let Some(name) = name {
+            self.opaque_value_types.push(OpaqueValueTypeDeclaration {
+                name,
+                kernel_contract,
+                opaque_span: opaque.span(),
+                kernel_contract_modifier_span,
+                immutable_span: immutable.span(),
+                transient_span: transient.span(),
+                span: SourceSpan {
+                    start: statement_start,
+                    end: semicolon.end,
+                },
+            });
+        }
+    }
+
+    fn parse_kernel_contract(
+        &mut self,
+        missing_kernel: &str,
+        missing_contract: &str,
+    ) -> Option<(SourceSlice, SourceSpan)> {
+        self.skip_trivia();
+        let Some(kernel) = self.take_word("KERNEL") else {
+            self.error_current("ORNA0001", missing_kernel);
+            return None;
+        };
+        self.skip_trivia();
+        let Some(contract) = self.take_word("CONTRACT") else {
+            self.error_current("ORNA0001", missing_contract);
+            return None;
+        };
+        let modifier_span = SourceSpan {
+            start: kernel.range.start,
+            end: contract.range.end,
+        };
+        self.skip_trivia();
+        let Some(contract_literal) = self
+            .current()
+            .cloned()
+            .filter(|token| token.kind == TokenKind::StringLiteral)
+        else {
+            self.error_current(
+                "ORNA0001",
+                "expected a string literal after KERNEL CONTRACT",
+            );
+            return None;
+        };
+        self.bump();
+        Some((
+            SourceSlice {
+                text: contract_literal.text.to_owned(),
+                span: contract_literal.span(),
+            },
+            modifier_span,
+        ))
     }
 
     fn parse_create_record_value_type_body(
