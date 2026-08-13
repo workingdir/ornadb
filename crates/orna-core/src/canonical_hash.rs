@@ -2531,11 +2531,11 @@ mod tests {
                 TypeId::from_bytes(id::<42>()),
                 QualifiedSemanticName::new(["crm", "status"]).unwrap(),
                 vec![
-                    RecordValueFieldDefinition::try_new(
+                    RecordValueFieldDefinition::try_new_descriptor(
                         FieldId::from_bytes(id::<43>()),
                         "active",
                         0,
-                        ResolvedType::value(standard_boolean_id()),
+                        TypeDescriptor::named(standard_boolean_id()),
                     )
                     .unwrap(),
                 ],
@@ -2573,11 +2573,11 @@ mod tests {
                 record_value_type,
                 QualifiedSemanticName::new(["crm", "status"]).unwrap(),
                 vec![
-                    RecordValueFieldDefinition::try_new(
+                    RecordValueFieldDefinition::try_new_descriptor(
                         FieldId::from_bytes(id::<43>()),
                         "active",
                         0,
-                        ResolvedType::value(standard_boolean_id()),
+                        TypeDescriptor::named(standard_boolean_id()),
                     )
                     .unwrap(),
                 ],
@@ -2640,18 +2640,18 @@ mod tests {
                 first_record,
                 QualifiedSemanticName::new(["crm", "status"]).unwrap(),
                 vec![
-                    RecordValueFieldDefinition::try_new(
+                    RecordValueFieldDefinition::try_new_descriptor(
                         FieldId::from_bytes(id::<43>()),
                         "active",
                         0,
-                        ResolvedType::value(standard_boolean_id()),
+                        TypeDescriptor::named(standard_boolean_id()),
                     )
                     .unwrap(),
-                    RecordValueFieldDefinition::try_new(
+                    RecordValueFieldDefinition::try_new_descriptor(
                         FieldId::from_bytes(id::<44>()),
                         "phase",
                         1,
-                        ResolvedType::named(enum_type),
+                        TypeDescriptor::named(enum_type),
                     )
                     .unwrap(),
                 ],
@@ -2660,11 +2660,11 @@ mod tests {
                 second_record,
                 QualifiedSemanticName::new(["crm", "marker"]).unwrap(),
                 vec![
-                    RecordValueFieldDefinition::try_new(
+                    RecordValueFieldDefinition::try_new_descriptor(
                         FieldId::from_bytes(id::<49>()),
                         "value",
                         0,
-                        ResolvedType::value(standard_boolean_id()),
+                        TypeDescriptor::named(standard_boolean_id()),
                     )
                     .unwrap(),
                 ],
@@ -4175,19 +4175,29 @@ mod tests {
             .unwrap();
             catalogue_digest_with_context(&context, &catalogue, &[], &[], &origins, &[]).unwrap()
         };
-        let field = |id: u8, name, ordinal, resolved_type| {
-            RecordValueFieldDefinition::try_new(
+        let field = |id: u8, name, ordinal, descriptor| {
+            RecordValueFieldDefinition::try_new_descriptor(
                 FieldId::from_bytes([id; 16]),
                 name,
                 ordinal,
-                resolved_type,
+                descriptor,
             )
             .expect("record field")
         };
         let base_fields = || {
             vec![
-                field(43, "active", 0, ResolvedType::value(standard_boolean_id())),
-                field(44, "enabled", 1, ResolvedType::value(standard_boolean_id())),
+                field(
+                    43,
+                    "active",
+                    0,
+                    TypeDescriptor::named(standard_boolean_id()),
+                ),
+                field(
+                    44,
+                    "enabled",
+                    1,
+                    TypeDescriptor::named(standard_boolean_id()),
+                ),
             ]
         };
         let base = digest("status", base_fields());
@@ -4196,22 +4206,52 @@ mod tests {
             digest(
                 "status",
                 vec![
-                    field(45, "active", 0, ResolvedType::value(standard_boolean_id())),
-                    field(44, "enabled", 1, ResolvedType::value(standard_boolean_id())),
+                    field(
+                        45,
+                        "active",
+                        0,
+                        TypeDescriptor::named(standard_boolean_id()),
+                    ),
+                    field(
+                        44,
+                        "enabled",
+                        1,
+                        TypeDescriptor::named(standard_boolean_id()),
+                    ),
                 ],
             ),
             digest(
                 "status",
                 vec![
-                    field(43, "changed", 0, ResolvedType::value(standard_boolean_id())),
-                    field(44, "enabled", 1, ResolvedType::value(standard_boolean_id())),
+                    field(
+                        43,
+                        "changed",
+                        0,
+                        TypeDescriptor::named(standard_boolean_id()),
+                    ),
+                    field(
+                        44,
+                        "enabled",
+                        1,
+                        TypeDescriptor::named(standard_boolean_id()),
+                    ),
                 ],
             ),
             digest(
                 "status",
                 vec![
-                    field(44, "enabled", 0, ResolvedType::value(standard_boolean_id())),
-                    field(43, "active", 1, ResolvedType::value(standard_boolean_id())),
+                    field(
+                        44,
+                        "enabled",
+                        0,
+                        TypeDescriptor::named(standard_boolean_id()),
+                    ),
+                    field(
+                        43,
+                        "active",
+                        1,
+                        TypeDescriptor::named(standard_boolean_id()),
+                    ),
                 ],
             ),
             digest(
@@ -4221,9 +4261,14 @@ mod tests {
                         43,
                         "active",
                         0,
-                        ResolvedType::named(TypeId::from_bytes(id::<47>())),
+                        TypeDescriptor::named(TypeId::from_bytes(id::<47>())),
                     ),
-                    field(44, "enabled", 1, ResolvedType::value(standard_boolean_id())),
+                    field(
+                        44,
+                        "enabled",
+                        1,
+                        TypeDescriptor::named(standard_boolean_id()),
+                    ),
                 ],
             ),
         ];
@@ -4235,7 +4280,7 @@ mod tests {
     #[test]
     fn version_two_record_fields_accept_only_the_closed_primitive_and_enum_family() {
         let context = CatalogueHashContext::version_two(verified_standard_snapshot(false));
-        let build = |resolved_type| {
+        let build = |descriptor: &TypeDescriptor| {
             CatalogueSnapshot::new_with_record_value_types(
                 CatalogueRevisionId::from_bytes(id::<40>()),
                 vec![SchemaDefinition::new(
@@ -4249,11 +4294,11 @@ mod tests {
                     TypeId::from_bytes(id::<42>()),
                     QualifiedSemanticName::new(["crm", "status"]).unwrap(),
                     vec![
-                        RecordValueFieldDefinition::try_new(
+                        RecordValueFieldDefinition::try_new_descriptor(
                             FieldId::from_bytes(id::<43>()),
                             "value",
                             0,
-                            resolved_type,
+                            descriptor.clone(),
                         )
                         .expect("record field"),
                     ],
@@ -4263,14 +4308,14 @@ mod tests {
             .unwrap()
         };
 
-        for resolved_type in [
-            ResolvedType::value(TypeId::from_bytes(id::<99>())),
-            ResolvedType::named(TypeId::from_bytes(id::<98>())),
+        for descriptor in [
+            TypeDescriptor::named(TypeId::from_bytes(id::<99>())),
+            TypeDescriptor::named(TypeId::from_bytes(id::<98>())),
         ] {
             assert_eq!(
                 catalogue_digest_with_context(
                     &context,
-                    &build(resolved_type),
+                    &build(&descriptor),
                     &[],
                     &[],
                     &record_value_origins(),
@@ -4279,10 +4324,7 @@ mod tests {
                 Err(CanonicalHashError::UnsupportedRecordValueFieldType {
                     record_value_type: TypeId::from_bytes(id::<42>()),
                     field: FieldId::from_bytes(id::<43>()),
-                    descriptor: TypeDescriptor::named(match resolved_type {
-                        ResolvedType::Named(type_id) | ResolvedType::Value(type_id) => type_id,
-                        ResolvedType::Scalar(_) | ResolvedType::Reference { .. } => unreachable!(),
-                    }),
+                    descriptor,
                 })
             );
         }
@@ -4305,11 +4347,11 @@ mod tests {
                 TypeId::from_bytes(id::<42>()),
                 QualifiedSemanticName::new(["crm", "status"]).unwrap(),
                 vec![
-                    RecordValueFieldDefinition::try_new(
+                    RecordValueFieldDefinition::try_new_descriptor(
                         FieldId::from_bytes(id::<43>()),
                         "phase",
                         0,
-                        ResolvedType::named(enum_type),
+                        TypeDescriptor::named(enum_type),
                     )
                     .unwrap(),
                 ],
@@ -4348,11 +4390,11 @@ mod tests {
                 TypeId::from_bytes(id::<42>()),
                 QualifiedSemanticName::new(["crm", "status"]).unwrap(),
                 vec![
-                    RecordValueFieldDefinition::try_new(
+                    RecordValueFieldDefinition::try_new_descriptor(
                         FieldId::from_bytes(id::<43>()),
                         "value",
                         0,
-                        ResolvedType::value(collision),
+                        TypeDescriptor::named(collision),
                     )
                     .unwrap(),
                 ],
