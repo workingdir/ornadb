@@ -161,8 +161,13 @@ impl RecordValueFieldDefinition {
         self.resolved_type
     }
 
-    /// Returns this field's temporary canonical descriptor view, if identified.
-    pub(crate) const fn type_descriptor(&self) -> Option<&TypeDescriptor> {
+    /// Returns this field's temporary canonical descriptor view.
+    ///
+    /// This is `None` only for a field created through the legacy infallible
+    /// constructor with a representation scalar. Catalogue admission rejects
+    /// that shape. Fields created through [`Self::try_new`] always return a
+    /// descriptor.
+    pub const fn type_descriptor(&self) -> Option<&TypeDescriptor> {
         self.descriptor.as_ref()
     }
 }
