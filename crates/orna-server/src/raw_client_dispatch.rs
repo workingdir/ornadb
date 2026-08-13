@@ -200,7 +200,7 @@ mod tests {
         },
         value::RuntimeValue,
     };
-    use orna_postgres::{PostgresKernel, ServerSelectError};
+    use orna_postgres::{PostgresKernel, RawServerTargetError, ServerSelectError};
     use orna_protocol::{
         CallArgument, CallFailure, RawCall, ServerAction, ServerFrame, encode_server_frame,
     };
@@ -393,10 +393,10 @@ mod tests {
         let unavailable = RawClientDispatchResult::from_kernel_error(
             11,
             PostgresKernelError::RawServerTargetUnavailable {
-                source: ServerSelectError::RawTarget {
+                source: RawServerTargetError::Select(ServerSelectError::RawTarget {
                     function: FUNCTION,
                     rule: "test",
-                },
+                }),
             },
         );
         assert_eq!(

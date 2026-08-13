@@ -51,6 +51,38 @@ pub use server_mutation_execution::{
     ServerUpdateContext, ServerUpdateError, ServerUpdateResult,
 };
 
+/// The typed source for an unavailable authenticated raw SERVER target.
+///
+/// Raw dispatch supports separate immutable artefact families for `SELECT`
+/// and the narrow parameter-free `INSERT` form. The source retains that
+/// family without changing the closed public failure category.
+#[non_exhaustive]
+#[derive(Debug)]
+pub enum RawServerTargetError {
+    /// The pinned target failed the raw SERVER `SELECT` boundary.
+    Select(ServerSelectError),
+    /// The pinned target failed the raw SERVER `INSERT` boundary.
+    Insert(ServerInsertError),
+}
+
+impl fmt::Display for RawServerTargetError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Select(error) => error.fmt(formatter),
+            Self::Insert(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl Error for RawServerTargetError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Select(error) => Some(error),
+            Self::Insert(error) => Some(error),
+        }
+    }
+}
+
 /// A concrete connection point for the private PostgreSQL kernel.
 #[derive(Clone)]
 pub struct PostgresKernel {
@@ -181,8 +213,8 @@ pub enum PostgresKernelError {
     },
     /// An allowed SERVER function is unavailable at the closed raw-call boundary.
     RawServerTargetUnavailable {
-        /// The exact pure SERVER target validation failure.
-        source: ServerSelectError,
+        /// The exact typed SERVER target validation failure.
+        source: RawServerTargetError,
     },
     /// An authorised CLIENT function could not be evaluated.
     ClientExecution(ClientExecutionError),
@@ -405,7 +437,7 @@ mod tests {
         security::{ExecuteDenial, LocalPeerAuthenticationError},
     };
 
-    use super::{PostgresKernel, PostgresKernelError, ServerSelectError};
+    use super::{PostgresKernel, PostgresKernelError, RawServerTargetError, ServerSelectError};
 
     #[test]
     fn parses_connection_parameters_without_connecting() {
@@ -557,10 +589,10 @@ mod tests {
     fn unavailable_raw_server_target_retains_its_typed_source() {
         let function = FunctionId::from_bytes([0x24; 16]);
         let error = PostgresKernelError::RawServerTargetUnavailable {
-            source: ServerSelectError::RawTarget {
+            source: RawServerTargetError::Select(ServerSelectError::RawTarget {
                 function,
                 rule: "test boundary",
-            },
+            }),
         };
 
         assert_eq!(
