@@ -31,9 +31,9 @@ mod physical;
 mod recovery;
 #[path = "kernel/security.rs"]
 mod security;
-#[path = "../../orna-kernel-postgres/src/server_execution.rs"]
+#[path = "kernel/server_execution.rs"]
 mod server_execution;
-#[path = "../../orna-kernel-postgres/src/server_mutation_execution.rs"]
+#[path = "kernel/server_mutation_execution.rs"]
 mod server_mutation_execution;
 #[path = "kernel/server_runtime.rs"]
 mod server_runtime;
