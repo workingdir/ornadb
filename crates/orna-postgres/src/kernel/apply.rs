@@ -1992,7 +1992,7 @@ impl<'a> CandidateEncoder<'a> {
                 invariant("record value fields must use one supported standard value or enum type")
             })?;
         match class {
-            RecordValueFieldDescriptorClass::Enum(type_id) => Ok(TypeColumns {
+            RecordValueFieldDescriptorClass::ApplicationEnum(type_id) => Ok(TypeColumns {
                 kind: "enum",
                 scalar: None,
                 target: None,
@@ -2001,6 +2001,9 @@ impl<'a> CandidateEncoder<'a> {
                 enum_type: Some(type_id),
                 record_type: None,
             }),
+            RecordValueFieldDescriptorClass::StandardEnum(_) => Err(invariant(
+                "standard enum record fields require durable standard enum storage",
+            )),
             RecordValueFieldDescriptorClass::StandardPrimitive(type_id) => {
                 let standard_library_revision =
                     self.standard_library_revision().ok_or_else(|| {

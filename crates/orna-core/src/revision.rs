@@ -1349,7 +1349,10 @@ impl ActiveDatabaseRevision {
     ) -> Option<ResolvedType> {
         let standard = self.catalogue_hash_context.standard()?.catalogue();
         match classify_record_value_field_descriptor(&self.catalogue, standard, descriptor).ok()? {
-            RecordValueFieldDescriptorClass::Enum(type_id) => Some(ResolvedType::named(type_id)),
+            RecordValueFieldDescriptorClass::ApplicationEnum(type_id)
+            | RecordValueFieldDescriptorClass::StandardEnum(type_id) => {
+                Some(ResolvedType::named(type_id))
+            }
             RecordValueFieldDescriptorClass::StandardPrimitive(type_id) => standard
                 .value_type_by_id(type_id)
                 .and_then(accepted_record_scalar)
@@ -2319,8 +2322,10 @@ fn validate_record_value_field_types(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum RecordValueFieldDescriptorClass {
-    /// An application or pinned-standard enum identity.
-    Enum(TypeId),
+    /// An application enum identity.
+    ApplicationEnum(TypeId),
+    /// A pinned-standard enum identity.
+    StandardEnum(TypeId),
     /// An accepted immutable, persistable pinned-standard primitive identity.
     StandardPrimitive(TypeId),
 }
@@ -2374,11 +2379,14 @@ pub(crate) fn classify_record_value_field_descriptor(
     let standard_scalar = standard
         .value_type_by_id(type_id)
         .and_then(accepted_record_scalar);
-    if application_enum && standard_scalar.is_some() {
+    if application_enum && (standard_enum || standard_scalar.is_some()) {
         return Err(RecordValueFieldDescriptorClassificationError::Ambiguous { type_id });
     }
-    if application_enum || standard_enum {
-        return Ok(RecordValueFieldDescriptorClass::Enum(type_id));
+    if application_enum {
+        return Ok(RecordValueFieldDescriptorClass::ApplicationEnum(type_id));
+    }
+    if standard_enum {
+        return Ok(RecordValueFieldDescriptorClass::StandardEnum(type_id));
     }
     if standard_scalar.is_some() {
         return Ok(RecordValueFieldDescriptorClass::StandardPrimitive(type_id));
@@ -4745,6 +4753,27 @@ mod tests {
                 type_id: TypeId::from_bytes(id::<71>()),
             })
         );
+        let standard_enum = DeployableRevision::new_with_catalogue_hash_context(
+            DeployableRevisionInput::new(
+                expected_base,
+                source(Some(expected_base.source())),
+                expected_base.catalogue(),
+                empty_catalogue(),
+                digest::<7>(),
+                DeployableRevisionContent::new(vec![], vec![], vec![], vec![])
+                    .with_current_function_revisions(vec![]),
+            ),
+            flat_type_standard_context(),
+        )
+        .unwrap();
+        assert_eq!(
+            standard_enum.record_value_field_descriptor_class(&TypeDescriptor::named(
+                TypeId::from_bytes(id::<75>()),
+            )),
+            Ok(RecordValueFieldDescriptorClass::StandardEnum(
+                TypeId::from_bytes(id::<75>()),
+            ))
+        );
         assert_eq!(
             DeployableRevision::new(
                 expected_base,
@@ -4927,6 +4956,50 @@ mod tests {
                 ResolvedType::named(application_enum),
             )
             .is_some()
+        );
+        assert_eq!(
+            classify_record_value_field_descriptor(
+                &application,
+                &standard,
+                &TypeDescriptor::named(application_enum),
+            ),
+            Ok(RecordValueFieldDescriptorClass::ApplicationEnum(
+                application_enum,
+            ))
+        );
+        assert_eq!(
+            classify_record_value_field_descriptor(
+                &application,
+                &standard,
+                &TypeDescriptor::named(standard_enum),
+            ),
+            Ok(RecordValueFieldDescriptorClass::StandardEnum(standard_enum))
+        );
+        let colliding_standard = CatalogueSnapshot::new_with_enum_types(
+            CatalogueRevisionId::from_bytes(id::<103>()),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes(id::<104>()),
+                QualifiedSemanticName::new(["std"]).unwrap(),
+            )],
+            vec![],
+            vec![],
+            vec![EnumTypeDefinition::new(
+                application_enum,
+                QualifiedSemanticName::new(["std", "phase"]).unwrap(),
+                ["new"],
+            )],
+            vec![],
+        )
+        .unwrap();
+        assert_eq!(
+            classify_record_value_field_descriptor(
+                &application,
+                &colliding_standard,
+                &TypeDescriptor::named(application_enum),
+            ),
+            Err(RecordValueFieldDescriptorClassificationError::Ambiguous {
+                type_id: application_enum,
+            })
         );
         assert!(
             record_value_field_runtime_type(
