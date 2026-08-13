@@ -2094,11 +2094,18 @@ mod tests {
         ordinal: u32,
         resolved_type: ResolvedType,
     ) -> RecordValueFieldDefinition {
-        RecordValueFieldDefinition::try_new(
+        let descriptor = match resolved_type {
+            ResolvedType::Named(type_id) | ResolvedType::Value(type_id) => {
+                TypeDescriptor::named(type_id)
+            }
+            ResolvedType::Reference { target } => TypeDescriptor::reference(target),
+            ResolvedType::Scalar(_) => panic!("record fixture cannot use a legacy scalar"),
+        };
+        RecordValueFieldDefinition::try_new_descriptor(
             FieldId::from_bytes([id; 16]),
             name,
             ordinal,
-            resolved_type,
+            descriptor,
         )
         .expect("record field")
     }
@@ -2482,15 +2489,12 @@ mod tests {
             )
         };
 
-        let (resolved_type, descriptor) = (
-            ResolvedType::reference(TypeId::from_bytes([92; 16])),
-            TypeDescriptor::reference(TypeId::from_bytes([92; 16])),
-        );
-        let field = RecordValueFieldDefinition::try_new(
+        let descriptor = TypeDescriptor::reference(TypeId::from_bytes([92; 16]));
+        let field = RecordValueFieldDefinition::try_new_descriptor(
             FieldId::from_bytes([3; 16]),
             "x",
             0,
-            resolved_type,
+            descriptor.clone(),
         )
         .unwrap();
         let error = CatalogueSnapshot::new_with_record_value_types(

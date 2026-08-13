@@ -1124,7 +1124,7 @@ mod tests {
             CatalogueHashContext, DefinitionIdentity, DefinitionOrigin, RevisionPair, SourceOrigin,
             StoredSourceRevision, StoredSourceUnit,
         },
-        types::{ResolvedType, StandardScalar},
+        types::{ResolvedType, StandardScalar, TypeDescriptor},
         value::{EnumValue, OpaqueValue, RecordValue, RuntimeFloat},
     };
     use orna_standard::{
@@ -1159,18 +1159,18 @@ mod tests {
     }
 
     fn active_record_revision() -> ActiveDatabaseRevision {
-        active_record_revision_with_second_type(ResolvedType::named(ENUM_TYPE))
+        active_record_revision_with_second_type(TypeDescriptor::named(ENUM_TYPE))
     }
 
     fn active_record_revision_with_second_type(
-        second_field_type: ResolvedType,
+        second_field_type: TypeDescriptor,
     ) -> ActiveDatabaseRevision {
-        active_record_revision_with_types(ResolvedType::value(BOOLEAN_TYPE_ID), second_field_type)
+        active_record_revision_with_types(TypeDescriptor::named(BOOLEAN_TYPE_ID), second_field_type)
     }
 
     fn active_record_revision_with_types(
-        first_field_type: ResolvedType,
-        second_field_type: ResolvedType,
+        first_field_type: TypeDescriptor,
+        second_field_type: TypeDescriptor,
     ) -> ActiveDatabaseRevision {
         let record_type = TypeId::from_bytes([0x47; 16]);
         let record_field = FieldId::from_bytes([0x48; 16]);
@@ -1194,14 +1194,14 @@ mod tests {
                 record_type,
                 QualifiedSemanticName::new(["crm", "flag"]).unwrap(),
                 vec![
-                    RecordValueFieldDefinition::try_new(
+                    RecordValueFieldDefinition::try_new_descriptor(
                         record_field,
                         "enabled",
                         0,
                         first_field_type,
                     )
                     .unwrap(),
-                    RecordValueFieldDefinition::try_new(
+                    RecordValueFieldDefinition::try_new_descriptor(
                         second_record_field,
                         "verified",
                         1,
@@ -1852,7 +1852,8 @@ mod tests {
             value,
         };
         let encoded = encode_active_client_frame(&original, &frame).unwrap();
-        let changed = active_record_revision_with_second_type(ResolvedType::value(BIGINT_TYPE_ID));
+        let changed =
+            active_record_revision_with_second_type(TypeDescriptor::named(BIGINT_TYPE_ID));
 
         assert_eq!(
             encode_active_client_frame(&changed, &frame),
@@ -2195,8 +2196,8 @@ mod tests {
     #[test]
     fn active_codec_rejects_a_field_length_that_consumes_the_next_entry() {
         let active = active_record_revision_with_types(
-            ResolvedType::value(BINARY_LARGE_OBJECT_TYPE_ID),
-            ResolvedType::named(ENUM_TYPE),
+            TypeDescriptor::named(BINARY_LARGE_OBJECT_TYPE_ID),
+            TypeDescriptor::named(ENUM_TYPE),
         );
         let record = &active.catalogue().record_value_types()[0];
         let value = RuntimeValue::Record(
@@ -2248,7 +2249,8 @@ mod tests {
             )
             .unwrap(),
         );
-        let changed = active_record_revision_with_second_type(ResolvedType::value(BIGINT_TYPE_ID));
+        let changed =
+            active_record_revision_with_second_type(TypeDescriptor::named(BIGINT_TYPE_ID));
 
         assert_eq!(
             encode_active_value(&changed, &value),
