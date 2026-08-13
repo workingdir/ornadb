@@ -5,33 +5,49 @@ use std::{
     time::Duration,
 };
 
+use orna_artifact::client_plan::{OPAQUE_FORMAT_VERSION, OpaqueClientPlan};
 use orna_compiler::{
     StandardApplicationCheckContext, check, check_standard_application, prepare,
     prepare_standard_application,
 };
 use orna_core::{
-    CatalogueRevisionId, FunctionId, PrincipalId, SourceRevisionId,
-    revision::RevisionPair,
+    CatalogueRevisionId, FunctionId, FunctionRevisionId, PrincipalId, SourceRevisionId,
+    canonical_hash::{
+        artifact_payload_digest, catalogue_digest_with_context,
+        function_semantic_digest_with_version,
+    },
+    catalogue::{
+        CatalogueSnapshot, FunctionDefinition, FunctionDomain, FunctionReturn, FunctionSecurity,
+        FunctionVolatility,
+    },
+    revision::{
+        DefinitionIdentity, DefinitionReference, DefinitionReferenceKind,
+        DefinitionReferenceTarget, DeployableRevision, DeployableRevisionContent,
+        DeployableRevisionInput, ExecutableArtifact, ExecutableArtifactKind,
+        FunctionRevisionRecord, FunctionSemanticHashVersion, RevisionPair,
+    },
     security::{
         ExecuteDenial, ExecuteGrant, InvocationTarget, LocalPeerAuthenticationError,
         LocalPeerCredential, Principal, PrincipalKind, PrincipalStatus, SecurityAuditDenial,
         SecurityAuditKind, SecurityAuditOutcome, SecuritySnapshot,
     },
     source::{SourceBundle, SourceUnit},
-    value::{EnumValue, RecordValue, RuntimeValue},
+    types::ResolvedType,
+    value::{EnumValue, OpaqueValue, RecordValue, RuntimeValue},
 };
 use orna_kernel_postgres::{AuthenticatedRawCallResult, PostgresKernel, PostgresKernelError};
 use orna_protocol::{
     CallFailure, Channel, ClientFrame, Event, RawCall, ServerAction, ServerFrame,
-    decode_active_server_frame, decode_server_frame, encode_active_client_frame,
-    encode_client_frame,
+    decode_active_server_frame, decode_registered_server_frame, decode_server_frame,
+    encode_active_client_frame, encode_client_frame, encode_registered_client_frame,
 };
 use orna_server::{
     LocalAuthenticationError, LocalRawSocketError, LocalRawSocketResources,
     OpenStandardDatabaseError, RawClientDispatch, open_standard_database, serve_local_raw_stream,
 };
 use orna_standard::{
-    BOOLEAN_TYPE_ID, retained_standard_library_snapshot, verify_standard_library_snapshot,
+    BOOLEAN_TYPE_ID, OPAQUE_TOKEN_TYPE_ID, registered_opaque_codecs,
+    retained_standard_library_snapshot, verify_standard_library_snapshot,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -1077,6 +1093,120 @@ async fn serves_the_actual_local_peer_through_the_raw_socket_protocol() -> TestR
             "local raw socket changed the exact authentication and execute audit sequence",
         )?;
 
+        let opaque_payload = [0x81; 16];
+        let current = kernel.recover().await?;
+        let opaque_active = install_opaque_client_fixture(
+            &kernel,
+            &current,
+            standard_upgrade.checked_standard_library(),
+            client_function,
+            opaque_payload,
+        )
+        .await?;
+        current_pair = opaque_active.pair();
+        let opaque_granted = SecuritySnapshot::new_with_local_peer_credentials(
+            current_pair,
+            functions.clone(),
+            granted.principals().collect(),
+            vec![],
+            granted.execute_grants().collect(),
+            vec![LocalPeerCredential::new(uid, RAW_CLIENT_USER)],
+        )?;
+        kernel.replace_security_snapshot(&opaque_granted).await?;
+        let registry = registered_opaque_codecs(
+            opaque_active
+                .catalogue_hash_context()
+                .standard()
+                .ok_or_else(|| failure("opaque CLIENT active revision omitted its standard"))?,
+        )?;
+        let expected_opaque = RuntimeValue::Opaque(OpaqueValue::new(
+            &opaque_active,
+            &registry,
+            OPAQUE_TOKEN_TYPE_ID,
+            opaque_payload,
+        )?);
+        let (server, client) = StandardUnixStream::pair()?;
+        client.set_nonblocking(true)?;
+        let mut client = UnixStream::from_std(client)?;
+        let connection = tokio::spawn(serve_local_raw_stream(
+            kernel.clone(),
+            server,
+            LocalRawSocketResources::new(),
+        ));
+        let version_four_operation = async {
+            client
+                .write_all(b"ORNA\x01\x00\x00\x04\x00\x00\x00\x00")
+                .await?;
+            let mut acknowledgement = [0_u8; 12];
+            client.read_exact(&mut acknowledgement).await?;
+            require(
+                acknowledgement == *b"ORNA\x81\x00\x00\x04\x00\x00\x00\x00",
+                "local raw socket returned the wrong registered-codec acknowledgement",
+            )?;
+            for frame in [
+                ClientFrame::CallRawStart {
+                    stream: 1,
+                    function: client_function,
+                },
+                ClientFrame::WindowUpdate {
+                    stream: 1,
+                    channel: Channel::ResultValues,
+                    credit: 57,
+                },
+                ClientFrame::CallArgumentsComplete { stream: 1 },
+            ] {
+                send_registered_protocol_frame(&mut client, &opaque_active, &registry, &frame)
+                    .await?;
+            }
+            require(
+                matches!(
+                    read_registered_protocol_frame(&mut client, &opaque_active, &registry).await?,
+                    ServerFrame::CallAccepted { stream: 1, .. }
+                ),
+                "protocol-4 socket did not accept the opaque CLIENT call",
+            )?;
+            require(
+                read_registered_protocol_frame(&mut client, &opaque_active, &registry).await?
+                    == ServerFrame::EventBatch {
+                        stream: 1,
+                        channel: Channel::ResultValues,
+                        events: vec![orna_protocol::EventRecord {
+                            sequence: 1,
+                            event: Event::Value(expected_opaque),
+                        }],
+                    },
+                "protocol-4 socket returned the wrong registered opaque value",
+            )?;
+            require(
+                read_registered_protocol_frame(&mut client, &opaque_active, &registry).await?
+                    == ServerFrame::CallCompleted { stream: 1 },
+                "protocol-4 socket did not complete the opaque CLIENT call",
+            )
+        }
+        .await;
+        let shutdown = client.shutdown().await.map_err(Into::into);
+        let connection = connection.await.map_err(Into::into).and_then(|result| {
+            result.map_err(|error| -> Box<dyn Error + Send + Sync> { Box::new(error) })
+        });
+        let cleanup = finish_session(shutdown, connection, "protocol-4 connection cleanup");
+        finish_session(
+            version_four_operation,
+            cleanup,
+            "local raw socket protocol-4 operation",
+        )?;
+        let events = kernel.recover_security_audit_events().await?;
+        require(
+            events.len() == 10
+                && events[8].decision().outcome() == SecurityAuditOutcome::Allowed
+                && events[8].decision().session_principal() == Some(RAW_CLIENT_USER)
+                && events[8].decision().target().is_none()
+                && events[9].decision().outcome() == SecurityAuditOutcome::Allowed
+                && events[9].decision().session_principal() == Some(RAW_CLIENT_USER)
+                && events[9].decision().target()
+                    == Some(InvocationTarget::new(client_function, current_pair)),
+            "protocol-4 opaque CLIENT call changed protected audit evidence",
+        )?;
+
         let revoked = SecuritySnapshot::new(
             current_pair,
             functions,
@@ -1122,12 +1252,12 @@ async fn serves_the_actual_local_peer_through_the_raw_socket_protocol() -> TestR
         )?;
         let events = kernel.recover_security_audit_events().await?;
         require(
-            events.len() == 9
-                && events[8].decision().kind() == SecurityAuditKind::Authentication
-                && events[8].decision().outcome() == SecurityAuditOutcome::Denied
-                && events[8].decision().session_principal().is_none()
-                && events[8].decision().target().is_none()
-                && events[8].decision().denial()
+            events.len() == 11
+                && events[10].decision().kind() == SecurityAuditKind::Authentication
+                && events[10].decision().outcome() == SecurityAuditOutcome::Denied
+                && events[10].decision().session_principal().is_none()
+                && events[10].decision().target().is_none()
+                && events[10].decision().denial()
                     == Some(SecurityAuditDenial::Authentication(
                         LocalPeerAuthenticationError::UnknownUid,
                     )),
@@ -1169,12 +1299,33 @@ async fn send_catalogue_protocol_frame(
     Ok(())
 }
 
+async fn send_registered_protocol_frame(
+    stream: &mut UnixStream,
+    active: &orna_core::revision::ActiveDatabaseRevision,
+    registry: &orna_core::value::OpaqueCodecRegistry,
+    frame: &ClientFrame,
+) -> TestResult<()> {
+    stream
+        .write_all(&encode_registered_client_frame(active, registry, frame)?)
+        .await?;
+    Ok(())
+}
+
 async fn read_active_protocol_frame(
     stream: &mut UnixStream,
     active: &orna_core::revision::ActiveDatabaseRevision,
 ) -> TestResult<ServerFrame> {
     let encoded = read_encoded_protocol_frame(stream).await?;
     Ok(decode_active_server_frame(active, &encoded)?)
+}
+
+async fn read_registered_protocol_frame(
+    stream: &mut UnixStream,
+    active: &orna_core::revision::ActiveDatabaseRevision,
+    registry: &orna_core::value::OpaqueCodecRegistry,
+) -> TestResult<ServerFrame> {
+    let encoded = read_encoded_protocol_frame(stream).await?;
+    Ok(decode_registered_server_frame(active, registry, &encoded)?)
 }
 
 async fn send_legacy_protocol_frame(
@@ -1284,6 +1435,182 @@ async fn install_raw_client_fixture(
         .ok_or_else(|| failure("raw CLIENT fixture is missing its SERVER function"))?
         .id();
     Ok((active, standard_upgrade, client, server))
+}
+
+async fn install_opaque_client_fixture(
+    kernel: &PostgresKernel,
+    active: &orna_core::revision::ActiveDatabaseRevision,
+    checked_standard: &orna_compiler::CheckedStandardLibrary,
+    function: FunctionId,
+    payload: [u8; 16],
+) -> TestResult<orna_core::revision::ActiveDatabaseRevision> {
+    let last_ordinal = active
+        .source()
+        .units()
+        .len()
+        .checked_sub(1)
+        .ok_or_else(|| failure("opaque CLIENT fixture has no retained source unit"))?;
+    let source = SourceBundle::new(active.source().units().iter().enumerate().map(
+        |(ordinal, unit)| {
+            let content = if ordinal == last_ordinal {
+                format!("{}\n", unit.content())
+            } else {
+                unit.content().to_owned()
+            };
+            SourceUnit::new(unit.logical_path(), content)
+        },
+    ))?;
+    let report = check_standard_application(
+        &source,
+        &StandardApplicationCheckContext::try_new(active.catalogue(), checked_standard)?,
+    );
+    require(
+        report.diagnostics().is_empty(),
+        "opaque CLIENT source-only precursor did not compile",
+    )?;
+    let precursor = prepare_standard_application(&report, active.pair(), active)?;
+    require(
+        precursor.new_function_revisions().is_empty(),
+        "opaque CLIENT source-only precursor changed executable semantics",
+    )?;
+    let previous = active
+        .function_revisions()
+        .iter()
+        .find(|revision| revision.function() == function)
+        .ok_or_else(|| failure("opaque CLIENT fixture is missing its prior function revision"))?;
+    let function_origin = precursor
+        .origins()
+        .iter()
+        .find_map(|origin| {
+            (origin.identity() == DefinitionIdentity::Function(function)).then_some(origin.source())
+        })
+        .ok_or_else(|| failure("opaque CLIENT fixture is missing its function origin"))?;
+    let function_revision = FunctionRevisionId::from_bytes([0x78; 16]);
+    require(
+        active
+            .function_revisions()
+            .iter()
+            .all(|revision| revision.id() != function_revision),
+        "opaque CLIENT fixture revision identity collides with active state",
+    )?;
+    let prior_definition = precursor
+        .candidate()
+        .function_by_id(function)
+        .ok_or_else(|| failure("opaque CLIENT fixture is missing its function definition"))?;
+    let opaque_definition = FunctionDefinition::new(
+        function,
+        prior_definition.name().clone(),
+        FunctionDomain::Client,
+        Vec::new(),
+        FunctionReturn::Single(ResolvedType::value(OPAQUE_TOKEN_TYPE_ID)),
+        function_revision,
+        FunctionSecurity::Invoker,
+        None,
+        FunctionVolatility::Immutable,
+    );
+    let functions = precursor
+        .candidate()
+        .functions()
+        .iter()
+        .map(|definition| {
+            if definition.id() == function {
+                opaque_definition.clone()
+            } else {
+                definition.clone()
+            }
+        })
+        .collect();
+    let catalogue = CatalogueSnapshot::new_with_functions_and_record_value_types(
+        precursor.candidate().revision(),
+        precursor.candidate().schemas().to_vec(),
+        precursor.candidate().object_types().to_vec(),
+        precursor.candidate().value_types().to_vec(),
+        precursor.candidate().enum_types().to_vec(),
+        precursor.candidate().record_value_types().to_vec(),
+        precursor.candidate().type_bindings().to_vec(),
+        functions,
+    )?;
+    let reference = DefinitionReference::new(
+        function,
+        function_revision,
+        0,
+        DefinitionReferenceTarget::ValueType(OPAQUE_TOKEN_TYPE_ID),
+        DefinitionReferenceKind::NamedType,
+        function_origin,
+    );
+    let plan = OpaqueClientPlan::return_opaque(OPAQUE_TOKEN_TYPE_ID, payload).encode();
+    let artifact = ExecutableArtifact::new(
+        ExecutableArtifactKind::Client,
+        "orna.client-plan",
+        OPAQUE_FORMAT_VERSION,
+        plan.clone(),
+        artifact_payload_digest(&plan)?,
+    )?;
+    let semantic_hash = function_semantic_digest_with_version(
+        FunctionSemanticHashVersion::Version2,
+        &opaque_definition,
+        previous.language_version(),
+        &artifact,
+        precursor.expressions(),
+        std::slice::from_ref(&reference),
+    )?;
+    let opaque_revision = FunctionRevisionRecord::new(
+        function,
+        function_revision,
+        previous.revision_number() + 1,
+        function_origin,
+        previous.declaration_content_hash(),
+        semantic_hash,
+        previous.language_version(),
+        artifact,
+    )?
+    .with_semantic_hash_version(FunctionSemanticHashVersion::Version2);
+    let current_revisions = precursor
+        .current_function_revisions()
+        .ok_or_else(|| failure("opaque CLIENT precursor omitted current revision evidence"))?
+        .iter()
+        .map(|revision| {
+            if revision.function() == function {
+                opaque_revision.clone()
+            } else {
+                revision.clone()
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut references = precursor
+        .references()
+        .iter()
+        .filter(|candidate| candidate.source_function() != function)
+        .cloned()
+        .collect::<Vec<_>>();
+    references.push(reference);
+    let context = precursor.catalogue_hash_context().clone();
+    let catalogue_hash = catalogue_digest_with_context(
+        &context,
+        &catalogue,
+        &current_revisions,
+        precursor.expressions(),
+        precursor.origins(),
+        &references,
+    )?;
+    let candidate = DeployableRevision::new_with_catalogue_hash_context(
+        DeployableRevisionInput::new(
+            precursor.expected_base(),
+            precursor.source().clone(),
+            precursor.parent_catalogue(),
+            catalogue,
+            catalogue_hash,
+            DeployableRevisionContent::new(
+                precursor.origins().to_vec(),
+                precursor.expressions().to_vec(),
+                vec![opaque_revision],
+                references,
+            )
+            .with_current_function_revisions(current_revisions),
+        ),
+        context,
+    )?;
+    Ok(kernel.apply(&candidate).await?)
 }
 
 fn raw_client_record(
