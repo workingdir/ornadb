@@ -4,10 +4,7 @@ use std::fmt;
 
 use sha2::{Digest, Sha256};
 
-use crate::{
-    FieldId, TypeBindingId, TypeId,
-    types::{ResolvedType, TypeDescriptor},
-};
+use crate::{FieldId, TypeBindingId, TypeId, types::TypeDescriptor};
 
 use super::{ObjectTypeDefinition, QualifiedSemanticName};
 
@@ -101,28 +98,6 @@ pub struct RecordValueFieldDefinition {
 }
 
 impl RecordValueFieldDefinition {
-    /// Creates a record field through the bounded flat-type migration seam.
-    ///
-    /// Catalogue and active-revision validation still decide whether the
-    /// resolved named or reference category is accepted in a record field.
-    pub fn try_new(
-        id: FieldId,
-        name: impl Into<String>,
-        ordinal: u32,
-        resolved_type: ResolvedType,
-    ) -> Result<Self, RecordValueFieldConstructionError> {
-        let descriptor = match resolved_type {
-            ResolvedType::Named(type_id) | ResolvedType::Value(type_id) => {
-                TypeDescriptor::named(type_id)
-            }
-            ResolvedType::Reference { target } => TypeDescriptor::reference(target),
-            ResolvedType::Scalar(scalar) => {
-                return Err(RecordValueFieldConstructionError::LegacyScalar { scalar });
-            }
-        };
-        Self::try_new_descriptor(id, name, ordinal, descriptor)
-    }
-
     /// Creates a record field from its canonical flat type descriptor.
     ///
     /// Constructed descriptors remain closed until their durable hash and
@@ -176,15 +151,10 @@ impl RecordValueFieldDefinition {
     }
 }
 
-/// A failure to construct a record field during flat-type migration.
+/// A failure to construct a record field from its canonical descriptor.
 #[non_exhaustive]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RecordValueFieldConstructionError {
-    /// A legacy representation scalar has no catalogue identity.
-    LegacyScalar {
-        /// The rejected compatibility representation.
-        scalar: crate::types::StandardScalar,
-    },
     /// A constructed descriptor is not admitted in record fields yet.
     ConstructedTypeNotAccepted {
         /// The rejected descriptor.
@@ -195,9 +165,6 @@ pub enum RecordValueFieldConstructionError {
 impl fmt::Display for RecordValueFieldConstructionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::LegacyScalar { .. } => {
-                formatter.write_str("legacy scalar cannot form a record field descriptor")
-            }
             Self::ConstructedTypeNotAccepted { .. } => {
                 formatter.write_str("constructed record field descriptors are not accepted")
             }
@@ -732,55 +699,29 @@ mod tests {
         RecordValueFieldDefinition, TypeBinding, TypeBindingKind, TypeDefinition,
         ValueTypeDefinition, ValueTypeKind, ValueTypeMutability, ValueTypePersistence,
     };
-    use crate::{
-        FieldId, TypeId,
-        catalogue::QualifiedSemanticName,
-        types::{ResolvedType, StandardScalar, TypeDescriptor},
-    };
+    use crate::{FieldId, TypeId, catalogue::QualifiedSemanticName, types::TypeDescriptor};
 
     #[test]
-    fn record_field_flat_constructor_preserves_identified_types_and_rejects_legacy_scalars() {
+    fn record_field_descriptor_constructor_accepts_flat_leaves_and_rejects_constructors() {
         let field = FieldId::from_bytes([0x21; 16]);
         let type_id = TypeId::from_bytes([0x22; 16]);
 
-        for resolved_type in [
-            ResolvedType::named(type_id),
-            ResolvedType::value(type_id),
-            ResolvedType::reference(type_id),
+        for descriptor in [
+            TypeDescriptor::named(type_id),
+            TypeDescriptor::reference(type_id),
         ] {
-            let definition =
-                RecordValueFieldDefinition::try_new(field, "value", 0, resolved_type).unwrap();
+            let definition = RecordValueFieldDefinition::try_new_descriptor(
+                field,
+                "value",
+                0,
+                descriptor.clone(),
+            )
+            .unwrap();
             assert_eq!(definition.id(), field);
             assert_eq!(definition.name(), "value");
             assert_eq!(definition.ordinal(), 0);
-            let expected = match resolved_type {
-                ResolvedType::Named(type_id) | ResolvedType::Value(type_id) => {
-                    TypeDescriptor::named(type_id)
-                }
-                ResolvedType::Reference { target } => TypeDescriptor::reference(target),
-                ResolvedType::Scalar(_) => unreachable!(),
-            };
-            assert_eq!(definition.descriptor(), &expected);
+            assert_eq!(definition.descriptor(), &descriptor);
         }
-
-        let error = RecordValueFieldDefinition::try_new(
-            field,
-            "value",
-            0,
-            ResolvedType::scalar(StandardScalar::Boolean),
-        )
-        .unwrap_err();
-        assert_eq!(
-            error,
-            RecordValueFieldConstructionError::LegacyScalar {
-                scalar: StandardScalar::Boolean,
-            }
-        );
-        assert_eq!(
-            error.to_string(),
-            "legacy scalar cannot form a record field descriptor"
-        );
-        assert!(std::error::Error::source(&error).is_none());
 
         let constructor_cases = [
             TypeDescriptor::list(TypeDescriptor::named(type_id)).unwrap(),
@@ -810,26 +751,6 @@ mod tests {
                 "constructed record field descriptors are not accepted"
             );
             assert!(std::error::Error::source(&error).is_none());
-        }
-    }
-
-    #[test]
-    fn record_field_descriptor_constructor_accepts_flat_descriptors() {
-        let field = FieldId::from_bytes([0x31; 16]);
-        let type_id = TypeId::from_bytes([0x32; 16]);
-
-        for descriptor in [
-            TypeDescriptor::named(type_id),
-            TypeDescriptor::reference(type_id),
-        ] {
-            let definition = RecordValueFieldDefinition::try_new_descriptor(
-                field,
-                "value",
-                0,
-                descriptor.clone(),
-            )
-            .unwrap();
-            assert_eq!(definition.descriptor(), &descriptor);
         }
     }
 
