@@ -3469,11 +3469,11 @@ mod tests {
                 TypeId::from_bytes(id::<83>()),
                 QualifiedSemanticName::new(["crm", "status"]).unwrap(),
                 vec![
-                    RecordValueFieldDefinition::try_new(
+                    RecordValueFieldDefinition::try_new_descriptor(
                         FieldId::from_bytes(id::<84>()),
                         "active",
                         0,
-                        ResolvedType::value(TypeId::from_bytes(id::<71>())),
+                        TypeDescriptor::named(TypeId::from_bytes(id::<71>())),
                     )
                     .unwrap(),
                 ],
@@ -4499,11 +4499,11 @@ mod tests {
                 TypeId::from_bytes(id::<76>()),
                 QualifiedSemanticName::new(["crm", "status"]).unwrap(),
                 vec![
-                    RecordValueFieldDefinition::try_new(
+                    RecordValueFieldDefinition::try_new_descriptor(
                         FieldId::from_bytes(id::<77>()),
                         "active",
                         0,
-                        ResolvedType::value(TypeId::from_bytes(id::<71>())),
+                        TypeDescriptor::named(TypeId::from_bytes(id::<71>())),
                     )
                     .unwrap(),
                 ],
@@ -4565,11 +4565,11 @@ mod tests {
                 record_value_type,
                 QualifiedSemanticName::new(["crm", "status"]).unwrap(),
                 vec![
-                    RecordValueFieldDefinition::try_new(
+                    RecordValueFieldDefinition::try_new_descriptor(
                         FieldId::from_bytes(id::<77>()),
                         "active",
                         0,
-                        ResolvedType::value(TypeId::from_bytes(id::<71>())),
+                        TypeDescriptor::named(TypeId::from_bytes(id::<71>())),
                     )
                     .unwrap(),
                 ],
@@ -5033,11 +5033,11 @@ mod tests {
                 TypeId::from_bytes(id::<98>()),
                 QualifiedSemanticName::new(["app", "record"]).unwrap(),
                 vec![
-                    RecordValueFieldDefinition::try_new(
+                    RecordValueFieldDefinition::try_new_descriptor(
                         FieldId::from_bytes(id::<99>()),
                         "value",
                         0,
-                        ResolvedType::value(collision),
+                        TypeDescriptor::named(collision),
                     )
                     .unwrap(),
                 ],

@@ -512,7 +512,7 @@ mod tests {
             SourceOrigin, StandardLibraryDigestVersion, StandardLibrarySnapshot,
             StoredSourceRevision, StoredSourceUnit,
         },
-        types::ResolvedType,
+        types::{ResolvedType, TypeDescriptor},
     };
 
     use super::*;
@@ -681,11 +681,11 @@ mod tests {
                 record_type,
                 name(&["demo", "status"]),
                 vec![
-                    RecordValueFieldDefinition::try_new(
+                    RecordValueFieldDefinition::try_new_descriptor(
                         SECOND_FIELD,
                         "active",
                         0,
-                        ResolvedType::value(TypeId::from_bytes([0xa4; 16])),
+                        TypeDescriptor::named(TypeId::from_bytes([0xa4; 16])),
                     )
                     .unwrap(),
                 ],
