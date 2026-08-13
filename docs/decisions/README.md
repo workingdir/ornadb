@@ -65,3 +65,5 @@ source-of-truth or authority rules.
   [Named Immutable Records Are Nominal Catalogue Values](0031-named-immutable-record-values.md)
 * **work ADR 0032:**
   [Raw Calls Dispatch One-Column SERVER SELECTs](0032-raw-server-select-dispatch.md)
+* **work ADR 0033:**
+  [Local Raw Recovery Calls Use Stable Function Identities](0033-local-raw-recovery-client.md)
