@@ -133,7 +133,7 @@ const MIGRATIONS: &[Migration] = &[
         version: 18,
         name: "disjoint field reference targets",
         sql: include_str!(
-            "../../../orna-kernel-postgres/migrations/0018_disjoint_field_reference_targets.sql"
+            "../../migrations/0018_disjoint_field_reference_targets.sql"
         ),
         data_step: None,
     },
