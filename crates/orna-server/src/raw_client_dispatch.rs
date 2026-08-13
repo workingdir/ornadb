@@ -1,7 +1,7 @@
 //! Protected dispatch for the current raw CLIENT and SERVER call subset.
 
 use orna_core::{InvocationId, security::AuthenticatedSession, value::RuntimeValue};
-use orna_kernel_postgres::{AuthenticatedRawCallResult, PostgresKernel, PostgresKernelError};
+use orna_postgres::{AuthenticatedRawCallResult, PostgresKernel, PostgresKernelError};
 use orna_protocol::{CallFailure, Event, RawCall, ServerAction};
 
 /// One accepted raw CLIENT call bound to trusted session state.
@@ -200,7 +200,7 @@ mod tests {
         },
         value::RuntimeValue,
     };
-    use orna_kernel_postgres::{PostgresKernel, ServerSelectError};
+    use orna_postgres::{PostgresKernel, ServerSelectError};
     use orna_protocol::{
         CallArgument, CallFailure, RawCall, ServerAction, ServerFrame, encode_server_frame,
     };

@@ -26,7 +26,7 @@ pub use upgrade::{EmbeddedUpgradeError, run_embedded_upgrade};
 
 use std::fmt;
 
-use orna_kernel_postgres::{PostgresKernel, PostgresKernelError};
+use orna_postgres::{PostgresKernel, PostgresKernelError};
 use orna_standard::{StandardLibraryError, StandardUpgradeError};
 
 /// A failure while opening a standard-backed application database.
@@ -131,7 +131,7 @@ pub async fn open_standard_database(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use orna_kernel_postgres::PostgresKernel;
+    use orna_postgres::PostgresKernel;
     use std::future::Future;
     use tokio_postgres::Config;
 
