@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
-#[path = "../../orna-postgres/src/kernel/recovery/functions.rs"]
+#[path = "recovery/functions.rs"]
 mod functions;
 
 use orna_core::{
