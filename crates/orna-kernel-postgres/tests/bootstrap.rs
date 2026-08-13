@@ -103,7 +103,7 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
     (
         9,
         "security decision snapshot",
-        include_str!("../migrations/0009_security_snapshot.sql"),
+        include_str!("../../orna-postgres/migrations/0009_security_snapshot.sql"),
     ),
     (
         10,
