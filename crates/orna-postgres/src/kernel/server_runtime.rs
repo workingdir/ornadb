@@ -319,6 +319,7 @@ mod tests {
             RecordValueFieldDefinition, RecordValueTypeDefinition, SchemaDefinition,
         },
         revision::{CatalogueHashContext, DefinitionReference, SourceOrigin},
+        types::TypeDescriptor,
     };
 
     use super::*;
@@ -440,11 +441,11 @@ mod tests {
                 record_type,
                 QualifiedSemanticName::new(["app", "flag"]).unwrap(),
                 vec![
-                    RecordValueFieldDefinition::try_new(
+                    RecordValueFieldDefinition::try_new_descriptor(
                         FieldId::from_bytes([0x58; 16]),
                         "stage",
                         0,
-                        ResolvedType::named(enum_type),
+                        TypeDescriptor::named(enum_type),
                     )
                     .expect("record field"),
                 ],
