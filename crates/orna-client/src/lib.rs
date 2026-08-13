@@ -4,19 +4,23 @@ use std::{error::Error, fmt};
 
 use orna_artifact::client_plan::{
     ClientPlan, ClientPlanError, FORMAT_IDENTITY, FORMAT_VERSION, LANGUAGE_VERSION_IDENTITY,
+    OPAQUE_FORMAT_VERSION, OpaqueClientPlan,
 };
 use orna_core::{
     FunctionId, FunctionRevisionId, TypeId,
     canonical_hash::{CanonicalHashError, catalogue_digest_with_context},
-    catalogue::{FunctionDomain, FunctionReturn, FunctionSecurity, FunctionVolatility},
+    catalogue::{
+        FunctionDomain, FunctionReturn, FunctionSecurity, FunctionVolatility, ValueTypeKind,
+    },
     revision::{
         ActiveDatabaseRevision, DefinitionReferenceKind, DefinitionReferenceTarget,
         FunctionSemanticHashVersion, RevisionPair,
     },
     security::{AuthorisedInvocation, InvocationTarget},
     types::StandardScalar,
-    value::RuntimeValue,
+    value::{OpaqueValue, OpaqueValueError, RuntimeValue},
 };
+use orna_standard::{RegisteredOpaqueCodecsError, registered_opaque_codecs};
 
 /// The active revision and function revision selected for one CLIENT execution.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -96,6 +100,45 @@ impl Error for ClientActiveRevisionError {
     }
 }
 
+/// A registered opaque-value failure during local CLIENT evaluation.
+#[non_exhaustive]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ClientOpaqueValueError {
+    /// The checked-in registry does not accept the active standard snapshot.
+    Registry(Box<RegisteredOpaqueCodecsError>),
+    /// The plan's nominal type differs from the function's declared return type.
+    TypeMismatch {
+        /// The function's declared opaque return type.
+        expected: TypeId,
+        /// The opaque type encoded in the saved plan.
+        actual: TypeId,
+    },
+    /// The registered codec rejected the plan value.
+    Value(OpaqueValueError),
+}
+
+impl fmt::Display for ClientOpaqueValueError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Registry(source) => source.fmt(formatter),
+            Self::TypeMismatch { .. } => {
+                formatter.write_str("opaque CLIENT plan type does not match its function return")
+            }
+            Self::Value(source) => source.fmt(formatter),
+        }
+    }
+}
+
+impl Error for ClientOpaqueValueError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Registry(source) => Some(source),
+            Self::Value(source) => Some(source),
+            Self::TypeMismatch { .. } => None,
+        }
+    }
+}
+
 /// A closed CLIENT-function validation rule.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -104,7 +147,7 @@ pub enum ClientExecutionRule {
     FunctionDomain,
     /// The function declares unsupported parameters.
     Parameters,
-    /// The function does not return the supported Boolean value.
+    /// The function does not return a supported CLIENT value.
     ReturnType,
     /// The function does not use INVOKER security.
     Security,
@@ -127,7 +170,9 @@ impl fmt::Display for ClientExecutionRule {
             Self::Parameters => {
                 formatter.write_str("this CLIENT function requires unsupported parameters")
             }
-            Self::ReturnType => formatter.write_str("this CLIENT function does not return BOOLEAN"),
+            Self::ReturnType => {
+                formatter.write_str("this CLIENT function has an unsupported return type")
+            }
             Self::Security => {
                 formatter.write_str("this CLIENT function has an unsupported security mode")
             }
@@ -191,6 +236,13 @@ pub enum ClientExecutionError {
         /// The artefact decoder error.
         source: ClientPlanError,
     },
+    /// A version-2 opaque plan cannot produce a registered runtime value.
+    InvalidOpaqueValue {
+        /// The resolved execution context.
+        context: ClientExecutionContext,
+        /// The registry or value validation failure.
+        source: ClientOpaqueValueError,
+    },
 }
 
 impl ClientExecutionError {
@@ -199,9 +251,9 @@ impl ClientExecutionError {
         match self {
             Self::AuthorisationMismatch { active, .. } => *active,
             Self::InvalidActiveRevision { pair, .. } | Self::FunctionNotFound { pair, .. } => *pair,
-            Self::InvalidFunction { context, .. } | Self::InvalidArtifact { context, .. } => {
-                context.pair()
-            }
+            Self::InvalidFunction { context, .. }
+            | Self::InvalidArtifact { context, .. }
+            | Self::InvalidOpaqueValue { context, .. } => context.pair(),
         }
     }
 
@@ -211,9 +263,9 @@ impl ClientExecutionError {
             Self::AuthorisationMismatch { authorised, .. } => authorised.function(),
             Self::InvalidActiveRevision { function, .. }
             | Self::FunctionNotFound { function, .. } => *function,
-            Self::InvalidFunction { context, .. } | Self::InvalidArtifact { context, .. } => {
-                context.function()
-            }
+            Self::InvalidFunction { context, .. }
+            | Self::InvalidArtifact { context, .. }
+            | Self::InvalidOpaqueValue { context, .. } => context.function(),
         }
     }
 
@@ -223,9 +275,9 @@ impl ClientExecutionError {
             Self::AuthorisationMismatch { .. }
             | Self::InvalidActiveRevision { .. }
             | Self::FunctionNotFound { .. } => None,
-            Self::InvalidFunction { context, .. } | Self::InvalidArtifact { context, .. } => {
-                Some(context)
-            }
+            Self::InvalidFunction { context, .. }
+            | Self::InvalidArtifact { context, .. }
+            | Self::InvalidOpaqueValue { context, .. } => Some(context),
         }
     }
 }
@@ -243,7 +295,7 @@ impl fmt::Display for ClientExecutionError {
                 formatter.write_str("the active revision does not contain this function")
             }
             Self::InvalidFunction { rule, .. } => rule.fmt(formatter),
-            Self::InvalidArtifact { .. } => {
+            Self::InvalidArtifact { .. } | Self::InvalidOpaqueValue { .. } => {
                 formatter.write_str("the saved CLIENT function cannot be evaluated")
             }
         }
@@ -255,6 +307,7 @@ impl Error for ClientExecutionError {
         match self {
             Self::InvalidActiveRevision { source, .. } => Some(source),
             Self::InvalidArtifact { source, .. } => Some(source),
+            Self::InvalidOpaqueValue { source, .. } => Some(source),
             Self::AuthorisationMismatch { .. }
             | Self::FunctionNotFound { .. }
             | Self::InvalidFunction { .. } => None,
@@ -262,7 +315,7 @@ impl Error for ClientExecutionError {
     }
 }
 
-/// Evaluates one closed Boolean CLIENT function from one active revision.
+/// Evaluates one closed CLIENT function from one active revision.
 ///
 /// The allow evidence selects the only function and revision that may run. The
 /// evaluator performs no database, protocol, filesystem, process, environment,
@@ -299,21 +352,70 @@ pub fn evaluate_client_function(
         function_revision: revision.id(),
     };
 
-    let return_shape = validate_function_shape(definition, context)?;
+    let return_shape = validate_function_shape(active, definition, context)?;
     validate_selected_references(
         active,
         revision.semantic_hash_version(),
         context,
         return_shape,
     )?;
-    validate_artifact(revision.artifact(), revision.language_version(), context)?;
-
-    let plan = ClientPlan::decode(revision.artifact().payload())
-        .map_err(|source| ClientExecutionError::InvalidArtifact { context, source })?;
-    Ok(ClientExecutionResult {
+    validate_artifact(
+        revision.artifact(),
+        revision.language_version(),
         context,
-        value: RuntimeValue::Boolean(plan.returned_boolean()),
-    })
+        return_shape,
+    )?;
+
+    let value = evaluate_plan(active, revision.artifact().payload(), context, return_shape)?;
+    Ok(ClientExecutionResult { context, value })
+}
+
+fn evaluate_plan(
+    active: &ActiveDatabaseRevision,
+    payload: &[u8],
+    context: ClientExecutionContext,
+    return_shape: ClientReturnShape,
+) -> Result<RuntimeValue, ClientExecutionError> {
+    match return_shape {
+        ClientReturnShape::LegacyBoolean | ClientReturnShape::StandardBoolean(_) => {
+            let plan = ClientPlan::decode(payload)
+                .map_err(|source| ClientExecutionError::InvalidArtifact { context, source })?;
+            Ok(RuntimeValue::Boolean(plan.returned_boolean()))
+        }
+        ClientReturnShape::Opaque(expected) => {
+            let plan = OpaqueClientPlan::decode(payload)
+                .map_err(|source| ClientExecutionError::InvalidArtifact { context, source })?;
+            if plan.opaque_type() != expected {
+                return Err(ClientExecutionError::InvalidOpaqueValue {
+                    context,
+                    source: ClientOpaqueValueError::TypeMismatch {
+                        expected,
+                        actual: plan.opaque_type(),
+                    },
+                });
+            }
+            let Some(standard) = active.catalogue_hash_context().standard() else {
+                return Err(ClientExecutionError::InvalidOpaqueValue {
+                    context,
+                    source: ClientOpaqueValueError::Value(OpaqueValueError::ActiveStandardRequired),
+                });
+            };
+            let registry = registered_opaque_codecs(standard).map_err(|source| {
+                ClientExecutionError::InvalidOpaqueValue {
+                    context,
+                    source: ClientOpaqueValueError::Registry(Box::new(source)),
+                }
+            })?;
+            let value = OpaqueValue::new(active, &registry, expected, plan.canonical_payload())
+                .map_err(|source| ClientExecutionError::InvalidOpaqueValue {
+                    context,
+                    source: ClientOpaqueValueError::Value(source),
+                })?;
+            Ok(RuntimeValue::Opaque(value))
+        }
+        ClientReturnShape::OtherValue => unreachable!("definition references were validated"),
+        ClientReturnShape::Unsupported => unreachable!("function shape was validated"),
+    }
 }
 
 fn validate_active_catalogue(
@@ -354,11 +456,16 @@ fn invalid_active_revision(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ClientReturnShape {
     LegacyBoolean,
-    Value(TypeId),
+    StandardBoolean(TypeId),
+    Opaque(TypeId),
+    OtherValue,
     Unsupported,
 }
 
-fn classify_client_return(return_type: &FunctionReturn) -> ClientReturnShape {
+fn classify_client_return(
+    active: &ActiveDatabaseRevision,
+    return_type: &FunctionReturn,
+) -> ClientReturnShape {
     let FunctionReturn::Single(resolved_type) = return_type else {
         return ClientReturnShape::Unsupported;
     };
@@ -376,12 +483,26 @@ fn classify_client_return(return_type: &FunctionReturn) -> ClientReturnShape {
         return ClientReturnShape::Unsupported;
     }
     if let Some(type_id) = resolved_type.value_type() {
-        return ClientReturnShape::Value(type_id);
+        let Some(definition) = active
+            .catalogue_hash_context()
+            .standard()
+            .and_then(|standard| standard.catalogue().value_type_by_id(type_id))
+        else {
+            return ClientReturnShape::Unsupported;
+        };
+        if definition.representation_contract() == "orna.kernel.value.boolean@1" {
+            return ClientReturnShape::StandardBoolean(type_id);
+        }
+        if definition.kind() == ValueTypeKind::Opaque {
+            return ClientReturnShape::Opaque(type_id);
+        }
+        return ClientReturnShape::OtherValue;
     }
     ClientReturnShape::Unsupported
 }
 
 fn validate_function_shape(
+    active: &ActiveDatabaseRevision,
     definition: &orna_core::catalogue::FunctionDefinition,
     context: ClientExecutionContext,
 ) -> Result<ClientReturnShape, ClientExecutionError> {
@@ -394,7 +515,7 @@ fn validate_function_shape(
     if !definition.parameters().is_empty() {
         return Err(invalid_function(context, ClientExecutionRule::Parameters));
     }
-    let return_shape = classify_client_return(definition.return_type());
+    let return_shape = classify_client_return(active, definition.return_type());
     if matches!(return_shape, ClientReturnShape::Unsupported) {
         return Err(invalid_function(context, ClientExecutionRule::ReturnType));
     }
@@ -441,19 +562,26 @@ fn validate_selected_references(
                 && reference.kind() == DefinitionReferenceKind::NamedType
                 && match reference.target() {
                     DefinitionReferenceTarget::ValueType(type_id) => {
-                        let pinned_boolean = standard
-                            .catalogue()
-                            .value_type_by_id(type_id)
-                            .is_some_and(|definition| {
-                                definition.representation_contract()
-                                    == "orna.kernel.value.boolean@1"
-                            });
-                        pinned_boolean
-                            && match return_shape {
-                                ClientReturnShape::LegacyBoolean => true,
-                                ClientReturnShape::Value(return_type) => return_type == type_id,
-                                ClientReturnShape::Unsupported => false,
+                        let definition = standard.catalogue().value_type_by_id(type_id);
+                        match return_shape {
+                            ClientReturnShape::LegacyBoolean => definition.is_some_and(|value| {
+                                value.representation_contract() == "orna.kernel.value.boolean@1"
+                            }),
+                            ClientReturnShape::StandardBoolean(return_type) => {
+                                return_type == type_id
+                                    && definition.is_some_and(|value| {
+                                        value.representation_contract()
+                                            == "orna.kernel.value.boolean@1"
+                                    })
                             }
+                            ClientReturnShape::Opaque(return_type) => {
+                                return_type == type_id
+                                    && definition
+                                        .is_some_and(|value| value.kind() == ValueTypeKind::Opaque)
+                            }
+                            ClientReturnShape::OtherValue => false,
+                            ClientReturnShape::Unsupported => false,
+                        }
                     }
                     _ => false,
                 };
@@ -470,6 +598,7 @@ fn validate_artifact(
     artifact: &orna_core::revision::ExecutableArtifact,
     language_version: &str,
     context: ClientExecutionContext,
+    return_shape: ClientReturnShape,
 ) -> Result<(), ClientExecutionError> {
     if artifact.format() != FORMAT_IDENTITY {
         return Err(invalid_function(
@@ -477,7 +606,13 @@ fn validate_artifact(
             ClientExecutionRule::ArtifactFormat,
         ));
     }
-    if artifact.version() != FORMAT_VERSION {
+    let expected_version = match return_shape {
+        ClientReturnShape::LegacyBoolean | ClientReturnShape::StandardBoolean(_) => FORMAT_VERSION,
+        ClientReturnShape::Opaque(_) => OPAQUE_FORMAT_VERSION,
+        ClientReturnShape::OtherValue => unreachable!("definition references were validated"),
+        ClientReturnShape::Unsupported => unreachable!("function shape was validated"),
+    };
+    if artifact.version() != expected_version {
         return Err(invalid_function(
             context,
             ClientExecutionRule::ArtifactVersion,
@@ -1206,6 +1341,86 @@ mod tests {
     }
 
     #[test]
+    fn evaluates_a_registered_opaque_client_result() {
+        let payload = [
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+            0xee, 0xff,
+        ];
+        let (active, function, pair, function_revision) =
+            version_two_opaque_active(orna_standard::OPAQUE_TOKEN_TYPE_ID, payload);
+
+        let result = evaluate_client_function(&active, function).unwrap();
+
+        assert_eq!(result.context().pair(), pair);
+        assert_eq!(result.context().function(), function);
+        assert_eq!(result.context().function_revision(), function_revision);
+        let RuntimeValue::Opaque(value) = result.value() else {
+            panic!("opaque plan must produce one opaque value");
+        };
+        assert_eq!(value.opaque_type(), orna_standard::OPAQUE_TOKEN_TYPE_ID);
+        assert_eq!(value.canonical_payload(), payload);
+    }
+
+    #[test]
+    fn opaque_client_result_rejects_plan_type_and_structure_before_value_creation() {
+        let payload = [0x5a; 16];
+        let wrong_type = TypeId::from_bytes([0xa7; 16]);
+        let (active, function, pair, function_revision) =
+            version_two_opaque_active(wrong_type, payload);
+
+        let error = evaluate_client_function(&active, function).unwrap_err();
+        assert_eq!(error.pair(), pair);
+        assert_eq!(error.function(), function);
+        assert_eq!(
+            error.context().map(|context| context.function_revision()),
+            Some(function_revision)
+        );
+        assert!(matches!(
+            error,
+            super::ClientExecutionError::InvalidOpaqueValue {
+                source: super::ClientOpaqueValueError::TypeMismatch {
+                    expected,
+                    actual,
+                },
+                ..
+            } if expected == orna_standard::OPAQUE_TOKEN_TYPE_ID && actual == wrong_type
+        ));
+        assert_eq!(
+            error.to_string(),
+            "the saved CLIENT function cannot be evaluated"
+        );
+        let source = std::error::Error::source(&error).unwrap();
+        assert_eq!(
+            source.to_string(),
+            "opaque CLIENT plan type does not match its function return"
+        );
+        assert!(std::error::Error::source(source).is_none());
+
+        let mut malformed = orna_artifact::client_plan::OpaqueClientPlan::return_opaque(
+            orna_standard::OPAQUE_TOKEN_TYPE_ID,
+            payload,
+        )
+        .encode();
+        malformed[29..33].copy_from_slice(&15_u32.to_be_bytes());
+        let (active, function, _, _) = version_two_value_active_with_artifact(
+            orna_standard::OPAQUE_TOKEN_TYPE_ID,
+            orna_standard::OPAQUE_TOKEN_TYPE_ID,
+            2,
+            malformed,
+        );
+        let error = evaluate_client_function(&active, function).unwrap_err();
+        assert!(matches!(
+            error,
+            super::ClientExecutionError::InvalidArtifact {
+                source: orna_artifact::client_plan::ClientPlanError::InvalidOpaquePayloadLength {
+                    actual: 15,
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn rejects_a_value_return_that_disagrees_with_its_selected_reference() {
         let standard = orna_standard::verify_standard_library_snapshot(
             orna_standard::retained_standard_library_snapshot().unwrap(),
@@ -1477,7 +1692,7 @@ mod tests {
 
         use super::{
             ClientActiveRevisionError, ClientExecutionContext, ClientExecutionError,
-            ClientExecutionRule,
+            ClientExecutionRule, ClientOpaqueValueError,
         };
 
         let (active, function, pair, function_revision) = version_one_active(true);
@@ -1497,7 +1712,7 @@ mod tests {
             ),
             (
                 ClientExecutionRule::ReturnType,
-                "this CLIENT function does not return BOOLEAN",
+                "this CLIENT function has an unsupported return type",
             ),
             (
                 ClientExecutionRule::Security,
@@ -1582,6 +1797,28 @@ mod tests {
             invalid_artifact.to_string(),
             "the saved CLIENT function cannot be evaluated"
         );
+
+        let opaque_error = ClientOpaqueValueError::TypeMismatch {
+            expected: orna_standard::OPAQUE_TOKEN_TYPE_ID,
+            actual: TypeId::from_bytes([0x78; 16]),
+        };
+        assert_eq!(
+            opaque_error.to_string(),
+            "opaque CLIENT plan type does not match its function return"
+        );
+        assert!(std::error::Error::source(&opaque_error).is_none());
+        let invalid_opaque = ClientExecutionError::InvalidOpaqueValue {
+            context,
+            source: opaque_error,
+        };
+        assert_eq!(invalid_opaque.pair(), pair);
+        assert_eq!(invalid_opaque.function(), function);
+        assert_eq!(invalid_opaque.context(), Some(&context));
+        assert_eq!(
+            invalid_opaque.to_string(),
+            "the saved CLIENT function cannot be evaluated"
+        );
+        assert!(std::error::Error::source(&invalid_opaque).is_some());
     }
 
     #[test]
@@ -1606,7 +1843,7 @@ mod tests {
                 ExecutableArtifact::new(
                     ExecutableArtifactKind::Client,
                     "orna.client-plan",
-                    2,
+                    orna_artifact::client_plan::OPAQUE_FORMAT_VERSION,
                     valid_payload.to_vec(),
                     artifact_payload_digest(valid_payload).unwrap(),
                 )
@@ -1803,7 +2040,7 @@ mod tests {
         ));
         assert_eq!(
             error.to_string(),
-            "this CLIENT function does not return BOOLEAN"
+            "this CLIENT function has an unsupported return type"
         );
         assert!(std::error::Error::source(&error).is_none());
     }
@@ -2185,6 +2422,43 @@ mod tests {
         RevisionPair,
         FunctionRevisionId,
     ) {
+        version_two_value_active_with_artifact(
+            return_type,
+            reference_target,
+            1,
+            b"ORNACP\0\0\0\0\0\x01\x01\x01".to_vec(),
+        )
+    }
+
+    fn version_two_opaque_active(
+        plan_type: TypeId,
+        payload: [u8; 16],
+    ) -> (
+        ActiveDatabaseRevision,
+        FunctionId,
+        RevisionPair,
+        FunctionRevisionId,
+    ) {
+        version_two_value_active_with_artifact(
+            orna_standard::OPAQUE_TOKEN_TYPE_ID,
+            orna_standard::OPAQUE_TOKEN_TYPE_ID,
+            orna_artifact::client_plan::OPAQUE_FORMAT_VERSION,
+            orna_artifact::client_plan::OpaqueClientPlan::return_opaque(plan_type, payload)
+                .encode(),
+        )
+    }
+
+    fn version_two_value_active_with_artifact(
+        return_type: TypeId,
+        reference_target: TypeId,
+        artifact_version: u32,
+        payload: Vec<u8>,
+    ) -> (
+        ActiveDatabaseRevision,
+        FunctionId,
+        RevisionPair,
+        FunctionRevisionId,
+    ) {
         let standard = orna_standard::verify_standard_library_snapshot(
             orna_standard::retained_standard_library_snapshot().unwrap(),
         )
@@ -2210,11 +2484,10 @@ mod tests {
         )
         .unwrap();
         let prior_revision = &version_one.function_revisions()[0];
-        let payload = b"ORNACP\0\0\0\0\0\x01\x01\x01".to_vec();
         let artifact = ExecutableArtifact::new(
             ExecutableArtifactKind::Client,
             "orna.client-plan",
-            1,
+            artifact_version,
             payload.clone(),
             artifact_payload_digest(&payload).unwrap(),
         )
