@@ -1208,7 +1208,7 @@ fn check_application_parsed(
     }
 
     let mut checked_record_value_types = Vec::with_capacity(record_value_headers.len());
-    for header in record_value_headers {
+    for header in &record_value_headers {
         let type_name = semantic_name(&header.declaration.name);
         let base_type = base.record_value_type_by_name(&type_name);
         let mut field_names = HashSet::new();
@@ -1262,6 +1262,18 @@ fn check_application_parsed(
             fields,
             location: location(header.logical_path, &header.declaration.span),
         });
+    }
+
+    let diagnostics_before_record_value_graph = diagnostics.len();
+    if diagnostics_before_record_value_graph == 0 {
+        validate_record_value_field_graph(
+            &record_value_headers,
+            &checked_record_value_types,
+            &mut diagnostics,
+        );
+    }
+    if diagnostics.len() != diagnostics_before_record_value_graph {
+        return application_failed(parse_report, diagnostics);
     }
 
     let field_renames = check_field_renames(&parse_report, base, &headers, &mut diagnostics);
@@ -3835,23 +3847,6 @@ fn resolve_record_value_field_type(
     diagnostics: &mut Vec<CompilerDiagnostic>,
     standard: &CheckedStandardLibrary,
 ) -> Option<ResolvedApplicationType> {
-    if let TypeSpecification::Named(name) = specification {
-        let semantic_name = semantic_name(name);
-        if matches!(
-            submitted_ids.get(&semantic_name),
-            Some(SubmittedType::RecordValue(_))
-        ) {
-            diagnostics.push(diagnostic(
-                DiagnosticCode::TypeMismatch,
-                format!(
-                    "record value type {semantic_name} cannot be used as a nested record field"
-                ),
-                logical_path,
-                &name.span,
-            ));
-            return None;
-        }
-    }
     let resolved = resolve_application_type(
         specification,
         submitted_ids,
@@ -3885,6 +3880,125 @@ fn resolve_record_value_field_type(
         specification.span(),
     ));
     None
+}
+
+struct RecordValueFieldGraphEdge<'a> {
+    target: usize,
+    logical_path: &'a str,
+    span: &'a SourceSpan,
+}
+
+struct RecordValueFieldGraphNode<'a> {
+    name: &'a QualifiedSemanticName,
+    edges: Vec<RecordValueFieldGraphEdge<'a>>,
+}
+
+fn validate_record_value_field_graph(
+    headers: &[RecordValueHeader<'_>],
+    record_value_types: &[CheckedRecordValueType],
+    diagnostics: &mut Vec<CompilerDiagnostic>,
+) {
+    debug_assert_eq!(headers.len(), record_value_types.len());
+    let indices = record_value_types
+        .iter()
+        .enumerate()
+        .map(|(index, record_value_type)| (record_value_type.id(), index))
+        .collect::<HashMap<_, _>>();
+    let mut nodes = Vec::with_capacity(record_value_types.len());
+    for (header, record_value_type) in headers.iter().zip(record_value_types) {
+        let mut edges = Vec::new();
+        for (declaration, checked_field) in header
+            .declaration
+            .fields
+            .iter()
+            .zip(record_value_type.fields())
+        {
+            let SemanticType::Named(target) = checked_field.semantic_type() else {
+                continue;
+            };
+            let Some(target) = indices.get(&target).copied() else {
+                continue;
+            };
+            edges.push(RecordValueFieldGraphEdge {
+                target,
+                logical_path: header.logical_path,
+                span: declaration.type_specification.span(),
+            });
+        }
+        nodes.push(RecordValueFieldGraphNode {
+            name: record_value_type.name(),
+            edges,
+        });
+    }
+
+    let mut colours = vec![0_u8; nodes.len()];
+    for root in 0..nodes.len() {
+        if colours[root] != 0 {
+            continue;
+        }
+        colours[root] = 1;
+        let mut stack = vec![(root, 0_usize)];
+        while let Some((node, edge_index)) = stack.pop() {
+            if edge_index == nodes[node].edges.len() {
+                colours[node] = 2;
+                continue;
+            }
+            let edge = &nodes[node].edges[edge_index];
+            stack.push((node, edge_index + 1));
+            match colours[edge.target] {
+                0 => {
+                    colours[edge.target] = 1;
+                    stack.push((edge.target, 0));
+                }
+                1 => {
+                    diagnostics.push(diagnostic(
+                        DiagnosticCode::TypeMismatch,
+                        format!(
+                            "record value fields must not form a recursive cycle through {}",
+                            nodes[edge.target].name
+                        ),
+                        edge.logical_path,
+                        edge.span,
+                    ));
+                    return;
+                }
+                2 => {}
+                _ => unreachable!("record graph colour is valid"),
+            }
+        }
+    }
+
+    let mut greatest_fully_explored_depth = vec![None::<usize>; nodes.len()];
+    for root in 0..nodes.len() {
+        let mut stack = vec![(root, 0_usize, 0_usize)];
+        while let Some((node, edge_index, depth)) = stack.pop() {
+            if greatest_fully_explored_depth[node].is_some_and(|cached| cached >= depth) {
+                continue;
+            }
+            if edge_index == nodes[node].edges.len() {
+                greatest_fully_explored_depth[node] = Some(
+                    greatest_fully_explored_depth[node].map_or(depth, |cached| cached.max(depth)),
+                );
+                continue;
+            }
+            let edge = &nodes[node].edges[edge_index];
+            stack.push((node, edge_index + 1, depth));
+            let next_depth = depth + 1;
+            if next_depth == 33 {
+                diagnostics.push(diagnostic(
+                    DiagnosticCode::TypeMismatch,
+                    format!(
+                        "record value nesting exceeds 32 levels through {}",
+                        nodes[edge.target].name
+                    ),
+                    edge.logical_path,
+                    edge.span,
+                ));
+                return;
+            }
+            stack.push((edge.target, 0, next_depth));
+        }
+    }
 }
 
 const fn supports_record_value_scalar(scalar: StandardScalar) -> bool {
@@ -5418,6 +5532,42 @@ mod tests {
     }
 
     #[test]
+    fn record_constructor_rejects_a_record_typed_parameter_for_a_nested_child() {
+        let standard =
+            check_standard_library_source(&verified_standard_library_for_relational_test())
+                .unwrap();
+        let source = "CREATE SCHEMA app;\n\
+            CREATE TYPE app.inner AS VALUE (flag BOOLEAN) IMMUTABLE PERSISTABLE;\n\
+            CREATE TYPE app.outer AS VALUE (child app.inner) IMMUTABLE PERSISTABLE;\n\
+            CREATE TYPE app.item AS OBJECT (outer app.outer NOT NULL);\n\
+            CREATE SERVER FUNCTION app.create(p_inner app.inner) RETURNS ROWS (item REF app.item)\n\
+            TRANSACTION ATOMIC AS INSERT INTO app.item AS made (outer)\n\
+            VALUES (app.outer{child: p_inner}) RETURNING REF(made);";
+        let source_bundle =
+            SourceBundle::new([SourceUnit::new("nested_constructor.orna", source)]).unwrap();
+        let report = check_new_application(&source_bundle, &standard).unwrap();
+
+        assert_eq!(report.diagnostics().len(), 1);
+        let diagnostic = &report.diagnostics()[0];
+        assert_eq!(diagnostic.code(), DiagnosticCode::DomainIncompatible);
+        assert_eq!(
+            diagnostic.message(),
+            "INSERT does not yet support the type of parameter p_inner; supported types are BOOLEAN, INTEGER, BIGINT, FLOAT, CHARACTER LARGE OBJECT, BINARY LARGE OBJECT, and REF"
+        );
+        let value_start = source.find("p_inner").unwrap();
+        assert_eq!(diagnostic.location().span().start(), value_start);
+        assert_eq!(
+            diagnostic.location().span().end(),
+            value_start + "p_inner".len()
+        );
+        assert_eq!(
+            &source[value_start..value_start + "p_inner".len()],
+            "p_inner"
+        );
+        assert!(report.checked_bundle().is_none());
+    }
+
+    #[test]
     fn record_constructor_semantics_reject_incomplete_or_incompatible_values() {
         let standard =
             check_standard_library_source(&verified_standard_library_for_relational_test())
@@ -5679,10 +5829,6 @@ mod tests {
                 ),
                 (
                     DiagnosticCode::TypeMismatch,
-                    "record value type app.first cannot be used as a nested record field",
-                ),
-                (
-                    DiagnosticCode::TypeMismatch,
                     "object type app.object must be declared with REF",
                 ),
             ]
@@ -5737,6 +5883,301 @@ mod tests {
             unsupported.diagnostics()[0].message(),
             "record value field uses a type outside the initial record family"
         );
+    }
+
+    #[test]
+    fn record_value_self_cycle_rejects_with_exact_orna0201_evidence() {
+        let verified = verified_standard_library_for_relational_test();
+        let standard = check_standard_library_source(&verified).unwrap();
+        let source = "CREATE SCHEMA app; CREATE TYPE app.loop AS VALUE (next app.loop) IMMUTABLE PERSISTABLE;";
+        let report = check_new_application(&bundle([("cycle.orna", source)]), &standard).unwrap();
+        assert_eq!(report.diagnostics().len(), 1);
+        let diagnostic = &report.diagnostics()[0];
+        assert_eq!(diagnostic.code(), DiagnosticCode::TypeMismatch);
+        assert_eq!(diagnostic.code().as_str(), "ORNA0201");
+        assert_eq!(
+            diagnostic.message(),
+            "record value fields must not form a recursive cycle through app.loop"
+        );
+        let start = source.find("AS VALUE (next ").unwrap() + "AS VALUE (next ".len();
+        assert_eq!(diagnostic.location().span().start(), start);
+        assert_eq!(diagnostic.location().span().end(), start + "app.loop".len());
+        assert_eq!(&source[start..start + "app.loop".len()], "app.loop");
+        assert!(report.checked_bundle().is_none());
+    }
+
+    #[test]
+    fn record_value_multi_record_cycle_reports_the_exact_closing_edge() {
+        let verified = verified_standard_library_for_relational_test();
+        let standard = check_standard_library_source(&verified).unwrap();
+        let source = "CREATE SCHEMA app;\nCREATE TYPE app.a AS VALUE (left app.b) IMMUTABLE PERSISTABLE;\nCREATE TYPE app.b AS VALUE (right app.a) IMMUTABLE PERSISTABLE;";
+        let report = check_new_application(&bundle([("cycle.orna", source)]), &standard).unwrap();
+        assert_eq!(report.diagnostics().len(), 1);
+        let diagnostic = &report.diagnostics()[0];
+        assert_eq!(diagnostic.code(), DiagnosticCode::TypeMismatch);
+        assert_eq!(diagnostic.code().as_str(), "ORNA0201");
+        assert_eq!(
+            diagnostic.message(),
+            "record value fields must not form a recursive cycle through app.a"
+        );
+        let start = source.find("right app.a").unwrap() + "right ".len();
+        assert_eq!(diagnostic.location().span().start(), start);
+        assert_eq!(diagnostic.location().span().end(), start + "app.a".len());
+        assert_eq!(&source[start..start + "app.a".len()], "app.a");
+        assert!(report.checked_bundle().is_none());
+    }
+
+    #[test]
+    fn record_value_cycle_phase_precedes_depth_validation() {
+        let verified = verified_standard_library_for_relational_test();
+        let standard = check_standard_library_source(&verified).unwrap();
+        let mut source = String::from("CREATE SCHEMA app;\n");
+        for index in 0..=32 {
+            source.push_str(&format!(
+                "CREATE TYPE app.d{index} AS VALUE (next app.d{}) IMMUTABLE PERSISTABLE;\n",
+                index + 1
+            ));
+        }
+        source.push_str("CREATE TYPE app.d33 AS VALUE (flag BOOLEAN) IMMUTABLE PERSISTABLE;\n");
+        source.push_str(
+            "CREATE TYPE app.c1 AS VALUE (next app.c2) IMMUTABLE PERSISTABLE;\nCREATE TYPE app.c2 AS VALUE (next app.c1) IMMUTABLE PERSISTABLE;\n",
+        );
+        let bundle = SourceBundle::new([SourceUnit::new("cycle.orna", source.clone())]).unwrap();
+        let report = check_new_application(&bundle, &standard).unwrap();
+        assert_eq!(report.diagnostics().len(), 1);
+        let diagnostic = &report.diagnostics()[0];
+        assert_eq!(diagnostic.code(), DiagnosticCode::TypeMismatch);
+        assert_eq!(diagnostic.code().as_str(), "ORNA0201");
+        assert_eq!(
+            diagnostic.message(),
+            "record value fields must not form a recursive cycle through app.c1"
+        );
+        let start = source.find("next app.c1").unwrap() + "next ".len();
+        assert_eq!(diagnostic.location().span().start(), start);
+        assert_eq!(diagnostic.location().span().end(), start + "app.c1".len());
+        assert_eq!(&source[start..start + "app.c1".len()], "app.c1");
+        assert!(report.checked_bundle().is_none());
+    }
+
+    #[test]
+    fn record_value_depth_thirty_two_chain_is_accepted_and_prepared() {
+        let verified = verified_standard_library_for_relational_test();
+        let standard = check_standard_library_source(&verified).unwrap();
+        let mut source = String::from("CREATE SCHEMA app;\n");
+        for index in 0..32 {
+            source.push_str(&format!(
+                "CREATE TYPE app.r{index} AS VALUE (next app.r{}) IMMUTABLE PERSISTABLE;\n",
+                index + 1
+            ));
+        }
+        source.push_str("CREATE TYPE app.r32 AS VALUE (flag BOOLEAN) IMMUTABLE PERSISTABLE;\n");
+        let bundle = SourceBundle::new([SourceUnit::new("chain.orna", source.clone())]).unwrap();
+        let initial = empty_version_two_active(&verified);
+        let context =
+            StandardApplicationCheckContext::try_new(initial.catalogue(), &standard).unwrap();
+        let report = check_standard_application(&bundle, &context);
+        assert_eq!(report.diagnostics(), &[]);
+        let prepared = prepare_standard_application(&report, initial.pair(), &initial).unwrap();
+        let records = prepared.candidate().record_value_types();
+        assert_eq!(records.len(), 33);
+        let first = records
+            .iter()
+            .find(|record| record.name().to_string() == "app.r0")
+            .unwrap();
+        let second = records
+            .iter()
+            .find(|record| record.name().to_string() == "app.r1")
+            .unwrap();
+        let last = records
+            .iter()
+            .find(|record| record.name().to_string() == "app.r31")
+            .unwrap();
+        let leaf = records
+            .iter()
+            .find(|record| record.name().to_string() == "app.r32")
+            .unwrap();
+        assert_eq!(
+            first.fields()[0].descriptor(),
+            &orna_core::types::TypeDescriptor::named(second.id())
+        );
+        assert_eq!(
+            last.fields()[0].descriptor(),
+            &orna_core::types::TypeDescriptor::named(leaf.id())
+        );
+    }
+
+    #[test]
+    fn record_value_depth_thirty_three_chain_rejects_the_r32_edge_exactly() {
+        let verified = verified_standard_library_for_relational_test();
+        let standard = check_standard_library_source(&verified).unwrap();
+        let mut source = String::from("CREATE SCHEMA app;\n");
+        for index in 0..=32 {
+            source.push_str(&format!(
+                "CREATE TYPE app.r{index} AS VALUE (next app.r{}) IMMUTABLE PERSISTABLE;\n",
+                index + 1
+            ));
+        }
+        source.push_str("CREATE TYPE app.r33 AS VALUE (flag BOOLEAN) IMMUTABLE PERSISTABLE;\n");
+        let bundle = SourceBundle::new([SourceUnit::new("chain.orna", source.clone())]).unwrap();
+        let report = check_new_application(&bundle, &standard).unwrap();
+        assert_eq!(report.diagnostics().len(), 1);
+        let diagnostic = &report.diagnostics()[0];
+        assert_eq!(diagnostic.code(), DiagnosticCode::TypeMismatch);
+        assert_eq!(diagnostic.code().as_str(), "ORNA0201");
+        assert_eq!(
+            diagnostic.message(),
+            "record value nesting exceeds 32 levels through app.r33"
+        );
+        let start = source.find("next app.r33").unwrap() + "next ".len();
+        assert_eq!(diagnostic.location().span().start(), start);
+        assert_eq!(diagnostic.location().span().end(), start + "app.r33".len());
+        assert_eq!(&source[start..start + "app.r33".len()], "app.r33");
+        assert!(report.checked_bundle().is_none());
+    }
+
+    #[test]
+    fn record_value_shared_acyclic_dag_is_accepted_and_prepared() {
+        let verified = verified_standard_library_for_relational_test();
+        let standard = check_standard_library_source(&verified).unwrap();
+        let source = "CREATE SCHEMA app;\nCREATE TYPE app.d AS VALUE (flag BOOLEAN) IMMUTABLE PERSISTABLE;\nCREATE TYPE app.b AS VALUE (next app.d) IMMUTABLE PERSISTABLE;\nCREATE TYPE app.c AS VALUE (next app.d) IMMUTABLE PERSISTABLE;\nCREATE TYPE app.a AS VALUE (left app.b, right app.c) IMMUTABLE PERSISTABLE;";
+        let bundle = bundle([("dag.orna", source)]);
+        let initial = empty_version_two_active(&verified);
+        let context =
+            StandardApplicationCheckContext::try_new(initial.catalogue(), &standard).unwrap();
+        let report = check_standard_application(&bundle, &context);
+        assert_eq!(report.diagnostics(), &[]);
+        let prepared = prepare_standard_application(&report, initial.pair(), &initial).unwrap();
+        let records = prepared.candidate().record_value_types();
+        assert_eq!(records.len(), 4);
+        let a = records
+            .iter()
+            .find(|record| record.name().to_string() == "app.a")
+            .unwrap();
+        let b = records
+            .iter()
+            .find(|record| record.name().to_string() == "app.b")
+            .unwrap();
+        let c = records
+            .iter()
+            .find(|record| record.name().to_string() == "app.c")
+            .unwrap();
+        let d = records
+            .iter()
+            .find(|record| record.name().to_string() == "app.d")
+            .unwrap();
+        assert_eq!(a.fields().len(), 2);
+        assert_eq!(
+            a.fields()[0].descriptor(),
+            &orna_core::types::TypeDescriptor::named(b.id())
+        );
+        assert_eq!(
+            a.fields()[1].descriptor(),
+            &orna_core::types::TypeDescriptor::named(c.id())
+        );
+        assert_eq!(
+            b.fields()[0].descriptor(),
+            &orna_core::types::TypeDescriptor::named(d.id())
+        );
+        assert_eq!(
+            c.fields()[0].descriptor(),
+            &orna_core::types::TypeDescriptor::named(d.id())
+        );
+    }
+
+    #[test]
+    fn record_value_enum_named_field_remains_accepted_and_never_forms_a_graph_edge() {
+        let verified = verified_standard_library_for_relational_test();
+        let standard = check_standard_library_source(&verified).unwrap();
+        let source = "CREATE SCHEMA app;\nCREATE TYPE app.phase AS ENUM ('new', 'done');\nCREATE TYPE app.status AS VALUE (phase app.phase) IMMUTABLE PERSISTABLE;";
+        let bundle = bundle([("enum_field.orna", source)]);
+        let initial = empty_version_two_active(&verified);
+        let context =
+            StandardApplicationCheckContext::try_new(initial.catalogue(), &standard).unwrap();
+        let report = check_standard_application(&bundle, &context);
+        assert_eq!(report.diagnostics(), &[]);
+        let prepared = prepare_standard_application(&report, initial.pair(), &initial).unwrap();
+        let records = prepared.candidate().record_value_types();
+        assert_eq!(records.len(), 1);
+        let status = &records[0];
+        assert_eq!(status.name().to_string(), "app.status");
+        assert_eq!(status.fields().len(), 1);
+        let phase = prepared
+            .candidate()
+            .enum_types()
+            .iter()
+            .find(|enum_type| enum_type.name().to_string() == "app.phase")
+            .unwrap();
+        assert_eq!(
+            status.fields()[0].descriptor(),
+            &orna_core::types::TypeDescriptor::named(phase.id())
+        );
+    }
+
+    #[test]
+    fn record_value_cycle_selection_follows_source_and_field_order() {
+        let verified = verified_standard_library_for_relational_test();
+        let standard = check_standard_library_source(&verified).unwrap();
+        let z_source = "CREATE SCHEMA app;\nCREATE TYPE app.z1 AS VALUE (first app.z2, second app.z3) IMMUTABLE PERSISTABLE;\nCREATE TYPE app.z2 AS VALUE (back app.z1) IMMUTABLE PERSISTABLE;\nCREATE TYPE app.z3 AS VALUE (back app.z1) IMMUTABLE PERSISTABLE;\n";
+        let a_source = "CREATE TYPE app.a1 AS VALUE (next app.a2) IMMUTABLE PERSISTABLE;\nCREATE TYPE app.a2 AS VALUE (back app.a1) IMMUTABLE PERSISTABLE;\n";
+        let bundle = SourceBundle::new([
+            SourceUnit::new("z.orna", z_source),
+            SourceUnit::new("a.orna", a_source),
+        ])
+        .unwrap();
+        let initial = empty_version_two_active(&verified);
+        let context =
+            StandardApplicationCheckContext::try_new(initial.catalogue(), &standard).unwrap();
+        let report = check_standard_application(&bundle, &context);
+        assert_eq!(report.diagnostics().len(), 1);
+        let diagnostic = &report.diagnostics()[0];
+        assert_eq!(
+            diagnostic.code(),
+            DiagnosticCode::TypeMismatch,
+            "{}",
+            diagnostic.message()
+        );
+        assert_eq!(diagnostic.code().as_str(), "ORNA0201");
+        assert_eq!(
+            diagnostic.message(),
+            "record value fields must not form a recursive cycle through app.z1"
+        );
+        assert_eq!(diagnostic.location().logical_path(), "z.orna");
+        let start = z_source.find("back app.z1").unwrap() + "back ".len();
+        assert_eq!(diagnostic.location().span().start(), start);
+        assert_eq!(diagnostic.location().span().end(), start + "app.z1".len());
+        assert_eq!(&z_source[start..start + "app.z1".len()], "app.z1");
+        assert!(report.checked_bundle().is_none());
+    }
+
+    #[test]
+    fn record_value_depth_validation_revisits_a_shallow_cached_suffix() {
+        let verified = verified_standard_library_for_relational_test();
+        let standard = check_standard_library_source(&verified).unwrap();
+        let mut source = String::from(
+            "CREATE SCHEMA app;\nCREATE TYPE app.x0 AS VALUE (next app.x1) IMMUTABLE PERSISTABLE;\nCREATE TYPE app.x1 AS VALUE (next app.s0) IMMUTABLE PERSISTABLE;\nCREATE TYPE app.s0 AS VALUE (next app.s1) IMMUTABLE PERSISTABLE;\nCREATE TYPE app.s1 AS VALUE (next app.s2) IMMUTABLE PERSISTABLE;\nCREATE TYPE app.s2 AS VALUE (next app.s3) IMMUTABLE PERSISTABLE;\nCREATE TYPE app.s3 AS VALUE (flag BOOLEAN) IMMUTABLE PERSISTABLE;\n",
+        );
+        for index in 0..29 {
+            source.push_str(&format!(
+                "CREATE TYPE app.y{index} AS VALUE (next app.y{}) IMMUTABLE PERSISTABLE;\n",
+                index + 1
+            ));
+        }
+        source.push_str("CREATE TYPE app.y29 AS VALUE (next app.s0) IMMUTABLE PERSISTABLE;\n");
+        let bundle = SourceBundle::new([SourceUnit::new("depth.orna", source.clone())]).unwrap();
+        let report = check_new_application(&bundle, &standard).unwrap();
+        assert_eq!(report.diagnostics().len(), 1);
+        let diagnostic = &report.diagnostics()[0];
+        assert_eq!(diagnostic.code(), DiagnosticCode::TypeMismatch);
+        assert_eq!(diagnostic.code().as_str(), "ORNA0201");
+        assert_eq!(
+            diagnostic.message(),
+            "record value nesting exceeds 32 levels through app.s3"
+        );
+        let start = source.find("next app.s3").unwrap() + "next ".len();
+        assert_eq!(diagnostic.location().span().start(), start);
+        assert_eq!(diagnostic.location().span().end(), start + "app.s3".len());
+        assert_eq!(&source[start..start + "app.s3".len()], "app.s3");
+        assert!(report.checked_bundle().is_none());
     }
 
     #[test]
@@ -5997,6 +6438,118 @@ mod tests {
             identity,
             SourceOrigin::new(SourceUnitId::from_bytes([4; 16]), byte_start, byte_end).unwrap(),
         )
+    }
+
+    #[test]
+    fn accepts_nested_record_value_fields_with_provisional_and_durable_evidence() {
+        let verified = verified_standard_library_for_relational_test();
+        let standard = check_standard_library_source(&verified).unwrap();
+        let initial = empty_version_two_active(&verified);
+        let source = "CREATE SCHEMA app;\nCREATE TYPE app.outer AS VALUE (inner app.inner) IMMUTABLE PERSISTABLE;\nCREATE TYPE app.inner AS VALUE (active BOOLEAN) IMMUTABLE PERSISTABLE;";
+        let bundle = bundle([("nested.orna", source)]);
+        let context =
+            StandardApplicationCheckContext::try_new(initial.catalogue(), &standard).unwrap();
+        let report = check_standard_application(&bundle, &context);
+        assert_eq!(report.diagnostics(), &[]);
+
+        let checked = report.checked_bundle().unwrap();
+        let records = checked.record_value_types().collect::<Vec<_>>();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].name().to_string(), "app.outer");
+        assert_eq!(records[1].name().to_string(), "app.inner");
+        let outer = records[0];
+        let inner = records[1];
+        let CheckedTypeId::Provisional(_) = outer.id() else {
+            panic!("outer record must be provisional at check time");
+        };
+        let CheckedTypeId::Provisional(_) = inner.id() else {
+            panic!("inner record must be provisional at check time");
+        };
+
+        let outer_fields = outer.fields().collect::<Vec<_>>();
+        assert_eq!(outer_fields.len(), 1);
+        assert_eq!(outer_fields[0].name(), "inner");
+        let type_use = outer_fields[0].resolved_type();
+        let CheckedTypeUseKind::Field { owner, field } = type_use.kind() else {
+            panic!("outer field must carry Field type-use evidence");
+        };
+        assert_eq!(owner, outer.id());
+        assert_eq!(field, outer_fields[0].id());
+        assert_eq!(type_use.named_type(), Some(inner.id()));
+        let span = type_use.location().span();
+        assert_eq!(&source[span.start()..span.end()], "app.inner");
+
+        let prepared = prepare_standard_application(&report, initial.pair(), &initial).unwrap();
+        let candidate = prepared.candidate();
+        let durable_outer = candidate
+            .record_value_types()
+            .iter()
+            .find(|record| record.name().to_string() == "app.outer")
+            .unwrap();
+        let durable_inner = candidate
+            .record_value_types()
+            .iter()
+            .find(|record| record.name().to_string() == "app.inner")
+            .unwrap();
+        assert_eq!(
+            durable_outer.fields()[0].descriptor(),
+            &orna_core::types::TypeDescriptor::named(durable_inner.id())
+        );
+        let unit = prepared.source().units()[0].id();
+        assert!(prepared.origins().iter().any(|origin| {
+            origin.identity()
+                == DefinitionIdentity::Field {
+                    owner: durable_outer.id(),
+                    field: durable_outer.fields()[0].id(),
+                }
+                && origin.source()
+                    == SourceOrigin::new(
+                        unit,
+                        u32::try_from(outer_fields[0].location().span().start()).unwrap(),
+                        u32::try_from(outer_fields[0].location().span().end()).unwrap(),
+                    )
+                    .unwrap()
+        }));
+        assert!(prepared.origins().iter().any(|origin| {
+            origin.identity() == DefinitionIdentity::ValueType(durable_inner.id())
+                && origin.source()
+                    == SourceOrigin::new(
+                        unit,
+                        u32::try_from(inner.location().span().start()).unwrap(),
+                        u32::try_from(inner.location().span().end()).unwrap(),
+                    )
+                    .unwrap()
+        }));
+
+        let active = active_from_prepared(&prepared);
+        let context =
+            StandardApplicationCheckContext::try_new(active.catalogue(), &standard).unwrap();
+        let replay_report = check_standard_application(&bundle, &context);
+        assert_eq!(replay_report.diagnostics(), &[]);
+        let replay_checked = replay_report.checked_bundle().unwrap();
+        let replay_records = replay_checked.record_value_types().collect::<Vec<_>>();
+        assert_eq!(
+            replay_records[0].id(),
+            CheckedTypeId::Existing(durable_outer.id())
+        );
+        assert_eq!(
+            replay_records[1].id(),
+            CheckedTypeId::Existing(durable_inner.id())
+        );
+        let replay = prepare_standard_application(&replay_report, active.pair(), &active).unwrap();
+        let replay_candidate = replay.candidate();
+        assert_eq!(
+            replay_candidate.record_value_types()[0].id(),
+            durable_outer.id()
+        );
+        assert_eq!(
+            replay_candidate.record_value_types()[1].id(),
+            durable_inner.id()
+        );
+        assert_eq!(
+            replay_candidate.record_value_types()[0].fields()[0].descriptor(),
+            &orna_core::types::TypeDescriptor::named(durable_inner.id())
+        );
     }
 
     fn verified_standard_library_for_relational_test()
