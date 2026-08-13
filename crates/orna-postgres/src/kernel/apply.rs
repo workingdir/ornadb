@@ -2577,7 +2577,7 @@ mod tests {
             SourceOrigin, StandardLibraryDigestVersion, StandardLibrarySnapshot,
             StoredSourceRevision, StoredSourceUnit,
         },
-        types::{ResolvedType, StandardScalar},
+        types::{ResolvedType, StandardScalar, TypeDescriptor},
     };
 
     use super::{
@@ -3028,11 +3028,11 @@ mod tests {
                 record_type,
                 QualifiedSemanticName::new(["app", "status"]).unwrap(),
                 vec![
-                    RecordValueFieldDefinition::try_new(
+                    RecordValueFieldDefinition::try_new_descriptor(
                         FieldId::from_bytes([0x65; 16]),
                         "stage",
                         0,
-                        ResolvedType::named(enum_type),
+                        TypeDescriptor::named(enum_type),
                     )
                     .unwrap(),
                 ],
