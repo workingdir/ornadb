@@ -2290,19 +2290,14 @@ fn validate_record_value_field_types(
             match classify_record_value_field_descriptor(
                 catalogue,
                 standard.catalogue(),
-                field
-                    .type_descriptor()
-                    .expect("catalogue-validated record field descriptor"),
+                field.descriptor(),
             ) {
                 Ok(_) => {}
                 Err(RecordValueFieldDescriptorClassificationError::Unsupported) => {
                     return Err(RevisionInvariantError::UnsupportedRecordValueFieldType {
                         record_value_type: record_value_type.id(),
                         field: field.id(),
-                        descriptor: field
-                            .type_descriptor()
-                            .expect("catalogue-validated record field descriptor")
-                            .clone(),
+                        descriptor: field.descriptor().clone(),
                     });
                 }
                 Err(RecordValueFieldDescriptorClassificationError::Ambiguous { type_id }) => {

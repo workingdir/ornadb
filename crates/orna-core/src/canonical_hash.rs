@@ -1011,9 +1011,7 @@ fn validate_record_value_field_types(
                 standard.catalogue(),
                 record_value_type.id(),
                 field.id(),
-                field
-                    .type_descriptor()
-                    .expect("catalogue-validated record field descriptor"),
+                field.descriptor(),
             )?;
         }
     }
@@ -1242,9 +1240,7 @@ fn encode_record_value_types(
                 standard,
                 record_value_type.id(),
                 field.id(),
-                field
-                    .type_descriptor()
-                    .expect("catalogue-validated record field descriptor"),
+                field.descriptor(),
             )? {
                 RecordValueFieldDescriptorClass::ApplicationEnum(type_id)
                 | RecordValueFieldDescriptorClass::StandardEnum(type_id) => {
