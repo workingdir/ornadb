@@ -3,7 +3,13 @@
 //! The linked engine and private SQL kernel are internal modules of one owned
 //! PostgreSQL implementation.
 
-include!("kernel.rs");
+mod kernel;
+
+pub use kernel::*;
+
+pub(crate) use kernel::{
+    bootstrap, decode, physical, recovery, server_execution, server_runtime, storage,
+};
 
 #[cfg(feature = "embedded")]
 mod engine;

@@ -108,41 +108,31 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 15,
         name: "catalogue record value storage",
-        sql: include_str!(
-            "../../migrations/0015_catalogue_record_value_types.sql"
-        ),
+        sql: include_str!("../../migrations/0015_catalogue_record_value_types.sql"),
         data_step: None,
     },
     Migration {
         version: 16,
         name: "resolved record value type storage",
-        sql: include_str!(
-            "../../migrations/0016_resolved_record_value_types.sql"
-        ),
+        sql: include_str!("../../migrations/0016_resolved_record_value_types.sql"),
         data_step: None,
     },
     Migration {
         version: 17,
         name: "record value field reference targets",
-        sql: include_str!(
-            "../../migrations/0017_record_field_reference_targets.sql"
-        ),
+        sql: include_str!("../../migrations/0017_record_field_reference_targets.sql"),
         data_step: None,
     },
     Migration {
         version: 18,
         name: "disjoint field reference targets",
-        sql: include_str!(
-            "../../migrations/0018_disjoint_field_reference_targets.sql"
-        ),
+        sql: include_str!("../../migrations/0018_disjoint_field_reference_targets.sql"),
         data_step: None,
     },
     Migration {
         version: 19,
         name: "standard opaque value storage",
-        sql: include_str!(
-            "../../migrations/0019_standard_opaque_value_types.sql"
-        ),
+        sql: include_str!("../../migrations/0019_standard_opaque_value_types.sql"),
         data_step: None,
     },
 ];
