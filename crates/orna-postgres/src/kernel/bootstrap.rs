@@ -96,7 +96,7 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 13,
         name: "resolved enum type storage",
-        sql: include_str!("../../../orna-kernel-postgres/migrations/0013_resolved_enum_types.sql"),
+        sql: include_str!("../../migrations/0013_resolved_enum_types.sql"),
         data_step: None,
     },
     Migration {

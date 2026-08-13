@@ -123,7 +123,7 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
     (
         13,
         "resolved enum type storage",
-        include_str!("../migrations/0013_resolved_enum_types.sql"),
+        include_str!("../../orna-postgres/migrations/0013_resolved_enum_types.sql"),
     ),
     (
         14,
