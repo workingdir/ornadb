@@ -926,6 +926,7 @@ impl CatalogueSnapshot {
                 let accepted = match field.descriptor().kind() {
                     crate::types::TypeDescriptorKind::Named(target) => {
                         enum_type_indices_by_id.contains_key(&target)
+                            || record_value_type_indices_by_id.contains_key(&target)
                             || !primary_type_ids.contains_key(&target)
                     }
                     crate::types::TypeDescriptorKind::Reference(_)
@@ -2597,13 +2598,20 @@ mod tests {
             }
         );
 
+        // A nested local application record field is accepted even when the
+        // referenced record is declared later in the input.
         let nested_id = TypeId::from_bytes([97; 16]);
-        let error = CatalogueSnapshot::new_with_record_value_types(
+        let enum_id = TypeId::from_bytes([98; 16]);
+        let snapshot = CatalogueSnapshot::new_with_record_value_types(
             CatalogueRevisionId::from_bytes([7; 16]),
             vec![schema(1, &["geometry"])],
             vec![],
             vec![],
-            vec![],
+            vec![EnumTypeDefinition::new(
+                enum_id,
+                name(&["geometry", "axis"]),
+                ["x"],
+            )],
             vec![
                 record(
                     2,
@@ -2620,23 +2628,91 @@ mod tests {
                     &["geometry", "nested"],
                     vec![record_field_with_type(
                         4,
-                        "external",
+                        "axis",
                         0,
-                        ResolvedType::value(TypeId::from_bytes([98; 16])),
+                        ResolvedType::value(enum_id),
                     )],
                 ),
             ],
             vec![],
         )
-        .unwrap_err();
+        .unwrap();
         assert_eq!(
-            error,
-            CatalogueSnapshotError::UnsupportedRecordValueFieldType {
-                owner: TypeId::from_bytes([2; 16]),
-                field: FieldId::from_bytes([3; 16]),
-                descriptor: TypeDescriptor::named(nested_id),
-            }
+            snapshot.record_value_types()[0].fields()[0].descriptor(),
+            &TypeDescriptor::named(nested_id),
+            "the point record must preserve the exact nested record descriptor"
         );
+        assert_eq!(
+            snapshot.record_value_types()[1].fields()[0].descriptor(),
+            &TypeDescriptor::named(enum_id),
+            "the nested record must preserve its enum field descriptor"
+        );
+    }
+
+    #[test]
+    fn local_application_record_fields_are_accepted_in_any_declaration_order() {
+        let enum_id = TypeId::from_bytes([101; 16]);
+        for point_first in [true, false] {
+            let point = record(
+                2,
+                &["geometry", "point"],
+                vec![record_field_with_type(
+                    3,
+                    "nested",
+                    0,
+                    ResolvedType::named(TypeId::from_bytes([97; 16])),
+                )],
+            );
+            let nested = record(
+                97,
+                &["geometry", "nested"],
+                vec![record_field_with_type(
+                    4,
+                    "axis",
+                    0,
+                    ResolvedType::value(enum_id),
+                )],
+            );
+            let records = if point_first {
+                vec![point, nested]
+            } else {
+                vec![nested, point]
+            };
+            let snapshot = CatalogueSnapshot::new_with_record_value_types(
+                CatalogueRevisionId::from_bytes([7; 16]),
+                vec![schema(1, &["geometry"])],
+                vec![],
+                vec![],
+                vec![EnumTypeDefinition::new(
+                    enum_id,
+                    name(&["geometry", "axis"]),
+                    ["x"],
+                )],
+                records,
+                vec![],
+            )
+            .expect("local application record field is accepted");
+            let point_definition = snapshot
+                .record_value_types()
+                .iter()
+                .find(|definition| definition.id() == TypeId::from_bytes([2; 16]))
+                .expect("point record is present");
+            assert_eq!(
+                point_definition.fields()[0].descriptor(),
+                &TypeDescriptor::named(TypeId::from_bytes([97; 16])),
+                "declaration order {point_first} must preserve the exact nested descriptor"
+            );
+            let nested_definition = snapshot
+                .record_value_types()
+                .iter()
+                .find(|definition| definition.id() == TypeId::from_bytes([97; 16]))
+                .expect("nested record is present");
+            assert_eq!(
+                nested_definition.fields()[0].descriptor(),
+                &TypeDescriptor::named(enum_id),
+                "declaration order {point_first} must preserve the nested enum descriptor"
+            );
+        }
     }
 
     #[test]

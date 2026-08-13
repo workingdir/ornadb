@@ -28,10 +28,11 @@ use crate::{
         DefinitionReference, DefinitionReferenceKind, DefinitionReferenceTarget,
         ExecutableArtifact, ExecutableArtifactKind, ExpressionArtifact, FunctionRevisionRecord,
         FunctionSemanticHashVersion, RecordValueFieldDescriptorClass,
-        RecordValueFieldDescriptorClassificationError, Sha256Digest, SourceOrigin,
-        StandardLibraryDigestVersion, StandardLibrarySnapshot, StoredSourceRevision,
-        StoredSourceUnit, VerifiedStandardLibrarySnapshot, classify_record_value_field_descriptor,
-        function_accepts_opaque_client_return, reference_kind_accepts_target,
+        RecordValueFieldDescriptorClassificationError, RecordValueFieldDescriptorValidationError,
+        Sha256Digest, SourceOrigin, StandardLibraryDigestVersion, StandardLibrarySnapshot,
+        StoredSourceRevision, StoredSourceUnit, VerifiedStandardLibrarySnapshot,
+        classify_record_value_field_descriptor, function_accepts_opaque_client_return,
+        reference_kind_accepts_target, validate_record_value_field_descriptors,
     },
     types::{ResolvedType, StandardScalar, TypeDescriptor},
 };
@@ -176,6 +177,28 @@ pub enum CanonicalHashError {
         field: FieldId,
         /// The conflicting type identity.
         type_id: TypeId,
+    },
+    /// Record fields form a recursive by-value dependency.
+    RecursiveRecordValueField {
+        /// The record value type owning the rejected field.
+        record_value_type: TypeId,
+        /// The edge that closes the cycle.
+        field: FieldId,
+        /// The active record value type already on the dependency path.
+        nested_record_value_type: TypeId,
+    },
+    /// Record fields exceed the maximum by-value nesting depth.
+    RecordValueNestingTooDeep {
+        /// The record value type owning the rejected field.
+        record_value_type: TypeId,
+        /// The edge that exceeds the maximum depth.
+        field: FieldId,
+        /// The record value type selected by the rejected edge.
+        nested_record_value_type: TypeId,
+        /// The accepted maximum number of record-valued edges.
+        maximum: u32,
+        /// The first depth outside the accepted maximum.
+        actual: u32,
     },
     /// A typed catalogue fact cannot be represented by the selected hash contract.
     CatalogueFactUnsupportedByHashVersion {
@@ -354,6 +377,12 @@ impl fmt::Display for CanonicalHashError {
             AmbiguousRecordValueFieldType { .. } => formatter.write_str(
                 "record field type is present in both application and standard catalogues",
             ),
+            RecursiveRecordValueField { .. } => {
+                formatter.write_str("record value fields must not form a recursive cycle")
+            }
+            RecordValueNestingTooDeep { .. } => {
+                formatter.write_str("record value nesting exceeds the maximum depth")
+            }
             CatalogueFactUnsupportedByHashVersion { version, fact } => match fact {
                 CatalogueHashFact::ValueTypeDefinition(_) => write!(
                     formatter,
@@ -1003,19 +1032,50 @@ fn validate_record_value_field_types(
     let CatalogueHashContext::Version2 { standard } = context else {
         return Ok(());
     };
-    for record_value_type in catalogue.record_value_types() {
-        let fields = sorted_by_key(record_value_type.fields(), |field| field.ordinal());
-        for field in fields {
-            canonical_record_value_field_type(
-                catalogue,
-                standard.catalogue(),
-                record_value_type.id(),
-                field.id(),
-                field.descriptor(),
-            )?;
+    validate_record_value_field_descriptors(catalogue, standard.catalogue()).map_err(|error| {
+        match error {
+            RecordValueFieldDescriptorValidationError::Unsupported {
+                record_value_type,
+                field,
+                descriptor,
+            } => CanonicalHashError::UnsupportedRecordValueFieldType {
+                record_value_type,
+                field,
+                descriptor,
+            },
+            RecordValueFieldDescriptorValidationError::Ambiguous {
+                record_value_type,
+                field,
+                type_id,
+            } => CanonicalHashError::AmbiguousRecordValueFieldType {
+                record_value_type,
+                field,
+                type_id,
+            },
+            RecordValueFieldDescriptorValidationError::RecursiveRecordValueField {
+                record_value_type,
+                field,
+                nested_record_value_type,
+            } => CanonicalHashError::RecursiveRecordValueField {
+                record_value_type,
+                field,
+                nested_record_value_type,
+            },
+            RecordValueFieldDescriptorValidationError::RecordValueNestingTooDeep {
+                record_value_type,
+                field,
+                nested_record_value_type,
+                maximum,
+                actual,
+            } => CanonicalHashError::RecordValueNestingTooDeep {
+                record_value_type,
+                field,
+                nested_record_value_type,
+                maximum,
+                actual,
+            },
         }
-    }
-    Ok(())
+    })
 }
 
 fn canonical_record_value_field_type(
@@ -1243,6 +1303,7 @@ fn encode_record_value_types(
                 field.descriptor(),
             )? {
                 RecordValueFieldDescriptorClass::ApplicationEnum(type_id)
+                | RecordValueFieldDescriptorClass::ApplicationRecord(type_id)
                 | RecordValueFieldDescriptorClass::StandardEnum(type_id) => {
                     encoder.u8(2);
                     encoder.type_id(type_id);
@@ -2296,7 +2357,7 @@ mod tests {
             ValueTypeDefinition, ValueTypeMutability, ValueTypePersistence,
         },
         revision::{CatalogueHashContext, SourceOrigin},
-        types::{ResolvedType, StandardScalar},
+        types::{ResolvedType, StandardScalar, TypeDescriptor},
     };
 
     const fn id<const BYTE: u8>() -> [u8; 16] {
@@ -2515,6 +2576,309 @@ mod tests {
             vec![function],
         )
         .unwrap()
+    }
+
+    fn record_value_catalogue(records: Vec<RecordValueTypeDefinition>) -> CatalogueSnapshot {
+        CatalogueSnapshot::new_with_record_value_types(
+            CatalogueRevisionId::from_bytes(id::<160>()),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes(id::<161>()),
+                QualifiedSemanticName::new(["crm"]).unwrap(),
+            )],
+            vec![],
+            vec![],
+            vec![],
+            records,
+            vec![],
+        )
+        .unwrap()
+    }
+
+    fn record_value_type(
+        record_byte: u8,
+        name: &str,
+        fields: Vec<(u8, u32, TypeId)>,
+    ) -> RecordValueTypeDefinition {
+        let fields = fields
+            .into_iter()
+            .map(|(field_byte, ordinal, target)| {
+                RecordValueFieldDefinition::try_new_descriptor(
+                    FieldId::from_bytes([field_byte; 16]),
+                    format!("edge_{ordinal}"),
+                    ordinal,
+                    TypeDescriptor::named(target),
+                )
+                .unwrap()
+            })
+            .collect();
+        RecordValueTypeDefinition::new(
+            TypeId::from_bytes([record_byte; 16]),
+            QualifiedSemanticName::new(["crm", name]).unwrap(),
+            fields,
+        )
+    }
+
+    fn record_value_origins_for(catalogue: &CatalogueSnapshot) -> Vec<DefinitionOrigin> {
+        let source = SourceUnitId::from_bytes(id::<162>());
+        let mut identities = Vec::new();
+        for schema in catalogue.schemas() {
+            identities.push(DefinitionIdentity::Schema(schema.id()));
+        }
+        for value_type in catalogue.value_types() {
+            identities.push(DefinitionIdentity::ValueType(value_type.id()));
+        }
+        for enum_type in catalogue.enum_types() {
+            identities.push(DefinitionIdentity::ValueType(enum_type.id()));
+        }
+        let mut records = catalogue.record_value_types().to_vec();
+        records.sort_by_key(|record| record.id().to_bytes());
+        for record in records {
+            identities.push(DefinitionIdentity::ValueType(record.id()));
+            let mut fields = record.fields().to_vec();
+            fields.sort_by_key(|field| field.ordinal());
+            for field in fields {
+                identities.push(DefinitionIdentity::Field {
+                    owner: record.id(),
+                    field: field.id(),
+                });
+            }
+        }
+        identities
+            .into_iter()
+            .enumerate()
+            .map(|(index, identity)| {
+                DefinitionOrigin::new(
+                    identity,
+                    SourceOrigin::new(source, index as u32, index as u32 + 1).unwrap(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn version_two_record_value_field_tags_distinguish_application_record_from_primitive() {
+        let context = CatalogueHashContext::version_two(verified_standard_snapshot(false));
+        let standard = context.standard().unwrap().catalogue();
+        let boolean_id = standard_boolean_id();
+        let inner_id = TypeId::from_bytes(id::<202>());
+        let encode = |records: Vec<RecordValueTypeDefinition>| {
+            let catalogue = record_value_catalogue(records);
+            let mut encoder = Encoder::new(b"probe");
+            encode_record_value_types(&mut encoder, &catalogue, standard).unwrap();
+            encoder.bytes
+        };
+        let application_bytes = encode(vec![
+            record_value_type(200, "outer", vec![(210, 0, inner_id)]),
+            record_value_type(202, "inner", vec![(212, 0, boolean_id)]),
+        ]);
+        let primitive_bytes = encode(vec![
+            record_value_type(200, "outer", vec![(210, 0, boolean_id)]),
+            record_value_type(202, "inner", vec![(212, 0, boolean_id)]),
+        ]);
+
+        let first_difference = application_bytes
+            .iter()
+            .zip(&primitive_bytes)
+            .position(|(left, right)| left != right)
+            .expect("the field tag must differ");
+        assert_eq!(application_bytes[first_difference], 2);
+        assert_eq!(primitive_bytes[first_difference], 4);
+        assert_eq!(
+            &application_bytes[first_difference + 1..first_difference + 17],
+            &inner_id.to_bytes(),
+        );
+        assert_eq!(
+            &primitive_bytes[first_difference + 1..first_difference + 17],
+            &boolean_id.to_bytes(),
+        );
+        for bytes in [&application_bytes, &primitive_bytes] {
+            assert!(
+                bytes
+                    .windows(17)
+                    .any(|window| window[0] == 4 && window[1..17] == boolean_id.to_bytes()),
+                "the boolean primitive field must encode with tag 4"
+            );
+        }
+        assert!(
+            application_bytes
+                .windows(17)
+                .any(|window| { window[0] == 2 && window[1..17] == inner_id.to_bytes() }),
+            "the application record field must encode with tag 2"
+        );
+    }
+
+    #[test]
+    fn version_two_nested_record_value_digest_is_order_independent() {
+        let context = CatalogueHashContext::version_two(verified_standard_snapshot(false));
+        let build = |reverse: bool| {
+            let outer = record_value_type(
+                200,
+                "outer",
+                vec![(210, 0, TypeId::from_bytes(id::<201>()))],
+            );
+            let inner = record_value_type(201, "inner", vec![(211, 0, standard_boolean_id())]);
+            let mut records = vec![outer, inner];
+            if reverse {
+                records.reverse();
+            }
+            let catalogue = record_value_catalogue(records);
+            let origins = record_value_origins_for(&catalogue);
+            let digest =
+                catalogue_digest_with_context(&context, &catalogue, &[], &[], &origins, &[])
+                    .unwrap();
+            (digest, hex(digest))
+        };
+        let (forward, forward_hex) = build(false);
+        let (reversed, _) = build(true);
+        assert_eq!(forward, reversed);
+        assert_eq!(
+            forward_hex, "83caded9eb4cdea395f021f983dbf03f4135cc394dbd3102d17dd8625066061c",
+            "the nested record digest must stay pinned"
+        );
+    }
+
+    #[test]
+    fn version_two_record_value_field_errors_are_exact_and_precede_any_digest() {
+        let context = CatalogueHashContext::version_two(verified_standard_snapshot(false));
+        let digest_error = |records: Vec<RecordValueTypeDefinition>| {
+            let catalogue = record_value_catalogue(records);
+            let origins = record_value_origins_for(&catalogue);
+            catalogue_digest_with_context(&context, &catalogue, &[], &[], &origins, &[])
+                .unwrap_err()
+        };
+
+        assert_eq!(
+            digest_error(vec![
+                record_value_type(
+                    200,
+                    "record_a",
+                    vec![(210, 0, TypeId::from_bytes(id::<201>()))],
+                ),
+                record_value_type(
+                    201,
+                    "record_b",
+                    vec![(211, 0, TypeId::from_bytes(id::<200>()))],
+                ),
+            ]),
+            CanonicalHashError::RecursiveRecordValueField {
+                record_value_type: TypeId::from_bytes(id::<201>()),
+                field: FieldId::from_bytes(id::<211>()),
+                nested_record_value_type: TypeId::from_bytes(id::<200>()),
+            }
+        );
+
+        let too_deep = (0..34)
+            .map(|index| {
+                let next_byte = if index == 33 {
+                    21
+                } else {
+                    200 + index as u8 + 1
+                };
+                record_value_type(
+                    200 + index as u8,
+                    &format!("chain_{index}"),
+                    vec![(210 + index as u8, 0, TypeId::from_bytes([next_byte; 16]))],
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            digest_error(too_deep),
+            CanonicalHashError::RecordValueNestingTooDeep {
+                record_value_type: TypeId::from_bytes(id::<232>()),
+                field: FieldId::from_bytes(id::<242>()),
+                nested_record_value_type: TypeId::from_bytes(id::<233>()),
+                maximum: 32,
+                actual: 33,
+            }
+        );
+
+        assert_eq!(
+            digest_error(vec![record_value_type(
+                21,
+                "collision",
+                vec![(210, 0, TypeId::from_bytes(id::<21>()))],
+            )]),
+            CanonicalHashError::AmbiguousRecordValueFieldType {
+                record_value_type: TypeId::from_bytes(id::<21>()),
+                field: FieldId::from_bytes(id::<210>()),
+                type_id: TypeId::from_bytes(id::<21>()),
+            }
+        );
+    }
+
+    #[test]
+    fn version_two_record_value_inner_change_keeps_outer_field_bytes_and_changes_digest() {
+        let context = CatalogueHashContext::version_two(verified_standard_snapshot(false));
+        let standard = context.standard().unwrap().catalogue();
+        let enum_type = TypeId::from_bytes(id::<47>());
+        let build = |inner_target: TypeId, with_enum: bool| {
+            let records = vec![
+                record_value_type(
+                    200,
+                    "outer",
+                    vec![(210, 0, TypeId::from_bytes(id::<201>()))],
+                ),
+                record_value_type(201, "inner", vec![(211, 0, inner_target)]),
+            ];
+            let mut enums = Vec::new();
+            if with_enum {
+                enums.push(EnumTypeDefinition::new(
+                    enum_type,
+                    QualifiedSemanticName::new(["crm", "phase"]).unwrap(),
+                    ["new"],
+                ));
+            }
+            let catalogue = CatalogueSnapshot::new_with_record_value_types(
+                CatalogueRevisionId::from_bytes(id::<160>()),
+                vec![SchemaDefinition::new(
+                    SchemaId::from_bytes(id::<161>()),
+                    QualifiedSemanticName::new(["crm"]).unwrap(),
+                )],
+                vec![],
+                vec![],
+                enums,
+                records,
+                vec![],
+            )
+            .unwrap();
+            let mut encoder = Encoder::new(b"probe");
+            encode_record_value_types(&mut encoder, &catalogue, standard).unwrap();
+            let record_bytes = encoder.bytes;
+            let origins = record_value_origins_for(&catalogue);
+            let digest =
+                catalogue_digest_with_context(&context, &catalogue, &[], &[], &origins, &[])
+                    .unwrap();
+            (record_bytes, digest)
+        };
+
+        let (boolean_bytes, boolean_digest) = build(standard_boolean_id(), false);
+        let (enum_bytes, enum_digest) = build(enum_type, true);
+        let first_difference = boolean_bytes
+            .iter()
+            .zip(&enum_bytes)
+            .position(|(left, right)| left != right)
+            .expect("the inner field target must differ");
+        assert_eq!(
+            &boolean_bytes[..first_difference],
+            &enum_bytes[..first_difference],
+            "the outer field encoding must stay nominal"
+        );
+        assert!(
+            first_difference > 40,
+            "the outer field target bytes must be unchanged"
+        );
+        for bytes in [&boolean_bytes, &enum_bytes] {
+            assert!(
+                bytes
+                    .windows(17)
+                    .any(|window| window[0] == 2 && window[1..17] == [201; 16]),
+                "the outer field must keep its application record target"
+            );
+        }
+        assert_ne!(
+            boolean_digest, enum_digest,
+            "an inner definition change must change the whole digest"
+        );
     }
 
     fn catalogue_with_record_value_type() -> CatalogueSnapshot {
