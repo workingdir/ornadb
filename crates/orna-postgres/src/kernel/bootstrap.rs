@@ -72,7 +72,7 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 9,
         name: "security decision snapshot",
-        sql: include_str!("../../../orna-kernel-postgres/migrations/0009_security_snapshot.sql"),
+        sql: include_str!("../../migrations/0009_security_snapshot.sql"),
         data_step: None,
     },
     Migration {
