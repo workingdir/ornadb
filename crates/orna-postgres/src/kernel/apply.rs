@@ -922,12 +922,7 @@ fn validate_postgres_encodings(
     }
     for record_type in candidate.candidate().record_value_types() {
         for field in record_type.fields() {
-            let _ = encoder.record_value_field_columns(
-                candidate,
-                field
-                    .type_descriptor()
-                    .expect("catalogue-validated record fields have descriptors"),
-            )?;
+            let _ = encoder.record_value_field_columns(candidate, field.descriptor())?;
         }
     }
     for function in candidate.candidate().functions() {
@@ -1405,12 +1400,7 @@ async fn persist_semantics(
                 application_enum_type,
                 enum_standard_library_revision,
                 standard_enum_type,
-            } = encoder.record_value_field_columns(
-                candidate,
-                field
-                    .type_descriptor()
-                    .expect("catalogue-validated record fields have descriptors"),
-            )?;
+            } = encoder.record_value_field_columns(candidate, field.descriptor())?;
             let field_origin = origin(
                 candidate.origins(),
                 DefinitionIdentity::Field {
