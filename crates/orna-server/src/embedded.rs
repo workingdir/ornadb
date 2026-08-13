@@ -26,7 +26,7 @@ use nix::{
     },
     unistd::{ForkResult, Group, Pid, User, fork, getegid, geteuid, getgid, getgroups, getuid},
 };
-use orna_postgres_engine::{
+use orna_postgres::{
     AbsolutePath, ControlData, ENGINE_MANIFEST, EmbeddedEngine, EngineError, LinkedArguments,
     POSTGRESQL_LICENCE, SUPPORT_ARCHIVE, SUPPORT_MANIFEST,
 };
@@ -915,11 +915,11 @@ pub fn run_embedded_server() -> Result<(), EmbeddedHostError> {
 fn prepare_running_kernel(
     postmaster: &mut EmbeddedPostmaster,
     instance: &PreparedInstance,
-) -> Result<orna_kernel_postgres::PostgresKernel, EmbeddedHostError> {
+) -> Result<orna_postgres::PostgresKernel, EmbeddedHostError> {
     let runtime = current_thread_runtime()?;
     runtime.block_on(async {
         postmaster.wait_until_ready("orna").await?;
-        let kernel = orna_kernel_postgres::PostgresKernel::new(private_database_config(
+        let kernel = orna_postgres::PostgresKernel::new(private_database_config(
             instance.paths.socket_directory(),
             "orna",
         ));
