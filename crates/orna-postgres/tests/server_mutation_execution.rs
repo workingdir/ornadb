@@ -25,14 +25,19 @@ use orna_core::{
     revision::{
         ActiveDatabaseRevision, DeployableRevision, RevisionPair, VerifiedStandardLibrarySnapshot,
     },
+    security::{
+        CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID, ExecuteGrant, SecurityAuditKind,
+        SecurityAuditOutcome,
+    },
     source::{SourceBundle, SourceUnit},
     types::ResolvedType,
     value::{EnumValue, FunctionArgument, RecordValue, RuntimeFloat, RuntimeValue},
 };
 use orna_postgres::{
-    PostgresKernel, PostgresKernelError, ServerDeleteCommitState, ServerDeleteError,
-    ServerDeleteResult, ServerInsertCommitState, ServerInsertError, ServerInsertResult,
-    ServerMutationError, ServerUpdateCommitState, ServerUpdateError, ServerUpdateResult,
+    AuthenticatedRawCallResult, PostgresKernel, PostgresKernelError, ServerDeleteCommitState,
+    ServerDeleteError, ServerDeleteResult, ServerInsertCommitState, ServerInsertError,
+    ServerInsertResult, ServerMutationError, ServerUpdateCommitState, ServerUpdateError,
+    ServerUpdateResult,
 };
 use orna_protocol::encode_active_value;
 use support::{TestDatabase, TestResult, TestSession, failure, with_test_database};
@@ -95,6 +100,28 @@ const MUTATION_SOURCE: &str = "CREATE SCHEMA tasks;\n\
     SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE\n\
     AS DELETE FROM tasks.owner AS deleted_owner\n\
     WHERE REF(deleted_owner) = p_owner RETURNING TRUE;\n";
+
+const RAW_INSERT_SOURCE: &str = "CREATE SCHEMA raw_insert_test;\n\
+    CREATE TYPE raw_insert_test.probe AS OBJECT (\n\
+      stored BOOLEAN NOT NULL,\n\
+      note TEXT\n\
+    );\n\
+    CREATE SERVER FUNCTION raw_insert_test.create_probe()\n\
+    RETURNS ROWS (created REF raw_insert_test.probe)\n\
+    SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE\n\
+    AS INSERT INTO raw_insert_test.probe AS made (stored)\n\
+    VALUES (TRUE) RETURNING REF(made);\n\
+    CREATE SERVER FUNCTION raw_insert_test.read_probes()\n\
+    RETURNS ROWS (stored BOOLEAN)\n\
+    SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n\
+    AS SELECT probe.stored FROM raw_insert_test.probe probe;\n\
+    CREATE SERVER FUNCTION raw_insert_test.create_named(p_name TEXT)\n\
+    RETURNS ROWS (created REF raw_insert_test.probe)\n\
+    SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE\n\
+    AS INSERT INTO raw_insert_test.probe AS made (stored, note)\n\
+    VALUES (TRUE, p_name) RETURNING REF(made);\n";
+
+const SERVICE_UID: u32 = 61_018;
 
 const RECORD_MUTATION_SOURCE: &str = "CREATE SCHEMA record_mutation;\n\
     CREATE TYPE record_mutation.stage AS ENUM ('lead', 'qualified');\n\
@@ -1996,6 +2023,163 @@ impl ExactTask {
 
 fn kernel(database: &TestDatabase) -> TestResult<PostgresKernel> {
     Ok(PostgresKernel::from_str(&database.connection_string())?)
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn authenticated_raw_insert_is_denied_then_granted_and_audited() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel: PostgresKernel = database.connection_string().parse()?;
+        kernel.bootstrap().await?;
+        let empty = kernel.recover().await?;
+        let upgrade = orna_standard::prepare_standard_upgrade(&empty)?;
+        let standard = kernel.apply_standard_upgrade(&upgrade).await?;
+        let applied = kernel
+            .apply(&standard_application_candidate(
+                RAW_INSERT_SOURCE,
+                &standard,
+                &upgrade,
+            )?)
+            .await?;
+        let pair = applied.pair();
+        let probe = applied
+            .catalogue()
+            .object_types()
+            .iter()
+            .find(|object| name_is(object.name().parts(), &["raw_insert_test", "probe"]))
+            .ok_or_else(|| failure("probe object type is absent"))?
+            .id();
+        let create_probe = raw_function_id(&applied, &["raw_insert_test", "create_probe"])?;
+        let read_probes = raw_function_id(&applied, &["raw_insert_test", "read_probes"])?;
+        let create_named = raw_function_id(&applied, &["raw_insert_test", "create_named"])?;
+        kernel.install_catalogue_health_service(SERVICE_UID).await?;
+        let session = kernel.authenticate_local_peer(SERVICE_UID).await?;
+
+        // The parameter-free raw INSERT is denied before its explicit grant.
+        let denied = kernel
+            .dispatch_authenticated_raw_call(&session, create_probe)
+            .await
+            .expect_err("raw INSERT before its grant must be denied");
+        require(
+            matches!(denied, PostgresKernelError::RawExecuteDenied { .. }),
+            "pre-grant raw INSERT returned the wrong typed error",
+        )?;
+
+        // Grant the raw SELECT only and prove the denied INSERT created nothing.
+        kernel
+            .grant_catalogue_health_service_execute(pair, read_probes)
+            .await?;
+        let empty_select = kernel
+            .dispatch_authenticated_raw_call(&session, read_probes)
+            .await?;
+        require(
+            matches!(
+                empty_select,
+                AuthenticatedRawCallResult::Server(values) if values.is_empty()
+            ),
+            "the denied INSERT must not create any object",
+        )?;
+
+        // Grant the parameter-free raw INSERT only and invoke it.
+        kernel
+            .grant_catalogue_health_service_execute(pair, create_probe)
+            .await?;
+        let inserted = kernel
+            .dispatch_authenticated_raw_call(&session, create_probe)
+            .await?;
+        let inserted = match inserted {
+            AuthenticatedRawCallResult::Server(values) if values.len() == 1 => values,
+            other => {
+                return Err(failure(format!(
+                    "raw INSERT must return exactly one Server value, got {other:?}"
+                )));
+            }
+        };
+        let RuntimeValue::Reference { target, object } = &inserted[0] else {
+            return Err(failure("raw INSERT must return an object reference"));
+        };
+        require(
+            *target == probe && *object != ObjectId::from_bytes([0; 16]),
+            "raw INSERT reference must name the probe type and a real row",
+        )?;
+
+        // The raw SELECT now proves exactly one object exists.
+        let one_probe = kernel
+            .dispatch_authenticated_raw_call(&session, read_probes)
+            .await?;
+        require(
+            matches!(
+                one_probe,
+                AuthenticatedRawCallResult::Server(values)
+                    if values == [RuntimeValue::Boolean(true)]
+            ),
+            "raw SELECT must return exactly the stored Boolean true value",
+        )?;
+
+        // An allowed-but-invalid raw mutation target is TARGET_UNAVAILABLE.
+        kernel
+            .grant_catalogue_health_service_execute(pair, create_named)
+            .await?;
+        let unavailable = kernel
+            .dispatch_authenticated_raw_call(&session, create_named)
+            .await
+            .expect_err("a parameterised raw INSERT target must be unavailable");
+        require(
+            matches!(
+                unavailable,
+                PostgresKernelError::RawServerTargetUnavailable { .. }
+            ),
+            "an invalid raw mutation target returned the wrong typed error",
+        )?;
+        let unchanged = kernel
+            .dispatch_authenticated_raw_call(&session, read_probes)
+            .await?;
+        require(
+            matches!(
+                unchanged,
+                AuthenticatedRawCallResult::Server(values)
+                    if values == [RuntimeValue::Boolean(true)]
+            ),
+            "an invalid raw mutation target must not change any row",
+        )?;
+
+        // One authentication audit, then one audit per dispatch: the pre-grant
+        // call was denied, every later call allowed.
+        let audits = kernel.recover_security_audit_events().await?;
+        require(audits.len() == 7, "raw dispatch audit count differs")?;
+        require(
+            audits[0].decision().kind() == SecurityAuditKind::Authentication
+                && audits[0].decision().outcome() == SecurityAuditOutcome::Allowed
+                && audits[1].decision().kind() == SecurityAuditKind::Execute
+                && audits[1].decision().outcome() == SecurityAuditOutcome::Denied
+                && audits[2..].iter().all(|event| {
+                    event.decision().kind() == SecurityAuditKind::Execute
+                        && event.decision().outcome() == SecurityAuditOutcome::Allowed
+                }),
+            "raw dispatch audit kinds and outcomes differ",
+        )?;
+
+        // Public recovery proves the exact fixed-service grant set.
+        let mut grants = kernel
+            .recover_security_snapshot()
+            .await?
+            .execute_grants()
+            .collect::<Vec<_>>();
+        grants.sort();
+        let mut expected = vec![
+            ExecuteGrant::new(CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID, create_probe),
+            ExecuteGrant::new(CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID, read_probes),
+            ExecuteGrant::new(CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID, create_named),
+        ];
+        expected.sort();
+        require(
+            grants == expected,
+            "recovered grants must contain exactly the three fixed-service grants",
+        )?;
+
+        Ok(())
+    })
+    .await
 }
 
 fn hostile_kernel(database: &TestDatabase) -> TestResult<PostgresKernel> {
@@ -4101,6 +4285,21 @@ fn name_is(actual: &[String], expected: &[&str]) -> bool {
         .iter()
         .map(String::as_str)
         .eq(expected.iter().copied())
+}
+
+/// The canonical identity of one active catalogue function by exact name.
+fn raw_function_id(active: &ActiveDatabaseRevision, name: &[&str]) -> TestResult<FunctionId> {
+    active
+        .catalogue()
+        .functions()
+        .iter()
+        .find(|function| name_is(function.name().parts(), name))
+        .map(|function| function.id())
+        .ok_or_else(|| {
+            failure(format!(
+                "function {name:?} is absent from the active catalogue"
+            ))
+        })
 }
 
 fn require(condition: bool, message: impl Into<String>) -> TestResult<()> {
