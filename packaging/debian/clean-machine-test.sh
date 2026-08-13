@@ -184,6 +184,27 @@ require_one_executable_tree
 [[ "$(stat -c '%U:%G %a %F' "${ready}")" == 'orna:orna 600 regular file' ]] ||
     fail 'private readiness metadata changed'
 
+health_function_id=function:00000000000000000000000004
+run_as_orna /usr/bin/orna raw-call sys.catalog.health \
+    >/work/catalogue-health-name.stdout 2>/work/catalogue-health-name.stderr ||
+    fail 'catalogue health name call failed'
+run_as_orna /usr/bin/orna raw-call "${health_function_id}" \
+    >/work/catalogue-health-id.stdout 2>/work/catalogue-health-id.stderr ||
+    fail 'catalogue health identity call failed'
+[[ ! -s /work/catalogue-health-name.stderr && ! -s /work/catalogue-health-id.stderr ]] ||
+    fail 'catalogue health call produced a diagnostic'
+cmp /work/catalogue-health-name.stdout /work/catalogue-health-id.stdout >/dev/null ||
+    fail 'catalogue health name and identity outputs differ'
+python3 - <<'PY'
+from pathlib import Path
+
+expected = b'ORV1' + bytes([2]) + bytes(15) + bytes([1]) + bytes([0, 0, 0, 1, 1])
+actual = Path('/work/catalogue-health-name.stdout').read_bytes()
+if actual != expected:
+    raise SystemExit('catalogue health output is not the exact Boolean TRUE envelope')
+PY
+require_one_executable_tree
+
 set +e
 run_as_orna /usr/bin/orna server upgrade >/work/live-upgrade.stdout \
     2>/work/live-upgrade.stderr
