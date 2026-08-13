@@ -93,7 +93,7 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
     (
         7,
         "standard catalogue type storage",
-        include_str!("../migrations/0007_catalogue_types.sql"),
+        include_str!("../../orna-postgres/migrations/0007_catalogue_types.sql"),
     ),
     (
         8,
