@@ -150,6 +150,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "disjoint field reference targets",
         include_str!("../migrations/0018_disjoint_field_reference_targets.sql"),
     ),
+    (
+        19,
+        "standard opaque value storage",
+        include_str!("../migrations/0019_standard_opaque_value_types.sql"),
+    ),
 ];
 const MIGRATION_DATA_STEP_SEPARATOR: &[u8] = b"\0orna.kernel.migration-step\0";
 const CANONICAL_HASH_V1_EMPTY_SEED_STEP: &[u8] = b"canonical-hash-v1-empty-seed/v1";
@@ -236,6 +241,7 @@ fn is_later_catalogue_relation(relation: &str) -> bool {
         || relation.starts_with("catalogue_enum_types")
         || relation.starts_with("catalogue_record_value")
         || relation == "definition_references_enum_type_target_index"
+        || relation.starts_with("definition_references_record_")
 }
 
 fn without_later_relations(snapshot: &CatalogueSurfaceSnapshot) -> CatalogueSurfaceSnapshot {
@@ -589,6 +595,30 @@ fn disjoint_field_reference_targets_are_the_registered_version_eighteen() -> Tes
     )
 }
 
+#[test]
+fn standard_opaque_value_storage_is_the_registered_version_nineteen() -> TestResult<()> {
+    let Some((version, name, sql)) = MIGRATIONS.get(18).copied() else {
+        return Err(failure(
+            "standard opaque value storage migration is not registered",
+        ));
+    };
+    require(version == 19, format!("migration is version {version}"))?;
+    require(
+        name == "standard opaque value storage",
+        format!("migration has unexpected name {name:?}"),
+    )?;
+    require(
+        sql.contains("value_kind IN ('primitive', 'opaque')")
+            && sql.contains("value_kind <> 'opaque'")
+            && sql.contains("persistence = 'transient'")
+            && sql.contains("octet_length(representation_contract) <= 128")
+            && sql.contains("representation_contract !~ '[^ -~]'")
+            && !sql.contains("CREATE TYPE")
+            && !sql.contains("LANGUAGE"),
+        "opaque value migration does not preserve the closed definition-only contract",
+    )
+}
+
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
 async fn bootstrap_creates_one_recoverable_empty_revision() -> TestResult<()> {
@@ -699,8 +729,8 @@ async fn bootstrap_upgrades_v5_write_reference_evidence_without_mutating_semanti
 
         let after = snapshot_upgrade_state(&database).await?;
         require(
-            after.migrations.len() == 18 && after.migrations[..5] == before.migrations[..],
-            format!("v6-v18 changed prior migration records: {:?}", after.migrations),
+            after.migrations.len() == 19 && after.migrations[..5] == before.migrations[..],
+            format!("v6-v19 changed prior migration records: {:?}", after.migrations),
         )?;
         require(
             after.migrations[5]
@@ -820,6 +850,15 @@ async fn bootstrap_upgrades_v5_write_reference_evidence_without_mutating_semanti
             format!("v18 migration record is not exact: {:?}", after.migrations[17]),
         )?;
         require(
+            after.migrations[18]
+                == (
+                    19,
+                    "standard opaque value storage".to_owned(),
+                    expected_migration_checksum(19, MIGRATIONS[18].2),
+                ),
+            format!("v19 migration record is not exact: {:?}", after.migrations[18]),
+        )?;
+        require(
             after.active_pair == before.active_pair,
             "v6 changed the active revision pair",
         )?;
@@ -905,7 +944,7 @@ async fn bootstrap_upgrades_registered_v6_without_standard_rows() -> TestResult<
 
         let after = snapshot_upgrade_state(&database).await?;
         require(
-            after.migrations.len() == 18
+            after.migrations.len() == 19
                 && after.migrations[..6] == before.migrations[..]
                 && after.migrations[6]
                     == (
@@ -1015,6 +1054,15 @@ async fn bootstrap_upgrades_registered_v6_without_standard_rows() -> TestResult<
             format!("v18 migration record is not exact: {:?}", after.migrations[17]),
         )?;
         require(
+            after.migrations[18]
+                == (
+                    19,
+                    "standard opaque value storage".to_owned(),
+                    expected_migration_checksum(19, MIGRATIONS[18].2),
+                ),
+            format!("v19 migration record is not exact: {:?}", after.migrations[18]),
+        )?;
+        require(
             after.active_pair == before.active_pair
                 && after.source_unit_count == before.source_unit_count
                 && after.references == before.references
@@ -1088,7 +1136,7 @@ async fn bootstrap_upgrades_registered_v7_without_resolved_value_rows() -> TestR
         let after_surface = snapshot_catalogue_surface(&database).await?;
         let after_target_fks = snapshot_application_target_foreign_keys(&database).await?;
         require(
-            after.migrations.len() == 18
+            after.migrations.len() == 19
                 && after.migrations[..7] == before.migrations[..]
                 && after.migrations[7]
                     == (
@@ -1155,6 +1203,12 @@ async fn bootstrap_upgrades_registered_v7_without_resolved_value_rows() -> TestR
                         18,
                         "disjoint field reference targets".to_owned(),
                         expected_migration_checksum(18, MIGRATIONS[17].2),
+                    )
+                && after.migrations[18]
+                    == (
+                        19,
+                        "standard opaque value storage".to_owned(),
+                        expected_migration_checksum(19, MIGRATIONS[18].2),
                     ),
             format!("v7 upgrade produced unexpected migrations: {:?}", after.migrations),
         )?;
@@ -2655,7 +2709,12 @@ fn exact_0007_constraint_definition(constraint: &str) -> Option<&'static str> {
             "CHECK (((cardinality(name_parts) >= 2) AND (array_position(name_parts, NULL::text) IS NULL) AND (array_position(name_parts, ''::text) IS NULL)))"
         }
         "std_cat_value_types_name_key" => "UNIQUE (standard_library_revision_id, name_parts)",
-        "std_cat_value_types_value_kind_check" => "CHECK ((value_kind = 'primitive'::text))",
+        "std_cat_value_types_value_kind_check" => {
+            "CHECK ((value_kind = ANY (ARRAY['primitive'::text, 'opaque'::text])))"
+        }
+        "std_cat_value_types_opaque_contract_check" => {
+            "CHECK (((value_kind <> 'opaque'::text) OR ((persistence = 'transient'::text) AND (octet_length(representation_contract) <= 128) AND (representation_contract !~ '[^ -~]'::text))))"
+        }
         "std_cat_value_types_mutability_check" => "CHECK ((mutability = 'immutable'::text))",
         "std_cat_value_types_persistence_check" => {
             "CHECK ((persistence = ANY (ARRAY['persistable'::text, 'transient'::text])))"
@@ -2862,7 +2921,12 @@ async fn inspect_standard_catalogue_constraints(client: &Client) -> TestResult<(
         (
             "standard_catalogue_value_types",
             "std_cat_value_types_value_kind_check",
-            "value_kind = 'primitive'::text",
+            "value_kind = ANY (ARRAY['primitive'::text, 'opaque'::text])",
+        ),
+        (
+            "standard_catalogue_value_types",
+            "std_cat_value_types_opaque_contract_check",
+            "value_kind <> 'opaque'::text",
         ),
         (
             "standard_catalogue_value_types",
