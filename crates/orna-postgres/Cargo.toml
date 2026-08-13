@@ -5,12 +5,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish = false
-build = false
+build = "build.rs"
 
 [features]
-embedded = ["dep:orna-postgres-engine", "orna-postgres-engine/embedded"]
+embedded = []
 test-hooks = ["orna-kernel-postgres/test-hooks"]
 
 [dependencies]
 orna-kernel-postgres = { path = "../orna-kernel-postgres" }
-orna-postgres-engine = { path = "../orna-postgres-engine", optional = true }
