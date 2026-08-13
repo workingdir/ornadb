@@ -23,7 +23,7 @@ use orna_core::{
     types::{ResolvedType, StandardScalar, TypeDescriptor, TypeDescriptorKind},
     value::{
         EnumValue, EnumValueError, OpaqueCodecRegistry, OpaqueValue, OpaqueValueError, RecordValue,
-        RuntimeFloat, RuntimeValue,
+        RuntimeFloat, RuntimeType, RuntimeValue,
     },
 };
 use orna_standard::{
@@ -813,7 +813,7 @@ fn encode_record_field_value(
         .ok_or(ValueCodecError::UnsupportedValue)?;
     match expected {
         ResolvedType::Scalar(_) => {
-            if value.resolved_type() != expected {
+            if value.runtime_type() != RuntimeType::Flat(expected) {
                 return Err(ValueCodecError::RecordValueNotActive { record_type });
             }
             let mut encoded = encode_value(value)?;

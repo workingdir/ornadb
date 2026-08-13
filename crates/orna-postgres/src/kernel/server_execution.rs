@@ -24,7 +24,7 @@ use orna_core::{
     types::{ResolvedType, StandardScalar},
     value::{
         EnumValue, FunctionArgument, ResultColumn, ResultRow, ResultRows, ResultRowsError,
-        RuntimeFloat, RuntimeValue,
+        RuntimeFloat, RuntimeType, RuntimeValue,
     },
 };
 use orna_protocol::{ValueCodecError, decode_active_value, encode_active_value};
@@ -1366,13 +1366,19 @@ fn validate_identity_selected_arguments(
                 "function arguments cannot be NULL",
             ));
         }
-        if !runtime_type_is_active(catalogue, context, value.resolved_type()) {
+        let RuntimeType::Flat(value_type) = value.runtime_type() else {
+            return Err(argument_error(
+                Some(parameter_id),
+                "the argument uses an unsupported type or refers to an unavailable object type",
+            ));
+        };
+        if !runtime_type_is_active(catalogue, context, value_type) {
             return Err(argument_error(
                 Some(parameter_id),
                 "the argument uses an unsupported type or refers to an unavailable object type",
             ));
         }
-        if !runtime_types_match(context, value.resolved_type(), parameter.resolved_type()) {
+        if !runtime_types_match(context, value_type, parameter.resolved_type()) {
             return Err(argument_error(
                 Some(parameter_id),
                 "the argument type does not match the declared parameter type",
