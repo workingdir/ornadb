@@ -13,7 +13,7 @@ use orna_protocol::CallFailure;
 mod package_maintenance;
 mod source_check;
 
-const USAGE: &str = "Usage:\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna source check <file.orna>\n  orna raw-call <canonical-function-id>";
+const USAGE: &str = "Usage:\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna raw-call <canonical-function-id>";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Command {
@@ -21,6 +21,7 @@ enum Command {
     BackendShell,
     Upgrade,
     SourceCheck(String),
+    SourceApply(String),
     RawCall(FunctionId),
 }
 
@@ -74,6 +75,35 @@ fn main() -> ExitCode {
                 }
             }
         }
+        Command::SourceApply(path) => match orna_server::run_installed_source_apply(&path) {
+            Ok(orna_server::InstalledSourceApplyOutcome::Diagnostics(diagnostics)) => {
+                let stderr = io::stderr();
+                let mut stderr = stderr.lock();
+                let _ = stderr
+                    .write_all(diagnostics.as_bytes())
+                    .and_then(|()| stderr.flush());
+                ExitCode::from(1)
+            }
+            Ok(orna_server::InstalledSourceApplyOutcome::Applied(document)) => {
+                let stdout = io::stdout();
+                let mut stdout = stdout.lock();
+                match document.write_to(&mut stdout) {
+                    Ok(()) => ExitCode::SUCCESS,
+                    Err(error) => {
+                        write_stderr_line(&error.to_string());
+                        ExitCode::from(1)
+                    }
+                }
+            }
+            Ok(_) => {
+                write_stderr_line("orna: source apply returned an unsupported result");
+                ExitCode::from(1)
+            }
+            Err(error) => {
+                write_stderr_line(&error.to_string());
+                ExitCode::from(1)
+            }
+        },
         Command::RawCall(function) => match orna_server::run_local_raw_call(function) {
             Ok(orna_server::LocalRawCallOutcome::Completed) => ExitCode::SUCCESS,
             Ok(orna_server::LocalRawCallOutcome::Failed(failure)) => {
@@ -114,12 +144,13 @@ where
             args.next().is_none().then_some(command)
         }
         Some(value) if value == OsStr::new("source") => {
-            if !matches!(args.next().as_deref(), Some(value) if value == OsStr::new("check")) {
-                return None;
-            }
+            let command = match args.next().as_deref() {
+                Some(value) if value == OsStr::new("check") => Command::SourceCheck,
+                Some(value) if value == OsStr::new("apply") => Command::SourceApply,
+                _ => return None,
+            };
             let path = args.next()?.into_string().ok()?;
-            (args.next().is_none() && valid_source_path(&path))
-                .then_some(Command::SourceCheck(path))
+            (args.next().is_none() && valid_source_path(&path)).then(|| command(path))
         }
         Some(value) if value == OsStr::new("raw-call") => {
             let function = args.next()?.into_string().ok()?;
@@ -189,6 +220,14 @@ mod tests {
         assert_eq!(
             parse_command(arguments(&["orna", "source", "check", "app.orna"])),
             Some(Command::SourceCheck("app.orna".to_owned()))
+        );
+    }
+
+    #[test]
+    fn accepts_one_exact_source_apply_path() {
+        assert_eq!(
+            parse_command(arguments(&["orna", "source", "apply", "app.orna"])),
+            Some(Command::SourceApply("app.orna".to_owned()))
         );
     }
 
@@ -299,6 +338,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn rejects_invalid_source_apply_shapes_and_paths() {
+        for values in [
+            vec!["orna", "source", "apply"],
+            vec!["orna", "source", "apply", ""],
+            vec!["orna", "source", "apply", "-"],
+            vec!["orna", "source", "apply", "-x"],
+            vec!["orna", "source", "apply", "a", "b"],
+            vec!["orna", "source", "--apply", "a"],
+            vec!["orna", "--source", "apply", "a"],
+            vec!["orna", "source", "apply", "line\nbreak"],
+            vec!["orna", "source", "apply", "line\u{2028}break"],
+        ] {
+            assert_eq!(parse_command(arguments(&values)), None, "{values:?}");
+        }
+        assert_eq!(
+            parse_command(arguments(&["orna", "source", "apply", "./-x"])),
+            Some(Command::SourceApply("./-x".to_owned()))
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn rejects_non_unicode_tokens() {
@@ -315,11 +375,28 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn rejects_non_unicode_source_apply_path() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let non_unicode = OsString::from_vec(b"app\xff.orna".to_vec());
+        assert_eq!(
+            parse_command(vec![
+                OsString::from("orna"),
+                OsString::from("source"),
+                OsString::from("apply"),
+                non_unicode,
+            ]),
+            None
+        );
+    }
+
     #[test]
     fn usage_diagnostic_is_exact() {
         assert_eq!(
             USAGE,
-            "Usage:\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna source check <file.orna>\n  orna raw-call <canonical-function-id>"
+            "Usage:\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna raw-call <canonical-function-id>"
         );
     }
 }
