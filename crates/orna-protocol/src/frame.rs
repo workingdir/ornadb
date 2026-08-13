@@ -1202,7 +1202,10 @@ impl RawCallClient {
                 Ok(RawCallClientResponse::Failed(failure))
             }
             ServerFrame::CallCancelled { .. }
-                if self.phase == RawCallClientPhase::Running && self.cancellation_requested =>
+                if matches!(
+                    self.phase,
+                    RawCallClientPhase::AwaitingAcceptance | RawCallClientPhase::Running
+                ) && self.cancellation_requested =>
             {
                 self.phase = RawCallClientPhase::Terminal;
                 Ok(RawCallClientResponse::Cancelled)
@@ -2877,6 +2880,17 @@ mod tests {
         assert_eq!(
             cancelled.request_cancellation().unwrap(),
             ClientFrame::CallCancel { stream: 1 }
+        );
+
+        let (mut cancelled_before_acceptance, _) = RawCallClient::start(function);
+        cancelled_before_acceptance.request_cancellation().unwrap();
+        assert_eq!(
+            cancelled_before_acceptance
+                .receive_encoded(
+                    &encode_server_frame(&ServerFrame::CallCancelled { stream: 1 }).unwrap(),
+                )
+                .unwrap(),
+            RawCallClientResponse::Cancelled
         );
         assert_eq!(
             cancelled.request_cancellation(),
