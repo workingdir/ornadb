@@ -18,9 +18,11 @@ STREAM<T>
 This descriptor is a prerequisite for the mandatory `sys.invoke.Request` and
 `sys.invoke.Event` values. It is not a second value type system. Existing
 `ResolvedType` values are the closed, flat compatibility subset used by the
-implemented catalogue and executor slices. Each accepted flat type has one
-exact conversion to the new descriptor. New constructed-type work uses the
-descriptor and does not add more flat variants to `ResolvedType`.
+implemented catalogue and executor slices. Each catalogue-identified flat type
+has one exact conversion to the new descriptor. The legacy
+`ResolvedType::Scalar` form has no catalogue identity and must be migrated to
+`ResolvedType::Value(TypeId)` before conversion. New constructed-type work uses
+the descriptor and does not add more flat variants to `ResolvedType`.
 
 This decision does not add `orna invoke` before its request can cross
 `CALL_RAW` as one canonical typed value. The client must not resolve a target
@@ -72,19 +74,76 @@ Conversion has these exact rules:
 ResolvedType::Named(id)       -> Named(id)
 ResolvedType::Value(id)       -> Named(id)
 ResolvedType::Reference(id)   -> Reference(id)
-ResolvedType::Scalar(scalar)  -> Named(accepted standard TypeId for scalar)
+ResolvedType::Scalar(scalar)  -> typed legacy-scalar failure
 ```
 
-The scalar conversion requires one verified standard snapshot and its exact
-accepted scalar binding. It cannot use a hard-coded compatibility scalar as
-catalogue identity authority. A missing, mismatched, or non-primitive binding
-is a typed failure. The conversion is not part of the first structure-only
-commit.
+The conversion reads only the application catalogue and verified standard
+snapshot pinned by the active database revision. It cannot use source spelling,
+an unpinned standard snapshot, a representation contract, or a compatibility
+scalar as catalogue identity authority. `Scalar(StandardScalar)` is the
+version-1 compatibility form retained by ADR 0016; core must not reverse-map it
+to a `TypeId`. A caller migrates that fact through the existing checked
+standard-type evidence and supplies `Value(TypeId)` instead. The conversion is
+not part of the first structure-only commit.
 
 There is no reverse conversion for a constructed descriptor. A later caller
 may project a `Named` or `Reference` leaf to the legacy model only when the
 same active catalogue proves the exact classification. Code must not erase a
 constructor to make an old API accept it.
+
+### Active flat-leaf conversion
+
+The only public flat conversion is:
+
+```rust
+pub fn type_descriptor_for(
+    &self,
+    resolved_type: ResolvedType,
+) -> Result<TypeDescriptor, FlatTypeDescriptorError>;
+```
+
+It validates in variant order without returning a partial descriptor:
+
+1. `Scalar(scalar)` returns `LegacyScalar { scalar }`. This check does not
+   inspect a standard snapshot because a compatibility representation is not
+   catalogue identity authority.
+2. `Named(id)` checks the active application catalogue and, when present, its
+   pinned standard catalogue before it classifies either result. If both contain
+   `id`, it returns `AmbiguousNamedType { id }`. Otherwise it accepts only an
+   enum or record value definition. An absent definition returns
+   `UnknownNamedType { id }`, an object returns `NamedObjectType { id }`, and a
+   primitive or opaque value definition returns `NamedValueType { id }` because
+   that category must use `Value(id)`.
+3. `Value(id)` first requires a pinned standard snapshot, otherwise returning
+   `StandardLibraryUnavailable { value_type: id }`. It then requires `id` to
+   resolve there to a primitive or opaque value definition, otherwise returning
+   `UnknownStandardValueType { value_type: id }`.
+4. `Reference { target }` requires `target` to resolve to an object definition
+   in the active application catalogue, otherwise returning
+   `ReferenceTargetNotObject { target }`. A standard-library object, value,
+   enum, or record definition cannot become an application object reference.
+
+`FlatTypeDescriptorError` is public, non-exhaustive, implements `Error`, and
+derives `Clone`, `Debug`, `Eq`, and `PartialEq`. Its display messages are:
+
+| Variant | Display |
+| --- | --- |
+| `LegacyScalar` | `legacy scalar type has no catalogue identity` |
+| `AmbiguousNamedType` | `resolved named type is present in both application and standard catalogues` |
+| `UnknownNamedType` | `resolved named type is absent from the active catalogue` |
+| `NamedObjectType` | `resolved named type is an object and requires REF` |
+| `NamedValueType` | `resolved named type is a value definition and requires a value identity` |
+| `StandardLibraryUnavailable` | `the active database has no standard library for the resolved value type` |
+| `UnknownStandardValueType` | `resolved value type is absent from the pinned standard library` |
+| `ReferenceTargetNotObject` | `resolved reference target is not an active application object` |
+
+The method does not expose a reverse conversion, change `ResolvedType`, admit a
+descriptor in any catalogue or execution position, or change canonical bytes.
+Its proof covers application enum and record leaves, pinned-standard enum
+leaves, primitive and opaque `Value` leaves, application object references,
+cross-catalogue identity collisions, every wrong-category and missing-definition
+error, version-1 value and scalar failures, and unchanged legacy canonical
+bytes.
 
 ## Source syntax
 
