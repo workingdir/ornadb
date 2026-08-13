@@ -195,6 +195,35 @@ exact tag-2 and tag-4 field bytes, rejection of every other leaf category and
 all five constructors, cross-catalogue identity ambiguity before tag selection,
 and no partial catalogue, revision, or digest.
 
+The descriptor-native constructor is
+`RecordValueFieldDefinition::try_new_descriptor`. It accepts only a flat
+`Named` or `Reference` descriptor before catalogue classification. `List`,
+`Set`, `Map`, `Option`, and `Stream` return the public, non-exhaustive
+`RecordValueFieldConstructionError::ConstructedTypeNotAccepted { descriptor }`
+before a field exists. That error displays
+`constructed record field descriptors are not accepted` and has no source.
+Catalogue validation remains responsible for rejecting `Reference` and an
+unsupported or ambiguous `Named` identity.
+
+The one public durable classification seam is
+`DeployableRevision::record_value_field_descriptor_class(&TypeDescriptor) ->
+Result<RecordValueFieldDescriptorClass, RecordValueFieldDescriptorError>`.
+It reads only the deployable candidate catalogue and the verified standard
+snapshot pinned in its catalogue-hash context. The public, non-exhaustive
+`RecordValueFieldDescriptorClass` has `Enum(TypeId)` and
+`StandardPrimitive(TypeId)`. The public, non-exhaustive
+`RecordValueFieldDescriptorError` has `StandardLibraryUnavailable`,
+`Unsupported`, and `Ambiguous { type_id }`. Their displays are, respectively,
+`deployable revision has no pinned standard library for record field classification`,
+`record field descriptor is not supported by the deployable revision`, and
+`record field type is present in both application and standard catalogues`.
+The error derives `Clone`, `Debug`, `Eq`, and `PartialEq`, implements `Error`,
+and has no source.
+PostgreSQL apply uses only this seam to select the existing enum/tag-2 or
+pinned-primitive/tag-4 durable tuple. Recovery reconstructs `Named(id)` only
+from those exact tuples and the catalogue-wide standard-library pin; it does
+not recreate a second classifier.
+
 The one-to-three-file, always-green migration uses this ordered bridge:
 
 1. Add a fallible flat compatibility constructor beside the existing
@@ -212,12 +241,18 @@ The one-to-three-file, always-green migration uses this ordered bridge:
    `Named` or `Value` and `Reference` from `Reference`. No API accepts both facts,
    so disagreement is unrepresentable. Active hash-context classification later
    recovers the distinction between the old tag-2 and tag-4 leaves.
-4. After every consumer uses the descriptor, replace the stored fact with the
-   descriptor and add the descriptor-native constructor. It rejects every
-   constructor before a field exists while step 5 remains selected.
-5. Move producers to the descriptor-native constructor in bounded commits, then
-   remove the legacy field, constructors, accessor, compatibility projection,
-   and construction error before step 6 opens.
+4. After every consumer uses the descriptor, remove every in-tree use of the
+   infallible `new(ResolvedType)` and remove that constructor. In the same
+   ownership flip, replace the stored `ResolvedType` and optional descriptor
+   with one required descriptor, remove `resolved_type`, rewrite fallible
+   `try_new` as the temporary flat `ResolvedType`-to-descriptor compatibility
+   projection, and add the descriptor-native constructor. The latter rejects
+   every constructor before a field exists while step 5 remains selected.
+5. Move the remaining producers from `try_new` to the descriptor-native
+   constructor in bounded commits, then remove `try_new`, the compatibility
+   projection, and the `LegacyScalar` construction-error variant before step 6
+   opens. The descriptor-native constructor and its
+   `ConstructedTypeNotAccepted` error remain the sole construction boundary.
 
 The bridge is not a durable format, public catalogue promise, second hash
 authority, or permission to admit a descriptor-backed field in a catalogue
