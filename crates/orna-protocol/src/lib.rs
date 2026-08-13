@@ -563,15 +563,8 @@ fn encode_record_value_with_marker(
     let mut payload = Vec::new();
     payload.extend_from_slice(&field_count.to_be_bytes());
     for (field, value) in definition.fields().iter().zip(value.fields()) {
-        let encoded = encode_record_field_value(
-            active,
-            definition.id(),
-            field
-                .type_descriptor()
-                .expect("active record fields have descriptors"),
-            value,
-            marker,
-        )?;
+        let encoded =
+            encode_record_field_value(active, definition.id(), field.descriptor(), value, marker)?;
         let encoded_length =
             u32::try_from(encoded.len()).map_err(|_| ValueCodecError::PayloadTooLarge {
                 actual: encoded.len(),
@@ -697,21 +690,13 @@ fn decode_record_value_with_marker(
         }
         require_record_field_wire_type(
             active,
-            definition_field
-                .type_descriptor()
-                .expect("active record fields have descriptors"),
+            definition_field.descriptor(),
             ordinal,
             tag,
             type_id,
         )?;
-        let value = decode_record_field_value(
-            active,
-            definition_field
-                .type_descriptor()
-                .expect("active record fields have descriptors"),
-            tag,
-            field_payload,
-        )?;
+        let value =
+            decode_record_field_value(active, definition_field.descriptor(), tag, field_payload)?;
         fields.push((definition_field.name().to_owned(), value));
         cursor = encoded_end;
     }

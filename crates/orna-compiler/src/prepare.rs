@@ -3087,9 +3087,7 @@ fn server_record_field_expression(
             validate_record_child_type(
                 checked_semantic,
                 checked.value_type().standard_value_type(),
-                durable
-                    .type_descriptor()
-                    .expect("candidate record fields have descriptors"),
+                durable.descriptor(),
                 enum_types,
                 standard,
             )?;
@@ -3105,9 +3103,7 @@ fn server_record_field_expression(
             validate_record_child_type(
                 checked_semantic,
                 checked.value_type().standard_value_type(),
-                durable
-                    .type_descriptor()
-                    .expect("candidate record fields have descriptors"),
+                durable.descriptor(),
                 enum_types,
                 standard,
             )?;
@@ -5452,7 +5448,7 @@ impl<'a> CandidateBuilder<'a> {
                         reason: "record value field reordering is not supported",
                     });
                 }
-                if candidate_field.type_descriptor() != active_field.type_descriptor() {
+                if candidate_field.descriptor() != active_field.descriptor() {
                     return Err(PrepareError::InvalidCheckedBundle {
                         reason: "record value field type change is not supported",
                     });
