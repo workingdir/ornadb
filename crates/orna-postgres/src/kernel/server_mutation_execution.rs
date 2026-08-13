@@ -24,7 +24,7 @@ use orna_core::{
     types::ResolvedType,
     value::{
         EnumValue, FunctionArgument, RecordValue, RecordValueError, ResultColumn, ResultRow,
-        ResultRows, ResultRowsError, RuntimeValue,
+        ResultRows, ResultRowsError, RuntimeType, RuntimeValue,
     },
 };
 use orna_protocol::{ValueCodecError, encode_active_value};
@@ -2676,13 +2676,19 @@ fn validate_arguments_with_context(
                 "function arguments cannot be NULL",
             ));
         }
-        if !runtime_type_is_active(context, catalogue, value.resolved_type()) {
+        let RuntimeType::Flat(value_type) = value.runtime_type() else {
+            return Err(argument_error(
+                Some(parameter_id),
+                "the argument type is unsupported or its referenced object type is inactive",
+            ));
+        };
+        if !runtime_type_is_active(context, catalogue, value_type) {
             return Err(argument_error(
                 Some(parameter_id),
                 "the argument type is unsupported or its referenced object type is inactive",
             ));
         }
-        if !runtime_types_match(context, value.resolved_type(), parameter.resolved_type()) {
+        if !runtime_types_match(context, value_type, parameter.resolved_type()) {
             return Err(argument_error(
                 Some(parameter_id),
                 "the argument type does not match the declared parameter type",
