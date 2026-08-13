@@ -487,18 +487,291 @@ The target position order for the `sys.invoke` carrier is:
 5. `STREAM<sys.invoke.Event>` as a function result shape; and
 6. one raw call to the stable `sys.invoke` identity.
 
-`SET` remains in the descriptor and source grammar but needs a separately
-accepted canonical ordering and duplicate rule before it gains a runtime
-value. `STREAM` is an execution result shape. It is never a materialised
-`RuntimeValue`, record field, collection element, map key, map value, option
-child, function argument, object field, or durable value.
+Step 7 opens core construction only for `OPTION`, `LIST`, and `MAP` runtime
+values. It does not open a catalogue, compiler, function signature, record
+field, function result, durable, executor, or protocol position. It does not
+open `ORV1` through `ORV4` or `ORF1` through `ORF4`. Catalogue hash version 2
+and all existing canonical bytes remain unchanged. Step 8 starts the separate,
+documentation-first `ORV5` and `ORF5` decision.
 
-The first `OPTION`, `LIST`, and `MAP` runtime boundary must define exact value
-invariants and a new codec version before it is executable. `MAP` must define
-canonical key ordering and duplicate detection. A later decision must also
-define the sealed `sys.invoke` system catalogue identities, the open
-`sys.invoke.Value` carrier, and exact request and event descriptors. This ADR
-does not invent those bytes early.
+`SET` still needs its own ordering and duplicate decision. `STREAM` remains an
+execution result shape and cannot be a materialised runtime value, collection
+child, map key, map value, option child, function argument, object field, or
+durable value. A later decision must define the sealed `sys.invoke` system
+catalogue identities, the open `sys.invoke.Value` carrier, and exact request
+and event descriptors. This ADR does not invent those bytes early.
+
+### Step 7: canonical constructed runtime values
+
+Step 7 defines the checked, immutable core runtime representation. It does not
+define an encoder, decoder, wire marker, catalogue hash tag, source literal,
+or an accepted position. A checked constructed value is useful only to core
+callers that already hold an ActiveDatabaseRevision; it cannot by itself cross
+an existing boundary.
+
+RuntimeValue gains one public variant:
+
+~~~rust
+RuntimeValue::Constructed(ConstructedValue)
+~~~
+
+ConstructedValue derives Clone, Debug, and PartialEq. It is public, but its
+state is private. Its state is equivalent to one complete TypeDescriptor, one
+private constructed kind, and one cached node count. The private kind has
+exactly these shapes:
+
+~~~text
+Option(None | Some(Box<RuntimeValue>))
+List(Vec<RuntimeValue>)
+Map(Vec<(RuntimeValue, RuntimeValue)>)  // canonical key order
+~~~
+
+The public API exposes the complete descriptor, immutable contents, and a
+borrowed ConstructedValueKind view. The borrowed view contains an optional
+borrowed option child, a borrowed list slice, or borrowed map pairs. It does
+not expose a mutable vector, a mutable pair, the cached count, or an unchecked
+constructor. Checked option, list, and map constructors live on RuntimeValue
+only. Each takes one ActiveDatabaseRevision reference, one complete
+TypeDescriptor, and its values. They retain the exact supplied descriptor for
+an empty option, list, or map. Callers cannot forge a constructed value or
+mutate it after construction. The public declarations are:
+
+~~~rust
+#[derive(Clone, Debug, PartialEq)]
+pub struct ConstructedValue {
+    // private descriptor, kind, and cached node count
+}
+
+impl ConstructedValue {
+    pub fn descriptor(&self) -> &TypeDescriptor;
+
+    pub fn kind(&self) -> ConstructedValueKind<'_>;
+}
+
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ConstructedValueKind<'a> {
+    Option(Option<&'a RuntimeValue>),
+    List(&'a [RuntimeValue]),
+    Map(&'a [(RuntimeValue, RuntimeValue)]),
+}
+~~~
+
+The public type query is a borrowed, non-exhaustive view:
+
+~~~rust
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuntimeType<'a> {
+    Flat(ResolvedType),
+    Constructed(&'a TypeDescriptor),
+}
+
+impl RuntimeValue {
+    pub fn runtime_type(&self) -> RuntimeType<'_>;
+
+    pub fn option(
+        active: &ActiveDatabaseRevision,
+        descriptor: TypeDescriptor,
+        value: Option<RuntimeValue>,
+    ) -> Result<Self, CollectionValueError>;
+
+    pub fn list(
+        active: &ActiveDatabaseRevision,
+        descriptor: TypeDescriptor,
+        values: Vec<RuntimeValue>,
+    ) -> Result<Self, CollectionValueError>;
+
+    pub fn map(
+        active: &ActiveDatabaseRevision,
+        descriptor: TypeDescriptor,
+        entries: Vec<(RuntimeValue, RuntimeValue)>,
+    ) -> Result<Self, CollectionValueError>;
+}
+~~~
+
+The old resolved_type method remains only during the migration bridge. It is
+removed after every caller uses runtime_type. A constructed descriptor is never
+flattened to make an old caller accept it.
+
+#### Admitted descriptors
+
+The checked constructors first preflight the complete descriptor against the
+current active application catalogue and the pinned verified standard snapshot.
+They walk it in preorder, from left to right, and walk a map key before its
+value. Any Named identity that is present in both catalogues returns
+AmbiguousNamedType before either definition is classified. A sole unsupported
+or wrong-category definition returns UnsupportedDescriptor. There is no
+revision-provenance acceptance rule.
+
+The only admitted leaves are:
+
+* an active application enum;
+* an active immutable application record;
+* a pinned-standard enum;
+* one of the six already executable pinned-standard primitives: Boolean,
+  Integer, BigInt, Float, CharacterLargeObject (RuntimeValue::Text), or
+  BinaryLargeObject (RuntimeValue::Bytes); and
+* an active application object through Reference.
+
+Application primitive and opaque values, pinned-standard opaque values,
+standard records, named objects, unsupported standard primitives, absent
+identities, and wrong categories remain closed. SET and STREAM remain closed
+at every depth. A pinned-standard opaque value remains closed because ADR 0034
+requires an OpaqueCodecRegistry, and an ActiveDatabaseRevision alone does not
+contain that registry.
+
+OPTION, LIST, and MAP may recurse through an option child, list element, or
+map value. A map key must be one admitted flat Named or Reference leaf. No
+constructed map key is admitted.
+
+One public immutable path type identifies both descriptor and runtime-value
+locations. Its empty sequence identifies the root:
+
+~~~rust
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CollectionValuePath(/* immutable sequence */);
+
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CollectionValuePathSegment {
+    OptionChild,
+    ListElement(usize),
+    MapKey(usize),
+    MapValue(usize),
+    RecordField(FieldId),
+    ListChild,
+    MapKeyChild,
+    MapValueChild,
+}
+
+impl CollectionValuePath {
+    pub fn segments(&self) -> &[CollectionValuePathSegment];
+}
+
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CollectionKind {
+    Option,
+    List,
+    Map,
+}
+~~~
+
+ListChild, MapKeyChild, and MapValueChild identify descriptor children, which
+have no runtime entry index. All runtime value paths use ListElement, MapKey,
+and MapValue. This keeps one public path representation without inventing a
+synthetic input index for a descriptor.
+
+The public CollectionKind is non-exhaustive, derives Clone, Copy, Debug, Eq,
+and PartialEq, and has Option, List, and Map. The public CollectionValueError
+is non-exhaustive, derives Clone, Debug, Eq, and PartialEq, implements Error,
+and has no source. Its variants and fixed displays are:
+
+| Variant | Display |
+| --- | --- |
+| WrongConstructor { expected: CollectionKind, descriptor: TypeDescriptor } | collection descriptor has the wrong outer constructor |
+| UnsupportedDescriptor { path: CollectionValuePath, descriptor: TypeDescriptor } | collection descriptor is not supported |
+| AmbiguousNamedType { path: CollectionValuePath, type_id: TypeId } | collection descriptor type is present in both application and standard catalogues |
+| TooManyNodes { maximum: usize } | runtime value has too many nodes |
+| NullValueNotAccepted { path: CollectionValuePath } | collection values cannot contain legacy typed NULL |
+| ValueTypeMismatch { path: CollectionValuePath } | collection value has a type mismatch |
+| InactiveValue { path: CollectionValuePath } | collection value is not active |
+| DuplicateMapKey { first: usize, duplicate: usize } | map contains a duplicate key |
+
+#### Value validity and equality
+
+Legacy RuntimeValue::Null is forbidden at every constructed depth. Option(None)
+is the only absence representation. Some(Null), a null list element, and a null
+map key or value fail. A list preserves its input order and duplicates.
+
+The semantic revalidation uses the supplied current active revision. It first
+requires the exact descriptor. For a reference, it then requires the reference
+target to be active. For an enum, it requires the label to be active. For a
+record, it uses the existing record validation after that validation is
+refactored into one result-returning shared validator. The validator reports the
+first declaration-order RecordField path. Boolean callers discard that detail.
+It requires the exact record TypeId, current declared FieldId order and field
+types, and recursive validity of every field value. No parallel traversal or
+second record graph policy exists. A constructed value made under an earlier
+revision is accepted when these current facts are semantically identical. It
+carries no revision provenance.
+
+Constructed equality is exact descriptor plus immutable contents. Map equality
+uses the retained canonical sequence, so it is independent of accepted input
+order. The cached node count does not contribute to equality.
+
+MAX_RUNTIME_VALUE_NODES is one public constant:
+
+~~~rust
+pub const MAX_RUNTIME_VALUE_NODES: usize = 65_536;
+~~~
+
+Every RuntimeValue is one node. An option, list, map, or record adds its own
+runtime node and every descendant node. Option(None) is one node. Constructors
+use checked addition. Before visiting children, LIST checks the lower bound
+`1 + len`, and MAP checks the lower bound `1 + 2 * len`, both with checked
+arithmetic. Counting stops and returns TooManyNodes immediately when the next
+node would be 65,537; it does not visit later siblings or entries. A value with
+exactly the maximum is accepted; a value with one more node fails with
+TooManyNodes { maximum: 65536 }. There is no entry-count limit. Descriptor
+construction depth 32 and the active record graph limit of 32 edges bound
+recursion; Step 7 adds no second depth limit.
+
+#### Canonical map order
+
+The map comparator is descriptor-directed only. It has no cross-category
+comparison. It compares values of the map key's fixed admitted flat descriptor
+as follows:
+
+* Boolean: false before true.
+* Signed numeric primitives: signed numeric order.
+* Float: finite numeric order, with positive and negative zero equal. NaN and
+  infinities already fail value validation.
+* CharacterLargeObject (RuntimeValue::Text): UTF-8 byte lexicographic order.
+* BinaryLargeObject (RuntimeValue::Bytes): unsigned-byte lexicographic order.
+* Reference: ObjectId bytes. The target descriptor is fixed.
+* Enum: label UTF-8 byte order. The type descriptor is fixed.
+* Record: declared field order, recursively using the current field
+  descriptors.
+
+For a map constructor, validation checks each input entry's key and then value
+in input order. After every entry passes, the constructor decorates entries
+with their original input index and sorts once by canonical key and then that
+index. It selects the first adjacent equal pair in that total order. Its
+DuplicateMapKey first and duplicate fields are the lower and higher original
+indexes of that selected pair. The rule also defines a deterministic result for
+three or more equal keys. Equal keys never enter the retained map.
+
+#### Validation order and closed positions
+
+Each checked constructor applies this fixed precedence and returns no partial
+value:
+
+1. It checks the outer descriptor constructor.
+2. It preflights the complete descriptor.
+3. It counts runtime nodes in input order, including the checked node limit,
+   without semantic validation. It stops at the first node that would exceed
+   the limit and does not visit later siblings or entries.
+4. It semantically validates option and list contents in input order, map keys
+   then values in input order, and record fields in declaration order. At each
+   location it reports legacy null before type mismatch and type mismatch before
+   inactive value.
+5. A map sorts only after step 4, then detects the first adjacent duplicate.
+
+Function arguments, SERVER result rows, and record field values remain closed
+to constructed values. Their typed errors are:
+
+| Error variant | Display |
+| --- | --- |
+| FunctionArgumentError::ConstructedValueNotAccepted { parameter: ParameterId, descriptor: TypeDescriptor } | constructed function arguments are not accepted |
+| ResultRowsError::ConstructedValueNotAccepted { row: usize, column: usize, descriptor: TypeDescriptor } | constructed SERVER result values are not accepted |
+| RecordValueError::ConstructedValueNotAccepted { record_type: TypeId, field: FieldId, descriptor: TypeDescriptor } | constructed record field values are not accepted |
+
+ORV1 through ORV4 and ORF1 through ORF4 retain their existing UnsupportedValue
+rejection. No executor, compiler, signature, catalogue, durable, or result
+position gains an acceptance path in Step 7.
+
 
 ## Required proof
 
@@ -523,6 +796,25 @@ The syntax slice must additionally prove:
 * no existing semantic or execution position becomes accepted through parsing
   alone.
 
+The Step-7 proof is public-behaviour proof. It does not depend on private
+helpers, cached counts, or implementation constants except through their public
+results:
+
+| Behaviour | Required proof |
+| --- | --- |
+| Empty and nested values | Empty option, list, and map retain their exact descriptor; nested values at descriptor and record depth 32 construct without a panic. |
+| List semantics | Lists retain input order and duplicate elements. |
+| Map semantics | Equivalent input permutations retain one canonical order; duplicate reports retain original indexes, including the selected pair from three or more equal keys; positive and negative zero collide. |
+| Map key families | Boolean, every admitted signed numeric primitive, finite float, CharacterLargeObject, BinaryLargeObject, Reference, enum, and record keys order and compare as specified. |
+| Closed descriptors | Every unsupported leaf and map key, SET, STREAM, and opaque descriptor reject at the correct path. |
+| Catalogue ambiguity | Any Named identity present in both the active application and pinned-standard catalogues rejects before either category is selected, including when one or both categories would otherwise be unsupported. |
+| Node boundary | A value at MAX_RUNTIME_VALUE_NODES is accepted and the next node rejects; LIST and MAP lower bounds use checked arithmetic, and counting does not visit later siblings or entries after the first excess node. |
+| Paths and precedence | Every public path segment is observable; outer-constructor, descriptor, node, null, mismatch, inactive, and duplicate precedence is exact. |
+| Revision revalidation | A stale changed revision rejects; a later revision with semantically identical current facts accepts. |
+| Equality and safety | Exact descriptor and content equality holds, map input order does not affect equality, and bounded arbitrary public input never panics. |
+| Closed positions | Real FunctionArgumentError, ResultRowsError, and RecordValueError reject constructed values, and ORV1 through ORV4 plus ORF1 through ORF4 retain their closed behaviour. |
+
+
 Normal format, strict Clippy, rustdoc, diff, similarity, workspace, focused
 syntax, core, canonical-hash, protocol, and live PostgreSQL gates remain
 required as each later position opens.
@@ -536,9 +828,30 @@ required as each later position opens.
 5. Migrate record field definitions and catalogue hash evidence to descriptors
    while retaining all earlier golden bytes when no constructor is present.
 6. Admit nested immutable record values against one active revision.
-7. Define and implement canonical `OPTION`, `LIST`, and `MAP` runtime values.
-8. Amend the value and frame codec with the exact new version bytes for
-   `OPTION`, `LIST`, and `MAP`; nested records already use ORV3 and ORV4.
+7. Implement canonical `OPTION`, `LIST`, and `MAP` core constructibility in
+   this bounded, signed, always-green sequence:
+   1. `docs(types): define constructed runtime values` changes this decision
+      only.
+   2. `refactor(values): add borrowed runtime type bridge` changes
+      `crates/orna-core/src/value.rs` only. It adds `RuntimeType` and retains
+      the old `resolved_type` method.
+   3. `refactor(values): migrate runtime type callers` changes exactly
+      `crates/orna-protocol/src/lib.rs`,
+      `crates/orna-postgres/src/kernel/server_execution.rs`, and
+      `crates/orna-postgres/src/kernel/server_mutation_execution.rs` to use
+      the borrowed type view.
+   4. `feat(values): construct canonical collection values` changes
+      `crates/orna-core/src/value.rs` only. It adds the checked values and
+      removes `resolved_type`.
+   5. `test(protocol): keep legacy collection codecs closed` changes only
+      `crates/orna-protocol/src/lib.rs`. It proves the public ORV1 through
+      ORV4 and ORF1 through ORF4 encoders retain their constructed-value
+      rejection.
+   No step-7 commit opens a position or changes a canonical byte.
+8. Begin the separate protocol step with `docs(protocol): define ORV5 and
+   ORF5 constructed values`, then implement only that accepted protocol design.
+   ORV5 and ORF5 are not implicit in Step 7; nested records continue to use
+   their existing ORV3 and ORV4 envelopes.
 9. Define and install the sealed Ring-1 invocation type family.
 10. Carry one complete canonical request to the stable `sys.invoke` function.
 11. Add `STREAM<sys.invoke.Event>` and the first canonical-result event path.
