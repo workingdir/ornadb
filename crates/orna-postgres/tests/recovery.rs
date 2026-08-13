@@ -18,21 +18,23 @@ use orna_core::{
         CanonicalHashError, artifact_payload_digest, catalogue_digest,
         catalogue_digest_with_context, function_declaration_digest, function_semantic_digest,
         function_semantic_digest_with_version, source_bundle_digest, source_revision_record_digest,
-        source_unit_content_digest,
+        source_unit_content_digest, verify_standard_library_snapshot,
     },
     catalogue::{
-        CatalogueSnapshot, FieldDefinition, FunctionDefinition, FunctionDomain, FunctionReturn,
-        FunctionReturnColumnDefinition, FunctionSecurity, FunctionTransaction, FunctionVolatility,
-        ObjectTypeDefinition, OnDeleteAction, ParameterDefinition, QualifiedSemanticName,
-        SchemaDefinition, TypeLookupName, ValueTypeMutability, ValueTypePersistence,
+        CatalogueSnapshot, EnumTypeDefinition, FieldDefinition, FunctionDefinition, FunctionDomain,
+        FunctionReturn, FunctionReturnColumnDefinition, FunctionSecurity, FunctionTransaction,
+        FunctionVolatility, ObjectTypeDefinition, OnDeleteAction, ParameterDefinition,
+        QualifiedSemanticName, SchemaDefinition, TypeBinding, TypeLookupName, ValueTypeMutability,
+        ValueTypePersistence,
     },
     revision::{
         CatalogueHashContext, DefinitionIdentity, DefinitionOrigin, DefinitionReference,
         DefinitionReferenceKind, DefinitionReferenceTarget, DurableCatalogueRevisionRole,
         EMPTY_APPLICATION_CATALOGUE_REVISION_ID, ExecutableArtifact, ExecutableArtifactKind,
         ExpressionArtifact, FunctionRevisionRecord, FunctionSemanticHashVersion,
-        RevisionInvariantError, RevisionPair, SourceOrigin, StoredSourceUnit,
-        VerifiedStandardLibrarySnapshot,
+        RevisionInvariantError, RevisionPair, Sha256Digest, SourceOrigin,
+        StandardLibraryDigestVersion, StandardLibrarySnapshot, StoredSourceRevision,
+        StoredSourceUnit, VerifiedStandardLibrarySnapshot,
     },
     security::{
         ExecuteDecision, ExecuteDenial, ExecuteGrant, InvocationTarget,
@@ -48,6 +50,10 @@ use orna_postgres::{PostgresKernel, PostgresKernelError};
 use support::{TestDatabase, TestResult, failure, with_test_database};
 
 const SCHEMA_SOURCE: &str = "schema café;\n";
+const FROZEN_STANDARD_ENUM_DIGEST: [u8; 32] = [
+    0xac, 0x5e, 0x03, 0x56, 0xb6, 0xb2, 0x5d, 0xae, 0x93, 0x07, 0x25, 0x3a, 0xba, 0x41, 0x57, 0x26,
+    0xd2, 0xa3, 0xc2, 0xb4, 0xa8, 0xe9, 0xe2, 0x9a, 0x71, 0xad, 0xdf, 0xd4, 0xc8, 0xa8, 0x0f, 0xd5,
+];
 const STANDARD_CLIENT_SCHEMA_SOURCE: &str = "CREATE SCHEMA app;\n";
 const STANDARD_CLIENT_TRUE_SOURCE: &str =
     "CREATE SCHEMA app;\nCREATE CLIENT FUNCTION app.enabled() RETURNS BOOLEAN RETURN TRUE;\n";
@@ -1452,6 +1458,153 @@ async fn recovers_a_complete_raw_v2_standard_revision() -> TestResult<()> {
                 == 12,
             "version-2 raw fixture did not retain all twelve value fields",
         )
+    })
+    .await
+}
+
+#[test]
+fn nonempty_standard_enum_fixture_matches_its_frozen_digest() -> TestResult<()> {
+    let standard = verified_standard_enum_fixture()?;
+
+    require(
+        standard.digest().to_bytes() == FROZEN_STANDARD_ENUM_DIGEST,
+        "verified standard enum fixture changed its frozen digest",
+    )?;
+    require(
+        standard.catalogue().enum_types().len() == 1
+            && standard.catalogue().type_bindings().len() == 1,
+        "verified standard enum fixture changed its exact definition inventory",
+    )
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn recovers_a_nonempty_standard_enum_and_binding_twice() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = kernel(&database)?;
+        kernel.bootstrap().await?;
+        let initial = kernel.recover().await?;
+        let expected = verified_standard_enum_fixture()?;
+        insert_standard_snapshot(&database, &expected).await?;
+
+        let context = CatalogueHashContext::version_two(expected.clone());
+        let content_hash = catalogue_digest_with_context(
+            &context,
+            initial.catalogue(),
+            initial.function_revisions(),
+            initial.expressions(),
+            initial.origins(),
+            initial.references(),
+        )?;
+        let session = database.open().await?;
+        let operation_result: TestResult<()> = async {
+            session.client().batch_execute("BEGIN").await?;
+            let updated = session
+                .client()
+                .execute(
+                    "UPDATE _orna_kernel.catalogue_revisions
+                     SET canonical_hash_version = 2,
+                         standard_library_revision_id = $2,
+                         content_hash = $3
+                     WHERE id = $1",
+                    &[
+                        &initial.pair().catalogue().to_bytes().to_vec(),
+                        &expected.revision().to_bytes().to_vec(),
+                        &content_hash.to_bytes().to_vec(),
+                    ],
+                )
+                .await?;
+            require(
+                updated == 1,
+                "standard enum fixture did not update one catalogue",
+            )?;
+            session.client().batch_execute("COMMIT").await?;
+            Ok(())
+        }
+        .await;
+        finish_session(
+            operation_result,
+            session.shutdown().await,
+            "standard enum catalogue pin",
+        )?;
+
+        let recovered = kernel.recover().await?;
+        let actual = recovered
+            .catalogue_hash_context()
+            .standard()
+            .ok_or_else(|| failure("standard enum recovery returned no pinned standard"))?;
+        require_standard_snapshot(actual, &expected)?;
+        let expected_enum = expected
+            .catalogue()
+            .enum_types()
+            .first()
+            .ok_or_else(|| failure("standard enum fixture has no enum"))?;
+        let expected_binding = expected
+            .catalogue()
+            .type_bindings()
+            .first()
+            .ok_or_else(|| failure("standard enum fixture has no binding"))?;
+        let expected_origin =
+            standard_origin(&expected, DefinitionIdentity::ValueType(expected_enum.id()))?;
+        let session = database.open().await?;
+        let operation_result: TestResult<()> = async {
+            let enum_row = session
+                .client()
+                .query_one(
+                    "SELECT type_id, schema_id, name_parts, labels,
+                            source_unit_id, source_start, source_end
+                     FROM _orna_kernel.standard_catalogue_enum_types
+                     WHERE standard_library_revision_id = $1",
+                    &[&expected.revision().to_bytes().to_vec()],
+                )
+                .await?;
+            let binding_row = session
+                .client()
+                .query_one(
+                    "SELECT type_binding_id, kind, name_parts, target_type_kind,
+                            target_type_id, target_enum_type_id
+                     FROM _orna_kernel.standard_catalogue_type_bindings
+                     WHERE standard_library_revision_id = $1",
+                    &[&expected.revision().to_bytes().to_vec()],
+                )
+                .await?;
+            require(
+                enum_row.try_get::<_, Vec<u8>>(0)? == expected_enum.id().to_bytes().to_vec()
+                    && enum_row.try_get::<_, Vec<u8>>(1)?
+                        == SchemaId::from_bytes([0xc4; 16]).to_bytes().to_vec()
+                    && enum_row.try_get::<_, Vec<String>>(2)? == expected_enum.name().parts()
+                    && enum_row.try_get::<_, Vec<String>>(3)? == expected_enum.labels()
+                    && enum_row.try_get::<_, Vec<u8>>(4)?
+                        == expected_origin.source_unit().to_bytes().to_vec()
+                    && enum_row.try_get::<_, i64>(5)? == i64::from(expected_origin.byte_start())
+                    && enum_row.try_get::<_, i64>(6)? == i64::from(expected_origin.byte_end()),
+                "standard enum recovery fixture did not retain its exact durable row",
+            )?;
+            require(
+                binding_row.try_get::<_, Vec<u8>>(0)? == expected_binding.id().to_bytes().to_vec()
+                    && binding_row.try_get::<_, String>(1)? == "qualified"
+                    && binding_row.try_get::<_, Vec<String>>(2)?
+                        == ["std".to_owned(), "mode_alias".to_owned()]
+                    && binding_row.try_get::<_, String>(3)? == "enum"
+                    && binding_row.try_get::<_, Option<Vec<u8>>>(4)?.is_none()
+                    && binding_row.try_get::<_, Option<Vec<u8>>>(5)?
+                        == Some(expected_enum.id().to_bytes().to_vec()),
+                "standard enum recovery fixture did not retain its exact enum binding tuple",
+            )
+        }
+        .await;
+        finish_session(
+            operation_result,
+            session.shutdown().await,
+            "standard enum durable rows",
+        )?;
+
+        let repeated = kernel.recover().await?;
+        let repeated_standard = repeated
+            .catalogue_hash_context()
+            .standard()
+            .ok_or_else(|| failure("repeated standard enum recovery returned no pin"))?;
+        require_standard_snapshot(repeated_standard, &expected)
     })
     .await
 }
@@ -3053,6 +3206,72 @@ struct RawV2Fixture {
     revisions: Vec<FunctionRevisionRecord>,
 }
 
+fn verified_standard_enum_fixture() -> TestResult<VerifiedStandardLibrarySnapshot> {
+    let unit = StoredSourceUnit::new(
+        SourceUnitId::from_bytes([0xc1; 16]),
+        0,
+        "std/enum.orna",
+        "standard enum fixture",
+        source_unit_content_digest("standard enum fixture")?,
+    )?;
+    let bundle = SourceBundleId::from_bytes([0xc2; 16]);
+    let bundle_hash = source_bundle_digest(std::slice::from_ref(&unit))?;
+    let source = StoredSourceRevision::new(
+        bundle,
+        SourceRevisionId::from_bytes([0xc3; 16]),
+        None,
+        vec![unit],
+        bundle_hash,
+        source_revision_record_digest(bundle, None, bundle_hash)?,
+    )?;
+    let schema = SchemaDefinition::new(
+        SchemaId::from_bytes([0xc4; 16]),
+        QualifiedSemanticName::new(["std"])?,
+    );
+    let enum_type = EnumTypeDefinition::new(
+        TypeId::from_bytes([0xc5; 16]),
+        QualifiedSemanticName::new(["std", "mode"])?,
+        vec!["one".to_owned(), "two".to_owned()],
+    );
+    let binding = TypeBinding::qualified(
+        QualifiedSemanticName::new(["std", "mode_alias"])?,
+        enum_type.id(),
+    )?;
+    let source_unit = SourceUnitId::from_bytes([0xc1; 16]);
+    let origins = vec![
+        DefinitionOrigin::new(
+            DefinitionIdentity::Schema(schema.id()),
+            SourceOrigin::new(source_unit, 0, 1)?,
+        ),
+        DefinitionOrigin::new(
+            DefinitionIdentity::ValueType(enum_type.id()),
+            SourceOrigin::new(source_unit, 1, 2)?,
+        ),
+        DefinitionOrigin::new(
+            DefinitionIdentity::TypeBinding(binding.id()),
+            SourceOrigin::new(source_unit, 2, 3)?,
+        ),
+    ];
+    let catalogue = CatalogueSnapshot::new_with_enum_types(
+        CatalogueRevisionId::from_bytes([0xc6; 16]),
+        vec![schema],
+        vec![],
+        vec![],
+        vec![enum_type],
+        vec![binding],
+    )?;
+    let snapshot = StandardLibrarySnapshot::new(
+        orna_core::StandardLibraryRevisionId::from_bytes([0xc7; 16]),
+        StandardLibraryDigestVersion::Version1,
+        source,
+        "orna.language/1",
+        catalogue,
+        origins,
+        Sha256Digest::from_bytes(FROZEN_STANDARD_ENUM_DIGEST),
+    )?;
+    Ok(verify_standard_library_snapshot(snapshot)?)
+}
+
 fn raw_v2_value_type_by_slot(
     standard: &VerifiedStandardLibrarySnapshot,
     slot: &str,
@@ -3905,9 +4124,27 @@ async fn insert_standard_snapshot(
             )
             .await?;
         }
+        for enum_type in standard.catalogue().enum_types() {
+            let origin = standard_origin(standard, DefinitionIdentity::ValueType(enum_type.id()))?;
+            insert_standard_enum_type(
+                session.client(),
+                standard.revision(),
+                standard.catalogue(),
+                enum_type,
+                origin,
+            )
+            .await?;
+        }
         for binding in standard.catalogue().type_bindings() {
             let origin = standard_origin(standard, DefinitionIdentity::TypeBinding(binding.id()))?;
-            insert_standard_binding(session.client(), standard.revision(), binding, origin).await?;
+            insert_standard_binding(
+                session.client(),
+                standard.revision(),
+                standard.catalogue(),
+                binding,
+                origin,
+            )
+            .await?;
         }
         session.client().batch_execute("COMMIT").await?;
         Ok(())
@@ -4016,6 +4253,7 @@ async fn insert_standard_value_type(
 async fn insert_standard_binding(
     client: &tokio_postgres::Client,
     revision: orna_core::StandardLibraryRevisionId,
+    catalogue: &CatalogueSnapshot,
     binding: &orna_core::catalogue::TypeBinding,
     origin: SourceOrigin,
 ) -> TestResult<()> {
@@ -4028,18 +4266,65 @@ async fn insert_standard_binding(
             ));
         }
     };
+    let (target_kind, value_target, enum_target) =
+        if catalogue.value_type_by_id(binding.target()).is_some() {
+            ("value", Some(binding.target().to_bytes().to_vec()), None)
+        } else if catalogue.enum_type_by_id(binding.target()).is_some() {
+            ("enum", None, Some(binding.target().to_bytes().to_vec()))
+        } else {
+            return Err(failure(
+                "standard fixture binding target is neither a value nor enum",
+            ));
+        };
     client
         .execute(
             "INSERT INTO _orna_kernel.standard_catalogue_type_bindings
                 (standard_library_revision_id, type_binding_id, kind, name_parts,
-                 target_type_id, source_unit_id, source_start, source_end)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                 target_type_kind, target_type_id, target_enum_type_id,
+                 source_unit_id, source_start, source_end)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
             &[
                 &revision.to_bytes().to_vec(),
                 &binding.id().to_bytes().to_vec(),
                 &kind,
                 &name_parts,
-                &binding.target().to_bytes().to_vec(),
+                &target_kind,
+                &value_target,
+                &enum_target,
+                &origin.source_unit().to_bytes().to_vec(),
+                &i64::from(origin.byte_start()),
+                &i64::from(origin.byte_end()),
+            ],
+        )
+        .await?;
+    Ok(())
+}
+
+async fn insert_standard_enum_type(
+    client: &tokio_postgres::Client,
+    revision: orna_core::StandardLibraryRevisionId,
+    catalogue: &CatalogueSnapshot,
+    enum_type: &EnumTypeDefinition,
+    origin: SourceOrigin,
+) -> TestResult<()> {
+    let schema = catalogue
+        .schemas()
+        .iter()
+        .filter(|schema| enum_type.name().parts().starts_with(schema.name().parts()))
+        .max_by_key(|schema| schema.name().parts().len())
+        .ok_or_else(|| failure("standard enum has no owning schema"))?;
+    client
+        .execute(
+            "INSERT INTO _orna_kernel.standard_catalogue_enum_types
+                (standard_library_revision_id, type_id, schema_id, name_parts, labels,
+                 source_unit_id, source_start, source_end)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+            &[
+                &revision.to_bytes().to_vec(),
+                &enum_type.id().to_bytes().to_vec(),
+                &schema.id().to_bytes().to_vec(),
+                &enum_type.name().parts(),
+                &enum_type.labels(),
                 &origin.source_unit().to_bytes().to_vec(),
                 &i64::from(origin.byte_start()),
                 &i64::from(origin.byte_end()),
@@ -4061,6 +4346,10 @@ fn require_standard_snapshot(
     let mut expected_value_types = expected.catalogue().value_types().to_vec();
     actual_value_types.sort_by_key(|value_type| value_type.id().to_bytes());
     expected_value_types.sort_by_key(|value_type| value_type.id().to_bytes());
+    let mut actual_enum_types = actual.catalogue().enum_types().to_vec();
+    let mut expected_enum_types = expected.catalogue().enum_types().to_vec();
+    actual_enum_types.sort_by_key(|enum_type| enum_type.id().to_bytes());
+    expected_enum_types.sort_by_key(|enum_type| enum_type.id().to_bytes());
     let mut actual_bindings = actual.catalogue().type_bindings().to_vec();
     let mut expected_bindings = expected.catalogue().type_bindings().to_vec();
     actual_bindings.sort_by_key(|binding| binding.id().to_bytes());
@@ -4087,6 +4376,7 @@ fn require_standard_snapshot(
             && actual_schemas == expected_schemas
             && actual.catalogue().object_types().is_empty()
             && actual_value_types == expected_value_types
+            && actual_enum_types == expected_enum_types
             && actual_bindings == expected_bindings
             && actual.catalogue().functions().is_empty()
             && actual_origins == expected_origins,
