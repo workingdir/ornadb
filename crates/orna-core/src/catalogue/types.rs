@@ -141,6 +141,39 @@ impl RecordValueFieldDefinition {
         Ok(Self::new(id, name, ordinal, resolved_type))
     }
 
+    /// Creates a record field from its canonical flat type descriptor.
+    ///
+    /// Constructed descriptors remain closed until their durable hash and
+    /// runtime contracts are accepted. Catalogue validation still decides
+    /// whether the identified flat leaf is admitted in a record field.
+    pub fn try_new_descriptor(
+        id: FieldId,
+        name: impl Into<String>,
+        ordinal: u32,
+        descriptor: TypeDescriptor,
+    ) -> Result<Self, RecordValueFieldConstructionError> {
+        let resolved_type = match descriptor.kind() {
+            crate::types::TypeDescriptorKind::Named(type_id) => ResolvedType::named(type_id),
+            crate::types::TypeDescriptorKind::Reference(target) => ResolvedType::reference(target),
+            crate::types::TypeDescriptorKind::List(_)
+            | crate::types::TypeDescriptorKind::Set(_)
+            | crate::types::TypeDescriptorKind::Map { .. }
+            | crate::types::TypeDescriptorKind::Option(_)
+            | crate::types::TypeDescriptorKind::Stream(_) => {
+                return Err(
+                    RecordValueFieldConstructionError::ConstructedTypeNotAccepted { descriptor },
+                );
+            }
+        };
+        Ok(Self {
+            id,
+            name: name.into(),
+            ordinal,
+            resolved_type,
+            descriptor: Some(descriptor),
+        })
+    }
+
     /// Returns this field's stable identity.
     pub const fn id(&self) -> FieldId {
         self.id
@@ -181,6 +214,11 @@ pub enum RecordValueFieldConstructionError {
         /// The rejected compatibility representation.
         scalar: crate::types::StandardScalar,
     },
+    /// A constructed descriptor is not admitted in record fields yet.
+    ConstructedTypeNotAccepted {
+        /// The rejected descriptor.
+        descriptor: TypeDescriptor,
+    },
 }
 
 impl fmt::Display for RecordValueFieldConstructionError {
@@ -188,6 +226,9 @@ impl fmt::Display for RecordValueFieldConstructionError {
         match self {
             Self::LegacyScalar { .. } => {
                 formatter.write_str("legacy scalar cannot form a record field descriptor")
+            }
+            Self::ConstructedTypeNotAccepted { .. } => {
+                formatter.write_str("constructed record field descriptors are not accepted")
             }
         }
     }
@@ -778,6 +819,36 @@ mod tests {
             ResolvedType::scalar(StandardScalar::Boolean),
         );
         assert_eq!(legacy.type_descriptor(), None);
+
+        let constructor_cases = [
+            TypeDescriptor::list(TypeDescriptor::named(type_id)).unwrap(),
+            TypeDescriptor::set(TypeDescriptor::named(type_id)).unwrap(),
+            TypeDescriptor::map(
+                TypeDescriptor::named(type_id),
+                TypeDescriptor::named(type_id),
+            )
+            .unwrap(),
+            TypeDescriptor::option(TypeDescriptor::named(type_id)).unwrap(),
+            TypeDescriptor::stream(TypeDescriptor::named(type_id)).unwrap(),
+        ];
+        for descriptor in constructor_cases {
+            let error = RecordValueFieldDefinition::try_new_descriptor(
+                field,
+                "value",
+                0,
+                descriptor.clone(),
+            )
+            .unwrap_err();
+            assert_eq!(
+                error,
+                RecordValueFieldConstructionError::ConstructedTypeNotAccepted { descriptor }
+            );
+            assert_eq!(
+                error.to_string(),
+                "constructed record field descriptors are not accepted"
+            );
+            assert!(std::error::Error::source(&error).is_none());
+        }
     }
 
     #[test]
