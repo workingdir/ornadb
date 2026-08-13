@@ -1,7 +1,7 @@
-//! Protected dispatch for the current raw CLIENT call subset.
+//! Protected dispatch for the current raw CLIENT and SERVER call subset.
 
 use orna_core::{InvocationId, security::AuthenticatedSession, value::RuntimeValue};
-use orna_kernel_postgres::{PostgresKernel, PostgresKernelError};
+use orna_kernel_postgres::{AuthenticatedRawCallResult, PostgresKernel, PostgresKernelError};
 use orna_protocol::{CallFailure, Event, RawCall, ServerAction};
 
 /// One accepted raw CLIENT call bound to trusted session state.
@@ -47,13 +47,16 @@ impl RawClientDispatch {
         }
     }
 
-    /// Runs the protected CLIENT kernel path and closes the public outcome.
+    /// Runs the protected raw-call kernel path and closes the public outcome.
     ///
-    /// Success returns one typed value action followed by completion. A call
+    /// CLIENT success returns one typed value action followed by completion.
+    /// SERVER success returns one value action per row followed by completion.
+    /// A call
     /// with arguments returns `TARGET_UNAVAILABLE`. Calls containing a record
     /// first complete the closed transactional record preflight; other
-    /// argument-bearing calls do not open PostgreSQL. Kernel execute denial
-    /// returns `EXECUTE_DENIED`, a CLIENT evaluator error returns
+    /// argument-bearing calls do not open PostgreSQL. Raw execute denial
+    /// returns `EXECUTE_DENIED`, an unavailable SERVER target returns
+    /// `TARGET_UNAVAILABLE`, a CLIENT evaluator error returns
     /// `CLIENT_EVALUATION_FAILED`, and every other kernel error returns
     /// `INTERNAL_FAILURE`. The result retains the private typed kernel source
     /// for trusted diagnostics only.
@@ -83,10 +86,10 @@ impl RawClientDispatch {
 
         match self
             .kernel
-            .evaluate_client_function(&self.session, self.call.function)
+            .dispatch_authenticated_raw_call(&self.session, self.call.function)
             .await
         {
-            Ok(result) => RawClientDispatchResult::success(self.stream, result.value().clone()),
+            Ok(result) => RawClientDispatchResult::success(self.stream, result),
             Err(source) => RawClientDispatchResult::from_kernel_error(self.stream, source),
         }
     }
@@ -101,16 +104,24 @@ pub struct RawClientDispatchResult {
 }
 
 impl RawClientDispatchResult {
-    fn success(stream: u64, value: orna_core::value::RuntimeValue) -> Self {
-        Self {
-            stream,
-            actions: vec![
-                ServerAction::Events {
+    fn success(stream: u64, result: AuthenticatedRawCallResult) -> Self {
+        let mut actions = match result {
+            AuthenticatedRawCallResult::Client(value) => vec![ServerAction::Events {
+                stream,
+                events: vec![Event::Value(value)],
+            }],
+            AuthenticatedRawCallResult::Server(values) => values
+                .into_iter()
+                .map(|value| ServerAction::Events {
                     stream,
                     events: vec![Event::Value(value)],
-                },
-                ServerAction::Completed { stream },
-            ],
+                })
+                .collect(),
+        };
+        actions.push(ServerAction::Completed { stream });
+        Self {
+            stream,
+            actions,
             source: None,
             operational_failure: false,
         }
@@ -118,8 +129,11 @@ impl RawClientDispatchResult {
 
     fn from_kernel_error(stream: u64, source: PostgresKernelError) -> Self {
         let (failure, operational_failure) = match source {
-            PostgresKernelError::ClientExecuteDenied { .. } => (CallFailure::ExecuteDenied, false),
+            PostgresKernelError::RawExecuteDenied { .. } => (CallFailure::ExecuteDenied, false),
             PostgresKernelError::ClientExecution(_) => (CallFailure::ClientEvaluationFailed, false),
+            PostgresKernelError::RawServerTargetUnavailable { .. } => {
+                (CallFailure::TargetUnavailable, false)
+            }
             _ => (CallFailure::InternalFailure, true),
         };
         Self::failure(stream, failure, Some(source), operational_failure)
@@ -186,7 +200,7 @@ mod tests {
         },
         value::RuntimeValue,
     };
-    use orna_kernel_postgres::PostgresKernel;
+    use orna_kernel_postgres::{PostgresKernel, ServerSelectError};
     use orna_protocol::{
         CallArgument, CallFailure, RawCall, ServerAction, ServerFrame, encode_server_frame,
     };
@@ -277,7 +291,10 @@ mod tests {
 
     #[test]
     fn success_maps_to_one_value_event_then_completion() {
-        let success = RawClientDispatchResult::success(8, RuntimeValue::Boolean(true));
+        let success = RawClientDispatchResult::success(
+            8,
+            AuthenticatedRawCallResult::Client(RuntimeValue::Boolean(true)),
+        );
         let expected = vec![
             ServerAction::Events {
                 stream: 8,
@@ -296,10 +313,39 @@ mod tests {
     }
 
     #[test]
+    fn server_success_maps_each_row_to_one_event_and_preserves_zero_rows() {
+        let values = RawClientDispatchResult::success(
+            12,
+            AuthenticatedRawCallResult::Server(vec![
+                RuntimeValue::Integer(1),
+                RuntimeValue::Integer(2),
+            ]),
+        );
+        assert_eq!(
+            values.actions(),
+            [
+                ServerAction::Events {
+                    stream: 12,
+                    events: vec![Event::Value(RuntimeValue::Integer(1))],
+                },
+                ServerAction::Events {
+                    stream: 12,
+                    events: vec![Event::Value(RuntimeValue::Integer(2))],
+                },
+                ServerAction::Completed { stream: 12 },
+            ]
+        );
+
+        let empty =
+            RawClientDispatchResult::success(13, AuthenticatedRawCallResult::Server(Vec::new()));
+        assert_eq!(empty.actions(), [ServerAction::Completed { stream: 13 }]);
+    }
+
+    #[test]
     fn every_kernel_error_family_uses_the_closed_mapping_and_precedence() {
         let denied = RawClientDispatchResult::from_kernel_error(
             9,
-            PostgresKernelError::ClientExecuteDenied {
+            PostgresKernelError::RawExecuteDenied {
                 pair: PAIR,
                 function: FUNCTION,
                 reason: ExecuteDenial::MissingExecuteGrant,
@@ -307,7 +353,7 @@ mod tests {
         );
         assert!(matches!(
             denied.source(),
-            Some(PostgresKernelError::ClientExecuteDenied { .. })
+            Some(PostgresKernelError::RawExecuteDenied { .. })
         ));
         assert_eq!(
             denied.actions(),
@@ -344,8 +390,29 @@ mod tests {
             ServerAction::Cancelled { stream: 10 }
         );
 
-        let operational = RawClientDispatchResult::from_kernel_error(
+        let unavailable = RawClientDispatchResult::from_kernel_error(
             11,
+            PostgresKernelError::RawServerTargetUnavailable {
+                source: ServerSelectError::RawTarget {
+                    function: FUNCTION,
+                    rule: "test",
+                },
+            },
+        );
+        assert_eq!(
+            unavailable.actions(),
+            &[ServerAction::Failed {
+                stream: 11,
+                failure: CallFailure::TargetUnavailable,
+            }]
+        );
+        assert_eq!(
+            unavailable.action_after_cancellation(),
+            ServerAction::Cancelled { stream: 11 }
+        );
+
+        let operational = RawClientDispatchResult::from_kernel_error(
+            12,
             PostgresKernelError::MigrationMismatch { version: 99 },
         );
         assert!(matches!(
@@ -355,14 +422,14 @@ mod tests {
         assert_eq!(
             operational.actions(),
             &[ServerAction::Failed {
-                stream: 11,
+                stream: 12,
                 failure: CallFailure::InternalFailure,
             }]
         );
         assert_eq!(
             operational.action_after_cancellation(),
             ServerAction::Failed {
-                stream: 11,
+                stream: 12,
                 failure: CallFailure::InternalFailure,
             }
         );
