@@ -7,8 +7,8 @@
 use std::{collections::BTreeMap, error::Error, fmt};
 
 use orna_artifact::server_mutation_plan::{
-    self, MutationExpressionKind, MutationSelector, ServerDeletePlan, ServerMutationOperation,
-    ServerMutationPlan,
+    self, MutationExpressionKind, MutationSelector, RecordFieldExpressionKind, ServerDeletePlan,
+    ServerMutationOperation, ServerMutationPlan,
 };
 use orna_core::{
     FieldId, FunctionId, FunctionRevisionId, ObjectId, ParameterId, TypeId,
@@ -21,8 +21,12 @@ use orna_core::{
         ExecutableArtifactKind, RevisionPair,
     },
     types::ResolvedType,
-    value::{FunctionArgument, ResultColumn, ResultRow, ResultRows, ResultRowsError, RuntimeValue},
+    value::{
+        EnumValue, FunctionArgument, RecordValue, RecordValueError, ResultColumn, ResultRow,
+        ResultRows, ResultRowsError, RuntimeValue,
+    },
 };
+use orna_protocol::{ValueCodecError, encode_active_value};
 use tokio_postgres::{
     Client, IsolationLevel, Row, Statement, Transaction,
     error::SqlState,
@@ -33,13 +37,14 @@ use crate::{
     PostgresKernel, PostgresKernelError,
     server_runtime::{
         ExpectedDefinitionReference, ReferenceReplayMismatch, ResolvedRuntimeType,
-        configure_and_recover, postgres_type, resolve_runtime_type, runtime_types_match,
-        validate_function_reference_replay,
+        configure_and_recover, postgres_type, resolve_catalogue_runtime_type, resolve_runtime_type,
+        runtime_types_match, validate_function_reference_replay,
     },
     storage::{DATA_SCHEMA, OBJECT_ID_COLUMN, field_name, relation_name, unique_constraint_name},
 };
 
 const VARIABLE_ARGUMENT_PAYLOAD_LIMIT: usize = 16 * 1024 * 1024;
+const ACTIVE_VALUE_ENVELOPE_LENGTH: usize = 25;
 const SQL_LIMIT: usize = 1024 * 1024;
 
 #[cfg(feature = "test-hooks")]
@@ -519,6 +524,10 @@ pub enum ServerMutationError {
     },
     /// The declared typed result could not be built.
     ResultRows(ResultRowsError),
+    /// A checked record constructor could not be built from the active catalogue.
+    RecordValue(RecordValueError),
+    /// A checked record constructor could not be encoded as canonical bytes.
+    ValueCodec(ValueCodecError),
     /// A required unique reference is already assigned to another object.
     UniqueReferenceConflict {
         /// The object type that owns the unique reference field.
@@ -583,6 +592,8 @@ impl ServerMutationError {
             | Self::RowDecode { .. }
             | Self::ValueInvariant { .. }
             | Self::ResultRows(_)
+            | Self::RecordValue(_)
+            | Self::ValueCodec(_)
             | Self::UniqueReferenceConflict { .. }
             | Self::CommitRejected { .. } => ServerInsertCommitState::NotCommitted,
         }
@@ -638,6 +649,12 @@ impl fmt::Display for ServerMutationError {
                 "the database returned an unexpected object identity; contact the database administrator",
             ),
             Self::ResultRows(_) => formatter.write_str("the function result is invalid"),
+            Self::RecordValue(_) => formatter.write_str(
+                "the saved record constructor is inconsistent with the active database",
+            ),
+            Self::ValueCodec(_) => formatter.write_str(
+                "the record constructor cannot be encoded as an active canonical value",
+            ),
             Self::UniqueReferenceConflict { .. } => {
                 formatter.write_str("this reference is already used by another object")
             }
@@ -672,6 +689,8 @@ impl Error for ServerMutationError {
             | Self::CommitOutcomeUnknown { source, .. } => Some(source),
             Self::PlanDecode(error) => Some(error),
             Self::ResultRows(error) => Some(error),
+            Self::RecordValue(error) => Some(error),
+            Self::ValueCodec(error) => Some(error),
             Self::CommittedButShutdownFailed { source, .. } => Some(source),
             Self::FunctionNotActive { .. }
             | Self::FunctionSignature { .. }
@@ -1430,11 +1449,7 @@ async fn execute_active_insert(
 ) -> Result<(ServerInsertResult, UniqueReferenceConstraints), PostgresKernelError> {
     let validated =
         validate_active_mutation(active, function, arguments, MutationExecutionKind::Insert)?;
-    let lowered = lower_insert_with_context(
-        active.catalogue_hash_context(),
-        &validated.plan,
-        &validated.arguments,
-    )?;
+    let lowered = lower_insert_with_active(active, &validated.plan, &validated.arguments)?;
     let statement = transaction
         .prepare_typed(&lowered.sql, &lowered.bind_types)
         .await
@@ -1579,11 +1594,15 @@ enum MutationExecutionKind {
 }
 
 impl MutationExecutionKind {
-    const fn artifact_version(self) -> u32 {
+    const fn accepts_artifact_version(self, version: u32) -> bool {
         match self {
-            Self::Insert => server_mutation_plan::INSERT_FORMAT_VERSION,
-            Self::Update => server_mutation_plan::UPDATE_FORMAT_VERSION,
-            Self::Delete => server_mutation_plan::DELETE_FORMAT_VERSION,
+            Self::Insert => matches!(
+                version,
+                server_mutation_plan::INSERT_FORMAT_VERSION
+                    | server_mutation_plan::RECORD_INSERT_FORMAT_VERSION
+            ),
+            Self::Update => version == server_mutation_plan::UPDATE_FORMAT_VERSION,
+            Self::Delete => version == server_mutation_plan::DELETE_FORMAT_VERSION,
         }
     }
 }
@@ -1621,14 +1640,8 @@ fn validate_active_mutation<'a>(
     let plan = ServerMutationPlan::decode(artifact.payload())
         .map_err(ServerMutationError::PlanDecode)
         .map_err(server_error)?;
-    let target = validate_plan_for_context(
-        context,
-        active.catalogue(),
-        function,
-        returned.target,
-        &plan,
-        operation,
-    )?;
+    validate_artifact_payload_version(function.id(), artifact.version(), &plan)?;
+    let target = validate_plan_for_active(active, function, returned.target, &plan, operation)?;
     validate_reference_evidence(active, function, &plan)?;
     let arguments =
         validate_arguments_with_context(context, active.catalogue(), function, arguments)?;
@@ -1717,12 +1730,14 @@ fn validate_artifact_metadata_for_operation(
             "the active function must contain SERVER executable data",
         ));
     }
-    if format != server_mutation_plan::FORMAT_IDENTITY || version != operation.artifact_version() {
+    if format != server_mutation_plan::FORMAT_IDENTITY
+        || !operation.accepts_artifact_version(version)
+    {
         return Err(artifact_error(
             function,
             match operation {
                 MutationExecutionKind::Insert => {
-                    "the active function must use the supported INSERT mutation format version 1"
+                    "the active function must use INSERT mutation format version 1 or 4"
                 }
                 MutationExecutionKind::Update => {
                     "the active function must use the supported UPDATE mutation format version 2"
@@ -1737,6 +1752,20 @@ fn validate_artifact_metadata_for_operation(
         return Err(artifact_error(
             function,
             "the active function must use orna.language/1",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_artifact_payload_version(
+    function: FunctionId,
+    artifact_version: u32,
+    plan: &ServerMutationPlan,
+) -> Result<(), PostgresKernelError> {
+    if artifact_version != plan.format_version() {
+        return Err(artifact_error(
+            function,
+            "the active artifact metadata version must match its mutation payload",
         ));
     }
     Ok(())
@@ -1948,15 +1977,15 @@ fn runtime_type_is_active(
     catalogue: &CatalogueSnapshot,
     resolved_type: ResolvedType,
 ) -> bool {
-    if postgres_type(resolve_runtime_type(context, resolved_type)).is_none() {
+    let runtime = resolve_mutation_runtime_type(context, catalogue, resolved_type);
+    if postgres_type(runtime).is_none() {
         return false;
     }
-    match resolve_runtime_type(context, resolved_type) {
+    match runtime {
         ResolvedRuntimeType::Reference(target) => catalogue.object_type_by_id(target).is_some(),
         ResolvedRuntimeType::LegacyScalar(_) | ResolvedRuntimeType::VerifiedValue { .. } => true,
-        ResolvedRuntimeType::CatalogueEnum(_)
-        | ResolvedRuntimeType::Record(_)
-        | ResolvedRuntimeType::Unsupported => false,
+        ResolvedRuntimeType::CatalogueEnum(_) => true,
+        ResolvedRuntimeType::Record(_) | ResolvedRuntimeType::Unsupported => false,
     }
 }
 
@@ -1966,10 +1995,11 @@ fn validate_active_runtime_type(
     resolved_type: ResolvedType,
     rule: &'static str,
 ) -> Result<(), PostgresKernelError> {
-    if postgres_type(resolve_runtime_type(context, resolved_type)).is_none() {
+    let runtime = resolve_mutation_runtime_type(context, catalogue, resolved_type);
+    if postgres_type(runtime).is_none() {
         return Err(plan_invariant(rule));
     }
-    match resolve_runtime_type(context, resolved_type) {
+    match runtime {
         ResolvedRuntimeType::Reference(target) if catalogue.object_type_by_id(target).is_none() => {
             return Err(plan_invariant(
                 "every referenced object type must be active",
@@ -1977,14 +2007,36 @@ fn validate_active_runtime_type(
         }
         ResolvedRuntimeType::LegacyScalar(_)
         | ResolvedRuntimeType::VerifiedValue { .. }
+        | ResolvedRuntimeType::CatalogueEnum(_)
         | ResolvedRuntimeType::Reference(_) => {}
-        ResolvedRuntimeType::CatalogueEnum(_)
-        | ResolvedRuntimeType::Record(_)
-        | ResolvedRuntimeType::Unsupported => {
+        ResolvedRuntimeType::Record(_) | ResolvedRuntimeType::Unsupported => {
             return Err(plan_invariant(rule));
         }
     }
     Ok(())
+}
+
+fn resolve_mutation_runtime_type(
+    context: &orna_core::revision::CatalogueHashContext,
+    catalogue: &CatalogueSnapshot,
+    resolved_type: ResolvedType,
+) -> ResolvedRuntimeType {
+    let runtime = resolve_catalogue_runtime_type(catalogue, context, resolved_type);
+    if runtime == ResolvedRuntimeType::Unsupported
+        && resolved_type.named_type().is_some_and(|enum_type| {
+            context
+                .standard()
+                .is_some_and(|standard| standard.catalogue().enum_type_by_id(enum_type).is_some())
+        })
+    {
+        ResolvedRuntimeType::CatalogueEnum(
+            resolved_type
+                .named_type()
+                .expect("standard enum identity was checked"),
+        )
+    } else {
+        runtime
+    }
 }
 
 #[cfg(test)]
@@ -2004,7 +2056,46 @@ fn validate_plan<'a>(
     .target)
 }
 
+#[cfg(test)]
 fn validate_plan_for_context<'a>(
+    context: &orna_core::revision::CatalogueHashContext,
+    catalogue: &'a CatalogueSnapshot,
+    function: &FunctionDefinition,
+    returned_target: TypeId,
+    plan: &ServerMutationPlan,
+    operation: MutationExecutionKind,
+) -> Result<ValidatedMutationTarget<'a>, PostgresKernelError> {
+    validate_plan_with_active(
+        None,
+        context,
+        catalogue,
+        function,
+        returned_target,
+        plan,
+        operation,
+    )
+}
+
+fn validate_plan_for_active<'a>(
+    active: &'a ActiveDatabaseRevision,
+    function: &FunctionDefinition,
+    returned_target: TypeId,
+    plan: &ServerMutationPlan,
+    operation: MutationExecutionKind,
+) -> Result<ValidatedMutationTarget<'a>, PostgresKernelError> {
+    validate_plan_with_active(
+        Some(active),
+        active.catalogue_hash_context(),
+        active.catalogue(),
+        function,
+        returned_target,
+        plan,
+        operation,
+    )
+}
+
+fn validate_plan_with_active<'a>(
+    active: Option<&'a ActiveDatabaseRevision>,
     context: &orna_core::revision::CatalogueHashContext,
     catalogue: &'a CatalogueSnapshot,
     function: &FunctionDefinition,
@@ -2022,7 +2113,7 @@ fn validate_plan_for_context<'a>(
             ServerMutationOperation::Update { .. }
         )
     );
-    if !operation_matches || plan.format_version() != operation.artifact_version() {
+    if !operation_matches || !operation.accepts_artifact_version(plan.format_version()) {
         return Err(plan_invariant(
             "the payload operation and version must match the requested mutation",
         ));
@@ -2075,6 +2166,21 @@ fn validate_plan_for_context<'a>(
             ));
         }
         let expression = assignment.expression();
+        if let MutationExpressionKind::RecordConstructor { fields } = expression.kind() {
+            validate_record_constructor(
+                active.ok_or_else(|| {
+                    plan_invariant(
+                        "record constructors require one complete active database revision",
+                    )
+                })?,
+                function,
+                field,
+                expression,
+                fields,
+                operation,
+            )?;
+            continue;
+        }
         validate_active_runtime_type(
             context,
             catalogue,
@@ -2144,6 +2250,104 @@ fn validate_plan_for_context<'a>(
         target,
         unique_references,
     })
+}
+
+fn validate_record_constructor(
+    active: &ActiveDatabaseRevision,
+    function: &FunctionDefinition,
+    target_field: &orna_core::catalogue::FieldDefinition,
+    expression: &server_mutation_plan::MutationExpression,
+    fields: &[server_mutation_plan::RecordFieldExpression],
+    operation: MutationExecutionKind,
+) -> Result<(), PostgresKernelError> {
+    if operation != MutationExecutionKind::Insert {
+        return Err(plan_invariant(
+            "record constructors are accepted only in INSERT plans",
+        ));
+    }
+    let record_type = expression
+        .resolved_type()
+        .named_type()
+        .ok_or_else(|| plan_invariant("record constructor must retain its nominal record type"))?;
+    if target_field.nullable() || target_field.resolved_type() != ResolvedType::named(record_type) {
+        return Err(plan_invariant(
+            "record constructor must target a non-null field of its exact nominal type",
+        ));
+    }
+    let definition = active
+        .catalogue()
+        .record_value_type_by_id(record_type)
+        .ok_or_else(|| plan_invariant("record constructor type must be active"))?;
+    if fields.len() != definition.fields().len() {
+        return Err(plan_invariant(
+            "record constructor field count must match its active definition",
+        ));
+    }
+    for (field, declared) in fields.iter().zip(definition.fields()) {
+        if field.owner() != record_type || field.field() != declared.id() {
+            return Err(plan_invariant(
+                "record constructor fields must retain active declaration order and identity",
+            ));
+        }
+        let runtime_type = active
+            .record_value_field_runtime_type(declared.resolved_type())
+            .ok_or_else(|| plan_invariant("record constructor field type must be active"))?;
+        if !runtime_types_match(
+            active.catalogue_hash_context(),
+            field.resolved_type(),
+            runtime_type,
+        ) {
+            return Err(plan_invariant(
+                "record constructor child type must match its active field type",
+            ));
+        }
+        validate_active_runtime_type(
+            active.catalogue_hash_context(),
+            active.catalogue(),
+            field.resolved_type(),
+            "record constructor child type must be active",
+        )?;
+        match field.kind() {
+            RecordFieldExpressionKind::Parameter { owner, parameter } => {
+                if *owner != function.id() {
+                    return Err(plan_invariant(
+                        "record constructor parameter owner must equal the active function",
+                    ));
+                }
+                let parameter = function.parameter_by_id(*parameter).ok_or_else(|| {
+                    plan_invariant("record constructor parameter must be actively declared")
+                })?;
+                if parameter.default_expression().is_some()
+                    || !runtime_types_match(
+                        active.catalogue_hash_context(),
+                        parameter.resolved_type(),
+                        field.resolved_type(),
+                    )
+                {
+                    return Err(plan_invariant(
+                        "record constructor parameter must exactly match its artifact child",
+                    ));
+                }
+            }
+            RecordFieldExpressionKind::BooleanLiteral { .. } => {
+                if !runtime_types_match(
+                    active.catalogue_hash_context(),
+                    field.resolved_type(),
+                    ResolvedType::scalar(orna_core::types::StandardScalar::Boolean),
+                ) {
+                    return Err(plan_invariant(
+                        "record constructor Boolean child must target a Boolean field",
+                    ));
+                }
+            }
+            _ => {
+                return Err(plan_invariant(
+                    "unknown future record constructor child kinds are unsupported",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -2274,16 +2478,48 @@ fn expected_body_references(plan: &ServerMutationPlan) -> Vec<ExpectedDefinition
                 field: assignment.field(),
             },
         ));
-        if let MutationExpressionKind::Parameter { owner, parameter } =
-            assignment.expression().kind()
-        {
-            expected.push(ExpectedDefinitionReference::new(
-                DefinitionReferenceKind::ParameterRead,
-                DefinitionReferenceTarget::Parameter {
-                    owner: *owner,
-                    parameter: *parameter,
-                },
-            ));
+        match assignment.expression().kind() {
+            MutationExpressionKind::Parameter { owner, parameter } => {
+                expected.push(ExpectedDefinitionReference::new(
+                    DefinitionReferenceKind::ParameterRead,
+                    DefinitionReferenceTarget::Parameter {
+                        owner: *owner,
+                        parameter: *parameter,
+                    },
+                ));
+            }
+            MutationExpressionKind::RecordConstructor { fields } => {
+                let record_type = assignment
+                    .expression()
+                    .resolved_type()
+                    .named_type()
+                    .expect("validated record constructor must retain a named type");
+                expected.push(ExpectedDefinitionReference::new(
+                    DefinitionReferenceKind::NamedType,
+                    DefinitionReferenceTarget::ValueType(record_type),
+                ));
+                for field in fields {
+                    expected.push(ExpectedDefinitionReference::new(
+                        DefinitionReferenceKind::WriteField,
+                        DefinitionReferenceTarget::Field {
+                            owner: field.owner(),
+                            field: field.field(),
+                        },
+                    ));
+                    if let RecordFieldExpressionKind::Parameter { owner, parameter } = field.kind()
+                    {
+                        expected.push(ExpectedDefinitionReference::new(
+                            DefinitionReferenceKind::ParameterRead,
+                            DefinitionReferenceTarget::Parameter {
+                                owner: *owner,
+                                parameter: *parameter,
+                            },
+                        ));
+                    }
+                }
+            }
+            MutationExpressionKind::BooleanLiteral { .. } | MutationExpressionKind::TypedNull => {}
+            _ => {}
         }
     }
     if let ServerMutationOperation::Update { selector } = plan.operation() {
@@ -2345,6 +2581,14 @@ fn validate_arguments_with_context(
             return Err(argument_error(
                 Some(parameter_id),
                 "the argument type does not match the declared parameter type",
+            ));
+        }
+        if let RuntimeValue::Enum(value) = value
+            && !enum_value_is_active(context, catalogue, value)
+        {
+            return Err(argument_error(
+                Some(parameter_id),
+                "the enum argument label is not active in the pinned catalogue",
             ));
         }
         variable_payload = variable_payload
@@ -2414,6 +2658,7 @@ fn variable_payload_len(value: &RuntimeValue) -> Result<usize, PostgresKernelErr
     match value {
         RuntimeValue::Text(value) => Ok(value.len()),
         RuntimeValue::Bytes(value) => Ok(value.len()),
+        RuntimeValue::Enum(value) => Ok(value.label().len()),
         RuntimeValue::Null(_)
         | RuntimeValue::Boolean(_)
         | RuntimeValue::Integer(_)
@@ -2439,6 +2684,7 @@ enum BindValue {
     Float(f64),
     Text(String),
     Bytes(Vec<u8>),
+    Enum { value: EnumValue, label: String },
 }
 
 impl BindValue {
@@ -2454,6 +2700,10 @@ impl BindValue {
             RuntimeValue::Text(value) => Ok(Self::Text(value.clone())),
             RuntimeValue::Bytes(value) => Ok(Self::Bytes(value.clone())),
             RuntimeValue::Reference { object, .. } => Ok(Self::Bytes(object.to_bytes().to_vec())),
+            RuntimeValue::Enum(value) => Ok(Self::Enum {
+                value: value.clone(),
+                label: value.label().to_owned(),
+            }),
             RuntimeValue::Null(_) => Err(argument_error(
                 Some(parameter),
                 "function arguments cannot be NULL",
@@ -2473,8 +2723,44 @@ impl BindValue {
             Self::Float(value) => value,
             Self::Text(value) => value,
             Self::Bytes(value) => value,
+            Self::Enum { label, .. } => label,
         }
     }
+
+    fn to_runtime(&self) -> RuntimeValue {
+        match self {
+            Self::Boolean(value) => RuntimeValue::Boolean(*value),
+            Self::Integer(value) => RuntimeValue::Integer(*value),
+            Self::BigInt(value) => RuntimeValue::BigInt(*value),
+            Self::Float(value) => RuntimeValue::Float(
+                orna_core::value::RuntimeFloat::new(*value)
+                    .expect("validated bind float must remain finite"),
+            ),
+            Self::Text(value) => RuntimeValue::Text(value.clone()),
+            Self::Bytes(value) => RuntimeValue::Bytes(value.clone()),
+            Self::Enum { value, .. } => RuntimeValue::Enum(value.clone()),
+        }
+    }
+}
+
+fn enum_value_is_active(
+    context: &orna_core::revision::CatalogueHashContext,
+    catalogue: &CatalogueSnapshot,
+    value: &EnumValue,
+) -> bool {
+    catalogue
+        .enum_type_by_id(value.enum_type())
+        .or_else(|| {
+            context
+                .standard()
+                .and_then(|standard| standard.catalogue().enum_type_by_id(value.enum_type()))
+        })
+        .is_some_and(|definition| {
+            definition
+                .labels()
+                .iter()
+                .any(|label| label == value.label())
+        })
 }
 
 struct LoweredMutation {
@@ -2483,25 +2769,57 @@ struct LoweredMutation {
     binds: Vec<BindValue>,
 }
 
+struct MutationBindState {
+    bind_types: Vec<Type>,
+    binds: Vec<BindValue>,
+    parameter_placeholders: BTreeMap<ParameterId, usize>,
+    record_payload: usize,
+}
+
+#[cfg(test)]
 fn lower_insert_with_context(
+    context: &orna_core::revision::CatalogueHashContext,
+    plan: &ServerMutationPlan,
+    arguments: &BTreeMap<ParameterId, BindValue>,
+) -> Result<LoweredMutation, PostgresKernelError> {
+    lower_insert_inner(None, context, plan, arguments)
+}
+
+fn lower_insert_with_active(
+    active: &ActiveDatabaseRevision,
+    plan: &ServerMutationPlan,
+    arguments: &BTreeMap<ParameterId, BindValue>,
+) -> Result<LoweredMutation, PostgresKernelError> {
+    lower_insert_inner(
+        Some(active),
+        active.catalogue_hash_context(),
+        plan,
+        arguments,
+    )
+}
+
+fn lower_insert_inner(
+    active: Option<&ActiveDatabaseRevision>,
     context: &orna_core::revision::CatalogueHashContext,
     plan: &ServerMutationPlan,
     arguments: &BTreeMap<ParameterId, BindValue>,
 ) -> Result<LoweredMutation, PostgresKernelError> {
     let mut columns = vec![String::from(OBJECT_ID_COLUMN)];
     let mut values = vec![String::from("$1")];
-    let mut bind_types = vec![Type::BYTEA];
-    let mut binds = Vec::new();
-    let mut parameter_placeholders = BTreeMap::new();
+    let mut bind_state = MutationBindState {
+        bind_types: vec![Type::BYTEA],
+        binds: Vec::new(),
+        parameter_placeholders: BTreeMap::new(),
+        record_payload: 0,
+    };
     for assignment in plan.assignments() {
         columns.push(field_name(assignment.field()));
         values.push(lower_assignment_expression(
+            active,
             context,
             assignment.expression(),
             arguments,
-            &mut bind_types,
-            &mut binds,
-            &mut parameter_placeholders,
+            &mut bind_state,
         )?);
     }
     let sql = format!(
@@ -2518,8 +2836,8 @@ fn lower_insert_with_context(
     }
     Ok(LoweredMutation {
         sql,
-        bind_types,
-        binds,
+        bind_types: bind_state.bind_types,
+        binds: bind_state.binds,
     })
 }
 
@@ -2536,56 +2854,152 @@ fn lower_insert(
 }
 
 fn lower_assignment_expression(
+    active: Option<&ActiveDatabaseRevision>,
     context: &orna_core::revision::CatalogueHashContext,
     expression: &server_mutation_plan::MutationExpression,
     arguments: &BTreeMap<ParameterId, BindValue>,
-    bind_types: &mut Vec<Type>,
-    binds: &mut Vec<BindValue>,
-    parameter_placeholders: &mut BTreeMap<ParameterId, usize>,
+    bind_state: &mut MutationBindState,
 ) -> Result<String, PostgresKernelError> {
-    let value_type = postgres_type(resolve_runtime_type(context, expression.resolved_type()))
-        .ok_or_else(|| {
-            plan_invariant("the assignment type cannot be stored by the initial runtime")
-        })?;
     match expression.kind() {
-        MutationExpressionKind::Parameter { parameter, .. } => parameter_placeholder(
-            *parameter,
-            value_type,
-            arguments,
-            bind_types,
-            binds,
-            parameter_placeholders,
-        ),
-        MutationExpressionKind::BooleanLiteral { value } => {
-            binds.push(BindValue::Boolean(*value));
-            bind_types.push(value_type);
-            Ok(format!("${}", bind_types.len()))
+        MutationExpressionKind::Parameter { parameter, .. } => {
+            let value_type = assignment_postgres_type(context, expression)?;
+            parameter_placeholder(*parameter, value_type, arguments, bind_state)
         }
-        MutationExpressionKind::TypedNull => Ok(format!("CAST(NULL AS {})", value_type.name())),
+        MutationExpressionKind::BooleanLiteral { value } => {
+            let value_type = assignment_postgres_type(context, expression)?;
+            bind_state.binds.push(BindValue::Boolean(*value));
+            bind_state.bind_types.push(value_type);
+            Ok(format!("${}", bind_state.bind_types.len()))
+        }
+        MutationExpressionKind::TypedNull => {
+            let value_type = assignment_postgres_type(context, expression)?;
+            Ok(format!("CAST(NULL AS {})", value_type.name()))
+        }
+        MutationExpressionKind::RecordConstructor { fields } => lower_record_constructor(
+            active.ok_or_else(|| {
+                plan_invariant("record constructor lowering requires an active revision")
+            })?,
+            expression,
+            fields,
+            arguments,
+            bind_state,
+        ),
         _ => Err(plan_invariant(
             "unknown future mutation expression kinds are unsupported",
         )),
     }
 }
 
+fn assignment_postgres_type(
+    context: &orna_core::revision::CatalogueHashContext,
+    expression: &server_mutation_plan::MutationExpression,
+) -> Result<Type, PostgresKernelError> {
+    postgres_type(resolve_runtime_type(context, expression.resolved_type())).ok_or_else(|| {
+        plan_invariant("the assignment type cannot be stored by the initial runtime")
+    })
+}
+
+fn lower_record_constructor(
+    active: &ActiveDatabaseRevision,
+    expression: &server_mutation_plan::MutationExpression,
+    fields: &[server_mutation_plan::RecordFieldExpression],
+    arguments: &BTreeMap<ParameterId, BindValue>,
+    bind_state: &mut MutationBindState,
+) -> Result<String, PostgresKernelError> {
+    let record_type = expression
+        .resolved_type()
+        .named_type()
+        .ok_or_else(|| plan_invariant("validated record constructor must have a named type"))?;
+    let definition = active
+        .catalogue()
+        .record_value_type_by_id(record_type)
+        .ok_or_else(|| plan_invariant("validated record constructor type must be active"))?;
+    if fields.len() != definition.fields().len() {
+        return Err(plan_invariant(
+            "validated record constructor field count must remain exact",
+        ));
+    }
+    let values = fields
+        .iter()
+        .zip(definition.fields())
+        .map(|(field, definition)| {
+            let value = match field.kind() {
+                RecordFieldExpressionKind::Parameter { parameter, .. } => arguments
+                    .get(parameter)
+                    .ok_or_else(|| {
+                        plan_invariant(
+                            "validated record constructor parameter must have one argument",
+                        )
+                    })?
+                    .to_runtime(),
+                RecordFieldExpressionKind::BooleanLiteral { value } => {
+                    RuntimeValue::Boolean(*value)
+                }
+                _ => {
+                    return Err(plan_invariant(
+                        "unknown future record constructor child kinds are unsupported",
+                    ));
+                }
+            };
+            Ok((definition.name().to_owned(), value))
+        })
+        .collect::<Result<Vec<_>, PostgresKernelError>>()?;
+    let record = RecordValue::new(active, record_type, values)
+        .map_err(ServerMutationError::RecordValue)
+        .map_err(server_error)?;
+    let encoded = encode_active_value(active, &RuntimeValue::Record(record))
+        .map_err(ServerMutationError::ValueCodec)
+        .map_err(server_error)?;
+    account_record_bind_payload(&mut bind_state.record_payload, encoded.len())?;
+    bind_state.binds.push(BindValue::Bytes(encoded));
+    bind_state.bind_types.push(Type::BYTEA);
+    Ok(format!("${}", bind_state.bind_types.len()))
+}
+
+fn account_record_bind_payload(
+    total: &mut usize,
+    encoded_length: usize,
+) -> Result<(), PostgresKernelError> {
+    let payload_length = encoded_length
+        .checked_sub(ACTIVE_VALUE_ENVELOPE_LENGTH)
+        .ok_or_else(|| {
+            plan_invariant("canonical record bind must contain one complete ORV3 envelope")
+        })?;
+    let next = total
+        .checked_add(payload_length)
+        .ok_or_else(record_bind_payload_limit_error)?;
+    if next > VARIABLE_ARGUMENT_PAYLOAD_LIMIT {
+        return Err(record_bind_payload_limit_error());
+    }
+    *total = next;
+    Ok(())
+}
+
+fn record_bind_payload_limit_error() -> PostgresKernelError {
+    server_error(ServerInsertError::ComplexityLimit {
+        category: "total size of canonical record payloads",
+        maximum: VARIABLE_ARGUMENT_PAYLOAD_LIMIT,
+    })
+}
+
 fn parameter_placeholder(
     parameter: ParameterId,
     value_type: Type,
     arguments: &BTreeMap<ParameterId, BindValue>,
-    bind_types: &mut Vec<Type>,
-    binds: &mut Vec<BindValue>,
-    parameter_placeholders: &mut BTreeMap<ParameterId, usize>,
+    bind_state: &mut MutationBindState,
 ) -> Result<String, PostgresKernelError> {
-    if let Some(placeholder) = parameter_placeholders.get(&parameter).copied() {
+    if let Some(placeholder) = bind_state.parameter_placeholders.get(&parameter).copied() {
         return Ok(format!("${placeholder}"));
     }
     let value = arguments.get(&parameter).ok_or_else(|| {
         plan_invariant("validated parameter expression must have one runtime argument")
     })?;
-    binds.push(value.clone());
-    bind_types.push(value_type);
-    let placeholder = bind_types.len();
-    parameter_placeholders.insert(parameter, placeholder);
+    bind_state.binds.push(value.clone());
+    bind_state.bind_types.push(value_type);
+    let placeholder = bind_state.bind_types.len();
+    bind_state
+        .parameter_placeholders
+        .insert(parameter, placeholder);
     Ok(format!("${placeholder}"))
 }
 
@@ -2598,17 +3012,19 @@ fn lower_update_with_context(
         return Err(plan_invariant("UPDATE execution requires an UPDATE plan"));
     };
     let mut assignments = Vec::with_capacity(plan.assignments().len());
-    let mut bind_types = Vec::new();
-    let mut binds = Vec::new();
-    let mut parameter_placeholders = BTreeMap::new();
+    let mut bind_state = MutationBindState {
+        bind_types: Vec::new(),
+        binds: Vec::new(),
+        parameter_placeholders: BTreeMap::new(),
+        record_payload: 0,
+    };
     for assignment in plan.assignments() {
         let value = lower_assignment_expression(
+            None,
             context,
             assignment.expression(),
             arguments,
-            &mut bind_types,
-            &mut binds,
-            &mut parameter_placeholders,
+            &mut bind_state,
         )?;
         assignments.push(format!("{} = {value}", field_name(assignment.field())));
     }
@@ -2616,9 +3032,7 @@ fn lower_update_with_context(
         selector.parameter(),
         Type::BYTEA,
         arguments,
-        &mut bind_types,
-        &mut binds,
-        &mut parameter_placeholders,
+        &mut bind_state,
     )?;
     let sql = format!(
         "UPDATE {DATA_SCHEMA}.{} SET {} WHERE {OBJECT_ID_COLUMN} = {selector_placeholder} RETURNING {OBJECT_ID_COLUMN} AS c0",
@@ -2633,8 +3047,8 @@ fn lower_update_with_context(
     }
     Ok(LoweredMutation {
         sql,
-        bind_types,
-        binds,
+        bind_types: bind_state.bind_types,
+        binds: bind_state.binds,
     })
 }
 
@@ -2951,7 +3365,9 @@ fn argument_error(parameter: Option<ParameterId>, rule: &'static str) -> Postgre
 
 #[cfg(test)]
 mod tests {
-    use orna_artifact::server_mutation_plan::{FieldAssignment, MutationExpression};
+    use orna_artifact::server_mutation_plan::{
+        FieldAssignment, MutationExpression, RecordFieldExpression,
+    };
     use orna_core::{
         CatalogueRevisionId, ExpressionId, FieldId, SchemaId, SourceRevisionId,
         catalogue::{
@@ -3175,6 +3591,27 @@ mod tests {
                     .unwrap(),
                 ),
             ],
+            TARGET,
+        )
+        .unwrap()
+    }
+
+    fn record_constructor_plan() -> ServerMutationPlan {
+        ServerMutationPlan::new_insert(
+            TARGET,
+            [FieldAssignment::new(
+                TARGET,
+                FIELD_TITLE,
+                MutationExpression::record_constructor(
+                    TARGET,
+                    [RecordFieldExpression::boolean_literal(
+                        TARGET,
+                        FIELD_ENABLED,
+                        true,
+                    )],
+                )
+                .unwrap(),
+            )],
             TARGET,
         )
         .unwrap()
@@ -4141,17 +4578,22 @@ mod tests {
     }
 
     #[test]
-    fn artifact_metadata_accepts_only_server_mutation_v1_and_language_v1() {
-        assert!(
-            validate_artifact_metadata(
-                FUNCTION,
-                ExecutableArtifactKind::Server,
-                server_mutation_plan::FORMAT_IDENTITY,
-                server_mutation_plan::FORMAT_VERSION,
-                server_mutation_plan::LANGUAGE_VERSION_IDENTITY,
-            )
-            .is_ok()
-        );
+    fn artifact_metadata_accepts_only_insert_versions_one_and_four() {
+        for version in [
+            server_mutation_plan::INSERT_FORMAT_VERSION,
+            server_mutation_plan::RECORD_INSERT_FORMAT_VERSION,
+        ] {
+            assert!(
+                validate_artifact_metadata(
+                    FUNCTION,
+                    ExecutableArtifactKind::Server,
+                    server_mutation_plan::FORMAT_IDENTITY,
+                    version,
+                    server_mutation_plan::LANGUAGE_VERSION_IDENTITY,
+                )
+                .is_ok()
+            );
+        }
         for (kind, format, version, language) in [
             (
                 ExecutableArtifactKind::Client,
@@ -4190,6 +4632,27 @@ mod tests {
             ServerMutationPlan::decode(b"not a mutation plan"),
             Err(server_mutation_plan::ServerMutationPlanError::InvalidMagic),
         ));
+    }
+
+    #[test]
+    fn artifact_metadata_version_must_match_the_decoded_payload_version() {
+        let version_one = valid_plan();
+        let version_four = record_constructor_plan();
+
+        assert!(validate_artifact_payload_version(FUNCTION, 1, &version_one).is_ok());
+        assert!(validate_artifact_payload_version(FUNCTION, 4, &version_four).is_ok());
+        for (metadata_version, plan) in [(1, &version_four), (4, &version_one)] {
+            assert!(matches!(
+                expect_insert_error(
+                    validate_artifact_payload_version(FUNCTION, metadata_version, plan)
+                        .unwrap_err()
+                ),
+                ServerInsertError::Artifact {
+                    function: FUNCTION,
+                    rule: "the active artifact metadata version must match its mutation payload",
+                }
+            ));
+        }
     }
 
     #[test]
@@ -4543,6 +5006,24 @@ mod tests {
             expect_insert_error(validate_arguments(&catalogue, &function, &oversized).unwrap_err()),
             ServerInsertError::ComplexityLimit {
                 category: "total size of text and binary arguments",
+                maximum: VARIABLE_ARGUMENT_PAYLOAD_LIMIT,
+            },
+        ));
+    }
+
+    #[test]
+    fn aggregate_record_bind_payload_is_bounded_when_one_large_argument_is_reused() {
+        let mut total = 0;
+        let encoded_length =
+            ACTIVE_VALUE_ENVELOPE_LENGTH + (VARIABLE_ARGUMENT_PAYLOAD_LIMIT / 2) + 1;
+
+        account_record_bind_payload(&mut total, encoded_length).unwrap();
+        assert!(matches!(
+            expect_insert_error(
+                account_record_bind_payload(&mut total, encoded_length).unwrap_err()
+            ),
+            ServerInsertError::ComplexityLimit {
+                category: "total size of canonical record payloads",
                 maximum: VARIABLE_ARGUMENT_PAYLOAD_LIMIT,
             },
         ));

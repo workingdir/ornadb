@@ -27,13 +27,14 @@ use orna_core::{
     },
     source::{SourceBundle, SourceUnit},
     types::ResolvedType,
-    value::{FunctionArgument, RuntimeFloat, RuntimeValue},
+    value::{EnumValue, FunctionArgument, RecordValue, RuntimeFloat, RuntimeValue},
 };
 use orna_kernel_postgres::{
     PostgresKernel, PostgresKernelError, ServerDeleteCommitState, ServerDeleteError,
     ServerDeleteResult, ServerInsertCommitState, ServerInsertError, ServerInsertResult,
     ServerMutationError, ServerUpdateCommitState, ServerUpdateError, ServerUpdateResult,
 };
+use orna_protocol::encode_active_value;
 use support::{TestDatabase, TestResult, TestSession, failure, with_test_database};
 use tokio_postgres::error::SqlState;
 #[cfg(feature = "test-hooks")]
@@ -94,6 +95,26 @@ const MUTATION_SOURCE: &str = "CREATE SCHEMA tasks;\n\
     SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE\n\
     AS DELETE FROM tasks.owner AS deleted_owner\n\
     WHERE REF(deleted_owner) = p_owner RETURNING TRUE;\n";
+
+const RECORD_MUTATION_SOURCE: &str = "CREATE SCHEMA record_mutation;\n\
+    CREATE TYPE record_mutation.stage AS ENUM ('lead', 'qualified');\n\
+    CREATE TYPE record_mutation.status AS VALUE (\n\
+      enabled BOOLEAN, stage record_mutation.stage\n\
+    ) IMMUTABLE PERSISTABLE;\n\
+    CREATE TYPE record_mutation.case AS OBJECT (\n\
+      status record_mutation.status NOT NULL\n\
+    );\n\
+    CREATE SERVER FUNCTION record_mutation.create(\n\
+      p_enabled BOOLEAN, p_stage record_mutation.stage\n\
+    )\n\
+    RETURNS ROWS (created REF record_mutation.case)\n\
+    SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE\n\
+    AS INSERT INTO record_mutation.case AS made (status)\n\
+    VALUES (record_mutation.status{stage: p_stage, enabled: p_enabled})\n\
+    RETURNING REF(made);\n\
+    CREATE SERVER FUNCTION record_mutation.read()\n\
+    RETURNS ROWS (status record_mutation.status)\n\
+    AS SELECT item.status FROM record_mutation.case item;\n";
 
 // This stays separate from `tasks.owner`: the main fixture deliberately uses
 // that type for a high-volume allocation regression and cannot make it unique.
@@ -342,6 +363,131 @@ async fn standard_value_mutations_preserve_legacy_bind_and_result_behaviour() ->
         require(
             count_rows(&database, fixture.task).await? == 0,
             "standard-backed DELETE left the inserted task row",
+        )?;
+        require_no_session_leaks(&database).await
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn constructs_stores_and_reads_one_canonical_named_record() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = hostile_kernel(&database)?;
+        kernel.bootstrap().await?;
+        let version_one = kernel.recover().await?;
+        let upgrade = orna_standard::prepare_standard_upgrade(&version_one)
+            .map_err(|error| failure(format!("standard upgrade preparation failed: {error}")))?;
+        let version_two = kernel.apply_standard_upgrade(&upgrade).await?;
+        let candidate =
+            standard_application_candidate(RECORD_MUTATION_SOURCE, &version_two, &upgrade)?;
+        let applied = kernel.apply(&candidate).await?;
+
+        let enum_type = applied
+            .catalogue()
+            .enum_types()
+            .iter()
+            .find(|definition| definition.name().to_string() == "record_mutation.stage")
+            .ok_or_else(|| failure("record mutation enum is absent"))?;
+        let record = applied
+            .catalogue()
+            .record_value_types()
+            .iter()
+            .find(|definition| definition.name().to_string() == "record_mutation.status")
+            .ok_or_else(|| failure("record mutation type is absent"))?;
+        let object = applied
+            .catalogue()
+            .object_types()
+            .iter()
+            .find(|definition| definition.name().to_string() == "record_mutation.case")
+            .ok_or_else(|| failure("record mutation object is absent"))?;
+        let object_field = object
+            .fields()
+            .first()
+            .ok_or_else(|| failure("record mutation object field is absent"))?;
+        let create = applied
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|definition| definition.name().to_string() == "record_mutation.create")
+            .ok_or_else(|| failure("record mutation INSERT function is absent"))?;
+        let read = applied
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|definition| definition.name().to_string() == "record_mutation.read")
+            .ok_or_else(|| failure("record mutation SELECT function is absent"))?;
+        let enabled_parameter = create
+            .parameters()
+            .iter()
+            .find(|parameter| parameter.name() == "p_enabled")
+            .ok_or_else(|| failure("record mutation Boolean parameter is absent"))?;
+        let stage_parameter = create
+            .parameters()
+            .iter()
+            .find(|parameter| parameter.name() == "p_stage")
+            .ok_or_else(|| failure("record mutation enum parameter is absent"))?;
+        let stage = EnumValue::new(applied.catalogue(), enum_type.id(), "qualified")?;
+        let expected = RuntimeValue::Record(RecordValue::new(
+            &applied,
+            record.id(),
+            [
+                (String::from("enabled"), RuntimeValue::Boolean(true)),
+                (String::from("stage"), RuntimeValue::Enum(stage.clone())),
+            ],
+        )?);
+        let expected_bytes = encode_active_value(&applied, &expected)?;
+
+        let inserted = kernel
+            .execute_server_insert(
+                create.id(),
+                &[
+                    FunctionArgument::new(stage_parameter.id(), RuntimeValue::Enum(stage))?,
+                    FunctionArgument::new(enabled_parameter.id(), RuntimeValue::Boolean(true))?,
+                ],
+            )
+            .await?;
+        require_insert_result(
+            &inserted,
+            applied.pair(),
+            create.id(),
+            create.current_revision(),
+            object.id(),
+            "created",
+        )?;
+
+        let session = database.open().await?;
+        let stored = session
+            .client()
+            .query_one(
+                &format!(
+                    "SELECT {} FROM {} WHERE _orna_object_id = $1",
+                    field(object_field.id()),
+                    relation(object.id()),
+                ),
+                &[&inserted.object().to_bytes().to_vec()],
+            )
+            .await?
+            .try_get::<_, Vec<u8>>(0)?;
+        session.shutdown().await?;
+        require(
+            stored == expected_bytes,
+            "record INSERT did not store the exact canonical ORV3 bytes",
+        )?;
+
+        let selected = kernel.execute_server_select(read.id()).await?;
+        let [row] = selected.rows().rows() else {
+            return Err(failure("record SELECT did not return exactly one row"));
+        };
+        let [actual] = row.values() else {
+            return Err(failure("record SELECT did not return exactly one value"));
+        };
+        require(
+            selected.pair() == applied.pair()
+                && selected.function() == read.id()
+                && selected.function_revision() == read.current_revision()
+                && actual == &expected,
+            "record INSERT and SELECT did not preserve the active nominal value",
         )?;
         require_no_session_leaks(&database).await
     })
