@@ -137,6 +137,7 @@ struct RecordValueFieldTypeTuple {
     application_enum_type: Option<TypeId>,
     enum_standard_library_revision: Option<StandardLibraryRevisionId>,
     standard_enum_type: Option<TypeId>,
+    application_record_type: Option<TypeId>,
 }
 
 struct RecoveredField {
@@ -1840,7 +1841,8 @@ async fn load_record_value_fields(
             "SELECT catalogue_revision_id, owner_type_id, field_id, name, ordinal,
                     type_kind, value_type_id, value_standard_library_revision_id,
                     enum_type_id, enum_standard_library_revision_id,
-                    standard_enum_type_id, source_unit_id, source_start, source_end
+                    standard_enum_type_id, record_type_id,
+                    source_unit_id, source_start, source_end
              FROM _orna_kernel.catalogue_record_value_fields
              WHERE catalogue_revision_id = $1
              ORDER BY owner_type_id, ordinal, field_id",
@@ -1900,7 +1902,7 @@ fn decode_record_value_field(
     let kind: Option<String> = record.column(
         row,
         "type_kind",
-        "record value field kind must be value or enum",
+        "record value field kind must be value, enum, or record",
     )?;
     let value_type = optional_identity_bytes(
         record.column(
@@ -1952,6 +1954,16 @@ fn decode_record_value_field(
         "record value field standard enum identity must be null or 16 bytes",
     )?
     .map(TypeId::from_bytes);
+    let record_type = optional_identity_bytes(
+        record.column(
+            row,
+            "record_type_id",
+            "record value field record identity must be null or 16 bytes",
+        )?,
+        &record,
+        "record value field record identity must be null or 16 bytes",
+    )?
+    .map(TypeId::from_bytes);
     let descriptor = decode_record_value_field_descriptor(
         RecordValueFieldTypeTuple {
             kind,
@@ -1960,6 +1972,7 @@ fn decode_record_value_field(
             application_enum_type: enum_type,
             enum_standard_library_revision,
             standard_enum_type,
+            application_record_type: record_type,
         },
         catalogue_hash_context,
         &record,
@@ -1986,16 +1999,17 @@ fn decode_record_value_field_descriptor(
             tuple.standard_enum_type,
         ) else {
             return Err(record.invariant(
-                "record value field type columns must form one exact pinned standard value, application enum, or pinned standard enum tuple",
+                "record value field type columns must form one exact pinned standard value, application enum, pinned standard enum, or application record tuple",
             ));
         };
         if tuple.kind.as_deref() != Some("enum")
             || tuple.value_type.is_some()
             || tuple.value_standard_library_revision.is_some()
             || tuple.application_enum_type.is_some()
+            || tuple.application_record_type.is_some()
         {
             return Err(record.invariant(
-                "record value field type columns must form one exact pinned standard value, application enum, or pinned standard enum tuple",
+                "record value field type columns must form one exact pinned standard value, application enum, pinned standard enum, or application record tuple",
             ));
         }
         let standard = catalogue_hash_context.standard().ok_or_else(|| {
@@ -2024,7 +2038,7 @@ fn decode_record_value_field_descriptor(
             value_type: tuple.value_type,
             standard_library_revision: tuple.value_standard_library_revision,
             enum_type: tuple.application_enum_type,
-            record_type: None,
+            record_type: tuple.application_record_type,
         },
         catalogue_hash_context,
         record,
@@ -3703,6 +3717,7 @@ mod tests {
                 application_enum_type: Some(enum_type),
                 enum_standard_library_revision: Some(standard.revision()),
                 standard_enum_type: Some(enum_type),
+                application_record_type: None,
             },
             &context,
             &record,
@@ -3710,7 +3725,7 @@ mod tests {
         assert!(matches!(
             malformed,
             Err(PostgresKernelError::DurableInvariant {
-                rule: "record value field type columns must form one exact pinned standard value, application enum, or pinned standard enum tuple",
+                rule: "record value field type columns must form one exact pinned standard value, application enum, pinned standard enum, or application record tuple",
                 ..
             })
         ));
@@ -3724,6 +3739,7 @@ mod tests {
                     application_enum_type: None,
                     enum_standard_library_revision: revision,
                     standard_enum_type: type_id,
+                    application_record_type: None,
                 },
                 &context,
                 &record,
@@ -3731,7 +3747,7 @@ mod tests {
             assert!(matches!(
                 partial,
                 Err(PostgresKernelError::DurableInvariant {
-                    rule: "record value field type columns must form one exact pinned standard value, application enum, or pinned standard enum tuple",
+                    rule: "record value field type columns must form one exact pinned standard value, application enum, pinned standard enum, or application record tuple",
                     ..
                 })
             ));
@@ -3747,6 +3763,7 @@ mod tests {
                     [0xb4; 16],
                 )),
                 standard_enum_type: Some(enum_type),
+                application_record_type: None,
             },
             &context,
             &record,
@@ -3768,6 +3785,7 @@ mod tests {
                 application_enum_type: None,
                 enum_standard_library_revision: Some(standard.revision()),
                 standard_enum_type: Some(enum_type),
+                application_record_type: None,
             },
             &context,
             &record,
@@ -3779,6 +3797,161 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn record_value_field_descriptor_rejects_partial_and_contaminated_record_tuples_exactly() {
+        let standard = orna_standard::verify_standard_library_snapshot(
+            orna_standard::retained_standard_library_snapshot()
+                .expect("retained standard snapshot"),
+        )
+        .expect("verified retained standard snapshot");
+        let context = CatalogueHashContext::version_two(standard);
+        let record_type = TypeId::from_bytes([0xc1; 16]);
+        let contamination = TypeId::from_bytes([0xc2; 16]);
+        let record =
+            DurableRecord::new("_orna_kernel.catalogue_record_value_fields", "record-tuple");
+        let generic_rule = "field type kind and identity columns must form one exact supported scalar, object, value, enum, or record tuple";
+        let widened_rule = "record value field type columns must form one exact pinned standard value, application enum, pinned standard enum, or application record tuple";
+
+        assert_eq!(
+            decode_record_value_field_descriptor(
+                RecordValueFieldTypeTuple {
+                    kind: Some("record".to_owned()),
+                    value_type: None,
+                    value_standard_library_revision: None,
+                    application_enum_type: None,
+                    enum_standard_library_revision: None,
+                    standard_enum_type: None,
+                    application_record_type: Some(record_type),
+                },
+                &context,
+                &record,
+            )
+            .expect("exact record tuple must decode"),
+            TypeDescriptor::named(record_type),
+        );
+
+        for (kind, record_target) in [
+            (Some("record".to_owned()), None),
+            (None, Some(record_type)),
+            (Some("value".to_owned()), Some(record_type)),
+            (Some("enum".to_owned()), Some(record_type)),
+        ] {
+            let decoded = decode_record_value_field_descriptor(
+                RecordValueFieldTypeTuple {
+                    kind,
+                    value_type: None,
+                    value_standard_library_revision: None,
+                    application_enum_type: None,
+                    enum_standard_library_revision: None,
+                    standard_enum_type: None,
+                    application_record_type: record_target,
+                },
+                &context,
+                &record,
+            );
+            match decoded {
+                Err(PostgresKernelError::DurableInvariant {
+                    relation,
+                    record,
+                    rule,
+                }) => assert_eq!(
+                    (relation, record, rule),
+                    (
+                        "_orna_kernel.catalogue_record_value_fields",
+                        "record-tuple".to_owned(),
+                        generic_rule,
+                    ),
+                    "unexpected partial record tuple error",
+                ),
+                other => panic!("unexpected partial record tuple result: {other:?}"),
+            }
+        }
+
+        for (value_type, value_standard, app_enum) in [
+            (Some(contamination), None, None),
+            (
+                None,
+                Some(StandardLibraryRevisionId::from_bytes([0xc3; 16])),
+                None,
+            ),
+            (None, None, Some(contamination)),
+        ] {
+            let decoded = decode_record_value_field_descriptor(
+                RecordValueFieldTypeTuple {
+                    kind: Some("record".to_owned()),
+                    value_type,
+                    value_standard_library_revision: value_standard,
+                    application_enum_type: app_enum,
+                    enum_standard_library_revision: None,
+                    standard_enum_type: None,
+                    application_record_type: Some(record_type),
+                },
+                &context,
+                &record,
+            );
+            match decoded {
+                Err(PostgresKernelError::DurableInvariant {
+                    relation,
+                    record,
+                    rule,
+                }) => assert_eq!(
+                    (relation, record, rule),
+                    (
+                        "_orna_kernel.catalogue_record_value_fields",
+                        "record-tuple".to_owned(),
+                        generic_rule,
+                    ),
+                    "unexpected contaminated record tuple error",
+                ),
+                other => panic!("unexpected contaminated record tuple result: {other:?}"),
+            }
+        }
+
+        for (enum_standard, std_enum) in [
+            (
+                Some(StandardLibraryRevisionId::from_bytes([0xc4; 16])),
+                None,
+            ),
+            (None, Some(contamination)),
+            (
+                Some(StandardLibraryRevisionId::from_bytes([0xc4; 16])),
+                Some(contamination),
+            ),
+        ] {
+            let decoded = decode_record_value_field_descriptor(
+                RecordValueFieldTypeTuple {
+                    kind: Some("record".to_owned()),
+                    value_type: None,
+                    value_standard_library_revision: None,
+                    application_enum_type: None,
+                    enum_standard_library_revision: enum_standard,
+                    standard_enum_type: std_enum,
+                    application_record_type: Some(record_type),
+                },
+                &context,
+                &record,
+            );
+            match decoded {
+                Err(PostgresKernelError::DurableInvariant {
+                    relation,
+                    record,
+                    rule,
+                }) => assert_eq!(
+                    (relation, record, rule),
+                    (
+                        "_orna_kernel.catalogue_record_value_fields",
+                        "record-tuple".to_owned(),
+                        widened_rule,
+                    ),
+                    "unexpected standard-enum provenance record tuple error",
+                ),
+                other => {
+                    panic!("unexpected standard-enum provenance record tuple result: {other:?}")
+                }
+            }
+        }
     }
 
     #[test]
