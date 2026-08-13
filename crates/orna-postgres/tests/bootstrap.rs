@@ -161,6 +161,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "standard enum record field storage",
         include_str!("../migrations/0020_standard_enum_record_fields.sql"),
     ),
+    (
+        21,
+        "nested record field targets",
+        include_str!("../migrations/0021_nested_record_field_targets.sql"),
+    ),
 ];
 const MIGRATION_DATA_STEP_SEPARATOR: &[u8] = b"\0orna.kernel.migration-step\0";
 const CANONICAL_HASH_V1_EMPTY_SEED_STEP: &[u8] = b"canonical-hash-v1-empty-seed/v1";
@@ -724,6 +729,93 @@ async fn bootstrap_upgrades_the_registered_v3_empty_catalogue() -> TestResult<()
 
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
+async fn bootstrap_upgrades_the_registered_v20_empty_catalogue() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let session = database.open().await?;
+        let seed_result = async {
+            seed_initial_catalogue_client(session.client()).await?;
+            apply_and_register_migrations(session.client(), &MIGRATIONS[1..20]).await
+        }
+        .await;
+        let shutdown_result = session.shutdown().await;
+        match (seed_result, shutdown_result) {
+            (Ok(()), Ok(())) => {}
+            (Err(error), Ok(())) | (Ok(()), Err(error)) => return Err(error),
+            (Err(seed_error), Err(shutdown_error)) => {
+                return Err(failure(format!(
+                    "registered v20 catalogue seed failed: {seed_error}; seed driver shutdown failed: {shutdown_error}"
+                )))
+            }
+        }
+
+        let before = snapshot_upgrade_state(&database).await?;
+        require(
+            before.migrations.len() == 20,
+            format!(
+                "registered v20 setup produced unexpected migrations: {:?}",
+                before.migrations
+            ),
+        )?;
+
+        let kernel = PostgresKernel::from_str(&database.connection_string())?;
+        kernel.bootstrap().await?;
+
+        let after = snapshot_upgrade_state(&database).await?;
+        require(
+            after.migrations.len() == 21 && after.migrations[..20] == before.migrations[..],
+            format!("v21 changed prior migration records: {:?}", after.migrations),
+        )?;
+        require(
+            after.migrations[20]
+                == (
+                    21,
+                    "nested record field targets".to_owned(),
+                    expected_migration_checksum(21, MIGRATIONS[20].2),
+                ),
+            format!("v21 migration record is not exact: {:?}", after.migrations[20]),
+        )?;
+        require(
+            after.active_pair == before.active_pair,
+            "v21 changed the active revision pair",
+        )?;
+
+        let recovered = kernel.recover().await?;
+        let (source_revision_id, catalogue_revision_id) = after.active_pair;
+        require(
+            recovered.pair().source().to_bytes().to_vec() == source_revision_id
+                && recovered.pair().catalogue().to_bytes().to_vec() == catalogue_revision_id,
+            "v21 recovery does not preserve the active revision pair",
+        )?;
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn bootstrap_enforces_nested_record_field_target_storage() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let session = database.open().await?;
+        let result = async {
+            let kernel = PostgresKernel::from_str(&database.connection_string())?;
+            kernel.bootstrap().await?;
+            verify_nested_record_field_target_storage(session.client()).await
+        }
+        .await;
+        let shutdown_result = session.shutdown().await;
+        match (result, shutdown_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+            (Err(verify_error), Err(shutdown_error)) => Err(failure(format!(
+                "nested record field target storage verification failed: {verify_error}; verification driver shutdown failed: {shutdown_error}"
+            ))),
+        }
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
 async fn bootstrap_owner_qualifies_registered_v4_semantic_references() -> TestResult<()> {
     with_test_database(|database| async move {
         seed_registered_v4_semantic_catalogue(&database, false).await?;
@@ -764,8 +856,8 @@ async fn bootstrap_upgrades_v5_write_reference_evidence_without_mutating_semanti
 
         let after = snapshot_upgrade_state(&database).await?;
         require(
-            after.migrations.len() == 20 && after.migrations[..5] == before.migrations[..],
-            format!("v6-v20 changed prior migration records: {:?}", after.migrations),
+            after.migrations.len() == 21 && after.migrations[..5] == before.migrations[..],
+            format!("v6-v21 changed prior migration records: {:?}", after.migrations),
         )?;
         require(
             after.migrations[5]
@@ -903,6 +995,15 @@ async fn bootstrap_upgrades_v5_write_reference_evidence_without_mutating_semanti
             format!("v20 migration record is not exact: {:?}", after.migrations[19]),
         )?;
         require(
+            after.migrations[20]
+                == (
+                    21,
+                    "nested record field targets".to_owned(),
+                    expected_migration_checksum(21, MIGRATIONS[20].2),
+                ),
+            format!("v21 migration record is not exact: {:?}", after.migrations[20]),
+        )?;
+        require(
             after.active_pair == before.active_pair,
             "v6 changed the active revision pair",
         )?;
@@ -988,13 +1089,19 @@ async fn bootstrap_upgrades_registered_v6_without_standard_rows() -> TestResult<
 
         let after = snapshot_upgrade_state(&database).await?;
         require(
-            after.migrations.len() == 20
+            after.migrations.len() == 21
                 && after.migrations[..6] == before.migrations[..]
                 && after.migrations[6]
                     == (
                         7,
                         "standard catalogue type storage".to_owned(),
                         expected_migration_checksum(7, MIGRATIONS[6].2),
+                    )
+                && after.migrations[20]
+                    == (
+                        21,
+                        "nested record field targets".to_owned(),
+                        expected_migration_checksum(21, MIGRATIONS[20].2),
                     ),
             format!("v6 upgrade produced unexpected migrations: {:?}", after.migrations),
         )?;
@@ -1189,7 +1296,7 @@ async fn bootstrap_upgrades_registered_v7_without_resolved_value_rows() -> TestR
         let after_surface = snapshot_catalogue_surface(&database).await?;
         let after_target_fks = snapshot_application_target_foreign_keys(&database).await?;
         require(
-            after.migrations.len() == 20
+            after.migrations.len() == 21
                 && after.migrations[..7] == before.migrations[..]
                 && after.migrations[7]
                     == (
@@ -1268,6 +1375,12 @@ async fn bootstrap_upgrades_registered_v7_without_resolved_value_rows() -> TestR
                         20,
                         "standard enum record field storage".to_owned(),
                         expected_migration_checksum(20, MIGRATIONS[19].2),
+                    )
+                && after.migrations[20]
+                    == (
+                        21,
+                        "nested record field targets".to_owned(),
+                        expected_migration_checksum(21, MIGRATIONS[20].2),
                     ),
             format!("v7 upgrade produced unexpected migrations: {:?}", after.migrations),
         )?;
@@ -1583,7 +1696,7 @@ async fn bootstrap_rejects_tampered_gapped_and_newer_migration_history() -> Test
         Sha256::digest(MIGRATIONS[1].2.as_bytes()).to_vec(),
     )
     .await?;
-    reject_migration_history(16, "future migration", vec![0; 32]).await
+    reject_migration_history(22, "future migration", vec![0; 32]).await
 }
 
 async fn inspect_bootstrap_state(database: &TestDatabase) -> TestResult<()> {
@@ -2517,6 +2630,7 @@ async fn inspect_record_value_storage(client: &Client) -> TestResult<()> {
                 Some(""),
             ),
             ("standard_enum_type_id", "bytea", "bytea", "YES", Some("")),
+            ("record_type_id", "bytea", "bytea", "YES", Some("")),
         ],
     )
     .await?;
@@ -2540,12 +2654,17 @@ async fn inspect_record_value_storage(client: &Client) -> TestResult<()> {
         (
             "catalogue_record_value_fields",
             "cat_record_value_fields_type_kind_check",
-            "type_kind = ANY (ARRAY['value'::text, 'enum'::text])",
+            "type_kind = ANY (ARRAY['value'::text, 'enum'::text, 'record'::text])",
         ),
         (
             "catalogue_record_value_fields",
             "cat_record_value_fields_type_check",
             "enum_standard_library_revision_id IS NOT NULL",
+        ),
+        (
+            "catalogue_record_value_fields",
+            "cat_record_value_fields_type_check",
+            "type_kind = 'record'::text) AND (value_type_id IS NULL)",
         ),
         (
             "catalogue_record_value_fields",
@@ -2556,6 +2675,11 @@ async fn inspect_record_value_storage(client: &Client) -> TestResult<()> {
             "catalogue_record_value_fields",
             "cat_record_value_fields_std_enum_id_length",
             "octet_length(standard_enum_type_id) = 16",
+        ),
+        (
+            "catalogue_record_value_fields",
+            "cat_record_value_fields_record_type_id_length",
+            "octet_length(record_type_id) = 16",
         ),
         (
             "catalogue_record_value_fields",
@@ -2590,6 +2714,16 @@ async fn inspect_record_value_storage(client: &Client) -> TestResult<()> {
     ] {
         require_constraint(client, table, constraint, fragment).await?;
     }
+
+    require_exact_constraint(
+        client,
+        "catalogue_record_value_fields",
+        "cat_record_value_fields_record_type_fk",
+        "FOREIGN KEY (catalogue_revision_id, record_type_id) REFERENCES _orna_kernel.catalogue_record_value_types(catalogue_revision_id, type_id) DEFERRABLE INITIALLY DEFERRED",
+        true,
+        true,
+    )
+    .await?;
 
     for table in [
         "catalogue_record_value_types",
@@ -4447,6 +4581,734 @@ async fn seed_initial_catalogue(database: &TestDatabase) -> TestResult<()> {
         (Err(seed_error), Err(shutdown_error)) => Err(failure(format!(
             "initial catalogue seed failed: {seed_error}; seed driver shutdown failed: {shutdown_error}"
         ))),
+    }
+}
+
+struct RecordFieldTarget<'a> {
+    name: &'a str,
+    ordinal: u32,
+    type_kind: &'a str,
+    value_type_id: Option<&'a [u8]>,
+    value_standard_library_revision_id: Option<&'a [u8]>,
+    enum_type_id: Option<&'a [u8]>,
+    enum_standard_library_revision_id: Option<&'a [u8]>,
+    standard_enum_type_id: Option<&'a [u8]>,
+    record_type_id: Option<&'a [u8]>,
+}
+
+impl<'a> RecordFieldTarget<'a> {
+    fn record(name: &'a str, ordinal: u32, record_type_id: Option<&'a [u8]>) -> Self {
+        Self {
+            name,
+            ordinal,
+            type_kind: "record",
+            value_type_id: None,
+            value_standard_library_revision_id: None,
+            enum_type_id: None,
+            enum_standard_library_revision_id: None,
+            standard_enum_type_id: None,
+            record_type_id,
+        }
+    }
+
+    fn value(
+        name: &'a str,
+        ordinal: u32,
+        value_type_id: &'a [u8],
+        standard_library_revision_id: &'a [u8],
+    ) -> Self {
+        Self {
+            name,
+            ordinal,
+            type_kind: "value",
+            value_type_id: Some(value_type_id),
+            value_standard_library_revision_id: Some(standard_library_revision_id),
+            enum_type_id: None,
+            enum_standard_library_revision_id: None,
+            standard_enum_type_id: None,
+            record_type_id: None,
+        }
+    }
+
+    fn application_enum(name: &'a str, ordinal: u32, enum_type_id: &'a [u8]) -> Self {
+        Self {
+            name,
+            ordinal,
+            type_kind: "enum",
+            value_type_id: None,
+            value_standard_library_revision_id: None,
+            enum_type_id: Some(enum_type_id),
+            enum_standard_library_revision_id: None,
+            standard_enum_type_id: None,
+            record_type_id: None,
+        }
+    }
+
+    fn standard_enum(
+        name: &'a str,
+        ordinal: u32,
+        standard_library_revision_id: &'a [u8],
+        standard_enum_type_id: &'a [u8],
+    ) -> Self {
+        Self {
+            name,
+            ordinal,
+            type_kind: "enum",
+            value_type_id: None,
+            value_standard_library_revision_id: None,
+            enum_type_id: None,
+            enum_standard_library_revision_id: Some(standard_library_revision_id),
+            standard_enum_type_id: Some(standard_enum_type_id),
+            record_type_id: None,
+        }
+    }
+}
+
+async fn verify_nested_record_field_target_storage(client: &Client) -> TestResult<()> {
+    let bundle_id = SourceBundleId::from_bytes([0x21; 16]);
+    let unit_id = SourceUnitId::from_bytes([0x22; 16]);
+    let schema_id = SchemaId::from_bytes([0x23; 16]);
+    let inner_type_id = TypeId::from_bytes([0x24; 16]);
+    let outer_type_id = TypeId::from_bytes([0x25; 16]);
+    let field_id = FieldId::from_bytes([0x26; 16]);
+    let bundle = bundle_id.to_bytes().to_vec();
+    let unit = unit_id.to_bytes().to_vec();
+    let schema = schema_id.to_bytes().to_vec();
+    let inner = inner_type_id.to_bytes().to_vec();
+    let outer = outer_type_id.to_bytes().to_vec();
+    let field = field_id.to_bytes().to_vec();
+    let catalogue_revision_id: Vec<u8> = value(
+        &client
+            .query_one(
+                "SELECT id FROM _orna_kernel.catalogue_revisions LIMIT 1",
+                &[],
+            )
+            .await?,
+        0,
+    )?;
+    let source = "CREATE SCHEMA app;\nCREATE TYPE app.inner AS VALUE (flag BOOLEAN) IMMUTABLE PERSISTABLE;\nCREATE TYPE app.outer AS VALUE (child app.inner) IMMUTABLE PERSISTABLE;\n";
+    let stored_unit = StoredSourceUnit::new(
+        unit_id,
+        0,
+        "records.orna",
+        source,
+        source_unit_content_digest(source).unwrap(),
+    )
+    .map_err(|error| failure(format!("cannot seed the source unit: {error}")))?;
+    let bundle_hash = source_bundle_digest(std::slice::from_ref(&stored_unit))?;
+    let bundle_hash = bundle_hash.to_bytes().to_vec();
+    let unit_hash = source_unit_content_digest(source)
+        .unwrap()
+        .to_bytes()
+        .to_vec();
+    client
+        .execute(
+            "INSERT INTO _orna_kernel.source_bundles (id, content_hash) VALUES ($1, $2)",
+            &[&bundle, &bundle_hash],
+        )
+        .await?;
+    client
+        .execute(
+            "INSERT INTO _orna_kernel.source_units
+                (id, bundle_id, ordinal, logical_path, content, content_hash)
+             VALUES ($1, $2, 0, 'records.orna', $3, $4)",
+            &[&unit, &bundle, &source, &unit_hash],
+        )
+        .await?;
+    client
+        .execute(
+            "INSERT INTO _orna_kernel.catalogue_schemas
+                (catalogue_revision_id, schema_id, name_parts,
+                 source_unit_id, source_start, source_end)
+             VALUES ($1, $2, ARRAY['app'], $3, 0, 12)",
+            &[&catalogue_revision_id, &schema, &unit],
+        )
+        .await?;
+    insert_record_value_type(
+        client,
+        &catalogue_revision_id,
+        &inner,
+        &schema,
+        "inner",
+        &unit,
+    )
+    .await?;
+    insert_record_value_type(
+        client,
+        &catalogue_revision_id,
+        &outer,
+        &schema,
+        "outer",
+        &unit,
+    )
+    .await?;
+
+    insert_record_field(
+        client,
+        &catalogue_revision_id,
+        &outer,
+        &field,
+        &RecordFieldTarget {
+            name: "child",
+            ordinal: 0,
+            type_kind: "record",
+            value_type_id: None,
+            value_standard_library_revision_id: None,
+            enum_type_id: None,
+            enum_standard_library_revision_id: None,
+            standard_enum_type_id: None,
+            record_type_id: Some(&inner),
+        },
+        &unit,
+    )
+    .await?;
+    let row = client
+        .query_one(
+            "SELECT type_kind, record_type_id, value_type_id, enum_type_id
+             FROM _orna_kernel.catalogue_record_value_fields
+             WHERE catalogue_revision_id = $1 AND owner_type_id = $2 AND field_id = $3",
+            &[&catalogue_revision_id, &outer, &field],
+        )
+        .await?;
+    let kind: String = value(&row, 0)?;
+    let record_type: Vec<u8> = value(&row, 1)?;
+    let value_type: Option<Vec<u8>> = value(&row, 2)?;
+    let enum_type: Option<Vec<u8>> = value(&row, 3)?;
+    require(
+        kind == "record" && record_type == inner && value_type.is_none() && enum_type.is_none(),
+        format!(
+            "record field did not round trip exactly: kind={kind} record_type={record_type:?} value={value_type:?} enum={enum_type:?}"
+        ),
+    )?;
+
+    let legacy_value_field = FieldId::from_bytes([0x6b; 16]).to_bytes().to_vec();
+    let legacy_enum_field = FieldId::from_bytes([0x6c; 16]).to_bytes().to_vec();
+    let legacy_std_enum_field = FieldId::from_bytes([0x6d; 16]).to_bytes().to_vec();
+    client.batch_execute("BEGIN").await?;
+    let value_arm = insert_record_field(
+        client,
+        &catalogue_revision_id,
+        &outer,
+        &legacy_value_field,
+        &RecordFieldTarget::value("legacy_value", 1, &[0xaa; 16], &[0xab; 16]),
+        &unit,
+    )
+    .await;
+    require(
+        value_arm.is_ok(),
+        "the replacement tuple check must accept the exact legacy value arm",
+    )?;
+    let enum_arm = insert_record_field(
+        client,
+        &catalogue_revision_id,
+        &outer,
+        &legacy_enum_field,
+        &RecordFieldTarget::application_enum("legacy_enum", 2, &[0xac; 16]),
+        &unit,
+    )
+    .await;
+    require(
+        enum_arm.is_ok(),
+        "the replacement tuple check must accept the exact legacy application-enum arm",
+    )?;
+    let std_enum_arm = insert_record_field(
+        client,
+        &catalogue_revision_id,
+        &outer,
+        &legacy_std_enum_field,
+        &RecordFieldTarget::standard_enum("legacy_std_enum", 3, &[0xab; 16], &[0xad; 16]),
+        &unit,
+    )
+    .await;
+    require(
+        std_enum_arm.is_ok(),
+        "the replacement tuple check must accept the exact legacy standard-enum arm",
+    )?;
+    client.batch_execute("ROLLBACK").await?;
+
+    let mixed_fields = (0..9)
+        .map(|index| {
+            FieldId::from_bytes([0x30 + index as u8; 16])
+                .to_bytes()
+                .to_vec()
+        })
+        .collect::<Vec<_>>();
+    for (index, (case, type_kind, value, value_std, enum_type, enum_std, std_enum, record_type)) in
+        [
+            (
+                "record with value provenance",
+                "record",
+                Some(&inner[..]),
+                None,
+                None,
+                None,
+                None,
+                Some(&inner[..]),
+            ),
+            (
+                "record with value standard revision provenance",
+                "record",
+                None,
+                Some(&inner[..]),
+                None,
+                None,
+                None,
+                Some(&inner[..]),
+            ),
+            (
+                "record with application enum provenance",
+                "record",
+                None,
+                None,
+                Some(&inner[..]),
+                None,
+                None,
+                Some(&inner[..]),
+            ),
+            (
+                "record with standard enum revision provenance",
+                "record",
+                None,
+                None,
+                None,
+                Some(&inner[..]),
+                None,
+                Some(&inner[..]),
+            ),
+            (
+                "record with standard enum provenance",
+                "record",
+                None,
+                None,
+                None,
+                None,
+                Some(&inner[..]),
+                Some(&inner[..]),
+            ),
+            (
+                "record with no target provenance",
+                "record",
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
+            (
+                "value arm mixed with record provenance",
+                "value",
+                Some(&inner[..]),
+                Some(&inner[..]),
+                None,
+                None,
+                None,
+                Some(&inner[..]),
+            ),
+            (
+                "enum arm mixed with record provenance",
+                "enum",
+                None,
+                None,
+                Some(&inner[..]),
+                None,
+                None,
+                Some(&inner[..]),
+            ),
+            (
+                "standard enum arm mixed with record provenance",
+                "enum",
+                None,
+                None,
+                None,
+                Some(&inner[..]),
+                Some(&inner[..]),
+                Some(&inner[..]),
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+    {
+        let violation = insert_record_field(
+            client,
+            &catalogue_revision_id,
+            &outer,
+            &mixed_fields[index],
+            &RecordFieldTarget {
+                name: "mixed_child",
+                ordinal: 0,
+                type_kind,
+                value_type_id: value,
+                value_standard_library_revision_id: value_std,
+                enum_type_id: enum_type,
+                enum_standard_library_revision_id: enum_std,
+                standard_enum_type_id: std_enum,
+                record_type_id: record_type,
+            },
+            &unit,
+        )
+        .await;
+        require_record_field_insert_violation(
+            violation,
+            "23514",
+            "cat_record_value_fields_type_check",
+            &format!("{case} must be rejected"),
+        )?;
+    }
+
+    for (case, size) in [("fifteen byte", 15_usize), ("seventeen byte", 17_usize)] {
+        let short_target = vec![0x41; size];
+        let field_id = FieldId::from_bytes([0x40 + size as u8; 16])
+            .to_bytes()
+            .to_vec();
+        let violation = insert_record_field(
+            client,
+            &catalogue_revision_id,
+            &outer,
+            &field_id,
+            &RecordFieldTarget::record("length_child", 0, Some(&short_target)),
+            &unit,
+        )
+        .await;
+        require_record_field_insert_violation(
+            violation,
+            "23514",
+            "cat_record_value_fields_record_type_id_length",
+            &format!("{case} record_type_id must be rejected"),
+        )?;
+    }
+
+    let dangling = vec![0x51; 16];
+    let dangling_field = FieldId::from_bytes([0x52; 16]).to_bytes().to_vec();
+    let violation = insert_record_field(
+        client,
+        &catalogue_revision_id,
+        &outer,
+        &dangling_field,
+        &RecordFieldTarget::record("dangling_child", 10, Some(&dangling)),
+        &unit,
+    )
+    .await;
+    require_record_field_insert_violation(
+        violation,
+        "23503",
+        "cat_record_value_fields_record_type_fk",
+        "dangling record_type_id must fail at the implicit statement commit",
+    )?;
+
+    let deferred_dangling_field = FieldId::from_bytes([0x53; 16]).to_bytes().to_vec();
+    client.batch_execute("BEGIN").await?;
+    let deferred = insert_record_field(
+        client,
+        &catalogue_revision_id,
+        &outer,
+        &deferred_dangling_field,
+        &RecordFieldTarget::record("dangling_child", 11, Some(&dangling)),
+        &unit,
+    )
+    .await;
+    require(
+        deferred.is_ok(),
+        "deferred dangling record field insert must defer its foreign key",
+    )?;
+    let commit = client.batch_execute("COMMIT").await;
+    match commit {
+        Ok(()) => Err(failure(
+            "deferred dangling record field commit unexpectedly succeeded",
+        )),
+        Err(error) => {
+            let database_error = error.as_db_error().ok_or_else(|| {
+                failure(format!(
+                    "deferred dangling record field commit produced a non-database failure: {error}"
+                ))
+            })?;
+            require(
+                database_error.code().code() == "23503"
+                    && database_error.constraint()
+                        == Some("cat_record_value_fields_record_type_fk"),
+                format!(
+                    "deferred dangling commit failed with SQLSTATE {} and constraint {:?}; expected 23503 and cat_record_value_fields_record_type_fk",
+                    database_error.code().code(),
+                    database_error.constraint(),
+                ),
+            )?;
+            Ok(())
+        }
+    }?;
+    client.batch_execute("ROLLBACK").await?;
+
+    let second_bundle_id = SourceBundleId::from_bytes([0x61; 16]);
+    let second_source_revision_id = SourceRevisionId::from_bytes([0x62; 16]);
+    let second_revision_id = CatalogueRevisionId::from_bytes([0x63; 16]);
+    let second_type_id = TypeId::from_bytes([0x64; 16]);
+    let second_bundle = second_bundle_id.to_bytes().to_vec();
+    let second_source_revision = second_source_revision_id.to_bytes().to_vec();
+    let second_revision = second_revision_id.to_bytes().to_vec();
+    let second_type = second_type_id.to_bytes().to_vec();
+    let active_source_revision_id: Vec<u8> = value(
+        &client
+            .query_one(
+                "SELECT source_revision_id
+                 FROM _orna_kernel.catalogue_revisions
+                 WHERE id = $1",
+                &[&catalogue_revision_id],
+            )
+            .await?,
+        0,
+    )?;
+    let (bundle_content_hash, bundle_hash_algorithm): (Vec<u8>, String) = {
+        let row = client
+            .query_one(
+                "SELECT bundle.content_hash, bundle.hash_algorithm
+                 FROM _orna_kernel.source_revisions AS revision
+                 JOIN _orna_kernel.source_bundles AS bundle ON bundle.id = revision.bundle_id
+                 WHERE revision.id = $1",
+                &[&active_source_revision_id],
+            )
+            .await?;
+        (value(&row, 0)?, value(&row, 1)?)
+    };
+    let (source_revision_content_hash, source_revision_hash_algorithm): (Vec<u8>, String) = {
+        let row = client
+            .query_one(
+                "SELECT content_hash, hash_algorithm
+                 FROM _orna_kernel.source_revisions
+                 WHERE id = $1",
+                &[&active_source_revision_id],
+            )
+            .await?;
+        (value(&row, 0)?, value(&row, 1)?)
+    };
+    let catalogue_revision_row = client
+        .query_one(
+            "SELECT content_hash, hash_algorithm, canonical_hash_version,
+                    standard_library_revision_id, parent_catalogue_revision_id
+             FROM _orna_kernel.catalogue_revisions
+             WHERE id = $1",
+            &[&catalogue_revision_id],
+        )
+        .await?;
+    let catalogue_revision_content_hash: Vec<u8> = value(&catalogue_revision_row, 0)?;
+    let catalogue_revision_hash_algorithm: String = value(&catalogue_revision_row, 1)?;
+    let canonical_hash_version: i16 = value(&catalogue_revision_row, 2)?;
+    let standard_library_revision_id: Option<Vec<u8>> = value(&catalogue_revision_row, 3)?;
+    let parent_catalogue_revision_id: Option<Vec<u8>> = value(&catalogue_revision_row, 4)?;
+    client
+        .execute(
+            "INSERT INTO _orna_kernel.source_bundles
+                (id, content_hash, hash_algorithm)
+             VALUES ($1, $2, $3)",
+            &[&second_bundle, &bundle_content_hash, &bundle_hash_algorithm],
+        )
+        .await?;
+    client
+        .execute(
+            "INSERT INTO _orna_kernel.source_revisions
+                (id, bundle_id, content_hash, hash_algorithm)
+             VALUES ($1, $2, $3, $4)",
+            &[
+                &second_source_revision,
+                &second_bundle,
+                &source_revision_content_hash,
+                &source_revision_hash_algorithm,
+            ],
+        )
+        .await?;
+    client
+        .execute(
+            "INSERT INTO _orna_kernel.catalogue_revisions
+                (id, source_revision_id, content_hash, hash_algorithm,
+                 canonical_hash_version, standard_library_revision_id,
+                 parent_catalogue_revision_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            &[
+                &second_revision,
+                &second_source_revision,
+                &catalogue_revision_content_hash,
+                &catalogue_revision_hash_algorithm,
+                &canonical_hash_version,
+                &standard_library_revision_id,
+                &parent_catalogue_revision_id,
+            ],
+        )
+        .await?;
+    client
+        .execute(
+            "INSERT INTO _orna_kernel.catalogue_schemas
+                (catalogue_revision_id, schema_id, name_parts,
+                 source_unit_id, source_start, source_end)
+             VALUES ($1, $2, ARRAY['app'], $3, 0, 12)",
+            &[&second_revision, &schema, &unit],
+        )
+        .await?;
+    insert_record_value_type(
+        client,
+        &second_revision,
+        &second_type,
+        &schema,
+        "second",
+        &unit,
+    )
+    .await?;
+
+    let cross_revision_field = FieldId::from_bytes([0x69; 16]).to_bytes().to_vec();
+    client.batch_execute("BEGIN").await?;
+    insert_record_field(
+        client,
+        &catalogue_revision_id,
+        &outer,
+        &cross_revision_field,
+        &RecordFieldTarget::record("cross_revision", 4, Some(&second_type)),
+        &unit,
+    )
+    .await?;
+    let immediate = client
+        .batch_execute(
+            "SET CONSTRAINTS _orna_kernel.cat_record_value_fields_record_type_fk IMMEDIATE",
+        )
+        .await;
+    match immediate {
+        Ok(()) => Err(failure(
+            "cross-revision record target unexpectedly passed SET CONSTRAINTS IMMEDIATE",
+        )),
+        Err(error) => {
+            let database_error = error.as_db_error().ok_or_else(|| {
+                failure(format!(
+                    "cross-revision record target produced a non-database failure: {error}"
+                ))
+            })?;
+            require(
+                database_error.code().code() == "23503"
+                    && database_error.constraint()
+                        == Some("cat_record_value_fields_record_type_fk"),
+                format!(
+                    "cross-revision SET CONSTRAINTS IMMEDIATE failed with SQLSTATE {} and constraint {:?}; expected 23503 and cat_record_value_fields_record_type_fk",
+                    database_error.code().code(),
+                    database_error.constraint(),
+                ),
+            )?;
+            Ok(())
+        }
+    }?;
+    client.batch_execute("ROLLBACK").await?;
+
+    let forward_field = FieldId::from_bytes([0x6a; 16]).to_bytes().to_vec();
+    let forward_type = TypeId::from_bytes([0x6b; 16]).to_bytes().to_vec();
+    client.batch_execute("BEGIN").await?;
+    insert_record_field(
+        client,
+        &catalogue_revision_id,
+        &outer,
+        &forward_field,
+        &RecordFieldTarget::record("forward_child", 5, Some(&forward_type)),
+        &unit,
+    )
+    .await?;
+    insert_record_value_type(
+        client,
+        &catalogue_revision_id,
+        &forward_type,
+        &schema,
+        "forward",
+        &unit,
+    )
+    .await?;
+    client
+        .batch_execute(
+            "SET CONSTRAINTS _orna_kernel.cat_record_value_fields_record_type_fk IMMEDIATE",
+        )
+        .await?;
+    client.batch_execute("COMMIT").await?;
+    Ok(())
+}
+
+async fn insert_record_value_type(
+    client: &Client,
+    catalogue_revision_id: &[u8],
+    type_id: &[u8],
+    schema_id: &[u8],
+    name: &str,
+    source_unit_id: &[u8],
+) -> TestResult<()> {
+    let name_parts = vec!["app".to_owned(), name.to_owned()];
+    client
+        .execute(
+            "INSERT INTO _orna_kernel.catalogue_record_value_types
+                (catalogue_revision_id, type_id, schema_id, name_parts,
+                 value_kind, mutability, persistence,
+                 source_unit_id, source_start, source_end)
+             VALUES ($1, $2, $3, $4, 'record', 'immutable', 'persistable', $5, 14, 30)",
+            &[
+                &catalogue_revision_id,
+                &type_id,
+                &schema_id,
+                &name_parts,
+                &source_unit_id,
+            ],
+        )
+        .await?;
+    Ok(())
+}
+
+async fn insert_record_field(
+    client: &Client,
+    catalogue_revision_id: &[u8],
+    owner_type_id: &[u8],
+    field_id: &[u8],
+    target: &RecordFieldTarget<'_>,
+    source_unit_id: &[u8],
+) -> Result<u64, tokio_postgres::Error> {
+    client
+        .execute(
+            "INSERT INTO _orna_kernel.catalogue_record_value_fields
+                (catalogue_revision_id, owner_type_id, field_id, name, ordinal, type_kind,
+                 value_type_id, value_standard_library_revision_id, enum_type_id,
+                 enum_standard_library_revision_id, standard_enum_type_id,
+                 record_type_id, source_unit_id, source_start, source_end)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 18, 30)",
+            &[
+                &catalogue_revision_id,
+                &owner_type_id,
+                &field_id,
+                &target.name,
+                &i64::from(target.ordinal),
+                &target.type_kind,
+                &target.value_type_id,
+                &target.value_standard_library_revision_id,
+                &target.enum_type_id,
+                &target.enum_standard_library_revision_id,
+                &target.standard_enum_type_id,
+                &target.record_type_id,
+                &source_unit_id,
+            ],
+        )
+        .await
+}
+
+fn require_record_field_insert_violation(
+    result: Result<u64, tokio_postgres::Error>,
+    expected_sqlstate: &str,
+    expected_constraint: &str,
+    context: &str,
+) -> TestResult<()> {
+    match result {
+        Ok(_) => Err(failure(format!("{context} unexpectedly accepted a row"))),
+        Err(error) => {
+            let database_error = error.as_db_error().ok_or_else(|| {
+                failure(format!(
+                    "{context} produced a non-database failure: {error}"
+                ))
+            })?;
+            require(
+                database_error.code().code() == expected_sqlstate
+                    && database_error.constraint() == Some(expected_constraint),
+                format!(
+                    "{context} failed with SQLSTATE {} and constraint {:?}; expected {expected_sqlstate} and {expected_constraint:?}",
+                    database_error.code().code(),
+                    database_error.constraint(),
+                ),
+            )
+        }
     }
 }
 

@@ -141,6 +141,12 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/0020_standard_enum_record_fields.sql"),
         data_step: None,
     },
+    Migration {
+        version: 21,
+        name: "nested record field targets",
+        sql: include_str!("../../migrations/0021_nested_record_field_targets.sql"),
+        data_step: None,
+    },
 ];
 const MIGRATION_DATA_STEP_SEPARATOR: &[u8] = b"\0orna.kernel.migration-step\0";
 const CANONICAL_HASH_V1_EMPTY_SEED_STEP: &[u8] = b"canonical-hash-v1-empty-seed/v1";
@@ -819,7 +825,7 @@ mod tests {
             validated_migration_registry()
                 .expect("registry is valid")
                 .len(),
-            20
+            21
         );
         assert_eq!(MIGRATIONS[0].version, 1);
         assert_eq!(MIGRATIONS[1].version, 2);
@@ -841,6 +847,7 @@ mod tests {
         assert_eq!(MIGRATIONS[17].version, 18);
         assert_eq!(MIGRATIONS[18].version, 19);
         assert_eq!(MIGRATIONS[19].version, 20);
+        assert_eq!(MIGRATIONS[20].version, 21);
         assert_eq!(MIGRATIONS[5].name, "definition reference write evidence");
         assert_eq!(MIGRATIONS[6].name, "standard catalogue type storage");
         assert_eq!(MIGRATIONS[7].name, "resolved value type storage");
@@ -856,6 +863,7 @@ mod tests {
         assert_eq!(MIGRATIONS[17].name, "disjoint field reference targets");
         assert_eq!(MIGRATIONS[18].name, "standard opaque value storage");
         assert_eq!(MIGRATIONS[19].name, "standard enum record field storage");
+        assert_eq!(MIGRATIONS[20].name, "nested record field targets");
         assert!(MIGRATIONS[6].data_step.is_none());
         assert!(MIGRATIONS[7].data_step.is_none());
         assert!(MIGRATIONS[8].data_step.is_none());
@@ -870,6 +878,7 @@ mod tests {
         assert!(MIGRATIONS[17].data_step.is_none());
         assert!(MIGRATIONS[18].data_step.is_none());
         assert!(MIGRATIONS[19].data_step.is_none());
+        assert!(MIGRATIONS[20].data_step.is_none());
     }
 
     #[tokio::test]
