@@ -138,7 +138,7 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
     (
         16,
         "resolved record value type storage",
-        include_str!("../migrations/0016_resolved_record_value_types.sql"),
+        include_str!("../../orna-postgres/migrations/0016_resolved_record_value_types.sql"),
     ),
     (
         17,
