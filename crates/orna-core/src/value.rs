@@ -18,6 +18,21 @@ use crate::{
 
 const MAX_OPAQUE_CODEC_PAYLOAD_LENGTH: usize = 16 * 1024 * 1024;
 
+/// A borrowed exact type view of one runtime value.
+///
+/// `Flat` preserves the existing compatibility `ResolvedType`. `Constructed`
+/// borrows the complete descriptor retained by a constructed runtime value.
+/// This bridge defines the constructed arm before any current `RuntimeValue`
+/// can return it.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuntimeType<'a> {
+    /// One existing flat runtime type.
+    Flat(ResolvedType),
+    /// One complete constructed descriptor borrowed from its runtime value.
+    Constructed(&'a TypeDescriptor),
+}
+
 /// One typed runtime value accepted by the initial SERVER query result subset.
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq)]
@@ -47,6 +62,15 @@ pub enum RuntimeValue {
 }
 
 impl RuntimeValue {
+    /// Returns the exact runtime type without erasing a constructed descriptor.
+    ///
+    /// Every currently constructible runtime value returns
+    /// [`RuntimeType::Flat`]. A later step adds the first value that returns
+    /// [`RuntimeType::Constructed`].
+    pub fn runtime_type(&self) -> RuntimeType<'_> {
+        RuntimeType::Flat(self.resolved_type())
+    }
+
     /// Creates a typed null in the initial supported runtime subset.
     pub fn null(resolved_type: ResolvedType) -> Result<Self, ResultRowsError> {
         require_supported_runtime_type(resolved_type)?;
@@ -618,7 +642,7 @@ fn record_value_is_active(active: &ActiveDatabaseRevision, value: &RecordValue) 
             else {
                 return false;
             };
-            if field_value.resolved_type() != expected {
+            if field_value.runtime_type() != RuntimeType::Flat(expected) {
                 return false;
             }
             if let Some(nested_record_type) =
@@ -1550,6 +1574,99 @@ mod tests {
         assert_eq!(
             RuntimeValue::Record(outer).resolved_type(),
             ResolvedType::named(outer_type)
+        );
+    }
+
+    #[test]
+    fn runtime_type_preserves_every_current_flat_runtime_variant() {
+        let active = active_record_revision();
+        let standard = active.catalogue_hash_context().standard().unwrap();
+        let registry = OpaqueCodecRegistry::new(
+            standard,
+            [opaque_registration(
+                OPAQUE_TYPE,
+                OPAQUE_NAME,
+                OPAQUE_CONTRACT,
+            )],
+        )
+        .unwrap();
+        let record = RecordValue::new(
+            &active,
+            RECORD_TYPE,
+            [
+                (String::from("enabled"), RuntimeValue::Boolean(true)),
+                (
+                    String::from("stage"),
+                    RuntimeValue::Enum(
+                        EnumValue::new(active.catalogue(), ENUM_TYPE, "qualified").unwrap(),
+                    ),
+                ),
+            ],
+        )
+        .unwrap();
+        let opaque = OpaqueValue::new(&active, &registry, OPAQUE_TYPE, [0; 16]).unwrap();
+
+        let cases: [(RuntimeValue, ResolvedType); 11] = [
+            (
+                RuntimeValue::null(ResolvedType::reference(TARGET)).unwrap(),
+                ResolvedType::reference(TARGET),
+            ),
+            (
+                RuntimeValue::Boolean(true),
+                ResolvedType::scalar(StandardScalar::Boolean),
+            ),
+            (
+                RuntimeValue::Integer(-7),
+                ResolvedType::scalar(StandardScalar::Integer),
+            ),
+            (
+                RuntimeValue::BigInt(8),
+                ResolvedType::scalar(StandardScalar::BigInt),
+            ),
+            (
+                RuntimeValue::Float(RuntimeFloat::new(9.5).unwrap()),
+                ResolvedType::scalar(StandardScalar::Float),
+            ),
+            (
+                RuntimeValue::Text("value".into()),
+                ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+            ),
+            (
+                RuntimeValue::Bytes(vec![1, 2, 3]),
+                ResolvedType::scalar(StandardScalar::BinaryLargeObject),
+            ),
+            (
+                RuntimeValue::Reference {
+                    target: TARGET,
+                    object: OBJECT,
+                },
+                ResolvedType::reference(TARGET),
+            ),
+            (
+                RuntimeValue::Enum(
+                    EnumValue::new(active.catalogue(), ENUM_TYPE, "qualified").unwrap(),
+                ),
+                ResolvedType::named(ENUM_TYPE),
+            ),
+            (
+                RuntimeValue::Record(record),
+                ResolvedType::named(RECORD_TYPE),
+            ),
+            (
+                RuntimeValue::Opaque(opaque),
+                ResolvedType::value(OPAQUE_TYPE),
+            ),
+        ];
+
+        for (value, expected) in cases {
+            assert_eq!(value.runtime_type(), RuntimeType::Flat(expected));
+            assert_eq!(value.resolved_type(), expected);
+        }
+
+        let query: for<'a> fn(&'a RuntimeValue) -> RuntimeType<'a> = RuntimeValue::runtime_type;
+        assert_eq!(
+            query(&RuntimeValue::Boolean(true)),
+            RuntimeType::Flat(ResolvedType::scalar(StandardScalar::Boolean))
         );
     }
 
