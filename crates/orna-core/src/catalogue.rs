@@ -12,7 +12,8 @@ use std::{
 
 use crate::{
     CatalogueRevisionId, ExpressionId, FieldId, FunctionId, FunctionRevisionId, ParameterId,
-    SchemaId, TypeBindingId, TypeId, types::ResolvedType,
+    SchemaId, TypeBindingId, TypeId,
+    types::{ResolvedType, TypeDescriptor},
 };
 
 mod types;
@@ -922,24 +923,23 @@ impl CatalogueSnapshot {
         for record_value_type in &record_value_types {
             Self::validate_record_value_fields(record_value_type)?;
             for field in record_value_type.fields() {
-                let accepted = match field.type_descriptor().map(|value| value.kind()) {
-                    Some(crate::types::TypeDescriptorKind::Named(target)) => {
+                let accepted = match field.descriptor().kind() {
+                    crate::types::TypeDescriptorKind::Named(target) => {
                         enum_type_indices_by_id.contains_key(&target)
                             || !primary_type_ids.contains_key(&target)
                     }
-                    Some(crate::types::TypeDescriptorKind::Reference(_))
-                    | Some(crate::types::TypeDescriptorKind::List(_))
-                    | Some(crate::types::TypeDescriptorKind::Set(_))
-                    | Some(crate::types::TypeDescriptorKind::Map { .. })
-                    | Some(crate::types::TypeDescriptorKind::Option(_))
-                    | Some(crate::types::TypeDescriptorKind::Stream(_))
-                    | None => false,
+                    crate::types::TypeDescriptorKind::Reference(_)
+                    | crate::types::TypeDescriptorKind::List(_)
+                    | crate::types::TypeDescriptorKind::Set(_)
+                    | crate::types::TypeDescriptorKind::Map { .. }
+                    | crate::types::TypeDescriptorKind::Option(_)
+                    | crate::types::TypeDescriptorKind::Stream(_) => false,
                 };
                 if !accepted {
                     return Err(CatalogueSnapshotError::UnsupportedRecordValueFieldType {
                         owner: record_value_type.id(),
                         field: field.id(),
-                        resolved_type: field.resolved_type(),
+                        descriptor: field.descriptor().clone(),
                     });
                 }
             }
@@ -1564,8 +1564,8 @@ pub enum CatalogueSnapshotError {
         owner: TypeId,
         /// The invalid field identity.
         field: FieldId,
-        /// The rejected resolved type descriptor.
-        resolved_type: ResolvedType,
+        /// The rejected type descriptor.
+        descriptor: TypeDescriptor,
     },
     /// A value type has no versioned representation contract.
     EmptyValueTypeRepresentationContract {
@@ -1857,10 +1857,10 @@ impl fmt::Display for CatalogueSnapshotError {
             Self::UnsupportedRecordValueFieldType {
                 owner,
                 field,
-                resolved_type,
+                descriptor,
             } => write!(
                 formatter,
-                "field {field} in record value type {owner} has unsupported type {resolved_type:?}"
+                "field {field} in record value type {owner} has unsupported descriptor {descriptor:?}"
             ),
             Self::EmptyValueTypeRepresentationContract { value_type } => write!(
                 formatter,
@@ -2055,7 +2055,7 @@ mod tests {
     use crate::{
         CatalogueRevisionId, ExpressionId, FieldId, FunctionId, FunctionRevisionId, ParameterId,
         SchemaId, TypeId,
-        types::{ResolvedType, StandardScalar},
+        types::{ResolvedType, StandardScalar, TypeDescriptor},
     };
 
     fn name(parts: &[&str]) -> QualifiedSemanticName {
@@ -2378,8 +2378,8 @@ mod tests {
             Some(&point.fields()[1])
         );
         assert_eq!(
-            point.fields()[2].resolved_type(),
-            ResolvedType::named(axis_id)
+            point.fields()[2].descriptor(),
+            &TypeDescriptor::named(axis_id)
         );
         assert_eq!(catalogue.record_value_type_by_id(point_id), Some(point));
         assert_eq!(
@@ -2482,44 +2482,49 @@ mod tests {
             )
         };
 
-        for resolved_type in [
-            ResolvedType::scalar(StandardScalar::Integer),
+        let (resolved_type, descriptor) = (
             ResolvedType::reference(TypeId::from_bytes([92; 16])),
-        ] {
-            let field = RecordValueFieldDefinition::new(
-                FieldId::from_bytes([3; 16]),
-                "x",
-                0,
-                resolved_type,
-            );
-            let error = CatalogueSnapshot::new_with_record_value_types(
-                CatalogueRevisionId::from_bytes([7; 16]),
-                vec![schema(1, &["geometry"])],
-                vec![],
-                vec![],
-                vec![],
-                vec![record(2, &["geometry", "point"], vec![field])],
-                vec![],
+            TypeDescriptor::reference(TypeId::from_bytes([92; 16])),
+        );
+        let field = RecordValueFieldDefinition::try_new(
+            FieldId::from_bytes([3; 16]),
+            "x",
+            0,
+            resolved_type,
+        )
+        .unwrap();
+        let error = CatalogueSnapshot::new_with_record_value_types(
+            CatalogueRevisionId::from_bytes([7; 16]),
+            vec![schema(1, &["geometry"])],
+            vec![],
+            vec![],
+            vec![],
+            vec![record(2, &["geometry", "point"], vec![field])],
+            vec![],
+        )
+        .unwrap_err();
+        let owner = TypeId::from_bytes([2; 16]);
+        let field = FieldId::from_bytes([3; 16]);
+        assert_eq!(
+            error,
+            CatalogueSnapshotError::UnsupportedRecordValueFieldType {
+                owner,
+                field,
+                descriptor: descriptor.clone(),
+            }
+        );
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "field {field} in record value type {owner} has unsupported descriptor {descriptor:?}"
             )
-            .unwrap_err();
-            assert_eq!(
-                error,
-                CatalogueSnapshotError::UnsupportedRecordValueFieldType {
-                    owner: TypeId::from_bytes([2; 16]),
-                    field: FieldId::from_bytes([3; 16]),
-                    resolved_type,
-                }
-            );
-        }
+        );
 
         for resolved_type in [
             ResolvedType::value(TypeId::from_bytes([93; 16])),
             ResolvedType::named(TypeId::from_bytes([94; 16])),
         ] {
-            assert_eq!(
-                build(resolved_type).unwrap().record_value_types()[0].fields()[0].resolved_type(),
-                resolved_type
-            );
+            assert!(build(resolved_type).is_ok());
         }
 
         let resolved_type = ResolvedType::value(transient_id);
@@ -2528,7 +2533,7 @@ mod tests {
             CatalogueSnapshotError::UnsupportedRecordValueFieldType {
                 owner: TypeId::from_bytes([2; 16]),
                 field: FieldId::from_bytes([3; 16]),
-                resolved_type,
+                descriptor: TypeDescriptor::named(transient_id),
             }
         );
 
@@ -2556,8 +2561,8 @@ mod tests {
             .unwrap()
             .record_value_types()[0]
                 .fields()[0]
-                .type_descriptor(),
-            Some(&crate::types::TypeDescriptor::named(enum_id))
+                .descriptor(),
+            &TypeDescriptor::named(enum_id)
         );
 
         let resolved_type = ResolvedType::named(object_id);
@@ -2584,7 +2589,7 @@ mod tests {
             CatalogueSnapshotError::UnsupportedRecordValueFieldType {
                 owner: TypeId::from_bytes([2; 16]),
                 field: FieldId::from_bytes([3; 16]),
-                resolved_type,
+                descriptor: TypeDescriptor::named(object_id),
             }
         );
 
@@ -2625,7 +2630,7 @@ mod tests {
             CatalogueSnapshotError::UnsupportedRecordValueFieldType {
                 owner: TypeId::from_bytes([2; 16]),
                 field: FieldId::from_bytes([3; 16]),
-                resolved_type: ResolvedType::named(nested_id),
+                descriptor: TypeDescriptor::named(nested_id),
             }
         );
     }

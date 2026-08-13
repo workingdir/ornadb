@@ -97,34 +97,10 @@ pub struct RecordValueFieldDefinition {
     id: FieldId,
     name: String,
     ordinal: u32,
-    resolved_type: ResolvedType,
-    descriptor: Option<TypeDescriptor>,
+    descriptor: TypeDescriptor,
 }
 
 impl RecordValueFieldDefinition {
-    /// Creates a record value field from resolved semantic data.
-    pub fn new(
-        id: FieldId,
-        name: impl Into<String>,
-        ordinal: u32,
-        resolved_type: ResolvedType,
-    ) -> Self {
-        let descriptor = match resolved_type {
-            ResolvedType::Named(type_id) | ResolvedType::Value(type_id) => {
-                Some(TypeDescriptor::named(type_id))
-            }
-            ResolvedType::Reference { target } => Some(TypeDescriptor::reference(target)),
-            ResolvedType::Scalar(_) => None,
-        };
-        Self {
-            id,
-            name: name.into(),
-            ordinal,
-            resolved_type,
-            descriptor,
-        }
-    }
-
     /// Creates a record field through the bounded flat-type migration seam.
     ///
     /// Catalogue and active-revision validation still decide whether the
@@ -135,10 +111,16 @@ impl RecordValueFieldDefinition {
         ordinal: u32,
         resolved_type: ResolvedType,
     ) -> Result<Self, RecordValueFieldConstructionError> {
-        if let ResolvedType::Scalar(scalar) = resolved_type {
-            return Err(RecordValueFieldConstructionError::LegacyScalar { scalar });
-        }
-        Ok(Self::new(id, name, ordinal, resolved_type))
+        let descriptor = match resolved_type {
+            ResolvedType::Named(type_id) | ResolvedType::Value(type_id) => {
+                TypeDescriptor::named(type_id)
+            }
+            ResolvedType::Reference { target } => TypeDescriptor::reference(target),
+            ResolvedType::Scalar(scalar) => {
+                return Err(RecordValueFieldConstructionError::LegacyScalar { scalar });
+            }
+        };
+        Self::try_new_descriptor(id, name, ordinal, descriptor)
     }
 
     /// Creates a record field from its canonical flat type descriptor.
@@ -152,9 +134,9 @@ impl RecordValueFieldDefinition {
         ordinal: u32,
         descriptor: TypeDescriptor,
     ) -> Result<Self, RecordValueFieldConstructionError> {
-        let resolved_type = match descriptor.kind() {
-            crate::types::TypeDescriptorKind::Named(type_id) => ResolvedType::named(type_id),
-            crate::types::TypeDescriptorKind::Reference(target) => ResolvedType::reference(target),
+        match descriptor.kind() {
+            crate::types::TypeDescriptorKind::Named(_)
+            | crate::types::TypeDescriptorKind::Reference(_) => {}
             crate::types::TypeDescriptorKind::List(_)
             | crate::types::TypeDescriptorKind::Set(_)
             | crate::types::TypeDescriptorKind::Map { .. }
@@ -169,8 +151,7 @@ impl RecordValueFieldDefinition {
             id,
             name: name.into(),
             ordinal,
-            resolved_type,
-            descriptor: Some(descriptor),
+            descriptor,
         })
     }
 
@@ -189,30 +170,9 @@ impl RecordValueFieldDefinition {
         self.ordinal
     }
 
-    /// Returns this field's temporary legacy resolved type.
-    pub const fn resolved_type(&self) -> ResolvedType {
-        self.resolved_type
-    }
-
-    /// Returns this field's temporary canonical descriptor view.
-    ///
-    /// This is `None` only for a field created through the legacy infallible
-    /// constructor with a representation scalar. Catalogue admission rejects
-    /// that shape. Fields created through [`Self::try_new`] always return a
-    /// descriptor.
-    pub const fn type_descriptor(&self) -> Option<&TypeDescriptor> {
-        self.descriptor.as_ref()
-    }
-
     /// Returns this field's canonical descriptor.
-    ///
-    /// The optional accessor remains for compatibility during the migration.
-    /// Fields created through the accepted constructors always contain a
-    /// descriptor.
     pub fn descriptor(&self) -> &TypeDescriptor {
-        self.descriptor
-            .as_ref()
-            .expect("record value field must have a descriptor")
+        &self.descriptor
     }
 }
 
@@ -793,7 +753,6 @@ mod tests {
             assert_eq!(definition.id(), field);
             assert_eq!(definition.name(), "value");
             assert_eq!(definition.ordinal(), 0);
-            assert_eq!(definition.resolved_type(), resolved_type);
             let expected = match resolved_type {
                 ResolvedType::Named(type_id) | ResolvedType::Value(type_id) => {
                     TypeDescriptor::named(type_id)
@@ -801,7 +760,6 @@ mod tests {
                 ResolvedType::Reference { target } => TypeDescriptor::reference(target),
                 ResolvedType::Scalar(_) => unreachable!(),
             };
-            assert_eq!(definition.type_descriptor(), Some(&expected));
             assert_eq!(definition.descriptor(), &expected);
         }
 
@@ -823,14 +781,6 @@ mod tests {
             "legacy scalar cannot form a record field descriptor"
         );
         assert!(std::error::Error::source(&error).is_none());
-
-        let legacy = RecordValueFieldDefinition::new(
-            field,
-            "value",
-            0,
-            ResolvedType::scalar(StandardScalar::Boolean),
-        );
-        assert_eq!(legacy.type_descriptor(), None);
 
         let constructor_cases = [
             TypeDescriptor::list(TypeDescriptor::named(type_id)).unwrap(),
@@ -880,7 +830,6 @@ mod tests {
             )
             .unwrap();
             assert_eq!(definition.descriptor(), &descriptor);
-            assert_eq!(definition.type_descriptor(), Some(&descriptor));
         }
     }
 
