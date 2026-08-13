@@ -1289,18 +1289,18 @@ mod tests {
                 record_type,
                 QualifiedSemanticName::new(["crm", "status"]).unwrap(),
                 vec![
-                    RecordValueFieldDefinition::try_new(
+                    RecordValueFieldDefinition::try_new_descriptor(
                         ENABLED_FIELD,
                         "enabled",
                         0,
-                        ResolvedType::value(STANDARD_BOOLEAN),
+                        TypeDescriptor::named(STANDARD_BOOLEAN),
                     )
                     .unwrap(),
-                    RecordValueFieldDefinition::try_new(
+                    RecordValueFieldDefinition::try_new_descriptor(
                         STAGE_FIELD,
                         "stage",
                         1,
-                        ResolvedType::named(ENUM_TYPE),
+                        TypeDescriptor::named(ENUM_TYPE),
                     )
                     .unwrap(),
                 ],
