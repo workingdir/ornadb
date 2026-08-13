@@ -1246,7 +1246,8 @@ fn encode_record_value_types(
                     .type_descriptor()
                     .expect("catalogue-validated record field descriptor"),
             )? {
-                RecordValueFieldDescriptorClass::Enum(type_id) => {
+                RecordValueFieldDescriptorClass::ApplicationEnum(type_id)
+                | RecordValueFieldDescriptorClass::StandardEnum(type_id) => {
                     encoder.u8(2);
                     encoder.type_id(type_id);
                 }
