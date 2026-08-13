@@ -26,6 +26,7 @@ use orna_core::{
         StandardLibrarySnapshot, StoredSourceRevision, StoredSourceUnit,
         VerifiedStandardLibrarySnapshot,
     },
+    value::{OpaqueCodecRegistration, OpaqueCodecRegistry, OpaqueCodecRegistryError},
 };
 use orna_syntax::{NamePart, PrimitiveValueTypePersistence, QualifiedName, TypeExportTarget};
 
@@ -917,6 +918,81 @@ pub fn verify_standard_library_snapshot(
         .map_err(|source| StandardLibraryError::CanonicalHash { source })
 }
 
+/// Builds the immutable opaque codec registry for the accepted standard snapshot.
+///
+/// The registration is compiled into this crate. The supplied snapshot can
+/// validate it, but cannot add or select a codec.
+pub fn registered_opaque_codecs(
+    standard: &VerifiedStandardLibrarySnapshot,
+) -> Result<OpaqueCodecRegistry, RegisteredOpaqueCodecsError> {
+    if standard.revision() != STANDARD_LIBRARY_REVISION_ID
+        || standard.catalogue().revision() != STANDARD_CATALOGUE_REVISION_ID
+        || standard.source().bundle() != STANDARD_SOURCE_BUNDLE_ID
+        || standard.source().id() != STANDARD_SOURCE_REVISION_ID
+        || standard.source().revision_hash() != ACCEPTED_SOURCE_REVISION_DIGEST
+        || standard.digest() != ACCEPTED_STANDARD_LIBRARY_DIGEST
+    {
+        return Err(RegisteredOpaqueCodecsError::UnacceptedStandardSnapshot);
+    }
+    let registration = OpaqueCodecRegistration::fixed_length_identity(
+        OPAQUE_TOKEN_TYPE_ID,
+        semantic_name(
+            "std.types.opaque_token",
+            ["std", "types", OPAQUE_TOKEN_LOCAL_NAME],
+        )
+        .map_err(|source| RegisteredOpaqueCodecsError::Manifest { source })?,
+        OPAQUE_TOKEN_CONTRACT,
+        16,
+    )
+    .map_err(|source| RegisteredOpaqueCodecsError::Registry { source })?;
+    OpaqueCodecRegistry::new(standard, [registration])
+        .map_err(|source| RegisteredOpaqueCodecsError::Registry { source })
+}
+
+/// An error from binding checked-in opaque codecs to a standard snapshot.
+#[non_exhaustive]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RegisteredOpaqueCodecsError {
+    /// The supplied verified snapshot is not the hard-coded accepted standard.
+    UnacceptedStandardSnapshot,
+    /// A checked-in codec semantic name is invalid.
+    Manifest {
+        /// The standard manifest error.
+        source: StandardLibraryManifestError,
+    },
+    /// The checked-in registry does not match the accepted definitions.
+    Registry {
+        /// The exact core registry validation error.
+        source: OpaqueCodecRegistryError,
+    },
+}
+
+impl fmt::Display for RegisteredOpaqueCodecsError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnacceptedStandardSnapshot => {
+                formatter.write_str("opaque codecs require the accepted standard snapshot")
+            }
+            Self::Manifest { source } => {
+                write!(formatter, "opaque codec name is invalid: {source}")
+            }
+            Self::Registry { source } => {
+                write!(formatter, "opaque codec registry is invalid: {source}")
+            }
+        }
+    }
+}
+
+impl Error for RegisteredOpaqueCodecsError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::UnacceptedStandardSnapshot => None,
+            Self::Manifest { source } => Some(source),
+            Self::Registry { source } => Some(source),
+        }
+    }
+}
+
 fn retained_standard_library_snapshot_from_source(
     source: &str,
 ) -> Result<StandardLibrarySnapshot, StandardLibraryError> {
@@ -1238,6 +1314,7 @@ mod tests {
             ActiveDatabaseRevision, ActiveDatabaseRevisionInput, ActiveRevisionContent,
             CatalogueHashContext, RevisionPair, StoredSourceRevision, StoredSourceUnit,
         },
+        value::OpaqueValue,
     };
 
     use super::{
@@ -1250,8 +1327,9 @@ mod tests {
         STD_TYPES_SCHEMA_ID, StandardLibraryError, StandardLibraryManifestError,
         StandardUpgradeError, TIME_TYPE_ID, TIMESTAMP_TYPE_ID, UUID_TYPE_ID, VOID_TYPE_ID,
         build_type_bindings, prepare_standard_upgrade, prepare_standard_upgrade_with,
-        retained_standard_library_snapshot, retained_standard_library_snapshot_from_source,
-        standard_library_manifest, verify_standard_library_snapshot,
+        registered_opaque_codecs, retained_standard_library_snapshot,
+        retained_standard_library_snapshot_from_source, standard_library_manifest,
+        verify_standard_library_snapshot,
     };
 
     const EXPECTED_RETAINED_STANDARD_SOURCE: &str = r#"CREATE SCHEMA std;
@@ -2326,8 +2404,12 @@ EXPORT TYPE std.types.OPAQUE_TOKEN AS std.OPAQUE_TOKEN;
         )
         .expect("the alternate standard snapshot is structurally valid");
 
-        assert!(
-            orna_core::canonical_hash::verify_standard_library_snapshot(non_golden.clone()).is_ok()
+        let core_verified =
+            orna_core::canonical_hash::verify_standard_library_snapshot(non_golden.clone())
+                .expect("the alternate standard is canonically self-consistent");
+        assert_eq!(
+            registered_opaque_codecs(&core_verified).unwrap_err(),
+            super::RegisteredOpaqueCodecsError::UnacceptedStandardSnapshot
         );
         assert!(matches!(
             verify_standard_library_snapshot(non_golden),
@@ -2343,6 +2425,24 @@ EXPORT TYPE std.types.OPAQUE_TOKEN AS std.OPAQUE_TOKEN;
                     0xb4, 0x54, 0xf8, 0x4a, 0x98, 0xb2,
                 ])
         ));
+    }
+
+    #[test]
+    fn registered_opaque_codec_is_bound_to_the_accepted_active_standard() {
+        let verified = verify_standard_library_snapshot(
+            retained_standard_library_snapshot().expect("the retained standard source is valid"),
+        )
+        .expect("the accepted standard snapshot verifies");
+        let registry = registered_opaque_codecs(&verified)
+            .expect("the checked-in opaque codec matches the accepted standard");
+        let active = empty_version_two_active_revision(&verified);
+        let payload = [0xa5; 16];
+
+        let value = OpaqueValue::new(&active, &registry, OPAQUE_TOKEN_TYPE_ID, payload)
+            .expect("the exact registered payload is accepted");
+
+        assert_eq!(value.opaque_type(), OPAQUE_TOKEN_TYPE_ID);
+        assert_eq!(value.canonical_payload(), payload);
     }
 
     #[test]
