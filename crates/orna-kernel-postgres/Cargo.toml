@@ -6,19 +6,17 @@ rust-version.workspace = true
 license.workspace = true
 
 [features]
-test-hooks = ["tokio/sync"]
+test-hooks = ["orna-postgres/test-hooks"]
 
 [dependencies]
-futures-util = { version = "0.3", default-features = false, features = ["std"] }
-orna-artifact = { path = "../orna-artifact" }
+orna-postgres = { path = "../orna-postgres" }
+
+[dev-dependencies]
 orna-client = { path = "../orna-client" }
+orna-compiler = { path = "../orna-compiler" }
 orna-core = { path = "../orna-core" }
 orna-protocol = { path = "../orna-protocol" }
 orna-standard = { path = "../orna-standard" }
 sha2 = "0.11.0"
-tokio = { version = "1.53.1", features = ["net", "rt"] }
-tokio-postgres = "0.7.18"
-
-[dev-dependencies]
-orna-compiler = { path = "../orna-compiler" }
 tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "sync"] }
+tokio-postgres = "0.7.18"
