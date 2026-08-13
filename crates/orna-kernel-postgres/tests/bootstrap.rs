@@ -113,7 +113,7 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
     (
         11,
         "protected security audit",
-        include_str!("../migrations/0011_security_audit.sql"),
+        include_str!("../../orna-postgres/migrations/0011_security_audit.sql"),
     ),
     (
         12,
