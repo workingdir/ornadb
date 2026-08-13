@@ -8,10 +8,17 @@ use std::{error::Error, fmt};
 
 use crate::{
     FieldId, ObjectId, ParameterId, TypeId,
-    catalogue::CatalogueSnapshot,
-    revision::{ActiveDatabaseRevision, record_value_field_runtime_type},
+    catalogue::{
+        CatalogueSnapshot, QualifiedSemanticName, ValueTypeKind, ValueTypeMutability,
+        ValueTypePersistence,
+    },
+    revision::{
+        ActiveDatabaseRevision, VerifiedStandardLibrarySnapshot, record_value_field_runtime_type,
+    },
     types::{ResolvedType, StandardScalar},
 };
+
+const MAX_OPAQUE_CODEC_PAYLOAD_LENGTH: usize = 16 * 1024 * 1024;
 
 /// One typed runtime value accepted by the initial SERVER query result subset.
 #[non_exhaustive]
@@ -37,6 +44,8 @@ pub enum RuntimeValue {
     Enum(EnumValue),
     /// A catalogue-validated named immutable record value.
     Record(RecordValue),
+    /// A registered, catalogue-validated opaque value.
+    Opaque(OpaqueValue),
 }
 
 impl RuntimeValue {
@@ -59,6 +68,7 @@ impl RuntimeValue {
             Self::Reference { target, .. } => ResolvedType::reference(*target),
             Self::Enum(value) => ResolvedType::named(value.enum_type),
             Self::Record(value) => ResolvedType::named(value.record_type),
+            Self::Opaque(value) => ResolvedType::value(value.opaque_type),
         }
     }
 
@@ -67,6 +77,368 @@ impl RuntimeValue {
         matches!(self, Self::Null(_))
     }
 }
+
+/// One checked-in identity codec registration for an opaque standard value type.
+///
+/// The registration is inert data supplied by linked code. It cannot name a
+/// dynamic library, executable, filesystem path, environment value, or source
+/// declaration.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OpaqueCodecRegistration {
+    opaque_type: TypeId,
+    semantic_name: QualifiedSemanticName,
+    representation_contract: String,
+    payload_length: usize,
+}
+
+impl OpaqueCodecRegistration {
+    /// Declares one bounded codec whose canonical form is the complete input bytes.
+    pub fn fixed_length_identity(
+        opaque_type: TypeId,
+        semantic_name: QualifiedSemanticName,
+        representation_contract: impl Into<String>,
+        payload_length: usize,
+    ) -> Result<Self, OpaqueCodecRegistryError> {
+        if payload_length == 0 || payload_length > MAX_OPAQUE_CODEC_PAYLOAD_LENGTH {
+            return Err(OpaqueCodecRegistryError::InvalidPayloadLength {
+                opaque_type,
+                payload_length,
+            });
+        }
+        Ok(Self {
+            opaque_type,
+            semantic_name,
+            representation_contract: representation_contract.into(),
+            payload_length,
+        })
+    }
+}
+
+/// An immutable set of checked-in codecs bound to one verified standard snapshot.
+#[derive(Clone, Debug)]
+pub struct OpaqueCodecRegistry {
+    standard: VerifiedStandardLibrarySnapshot,
+    registrations: Vec<OpaqueCodecRegistration>,
+}
+
+impl OpaqueCodecRegistry {
+    /// Validates a complete checked-in registration set against one standard snapshot.
+    pub fn new(
+        standard: &VerifiedStandardLibrarySnapshot,
+        registrations: impl IntoIterator<Item = OpaqueCodecRegistration>,
+    ) -> Result<Self, OpaqueCodecRegistryError> {
+        let registrations = registrations.into_iter().collect::<Vec<_>>();
+        if registrations.is_empty() {
+            return Err(OpaqueCodecRegistryError::EmptyRegistry);
+        }
+
+        for (index, registration) in registrations.iter().enumerate() {
+            for earlier in &registrations[..index] {
+                if earlier.opaque_type == registration.opaque_type {
+                    return Err(OpaqueCodecRegistryError::DuplicateType {
+                        opaque_type: registration.opaque_type,
+                    });
+                }
+                if earlier.semantic_name == registration.semantic_name {
+                    return Err(OpaqueCodecRegistryError::DuplicateName {
+                        semantic_name: registration.semantic_name.clone(),
+                    });
+                }
+                if earlier.representation_contract == registration.representation_contract {
+                    return Err(OpaqueCodecRegistryError::DuplicateContract {
+                        representation_contract: registration.representation_contract.clone(),
+                    });
+                }
+            }
+            validate_opaque_registration(standard, registration)?;
+        }
+
+        if let Some(definition) = standard
+            .catalogue()
+            .value_types()
+            .iter()
+            .find(|definition| {
+                definition.kind() == ValueTypeKind::Opaque
+                    && !registrations
+                        .iter()
+                        .any(|registration| registration.opaque_type == definition.id())
+            })
+        {
+            return Err(OpaqueCodecRegistryError::UnregisteredOpaqueDefinition {
+                opaque_type: definition.id(),
+            });
+        }
+
+        Ok(Self {
+            standard: standard.clone(),
+            registrations,
+        })
+    }
+
+    fn construct(
+        &self,
+        active: &ActiveDatabaseRevision,
+        opaque_type: TypeId,
+        payload: &[u8],
+    ) -> Result<OpaqueValue, OpaqueValueError> {
+        let active_standard = active
+            .catalogue_hash_context()
+            .standard()
+            .ok_or(OpaqueValueError::ActiveStandardRequired)?;
+        if !same_standard_snapshot(&self.standard, active_standard) {
+            return Err(OpaqueValueError::ActiveStandardMismatch);
+        }
+        let registration = self
+            .registrations
+            .iter()
+            .find(|registration| registration.opaque_type == opaque_type)
+            .ok_or(OpaqueValueError::UnregisteredType { opaque_type })?;
+        validate_opaque_registration(active_standard, registration)
+            .map_err(|_| OpaqueValueError::InactiveRegistration { opaque_type })?;
+        if payload.len() != registration.payload_length {
+            return Err(OpaqueValueError::WrongPayloadLength {
+                opaque_type,
+                expected: registration.payload_length,
+                actual: payload.len(),
+            });
+        }
+        Ok(OpaqueValue {
+            opaque_type,
+            canonical_payload: payload.to_vec(),
+        })
+    }
+}
+
+fn validate_opaque_registration(
+    standard: &VerifiedStandardLibrarySnapshot,
+    registration: &OpaqueCodecRegistration,
+) -> Result<(), OpaqueCodecRegistryError> {
+    let Some(definition) = standard
+        .catalogue()
+        .type_definition_by_id(registration.opaque_type)
+    else {
+        return Err(OpaqueCodecRegistryError::MissingDefinition {
+            opaque_type: registration.opaque_type,
+        });
+    };
+    let Some(definition) = definition.as_opaque_value() else {
+        return Err(OpaqueCodecRegistryError::WrongDefinitionKind {
+            opaque_type: registration.opaque_type,
+        });
+    };
+    if definition.name() != &registration.semantic_name {
+        return Err(OpaqueCodecRegistryError::SemanticNameMismatch {
+            opaque_type: registration.opaque_type,
+        });
+    }
+    if definition.representation_contract() != registration.representation_contract {
+        return Err(OpaqueCodecRegistryError::ContractMismatch {
+            opaque_type: registration.opaque_type,
+        });
+    }
+    if definition.mutability() != ValueTypeMutability::Immutable
+        || definition.persistence() != ValueTypePersistence::Transient
+    {
+        return Err(OpaqueCodecRegistryError::DefinitionPolicyMismatch {
+            opaque_type: registration.opaque_type,
+        });
+    }
+    Ok(())
+}
+
+fn same_standard_snapshot(
+    expected: &VerifiedStandardLibrarySnapshot,
+    actual: &VerifiedStandardLibrarySnapshot,
+) -> bool {
+    expected.revision() == actual.revision()
+        && expected.digest_version() == actual.digest_version()
+        && expected.source().id() == actual.source().id()
+        && expected.source().revision_hash() == actual.source().revision_hash()
+        && expected.catalogue().revision() == actual.catalogue().revision()
+        && expected.digest() == actual.digest()
+}
+
+/// An opaque runtime value accepted by one active revision and codec registry.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OpaqueValue {
+    opaque_type: TypeId,
+    canonical_payload: Vec<u8>,
+}
+
+impl OpaqueValue {
+    /// Validates and constructs one complete opaque payload.
+    pub fn new(
+        active: &ActiveDatabaseRevision,
+        registry: &OpaqueCodecRegistry,
+        opaque_type: TypeId,
+        payload: impl AsRef<[u8]>,
+    ) -> Result<Self, OpaqueValueError> {
+        registry.construct(active, opaque_type, payload.as_ref())
+    }
+
+    /// Returns the nominal opaque value-type identity.
+    pub const fn opaque_type(&self) -> TypeId {
+        self.opaque_type
+    }
+
+    /// Returns the complete bounded canonical codec payload.
+    pub fn canonical_payload(&self) -> &[u8] {
+        &self.canonical_payload
+    }
+}
+
+/// An error from validating an immutable opaque codec registry.
+#[non_exhaustive]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum OpaqueCodecRegistryError {
+    /// The checked-in registry contains no codec.
+    EmptyRegistry,
+    /// A fixed-length identity codec has an invalid payload bound.
+    InvalidPayloadLength {
+        /// The opaque type named by the invalid registration.
+        opaque_type: TypeId,
+        /// The invalid exact payload length.
+        payload_length: usize,
+    },
+    /// Two registrations name the same type identity.
+    DuplicateType {
+        /// The duplicated opaque type identity.
+        opaque_type: TypeId,
+    },
+    /// Two registrations name the same semantic type.
+    DuplicateName {
+        /// The duplicated qualified semantic name.
+        semantic_name: QualifiedSemanticName,
+    },
+    /// Two registrations select the same representation contract.
+    DuplicateContract {
+        /// The duplicated representation contract.
+        representation_contract: String,
+    },
+    /// A registered type identity is absent from the standard snapshot.
+    MissingDefinition {
+        /// The absent opaque type identity.
+        opaque_type: TypeId,
+    },
+    /// A registered identity resolves to a non-opaque definition.
+    WrongDefinitionKind {
+        /// The mismatched type identity.
+        opaque_type: TypeId,
+    },
+    /// The registered semantic name differs from the standard definition.
+    SemanticNameMismatch {
+        /// The mismatched opaque type identity.
+        opaque_type: TypeId,
+    },
+    /// The registered contract differs from the standard definition.
+    ContractMismatch {
+        /// The mismatched opaque type identity.
+        opaque_type: TypeId,
+    },
+    /// The standard definition is not immutable and transient.
+    DefinitionPolicyMismatch {
+        /// The mismatched opaque type identity.
+        opaque_type: TypeId,
+    },
+    /// The standard snapshot contains an opaque definition with no codec.
+    UnregisteredOpaqueDefinition {
+        /// The unregistered opaque type identity.
+        opaque_type: TypeId,
+    },
+}
+
+impl fmt::Display for OpaqueCodecRegistryError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptyRegistry => formatter.write_str("opaque codec registry is empty"),
+            Self::InvalidPayloadLength { .. } => {
+                formatter.write_str("opaque codec payload length is invalid")
+            }
+            Self::DuplicateType { .. } => {
+                formatter.write_str("opaque codec type identity is duplicated")
+            }
+            Self::DuplicateName { .. } => {
+                formatter.write_str("opaque codec semantic name is duplicated")
+            }
+            Self::DuplicateContract { .. } => {
+                formatter.write_str("opaque codec representation contract is duplicated")
+            }
+            Self::MissingDefinition { .. } => {
+                formatter.write_str("opaque codec definition is missing")
+            }
+            Self::WrongDefinitionKind { .. } => {
+                formatter.write_str("opaque codec definition has the wrong kind")
+            }
+            Self::SemanticNameMismatch { .. } => {
+                formatter.write_str("opaque codec semantic name does not match")
+            }
+            Self::ContractMismatch { .. } => {
+                formatter.write_str("opaque codec representation contract does not match")
+            }
+            Self::DefinitionPolicyMismatch { .. } => {
+                formatter.write_str("opaque codec definition policy does not match")
+            }
+            Self::UnregisteredOpaqueDefinition { .. } => {
+                formatter.write_str("standard opaque definition has no registered codec")
+            }
+        }
+    }
+}
+
+impl Error for OpaqueCodecRegistryError {}
+
+/// An error from constructing a registered opaque runtime value.
+#[non_exhaustive]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum OpaqueValueError {
+    /// The active revision does not pin a verified standard snapshot.
+    ActiveStandardRequired,
+    /// The active revision pins a different verified standard snapshot.
+    ActiveStandardMismatch,
+    /// The requested opaque type has no checked-in codec registration.
+    UnregisteredType {
+        /// The unregistered opaque type identity.
+        opaque_type: TypeId,
+    },
+    /// The active standard no longer matches the checked registration.
+    InactiveRegistration {
+        /// The inactive opaque type identity.
+        opaque_type: TypeId,
+    },
+    /// The complete opaque payload has the wrong exact length.
+    WrongPayloadLength {
+        /// The opaque type whose payload was rejected.
+        opaque_type: TypeId,
+        /// The codec's required payload length.
+        expected: usize,
+        /// The supplied complete payload length.
+        actual: usize,
+    },
+}
+
+impl fmt::Display for OpaqueValueError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ActiveStandardRequired => {
+                formatter.write_str("opaque value requires an active standard snapshot")
+            }
+            Self::ActiveStandardMismatch => {
+                formatter.write_str("opaque codec registry does not match the active standard")
+            }
+            Self::UnregisteredType { .. } => {
+                formatter.write_str("opaque value type has no registered codec")
+            }
+            Self::InactiveRegistration { .. } => {
+                formatter.write_str("opaque codec registration is not active")
+            }
+            Self::WrongPayloadLength { .. } => {
+                formatter.write_str("opaque value payload has the wrong length")
+            }
+        }
+    }
+}
+
+impl Error for OpaqueValueError {}
 
 /// One named immutable record value validated against an active catalogue.
 #[derive(Clone, Debug, PartialEq)]
@@ -369,6 +741,10 @@ impl FunctionArgument {
                 parameter,
                 record_type: value.record_type(),
             }),
+            RuntimeValue::Opaque(value) => Err(FunctionArgumentError::OpaqueValueNotAccepted {
+                parameter,
+                opaque_type: value.opaque_type(),
+            }),
         }
     }
 
@@ -401,6 +777,13 @@ pub enum FunctionArgumentError {
         /// The record type carried by the value.
         record_type: TypeId,
     },
+    /// An opaque value is outside the current executable argument subset.
+    OpaqueValueNotAccepted {
+        /// The parameter identity supplied with the opaque value.
+        parameter: ParameterId,
+        /// The opaque type carried by the value.
+        opaque_type: TypeId,
+    },
 }
 
 impl fmt::Display for FunctionArgumentError {
@@ -409,6 +792,9 @@ impl fmt::Display for FunctionArgumentError {
             Self::NullValue { .. } => formatter.write_str("function argument value cannot be NULL"),
             Self::RecordValueNotAccepted { .. } => {
                 formatter.write_str("record function arguments are not accepted")
+            }
+            Self::OpaqueValueNotAccepted { .. } => {
+                formatter.write_str("opaque function arguments are not accepted")
             }
         }
     }
@@ -551,6 +937,13 @@ impl ResultRows {
                 });
             }
             for (column_index, (column, value)) in columns.iter().zip(&row.values).enumerate() {
+                if let RuntimeValue::Opaque(value) = value {
+                    return Err(ResultRowsError::OpaqueValueNotAccepted {
+                        row: row_index,
+                        column: column_index,
+                        opaque_type: value.opaque_type(),
+                    });
+                }
                 if value.is_null() && !column.nullable {
                     return Err(ResultRowsError::NullInNonNullableColumn {
                         row: row_index,
@@ -621,6 +1014,15 @@ pub enum ResultRowsError {
         expected: ResolvedType,
         actual: ResolvedType,
     },
+    /// An opaque value occurred in a SERVER result row.
+    OpaqueValueNotAccepted {
+        /// The zero-based result-row position.
+        row: usize,
+        /// The zero-based result-column position.
+        column: usize,
+        /// The rejected opaque type identity.
+        opaque_type: TypeId,
+    },
 }
 
 impl fmt::Display for ResultRowsError {
@@ -660,6 +1062,12 @@ impl fmt::Display for ResultRowsError {
                 formatter,
                 "result row {row} column {column} has a type mismatch"
             ),
+            Self::OpaqueValueNotAccepted { row, column, .. } => {
+                write!(
+                    formatter,
+                    "result row {row} column {column} cannot contain an opaque value"
+                )
+            }
         }
     }
 }
@@ -730,7 +1138,7 @@ mod tests {
             ActiveDatabaseRevision, ActiveDatabaseRevisionInput, ActiveRevisionContent,
             CatalogueHashContext, DefinitionIdentity, DefinitionOrigin, RevisionPair, Sha256Digest,
             SourceOrigin, StandardLibraryDigestVersion, StandardLibrarySnapshot,
-            StoredSourceRevision, StoredSourceUnit,
+            StoredSourceRevision, StoredSourceUnit, VerifiedStandardLibrarySnapshot,
         },
     };
 
@@ -739,21 +1147,43 @@ mod tests {
     const ENUM_TYPE: TypeId = TypeId::from_bytes([0x43; 16]);
     const RECORD_TYPE: TypeId = TypeId::from_bytes([0x47; 16]);
     const STANDARD_BOOLEAN: TypeId = TypeId::from_bytes([0x48; 16]);
+    const OPAQUE_TYPE: TypeId = TypeId::from_bytes([0x49; 16]);
+    const OTHER_OPAQUE_TYPE: TypeId = TypeId::from_bytes([0x4a; 16]);
     const ENABLED_FIELD: FieldId = FieldId::from_bytes([0x59; 16]);
     const STAGE_FIELD: FieldId = FieldId::from_bytes([0x5a; 16]);
+    const OPAQUE_NAME: [&str; 3] = ["std", "types", "opaque_token"];
+    const OPAQUE_CONTRACT: &str = "orna.std.value.opaque-token@1";
 
     fn active_record_revision() -> ActiveDatabaseRevision {
         active_record_revision_with_type(RECORD_TYPE)
     }
 
     fn active_record_revision_with_type(record_type: TypeId) -> ActiveDatabaseRevision {
-        let standard_unit_content = "CREATE SCHEMA std; CREATE TYPE std.boolean;";
+        active_record_revision_with_opaque_contract(record_type, OPAQUE_CONTRACT)
+    }
+
+    fn active_record_revision_with_opaque_contract(
+        record_type: TypeId,
+        opaque_contract: &str,
+    ) -> ActiveDatabaseRevision {
+        let standard = verified_standard_with_value_types(vec![
+            standard_boolean_definition(),
+            opaque_definition(OPAQUE_TYPE, OPAQUE_NAME, opaque_contract),
+        ]);
+
+        active_record_revision_with_standard(record_type, standard)
+    }
+
+    fn verified_standard_with_value_types(
+        value_types: Vec<ValueTypeDefinition>,
+    ) -> VerifiedStandardLibrarySnapshot {
+        let standard_unit_content = "x".repeat(value_types.len() + 2);
         let standard_unit = StoredSourceUnit::new(
             SourceUnitId::from_bytes([0x50; 16]),
             0,
             "std/types.orna",
-            standard_unit_content,
-            source_unit_content_digest(standard_unit_content).unwrap(),
+            &standard_unit_content,
+            source_unit_content_digest(&standard_unit_content).unwrap(),
         )
         .unwrap();
         let standard_bundle_hash =
@@ -773,33 +1203,44 @@ mod tests {
         )
         .unwrap();
         let standard_schema = SchemaId::from_bytes([0x53; 16]);
+        let standard_types_schema = SchemaId::from_bytes([0x54; 16]);
         let standard_catalogue = CatalogueSnapshot::new_with_types(
-            CatalogueRevisionId::from_bytes([0x54; 16]),
-            vec![SchemaDefinition::new(
-                standard_schema,
-                QualifiedSemanticName::new(["std"]).unwrap(),
-            )],
+            CatalogueRevisionId::from_bytes([0x5b; 16]),
+            vec![
+                SchemaDefinition::new(
+                    standard_schema,
+                    QualifiedSemanticName::new(["std"]).unwrap(),
+                ),
+                SchemaDefinition::new(
+                    standard_types_schema,
+                    QualifiedSemanticName::new(["std", "types"]).unwrap(),
+                ),
+            ],
             vec![],
-            vec![ValueTypeDefinition::primitive(
-                STANDARD_BOOLEAN,
-                QualifiedSemanticName::new(["std", "boolean"]).unwrap(),
-                ValueTypeMutability::Immutable,
-                ValueTypePersistence::Persistable,
-                "orna.kernel.value.boolean@1",
-            )],
+            value_types,
             vec![],
         )
         .unwrap();
-        let standard_origins = vec![
+        let mut standard_origins = vec![
             DefinitionOrigin::new(
                 DefinitionIdentity::Schema(standard_schema),
                 SourceOrigin::new(SourceUnitId::from_bytes([0x50; 16]), 0, 1).unwrap(),
             ),
             DefinitionOrigin::new(
-                DefinitionIdentity::ValueType(STANDARD_BOOLEAN),
+                DefinitionIdentity::Schema(standard_types_schema),
                 SourceOrigin::new(SourceUnitId::from_bytes([0x50; 16]), 1, 2).unwrap(),
             ),
         ];
+        standard_origins.extend(standard_catalogue.value_types().iter().enumerate().map(
+            |(index, value_type)| {
+                let start = u32::try_from(index + 2).unwrap();
+                DefinitionOrigin::new(
+                    DefinitionIdentity::ValueType(value_type.id()),
+                    SourceOrigin::new(SourceUnitId::from_bytes([0x50; 16]), start, start + 1)
+                        .unwrap(),
+                )
+            },
+        ));
         let provisional_standard = StandardLibrarySnapshot::new(
             StandardLibraryRevisionId::from_bytes([0x55; 16]),
             StandardLibraryDigestVersion::Version1,
@@ -812,7 +1253,7 @@ mod tests {
         .unwrap();
         let standard_digest =
             calculate_standard_library_digest_for_test(&provisional_standard).unwrap();
-        let standard = verify_standard_library_snapshot(
+        verify_standard_library_snapshot(
             StandardLibrarySnapshot::new(
                 provisional_standard.revision(),
                 provisional_standard.digest_version(),
@@ -824,8 +1265,13 @@ mod tests {
             )
             .unwrap(),
         )
-        .unwrap();
+        .unwrap()
+    }
 
+    fn active_record_revision_with_standard(
+        record_type: TypeId,
+        standard: VerifiedStandardLibrarySnapshot,
+    ) -> ActiveDatabaseRevision {
         let application_schema = SchemaId::from_bytes([0x57; 16]);
         let catalogue_revision = CatalogueRevisionId::from_bytes([0x58; 16]);
         let catalogue = CatalogueSnapshot::new_with_record_value_types(
@@ -933,6 +1379,42 @@ mod tests {
         .unwrap()
     }
 
+    fn standard_boolean_definition() -> ValueTypeDefinition {
+        ValueTypeDefinition::primitive(
+            STANDARD_BOOLEAN,
+            QualifiedSemanticName::new(["std", "boolean"]).unwrap(),
+            ValueTypeMutability::Immutable,
+            ValueTypePersistence::Persistable,
+            "orna.kernel.value.boolean@1",
+        )
+    }
+
+    fn opaque_definition(
+        opaque_type: TypeId,
+        name: impl IntoIterator<Item = &'static str>,
+        contract: &str,
+    ) -> ValueTypeDefinition {
+        ValueTypeDefinition::opaque(
+            opaque_type,
+            QualifiedSemanticName::new(name).unwrap(),
+            contract,
+        )
+    }
+
+    fn opaque_registration(
+        opaque_type: TypeId,
+        name: impl IntoIterator<Item = &'static str>,
+        contract: &str,
+    ) -> OpaqueCodecRegistration {
+        OpaqueCodecRegistration::fixed_length_identity(
+            opaque_type,
+            QualifiedSemanticName::new(name).unwrap(),
+            contract,
+            16,
+        )
+        .unwrap()
+    }
+
     fn enum_catalogue(labels: &[&str]) -> CatalogueSnapshot {
         CatalogueSnapshot::new_with_enum_types(
             CatalogueRevisionId::from_bytes([0x44; 16]),
@@ -954,6 +1436,197 @@ mod tests {
 
     fn column(name: &str, resolved_type: ResolvedType, nullable: bool) -> ResultColumn {
         ResultColumn::new(name, resolved_type, nullable).unwrap()
+    }
+
+    #[test]
+    fn opaque_codec_registry_is_complete_unique_and_exact() {
+        let active = active_record_revision();
+        let standard = active.catalogue_hash_context().standard().unwrap();
+        let accepted = opaque_registration(OPAQUE_TYPE, OPAQUE_NAME, OPAQUE_CONTRACT);
+        assert!(OpaqueCodecRegistry::new(standard, [accepted.clone()]).is_ok());
+        assert_eq!(
+            OpaqueCodecRegistry::new(standard, Vec::<OpaqueCodecRegistration>::new()).unwrap_err(),
+            OpaqueCodecRegistryError::EmptyRegistry
+        );
+
+        let duplicate_type = opaque_registration(
+            OPAQUE_TYPE,
+            ["std", "types", "other_token"],
+            "orna.std.value.other-token@1",
+        );
+        assert_eq!(
+            OpaqueCodecRegistry::new(standard, [accepted.clone(), duplicate_type]).unwrap_err(),
+            OpaqueCodecRegistryError::DuplicateType {
+                opaque_type: OPAQUE_TYPE,
+            }
+        );
+        let duplicate_name = opaque_registration(
+            OTHER_OPAQUE_TYPE,
+            OPAQUE_NAME,
+            "orna.std.value.other-token@1",
+        );
+        assert_eq!(
+            OpaqueCodecRegistry::new(standard, [accepted.clone(), duplicate_name]).unwrap_err(),
+            OpaqueCodecRegistryError::DuplicateName {
+                semantic_name: QualifiedSemanticName::new(OPAQUE_NAME).unwrap(),
+            }
+        );
+        let duplicate_contract = opaque_registration(
+            OTHER_OPAQUE_TYPE,
+            ["std", "types", "other_token"],
+            OPAQUE_CONTRACT,
+        );
+        assert_eq!(
+            OpaqueCodecRegistry::new(standard, [accepted.clone(), duplicate_contract]).unwrap_err(),
+            OpaqueCodecRegistryError::DuplicateContract {
+                representation_contract: OPAQUE_CONTRACT.into(),
+            }
+        );
+
+        for (registration, expected) in [
+            (
+                opaque_registration(
+                    OTHER_OPAQUE_TYPE,
+                    ["std", "types", "missing"],
+                    "orna.std.value.missing@1",
+                ),
+                OpaqueCodecRegistryError::MissingDefinition {
+                    opaque_type: OTHER_OPAQUE_TYPE,
+                },
+            ),
+            (
+                opaque_registration(
+                    STANDARD_BOOLEAN,
+                    ["std", "boolean"],
+                    "orna.kernel.value.boolean@1",
+                ),
+                OpaqueCodecRegistryError::WrongDefinitionKind {
+                    opaque_type: STANDARD_BOOLEAN,
+                },
+            ),
+            (
+                opaque_registration(
+                    OPAQUE_TYPE,
+                    ["std", "types", "wrong_token"],
+                    OPAQUE_CONTRACT,
+                ),
+                OpaqueCodecRegistryError::SemanticNameMismatch {
+                    opaque_type: OPAQUE_TYPE,
+                },
+            ),
+            (
+                opaque_registration(OPAQUE_TYPE, OPAQUE_NAME, "orna.std.value.wrong-token@1"),
+                OpaqueCodecRegistryError::ContractMismatch {
+                    opaque_type: OPAQUE_TYPE,
+                },
+            ),
+        ] {
+            assert_eq!(
+                OpaqueCodecRegistry::new(standard, [registration]).unwrap_err(),
+                expected
+            );
+        }
+
+        let expanded_standard = verified_standard_with_value_types(vec![
+            standard_boolean_definition(),
+            opaque_definition(OPAQUE_TYPE, OPAQUE_NAME, OPAQUE_CONTRACT),
+            opaque_definition(
+                OTHER_OPAQUE_TYPE,
+                ["std", "types", "other_token"],
+                "orna.std.value.other-token@1",
+            ),
+        ]);
+        assert_eq!(
+            OpaqueCodecRegistry::new(&expanded_standard, [accepted]).unwrap_err(),
+            OpaqueCodecRegistryError::UnregisteredOpaqueDefinition {
+                opaque_type: OTHER_OPAQUE_TYPE,
+            }
+        );
+    }
+
+    #[test]
+    fn opaque_values_require_the_same_active_standard_and_exact_payload() {
+        let active = active_record_revision();
+        let standard = active.catalogue_hash_context().standard().unwrap();
+        let registry = OpaqueCodecRegistry::new(
+            standard,
+            [opaque_registration(
+                OPAQUE_TYPE,
+                OPAQUE_NAME,
+                OPAQUE_CONTRACT,
+            )],
+        )
+        .unwrap();
+
+        for position in 0..16 {
+            for byte in u8::MIN..=u8::MAX {
+                let mut payload = [0; 16];
+                payload[position] = byte;
+                let value = OpaqueValue::new(&active, &registry, OPAQUE_TYPE, payload).unwrap();
+                assert_eq!(value.opaque_type(), OPAQUE_TYPE);
+                assert_eq!(value.canonical_payload(), payload);
+                assert_eq!(
+                    RuntimeValue::Opaque(value.clone()).resolved_type(),
+                    ResolvedType::value(OPAQUE_TYPE)
+                );
+                assert_eq!(value, value.clone());
+            }
+        }
+
+        for length in (0..=32).filter(|length| *length != 16) {
+            assert_eq!(
+                OpaqueValue::new(&active, &registry, OPAQUE_TYPE, vec![0; length]),
+                Err(OpaqueValueError::WrongPayloadLength {
+                    opaque_type: OPAQUE_TYPE,
+                    expected: 16,
+                    actual: length,
+                })
+            );
+        }
+        assert_eq!(
+            OpaqueValue::new(&active, &registry, OTHER_OPAQUE_TYPE, [0; 16]),
+            Err(OpaqueValueError::UnregisteredType {
+                opaque_type: OTHER_OPAQUE_TYPE,
+            })
+        );
+
+        let stale = active_record_revision_with_opaque_contract(
+            TypeId::from_bytes([0x4b; 16]),
+            "orna.std.value.opaque-token@2",
+        );
+        assert_eq!(
+            OpaqueValue::new(&stale, &registry, OPAQUE_TYPE, [0; 16]),
+            Err(OpaqueValueError::ActiveStandardMismatch)
+        );
+
+        let value = OpaqueValue::new(&active, &registry, OPAQUE_TYPE, [0; 16]).unwrap();
+        let runtime_value = RuntimeValue::Opaque(value.clone());
+        let parameter = ParameterId::from_bytes([0x4c; 16]);
+        assert_eq!(
+            FunctionArgument::new(parameter, runtime_value.clone()),
+            Err(FunctionArgumentError::OpaqueValueNotAccepted {
+                parameter,
+                opaque_type: OPAQUE_TYPE,
+            })
+        );
+        assert_eq!(
+            ResultRows::new(
+                [ResultColumn::new("opaque", ResolvedType::value(OPAQUE_TYPE), false).unwrap()],
+                [ResultRow::new([runtime_value])],
+            ),
+            Err(ResultRowsError::OpaqueValueNotAccepted {
+                row: 0,
+                column: 0,
+                opaque_type: OPAQUE_TYPE,
+            })
+        );
+        assert_ne!(
+            value,
+            OpaqueValue {
+                opaque_type: OTHER_OPAQUE_TYPE,
+                canonical_payload: vec![0; 16],
+            }
+        );
     }
 
     #[test]
