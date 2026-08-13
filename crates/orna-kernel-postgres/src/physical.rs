@@ -1,5 +1,6 @@
 //! PostgreSQL lowering for backend-neutral physical catalogue changes.
 
+#[path = "physical/verify.rs"]
 mod verify;
 
 use orna_core::{
