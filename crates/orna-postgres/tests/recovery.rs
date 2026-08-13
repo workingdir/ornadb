@@ -1,4 +1,3 @@
-#[path = "../../orna-kernel-postgres/tests/support/mod.rs"]
 mod support;
 
 use std::{
