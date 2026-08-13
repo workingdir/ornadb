@@ -13,8 +13,9 @@ use orna_core::{
         SecurityAuditEvent, SecurityAuditKind, SecurityAuditOutcome, SecuritySnapshot,
         SessionBindingError,
     },
-    value::FunctionArgument,
+    value::{FunctionArgument, RecordValue, RuntimeValue},
 };
+use orna_protocol::encode_active_value;
 use tokio_postgres::{IsolationLevel, Row, Transaction, types::FromSqlOwned};
 
 use crate::{
@@ -26,6 +27,47 @@ use crate::{
 };
 
 impl PostgresKernel {
+    /// Revalidates raw record arguments against one transactional active revision.
+    ///
+    /// An empty list performs no PostgreSQL operation. A non-empty list opens
+    /// one read-only, repeatable-read transaction and returns only whether all
+    /// record values remain canonical for its recovered active revision. This
+    /// operation does not select, authorise, audit, or execute a target.
+    pub async fn preflight_record_arguments(
+        &self,
+        records: Vec<RecordValue>,
+    ) -> Result<RecordArgumentPreflight, PostgresKernelError> {
+        if records.is_empty() {
+            return Ok(RecordArgumentPreflight::NotRequired);
+        }
+        let mut session = self.open().await?;
+        let operation = async {
+            let transaction = session
+                .client
+                .build_transaction()
+                .isolation_level(IsolationLevel::RepeatableRead)
+                .read_only(true)
+                .start()
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            require_current_migrations(&transaction).await?;
+            let active = recover_active_revision(&transaction).await?;
+            let mut outcome = RecordArgumentPreflight::Current;
+            for record in records {
+                if encode_active_value(&active, &RuntimeValue::Record(record)).is_err() {
+                    outcome = RecordArgumentPreflight::Stale;
+                }
+            }
+            transaction
+                .commit()
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            Ok(outcome)
+        }
+        .await;
+        finish_security_session(operation, session.shutdown().await)
+    }
+
     /// Executes one authorised SERVER `SELECT` against one active snapshot.
     ///
     /// The operation records and commits its protected `EXECUTE` decision. It
@@ -379,6 +421,17 @@ impl PostgresKernel {
         .await;
         finish_security_session(operation, session.shutdown().await)
     }
+}
+
+/// The closed result of raw record-argument preflight.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RecordArgumentPreflight {
+    /// The call contains no record argument and needs no PostgreSQL preflight.
+    NotRequired,
+    /// Every record is canonical for the transaction's active revision.
+    Current,
+    /// At least one record is stale or incompatible with the active revision.
+    Stale,
 }
 
 #[cfg(feature = "test-hooks")]
@@ -1162,6 +1215,18 @@ fn decode_principal_status(value: String) -> Result<PrincipalStatus, PostgresKer
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn empty_record_preflight_does_not_open_postgres() {
+        let kernel = "host=127.0.0.1 port=1 dbname=absent"
+            .parse::<PostgresKernel>()
+            .expect("unavailable test configuration is valid");
+
+        assert_eq!(
+            kernel.preflight_record_arguments(Vec::new()).await.unwrap(),
+            RecordArgumentPreflight::NotRequired,
+        );
+    }
     use orna_core::security::ExecuteDenial;
 
     #[test]
