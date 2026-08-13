@@ -3460,15 +3460,20 @@ fn reference_location(
     let TypeSpecification::Reference { target, .. } = specification else {
         return None;
     };
-    Some(location(logical_path, &target.span))
+    Some(location(logical_path, target.span()))
 }
 
 fn type_use_location(specification: &TypeSpecification, logical_path: &str) -> SourceLocation {
     match specification {
-        TypeSpecification::Reference { target, .. } => location(logical_path, &target.span),
+        TypeSpecification::Reference { target, .. } => location(logical_path, target.span()),
         TypeSpecification::Named(_) | TypeSpecification::StandardLargeObject { .. } => {
             location(logical_path, specification.span())
         }
+        TypeSpecification::List { .. }
+        | TypeSpecification::Set { .. }
+        | TypeSpecification::Map { .. }
+        | TypeSpecification::Option { .. }
+        | TypeSpecification::Stream { .. } => location(logical_path, specification.span()),
     }
 }
 
@@ -3750,6 +3755,15 @@ fn resolve_application_type(
             })
         }
         TypeSpecification::Reference { target, .. } => {
+            let TypeSpecification::Named(target) = target.as_ref() else {
+                diagnostics.push(diagnostic(
+                    DiagnosticCode::InvalidReferenceTarget,
+                    "REF target must be one named object type",
+                    logical_path,
+                    target.span(),
+                ));
+                return None;
+            };
             let scalar_target = standard.map_or_else(
                 || resolve_closed_scalar(target).is_some(),
                 |standard| standard_value_by_name(target, standard).is_some(),
@@ -3797,6 +3811,19 @@ fn resolve_application_type(
                     None
                 }
             }
+        }
+        TypeSpecification::List { .. }
+        | TypeSpecification::Set { .. }
+        | TypeSpecification::Map { .. }
+        | TypeSpecification::Option { .. }
+        | TypeSpecification::Stream { .. } => {
+            diagnostics.push(diagnostic(
+                DiagnosticCode::TypeMismatch,
+                "constructed types are not admitted in this position",
+                logical_path,
+                specification.span(),
+            ));
+            None
         }
     }
 }
@@ -4573,6 +4600,62 @@ mod tests {
             assert_eq!(diagnostics.len(), 1, "{spelling}");
             assert_eq!(diagnostics[0].code(), DiagnosticCode::UnknownQualifiedName);
         }
+    }
+
+    #[test]
+    fn parsed_constructed_types_do_not_open_semantic_positions() {
+        for spelling in [
+            "LIST<BOOL>",
+            "SET<BOOL>",
+            "MAP<TEXT, BOOL>",
+            "OPTION<BOOL>",
+            "BOOL?",
+            "STREAM<BOOL>",
+        ] {
+            let specification = legacy_type_specification(spelling);
+            let mut diagnostics = Vec::new();
+            let resolved = super::resolve_application_type(
+                &specification,
+                &std::collections::HashMap::new(),
+                "constructed.orna",
+                &mut diagnostics,
+                None,
+            );
+
+            assert!(resolved.is_none(), "{spelling}");
+            assert_eq!(diagnostics.len(), 1, "{spelling}");
+            assert_eq!(diagnostics[0].code(), DiagnosticCode::TypeMismatch);
+            assert_eq!(
+                diagnostics[0].message(),
+                "constructed types are not admitted in this position"
+            );
+            assert_eq!(
+                diagnostics[0].location().span().end() - diagnostics[0].location().span().start(),
+                spelling.len()
+            );
+        }
+
+        let specification = legacy_type_specification("REF LIST<BOOL>");
+        let mut diagnostics = Vec::new();
+        assert!(
+            super::resolve_application_type(
+                &specification,
+                &std::collections::HashMap::new(),
+                "constructed.orna",
+                &mut diagnostics,
+                None,
+            )
+            .is_none()
+        );
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            diagnostics[0].code(),
+            DiagnosticCode::InvalidReferenceTarget
+        );
+        assert_eq!(
+            diagnostics[0].message(),
+            "REF target must be one named object type"
+        );
     }
 
     #[test]

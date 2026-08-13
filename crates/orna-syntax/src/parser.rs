@@ -5,11 +5,11 @@ use crate::{
     Diagnostic, EnumLabelDeclaration, EnumTypeDeclaration, FieldRenameDeclaration,
     FunctionReturnType, FunctionSecurity, FunctionTransaction, FunctionVolatility, InsertStatement,
     MutationValue, NamePart, NullOrdering, ObjectFieldDeclaration, ObjectSource,
-    ObjectTypeDeclaration, OnDeletePolicy, OpaqueValueTypeDeclaration, OrderingDirection,
-    OrderingExpression, Parse, PrimitiveValueTypeDeclaration, PrimitiveValueTypePersistence,
-    QualifiedName, QueryExpression, RecordConstructor, RecordConstructorField,
-    RecordConstructorFieldValue, RecordValueTypeDeclaration, RowsColumnDeclaration,
-    SchemaDeclaration, SelectQuantifier, SelectQuery, ServerFunctionBody,
+    ObjectTypeDeclaration, OnDeletePolicy, OpaqueValueTypeDeclaration, OptionTypeSpelling,
+    OrderingDirection, OrderingExpression, Parse, PrimitiveValueTypeDeclaration,
+    PrimitiveValueTypePersistence, QualifiedName, QueryExpression, RecordConstructor,
+    RecordConstructorField, RecordConstructorFieldValue, RecordValueTypeDeclaration,
+    RowsColumnDeclaration, SchemaDeclaration, SelectQuantifier, SelectQuery, ServerFunctionBody,
     ServerFunctionDeclaration, ServerFunctionParameter, SourceSlice, SourceSpan, SqlDeleteBody,
     SqlInsertBody, SqlQueryBody, SqlUpdateBody, StandardLargeObjectKind, SyntaxTree,
     TypeExportDeclaration, TypeExportTarget, TypeSpecification, UpdateAssignment, UpdateStatement,
@@ -58,6 +58,11 @@ pub(crate) enum SyntaxKind {
     ClientBooleanReturnBody,
     ExportTypeStatement,
     ValueField,
+    ListTypeSpecification,
+    SetTypeSpecification,
+    MapTypeSpecification,
+    OptionTypeSpecification,
+    StreamTypeSpecification,
 }
 
 impl From<SyntaxKind> for rowan::SyntaxKind {
@@ -112,6 +117,11 @@ impl Language for OrnaLanguage {
             35 => SyntaxKind::ClientBooleanReturnBody,
             36 => SyntaxKind::ExportTypeStatement,
             37 => SyntaxKind::ValueField,
+            38 => SyntaxKind::ListTypeSpecification,
+            39 => SyntaxKind::SetTypeSpecification,
+            40 => SyntaxKind::MapTypeSpecification,
+            41 => SyntaxKind::OptionTypeSpecification,
+            42 => SyntaxKind::StreamTypeSpecification,
             _ => panic!("unknown Orna syntax kind"),
         }
     }
@@ -790,7 +800,11 @@ impl<'source> Parser<'source> {
             self.error_current("ORNA0001", table_message);
             return None;
         }
-        if self.current().is_some_and(|token| token.is_word("SET")) {
+        if self.current().is_some_and(|token| token.is_word("SET"))
+            && self
+                .peek_significant(1)
+                .is_some_and(|token| token.is_word("OF"))
+        {
             self.error_current("ORNA0001", set_message);
             return None;
         }
@@ -1966,35 +1980,223 @@ impl<'source> Parser<'source> {
         &mut self,
         named_type_message: &str,
     ) -> Option<TypeSpecification> {
+        self.parse_type_specification_at_depth(named_type_message, 0)
+    }
+
+    fn parse_type_specification_at_depth(
+        &mut self,
+        named_type_message: &str,
+        depth: usize,
+    ) -> Option<TypeSpecification> {
+        const MAXIMUM_DEPTH: usize = 32;
+
+        if depth > MAXIMUM_DEPTH {
+            self.error_current(
+                "ORNA0001",
+                "type specification exceeds the maximum depth of 32",
+            );
+            return None;
+        }
+
         if self.current().is_some_and(|token| token.is_word("REF")) {
             self.builder
                 .start_node(SyntaxKind::ReferenceTypeSpecification.into());
             let start = self.current().expect("REF token exists").range.start;
             self.bump();
             self.skip_trivia();
-            let target = self.parse_qualified_name("expected an object type name after REF");
+            let target = self.parse_type_specification_at_depth(
+                "expected a type specification after REF",
+                depth + 1,
+            );
             self.builder.finish_node();
             let target = target?;
-            return Some(TypeSpecification::Reference {
+            let specification = TypeSpecification::Reference {
                 span: SourceSpan {
                     start,
-                    end: target.span.end,
+                    end: target.span().end,
                 },
-                target,
-            });
+                target: Box::new(target),
+            };
+            return self.parse_postfix_options(specification, depth, MAXIMUM_DEPTH);
         }
 
-        if let Some(specification) = self.parse_multiword_standard_scalar() {
-            return Some(specification);
+        if self.current().is_some_and(|token| {
+            token.is_word("LIST")
+                || token.is_word("SET")
+                || token.is_word("MAP")
+                || token.is_word("OPTION")
+                || token.is_word("STREAM")
+        }) {
+            let specification =
+                self.parse_prefix_type_specification(named_type_message, depth, MAXIMUM_DEPTH)?;
+            return self.parse_postfix_options(specification, depth, MAXIMUM_DEPTH);
         }
 
-        self.builder
-            .start_node(SyntaxKind::NamedTypeSpecification.into());
-        let specification = self
-            .parse_qualified_name(named_type_message)
-            .map(TypeSpecification::Named);
+        let specification = if let Some(specification) = self.parse_multiword_standard_scalar() {
+            specification
+        } else {
+            self.builder
+                .start_node(SyntaxKind::NamedTypeSpecification.into());
+            let specification = self
+                .parse_qualified_name(named_type_message)
+                .map(TypeSpecification::Named);
+            self.builder.finish_node();
+            specification?
+        };
+        self.parse_postfix_options(specification, depth, MAXIMUM_DEPTH)
+    }
+
+    fn parse_prefix_type_specification(
+        &mut self,
+        named_type_message: &str,
+        depth: usize,
+        maximum_depth: usize,
+    ) -> Option<TypeSpecification> {
+        let constructor = self.current().expect("type constructor exists").clone();
+        let syntax_kind = if constructor.is_word("LIST") {
+            SyntaxKind::ListTypeSpecification
+        } else if constructor.is_word("SET") {
+            SyntaxKind::SetTypeSpecification
+        } else if constructor.is_word("MAP") {
+            SyntaxKind::MapTypeSpecification
+        } else if constructor.is_word("OPTION") {
+            SyntaxKind::OptionTypeSpecification
+        } else {
+            SyntaxKind::StreamTypeSpecification
+        };
+        self.builder.start_node(syntax_kind.into());
+        let start = constructor.range.start;
+        self.bump();
+        self.skip_trivia();
+        if self.take_symbol("<").is_none() {
+            self.error_current("ORNA0001", "expected '<' after type constructor");
+            self.builder.finish_node();
+            return None;
+        }
+        self.skip_trivia();
+
+        let Some(first) = self.parse_type_specification_at_depth(named_type_message, depth + 1)
+        else {
+            self.recover_type_constructor();
+            self.builder.finish_node();
+            return None;
+        };
+        self.skip_trivia();
+
+        let second = if constructor.is_word("MAP") {
+            if self.take_kind(TokenKind::Comma).is_none() {
+                self.error_current("ORNA0001", "expected ',' between MAP key and value types");
+                self.recover_type_constructor();
+                self.builder.finish_node();
+                return None;
+            }
+            self.skip_trivia();
+            let Some(second) =
+                self.parse_type_specification_at_depth(named_type_message, depth + 1)
+            else {
+                self.recover_type_constructor();
+                self.builder.finish_node();
+                return None;
+            };
+            self.skip_trivia();
+            Some(second)
+        } else {
+            None
+        };
+
+        let Some(end) = self.take_symbol(">").map(|token| token.range.end) else {
+            self.error_current("ORNA0001", "expected '>' to close type constructor");
+            self.recover_type_constructor();
+            self.builder.finish_node();
+            return None;
+        };
         self.builder.finish_node();
-        specification
+        let span = SourceSpan { start, end };
+        let specification = if constructor.is_word("LIST") {
+            TypeSpecification::List {
+                element: Box::new(first),
+                span,
+            }
+        } else if constructor.is_word("SET") {
+            TypeSpecification::Set {
+                element: Box::new(first),
+                span,
+            }
+        } else if constructor.is_word("MAP") {
+            TypeSpecification::Map {
+                key: Box::new(first),
+                value: Box::new(second.expect("MAP value exists")),
+                span,
+            }
+        } else if constructor.is_word("OPTION") {
+            TypeSpecification::Option {
+                value: Box::new(first),
+                spelling: OptionTypeSpelling::Prefix,
+                span,
+            }
+        } else {
+            TypeSpecification::Stream {
+                element: Box::new(first),
+                span,
+            }
+        };
+        debug_assert!(depth + type_specification_depth(&specification) <= maximum_depth);
+        Some(specification)
+    }
+
+    fn parse_postfix_options(
+        &mut self,
+        mut specification: TypeSpecification,
+        enclosing_depth: usize,
+        maximum_depth: usize,
+    ) -> Option<TypeSpecification> {
+        loop {
+            self.skip_trivia();
+            if !self
+                .current()
+                .is_some_and(|token| token.kind == TokenKind::Other && token.text == "?")
+            {
+                return Some(specification);
+            }
+            if enclosing_depth + type_specification_depth(&specification) >= maximum_depth {
+                self.error_current(
+                    "ORNA0001",
+                    "type specification exceeds the maximum depth of 32",
+                );
+                return None;
+            }
+            self.builder
+                .start_node(SyntaxKind::OptionTypeSpecification.into());
+            let end = self.current().expect("postfix option exists").range.end;
+            self.bump();
+            self.builder.finish_node();
+            let start = specification.span().start;
+            specification = TypeSpecification::Option {
+                value: Box::new(specification),
+                spelling: OptionTypeSpelling::Postfix,
+                span: SourceSpan { start, end },
+            };
+        }
+    }
+
+    fn recover_type_constructor(&mut self) {
+        let mut nested = 0usize;
+        while let Some(token) = self.current().cloned() {
+            if token.kind == TokenKind::Semicolon || token.kind == TokenKind::RightParenthesis {
+                break;
+            }
+            if token.kind == TokenKind::Other && token.text == "<" {
+                nested += 1;
+            } else if token.kind == TokenKind::Other && token.text == ">" {
+                self.bump();
+                if nested == 0 {
+                    break;
+                }
+                nested -= 1;
+                continue;
+            }
+            self.bump();
+        }
     }
 
     fn parse_multiword_standard_scalar(&mut self) -> Option<TypeSpecification> {
@@ -2187,6 +2389,26 @@ impl<'source> Parser<'source> {
         }
     }
 
+    fn take_kind(&mut self, expected: TokenKind) -> Option<Token<'source>> {
+        let token = self.current().cloned()?;
+        if token.kind == expected {
+            self.bump();
+            Some(token)
+        } else {
+            None
+        }
+    }
+
+    fn take_symbol(&mut self, expected: &str) -> Option<Token<'source>> {
+        let token = self.current().cloned()?;
+        if token.kind == TokenKind::Other && token.text == expected {
+            self.bump();
+            Some(token)
+        } else {
+            None
+        }
+    }
+
     fn expect_word_token(&mut self, expected: &str) -> Option<Token<'source>> {
         if let Some(token) = self.take_word(expected) {
             return Some(token);
@@ -2298,6 +2520,20 @@ impl<'source> Parser<'source> {
         self.builder
             .token(token.kind.syntax_kind().into(), token.text);
         self.index += 1;
+    }
+}
+
+fn type_specification_depth(specification: &TypeSpecification) -> usize {
+    match specification {
+        TypeSpecification::Named(_) | TypeSpecification::StandardLargeObject { .. } => 0,
+        TypeSpecification::Reference { target, .. } => type_specification_depth(target) + 1,
+        TypeSpecification::List { element, .. }
+        | TypeSpecification::Set { element, .. }
+        | TypeSpecification::Stream { element, .. } => type_specification_depth(element) + 1,
+        TypeSpecification::Map { key, value, .. } => {
+            type_specification_depth(key).max(type_specification_depth(value)) + 1
+        }
+        TypeSpecification::Option { value, .. } => type_specification_depth(value) + 1,
     }
 }
 
