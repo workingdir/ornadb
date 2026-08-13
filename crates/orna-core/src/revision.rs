@@ -23,8 +23,9 @@ use crate::{
     SchemaId, SourceBundleId, SourceRevisionId, SourceUnitId, StandardLibraryRevisionId,
     TypeBindingId, TypeId,
     catalogue::{
-        CatalogueSnapshot, FunctionDomain, FunctionReturn, ValueTypeDefinition, ValueTypeKind,
-        ValueTypeMutability, ValueTypePersistence,
+        CatalogueSnapshot, FunctionDefinition, FunctionDomain, FunctionReturn, FunctionSecurity,
+        FunctionVolatility, ValueTypeDefinition, ValueTypeKind, ValueTypeMutability,
+        ValueTypePersistence,
     },
     security::CATALOGUE_HEALTH_FUNCTION_ID,
     types::{ResolvedType, StandardScalar},
@@ -1927,6 +1928,7 @@ fn validate_resolved_type_slots(
                     field: field.id(),
                 },
                 field.resolved_type(),
+                false,
             )?;
         }
     }
@@ -1940,6 +1942,7 @@ fn validate_resolved_type_slots(
                     parameter: parameter.id(),
                 },
                 parameter.resolved_type(),
+                false,
             )?;
         }
 
@@ -1953,6 +1956,7 @@ fn validate_resolved_type_slots(
                             ordinal: column.ordinal(),
                         },
                         column.resolved_type(),
+                        false,
                     )?;
                 }
             }
@@ -1960,6 +1964,7 @@ fn validate_resolved_type_slots(
                 context,
                 DefinitionIdentity::Function(function.id()),
                 *resolved_type,
+                function_accepts_opaque_client_return(function),
             )?,
         }
     }
@@ -1971,6 +1976,7 @@ fn validate_resolved_type_slot(
     context: &CatalogueHashContext,
     identity: DefinitionIdentity,
     resolved_type: ResolvedType,
+    opaque_accepted: bool,
 ) -> Result<(), RevisionInvariantError> {
     match resolved_type {
         ResolvedType::Scalar(scalar) => {
@@ -2002,7 +2008,7 @@ fn validate_resolved_type_slot(
                         },
                     );
                 };
-                if value_type_definition.kind() == ValueTypeKind::Opaque {
+                if value_type_definition.kind() == ValueTypeKind::Opaque && !opaque_accepted {
                     return Err(RevisionInvariantError::OpaqueValueTypeNotAcceptedInSlot {
                         identity,
                         value_type,
@@ -2014,6 +2020,18 @@ fn validate_resolved_type_slot(
     }
 
     Ok(())
+}
+
+pub(crate) fn function_accepts_opaque_client_return(function: &FunctionDefinition) -> bool {
+    function.domain() == FunctionDomain::Client
+        && function.parameters().is_empty()
+        && matches!(
+            function.return_type(),
+            FunctionReturn::Single(ResolvedType::Value(_))
+        )
+        && function.security() == FunctionSecurity::Invoker
+        && function.transaction().is_none()
+        && function.volatility() == FunctionVolatility::Immutable
 }
 
 fn validate_catalogue_hash_context_coherence(
@@ -3263,6 +3281,37 @@ mod tests {
             CatalogueRevisionId::from_bytes(id::<7>()),
             vec![schema],
             vec![object_type],
+            vec![function],
+        )
+        .unwrap()
+    }
+
+    fn catalogue_with_opaque_client_return(
+        opaque: TypeId,
+        domain: FunctionDomain,
+        parameters: Vec<ParameterDefinition>,
+        security: FunctionSecurity,
+        volatility: FunctionVolatility,
+    ) -> CatalogueSnapshot {
+        let schema = SchemaDefinition::new(
+            SchemaId::from_bytes(id::<8>()),
+            QualifiedSemanticName::new(["crm"]).unwrap(),
+        );
+        let function = FunctionDefinition::new(
+            FunctionId::from_bytes(id::<82>()),
+            QualifiedSemanticName::new(["crm", "token"]).unwrap(),
+            domain,
+            parameters,
+            FunctionReturn::Single(ResolvedType::value(opaque)),
+            FunctionRevisionId::from_bytes(id::<84>()),
+            security,
+            None,
+            volatility,
+        );
+        CatalogueSnapshot::new_with_functions(
+            CatalogueRevisionId::from_bytes(id::<7>()),
+            vec![schema],
+            vec![],
             vec![function],
         )
         .unwrap()
@@ -5686,6 +5735,66 @@ mod tests {
                 validate_resolved_type_slots(&opaque_standard_context(), &catalogue),
                 Err(RevisionInvariantError::OpaqueValueTypeNotAcceptedInSlot {
                     identity,
+                    value_type: opaque,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn version_two_accepts_only_the_exact_pinned_opaque_client_return() {
+        let opaque = TypeId::from_bytes(id::<72>());
+        let context = opaque_standard_context();
+        let accepted = catalogue_with_opaque_client_return(
+            opaque,
+            FunctionDomain::Client,
+            vec![],
+            FunctionSecurity::Invoker,
+            FunctionVolatility::Immutable,
+        );
+        assert_eq!(validate_resolved_type_slots(&context, &accepted), Ok(()));
+
+        let parameter = ParameterDefinition::new(
+            ParameterId::from_bytes(id::<83>()),
+            "enabled",
+            0,
+            ResolvedType::value(TypeId::from_bytes(id::<71>())),
+            None,
+        );
+        for catalogue in [
+            catalogue_with_opaque_client_return(
+                opaque,
+                FunctionDomain::Client,
+                vec![parameter],
+                FunctionSecurity::Invoker,
+                FunctionVolatility::Immutable,
+            ),
+            catalogue_with_opaque_client_return(
+                opaque,
+                FunctionDomain::Server,
+                vec![],
+                FunctionSecurity::Invoker,
+                FunctionVolatility::Immutable,
+            ),
+            catalogue_with_opaque_client_return(
+                opaque,
+                FunctionDomain::Client,
+                vec![],
+                FunctionSecurity::Definer,
+                FunctionVolatility::Immutable,
+            ),
+            catalogue_with_opaque_client_return(
+                opaque,
+                FunctionDomain::Client,
+                vec![],
+                FunctionSecurity::Invoker,
+                FunctionVolatility::Stable,
+            ),
+        ] {
+            assert_eq!(
+                validate_resolved_type_slots(&context, &catalogue),
+                Err(RevisionInvariantError::OpaqueValueTypeNotAcceptedInSlot {
+                    identity: DefinitionIdentity::Function(FunctionId::from_bytes(id::<82>())),
                     value_type: opaque,
                 })
             );

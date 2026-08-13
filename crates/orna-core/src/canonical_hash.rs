@@ -29,8 +29,8 @@ use crate::{
         ExecutableArtifact, ExecutableArtifactKind, ExpressionArtifact, FunctionRevisionRecord,
         FunctionSemanticHashVersion, Sha256Digest, SourceOrigin, StandardLibraryDigestVersion,
         StandardLibrarySnapshot, StoredSourceRevision, StoredSourceUnit,
-        VerifiedStandardLibrarySnapshot, record_value_field_type_is_supported,
-        reference_kind_accepts_target,
+        VerifiedStandardLibrarySnapshot, function_accepts_opaque_client_return,
+        record_value_field_type_is_supported, reference_kind_accepts_target,
     },
     types::{ResolvedType, StandardScalar},
 };
@@ -874,6 +874,7 @@ fn validate_resolved_type_slots(
                     field: field.id(),
                 },
                 field.resolved_type(),
+                false,
             )?;
         }
     }
@@ -886,6 +887,7 @@ fn validate_resolved_type_slots(
                     parameter: parameter.id(),
                 },
                 parameter.resolved_type(),
+                false,
             )?;
         }
         match function.return_type() {
@@ -893,6 +895,7 @@ fn validate_resolved_type_slots(
                 context,
                 DefinitionIdentity::Function(function.id()),
                 *resolved_type,
+                function_accepts_opaque_client_return(function),
             )?,
             FunctionReturn::Rows(columns) => {
                 for column in columns {
@@ -903,6 +906,7 @@ fn validate_resolved_type_slots(
                             ordinal: column.ordinal(),
                         },
                         column.resolved_type(),
+                        false,
                     )?;
                 }
             }
@@ -915,6 +919,7 @@ fn validate_resolved_type_slot(
     context: &CatalogueHashContext,
     identity: DefinitionIdentity,
     resolved_type: ResolvedType,
+    opaque_accepted: bool,
 ) -> Result<(), CanonicalHashError> {
     if let Some(scalar) = resolved_type.legacy_scalar() {
         if context.version() == CatalogueHashVersion::Version2 {
@@ -947,7 +952,7 @@ fn validate_resolved_type_slot(
             value_type,
         });
     };
-    if value_type_definition.kind() == ValueTypeKind::Opaque {
+    if value_type_definition.kind() == ValueTypeKind::Opaque && !opaque_accepted {
         return Err(CanonicalHashError::OpaqueValueTypeNotAcceptedInSlot {
             identity,
             value_type,
@@ -2708,6 +2713,35 @@ mod tests {
         .unwrap()
     }
 
+    fn catalogue_with_opaque_client_return(
+        opaque: TypeId,
+        domain: FunctionDomain,
+        parameters: Vec<ParameterDefinition>,
+        security: FunctionSecurity,
+        volatility: FunctionVolatility,
+    ) -> CatalogueSnapshot {
+        let base = catalogue();
+        let prior_function = &base.functions()[0];
+        let function = FunctionDefinition::new(
+            prior_function.id(),
+            prior_function.name().clone(),
+            domain,
+            parameters,
+            FunctionReturn::Single(ResolvedType::value(opaque)),
+            prior_function.current_revision(),
+            security,
+            None,
+            volatility,
+        );
+        CatalogueSnapshot::new_with_functions(
+            base.revision(),
+            base.schemas().to_vec(),
+            vec![],
+            vec![function],
+        )
+        .unwrap()
+    }
+
     fn verified_standard_snapshot_with_extra_value(
         value_type: ValueTypeDefinition,
     ) -> VerifiedStandardLibrarySnapshot {
@@ -3550,6 +3584,71 @@ mod tests {
                 validate_resolved_type_slots(&context, &catalogue),
                 Err(CanonicalHashError::OpaqueValueTypeNotAcceptedInSlot {
                     identity,
+                    value_type: opaque,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn version_two_accepts_only_the_exact_pinned_opaque_client_return() {
+        let opaque = TypeId::from_bytes(id::<96>());
+        let standard = verified_standard_snapshot_with_extra_value(ValueTypeDefinition::opaque(
+            opaque,
+            QualifiedSemanticName::new(["std", "types", "token"]).unwrap(),
+            "std.types.token@1",
+        ));
+        let context = CatalogueHashContext::version_two(standard);
+        let accepted = catalogue_with_opaque_client_return(
+            opaque,
+            FunctionDomain::Client,
+            vec![],
+            FunctionSecurity::Invoker,
+            FunctionVolatility::Immutable,
+        );
+        assert_eq!(validate_resolved_type_slots(&context, &accepted), Ok(()));
+
+        let parameter = ParameterDefinition::new(
+            ParameterId::from_bytes(id::<5>()),
+            "enabled",
+            0,
+            ResolvedType::value(standard_boolean_id()),
+            None,
+        );
+        for catalogue in [
+            catalogue_with_opaque_client_return(
+                opaque,
+                FunctionDomain::Client,
+                vec![parameter],
+                FunctionSecurity::Invoker,
+                FunctionVolatility::Immutable,
+            ),
+            catalogue_with_opaque_client_return(
+                opaque,
+                FunctionDomain::Server,
+                vec![],
+                FunctionSecurity::Invoker,
+                FunctionVolatility::Immutable,
+            ),
+            catalogue_with_opaque_client_return(
+                opaque,
+                FunctionDomain::Client,
+                vec![],
+                FunctionSecurity::Definer,
+                FunctionVolatility::Immutable,
+            ),
+            catalogue_with_opaque_client_return(
+                opaque,
+                FunctionDomain::Client,
+                vec![],
+                FunctionSecurity::Invoker,
+                FunctionVolatility::Stable,
+            ),
+        ] {
+            assert_eq!(
+                validate_resolved_type_slots(&context, &catalogue),
+                Err(CanonicalHashError::OpaqueValueTypeNotAcceptedInSlot {
+                    identity: DefinitionIdentity::Function(FunctionId::from_bytes(id::<4>())),
                     value_type: opaque,
                 })
             );
