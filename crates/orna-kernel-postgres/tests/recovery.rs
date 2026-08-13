@@ -228,6 +228,102 @@ async fn recovers_and_evaluates_a_standard_boolean_client_function() -> TestResu
 
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
+async fn decodes_an_exact_opaque_standard_row_before_detecting_digest_tamper() -> TestResult<()> {
+    with_test_database(|database| async move {
+        kernel(&database)?.bootstrap().await?;
+        let fixture = install_raw_v2_standard_revision(&database).await?;
+        let standard_revision = fixture.standard.revision().to_bytes().to_vec();
+        let void_type = orna_standard::VOID_TYPE_ID.to_bytes().to_vec();
+        let session = database.open().await?;
+        let operation: TestResult<()> = async {
+            let invalid_persistence = session
+                .client()
+                .execute(
+                    "UPDATE _orna_kernel.standard_catalogue_value_types
+                     SET value_kind = 'opaque', persistence = 'persistable'
+                     WHERE standard_library_revision_id = $1 AND type_id = $2",
+                    &[&standard_revision, &void_type],
+                )
+                .await
+                .expect_err("persistable opaque standard row must be rejected");
+            require(
+                invalid_persistence.as_db_error().is_some_and(|error| {
+                    error.code().code() == "23514"
+                        && error.constraint() == Some("std_cat_value_types_opaque_contract_check")
+                }),
+                "persistable opaque standard row did not fail its exact database constraint",
+            )?;
+            let invalid_contract = session
+                .client()
+                .execute(
+                    "UPDATE _orna_kernel.standard_catalogue_value_types
+                     SET value_kind = 'opaque', representation_contract = E'opaque\\ncontract'
+                     WHERE standard_library_revision_id = $1 AND type_id = $2",
+                    &[&standard_revision, &void_type],
+                )
+                .await
+                .expect_err("non-printable opaque standard contract must be rejected");
+            require(
+                invalid_contract.as_db_error().is_some_and(|error| {
+                    error.code().code() == "23514"
+                        && error.constraint() == Some("std_cat_value_types_opaque_contract_check")
+                }),
+                "non-printable opaque standard contract did not fail its exact database constraint",
+            )?;
+            let updated = session
+                .client()
+                .execute(
+                    "UPDATE _orna_kernel.standard_catalogue_value_types
+                     SET value_kind = 'opaque'
+                     WHERE standard_library_revision_id = $1 AND type_id = $2
+                       AND persistence = 'transient'",
+                    &[&standard_revision, &void_type],
+                )
+                .await?;
+            require(
+                updated == 1,
+                format!("opaque kind tamper changed {updated} rows"),
+            )
+        }
+        .await;
+        finish_session(
+            operation,
+            session.shutdown().await,
+            "opaque standard row tamper",
+        )?;
+
+        let error = recovery_error(&database).await?;
+        require_standard_library_digest_mismatch(&error, fixture.standard.revision().to_bytes())?;
+        let session = database.open().await?;
+        let operation: TestResult<()> = async {
+            let row = session
+                .client()
+                .query_one(
+                    "SELECT value_kind, persistence, representation_contract
+                     FROM _orna_kernel.standard_catalogue_value_types
+                     WHERE standard_library_revision_id = $1 AND type_id = $2",
+                    &[&standard_revision, &void_type],
+                )
+                .await?;
+            require(
+                row.try_get::<_, String>(0)? == "opaque"
+                    && row.try_get::<_, String>(1)? == "transient"
+                    && row.try_get::<_, String>(2)? == "orna.kernel.value.void@1",
+                "failed opaque recovery repaired or changed the durable row",
+            )
+        }
+        .await;
+        finish_session(
+            operation,
+            session.shutdown().await,
+            "opaque standard row postcondition",
+        )
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
 async fn persists_recovers_revokes_and_disables_execute_authority() -> TestResult<()> {
     const USER_UID: u32 = 1_001;
     const USER: PrincipalId = PrincipalId::from_bytes([0x31; 16]);
