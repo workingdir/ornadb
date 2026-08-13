@@ -14,7 +14,7 @@ mod package_maintenance;
 mod security_admin;
 mod source_check;
 
-const USAGE: &str = "Usage:\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna raw-call <canonical-function-id>";
+const USAGE: &str = "Usage:\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna security grant-execute <canonical-function-id>\n  orna raw-call <canonical-function-id>";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Command {
@@ -467,7 +467,7 @@ mod tests {
     fn usage_diagnostic_is_exact() {
         assert_eq!(
             USAGE,
-            "Usage:\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna raw-call <canonical-function-id>"
+            "Usage:\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna security grant-execute <canonical-function-id>\n  orna raw-call <canonical-function-id>"
         );
     }
 }
