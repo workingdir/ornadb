@@ -5,6 +5,7 @@ use orna_client::{
 };
 use orna_core::{
     CatalogueRevisionId, FunctionId, PrincipalId, SecurityAuditEventId, SourceRevisionId,
+    catalogue::FunctionDomain,
     revision::{ActiveDatabaseRevision, RevisionPair},
     security::{
         AuthenticatedSession, ExecuteDecision, ExecuteGrant, InvocationTarget,
@@ -22,11 +23,147 @@ use crate::{
     PostgresKernel, PostgresKernelError,
     bootstrap::require_current_migrations,
     recovery::recover_active_revision,
-    server_execution::{ServerSelectResult, execute_authorised_server_select},
+    server_execution::{
+        ServerSelectResult, execute_authorised_server_select, into_raw_server_values,
+        raw_server_target_is_unavailable, validate_raw_server_select_target,
+    },
     server_runtime::configure_and_recover,
 };
 
+/// The owned value result of one authenticated raw call.
+#[derive(Clone, Debug, PartialEq)]
+pub enum AuthenticatedRawCallResult {
+    /// One value evaluated by the CLIENT runtime.
+    Client(RuntimeValue),
+    /// Zero or more values returned in SERVER query row order.
+    Server(Vec<RuntimeValue>),
+}
+
+impl AuthenticatedRawCallResult {
+    /// Transfers result values without cloning their payloads.
+    pub fn into_values(self) -> Vec<RuntimeValue> {
+        match self {
+            Self::Client(value) => vec![value],
+            Self::Server(values) => values,
+        }
+    }
+}
+
 impl PostgresKernel {
+    /// Dispatches one authenticated parameter-free raw call inside one transaction.
+    ///
+    /// The kernel authorises the exact active target before it selects the
+    /// function domain. An allowed CLIENT target evaluates through the current
+    /// CLIENT evaluator. An allowed SERVER target must satisfy the closed
+    /// one-column raw SELECT boundary before it can return values.
+    pub async fn dispatch_authenticated_raw_call(
+        &self,
+        authenticated_session: &AuthenticatedSession,
+        function: FunctionId,
+    ) -> Result<AuthenticatedRawCallResult, PostgresKernelError> {
+        let mut database_session = self.open().await?;
+        let operation = async {
+            let mut transaction = database_session
+                .client
+                .build_transaction()
+                .isolation_level(IsolationLevel::RepeatableRead)
+                .start()
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            require_current_migrations(&transaction).await?;
+            let active = configure_and_recover(&transaction).await?;
+            let security = recover_security_snapshot_for_active(&transaction, &active).await?;
+            let target = InvocationTarget::new(function, active.pair());
+
+            let execution = match security.authorise_execute(authenticated_session, target) {
+                ExecuteDecision::Denied(reason) => {
+                    append_security_audit_event(
+                        &transaction,
+                        SecurityAuditDecision::execute_denied(
+                            authenticated_session,
+                            target,
+                            reason,
+                        ),
+                    )
+                    .await?;
+                    Err(PostgresKernelError::RawExecuteDenied {
+                        pair: active.pair(),
+                        function,
+                        reason,
+                    })
+                }
+                ExecuteDecision::Allowed(authorisation) => {
+                    append_security_audit_event(
+                        &transaction,
+                        SecurityAuditDecision::execute_allowed(&authorisation),
+                    )
+                    .await?;
+                    match active.catalogue().function_by_id(function) {
+                        Some(definition) if definition.domain() == FunctionDomain::Client => {
+                            evaluate_authorised_client_function(&active, &authorisation)
+                                .map(|result| {
+                                    AuthenticatedRawCallResult::Client(result.into_value())
+                                })
+                                .map_err(PostgresKernelError::ClientExecution)
+                        }
+                        Some(definition) if definition.domain() == FunctionDomain::Server => {
+                            let savepoint = transaction
+                                .savepoint("raw_server_select_execution")
+                                .await
+                                .map_err(PostgresKernelError::Database)?;
+                            let server = async {
+                                validate_raw_server_select_target(&active, function)?;
+                                let result = execute_authorised_server_select(
+                                    &savepoint,
+                                    &active,
+                                    &authorisation,
+                                    &[],
+                                )
+                                .await?;
+                                let values = into_raw_server_values(&active, function, result)?;
+                                Ok(AuthenticatedRawCallResult::Server(values))
+                            }
+                            .await;
+                            match server {
+                                Ok(result) => {
+                                    savepoint
+                                        .commit()
+                                        .await
+                                        .map_err(PostgresKernelError::Database)?;
+                                    Ok(result)
+                                }
+                                Err(error) => {
+                                    savepoint
+                                        .rollback()
+                                        .await
+                                        .map_err(PostgresKernelError::Database)?;
+                                    Err(classify_raw_server_error(error))
+                                }
+                            }
+                        }
+                        Some(_) => Err(PostgresKernelError::DurableInvariant {
+                            relation: "active catalogue",
+                            record: function.canonical(),
+                            rule: "active function domain is unsupported by raw dispatch",
+                        }),
+                        None => Err(PostgresKernelError::DurableInvariant {
+                            relation: "active catalogue",
+                            record: function.canonical(),
+                            rule: "allowed raw target must exist in the active catalogue",
+                        }),
+                    }
+                }
+            };
+            transaction
+                .commit()
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            execution
+        }
+        .await;
+        finish_authenticated_server_select_session(operation, database_session.shutdown().await)
+    }
+
     /// Revalidates raw record arguments against one transactional active revision.
     ///
     /// An empty list performs no PostgreSQL operation. A non-empty list opens
@@ -475,6 +612,15 @@ fn finish_authenticated_server_select_session<T>(
 ) -> Result<T, PostgresKernelError> {
     shutdown?;
     operation
+}
+
+fn classify_raw_server_error(error: PostgresKernelError) -> PostgresKernelError {
+    match error {
+        PostgresKernelError::ServerSelect(source) if raw_server_target_is_unavailable(&source) => {
+            PostgresKernelError::RawServerTargetUnavailable { source }
+        }
+        error => error,
+    }
 }
 
 async fn append_security_audit_event(
@@ -1215,6 +1361,21 @@ fn decode_principal_status(value: String) -> Result<PrincipalStatus, PostgresKer
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raw_call_results_transfer_owned_values_in_execution_order() {
+        let client = AuthenticatedRawCallResult::Client(RuntimeValue::Boolean(true));
+        assert_eq!(client.into_values(), vec![RuntimeValue::Boolean(true)]);
+
+        let server = AuthenticatedRawCallResult::Server(vec![
+            RuntimeValue::Integer(1),
+            RuntimeValue::Integer(2),
+        ]);
+        assert_eq!(
+            server.into_values(),
+            vec![RuntimeValue::Integer(1), RuntimeValue::Integer(2)]
+        );
+    }
 
     #[tokio::test]
     async fn empty_record_preflight_does_not_open_postgres() {
