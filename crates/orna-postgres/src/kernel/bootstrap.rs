@@ -78,7 +78,7 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 10,
         name: "local peer credentials",
-        sql: include_str!("../../../orna-kernel-postgres/migrations/0010_local_peer_credentials.sql"),
+        sql: include_str!("../../migrations/0010_local_peer_credentials.sql"),
         data_step: None,
     },
     Migration {
