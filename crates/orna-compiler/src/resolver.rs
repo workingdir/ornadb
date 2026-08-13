@@ -242,7 +242,9 @@ impl<'a> StandardApplicationCheckContext<'a> {
         }
 
         for value_type in standard.value_types() {
-            if compatibility_scalar(value_type.representation_contract()).is_none() {
+            if value_type.kind() == ValueTypeKind::Primitive
+                && compatibility_scalar(value_type.representation_contract()).is_none()
+            {
                 return Err(
                     StandardApplicationContextError::UnsupportedCompatibilityContract {
                         type_id: value_type.id(),
@@ -441,9 +443,11 @@ fn validate_standard_source_shape(
         || parsed_unit.source_text() != parsed_unit.syntax_text()
         || !catalogue.object_types().is_empty()
         || !catalogue.enum_types().is_empty()
+        || !catalogue.record_value_types().is_empty()
         || !catalogue.functions().is_empty()
         || !parsed_unit.parsed().object_types().is_empty()
         || !parsed_unit.parsed().enum_types().is_empty()
+        || !parsed_unit.parsed().record_value_types().is_empty()
         || !parsed_unit.parsed().field_renames().is_empty()
         || !parsed_unit.parsed().server_functions().is_empty()
         || !parsed_unit.parsed().client_functions().is_empty()
@@ -456,7 +460,9 @@ fn validate_standard_source_shape(
     let (qualified_export_count, prelude_export_count) =
         source_export_category_counts(parsed_unit)?;
     if parsed_unit.parsed().schemas().len() != catalogue.schemas().len()
-        || parsed_unit.parsed().primitive_value_types().len() != catalogue.value_types().len()
+        || parsed_unit.parsed().primitive_value_types().len()
+            + parsed_unit.parsed().opaque_value_types().len()
+            != catalogue.value_types().len()
         || qualified_export_count != qualified_binding_count
         || prelude_export_count != prelude_binding_count
     {
@@ -491,17 +497,18 @@ fn match_standard_source_facts(
     }
 
     let mut primary_type_ids = HashMap::with_capacity(catalogue.value_types().len());
-    let mut value_types = Vec::with_capacity(parsed_unit.parsed().primitive_value_types().len());
-    for declaration in parsed_unit.parsed().primitive_value_types() {
-        let name = unquoted_semantic_name(&declaration.name)?;
-        let contract = decode_string_literal(&declaration.kernel_contract)
-            .ok_or(StandardLibraryCheckError::SourceMismatch)?;
-        let persistence = value_type_persistence(declaration.persistence);
+    let mut value_types = Vec::with_capacity(catalogue.value_types().len());
+    let mut match_value_type = |name: QualifiedSemanticName,
+                                kind: ValueTypeKind,
+                                persistence: ValueTypePersistence,
+                                contract: String,
+                                span: SourceSpan|
+     -> Result<PendingStandardValueType, StandardLibraryCheckError> {
         let definition = catalogue
             .value_type_by_name(&name)
             .ok_or(StandardLibraryCheckError::SourceMismatch)?;
-        if !matches!(definition.kind(), ValueTypeKind::Primitive)
-            || !matches!(definition.mutability(), ValueTypeMutability::Immutable)
+        if definition.kind() != kind
+            || definition.mutability() != ValueTypeMutability::Immutable
             || definition.persistence() != persistence
             || definition.representation_contract() != contract
             || !consumed_type_ids.insert(definition.id())
@@ -511,16 +518,43 @@ fn match_standard_source_facts(
         {
             return Err(StandardLibraryCheckError::SourceMismatch);
         }
-        value_types.push(PendingStandardValueType {
+        Ok(PendingStandardValueType {
             id: definition.id(),
             name,
             kind: definition.kind(),
             mutability: definition.mutability(),
             persistence: definition.persistence(),
             representation_contract: definition.representation_contract().to_owned(),
-            span: declaration.span.clone(),
-        });
+            span,
+        })
+    };
+    for declaration in parsed_unit.parsed().primitive_value_types() {
+        let name = unquoted_semantic_name(&declaration.name)?;
+        let contract = decode_string_literal(&declaration.kernel_contract)
+            .ok_or(StandardLibraryCheckError::SourceMismatch)?;
+        let persistence = value_type_persistence(declaration.persistence);
+        value_types.push(match_value_type(
+            name,
+            ValueTypeKind::Primitive,
+            persistence,
+            contract,
+            declaration.span.clone(),
+        )?);
     }
+    for declaration in parsed_unit.parsed().opaque_value_types() {
+        let name = unquoted_semantic_name(&declaration.name)?;
+        let contract = decode_string_literal(&declaration.kernel_contract)
+            .filter(|contract| opaque_contract_is_valid(contract))
+            .ok_or(StandardLibraryCheckError::SourceMismatch)?;
+        value_types.push(match_value_type(
+            name,
+            ValueTypeKind::Opaque,
+            ValueTypePersistence::Transient,
+            contract,
+            declaration.span.clone(),
+        )?);
+    }
+    value_types.sort_by_key(|value_type| value_type.span.start);
 
     let type_exports = parsed_unit.parsed().type_exports();
     let mut qualified_bindings = (0..type_exports.len()).map(|_| None).collect::<Vec<_>>();
@@ -789,6 +823,12 @@ fn decode_string_literal(slice: &SourceSlice) -> Option<String> {
         decoded.push(character);
     }
     Some(decoded)
+}
+
+fn opaque_contract_is_valid(contract: &str) -> bool {
+    !contract.is_empty()
+        && contract.len() <= 128
+        && contract.bytes().all(|byte| (0x20..=0x7e).contains(&byte))
 }
 
 #[derive(Clone, Copy)]
@@ -1476,6 +1516,9 @@ fn check_protected_source(parse_report: &ParseReport) -> Vec<CompilerDiagnostic>
         for declaration in unit.parsed().primitive_value_types() {
             owners.push((&declaration.name, &declaration.name.span, &declaration.span));
         }
+        for declaration in unit.parsed().opaque_value_types() {
+            owners.push((&declaration.name, &declaration.name.span, &declaration.span));
+        }
         for declaration in unit.parsed().field_renames() {
             owners.push((
                 &declaration.type_name,
@@ -1517,22 +1560,43 @@ fn check_protected_source(parse_report: &ParseReport) -> Vec<CompilerDiagnostic>
     }
 
     for (unit_index, unit) in parse_report.units().iter().enumerate() {
-        for declaration in unit.parsed().primitive_value_types() {
+        let protected_value_declarations = unit
+            .parsed()
+            .primitive_value_types()
+            .iter()
+            .map(|declaration| {
+                (
+                    &declaration.span,
+                    &declaration.kernel_contract_modifier_span,
+                )
+            })
+            .chain(
+                unit.parsed()
+                    .opaque_value_types()
+                    .iter()
+                    .map(|declaration| {
+                        (
+                            &declaration.span,
+                            &declaration.kernel_contract_modifier_span,
+                        )
+                    }),
+            );
+        for (declaration_span, modifier_span) in protected_value_declarations {
             if !protected_declarations.contains(&(
                 unit_index,
-                declaration.span.start,
-                declaration.span.end,
+                declaration_span.start,
+                declaration_span.end,
             )) {
                 diagnostics.push(diagnostic(
                     DiagnosticCode::DomainIncompatible,
                     "KERNEL CONTRACT is available only to the standard library",
                     unit.logical_path(),
-                    &declaration.kernel_contract_modifier_span,
+                    modifier_span,
                 ));
                 protected_declarations.insert((
                     unit_index,
-                    declaration.span.start,
-                    declaration.span.end,
+                    declaration_span.start,
+                    declaration_span.end,
                 ));
             }
         }
@@ -3848,6 +3912,9 @@ fn standard_value_by_lookup(
         .value_types()
         .iter()
         .find(|value_type| value_type.id() == direct)?;
+    if value_type.kind() != ValueTypeKind::Primitive {
+        return None;
+    }
     compatibility_scalar(value_type.representation_contract()).map(|scalar| (direct, scalar))
 }
 
@@ -3858,7 +3925,10 @@ fn intrinsic_boolean_type(standard: Option<&CheckedStandardLibrary>) -> Intrinsi
     standard
         .value_types()
         .iter()
-        .find(|value_type| value_type.representation_contract() == "orna.kernel.value.boolean@1")
+        .find(|value_type| {
+            value_type.kind() == ValueTypeKind::Primitive
+                && value_type.representation_contract() == "orna.kernel.value.boolean@1"
+        })
         .map_or(IntrinsicBooleanType::Missing, |value_type| {
             IntrinsicBooleanType::Standard(value_type.id())
         })
@@ -4372,7 +4442,7 @@ mod tests {
             FunctionDefinition, FunctionDomain, FunctionReturn, FunctionReturnColumnDefinition,
             FunctionSecurity, FunctionTransaction, FunctionVolatility, ObjectTypeDefinition,
             OnDeleteAction, ParameterDefinition, PreludeTypeName, QualifiedSemanticName,
-            SchemaDefinition, TypeBinding, TypeLookupName, ValueTypeDefinition,
+            SchemaDefinition, TypeBinding, TypeLookupName, ValueTypeDefinition, ValueTypeKind,
             ValueTypeMutability, ValueTypePersistence,
         },
         revision::{
@@ -5791,6 +5861,50 @@ mod tests {
         (stored_unit, parsed_unit, catalogue, origins)
     }
 
+    fn opaque_standard_reconciliation_inputs(
+        source: &str,
+        name: QualifiedSemanticName,
+        contract: &str,
+    ) -> (
+        StoredSourceUnit,
+        ParsedSourceUnit,
+        CatalogueSnapshot,
+        Vec<DefinitionOrigin>,
+    ) {
+        let stored_unit = StoredSourceUnit::new(
+            SourceUnitId::from_bytes([4; 16]),
+            0,
+            "std/types.orna",
+            source,
+            source_unit_content_digest(source).unwrap(),
+        )
+        .unwrap();
+        let parsed_unit = parsed_standard_unit(source);
+        let opaque = ValueTypeDefinition::opaque(TypeId::from_bytes([3; 16]), name, contract);
+        let catalogue = CatalogueSnapshot::new_with_types(
+            CatalogueRevisionId::from_bytes([8; 16]),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes([1; 16]),
+                QualifiedSemanticName::new(["std"]).unwrap(),
+            )],
+            vec![],
+            vec![opaque],
+            vec![],
+        )
+        .unwrap();
+        let origins = vec![
+            parsed_origin(
+                DefinitionIdentity::Schema(SchemaId::from_bytes([1; 16])),
+                &parsed_unit.parsed().schemas()[0].span,
+            ),
+            parsed_origin(
+                DefinitionIdentity::ValueType(TypeId::from_bytes([3; 16])),
+                &parsed_unit.parsed().opaque_value_types()[0].span,
+            ),
+        ];
+        (stored_unit, parsed_unit, catalogue, origins)
+    }
+
     fn standard_origin(
         identity: DefinitionIdentity,
         byte_start: u32,
@@ -5895,6 +6009,133 @@ mod tests {
         .unwrap();
 
         verify_standard_library_snapshot(snapshot).unwrap()
+    }
+
+    fn verified_standard_library_with_opaque_for_test()
+    -> orna_core::revision::VerifiedStandardLibrarySnapshot {
+        const SOURCE: &str = "CREATE SCHEMA std;CREATE TYPE std.BOOLEAN AS VALUE PRIMITIVE KERNEL CONTRACT 'orna.kernel.value.boolean@1' IMMUTABLE PERSISTABLE;CREATE TYPE std.TOKEN AS VALUE OPAQUE KERNEL CONTRACT 'std.token@1' IMMUTABLE TRANSIENT;";
+        let parsed = parsed_standard_unit(SOURCE);
+        let source_unit = StoredSourceUnit::new(
+            SourceUnitId::from_bytes([0x31; 16]),
+            0,
+            "std/types.orna",
+            SOURCE,
+            source_unit_content_digest(SOURCE).unwrap(),
+        )
+        .unwrap();
+        let bundle_hash = source_bundle_digest(std::slice::from_ref(&source_unit)).unwrap();
+        let source = StoredSourceRevision::new(
+            SourceBundleId::from_bytes([0x32; 16]),
+            SourceRevisionId::from_bytes([0x33; 16]),
+            None,
+            vec![source_unit],
+            bundle_hash,
+            source_revision_record_digest(
+                SourceBundleId::from_bytes([0x32; 16]),
+                None,
+                bundle_hash,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let boolean = ValueTypeDefinition::primitive(
+            TypeId::from_bytes([0x34; 16]),
+            QualifiedSemanticName::new(["std", "boolean"]).unwrap(),
+            ValueTypeMutability::Immutable,
+            ValueTypePersistence::Persistable,
+            "orna.kernel.value.boolean@1",
+        );
+        let opaque = ValueTypeDefinition::opaque(
+            TypeId::from_bytes([0x35; 16]),
+            QualifiedSemanticName::new(["std", "token"]).unwrap(),
+            "std.token@1",
+        );
+        let catalogue = CatalogueSnapshot::new_with_types(
+            CatalogueRevisionId::from_bytes([0x36; 16]),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes([0x37; 16]),
+                QualifiedSemanticName::new(["std"]).unwrap(),
+            )],
+            vec![],
+            vec![boolean, opaque],
+            vec![],
+        )
+        .unwrap();
+        let source_unit = SourceUnitId::from_bytes([0x31; 16]);
+        let origins = vec![
+            DefinitionOrigin::new(
+                DefinitionIdentity::Schema(SchemaId::from_bytes([0x37; 16])),
+                SourceOrigin::new(
+                    source_unit,
+                    parsed.parsed().schemas()[0].span.start as u32,
+                    parsed.parsed().schemas()[0].span.end as u32,
+                )
+                .unwrap(),
+            ),
+            DefinitionOrigin::new(
+                DefinitionIdentity::ValueType(TypeId::from_bytes([0x34; 16])),
+                SourceOrigin::new(
+                    source_unit,
+                    parsed.parsed().primitive_value_types()[0].span.start as u32,
+                    parsed.parsed().primitive_value_types()[0].span.end as u32,
+                )
+                .unwrap(),
+            ),
+            DefinitionOrigin::new(
+                DefinitionIdentity::ValueType(TypeId::from_bytes([0x35; 16])),
+                SourceOrigin::new(
+                    source_unit,
+                    parsed.parsed().opaque_value_types()[0].span.start as u32,
+                    parsed.parsed().opaque_value_types()[0].span.end as u32,
+                )
+                .unwrap(),
+            ),
+        ];
+        verify_standard_library_snapshot(
+            StandardLibrarySnapshot::new(
+                StandardLibraryRevisionId::from_bytes([0x38; 16]),
+                StandardLibraryDigestVersion::Version1,
+                source,
+                "orna.language/1",
+                catalogue,
+                origins,
+                Sha256Digest::from_bytes([
+                    0x68, 0x7c, 0xa1, 0x50, 0xba, 0x69, 0x05, 0x01, 0x95, 0x14, 0xb8, 0xc3, 0xa9,
+                    0xb3, 0xa7, 0x0c, 0x36, 0x66, 0x8a, 0xe1, 0xd9, 0x12, 0xe9, 0x1d, 0xc3, 0xce,
+                    0x68, 0xab, 0x86, 0x22, 0xa4, 0x11,
+                ]),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn checked_opaque_standard_remains_definition_only_for_applications() {
+        let snapshot = verified_standard_library_with_opaque_for_test();
+        let standard = check_standard_library_source(&snapshot).unwrap();
+        assert_eq!(standard.value_types().len(), 2);
+        assert_eq!(standard.value_types()[0].kind(), ValueTypeKind::Primitive);
+        assert_eq!(standard.value_types()[1].kind(), ValueTypeKind::Opaque);
+        assert_eq!(
+            standard.value_types()[1].representation_contract(),
+            "std.token@1"
+        );
+        let application = empty_catalogue();
+        let context = StandardApplicationCheckContext::try_new(&application, &standard).unwrap();
+
+        let source = "CREATE SCHEMA app;CREATE TYPE app.item AS OBJECT (token std.TOKEN NOT NULL);";
+        let report = check_standard_application(&bundle([("opaque-use.orna", source)]), &context);
+        assert!(report.checked_bundle().is_none());
+        assert_eq!(report.diagnostics().len(), 1);
+        assert_eq!(
+            report.diagnostics()[0].code(),
+            DiagnosticCode::UnknownQualifiedName
+        );
+        assert_eq!(
+            report.diagnostics()[0].message(),
+            "unknown type name std.token"
+        );
     }
 
     fn empty_version_two_active(
@@ -7647,6 +7888,65 @@ mod tests {
         assert_eq!(bindings[1].name().to_string(), "std.integer");
         assert_eq!(bindings[2].name().to_string(), "boolean");
         assert_eq!(bindings[3].name().to_string(), "std.boolean");
+    }
+
+    #[test]
+    fn standard_reconciliation_binds_one_exact_opaque_definition_and_origin() {
+        let source = "CREATE SCHEMA std;CREATE TYPE std.TOKEN AS VALUE OPAQUE KERNEL CONTRACT 'std.token@1' IMMUTABLE TRANSIENT;";
+        let (stored_unit, parsed_unit, catalogue, origins) = opaque_standard_reconciliation_inputs(
+            source,
+            QualifiedSemanticName::new(["std", "token"]).unwrap(),
+            "std.token@1",
+        );
+
+        let families =
+            reconcile_standard_source(&stored_unit, &parsed_unit, &catalogue, &origins).unwrap();
+        assert_eq!(families.value_types.len(), 1);
+        let opaque = &families.value_types[0];
+        assert_eq!(opaque.id(), TypeId::from_bytes([3; 16]));
+        assert_eq!(opaque.name().to_string(), "std.token");
+        assert_eq!(opaque.kind(), ValueTypeKind::Opaque);
+        assert_eq!(opaque.mutability(), ValueTypeMutability::Immutable);
+        assert_eq!(opaque.persistence(), ValueTypePersistence::Transient);
+        assert_eq!(opaque.representation_contract(), "std.token@1");
+        assert_eq!(opaque.origin(), origins[1].source());
+
+        for contract in ["", &"a".repeat(129), "line\nbreak", "\u{7f}"] {
+            assert!(!super::opaque_contract_is_valid(contract));
+        }
+        for contract in ["a", "std.token@1", "!~"] {
+            assert!(super::opaque_contract_is_valid(contract));
+        }
+    }
+
+    #[test]
+    fn standard_reconciliation_keeps_primitive_and_opaque_kinds_distinct() {
+        let opaque_source = "CREATE SCHEMA std;CREATE TYPE std.TOKEN AS VALUE OPAQUE KERNEL CONTRACT 'std.token@1' IMMUTABLE TRANSIENT;";
+        let (stored_unit, parsed_unit, mut catalogue, origins) =
+            opaque_standard_reconciliation_inputs(
+                opaque_source,
+                QualifiedSemanticName::new(["std", "token"]).unwrap(),
+                "std.token@1",
+            );
+        catalogue = CatalogueSnapshot::new_with_types(
+            catalogue.revision(),
+            catalogue.schemas().to_vec(),
+            vec![],
+            vec![ValueTypeDefinition::primitive(
+                TypeId::from_bytes([3; 16]),
+                QualifiedSemanticName::new(["std", "token"]).unwrap(),
+                ValueTypeMutability::Immutable,
+                ValueTypePersistence::Transient,
+                "std.token@1",
+            )],
+            vec![],
+        )
+        .unwrap();
+
+        assert_eq!(
+            reconcile_standard_source(&stored_unit, &parsed_unit, &catalogue, &origins),
+            Err(super::StandardLibraryCheckError::SourceMismatch)
+        );
     }
 
     #[test]
@@ -11601,6 +11901,30 @@ mod tests {
             assert_eq!(diagnostic.location().span().start(), start);
             assert_eq!(diagnostic.location().span().end(), start + length);
         }
+        assert_no_checked_bundle(&report);
+    }
+
+    #[test]
+    fn rejects_opaque_value_declarations_outside_the_standard_library() {
+        let source = "CREATE TYPE app.token AS VALUE OPAQUE KERNEL CONTRACT 'app.token@1' IMMUTABLE TRANSIENT;";
+        let report = check(&bundle([("opaque.orna", source)]), &empty_catalogue());
+
+        assert_eq!(report.diagnostics().len(), 1);
+        let diagnostic = &report.diagnostics()[0];
+        assert_eq!(diagnostic.code(), DiagnosticCode::DomainIncompatible);
+        assert_eq!(
+            diagnostic.message(),
+            "KERNEL CONTRACT is available only to the standard library"
+        );
+        assert_eq!(diagnostic.location().logical_path(), "opaque.orna");
+        assert_eq!(
+            diagnostic.location().span().start(),
+            source.find("KERNEL CONTRACT").unwrap()
+        );
+        assert_eq!(
+            diagnostic.location().span().end(),
+            source.find("KERNEL CONTRACT").unwrap() + "KERNEL CONTRACT".len()
+        );
         assert_no_checked_bundle(&report);
     }
 
