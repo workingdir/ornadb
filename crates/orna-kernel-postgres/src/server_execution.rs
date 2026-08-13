@@ -154,6 +154,11 @@ impl ServerSelectResult {
     pub fn rows(&self) -> &ResultRows {
         &self.rows
     }
+
+    /// Transfers validated rows without cloning their value payloads.
+    pub(crate) fn into_rows(self) -> ResultRows {
+        self.rows
+    }
 }
 
 /// A typed rejection of the initial SERVER `SELECT` execution subset.
@@ -200,6 +205,13 @@ pub enum ServerSelectError {
         function: FunctionId,
         rule: &'static str,
     },
+    /// The function or its result is outside the raw-call SERVER boundary.
+    RawTarget {
+        /// The requested function identity.
+        function: FunctionId,
+        /// The exact rejected raw-call rule.
+        rule: &'static str,
+    },
     /// The active function has no exact active immutable revision record.
     CurrentRevision {
         function: FunctionId,
@@ -235,6 +247,8 @@ pub enum ServerSelectError {
     Cardinality { rule: &'static str },
     /// The plan result cannot enter the initial runtime value subset.
     ResultRows(ResultRowsError),
+    /// Returned values did not reconstruct the already validated result shape.
+    ReturnedRows(ResultRowsError),
     /// PostgreSQL did not prepare the exact generated result shape.
     PreparedResult { rule: &'static str },
     /// PostgreSQL returned a value that does not match the generated result shape.
@@ -340,6 +354,11 @@ impl fmt::Display for ServerSelectError {
                     function.canonical()
                 )
             }
+            Self::RawTarget { function, rule } => write!(
+                formatter,
+                "function {} is not an available raw SERVER target: {rule}",
+                function.canonical()
+            ),
             Self::CurrentRevision { function, revision } => write!(
                 formatter,
                 "function {} has no active revision {}",
@@ -375,6 +394,9 @@ impl fmt::Display for ServerSelectError {
                 write!(formatter, "SERVER SELECT returned too many rows: {rule}")
             }
             Self::ResultRows(error) => write!(formatter, "invalid server result shape: {error}"),
+            Self::ReturnedRows(error) => {
+                write!(formatter, "returned server rows are invalid: {error}")
+            }
             Self::PreparedResult { rule } => {
                 write!(formatter, "prepared server result is invalid: {rule}")
             }
@@ -435,12 +457,14 @@ impl Error for ServerSelectError {
             Self::Kernel { source } => Some(source),
             Self::PlanDecode(error) => Some(error),
             Self::ResultRows(error) => Some(error),
+            Self::ReturnedRows(error) => Some(error),
             Self::RowDecode { source, .. } => Some(source),
             Self::ValueCodec { source, .. } => Some(source),
             Self::FunctionNotActive { .. }
             | Self::AuthorisationMismatch { .. }
             | Self::FunctionDomain { .. }
             | Self::FunctionSignature { .. }
+            | Self::RawTarget { .. }
             | Self::CurrentRevision { .. }
             | Self::Artifact { .. }
             | Self::PlanInvariant { .. }
@@ -665,6 +689,136 @@ pub(crate) async fn execute_authorised_server_select(
         }));
     }
     execute_recovered_server_select(transaction, active, target.function(), arguments, None).await
+}
+
+/// Validates the closed parameter-free, one-column raw SERVER target shape.
+pub(crate) fn validate_raw_server_select_target(
+    active: &ActiveDatabaseRevision,
+    function_id: FunctionId,
+) -> Result<(), PostgresKernelError> {
+    let function = active
+        .catalogue()
+        .function_by_id(function_id)
+        .ok_or_else(|| {
+            server_error(ServerSelectError::FunctionNotActive {
+                pair: active.pair(),
+                function: function_id,
+            })
+        })?;
+    if function.domain() != FunctionDomain::Server {
+        return Err(server_error(ServerSelectError::FunctionDomain {
+            function: function_id,
+        }));
+    }
+    if !function.parameters().is_empty() {
+        return Err(raw_target_error(
+            function_id,
+            "raw SERVER calls must have zero parameters",
+        ));
+    }
+    let FunctionReturn::Rows(columns) = function.return_type() else {
+        return Err(raw_target_error(
+            function_id,
+            "raw SERVER calls must return ROWS with exactly one column",
+        ));
+    };
+    let [column] = columns.as_slice() else {
+        return Err(raw_target_error(
+            function_id,
+            "raw SERVER calls must return ROWS with exactly one column",
+        ));
+    };
+    if !raw_result_type_is_supported(
+        active.catalogue(),
+        active.catalogue_hash_context(),
+        column.resolved_type(),
+    ) {
+        return Err(raw_target_error(
+            function_id,
+            "raw SERVER results support only protocol-1 scalar and reference values",
+        ));
+    }
+    Ok(())
+}
+
+/// Transfers one-column raw SERVER results without cloning value payloads.
+pub(crate) fn into_raw_server_values(
+    active: &ActiveDatabaseRevision,
+    function: FunctionId,
+    result: ServerSelectResult,
+) -> Result<Vec<RuntimeValue>, PostgresKernelError> {
+    into_raw_server_values_for_context(
+        active.catalogue(),
+        active.catalogue_hash_context(),
+        function,
+        result,
+    )
+}
+
+fn into_raw_server_values_for_context(
+    catalogue: &CatalogueSnapshot,
+    context: &CatalogueHashContext,
+    function: FunctionId,
+    result: ServerSelectResult,
+) -> Result<Vec<RuntimeValue>, PostgresKernelError> {
+    result
+        .into_rows()
+        .into_rows()
+        .into_iter()
+        .map(|row| {
+            let [value] =
+                <Vec<RuntimeValue> as TryInto<[RuntimeValue; 1]>>::try_into(row.into_values())
+                    .map_err(|_| {
+                        raw_target_error(
+                            function,
+                            "raw SERVER execution must produce exactly one value per row",
+                        )
+                    })?;
+            if let RuntimeValue::Null(value) = value {
+                normalise_raw_null(catalogue, context, function, value.resolved_type())
+            } else if raw_runtime_value_is_supported(&value) {
+                Ok(value)
+            } else {
+                Err(raw_target_error(
+                    function,
+                    "raw SERVER execution produced a value outside the protocol-1 subset",
+                ))
+            }
+        })
+        .collect()
+}
+
+/// Reports whether a SERVER failure is an unavailable raw target, not an operational failure.
+pub(crate) const fn raw_server_target_is_unavailable(error: &ServerSelectError) -> bool {
+    match error {
+        ServerSelectError::Execution { source, .. } => raw_server_target_is_unavailable(source),
+        ServerSelectError::FunctionNotActive { .. }
+        | ServerSelectError::FunctionDomain { .. }
+        | ServerSelectError::FunctionSignature { .. }
+        | ServerSelectError::RawTarget { .. }
+        | ServerSelectError::Artifact { .. }
+        | ServerSelectError::PlanDecode(_)
+        | ServerSelectError::PlanInvariant { .. }
+        | ServerSelectError::Distinct { .. }
+        | ServerSelectError::ReferenceEvidence { .. }
+        | ServerSelectError::Argument { .. }
+        | ServerSelectError::Cardinality { .. }
+        | ServerSelectError::ResultRows(_)
+        | ServerSelectError::VariablePayload { .. }
+        | ServerSelectError::ComplexityLimit { .. }
+        | ServerSelectError::RowLimit { .. }
+        | ServerSelectError::CellLimit { .. }
+        | ServerSelectError::PayloadLimit { .. } => true,
+        ServerSelectError::AuthorisationMismatch { .. }
+        | ServerSelectError::Database { .. }
+        | ServerSelectError::Kernel { .. }
+        | ServerSelectError::CurrentRevision { .. }
+        | ServerSelectError::PreparedResult { .. }
+        | ServerSelectError::ReturnedRows(_)
+        | ServerSelectError::RowDecode { .. }
+        | ServerSelectError::ValueInvariant { .. }
+        | ServerSelectError::ValueCodec { .. } => false,
+    }
 }
 
 #[cfg(feature = "test-hooks")]
@@ -1270,6 +1424,10 @@ fn function_signature_error(function: FunctionId, rule: &'static str) -> Postgre
     server_error(ServerSelectError::FunctionSignature { function, rule })
 }
 
+fn raw_target_error(function: FunctionId, rule: &'static str) -> PostgresKernelError {
+    server_error(ServerSelectError::RawTarget { function, rule })
+}
+
 fn argument_error(parameter: Option<ParameterId>, rule: &'static str) -> PostgresKernelError {
     server_error(ServerSelectError::Argument { parameter, rule })
 }
@@ -1490,6 +1648,78 @@ fn supports_result_type(
         ResolvedRuntimeType::CatalogueEnum(_)
             | ResolvedRuntimeType::Record(_)
             | ResolvedRuntimeType::Reference(_)
+    )
+}
+
+fn raw_result_type_is_supported(
+    catalogue: &CatalogueSnapshot,
+    context: &CatalogueHashContext,
+    resolved_type: ResolvedType,
+) -> bool {
+    match resolve_catalogue_runtime_type(catalogue, context, resolved_type) {
+        ResolvedRuntimeType::LegacyScalar(scalar)
+        | ResolvedRuntimeType::VerifiedValue {
+            compatibility: scalar,
+            ..
+        } => raw_scalar_is_supported(scalar),
+        ResolvedRuntimeType::Reference(target) => catalogue.object_type_by_id(target).is_some(),
+        ResolvedRuntimeType::CatalogueEnum(_)
+        | ResolvedRuntimeType::Record(_)
+        | ResolvedRuntimeType::Unsupported => false,
+    }
+}
+
+fn raw_runtime_value_is_supported(value: &RuntimeValue) -> bool {
+    match value {
+        RuntimeValue::Null(_) => false,
+        RuntimeValue::Boolean(_)
+        | RuntimeValue::Integer(_)
+        | RuntimeValue::BigInt(_)
+        | RuntimeValue::Float(_)
+        | RuntimeValue::Text(_)
+        | RuntimeValue::Bytes(_)
+        | RuntimeValue::Reference { .. } => true,
+        RuntimeValue::Enum(_) | RuntimeValue::Record(_) => false,
+        _ => false,
+    }
+}
+
+fn normalise_raw_null(
+    catalogue: &CatalogueSnapshot,
+    context: &CatalogueHashContext,
+    function: FunctionId,
+    resolved_type: ResolvedType,
+) -> Result<RuntimeValue, PostgresKernelError> {
+    let normalised = match resolve_catalogue_runtime_type(catalogue, context, resolved_type) {
+        ResolvedRuntimeType::LegacyScalar(scalar)
+        | ResolvedRuntimeType::VerifiedValue {
+            compatibility: scalar,
+            ..
+        } if raw_scalar_is_supported(scalar) => ResolvedType::scalar(scalar),
+        ResolvedRuntimeType::Reference(target) if catalogue.object_type_by_id(target).is_some() => {
+            ResolvedType::reference(target)
+        }
+        _ => {
+            return Err(raw_target_error(
+                function,
+                "raw SERVER execution produced a null outside the protocol-1 subset",
+            ));
+        }
+    };
+    RuntimeValue::null(normalised)
+        .map_err(ServerSelectError::ReturnedRows)
+        .map_err(server_error)
+}
+
+const fn raw_scalar_is_supported(scalar: StandardScalar) -> bool {
+    matches!(
+        scalar,
+        StandardScalar::Boolean
+            | StandardScalar::Integer
+            | StandardScalar::BigInt
+            | StandardScalar::Float
+            | StandardScalar::CharacterLargeObject
+            | StandardScalar::BinaryLargeObject
     )
 }
 
@@ -2373,7 +2603,7 @@ async fn stream_rows(
         rows.push(ResultRow::new(values));
     }
     ResultRows::new(shape.columns.to_vec(), rows)
-        .map_err(ServerSelectError::ResultRows)
+        .map_err(ServerSelectError::ReturnedRows)
         .map_err(server_error)
 }
 
@@ -2444,7 +2674,7 @@ fn decode_value(
             decode!(f64, |value| {
                 RuntimeFloat::new(value)
                     .map(RuntimeValue::Float)
-                    .map_err(ServerSelectError::ResultRows)
+                    .map_err(ServerSelectError::ReturnedRows)
                     .map_err(server_error)
             })
         }
@@ -2505,7 +2735,7 @@ fn decode_value(
     match value {
         Some(value) => Ok(value),
         None => RuntimeValue::null(resolved_type)
-            .map_err(ServerSelectError::ResultRows)
+            .map_err(ServerSelectError::ReturnedRows)
             .map_err(server_error),
     }
 }
@@ -4655,6 +4885,167 @@ mod tests {
         ];
         assert_eq!(initial_payload_len(&columns).unwrap(), 6);
         assert!(add_payload(PAYLOAD_LIMIT, 1).is_err());
+    }
+
+    #[test]
+    fn raw_result_boundary_accepts_only_protocol_one_types() {
+        let (catalogue, active_object, _, _) = catalogue();
+        let context = CatalogueHashContext::version_one();
+        for scalar in StandardScalar::ALL {
+            let expected = matches!(
+                scalar,
+                StandardScalar::Boolean
+                    | StandardScalar::Integer
+                    | StandardScalar::BigInt
+                    | StandardScalar::Float
+                    | StandardScalar::CharacterLargeObject
+                    | StandardScalar::BinaryLargeObject
+            );
+            assert_eq!(
+                raw_result_type_is_supported(&catalogue, &context, ResolvedType::scalar(scalar)),
+                expected,
+                "unexpected raw support for {scalar:?}",
+            );
+        }
+        assert!(raw_result_type_is_supported(
+            &catalogue,
+            &context,
+            ResolvedType::reference(active_object),
+        ));
+        assert!(!raw_result_type_is_supported(
+            &catalogue,
+            &context,
+            ResolvedType::reference(TypeId::from_bytes([0xfe; 16])),
+        ));
+        assert!(!raw_result_type_is_supported(
+            &catalogue,
+            &context,
+            ResolvedType::named(TypeId::from_bytes([0xfd; 16])),
+        ));
+    }
+
+    #[test]
+    fn raw_result_transfer_preserves_rows_and_reference_nulls() {
+        let (catalogue, active_object, _, _) = catalogue();
+        let context = CatalogueHashContext::version_one();
+        let pair = RevisionPair::new(
+            orna_core::SourceRevisionId::from_bytes([0xa1; 16]),
+            CatalogueRevisionId::from_bytes([0xa2; 16]),
+        );
+        let function = FunctionId::from_bytes([0xa3; 16]);
+        let revision = FunctionRevisionId::from_bytes([0xa4; 16]);
+        let rows = ResultRows::new(
+            [ResultColumn::new(
+                "value",
+                ResolvedType::scalar(StandardScalar::Integer),
+                false,
+            )
+            .unwrap()],
+            [
+                ResultRow::new([RuntimeValue::Integer(1)]),
+                ResultRow::new([RuntimeValue::Integer(2)]),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            into_raw_server_values_for_context(
+                &catalogue,
+                &context,
+                function,
+                ServerSelectResult::new(pair, function, revision, rows),
+            )
+            .unwrap(),
+            vec![RuntimeValue::Integer(1), RuntimeValue::Integer(2)],
+        );
+
+        let reference = ResolvedType::reference(active_object);
+        let rows = ResultRows::new(
+            [ResultColumn::new("value", reference, true).unwrap()],
+            [ResultRow::new([RuntimeValue::null(reference).unwrap()])],
+        )
+        .unwrap();
+        assert_eq!(
+            into_raw_server_values_for_context(
+                &catalogue,
+                &context,
+                function,
+                ServerSelectResult::new(pair, function, revision, rows),
+            )
+            .unwrap(),
+            vec![RuntimeValue::null(reference).unwrap()]
+        );
+    }
+
+    #[test]
+    fn raw_result_transfer_normalises_standard_value_nulls_to_protocol_one_scalars() {
+        let (context, boolean) = retained_value_context("orna.kernel.value.boolean@1");
+        let catalogue = CatalogueSnapshot::new(
+            CatalogueRevisionId::from_bytes([0xc1; 16]),
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        let pair = RevisionPair::new(
+            orna_core::SourceRevisionId::from_bytes([0xc2; 16]),
+            CatalogueRevisionId::from_bytes([0xc1; 16]),
+        );
+        let function = FunctionId::from_bytes([0xc3; 16]);
+        let revision = FunctionRevisionId::from_bytes([0xc4; 16]);
+        let value_type = ResolvedType::value(boolean);
+        let rows = ResultRows::new(
+            [ResultColumn::new("value", value_type, true).unwrap()],
+            [ResultRow::new([RuntimeValue::null(value_type).unwrap()])],
+        )
+        .unwrap();
+
+        assert_eq!(
+            into_raw_server_values_for_context(
+                &catalogue,
+                &context,
+                function,
+                ServerSelectResult::new(pair, function, revision, rows),
+            )
+            .unwrap(),
+            vec![RuntimeValue::null(ResolvedType::scalar(StandardScalar::Boolean)).unwrap()]
+        );
+    }
+
+    #[test]
+    fn raw_target_classification_separates_validation_from_operations() {
+        let function = FunctionId::from_bytes([0xb1; 16]);
+        assert!(raw_server_target_is_unavailable(
+            &ServerSelectError::RawTarget {
+                function,
+                rule: "test",
+            }
+        ));
+        assert!(raw_server_target_is_unavailable(
+            &ServerSelectError::Execution {
+                context: ServerSelectContext::new(
+                    RevisionPair::new(
+                        orna_core::SourceRevisionId::from_bytes([0xb2; 16]),
+                        CatalogueRevisionId::from_bytes([0xb3; 16]),
+                    ),
+                    function,
+                    FunctionRevisionId::from_bytes([0xb4; 16]),
+                ),
+                source: Box::new(ServerSelectError::PayloadLimit {
+                    maximum: PAYLOAD_LIMIT,
+                }),
+            }
+        ));
+        assert!(!raw_server_target_is_unavailable(
+            &ServerSelectError::PreparedResult { rule: "test" }
+        ));
+        assert!(!raw_server_target_is_unavailable(
+            &ServerSelectError::ReturnedRows(ResultRowsError::NonFiniteFloat)
+        ));
+        assert!(!raw_server_target_is_unavailable(
+            &ServerSelectError::CurrentRevision {
+                function,
+                revision: FunctionRevisionId::from_bytes([0xb5; 16]),
+            }
+        ));
     }
 
     #[test]
