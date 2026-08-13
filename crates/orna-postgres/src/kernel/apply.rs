@@ -19,10 +19,10 @@ use orna_core::{
         ActiveDatabaseRevision, ActiveDatabaseRevisionInput, ActiveRevisionContent,
         CatalogueHashContext, DefinitionIdentity, DefinitionOrigin, DefinitionReference,
         DefinitionReferenceKind, DefinitionReferenceTarget, DeployableRevision,
-        FunctionRevisionRecord, RevisionPair, Sha256Digest, SourceOrigin,
-        VerifiedStandardLibrarySnapshot, validate_persistable_catalogue,
+        FunctionRevisionRecord, RecordValueFieldDescriptorClass, RevisionPair, Sha256Digest,
+        SourceOrigin, VerifiedStandardLibrarySnapshot, validate_persistable_catalogue,
     },
-    types::{ResolvedType, StandardScalar},
+    types::{ResolvedType, StandardScalar, TypeDescriptor},
 };
 use orna_standard::{StandardUpgrade, StandardUpgradeIdentity};
 use tokio_postgres::{Client, IsolationLevel, Transaction};
@@ -858,6 +858,16 @@ fn validate_postgres_encodings(
             let _ = on_delete(field.on_delete());
         }
     }
+    for record_type in candidate.candidate().record_value_types() {
+        for field in record_type.fields() {
+            let _ = encoder.record_value_field_columns(
+                candidate,
+                field
+                    .type_descriptor()
+                    .expect("catalogue-validated record fields have descriptors"),
+            )?;
+        }
+    }
     for function in candidate.candidate().functions() {
         schema_for_name(candidate.candidate(), function.name())?;
         let _ = function_domain(function.domain());
@@ -1287,7 +1297,12 @@ async fn persist_semantics(
                 standard_library_revision,
                 enum_type,
                 record_type: nested_record_type,
-            } = encoder.type_columns(field.resolved_type(), false)?;
+            } = encoder.record_value_field_columns(
+                candidate,
+                field
+                    .type_descriptor()
+                    .expect("catalogue-validated record fields have descriptors"),
+            )?;
             if scalar.is_some()
                 || target.is_some()
                 || nested_record_type.is_some()
@@ -1964,6 +1979,49 @@ impl<'a> CandidateEncoder<'a> {
         self.context
             .standard()
             .map(VerifiedStandardLibrarySnapshot::revision)
+    }
+
+    fn record_value_field_columns(
+        &self,
+        candidate: &DeployableRevision,
+        descriptor: &TypeDescriptor,
+    ) -> Result<TypeColumns, PostgresKernelError> {
+        let class = candidate
+            .record_value_field_descriptor_class(descriptor)
+            .map_err(|_| {
+                invariant("record value fields must use one supported standard value or enum type")
+            })?;
+        match class {
+            RecordValueFieldDescriptorClass::Enum(type_id) => Ok(TypeColumns {
+                kind: "enum",
+                scalar: None,
+                target: None,
+                value_type: None,
+                standard_library_revision: None,
+                enum_type: Some(type_id),
+                record_type: None,
+            }),
+            RecordValueFieldDescriptorClass::StandardPrimitive(type_id) => {
+                let standard_library_revision =
+                    self.standard_library_revision().ok_or_else(|| {
+                        invariant(
+                            "record value field standard primitive must retain its standard pin",
+                        )
+                    })?;
+                Ok(TypeColumns {
+                    kind: "value",
+                    scalar: None,
+                    target: None,
+                    value_type: Some(type_id),
+                    standard_library_revision: Some(standard_library_revision),
+                    enum_type: None,
+                    record_type: None,
+                })
+            }
+            _ => Err(invariant(
+                "record value field descriptor class must be supported by this kernel",
+            )),
+        }
     }
 
     fn type_columns(
