@@ -12,7 +12,7 @@ use orna_core::{
 use orna_postgres::{PostgresKernel, PostgresKernelError};
 use orna_server::{LocalAuthenticationError, authenticate_local_stream};
 
-#[path = "../../orna-kernel-postgres/tests/support/mod.rs"]
+#[path = "../../orna-postgres/tests/support/mod.rs"]
 mod postgres_test_support;
 
 use postgres_test_support::{TestResult, failure, with_test_database};

@@ -56,7 +56,7 @@ use tokio::{
     time::sleep,
 };
 
-#[path = "../../orna-kernel-postgres/tests/support/mod.rs"]
+#[path = "../../orna-postgres/tests/support/mod.rs"]
 mod postgres_test_support;
 
 use postgres_test_support::{TestDatabase, TestResult, failure, with_test_database};
