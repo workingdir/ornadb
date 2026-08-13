@@ -24,11 +24,11 @@ use crate::{
     TypeBindingId, TypeId,
     catalogue::{
         CatalogueSnapshot, FunctionDefinition, FunctionDomain, FunctionReturn, FunctionSecurity,
-        FunctionVolatility, ValueTypeDefinition, ValueTypeKind, ValueTypeMutability,
-        ValueTypePersistence,
+        FunctionVolatility, TypeDefinition, ValueTypeDefinition, ValueTypeKind,
+        ValueTypeMutability, ValueTypePersistence,
     },
     security::CATALOGUE_HEALTH_FUNCTION_ID,
-    types::{ResolvedType, StandardScalar},
+    types::{ResolvedType, StandardScalar, TypeDescriptor},
 };
 
 /// The reserved catalogue identity for the ephemeral offline application check.
@@ -1266,6 +1266,67 @@ impl ActiveDatabaseRevision {
         &self.catalogue_hash_context
     }
 
+    /// Converts one legacy flat resolved type into a catalogue-validated leaf descriptor.
+    ///
+    /// This does not admit the descriptor in any catalogue or execution
+    /// position. Legacy compatibility scalars have no catalogue identity and
+    /// must first be migrated to a resolved value identity.
+    pub fn type_descriptor_for(
+        &self,
+        resolved_type: ResolvedType,
+    ) -> Result<TypeDescriptor, FlatTypeDescriptorError> {
+        match resolved_type {
+            ResolvedType::Scalar(scalar) => Err(FlatTypeDescriptorError::LegacyScalar { scalar }),
+            ResolvedType::Named(id) => {
+                let application = self.catalogue.type_definition_by_id(id);
+                let standard = self
+                    .catalogue_hash_context
+                    .standard()
+                    .and_then(|standard| standard.catalogue().type_definition_by_id(id));
+                if application.is_some() && standard.is_some() {
+                    return Err(FlatTypeDescriptorError::AmbiguousNamedType { id });
+                }
+                match application.or(standard) {
+                    None => Err(FlatTypeDescriptorError::UnknownNamedType { id }),
+                    Some(TypeDefinition::Object(_)) => {
+                        Err(FlatTypeDescriptorError::NamedObjectType { id })
+                    }
+                    Some(TypeDefinition::Value(_)) => {
+                        Err(FlatTypeDescriptorError::NamedValueType { id })
+                    }
+                    Some(TypeDefinition::Enum(_) | TypeDefinition::RecordValue(_)) => {
+                        Ok(TypeDescriptor::named(id))
+                    }
+                }
+            }
+            ResolvedType::Value(value_type) => {
+                let standard = self
+                    .catalogue_hash_context
+                    .standard()
+                    .ok_or(FlatTypeDescriptorError::StandardLibraryUnavailable { value_type })?;
+                if !standard
+                    .catalogue()
+                    .value_type_by_id(value_type)
+                    .is_some_and(|definition| {
+                        matches!(
+                            definition.kind(),
+                            ValueTypeKind::Primitive | ValueTypeKind::Opaque
+                        )
+                    })
+                {
+                    return Err(FlatTypeDescriptorError::UnknownStandardValueType { value_type });
+                }
+                Ok(TypeDescriptor::named(value_type))
+            }
+            ResolvedType::Reference { target } => {
+                if self.catalogue.object_type_by_id(target).is_none() {
+                    return Err(FlatTypeDescriptorError::ReferenceTargetNotObject { target });
+                }
+                Ok(TypeDescriptor::reference(target))
+            }
+        }
+    }
+
     /// Resolves one admitted record field to its executable runtime type.
     ///
     /// This uses the application catalogue and the exact verified standard
@@ -1303,6 +1364,84 @@ impl ActiveDatabaseRevision {
         &self.references
     }
 }
+
+/// A failure to validate one flat resolved type against an active revision.
+#[non_exhaustive]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FlatTypeDescriptorError {
+    /// A version-1 compatibility scalar has no durable catalogue identity.
+    LegacyScalar {
+        /// The rejected compatibility representation.
+        scalar: StandardScalar,
+    },
+    /// The same named identity is present in both active type catalogues.
+    AmbiguousNamedType {
+        /// The colliding type identity.
+        id: TypeId,
+    },
+    /// The named identity is absent from both active type catalogues.
+    UnknownNamedType {
+        /// The missing type identity.
+        id: TypeId,
+    },
+    /// The named identity resolves to an object and must use `REF`.
+    NamedObjectType {
+        /// The rejected object identity.
+        id: TypeId,
+    },
+    /// The named identity resolves to a primitive or opaque value definition.
+    NamedValueType {
+        /// The rejected value identity.
+        id: TypeId,
+    },
+    /// A resolved value identity has no pinned standard-library catalogue.
+    StandardLibraryUnavailable {
+        /// The unresolved value identity.
+        value_type: TypeId,
+    },
+    /// A resolved value identity is absent from the pinned standard library.
+    UnknownStandardValueType {
+        /// The missing standard value identity.
+        value_type: TypeId,
+    },
+    /// A resolved reference target is not an active application object.
+    ReferenceTargetNotObject {
+        /// The rejected reference target.
+        target: TypeId,
+    },
+}
+
+impl fmt::Display for FlatTypeDescriptorError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::LegacyScalar { .. } => {
+                formatter.write_str("legacy scalar type has no catalogue identity")
+            }
+            Self::AmbiguousNamedType { .. } => formatter.write_str(
+                "resolved named type is present in both application and standard catalogues",
+            ),
+            Self::UnknownNamedType { .. } => {
+                formatter.write_str("resolved named type is absent from the active catalogue")
+            }
+            Self::NamedObjectType { .. } => {
+                formatter.write_str("resolved named type is an object and requires REF")
+            }
+            Self::NamedValueType { .. } => formatter.write_str(
+                "resolved named type is a value definition and requires a value identity",
+            ),
+            Self::StandardLibraryUnavailable { .. } => formatter.write_str(
+                "the active database has no standard library for the resolved value type",
+            ),
+            Self::UnknownStandardValueType { .. } => formatter
+                .write_str("resolved value type is absent from the pinned standard library"),
+            Self::ReferenceTargetNotObject { .. } => {
+                formatter.write_str("resolved reference target is not an active application object")
+            }
+        }
+    }
+}
+
+impl Error for FlatTypeDescriptorError {}
 
 /// The semantic records produced for one deployable catalogue candidate.
 #[derive(Clone, Debug)]
@@ -3039,7 +3178,7 @@ mod tests {
             RecordValueFieldDefinition, RecordValueTypeDefinition, SchemaDefinition, TypeBinding,
             ValueTypeDefinition, ValueTypeMutability, ValueTypePersistence,
         },
-        types::{ResolvedType, StandardScalar},
+        types::{ResolvedType, StandardScalar, TypeDescriptorKind},
     };
 
     const fn id<const BYTE: u8>() -> [u8; 16] {
@@ -3149,6 +3288,342 @@ mod tests {
 
     fn empty_catalogue() -> CatalogueSnapshot {
         CatalogueSnapshot::new(CatalogueRevisionId::from_bytes(id::<7>()), vec![], vec![]).unwrap()
+    }
+
+    fn active_for_flat_type_conversion(
+        catalogue: CatalogueSnapshot,
+        catalogue_hash_context: CatalogueHashContext,
+    ) -> ActiveDatabaseRevision {
+        let source = source(None);
+        ActiveDatabaseRevision {
+            pair: RevisionPair::new(source.id(), catalogue.revision()),
+            source,
+            catalogue,
+            catalogue_hash: digest::<7>(),
+            catalogue_hash_context,
+            expressions: vec![],
+            function_revisions: vec![],
+            historical_function_revisions: vec![],
+            origins: vec![],
+            references: vec![],
+        }
+    }
+
+    fn flat_type_application_catalogue() -> CatalogueSnapshot {
+        CatalogueSnapshot::new_with_record_value_types(
+            CatalogueRevisionId::from_bytes(id::<7>()),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes(id::<8>()),
+                QualifiedSemanticName::new(["crm"]).unwrap(),
+            )],
+            vec![ObjectTypeDefinition::new(
+                TypeId::from_bytes(id::<80>()),
+                QualifiedSemanticName::new(["crm", "contact"]).unwrap(),
+                vec![],
+            )],
+            vec![ValueTypeDefinition::opaque(
+                TypeId::from_bytes(id::<81>()),
+                QualifiedSemanticName::new(["crm", "token"]).unwrap(),
+                "crm.token@1",
+            )],
+            vec![EnumTypeDefinition::new(
+                TypeId::from_bytes(id::<82>()),
+                QualifiedSemanticName::new(["crm", "stage"]).unwrap(),
+                ["lead"],
+            )],
+            vec![RecordValueTypeDefinition::new(
+                TypeId::from_bytes(id::<83>()),
+                QualifiedSemanticName::new(["crm", "status"]).unwrap(),
+                vec![RecordValueFieldDefinition::new(
+                    FieldId::from_bytes(id::<84>()),
+                    "active",
+                    0,
+                    ResolvedType::value(TypeId::from_bytes(id::<71>())),
+                )],
+            )],
+            vec![],
+        )
+        .unwrap()
+    }
+
+    fn flat_type_standard_context() -> CatalogueHashContext {
+        let catalogue = CatalogueSnapshot::new_with_enum_types(
+            CatalogueRevisionId::from_bytes(id::<72>()),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes(id::<73>()),
+                QualifiedSemanticName::new(["std"]).unwrap(),
+            )],
+            vec![],
+            vec![
+                standard_boolean_definition(),
+                ValueTypeDefinition::opaque(
+                    TypeId::from_bytes(id::<74>()),
+                    QualifiedSemanticName::new(["std", "token"]).unwrap(),
+                    "std.token@1",
+                ),
+            ],
+            vec![EnumTypeDefinition::new(
+                TypeId::from_bytes(id::<75>()),
+                QualifiedSemanticName::new(["std", "mode"]).unwrap(),
+                ["safe"],
+            )],
+            vec![],
+        )
+        .unwrap();
+        let content = "standard flat type descriptor fixture";
+        let unit = StoredSourceUnit::new(
+            SourceUnitId::from_bytes(id::<3>()),
+            0,
+            "std/types.orna",
+            content,
+            source_unit_content_digest(content).unwrap(),
+        )
+        .unwrap();
+        let bundle_hash = source_bundle_digest(std::slice::from_ref(&unit)).unwrap();
+        let source = StoredSourceRevision::new(
+            SourceBundleId::from_bytes(id::<1>()),
+            SourceRevisionId::from_bytes(id::<2>()),
+            None,
+            vec![unit],
+            bundle_hash,
+            source_revision_record_digest(SourceBundleId::from_bytes(id::<1>()), None, bundle_hash)
+                .unwrap(),
+        )
+        .unwrap();
+        let source_unit = SourceUnitId::from_bytes(id::<3>());
+        let origins = [
+            DefinitionIdentity::Schema(SchemaId::from_bytes(id::<73>())),
+            DefinitionIdentity::ValueType(TypeId::from_bytes(id::<71>())),
+            DefinitionIdentity::ValueType(TypeId::from_bytes(id::<74>())),
+            DefinitionIdentity::ValueType(TypeId::from_bytes(id::<75>())),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, identity)| {
+            DefinitionOrigin::new(
+                identity,
+                SourceOrigin::new(source_unit, index as u32, index as u32 + 1).unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+        let provisional = StandardLibrarySnapshot::new(
+            StandardLibraryRevisionId::from_bytes(id::<74>()),
+            StandardLibraryDigestVersion::Version1,
+            source.clone(),
+            "orna.language/1",
+            catalogue.clone(),
+            origins.clone(),
+            digest::<75>(),
+        )
+        .unwrap();
+        let digest = calculate_standard_library_digest_for_test(&provisional).unwrap();
+        let standard = StandardLibrarySnapshot::new(
+            provisional.revision(),
+            provisional.digest_version(),
+            source,
+            provisional.language_version(),
+            catalogue,
+            origins,
+            digest,
+        )
+        .unwrap();
+        CatalogueHashContext::version_two(verify_standard_library_snapshot(standard).unwrap())
+    }
+
+    #[test]
+    fn active_revision_converts_only_catalogue_identified_flat_type_leaves() {
+        let active = active_for_flat_type_conversion(
+            flat_type_application_catalogue(),
+            flat_type_standard_context(),
+        );
+
+        for type_id in [
+            TypeId::from_bytes(id::<82>()),
+            TypeId::from_bytes(id::<83>()),
+            TypeId::from_bytes(id::<75>()),
+        ] {
+            assert_eq!(
+                active
+                    .type_descriptor_for(ResolvedType::named(type_id))
+                    .unwrap()
+                    .kind(),
+                TypeDescriptorKind::Named(type_id)
+            );
+        }
+        for type_id in [
+            TypeId::from_bytes(id::<71>()),
+            TypeId::from_bytes(id::<74>()),
+        ] {
+            assert_eq!(
+                active
+                    .type_descriptor_for(ResolvedType::value(type_id))
+                    .unwrap()
+                    .kind(),
+                TypeDescriptorKind::Named(type_id)
+            );
+        }
+        let object = TypeId::from_bytes(id::<80>());
+        assert_eq!(
+            active
+                .type_descriptor_for(ResolvedType::reference(object))
+                .unwrap()
+                .kind(),
+            TypeDescriptorKind::Reference(object)
+        );
+    }
+
+    #[test]
+    fn active_revision_flat_type_conversion_rejects_every_missing_or_wrong_category() {
+        let active = active_for_flat_type_conversion(
+            flat_type_application_catalogue(),
+            flat_type_standard_context(),
+        );
+        let missing = TypeId::from_bytes(id::<99>());
+
+        assert_eq!(
+            active.type_descriptor_for(ResolvedType::scalar(StandardScalar::Boolean)),
+            Err(FlatTypeDescriptorError::LegacyScalar {
+                scalar: StandardScalar::Boolean,
+            })
+        );
+        assert_eq!(
+            active.type_descriptor_for(ResolvedType::named(missing)),
+            Err(FlatTypeDescriptorError::UnknownNamedType { id: missing })
+        );
+        assert_eq!(
+            active.type_descriptor_for(ResolvedType::named(TypeId::from_bytes(id::<80>()))),
+            Err(FlatTypeDescriptorError::NamedObjectType {
+                id: TypeId::from_bytes(id::<80>()),
+            })
+        );
+        assert_eq!(
+            active.type_descriptor_for(ResolvedType::named(TypeId::from_bytes(id::<81>()))),
+            Err(FlatTypeDescriptorError::NamedValueType {
+                id: TypeId::from_bytes(id::<81>()),
+            })
+        );
+        assert_eq!(
+            active.type_descriptor_for(ResolvedType::named(TypeId::from_bytes(id::<71>()))),
+            Err(FlatTypeDescriptorError::NamedValueType {
+                id: TypeId::from_bytes(id::<71>()),
+            })
+        );
+        assert_eq!(
+            active.type_descriptor_for(ResolvedType::value(missing)),
+            Err(FlatTypeDescriptorError::UnknownStandardValueType {
+                value_type: missing,
+            })
+        );
+        assert_eq!(
+            active.type_descriptor_for(ResolvedType::value(TypeId::from_bytes(id::<81>()))),
+            Err(FlatTypeDescriptorError::UnknownStandardValueType {
+                value_type: TypeId::from_bytes(id::<81>()),
+            })
+        );
+        assert_eq!(
+            active.type_descriptor_for(ResolvedType::value(TypeId::from_bytes(id::<75>()))),
+            Err(FlatTypeDescriptorError::UnknownStandardValueType {
+                value_type: TypeId::from_bytes(id::<75>()),
+            })
+        );
+        assert_eq!(
+            active.type_descriptor_for(ResolvedType::reference(TypeId::from_bytes(id::<82>()))),
+            Err(FlatTypeDescriptorError::ReferenceTargetNotObject {
+                target: TypeId::from_bytes(id::<82>()),
+            })
+        );
+    }
+
+    #[test]
+    fn active_revision_flat_type_conversion_closes_version_one_and_colliding_identities() {
+        let value_type = TypeId::from_bytes(id::<71>());
+        let version_one = active_for_flat_type_conversion(
+            flat_type_application_catalogue(),
+            CatalogueHashContext::version_one(),
+        );
+        assert_eq!(
+            version_one.type_descriptor_for(ResolvedType::value(value_type)),
+            Err(FlatTypeDescriptorError::StandardLibraryUnavailable { value_type })
+        );
+        assert_eq!(
+            version_one.type_descriptor_for(ResolvedType::scalar(StandardScalar::Boolean)),
+            Err(FlatTypeDescriptorError::LegacyScalar {
+                scalar: StandardScalar::Boolean,
+            })
+        );
+
+        let collision = TypeId::from_bytes(id::<75>());
+        let application = CatalogueSnapshot::new_with_enum_types(
+            CatalogueRevisionId::from_bytes(id::<7>()),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes(id::<8>()),
+                QualifiedSemanticName::new(["crm"]).unwrap(),
+            )],
+            vec![],
+            vec![],
+            vec![EnumTypeDefinition::new(
+                collision,
+                QualifiedSemanticName::new(["crm", "mode"]).unwrap(),
+                ["open"],
+            )],
+            vec![],
+        )
+        .unwrap();
+        let active = active_for_flat_type_conversion(application, flat_type_standard_context());
+        assert_eq!(
+            active.type_descriptor_for(ResolvedType::named(collision)),
+            Err(FlatTypeDescriptorError::AmbiguousNamedType { id: collision })
+        );
+    }
+
+    #[test]
+    fn flat_type_descriptor_errors_have_exact_actionable_messages_without_sources() {
+        let type_id = TypeId::from_bytes(id::<99>());
+        let cases = [
+            (
+                FlatTypeDescriptorError::LegacyScalar {
+                    scalar: StandardScalar::Boolean,
+                },
+                "legacy scalar type has no catalogue identity",
+            ),
+            (
+                FlatTypeDescriptorError::AmbiguousNamedType { id: type_id },
+                "resolved named type is present in both application and standard catalogues",
+            ),
+            (
+                FlatTypeDescriptorError::UnknownNamedType { id: type_id },
+                "resolved named type is absent from the active catalogue",
+            ),
+            (
+                FlatTypeDescriptorError::NamedObjectType { id: type_id },
+                "resolved named type is an object and requires REF",
+            ),
+            (
+                FlatTypeDescriptorError::NamedValueType { id: type_id },
+                "resolved named type is a value definition and requires a value identity",
+            ),
+            (
+                FlatTypeDescriptorError::StandardLibraryUnavailable {
+                    value_type: type_id,
+                },
+                "the active database has no standard library for the resolved value type",
+            ),
+            (
+                FlatTypeDescriptorError::UnknownStandardValueType {
+                    value_type: type_id,
+                },
+                "resolved value type is absent from the pinned standard library",
+            ),
+            (
+                FlatTypeDescriptorError::ReferenceTargetNotObject { target: type_id },
+                "resolved reference target is not an active application object",
+            ),
+        ];
+
+        for (error, expected) in cases {
+            assert_eq!(error.to_string(), expected);
+            assert!(error.source().is_none());
+        }
     }
 
     fn unchecked_standard_with_catalogue_revision(
