@@ -922,16 +922,18 @@ impl CatalogueSnapshot {
         for record_value_type in &record_value_types {
             Self::validate_record_value_fields(record_value_type)?;
             for field in record_value_type.fields() {
-                let accepted = match field.resolved_type() {
-                    ResolvedType::Value(target) => {
-                        value_type_indices_by_id.contains_key(&target)
-                            || !primary_type_ids.contains_key(&target)
-                    }
-                    ResolvedType::Named(target) => {
+                let accepted = match field.type_descriptor().map(|value| value.kind()) {
+                    Some(crate::types::TypeDescriptorKind::Named(target)) => {
                         enum_type_indices_by_id.contains_key(&target)
                             || !primary_type_ids.contains_key(&target)
                     }
-                    ResolvedType::Scalar(_) | ResolvedType::Reference { .. } => false,
+                    Some(crate::types::TypeDescriptorKind::Reference(_))
+                    | Some(crate::types::TypeDescriptorKind::List(_))
+                    | Some(crate::types::TypeDescriptorKind::Set(_))
+                    | Some(crate::types::TypeDescriptorKind::Map { .. })
+                    | Some(crate::types::TypeDescriptorKind::Option(_))
+                    | Some(crate::types::TypeDescriptorKind::Stream(_))
+                    | None => false,
                 };
                 if !accepted {
                     return Err(CatalogueSnapshotError::UnsupportedRecordValueFieldType {
@@ -2480,45 +2482,23 @@ mod tests {
             )
         };
 
-        let resolved_type = ResolvedType::reference(TypeId::from_bytes([92; 16]));
-        assert_eq!(
-            build(resolved_type).unwrap_err(),
-            CatalogueSnapshotError::UnsupportedRecordValueFieldType {
-                owner: TypeId::from_bytes([2; 16]),
-                field: FieldId::from_bytes([3; 16]),
-                resolved_type,
-            }
-        );
-
         for resolved_type in [
-            ResolvedType::value(TypeId::from_bytes([93; 16])),
-            ResolvedType::value(transient_id),
-            ResolvedType::named(TypeId::from_bytes([94; 16])),
+            ResolvedType::scalar(StandardScalar::Integer),
+            ResolvedType::reference(TypeId::from_bytes([92; 16])),
         ] {
-            assert_eq!(
-                build(resolved_type).unwrap().record_value_types()[0].fields()[0].resolved_type(),
-                resolved_type
+            let field = RecordValueFieldDefinition::new(
+                FieldId::from_bytes([3; 16]),
+                "x",
+                0,
+                resolved_type,
             );
-        }
-
-        let object_id = TypeId::from_bytes([95; 16]);
-        let enum_id = TypeId::from_bytes([96; 16]);
-        for resolved_type in [ResolvedType::named(object_id), ResolvedType::value(enum_id)] {
             let error = CatalogueSnapshot::new_with_record_value_types(
                 CatalogueRevisionId::from_bytes([7; 16]),
                 vec![schema(1, &["geometry"])],
-                vec![object(95, &["geometry", "object"], vec![])],
                 vec![],
-                vec![EnumTypeDefinition::new(
-                    enum_id,
-                    name(&["geometry", "axis"]),
-                    ["x"],
-                )],
-                vec![record(
-                    2,
-                    &["geometry", "point"],
-                    vec![record_field_with_type(3, "x", 0, resolved_type)],
-                )],
+                vec![],
+                vec![],
+                vec![record(2, &["geometry", "point"], vec![field])],
                 vec![],
             )
             .unwrap_err();
@@ -2531,6 +2511,82 @@ mod tests {
                 }
             );
         }
+
+        for resolved_type in [
+            ResolvedType::value(TypeId::from_bytes([93; 16])),
+            ResolvedType::named(TypeId::from_bytes([94; 16])),
+        ] {
+            assert_eq!(
+                build(resolved_type).unwrap().record_value_types()[0].fields()[0].resolved_type(),
+                resolved_type
+            );
+        }
+
+        let resolved_type = ResolvedType::value(transient_id);
+        assert_eq!(
+            build(resolved_type).unwrap_err(),
+            CatalogueSnapshotError::UnsupportedRecordValueFieldType {
+                owner: TypeId::from_bytes([2; 16]),
+                field: FieldId::from_bytes([3; 16]),
+                resolved_type,
+            }
+        );
+
+        let object_id = TypeId::from_bytes([95; 16]);
+        let enum_id = TypeId::from_bytes([96; 16]);
+        let normalised_enum = ResolvedType::value(enum_id);
+        assert_eq!(
+            CatalogueSnapshot::new_with_record_value_types(
+                CatalogueRevisionId::from_bytes([7; 16]),
+                vec![schema(1, &["geometry"])],
+                vec![],
+                vec![],
+                vec![EnumTypeDefinition::new(
+                    enum_id,
+                    name(&["geometry", "axis"]),
+                    ["x"],
+                )],
+                vec![record(
+                    2,
+                    &["geometry", "point"],
+                    vec![record_field_with_type(3, "x", 0, normalised_enum)],
+                )],
+                vec![],
+            )
+            .unwrap()
+            .record_value_types()[0]
+                .fields()[0]
+                .type_descriptor(),
+            Some(&crate::types::TypeDescriptor::named(enum_id))
+        );
+
+        let resolved_type = ResolvedType::named(object_id);
+        let error = CatalogueSnapshot::new_with_record_value_types(
+            CatalogueRevisionId::from_bytes([7; 16]),
+            vec![schema(1, &["geometry"])],
+            vec![object(95, &["geometry", "object"], vec![])],
+            vec![],
+            vec![EnumTypeDefinition::new(
+                enum_id,
+                name(&["geometry", "axis"]),
+                ["x"],
+            )],
+            vec![record(
+                2,
+                &["geometry", "point"],
+                vec![record_field_with_type(3, "x", 0, resolved_type)],
+            )],
+            vec![],
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            CatalogueSnapshotError::UnsupportedRecordValueFieldType {
+                owner: TypeId::from_bytes([2; 16]),
+                field: FieldId::from_bytes([3; 16]),
+                resolved_type,
+            }
+        );
 
         let nested_id = TypeId::from_bytes([97; 16]);
         let error = CatalogueSnapshot::new_with_record_value_types(

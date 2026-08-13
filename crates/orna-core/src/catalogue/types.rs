@@ -4,7 +4,10 @@ use std::fmt;
 
 use sha2::{Digest, Sha256};
 
-use crate::{FieldId, TypeBindingId, TypeId, types::ResolvedType};
+use crate::{
+    FieldId, TypeBindingId, TypeId,
+    types::{ResolvedType, TypeDescriptor},
+};
 
 use super::{ObjectTypeDefinition, QualifiedSemanticName};
 
@@ -95,6 +98,7 @@ pub struct RecordValueFieldDefinition {
     name: String,
     ordinal: u32,
     resolved_type: ResolvedType,
+    descriptor: Option<TypeDescriptor>,
 }
 
 impl RecordValueFieldDefinition {
@@ -105,11 +109,19 @@ impl RecordValueFieldDefinition {
         ordinal: u32,
         resolved_type: ResolvedType,
     ) -> Self {
+        let descriptor = match resolved_type {
+            ResolvedType::Named(type_id) | ResolvedType::Value(type_id) => {
+                Some(TypeDescriptor::named(type_id))
+            }
+            ResolvedType::Reference { target } => Some(TypeDescriptor::reference(target)),
+            ResolvedType::Scalar(_) => None,
+        };
         Self {
             id,
             name: name.into(),
             ordinal,
             resolved_type,
+            descriptor,
         }
     }
 
@@ -144,9 +156,14 @@ impl RecordValueFieldDefinition {
         self.ordinal
     }
 
-    /// Returns this field's resolved type descriptor.
+    /// Returns this field's temporary legacy resolved type.
     pub const fn resolved_type(&self) -> ResolvedType {
         self.resolved_type
+    }
+
+    /// Returns this field's temporary canonical descriptor view, if identified.
+    pub(crate) const fn type_descriptor(&self) -> Option<&TypeDescriptor> {
+        self.descriptor.as_ref()
     }
 }
 
@@ -701,7 +718,7 @@ mod tests {
     use crate::{
         FieldId, TypeId,
         catalogue::QualifiedSemanticName,
-        types::{ResolvedType, StandardScalar},
+        types::{ResolvedType, StandardScalar, TypeDescriptor},
     };
 
     #[test]
@@ -720,6 +737,14 @@ mod tests {
             assert_eq!(definition.name(), "value");
             assert_eq!(definition.ordinal(), 0);
             assert_eq!(definition.resolved_type(), resolved_type);
+            let expected = match resolved_type {
+                ResolvedType::Named(type_id) | ResolvedType::Value(type_id) => {
+                    TypeDescriptor::named(type_id)
+                }
+                ResolvedType::Reference { target } => TypeDescriptor::reference(target),
+                ResolvedType::Scalar(_) => unreachable!(),
+            };
+            assert_eq!(definition.type_descriptor(), Some(&expected));
         }
 
         let error = RecordValueFieldDefinition::try_new(
@@ -740,6 +765,14 @@ mod tests {
             "legacy scalar cannot form a record field descriptor"
         );
         assert!(std::error::Error::source(&error).is_none());
+
+        let legacy = RecordValueFieldDefinition::new(
+            field,
+            "value",
+            0,
+            ResolvedType::scalar(StandardScalar::Boolean),
+        );
+        assert_eq!(legacy.type_descriptor(), None);
     }
 
     #[test]
