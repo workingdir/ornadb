@@ -22,7 +22,11 @@
 //! 10. invoke the raw INSERT again for a second distinct object and read two
 //!     canonical Boolean TRUE values;
 //! 11. restart the installed server and prove the two rows persist
-//!     byte-identically.
+//!     byte-identically;
+//! 12. apply the checked-in false fixture, prove the active revisions change
+//!     while the function identities stay stable, insert a third object, and
+//!     prove the three stored rows decode as one FALSE and two TRUE values,
+//!     byte-order-independent, across another restart.
 //!
 //! The test is ignored by default so ordinary gates stay green. The Debian
 //! package workflow runs it against the reproduced package by setting
@@ -566,6 +570,41 @@ fn two_boolean_true_envelopes() -> Vec<u8> {
     bytes
 }
 
+/// Decode one complete canonical ORV1 Boolean envelope.
+///
+/// Returns `Some(value)` only when the bytes form exactly one envelope with
+/// the ORV1 marker, the BOOLEAN tag, the BOOLEAN type identity, payload
+/// length 1, and a payload byte of exactly 0 or 1.
+fn decode_boolean_envelope(bytes: &[u8]) -> Option<bool> {
+    if bytes.len() != 26
+        || &bytes[0..4] != b"ORV1"
+        || bytes[4] != 0x02
+        || bytes[5..20] != [0; 15]
+        || bytes[20] != 0x01
+        || bytes[21..25] != 1_u32.to_be_bytes()
+    {
+        return None;
+    }
+    match bytes[25] {
+        0x00 => Some(false),
+        0x01 => Some(true),
+        _ => None,
+    }
+}
+
+/// Decode a stream of complete canonical ORV1 Boolean envelopes in order.
+///
+/// Returns `None` when any envelope is malformed or trailing bytes remain.
+fn decode_boolean_envelopes(bytes: &[u8]) -> Option<Vec<bool>> {
+    if !bytes.len().is_multiple_of(26) {
+        return None;
+    }
+    bytes
+        .chunks_exact(26)
+        .map(decode_boolean_envelope)
+        .collect()
+}
+
 /// One parsed `ORV1` object-reference envelope.
 struct OrvReference {
     type_id: [u8; 16],
@@ -874,7 +913,11 @@ impl std::error::Error for Error {
 /// * a failed apply preserves the active functions, grants, and rows;
 /// * a second raw INSERT allocates a distinct object identity and the raw
 ///   SELECT returns two exact canonical Boolean TRUE values;
-/// * restart preserves the exact two-row canonical SELECT output bytes.
+/// * restart preserves the exact two-row canonical SELECT output bytes;
+/// * semantic apply activates new revisions while the function identities
+///   and grants stay stable and existing rows are preserved;
+/// * a third row with FALSE decodes with the two existing TRUE rows as one
+///   unordered FALSE and two TRUE values, across another restart.
 #[test]
 #[ignore = "requires Docker, ORNA_SYSTEM_TEST_DEBIAN_PACKAGE, and the ADR 0038 commands in the installed orna executable"]
 fn installed_source_apply_grants_raw_insert_and_persists_across_restart() {
@@ -1005,8 +1048,8 @@ fn installed_source_apply_grants_raw_insert_and_persists_across_restart() {
         "raw select must keep standard error empty"
     );
     assert_eq!(
-        &two_rows.stdout,
-        &two_boolean_true_envelopes(),
+        two_rows.stdout.as_slice(),
+        two_boolean_true_envelopes().as_slice(),
         "two rows must emit exactly two concatenated Boolean TRUE envelopes"
     );
 
@@ -1024,7 +1067,121 @@ fn installed_source_apply_grants_raw_insert_and_persists_across_restart() {
         "raw select after restart must keep standard error empty"
     );
     assert_eq!(
-        &after.stdout, &two_rows.stdout,
+        after.stdout.as_slice(),
+        two_rows.stdout.as_slice(),
         "restart must preserve the exact two-row canonical output bytes"
+    );
+
+    // The false fixture activates a new revision with stable identities.
+    let false_fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures")
+        .join("product_test_false.orna");
+    let false_fixture = fs::read(&false_fixture_path).expect("read the checked-in false fixture");
+    machine
+        .write_fixture(&false_fixture)
+        .expect("replace the fixture with the false source");
+    let reapplied = machine
+        .run_as_orna(&["source", "apply", FIXTURE_PATH])
+        .expect("run installed source apply on the false fixture");
+    let reapplied = require_success("orna source apply false fixture", reapplied)
+        .expect("false source apply must succeed");
+    let false_document =
+        parse_apply_document(&reapplied.stdout).expect("false source apply JSON must parse");
+    assert_ne!(
+        false_document.source_revision, document.source_revision,
+        "semantic apply must activate a new source revision"
+    );
+    assert_ne!(
+        false_document.catalogue_revision, document.catalogue_revision,
+        "semantic apply must activate a new catalogue revision"
+    );
+    let false_create_probe = false_document
+        .function_id(&["product_test", "create_probe"])
+        .expect("false apply must report create_probe");
+    let false_read_probes = false_document
+        .function_id(&["product_test", "read_probes"])
+        .expect("false apply must report read_probes");
+    assert_eq!(
+        false_create_probe, create_probe,
+        "create_probe identity must be stable across semantic apply"
+    );
+    assert_eq!(
+        false_read_probes, read_probes,
+        "read_probes identity must be stable across semantic apply"
+    );
+
+    // The existing grant still covers the stable identity: no re-grant needed.
+    let third = machine
+        .run_as_orna(&["raw-call", create_probe])
+        .expect("run raw insert call after semantic apply");
+    let third = require_success("orna raw-call create_probe after semantic apply", third)
+        .expect("raw insert after semantic apply must succeed");
+    let third_reference = parse_reference_envelope(&third.stdout)
+        .expect("raw insert after semantic apply must return one ORV reference");
+    assert!(
+        third_reference.type_id != [0; 16] && !third_reference.object_is_zero(),
+        "the third object reference must name a real row"
+    );
+    assert_ne!(
+        third_reference.object, reference.object,
+        "the third object must differ from the first object"
+    );
+    assert_ne!(
+        third_reference.object, second_reference.object,
+        "the third object must differ from the second object"
+    );
+
+    // Three rows decode as one FALSE and two TRUE values.
+    let three_rows = machine
+        .run_as_orna(&["raw-call", read_probes])
+        .expect("run raw select call after semantic apply");
+    let three_rows = require_success("orna raw-call read_probes three rows", three_rows)
+        .expect("raw select after semantic apply must succeed");
+    assert!(
+        three_rows.stderr.is_empty(),
+        "raw select after semantic apply must keep standard error empty"
+    );
+    let mut three_values = decode_boolean_envelopes(&three_rows.stdout)
+        .expect("three rows must decode as three Boolean envelopes");
+    assert_eq!(
+        three_values.len(),
+        3,
+        "three rows must emit exactly three Boolean envelopes"
+    );
+    three_values.sort_unstable();
+    assert_eq!(
+        three_values,
+        [false, true, true],
+        "the three stored rows must hold one FALSE and two TRUE values"
+    );
+
+    // Restart preserves the same unordered Boolean multiset.
+    machine
+        .restart_server()
+        .expect("installed server must restart cleanly after semantic apply");
+    let three_rows_after = machine
+        .run_as_orna(&["raw-call", read_probes])
+        .expect("run raw select call after semantic apply restart");
+    let three_rows_after = require_success(
+        "orna raw-call read_probes after semantic apply restart",
+        three_rows_after,
+    )
+    .expect("raw select after semantic apply restart must succeed");
+    assert!(
+        three_rows_after.stderr.is_empty(),
+        "raw select after semantic apply restart must keep standard error empty"
+    );
+    let mut three_after = decode_boolean_envelopes(&three_rows_after.stdout)
+        .expect("restart rows must decode as three Boolean envelopes");
+    assert_eq!(
+        three_after.len(),
+        3,
+        "restart must emit exactly three Boolean envelopes"
+    );
+    three_after.sort_unstable();
+    assert_eq!(
+        three_after,
+        [false, true, true],
+        "restart must preserve the same unordered Boolean multiset"
     );
 }
