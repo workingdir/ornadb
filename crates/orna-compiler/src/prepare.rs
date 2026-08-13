@@ -5432,7 +5432,7 @@ impl<'a> CandidateBuilder<'a> {
                         reason: "record value field reordering is not supported",
                     });
                 }
-                if candidate_field.resolved_type() != active_field.resolved_type() {
+                if candidate_field.type_descriptor() != active_field.type_descriptor() {
                     return Err(PrepareError::InvalidCheckedBundle {
                         reason: "record value field type change is not supported",
                     });
