@@ -1728,6 +1728,29 @@ impl DeployableRevision {
         &self.catalogue_hash_context
     }
 
+    /// Classifies one record-field descriptor for durable storage.
+    ///
+    /// The candidate application catalogue and its pinned verified standard
+    /// snapshot are the only classification authority.
+    pub fn record_value_field_descriptor_class(
+        &self,
+        descriptor: &TypeDescriptor,
+    ) -> Result<RecordValueFieldDescriptorClass, RecordValueFieldDescriptorError> {
+        let standard = self
+            .catalogue_hash_context
+            .standard()
+            .ok_or(RecordValueFieldDescriptorError::StandardLibraryUnavailable)?;
+        classify_record_value_field_descriptor(&self.candidate, standard.catalogue(), descriptor)
+            .map_err(|error| match error {
+                RecordValueFieldDescriptorClassificationError::Unsupported => {
+                    RecordValueFieldDescriptorError::Unsupported
+                }
+                RecordValueFieldDescriptorClassificationError::Ambiguous { type_id } => {
+                    RecordValueFieldDescriptorError::Ambiguous { type_id }
+                }
+            })
+    }
+
     /// Returns definition declaration origins.
     pub fn origins(&self) -> &[DefinitionOrigin] {
         &self.origins
@@ -2269,7 +2292,7 @@ fn validate_record_value_field_types(
                     .expect("catalogue-validated record field descriptor"),
             ) {
                 Ok(_) => {}
-                Err(RecordValueFieldDescriptorError::Unsupported) => {
+                Err(RecordValueFieldDescriptorClassificationError::Unsupported) => {
                     return Err(RevisionInvariantError::UnsupportedRecordValueFieldType {
                         record_value_type: record_value_type.id(),
                         field: field.id(),
@@ -2279,7 +2302,7 @@ fn validate_record_value_field_types(
                             .clone(),
                     });
                 }
-                Err(RecordValueFieldDescriptorError::Ambiguous { type_id }) => {
+                Err(RecordValueFieldDescriptorClassificationError::Ambiguous { type_id }) => {
                     return Err(RevisionInvariantError::AmbiguousRecordValueFieldType {
                         record_value_type: record_value_type.id(),
                         field: field.id(),
@@ -2292,14 +2315,48 @@ fn validate_record_value_field_types(
     Ok(())
 }
 
+/// The durable storage class of one admitted record-value field descriptor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RecordValueFieldDescriptorClass {
+#[non_exhaustive]
+pub enum RecordValueFieldDescriptorClass {
+    /// An application or pinned-standard enum identity.
     Enum(TypeId),
+    /// An accepted immutable, persistable pinned-standard primitive identity.
     StandardPrimitive(TypeId),
 }
 
+/// An error classifying a record-value field descriptor for durable storage.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum RecordValueFieldDescriptorError {
+    /// The deployable revision does not pin a verified standard library.
+    StandardLibraryUnavailable,
+    /// The descriptor is outside the accepted record-field family.
+    Unsupported,
+    /// The identity selects incompatible application and standard definitions.
+    Ambiguous { type_id: TypeId },
+}
+
+impl fmt::Display for RecordValueFieldDescriptorError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::StandardLibraryUnavailable => formatter.write_str(
+                "deployable revision has no pinned standard library for record field classification",
+            ),
+            Self::Unsupported => formatter.write_str(
+                "record field descriptor is not supported by the deployable revision",
+            ),
+            Self::Ambiguous { .. } => formatter.write_str(
+                "record field type is present in both application and standard catalogues",
+            ),
+        }
+    }
+}
+
+impl Error for RecordValueFieldDescriptorError {}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RecordValueFieldDescriptorError {
+pub(crate) enum RecordValueFieldDescriptorClassificationError {
     Unsupported,
     Ambiguous { type_id: TypeId },
 }
@@ -2308,9 +2365,9 @@ pub(crate) fn classify_record_value_field_descriptor(
     catalogue: &CatalogueSnapshot,
     standard: &CatalogueSnapshot,
     descriptor: &TypeDescriptor,
-) -> Result<RecordValueFieldDescriptorClass, RecordValueFieldDescriptorError> {
+) -> Result<RecordValueFieldDescriptorClass, RecordValueFieldDescriptorClassificationError> {
     let TypeDescriptorKind::Named(type_id) = descriptor.kind() else {
-        return Err(RecordValueFieldDescriptorError::Unsupported);
+        return Err(RecordValueFieldDescriptorClassificationError::Unsupported);
     };
     let application_enum = catalogue.enum_type_by_id(type_id).is_some();
     let standard_enum = standard.enum_type_by_id(type_id).is_some();
@@ -2318,7 +2375,7 @@ pub(crate) fn classify_record_value_field_descriptor(
         .value_type_by_id(type_id)
         .and_then(accepted_record_scalar);
     if application_enum && standard_scalar.is_some() {
-        return Err(RecordValueFieldDescriptorError::Ambiguous { type_id });
+        return Err(RecordValueFieldDescriptorClassificationError::Ambiguous { type_id });
     }
     if application_enum || standard_enum {
         return Ok(RecordValueFieldDescriptorClass::Enum(type_id));
@@ -2326,7 +2383,7 @@ pub(crate) fn classify_record_value_field_descriptor(
     if standard_scalar.is_some() {
         return Ok(RecordValueFieldDescriptorClass::StandardPrimitive(type_id));
     }
-    Err(RecordValueFieldDescriptorError::Unsupported)
+    Err(RecordValueFieldDescriptorClassificationError::Unsupported)
 }
 
 pub(crate) fn record_value_field_runtime_type(
@@ -4622,25 +4679,71 @@ mod tests {
             SourceRevisionId::from_bytes(id::<78>()),
             CatalogueRevisionId::from_bytes(id::<79>()),
         );
-        assert!(
-            DeployableRevision::new_with_catalogue_hash_context(
-                DeployableRevisionInput::new(
-                    expected_base,
-                    source(Some(expected_base.source())),
-                    expected_base.catalogue(),
-                    record_value_type_catalogue(),
-                    digest::<7>(),
-                    DeployableRevisionContent::new(
-                        record_value_type_origins(),
-                        vec![],
-                        vec![],
-                        vec![],
-                    )
+        let deployable = DeployableRevision::new_with_catalogue_hash_context(
+            DeployableRevisionInput::new(
+                expected_base,
+                source(Some(expected_base.source())),
+                expected_base.catalogue(),
+                record_value_type_catalogue(),
+                digest::<7>(),
+                DeployableRevisionContent::new(record_value_type_origins(), vec![], vec![], vec![])
                     .with_current_function_revisions(vec![]),
-                ),
-                standard_context(),
-            )
-            .is_ok()
+            ),
+            standard_context(),
+        )
+        .unwrap();
+        assert_eq!(
+            deployable.record_value_field_descriptor_class(&TypeDescriptor::named(
+                TypeId::from_bytes(id::<71>()),
+            )),
+            Ok(RecordValueFieldDescriptorClass::StandardPrimitive(
+                TypeId::from_bytes(id::<71>()),
+            ))
+        );
+        assert_eq!(
+            deployable.record_value_field_descriptor_class(&TypeDescriptor::reference(
+                TypeId::from_bytes(id::<80>()),
+            )),
+            Err(RecordValueFieldDescriptorError::Unsupported)
+        );
+        let version_one = DeployableRevision::new(
+            expected_base,
+            source(Some(expected_base.source())),
+            expected_base.catalogue(),
+            empty_catalogue(),
+            digest::<7>(),
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        )
+        .unwrap();
+        assert_eq!(
+            version_one.record_value_field_descriptor_class(&TypeDescriptor::named(
+                TypeId::from_bytes(id::<71>()),
+            )),
+            Err(RecordValueFieldDescriptorError::StandardLibraryUnavailable)
+        );
+        let collision = DeployableRevision::new_with_catalogue_hash_context(
+            DeployableRevisionInput::new(
+                expected_base,
+                source(Some(expected_base.source())),
+                expected_base.catalogue(),
+                enum_type_catalogue(),
+                digest::<7>(),
+                DeployableRevisionContent::new(value_type_origins(), vec![], vec![], vec![])
+                    .with_current_function_revisions(vec![]),
+            ),
+            standard_context(),
+        )
+        .unwrap();
+        assert_eq!(
+            collision.record_value_field_descriptor_class(&TypeDescriptor::named(
+                TypeId::from_bytes(id::<71>()),
+            )),
+            Err(RecordValueFieldDescriptorError::Ambiguous {
+                type_id: TypeId::from_bytes(id::<71>()),
+            })
         );
         assert_eq!(
             DeployableRevision::new(
@@ -4892,6 +4995,25 @@ mod tests {
             "record field type is present in both application and standard catalogues"
         );
         assert!(std::error::Error::source(&error).is_none());
+
+        let cases = [
+            (
+                RecordValueFieldDescriptorError::StandardLibraryUnavailable,
+                "deployable revision has no pinned standard library for record field classification",
+            ),
+            (
+                RecordValueFieldDescriptorError::Unsupported,
+                "record field descriptor is not supported by the deployable revision",
+            ),
+            (
+                RecordValueFieldDescriptorError::Ambiguous { type_id: collision },
+                "record field type is present in both application and standard catalogues",
+            ),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(error.to_string(), expected);
+            assert!(std::error::Error::source(&error).is_none());
+        }
     }
 
     #[test]
