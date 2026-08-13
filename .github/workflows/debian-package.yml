@@ -41,11 +41,11 @@ jobs:
         run: make --file packaging/debian/rules package
       - name: Prove package transaction exclusion
         run: >-
-          packaging/debian/tests/package-install.sh
+          crates/orna-system-tests/scenarios/debian-package.sh
           "${GITHUB_WORKSPACE}/target/debian-package/orna_0.1.0-1_amd64.deb"
       - name: Prove the installed one-executable lifecycle
         run: >-
-          packaging/debian/clean-machine-test.sh
+          crates/orna-system-tests/scenarios/debian-clean-machine.sh
           "${GITHUB_WORKSPACE}/target/debian-package/orna_0.1.0-1_amd64.deb"
       - name: Upload the reproduced package and manifests
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
