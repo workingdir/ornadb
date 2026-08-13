@@ -28,7 +28,7 @@ use orna_core::{
         StoredSourceRevision, StoredSourceUnit,
     },
     source::{SourceBundle, SourceUnit},
-    types::ResolvedType,
+    types::{ResolvedType, TypeDescriptorKind},
     value::RuntimeValue,
 };
 use orna_postgres::{PostgresKernel, PostgresKernelError};
@@ -576,6 +576,20 @@ async fn applies_and_recovers_named_record_definitions() -> TestResult<()> {
             )
             .await?
             .try_get(0)?;
+        let expected_value_type = match expected.fields()[0]
+            .type_descriptor()
+            .map(|descriptor| descriptor.kind())
+        {
+            Some(TypeDescriptorKind::Named(type_id)) => type_id.to_bytes().to_vec(),
+            _ => return Err(failure("record value field has no named descriptor")),
+        };
+        let expected_enum_type = match expected.fields()[1]
+            .type_descriptor()
+            .map(|descriptor| descriptor.kind())
+        {
+            Some(TypeDescriptorKind::Named(type_id)) => type_id.to_bytes().to_vec(),
+            _ => return Err(failure("record enum field has no named descriptor")),
+        };
         require(
             type_row.try_get::<_, Vec<u8>>(0)? == expected.id().to_bytes().to_vec()
                 && type_row.try_get::<_, Vec<String>>(1)? == expected.name().parts()
@@ -598,11 +612,7 @@ async fn applies_and_recovers_named_record_definitions() -> TestResult<()> {
                 && field_rows[0].try_get::<_, String>(1)? == "enabled"
                 && field_rows[0].try_get::<_, i64>(2)? == 0
                 && field_rows[0].try_get::<_, String>(3)? == "value"
-                && field_rows[0].try_get::<_, Option<Vec<u8>>>(4)?
-                    == expected.fields()[0]
-                        .resolved_type()
-                        .value_type()
-                        .map(|id| id.to_bytes().to_vec())
+                && field_rows[0].try_get::<_, Option<Vec<u8>>>(4)? == Some(expected_value_type)
                 && field_rows[0].try_get::<_, Option<Vec<u8>>>(5)?
                     == Some(
                         upgrade
@@ -629,11 +639,7 @@ async fn applies_and_recovers_named_record_definitions() -> TestResult<()> {
                 && field_rows[1].try_get::<_, String>(3)? == "enum"
                 && field_rows[1].try_get::<_, Option<Vec<u8>>>(4)?.is_none()
                 && field_rows[1].try_get::<_, Option<Vec<u8>>>(5)?.is_none()
-                && field_rows[1].try_get::<_, Option<Vec<u8>>>(6)?
-                    == expected.fields()[1]
-                        .resolved_type()
-                        .named_type()
-                        .map(|id| id.to_bytes().to_vec())
+                && field_rows[1].try_get::<_, Option<Vec<u8>>>(6)? == Some(expected_enum_type)
                 && field_rows[1].try_get::<_, Vec<u8>>(7)?
                     == expected_field_origins[1]
                         .source()
