@@ -80,12 +80,15 @@ closed public `CallFailure`; connection and protocol diagnostics disclose no
 principal, function-existence fact, catalogue, revision, SQL, PostgreSQL
 message, filesystem fallback, or server-private source.
 
-`SIGINT` after connection sends one `CALL_CANCEL` for stream 1. The client then
-drains the bounded connection until `CALL_CANCELLED` or an already committed
-terminal result. A second interruption closes the connection and returns the
-cancelled status. Cancellation never changes an already emitted value or
-hides a protocol failure. A standard-output write failure attempts the same
-single cancellation and bounded drain before returning an internal failure.
+`SIGINT` before `CALL_RAW_START` closes the connection and returns the
+cancelled status without sending a frame. After `CALL_RAW_START`, the first
+interruption sends one `CALL_CANCEL` for stream 1 and drains the bounded
+connection until `CALL_CANCELLED` or an already committed terminal result. A
+second interruption closes the connection and returns the cancelled status.
+Cancellation never changes an already emitted value or hides a protocol
+failure. A standard-output write failure after stream creation attempts the
+same single cancellation and bounded drain before returning an internal
+failure.
 
 ## Exit status
 
