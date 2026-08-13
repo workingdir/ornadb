@@ -58,7 +58,7 @@ use orna_core::{
         SourceOrigin, StoredSourceRevision, StoredSourceUnit, VerifiedStandardLibrarySnapshot,
     },
     source::{SourceBundle, SourceUnit},
-    types::{ResolvedType, StandardScalar},
+    types::{ResolvedType, StandardScalar, TypeDescriptor, TypeDescriptorKind},
 };
 
 use crate::{
@@ -3087,7 +3087,9 @@ fn server_record_field_expression(
             validate_record_child_type(
                 checked_semantic,
                 checked.value_type().standard_value_type(),
-                durable.resolved_type(),
+                durable
+                    .type_descriptor()
+                    .expect("candidate record fields have descriptors"),
                 enum_types,
                 standard,
             )?;
@@ -3103,7 +3105,9 @@ fn server_record_field_expression(
             validate_record_child_type(
                 checked_semantic,
                 checked.value_type().standard_value_type(),
-                durable.resolved_type(),
+                durable
+                    .type_descriptor()
+                    .expect("candidate record fields have descriptors"),
                 enum_types,
                 standard,
             )?;
@@ -3129,12 +3133,17 @@ fn server_record_field_expression(
 fn validate_record_child_type(
     checked_semantic: SemanticType<TypeId>,
     checked_standard: Option<TypeId>,
-    durable: ResolvedType,
+    durable: &TypeDescriptor,
     enum_types: &[EnumTypeDefinition],
     standard: Option<&CatalogueSnapshot>,
 ) -> Result<(), PrepareError> {
-    match (checked_semantic, checked_standard, durable) {
-        (SemanticType::Scalar(scalar), Some(checked_standard), ResolvedType::Value(durable_id))
+    let TypeDescriptorKind::Named(durable_id) = durable.kind() else {
+        return Err(PrepareError::InvalidCheckedBundle {
+            reason: "record constructor child type differs from its durable candidate field",
+        });
+    };
+    match (checked_semantic, checked_standard) {
+        (SemanticType::Scalar(scalar), Some(checked_standard))
             if checked_standard == durable_id
                 && standard.is_some_and(|standard| {
                     standard
@@ -3145,7 +3154,7 @@ fn validate_record_child_type(
         {
             Ok(())
         }
-        (SemanticType::Named(checked), None, ResolvedType::Named(durable_id))
+        (SemanticType::Named(checked), None)
             if checked == durable_id
                 && (enum_types
                     .iter()
@@ -5363,12 +5372,23 @@ impl<'a> CandidateBuilder<'a> {
                     true,
                     CandidateTypeProjection::Durable,
                 )?;
+                let descriptor = match resolved_type {
+                    ResolvedType::Named(type_id) | ResolvedType::Value(type_id) => {
+                        TypeDescriptor::named(type_id)
+                    }
+                    ResolvedType::Reference { target } => TypeDescriptor::reference(target),
+                    ResolvedType::Scalar(_) => {
+                        return Err(PrepareError::InvalidCheckedBundle {
+                            reason: "checked record field has no catalogue identity",
+                        });
+                    }
+                };
                 fields.push(
-                    RecordValueFieldDefinition::try_new(
+                    RecordValueFieldDefinition::try_new_descriptor(
                         field_id,
                         checked_field.name(),
                         checked_field.ordinal(),
-                        resolved_type,
+                        descriptor,
                     )
                     .map_err(|_| PrepareError::InvalidCheckedBundle {
                         reason: "checked record field has no catalogue identity",
@@ -10411,11 +10431,11 @@ mod tests {
             record_id,
             semantic_name(&["tasks", "flags"]),
             vec![
-                RecordValueFieldDefinition::try_new(
+                RecordValueFieldDefinition::try_new_descriptor(
                     record_field_id,
                     "active",
                     0,
-                    ResolvedType::value(boolean_id),
+                    TypeDescriptor::named(boolean_id),
                 )
                 .unwrap(),
             ],
