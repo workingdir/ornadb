@@ -141,7 +141,7 @@ const MIGRATIONS: &[Migration] = &[
         version: 19,
         name: "standard opaque value storage",
         sql: include_str!(
-            "../../../orna-kernel-postgres/migrations/0019_standard_opaque_value_types.sql"
+            "../../migrations/0019_standard_opaque_value_types.sql"
         ),
         data_step: None,
     },
