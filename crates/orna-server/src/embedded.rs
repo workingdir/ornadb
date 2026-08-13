@@ -140,6 +140,7 @@ impl EmbeddedHostPaths {
     }
 }
 
+#[derive(Clone, Copy)]
 struct ServiceIdentity {
     uid: u32,
     gid: u32,
@@ -163,6 +164,7 @@ impl LockKind {
 struct PreparedInstance {
     paths: EmbeddedHostPaths,
     identity: EmbeddedEngineIdentity,
+    service: ServiceIdentity,
     data_directory: PathBuf,
     is_new: bool,
     _package_lock: fs::File,
@@ -297,6 +299,7 @@ fn prepare_instance() -> Result<PreparedInstance, EmbeddedHostError> {
     Ok(PreparedInstance {
         paths,
         identity,
+        service,
         data_directory,
         is_new,
         _package_lock: package_lock,
@@ -920,9 +923,16 @@ fn prepare_running_kernel(
             instance.paths.socket_directory(),
             "orna",
         ));
-        open_standard_database(kernel)
+        let kernel = open_standard_database(kernel)
             .await
-            .map_err(EmbeddedHostError::from)
+            .map_err(EmbeddedHostError::from)?;
+        kernel
+            .install_catalogue_health_service(instance.service.uid)
+            .await
+            .map_err(|source| {
+                EmbeddedHostError::from(OpenStandardDatabaseError::Kernel { source })
+            })?;
+        Ok(kernel)
     })
 }
 
