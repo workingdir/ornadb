@@ -1,6 +1,6 @@
 //! Protected dispatch for the current raw CLIENT call subset.
 
-use orna_core::{InvocationId, security::AuthenticatedSession};
+use orna_core::{InvocationId, security::AuthenticatedSession, value::RuntimeValue};
 use orna_kernel_postgres::{PostgresKernel, PostgresKernelError};
 use orna_protocol::{CallFailure, Event, RawCall, ServerAction};
 
@@ -50,13 +50,29 @@ impl RawClientDispatch {
     /// Runs the protected CLIENT kernel path and closes the public outcome.
     ///
     /// Success returns one typed value action followed by completion. A call
-    /// with arguments returns `TARGET_UNAVAILABLE` without opening PostgreSQL.
-    /// Kernel execute denial returns `EXECUTE_DENIED`, a CLIENT evaluator error
-    /// returns `CLIENT_EVALUATION_FAILED`, and every other kernel error returns
+    /// with arguments returns `TARGET_UNAVAILABLE`. Calls containing a record
+    /// first complete the closed transactional record preflight; other
+    /// argument-bearing calls do not open PostgreSQL. Kernel execute denial
+    /// returns `EXECUTE_DENIED`, a CLIENT evaluator error returns
+    /// `CLIENT_EVALUATION_FAILED`, and every other kernel error returns
     /// `INTERNAL_FAILURE`. The result retains the private typed kernel source
     /// for trusted diagnostics only.
     pub async fn finish(self) -> RawClientDispatchResult {
         if !self.call.arguments.is_empty() {
+            let records = self
+                .call
+                .arguments
+                .into_iter()
+                .filter_map(|argument| match argument.value {
+                    RuntimeValue::Record(record) => Some(record),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            if !records.is_empty()
+                && let Err(source) = self.kernel.preflight_record_arguments(records).await
+            {
+                return RawClientDispatchResult::from_kernel_error(self.stream, source);
+            }
             return RawClientDispatchResult::failure(
                 self.stream,
                 CallFailure::TargetUnavailable,
