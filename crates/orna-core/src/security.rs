@@ -18,6 +18,10 @@ pub const CATALOGUE_HEALTH_FUNCTION_ID: FunctionId =
 /// The one exact recovery-command name of the catalogue health function.
 pub const CATALOGUE_HEALTH_FUNCTION_NAME: &str = "sys.catalog.health";
 
+/// The stable principal reserved for installed catalogue-health recovery.
+pub const CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID: PrincipalId =
+    PrincipalId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+
 /// The security-relevant kind of an Orna principal.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PrincipalKind {
@@ -1429,6 +1433,10 @@ mod tests {
             [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]
         );
         assert_eq!(CATALOGUE_HEALTH_FUNCTION_NAME, "sys.catalog.health");
+        assert_eq!(
+            CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID.to_bytes(),
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]
+        );
     }
 
     #[test]

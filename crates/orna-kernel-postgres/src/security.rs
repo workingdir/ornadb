@@ -8,11 +8,11 @@ use orna_core::{
     catalogue::FunctionDomain,
     revision::{ActiveDatabaseRevision, RevisionPair},
     security::{
-        AuthenticatedSession, ExecuteDecision, ExecuteGrant, InvocationTarget,
-        LocalPeerAuthenticationError, LocalPeerCredential, Principal, PrincipalKind,
-        PrincipalStatus, RoleMembership, SecurityAuditDecision, SecurityAuditDenial,
-        SecurityAuditEvent, SecurityAuditKind, SecurityAuditOutcome, SecuritySnapshot,
-        SessionBindingError,
+        AuthenticatedSession, CATALOGUE_HEALTH_FUNCTION_ID, CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID,
+        ExecuteDecision, ExecuteGrant, InvocationTarget, LocalPeerAuthenticationError,
+        LocalPeerCredential, Principal, PrincipalKind, PrincipalStatus, RoleMembership,
+        SecurityAuditDecision, SecurityAuditDenial, SecurityAuditEvent, SecurityAuditKind,
+        SecurityAuditOutcome, SecuritySnapshot, SessionBindingError,
     },
     value::{FunctionArgument, RecordValue, RuntimeValue},
 };
@@ -562,6 +562,78 @@ impl PostgresKernel {
         finish_security_session(operation, session.shutdown().await)
     }
 
+    /// Installs the fixed local service identity used by catalogue health.
+    ///
+    /// Repeating the exact UID is idempotent. A partial or conflicting durable
+    /// identity fails without repair.
+    pub async fn install_catalogue_health_service(
+        &self,
+        uid: u32,
+    ) -> Result<SecuritySnapshot, PostgresKernelError> {
+        let mut session = self.open().await?;
+        let operation = async {
+            let transaction = session
+                .client
+                .build_transaction()
+                .isolation_level(IsolationLevel::Serializable)
+                .start()
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            require_current_migrations(&transaction).await?;
+            let active = configure_and_recover(&transaction).await?;
+            if active.catalogue_hash_context().standard().is_none() {
+                return Err(PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.active_revision",
+                    record: active.pair().catalogue().canonical(),
+                    rule: "catalogue health service requires the accepted standard context",
+                });
+            }
+            if active
+                .catalogue()
+                .function_by_id(CATALOGUE_HEALTH_FUNCTION_ID)
+                .is_some()
+            {
+                return Err(PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.catalogue_functions",
+                    record: CATALOGUE_HEALTH_FUNCTION_ID.canonical(),
+                    rule: "application catalogue uses the reserved catalogue health identity",
+                });
+            }
+            lock_catalogue_health_identity(&transaction).await?;
+            let current = recover_security_snapshot_for_active(&transaction, &active).await?;
+            match catalogue_health_service_uid(&current)? {
+                None => {
+                    if current
+                        .local_peer_credentials()
+                        .any(|credential| credential.uid() == uid)
+                    {
+                        return Err(catalogue_health_identity_error(
+                            "_orna_kernel.security_local_peer_credentials",
+                            "the catalogue health UID already selects another principal",
+                        ));
+                    }
+                    insert_catalogue_health_identity(&transaction, uid).await?;
+                }
+                Some(installed_uid) if installed_uid == uid => {}
+                Some(_) => {
+                    return Err(catalogue_health_identity_error(
+                        "_orna_kernel.security_local_peer_credentials",
+                        "the reserved catalogue health service identity must be complete",
+                    ));
+                }
+            }
+            let recovered = recover_security_snapshot_for_active(&transaction, &active).await?;
+            require_catalogue_health_snapshot(&recovered, uid)?;
+            transaction
+                .commit()
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            Ok(recovered)
+        }
+        .await;
+        finish_security_session(operation, session.shutdown().await)
+    }
+
     /// Atomically replaces all durable security decision records.
     pub async fn replace_security_snapshot(
         &self,
@@ -579,6 +651,10 @@ impl PostgresKernel {
             require_current_migrations(&transaction).await?;
             lock_active_revision(&transaction, snapshot.revision()).await?;
             require_complete_function_set(&transaction, snapshot).await?;
+            lock_catalogue_health_identity(&transaction).await?;
+            let active = recover_active_revision(&transaction).await?;
+            let current = recover_security_snapshot_for_active(&transaction, &active).await?;
+            require_catalogue_health_identity_preserved(&current, snapshot)?;
             replace_security_rows(&transaction, snapshot).await?;
             let recovered = recover_security_snapshot(&transaction).await?;
             transaction
@@ -589,6 +665,143 @@ impl PostgresKernel {
         }
         .await;
         finish_security_session(operation, session.shutdown().await)
+    }
+}
+
+async fn lock_catalogue_health_identity(
+    transaction: &Transaction<'_>,
+) -> Result<(), PostgresKernelError> {
+    transaction
+        .batch_execute(
+            "LOCK TABLE _orna_kernel.security_principals,
+                        _orna_kernel.security_local_peer_credentials
+             IN SHARE ROW EXCLUSIVE MODE",
+        )
+        .await
+        .map_err(PostgresKernelError::Database)
+}
+
+async fn insert_catalogue_health_identity(
+    transaction: &Transaction<'_>,
+    uid: u32,
+) -> Result<(), PostgresKernelError> {
+    let principal = CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID.to_bytes().to_vec();
+    transaction
+        .execute(
+            "INSERT INTO _orna_kernel.security_principals (id, kind, status)
+             VALUES ($1, 'service', 'active')",
+            &[&principal],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?;
+    transaction
+        .execute(
+            "INSERT INTO _orna_kernel.security_local_peer_credentials (uid, principal_id)
+             VALUES ($1, $2)",
+            &[&i64::from(uid), &principal],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?;
+    Ok(())
+}
+
+fn require_catalogue_health_identity_preserved(
+    current: &SecuritySnapshot,
+    candidate: &SecuritySnapshot,
+) -> Result<(), PostgresKernelError> {
+    match catalogue_health_service_uid(current)? {
+        None => {
+            if snapshot_contains_catalogue_health_identity(candidate) {
+                return Err(catalogue_health_identity_error(
+                    "_orna_kernel.security_principals",
+                    "the reserved catalogue health service identity must be installed through its fixed setup",
+                ));
+            }
+            Ok(())
+        }
+        Some(uid) => require_catalogue_health_snapshot(candidate, uid),
+    }
+}
+
+fn snapshot_contains_catalogue_health_identity(snapshot: &SecuritySnapshot) -> bool {
+    snapshot
+        .principals()
+        .any(|principal| principal.id() == CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID)
+        || snapshot
+            .local_peer_credentials()
+            .any(|credential| credential.principal() == CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID)
+}
+
+fn require_catalogue_health_snapshot(
+    snapshot: &SecuritySnapshot,
+    uid: u32,
+) -> Result<(), PostgresKernelError> {
+    let principal = snapshot
+        .principals()
+        .find(|principal| principal.id() == CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID);
+    let credential = snapshot.local_peer_credentials().find(|credential| {
+        credential.principal() == CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID || credential.uid() == uid
+    });
+    if principal
+        != Some(Principal::new(
+            CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID,
+            PrincipalKind::Service,
+            PrincipalStatus::Active,
+        ))
+        || credential
+            != Some(LocalPeerCredential::new(
+                uid,
+                CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID,
+            ))
+    {
+        return Err(catalogue_health_identity_error(
+            "_orna_kernel.security_principals",
+            "the reserved catalogue health service identity must be preserved",
+        ));
+    }
+    Ok(())
+}
+
+fn catalogue_health_service_uid(
+    snapshot: &SecuritySnapshot,
+) -> Result<Option<u32>, PostgresKernelError> {
+    let principal = snapshot
+        .principals()
+        .find(|principal| principal.id() == CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID);
+    let credential = snapshot
+        .local_peer_credentials()
+        .find(|credential| credential.principal() == CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID);
+    match (principal, credential) {
+        (None, None) => Ok(None),
+        (Some(principal), Some(credential))
+            if principal
+                == Principal::new(
+                    CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID,
+                    PrincipalKind::Service,
+                    PrincipalStatus::Active,
+                ) =>
+        {
+            Ok(Some(credential.uid()))
+        }
+        (Some(_), None) => Err(catalogue_health_identity_error(
+            "_orna_kernel.security_local_peer_credentials",
+            "the reserved catalogue health service identity must be complete",
+        )),
+        _ => Err(catalogue_health_identity_error(
+            "_orna_kernel.security_principals",
+            "the reserved catalogue health principal must be an active service",
+        )),
+    }
+}
+
+fn catalogue_health_identity_error(
+    relation: &'static str,
+    rule: &'static str,
+) -> PostgresKernelError {
+    PostgresKernelError::DurableInvariant {
+        relation,
+        record: CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID.canonical(),
+        rule,
     }
 }
 
