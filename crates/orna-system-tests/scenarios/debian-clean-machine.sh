@@ -2,7 +2,7 @@
 set -euo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-repository_root=$(cd "$(dirname "$0")/../.." && pwd -P)
+repository_root=$(cd "$(dirname "$0")/../../.." && pwd -P)
 package=${1:-"${repository_root}/target/debian-package/orna_0.1.0-1_amd64.deb"}
 
 [[ "${package}" == /* && -f "${package}" && ! -L "${package}" ]] || {
