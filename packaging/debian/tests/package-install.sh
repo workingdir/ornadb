@@ -20,7 +20,7 @@ cleanup() {
 trap cleanup EXIT
 
 docker build --platform linux/amd64 --provenance=false --tag "${image}" \
-    --file "${repository_root}/packaging/debian/test-Containerfile" "${scratch}"
+    --file "${repository_root}/crates/orna-system-tests/assets/debian/Containerfile" "${scratch}"
 docker run --rm --interactive --network=none --platform linux/amd64 \
     --volume "${package}:/proof/orna.deb:ro" \
     "${image}" /bin/bash -euo pipefail -s <<'TEST'
