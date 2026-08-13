@@ -2084,7 +2084,7 @@ mod tests {
             id,
             name,
             ordinal,
-            ResolvedType::value(TypeId::from_bytes([90; 16])),
+            ResolvedType::value(TypeId::from_bytes([89; 16])),
         )
     }
 

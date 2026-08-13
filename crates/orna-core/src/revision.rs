@@ -28,7 +28,7 @@ use crate::{
         ValueTypeMutability, ValueTypePersistence,
     },
     security::CATALOGUE_HEALTH_FUNCTION_ID,
-    types::{ResolvedType, StandardScalar, TypeDescriptor},
+    types::{ResolvedType, StandardScalar, TypeDescriptor, TypeDescriptorKind},
 };
 
 /// The reserved catalogue identity for the ephemeral offline application check.
@@ -2243,28 +2243,72 @@ fn validate_record_value_field_types(
     };
     for record_value_type in catalogue.record_value_types() {
         for field in record_value_type.fields() {
-            if !record_value_field_type_is_supported(
+            match classify_record_value_field_descriptor(
                 catalogue,
                 standard.catalogue(),
-                field.resolved_type(),
+                field
+                    .type_descriptor()
+                    .expect("catalogue-validated record field descriptor"),
             ) {
-                return Err(RevisionInvariantError::UnsupportedRecordValueFieldType {
-                    record_value_type: record_value_type.id(),
-                    field: field.id(),
-                    resolved_type: field.resolved_type(),
-                });
+                Ok(_) => {}
+                Err(RecordValueFieldDescriptorError::Unsupported) => {
+                    return Err(RevisionInvariantError::UnsupportedRecordValueFieldType {
+                        record_value_type: record_value_type.id(),
+                        field: field.id(),
+                        descriptor: field
+                            .type_descriptor()
+                            .expect("catalogue-validated record field descriptor")
+                            .clone(),
+                    });
+                }
+                Err(RecordValueFieldDescriptorError::Ambiguous { type_id }) => {
+                    return Err(RevisionInvariantError::AmbiguousRecordValueFieldType {
+                        record_value_type: record_value_type.id(),
+                        field: field.id(),
+                        type_id,
+                    });
+                }
             }
         }
     }
     Ok(())
 }
 
-pub(crate) fn record_value_field_type_is_supported(
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RecordValueFieldDescriptorClass {
+    Enum(TypeId),
+    StandardPrimitive(TypeId),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RecordValueFieldDescriptorError {
+    Unsupported,
+    Ambiguous { type_id: TypeId },
+}
+
+pub(crate) fn classify_record_value_field_descriptor(
     catalogue: &CatalogueSnapshot,
     standard: &CatalogueSnapshot,
-    resolved_type: ResolvedType,
-) -> bool {
-    record_value_field_runtime_type(catalogue, standard, resolved_type).is_some()
+    descriptor: &TypeDescriptor,
+) -> Result<RecordValueFieldDescriptorClass, RecordValueFieldDescriptorError> {
+    let TypeDescriptorKind::Named(type_id) = descriptor.kind() else {
+        return Err(RecordValueFieldDescriptorError::Unsupported);
+    };
+    let application_enum = catalogue.enum_type_by_id(type_id).is_some();
+    let standard_enum = standard.enum_type_by_id(type_id).is_some();
+    let standard_scalar = standard
+        .value_type_by_id(type_id)
+        .and_then(accepted_record_scalar);
+    if application_enum && standard_scalar.is_some() {
+        return Err(RecordValueFieldDescriptorError::Ambiguous { type_id });
+    }
+    if application_enum || standard_enum {
+        return Ok(RecordValueFieldDescriptorClass::Enum(type_id));
+    }
+    if standard_scalar.is_some() {
+        return Ok(RecordValueFieldDescriptorClass::StandardPrimitive(type_id));
+    }
+    Err(RecordValueFieldDescriptorError::Unsupported)
 }
 
 pub(crate) fn record_value_field_runtime_type(
@@ -2804,8 +2848,17 @@ pub enum RevisionInvariantError {
         record_value_type: TypeId,
         /// The rejected record field.
         field: FieldId,
-        /// The unsupported resolved type.
-        resolved_type: ResolvedType,
+        /// The unsupported descriptor.
+        descriptor: TypeDescriptor,
+    },
+    /// A record field identity has conflicting application and standard meanings.
+    AmbiguousRecordValueFieldType {
+        /// The record value type owning the field.
+        record_value_type: TypeId,
+        /// The ambiguous record field.
+        field: FieldId,
+        /// The conflicting type identity.
+        type_id: TypeId,
     },
     /// A type-name binding was paired with a version-1 catalogue hash.
     TypeBindingRequiresCatalogueHashVersionTwo {
@@ -3053,6 +3106,9 @@ impl fmt::Display for RevisionInvariantError {
             UnsupportedRecordValueFieldType { .. } => {
                 formatter.write_str("record value field has an unsupported resolved type")
             }
+            AmbiguousRecordValueFieldType { .. } => formatter.write_str(
+                "record field type is present in both application and standard catalogues",
+            ),
             TypeBindingRequiresCatalogueHashVersionTwo { .. } => {
                 formatter.write_str("type-name bindings require catalogue hash version 2")
             }
@@ -4663,11 +4719,9 @@ mod tests {
         let application = empty_catalogue();
         for (index, (_, scalar)) in accepted_contracts.iter().enumerate() {
             let resolved_type = ResolvedType::value(TypeId::from_bytes([index as u8 + 1; 16]));
-            assert!(record_value_field_type_is_supported(
-                &application,
-                &standard,
-                resolved_type,
-            ));
+            assert!(
+                record_value_field_runtime_type(&application, &standard, resolved_type).is_some()
+            );
             assert_eq!(
                 record_value_field_runtime_type(&application, &standard, resolved_type),
                 Some(ResolvedType::scalar(*scalar))
@@ -4737,33 +4791,89 @@ mod tests {
             vec![],
         )
         .unwrap();
-        assert!(!record_value_field_type_is_supported(
-            &application,
-            &standard,
-            ResolvedType::value(application_primitive),
-        ));
-        assert!(record_value_field_type_is_supported(
-            &application,
-            &standard,
-            ResolvedType::named(application_enum),
-        ));
-        assert!(record_value_field_type_is_supported(
-            &application,
-            &standard,
-            ResolvedType::named(standard_enum),
-        ));
+        assert!(
+            record_value_field_runtime_type(
+                &application,
+                &standard,
+                ResolvedType::value(application_primitive),
+            )
+            .is_none()
+        );
+        assert!(
+            record_value_field_runtime_type(
+                &application,
+                &standard,
+                ResolvedType::named(application_enum),
+            )
+            .is_some()
+        );
+        assert!(
+            record_value_field_runtime_type(
+                &application,
+                &standard,
+                ResolvedType::named(standard_enum),
+            )
+            .is_some()
+        );
         for unsupported in [
             ResolvedType::value(TypeId::from_bytes(id::<100>())),
             ResolvedType::named(TypeId::from_bytes(id::<101>())),
             ResolvedType::scalar(StandardScalar::Boolean),
             ResolvedType::reference(TypeId::from_bytes(id::<102>())),
         ] {
-            assert!(!record_value_field_type_is_supported(
-                &application,
-                &standard,
-                unsupported,
-            ));
+            assert!(
+                record_value_field_runtime_type(&application, &standard, unsupported,).is_none()
+            );
         }
+
+        let collision = TypeId::from_bytes(id::<71>());
+        let collision_catalogue = CatalogueSnapshot::new_with_record_value_types(
+            CatalogueRevisionId::from_bytes(id::<96>()),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes(id::<97>()),
+                QualifiedSemanticName::new(["app"]).unwrap(),
+            )],
+            vec![],
+            vec![],
+            vec![EnumTypeDefinition::new(
+                collision,
+                QualifiedSemanticName::new(["app", "collision"]).unwrap(),
+                ["value"],
+            )],
+            vec![RecordValueTypeDefinition::new(
+                TypeId::from_bytes(id::<98>()),
+                QualifiedSemanticName::new(["app", "record"]).unwrap(),
+                vec![
+                    RecordValueFieldDefinition::try_new(
+                        FieldId::from_bytes(id::<99>()),
+                        "value",
+                        0,
+                        ResolvedType::value(collision),
+                    )
+                    .unwrap(),
+                ],
+            )],
+            vec![],
+        )
+        .unwrap();
+        assert_eq!(
+            validate_record_value_field_types(&standard_context(), &collision_catalogue),
+            Err(RevisionInvariantError::AmbiguousRecordValueFieldType {
+                record_value_type: TypeId::from_bytes(id::<98>()),
+                field: FieldId::from_bytes(id::<99>()),
+                type_id: collision,
+            })
+        );
+        let error = RevisionInvariantError::AmbiguousRecordValueFieldType {
+            record_value_type: TypeId::from_bytes(id::<98>()),
+            field: FieldId::from_bytes(id::<99>()),
+            type_id: collision,
+        };
+        assert_eq!(
+            error.to_string(),
+            "record field type is present in both application and standard catalogues"
+        );
+        assert!(std::error::Error::source(&error).is_none());
     }
 
     #[test]

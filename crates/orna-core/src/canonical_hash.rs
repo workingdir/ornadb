@@ -20,19 +20,20 @@ use crate::{
         CatalogueSnapshot, EnumTypeDefinition, FunctionDefinition, FunctionDomain, FunctionReturn,
         FunctionSecurity, FunctionTransaction, FunctionVolatility, ObjectTypeDefinition,
         OnDeleteAction, ParameterDefinition, PreludeTypeName, QualifiedSemanticName,
-        RecordValueTypeDefinition, SchemaDefinition, TypeBinding, TypeBindingKind, TypeLookupName,
-        ValueTypeDefinition, ValueTypeKind, ValueTypeMutability, ValueTypePersistence,
+        SchemaDefinition, TypeBinding, TypeBindingKind, TypeLookupName, ValueTypeDefinition,
+        ValueTypeKind, ValueTypeMutability, ValueTypePersistence,
     },
     revision::{
         CatalogueHashContext, CatalogueHashVersion, DefinitionIdentity, DefinitionOrigin,
         DefinitionReference, DefinitionReferenceKind, DefinitionReferenceTarget,
         ExecutableArtifact, ExecutableArtifactKind, ExpressionArtifact, FunctionRevisionRecord,
-        FunctionSemanticHashVersion, Sha256Digest, SourceOrigin, StandardLibraryDigestVersion,
+        FunctionSemanticHashVersion, RecordValueFieldDescriptorClass,
+        RecordValueFieldDescriptorError, Sha256Digest, SourceOrigin, StandardLibraryDigestVersion,
         StandardLibrarySnapshot, StoredSourceRevision, StoredSourceUnit,
-        VerifiedStandardLibrarySnapshot, function_accepts_opaque_client_return,
-        record_value_field_type_is_supported, reference_kind_accepts_target,
+        VerifiedStandardLibrarySnapshot, classify_record_value_field_descriptor,
+        function_accepts_opaque_client_return, reference_kind_accepts_target,
     },
-    types::{ResolvedType, StandardScalar},
+    types::{ResolvedType, StandardScalar, TypeDescriptor},
 };
 
 const SOURCE_UNIT_CONTENT_DOMAIN: &[u8] = b"ornadb.hash/source-unit-content/v1\0";
@@ -164,8 +165,17 @@ pub enum CanonicalHashError {
         record_value_type: TypeId,
         /// The rejected record field.
         field: FieldId,
-        /// The unsupported resolved type.
-        resolved_type: ResolvedType,
+        /// The unsupported descriptor.
+        descriptor: TypeDescriptor,
+    },
+    /// A record field identity has conflicting application and standard meanings.
+    AmbiguousRecordValueFieldType {
+        /// The record value type owning the field.
+        record_value_type: TypeId,
+        /// The ambiguous record field.
+        field: FieldId,
+        /// The conflicting type identity.
+        type_id: TypeId,
     },
     /// A typed catalogue fact cannot be represented by the selected hash contract.
     CatalogueFactUnsupportedByHashVersion {
@@ -341,6 +351,9 @@ impl fmt::Display for CanonicalHashError {
             UnsupportedRecordValueFieldType { .. } => {
                 formatter.write_str("record value field has an unsupported resolved type")
             }
+            AmbiguousRecordValueFieldType { .. } => formatter.write_str(
+                "record field type is present in both application and standard catalogues",
+            ),
             CatalogueFactUnsupportedByHashVersion { version, fact } => match fact {
                 CatalogueHashFact::ValueTypeDefinition(_) => write!(
                     formatter,
@@ -844,7 +857,7 @@ pub fn catalogue_digest_with_context(
                 encode_enum_types(&mut encoder, catalogue.enum_types(), None)?;
             }
             if !catalogue.record_value_types().is_empty() {
-                encode_record_value_types(&mut encoder, catalogue.record_value_types())?;
+                encode_record_value_types(&mut encoder, catalogue, standard.catalogue())?;
             }
             encode_type_bindings(&mut encoder, catalogue.type_bindings(), None)?;
             encode_catalogue_functions(&mut encoder, catalogue)?;
@@ -993,20 +1006,45 @@ fn validate_record_value_field_types(
     for record_value_type in catalogue.record_value_types() {
         let fields = sorted_by_key(record_value_type.fields(), |field| field.ordinal());
         for field in fields {
-            if !record_value_field_type_is_supported(
+            canonical_record_value_field_type(
                 catalogue,
                 standard.catalogue(),
-                field.resolved_type(),
-            ) {
-                return Err(CanonicalHashError::UnsupportedRecordValueFieldType {
-                    record_value_type: record_value_type.id(),
-                    field: field.id(),
-                    resolved_type: field.resolved_type(),
-                });
-            }
+                record_value_type.id(),
+                field.id(),
+                field
+                    .type_descriptor()
+                    .expect("catalogue-validated record field descriptor"),
+            )?;
         }
     }
     Ok(())
+}
+
+fn canonical_record_value_field_type(
+    catalogue: &CatalogueSnapshot,
+    standard: &CatalogueSnapshot,
+    record_value_type: TypeId,
+    field: FieldId,
+    descriptor: &TypeDescriptor,
+) -> Result<RecordValueFieldDescriptorClass, CanonicalHashError> {
+    classify_record_value_field_descriptor(catalogue, standard, descriptor).map_err(|error| {
+        match error {
+            RecordValueFieldDescriptorError::Unsupported => {
+                CanonicalHashError::UnsupportedRecordValueFieldType {
+                    record_value_type,
+                    field,
+                    descriptor: descriptor.clone(),
+                }
+            }
+            RecordValueFieldDescriptorError::Ambiguous { type_id } => {
+                CanonicalHashError::AmbiguousRecordValueFieldType {
+                    record_value_type,
+                    field,
+                    type_id,
+                }
+            }
+        }
+    })
 }
 
 fn validate_catalogue_version_facts(
@@ -1180,9 +1218,10 @@ fn encode_enum_types(
 
 fn encode_record_value_types(
     encoder: &mut Encoder,
-    record_value_types: &[RecordValueTypeDefinition],
+    catalogue: &CatalogueSnapshot,
+    standard: &CatalogueSnapshot,
 ) -> Result<(), CanonicalHashError> {
-    let record_value_types = sorted_by_key(record_value_types, |record_value_type| {
+    let record_value_types = sorted_by_key(catalogue.record_value_types(), |record_value_type| {
         record_value_type.id().to_bytes()
     });
     encoder.sequence_len(record_value_types.len(), "catalogue record value types")?;
@@ -1198,7 +1237,24 @@ fn encode_record_value_types(
             encoder.field_id(field.id());
             encoder.text(field.name(), "record value field name")?;
             encoder.u32(field.ordinal());
-            encode_resolved_type(encoder, field.resolved_type());
+            match canonical_record_value_field_type(
+                catalogue,
+                standard,
+                record_value_type.id(),
+                field.id(),
+                field
+                    .type_descriptor()
+                    .expect("catalogue-validated record field descriptor"),
+            )? {
+                RecordValueFieldDescriptorClass::Enum(type_id) => {
+                    encoder.u8(2);
+                    encoder.type_id(type_id);
+                }
+                RecordValueFieldDescriptorClass::StandardPrimitive(type_id) => {
+                    encoder.u8(4);
+                    encoder.type_id(type_id);
+                }
+            }
         }
     }
     Ok(())
@@ -4007,6 +4063,8 @@ mod tests {
     #[test]
     fn record_value_types_use_only_the_version_two_hash_contract() {
         let catalogue = catalogue_with_record_value_type();
+        let standard = verified_standard_snapshot(false);
+        let context = CatalogueHashContext::version_two(standard.clone());
         let expected_fact =
             CatalogueHashFact::RecordValueTypeDefinition(TypeId::from_bytes(id::<42>()));
 
@@ -4019,7 +4077,7 @@ mod tests {
         );
         assert!(
             catalogue_digest_with_context(
-                &CatalogueHashContext::version_two(verified_standard_snapshot(false)),
+                &context,
                 &catalogue,
                 &[],
                 &[],
@@ -4030,7 +4088,7 @@ mod tests {
         );
 
         let mut encoder = Encoder::new(b"");
-        encode_record_value_types(&mut encoder, catalogue.record_value_types()).unwrap();
+        encode_record_value_types(&mut encoder, &catalogue, standard.catalogue()).unwrap();
         let mut expected = vec![0, 0, 0, 1];
         expected.extend([42; 16]);
         expected.extend([0, 0, 0, 2, 0, 0, 0, 3]);
@@ -4224,7 +4282,10 @@ mod tests {
                 Err(CanonicalHashError::UnsupportedRecordValueFieldType {
                     record_value_type: TypeId::from_bytes(id::<42>()),
                     field: FieldId::from_bytes(id::<43>()),
-                    resolved_type,
+                    descriptor: TypeDescriptor::named(match resolved_type {
+                        ResolvedType::Named(type_id) | ResolvedType::Value(type_id) => type_id,
+                        ResolvedType::Scalar(_) | ResolvedType::Reference { .. } => unreachable!(),
+                    }),
                 })
             );
         }
@@ -4260,6 +4321,65 @@ mod tests {
         )
         .unwrap();
         assert!(validate_record_value_field_types(&context, &enum_catalogue).is_ok());
+
+        let mut enum_encoder = Encoder::new(b"");
+        encode_record_value_types(
+            &mut enum_encoder,
+            &enum_catalogue,
+            context.standard().unwrap().catalogue(),
+        )
+        .unwrap();
+        let mut enum_tail = vec![0, 0, 0, 0, 2];
+        enum_tail.extend(enum_type.to_bytes());
+        assert!(enum_encoder.bytes.ends_with(&enum_tail));
+
+        let collision = standard_boolean_id();
+        let collision_catalogue = CatalogueSnapshot::new_with_record_value_types(
+            CatalogueRevisionId::from_bytes(id::<40>()),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes(id::<41>()),
+                QualifiedSemanticName::new(["crm"]).unwrap(),
+            )],
+            vec![],
+            vec![],
+            vec![EnumTypeDefinition::new(
+                collision,
+                QualifiedSemanticName::new(["crm", "collision"]).unwrap(),
+                ["value"],
+            )],
+            vec![RecordValueTypeDefinition::new(
+                TypeId::from_bytes(id::<42>()),
+                QualifiedSemanticName::new(["crm", "status"]).unwrap(),
+                vec![
+                    RecordValueFieldDefinition::try_new(
+                        FieldId::from_bytes(id::<43>()),
+                        "value",
+                        0,
+                        ResolvedType::value(collision),
+                    )
+                    .unwrap(),
+                ],
+            )],
+            vec![],
+        )
+        .unwrap();
+        assert_eq!(
+            catalogue_digest_with_context(&context, &collision_catalogue, &[], &[], &[], &[]),
+            Err(CanonicalHashError::AmbiguousRecordValueFieldType {
+                record_value_type: TypeId::from_bytes(id::<42>()),
+                field: FieldId::from_bytes(id::<43>()),
+                type_id: collision,
+            })
+        );
+        assert_eq!(
+            CanonicalHashError::AmbiguousRecordValueFieldType {
+                record_value_type: TypeId::from_bytes(id::<42>()),
+                field: FieldId::from_bytes(id::<43>()),
+                type_id: collision,
+            }
+            .to_string(),
+            "record field type is present in both application and standard catalogues"
+        );
     }
 
     #[test]
