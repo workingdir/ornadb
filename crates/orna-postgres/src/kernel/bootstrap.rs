@@ -24,7 +24,7 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 1,
         name: "private kernel catalogue",
-        sql: include_str!("../../../orna-kernel-postgres/migrations/0001_kernel.sql"),
+        sql: include_str!("../../migrations/0001_kernel.sql"),
         data_step: None,
     },
     Migration {
