@@ -63,3 +63,5 @@ source-of-truth or authority rules.
   [One Authenticated, Authorised, Audited SERVER SELECT](0030-authenticated-server-select.md)
 * **work ADR 0031:**
   [Named Immutable Records Are Nominal Catalogue Values](0031-named-immutable-record-values.md)
+* **work ADR 0032:**
+  [Raw Calls Dispatch One-Column SERVER SELECTs](0032-raw-server-select-dispatch.md)
