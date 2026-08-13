@@ -20,7 +20,7 @@ use orna_core::{
     FieldId, ObjectId, TypeId,
     catalogue::CatalogueSnapshot,
     revision::ActiveDatabaseRevision,
-    types::{ResolvedType, StandardScalar},
+    types::{ResolvedType, StandardScalar, TypeDescriptor, TypeDescriptorKind},
     value::{
         EnumValue, EnumValueError, OpaqueCodecRegistry, OpaqueValue, OpaqueValueError, RecordValue,
         RuntimeFloat, RuntimeValue,
@@ -200,8 +200,8 @@ pub enum ValueCodecError {
     WrongRecordFieldType {
         /// The zero-based declaration ordinal.
         ordinal: usize,
-        /// The resolved field type required by the active definition.
-        expected: ResolvedType,
+        /// The field descriptor required by the active definition.
+        expected: TypeDescriptor,
         /// The encoded value tag.
         tag: u8,
         /// The encoded stable type identity.
@@ -566,7 +566,9 @@ fn encode_record_value_with_marker(
         let encoded = encode_record_field_value(
             active,
             definition.id(),
-            field.resolved_type(),
+            field
+                .type_descriptor()
+                .expect("active record fields have descriptors"),
             value,
             marker,
         )?;
@@ -695,14 +697,18 @@ fn decode_record_value_with_marker(
         }
         require_record_field_wire_type(
             active,
-            definition_field.resolved_type(),
+            definition_field
+                .type_descriptor()
+                .expect("active record fields have descriptors"),
             ordinal,
             tag,
             type_id,
         )?;
         let value = decode_record_field_value(
             active,
-            definition_field.resolved_type(),
+            definition_field
+                .type_descriptor()
+                .expect("active record fields have descriptors"),
             tag,
             field_payload,
         )?;
@@ -753,27 +759,41 @@ fn decode_catalogue_value_parts(
 
 fn require_record_field_wire_type(
     active: &ActiveDatabaseRevision,
-    expected: ResolvedType,
+    expected: &TypeDescriptor,
     ordinal: usize,
     tag: u8,
     actual: TypeId,
 ) -> Result<(), ValueCodecError> {
-    let matches = match expected {
-        ResolvedType::Value(expected) => active
-            .record_value_field_runtime_type(ResolvedType::value(expected))
-            .and_then(ResolvedType::legacy_scalar)
-            .is_some_and(|scalar| {
-                actual == expected && supported_scalar_tag_from_scalar(scalar) == Some(tag)
-            }),
-        ResolvedType::Named(expected) => actual == expected && tag == ENUM_TAG,
-        ResolvedType::Scalar(_) | ResolvedType::Reference { .. } => false,
+    let expected_type = match expected.kind() {
+        TypeDescriptorKind::Named(type_id) => type_id,
+        TypeDescriptorKind::Reference(_)
+        | TypeDescriptorKind::List(_)
+        | TypeDescriptorKind::Set(_)
+        | TypeDescriptorKind::Map { .. }
+        | TypeDescriptorKind::Option(_)
+        | TypeDescriptorKind::Stream(_) => {
+            return Err(ValueCodecError::WrongRecordFieldType {
+                ordinal,
+                expected: expected.clone(),
+                tag,
+                actual,
+            });
+        }
     };
+    let matches = active
+        .record_value_field_descriptor_runtime_type(expected)
+        .is_some_and(|runtime| {
+            actual == expected_type
+                && runtime.legacy_scalar().map_or(tag == ENUM_TAG, |scalar| {
+                    supported_scalar_tag_from_scalar(scalar) == Some(tag)
+                })
+        });
     if matches {
         Ok(())
     } else {
         Err(ValueCodecError::WrongRecordFieldType {
             ordinal,
-            expected,
+            expected: expected.clone(),
             tag,
             actual,
         })
@@ -783,15 +803,18 @@ fn require_record_field_wire_type(
 fn encode_record_field_value(
     active: &ActiveDatabaseRevision,
     record_type: TypeId,
-    declared: ResolvedType,
+    declared: &TypeDescriptor,
     value: &RuntimeValue,
     marker: &[u8; 4],
 ) -> Result<Vec<u8>, ValueCodecError> {
-    match declared {
-        ResolvedType::Value(type_id) => {
-            let expected = active
-                .record_value_field_runtime_type(declared)
-                .ok_or(ValueCodecError::UnsupportedValue)?;
+    let TypeDescriptorKind::Named(type_id) = declared.kind() else {
+        return Err(ValueCodecError::UnsupportedValue);
+    };
+    let expected = active
+        .record_value_field_descriptor_runtime_type(declared)
+        .ok_or(ValueCodecError::UnsupportedValue)?;
+    match expected {
+        ResolvedType::Scalar(_) => {
             if value.resolved_type() != expected {
                 return Err(ValueCodecError::RecordValueNotActive { record_type });
             }
@@ -810,7 +833,7 @@ fn encode_record_field_value(
                 encoded
             })
         }
-        ResolvedType::Scalar(_) | ResolvedType::Reference { .. } => {
+        ResolvedType::Value(_) | ResolvedType::Reference { .. } => {
             Err(ValueCodecError::UnsupportedValue)
         }
     }
@@ -818,16 +841,15 @@ fn encode_record_field_value(
 
 fn decode_record_field_value(
     active: &ActiveDatabaseRevision,
-    declared: ResolvedType,
+    declared: &TypeDescriptor,
     tag: u8,
     payload: &[u8],
 ) -> Result<RuntimeValue, ValueCodecError> {
-    match declared {
-        ResolvedType::Value(_) => {
-            let scalar = active
-                .record_value_field_runtime_type(declared)
-                .and_then(ResolvedType::legacy_scalar)
-                .ok_or(ValueCodecError::UnsupportedValue)?;
+    let expected = active
+        .record_value_field_descriptor_runtime_type(declared)
+        .ok_or(ValueCodecError::UnsupportedValue)?;
+    match expected {
+        ResolvedType::Scalar(scalar) => {
             let canonical_type =
                 supported_scalar_type_id(scalar).ok_or(ValueCodecError::UnsupportedValue)?;
             decode_non_enum_value(tag, canonical_type, payload)
@@ -837,7 +859,7 @@ fn decode_record_field_value(
             let label = std::str::from_utf8(payload).map_err(|_| ValueCodecError::InvalidUtf8)?;
             validate_active_enum_value(active, enum_type, label).map(RuntimeValue::Enum)
         }
-        ResolvedType::Scalar(_) | ResolvedType::Reference { .. } => {
+        ResolvedType::Value(_) | ResolvedType::Reference { .. } => {
             Err(ValueCodecError::UnsupportedValue)
         }
     }
@@ -2096,7 +2118,7 @@ mod tests {
             decode_active_value(&active, &wrong_field_type),
             Err(ValueCodecError::WrongRecordFieldType {
                 ordinal: 0,
-                expected: ResolvedType::value(BOOLEAN_TYPE_ID),
+                expected: TypeDescriptor::named(BOOLEAN_TYPE_ID),
                 tag: 0x06,
                 actual: CHARACTER_LARGE_OBJECT_TYPE_ID,
             })
@@ -2129,7 +2151,7 @@ mod tests {
             decode_active_value(&active, &null_field),
             Err(ValueCodecError::WrongRecordFieldType {
                 ordinal: 0,
-                expected: ResolvedType::value(BOOLEAN_TYPE_ID),
+                expected: TypeDescriptor::named(BOOLEAN_TYPE_ID),
                 tag: 0x00,
                 actual: BOOLEAN_TYPE_ID,
             })
@@ -2147,7 +2169,7 @@ mod tests {
             decode_active_value(&active, &reference_field),
             Err(ValueCodecError::WrongRecordFieldType {
                 ordinal: 0,
-                expected: ResolvedType::value(BOOLEAN_TYPE_ID),
+                expected: TypeDescriptor::named(BOOLEAN_TYPE_ID),
                 tag: 0x08,
                 actual: reference_type,
             })
