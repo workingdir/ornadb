@@ -1291,18 +1291,20 @@ mod tests {
                 record_type,
                 QualifiedSemanticName::new(["crm", "status"]).unwrap(),
                 vec![
-                    RecordValueFieldDefinition::new(
+                    RecordValueFieldDefinition::try_new(
                         ENABLED_FIELD,
                         "enabled",
                         0,
                         ResolvedType::value(STANDARD_BOOLEAN),
-                    ),
-                    RecordValueFieldDefinition::new(
+                    )
+                    .unwrap(),
+                    RecordValueFieldDefinition::try_new(
                         STAGE_FIELD,
                         "stage",
                         1,
                         ResolvedType::named(ENUM_TYPE),
-                    ),
+                    )
+                    .unwrap(),
                 ],
             )],
             vec![],
