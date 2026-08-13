@@ -191,11 +191,6 @@ pub enum ValueCodecError {
         /// The bytes available after the entry header.
         remaining: usize,
     },
-    /// A record field contains the deferred nested-record shape.
-    NestedRecordValue {
-        /// The zero-based declaration ordinal.
-        ordinal: usize,
-    },
     /// A record field value does not use its declared wire type.
     WrongRecordFieldType {
         /// The zero-based declaration ordinal.
@@ -271,9 +266,6 @@ impl fmt::Display for ValueCodecError {
             }
             Self::InvalidRecordFieldLength { .. } => {
                 formatter.write_str("record field length is invalid")
-            }
-            Self::NestedRecordValue { .. } => {
-                formatter.write_str("nested record values are not supported")
             }
             Self::WrongRecordFieldType { .. } => {
                 formatter.write_str("record field value does not match its declared type")
@@ -542,7 +534,7 @@ fn encode_record_value_with_marker(
             record_type: value.record_type(),
         });
     }
-    RecordValue::new(
+    let checked = RecordValue::new(
         active,
         value.record_type(),
         definition
@@ -554,6 +546,11 @@ fn encode_record_value_with_marker(
     .map_err(|_| ValueCodecError::RecordValueNotActive {
         record_type: value.record_type(),
     })?;
+    if checked != *value {
+        return Err(ValueCodecError::RecordValueNotActive {
+            record_type: value.record_type(),
+        });
+    }
 
     let field_count =
         u32::try_from(definition.fields().len()).map_err(|_| ValueCodecError::PayloadTooLarge {
@@ -685,9 +682,6 @@ fn decode_record_value_with_marker(
         let encoded_end = cursor + declared;
         let encoded = &payload[cursor..encoded_end];
         let (tag, type_id, field_payload) = decode_envelope(encoded, marker)?;
-        if tag == RECORD_TAG {
-            return Err(ValueCodecError::NestedRecordValue { ordinal });
-        }
         require_record_field_wire_type(
             active,
             definition_field.descriptor(),
@@ -695,8 +689,14 @@ fn decode_record_value_with_marker(
             tag,
             type_id,
         )?;
-        let value =
-            decode_record_field_value(active, definition_field.descriptor(), tag, field_payload)?;
+        let value = decode_record_field_value(
+            active,
+            definition_field.descriptor(),
+            tag,
+            type_id,
+            field_payload,
+            marker,
+        )?;
         fields.push((definition_field.name().to_owned(), value));
         cursor = encoded_end;
     }
@@ -765,14 +765,18 @@ fn require_record_field_wire_type(
             });
         }
     };
-    let matches = active
-        .record_value_field_descriptor_runtime_type(expected)
-        .is_some_and(|runtime| {
-            actual == expected_type
-                && runtime.legacy_scalar().map_or(tag == ENUM_TAG, |scalar| {
-                    supported_scalar_tag_from_scalar(scalar) == Some(tag)
-                })
-        });
+    let matches = if application_record_field_target(active, expected).is_some() {
+        actual == expected_type && tag == RECORD_TAG
+    } else {
+        active
+            .record_value_field_descriptor_runtime_type(expected)
+            .is_some_and(|runtime| {
+                actual == expected_type
+                    && runtime.legacy_scalar().map_or(tag == ENUM_TAG, |scalar| {
+                        supported_scalar_tag_from_scalar(scalar) == Some(tag)
+                    })
+            })
+    };
     if matches {
         Ok(())
     } else {
@@ -795,6 +799,15 @@ fn encode_record_field_value(
     let TypeDescriptorKind::Named(type_id) = declared.kind() else {
         return Err(ValueCodecError::UnsupportedValue);
     };
+    if let Some(expected_record_type) = application_record_field_target(active, declared) {
+        let RuntimeValue::Record(value) = value else {
+            return Err(ValueCodecError::RecordValueNotActive { record_type });
+        };
+        if value.record_type() != expected_record_type {
+            return Err(ValueCodecError::RecordValueNotActive { record_type });
+        }
+        return encode_record_value_with_marker(active, value, marker);
+    }
     let expected = active
         .record_value_field_descriptor_runtime_type(declared)
         .ok_or(ValueCodecError::UnsupportedValue)?;
@@ -828,8 +841,13 @@ fn decode_record_field_value(
     active: &ActiveDatabaseRevision,
     declared: &TypeDescriptor,
     tag: u8,
+    type_id: TypeId,
     payload: &[u8],
+    marker: &[u8; 4],
 ) -> Result<RuntimeValue, ValueCodecError> {
+    if application_record_field_target(active, declared).is_some() {
+        return decode_record_value_with_marker(active, type_id, payload, marker);
+    }
     let expected = active
         .record_value_field_descriptor_runtime_type(declared)
         .ok_or(ValueCodecError::UnsupportedValue)?;
@@ -848,6 +866,20 @@ fn decode_record_field_value(
             Err(ValueCodecError::UnsupportedValue)
         }
     }
+}
+
+fn application_record_field_target(
+    active: &ActiveDatabaseRevision,
+    descriptor: &TypeDescriptor,
+) -> Option<TypeId> {
+    let TypeDescriptorKind::Named(type_id) = descriptor.kind() else {
+        return None;
+    };
+    active
+        .catalogue()
+        .record_value_type_by_id(type_id)
+        .is_some()
+        .then_some(type_id)
 }
 
 fn decode_non_enum_value(
@@ -1285,6 +1317,133 @@ mod tests {
         .unwrap()
     }
 
+    fn active_nested_record_revision() -> ActiveDatabaseRevision {
+        active_nested_record_revision_with_fields(vec![
+            RecordValueFieldDefinition::try_new_descriptor(
+                FieldId::from_bytes([0x3a; 16]),
+                "value",
+                0,
+                TypeDescriptor::named(BOOLEAN_TYPE_ID),
+            )
+            .unwrap(),
+        ])
+    }
+
+    fn active_nested_record_revision_with_fields(
+        inner_fields: Vec<RecordValueFieldDefinition>,
+    ) -> ActiveDatabaseRevision {
+        let inner_type = TypeId::from_bytes([0x31; 16]);
+        let outer_type = TypeId::from_bytes([0x30; 16]);
+        let outer_field = FieldId::from_bytes([0x3b; 16]);
+        let inner_field_ids = inner_fields
+            .iter()
+            .map(|field| field.id())
+            .collect::<Vec<_>>();
+        let schema = SchemaId::from_bytes([0x49; 16]);
+        let catalogue_revision = CatalogueRevisionId::from_bytes([0x4a; 16]);
+        let catalogue = CatalogueSnapshot::new_with_record_value_types(
+            catalogue_revision,
+            vec![SchemaDefinition::new(
+                schema,
+                QualifiedSemanticName::new(["crm"]).unwrap(),
+            )],
+            vec![],
+            vec![],
+            vec![],
+            vec![
+                RecordValueTypeDefinition::new(
+                    inner_type,
+                    QualifiedSemanticName::new(["crm", "inner"]).unwrap(),
+                    inner_fields,
+                ),
+                RecordValueTypeDefinition::new(
+                    outer_type,
+                    QualifiedSemanticName::new(["crm", "outer"]).unwrap(),
+                    vec![
+                        RecordValueFieldDefinition::try_new_descriptor(
+                            outer_field,
+                            "payload",
+                            0,
+                            TypeDescriptor::named(inner_type),
+                        )
+                        .unwrap(),
+                    ],
+                ),
+            ],
+            vec![],
+        )
+        .unwrap();
+        let source_unit_id = SourceUnitId::from_bytes([0x4b; 16]);
+        let source_unit = StoredSourceUnit::new(
+            source_unit_id,
+            0,
+            "app/types.orna",
+            "abcdef",
+            source_unit_content_digest("abcdef").unwrap(),
+        )
+        .unwrap();
+        let bundle_hash = source_bundle_digest(std::slice::from_ref(&source_unit)).unwrap();
+        let source_revision = SourceRevisionId::from_bytes([0x4c; 16]);
+        let source = StoredSourceRevision::new(
+            SourceBundleId::from_bytes([0x4d; 16]),
+            source_revision,
+            None,
+            vec![source_unit],
+            bundle_hash,
+            source_revision_record_digest(
+                SourceBundleId::from_bytes([0x4d; 16]),
+                None,
+                bundle_hash,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let mut identities = vec![
+            DefinitionIdentity::Schema(schema),
+            DefinitionIdentity::ValueType(inner_type),
+        ];
+        identities.extend(
+            inner_field_ids
+                .iter()
+                .map(|&field| DefinitionIdentity::Field {
+                    owner: inner_type,
+                    field,
+                }),
+        );
+        identities.push(DefinitionIdentity::ValueType(outer_type));
+        identities.push(DefinitionIdentity::Field {
+            owner: outer_type,
+            field: outer_field,
+        });
+        let origins = identities
+            .into_iter()
+            .enumerate()
+            .map(|(index, identity)| {
+                DefinitionOrigin::new(
+                    identity,
+                    SourceOrigin::new(source_unit_id, index as u32, index as u32 + 1).unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let standard =
+            verify_standard_library_snapshot(retained_standard_library_snapshot().unwrap())
+                .unwrap();
+        let context = CatalogueHashContext::version_two(standard);
+        let catalogue_hash =
+            catalogue_digest_with_context(&context, &catalogue, &[], &[], &origins, &[]).unwrap();
+        ActiveDatabaseRevision::new_with_catalogue_hash_context(
+            ActiveDatabaseRevisionInput::new(
+                RevisionPair::new(source_revision, catalogue_revision),
+                source,
+                catalogue,
+                catalogue_hash,
+                ActiveRevisionContent::new(vec![], vec![], origins, vec![]),
+            ),
+            context,
+        )
+        .unwrap()
+    }
+
     #[test]
     fn public_frame_payload_limit_matches_the_wire_contract() {
         assert_eq!(MAX_FRAME_PAYLOAD_LENGTH, 16 * 1024 * 1024 + 64);
@@ -1400,6 +1559,520 @@ mod tests {
 
         assert_eq!(encode_active_value(&active, &value), Ok(expected.clone()));
         assert_eq!(decode_active_value(&active, &expected), Ok(value));
+    }
+
+    #[test]
+    fn tracer_bullet_active_codec_encodes_nested_immutable_records() {
+        let active = active_nested_record_revision();
+        let inner_type = TypeId::from_bytes([0x31; 16]);
+        let outer_type = TypeId::from_bytes([0x30; 16]);
+        let inner_field = FieldId::from_bytes([0x3a; 16]);
+        let outer_field = FieldId::from_bytes([0x3b; 16]);
+        let inner = RecordValue::new(
+            &active,
+            inner_type,
+            [(String::from("value"), RuntimeValue::Boolean(true))],
+        )
+        .expect("the inner record must construct");
+        let outer = RecordValue::new(
+            &active,
+            outer_type,
+            [(String::from("payload"), RuntimeValue::Record(inner))],
+        )
+        .expect("the outer record must construct");
+        let value = RuntimeValue::Record(outer);
+
+        let mut boolean_envelope = b"ORV3".to_vec();
+        boolean_envelope.push(0x02);
+        boolean_envelope.extend_from_slice(&BOOLEAN_TYPE_ID.to_bytes());
+        boolean_envelope.extend_from_slice(&1_u32.to_be_bytes());
+        boolean_envelope.push(1);
+
+        let mut inner_payload = 1_u32.to_be_bytes().to_vec();
+        inner_payload.extend_from_slice(&inner_field.to_bytes());
+        inner_payload.extend_from_slice(&(boolean_envelope.len() as u32).to_be_bytes());
+        inner_payload.extend_from_slice(&boolean_envelope);
+        let mut inner_envelope = b"ORV3".to_vec();
+        inner_envelope.push(0x0b);
+        inner_envelope.extend_from_slice(&inner_type.to_bytes());
+        inner_envelope.extend_from_slice(&(inner_payload.len() as u32).to_be_bytes());
+        inner_envelope.extend_from_slice(&inner_payload);
+
+        let mut outer_payload = 1_u32.to_be_bytes().to_vec();
+        outer_payload.extend_from_slice(&outer_field.to_bytes());
+        outer_payload.extend_from_slice(&(inner_envelope.len() as u32).to_be_bytes());
+        outer_payload.extend_from_slice(&inner_envelope);
+        let mut expected = b"ORV3".to_vec();
+        expected.push(0x0b);
+        expected.extend_from_slice(&outer_type.to_bytes());
+        expected.extend_from_slice(&(outer_payload.len() as u32).to_be_bytes());
+        expected.extend_from_slice(&outer_payload);
+
+        assert_eq!(
+            encode_active_value(&active, &value),
+            Ok(expected.clone()),
+            "the active codec must encode a nested immutable record"
+        );
+        assert_eq!(
+            decode_active_value(&active, &expected),
+            Ok(value),
+            "the active codec must round-trip a nested immutable record"
+        );
+    }
+
+    #[test]
+    fn tracer_bullet_active_codec_rejects_stale_inner_field_identity() {
+        let inner_type = TypeId::from_bytes([0x31; 16]);
+        let field_a = RecordValueFieldDefinition::try_new_descriptor(
+            FieldId::from_bytes([0x3a; 16]),
+            "a",
+            0,
+            TypeDescriptor::named(BOOLEAN_TYPE_ID),
+        )
+        .unwrap();
+        let field_b = RecordValueFieldDefinition::try_new_descriptor(
+            FieldId::from_bytes([0x3c; 16]),
+            "b",
+            1,
+            TypeDescriptor::named(BOOLEAN_TYPE_ID),
+        )
+        .unwrap();
+        let old = active_nested_record_revision_with_fields(vec![field_a, field_b]);
+        let current = active_nested_record_revision_with_fields(vec![
+            RecordValueFieldDefinition::try_new_descriptor(
+                FieldId::from_bytes([0x3c; 16]),
+                "b",
+                0,
+                TypeDescriptor::named(BOOLEAN_TYPE_ID),
+            )
+            .unwrap(),
+            RecordValueFieldDefinition::try_new_descriptor(
+                FieldId::from_bytes([0x3a; 16]),
+                "a",
+                1,
+                TypeDescriptor::named(BOOLEAN_TYPE_ID),
+            )
+            .unwrap(),
+        ]);
+        let old_child = RecordValue::new(
+            &old,
+            inner_type,
+            [
+                (String::from("a"), RuntimeValue::Boolean(true)),
+                (String::from("b"), RuntimeValue::Boolean(false)),
+            ],
+        )
+        .expect("the child must construct under the old revision");
+
+        let value = RuntimeValue::Record(old_child);
+        assert_eq!(
+            encode_active_value(&current, &value),
+            Err(ValueCodecError::RecordValueNotActive {
+                record_type: inner_type,
+            }),
+            "the encoder must reject a stale inner field identity"
+        );
+        let standard = current.catalogue_hash_context().standard().unwrap();
+        let registry = registered_opaque_codecs(standard).unwrap();
+        assert_eq!(
+            encode_registered_value(&current, &registry, &value),
+            Err(ValueCodecError::RecordValueNotActive {
+                record_type: inner_type,
+            }),
+            "the registered encoder must reject a stale inner field identity"
+        );
+    }
+
+    #[test]
+    fn stale_replaced_field_identity_fails_both_encoders() {
+        let inner_type = TypeId::from_bytes([0x31; 16]);
+        let field_a = RecordValueFieldDefinition::try_new_descriptor(
+            FieldId::from_bytes([0x3a; 16]),
+            "a",
+            0,
+            TypeDescriptor::named(BOOLEAN_TYPE_ID),
+        )
+        .unwrap();
+        let replaced_a = RecordValueFieldDefinition::try_new_descriptor(
+            FieldId::from_bytes([0x3d; 16]),
+            "a",
+            0,
+            TypeDescriptor::named(BOOLEAN_TYPE_ID),
+        )
+        .unwrap();
+        let old = active_nested_record_revision_with_fields(vec![field_a]);
+        let current = active_nested_record_revision_with_fields(vec![replaced_a]);
+        let old_child = RecordValue::new(
+            &old,
+            inner_type,
+            [(String::from("a"), RuntimeValue::Boolean(true))],
+        )
+        .expect("the child must construct under the old revision");
+        let value = RuntimeValue::Record(old_child);
+        assert_eq!(
+            encode_active_value(&current, &value.clone()),
+            Err(ValueCodecError::RecordValueNotActive {
+                record_type: inner_type,
+            })
+        );
+        let standard = current.catalogue_hash_context().standard().unwrap();
+        let registry = registered_opaque_codecs(standard).unwrap();
+        assert_eq!(
+            encode_registered_value(&current, &registry, &value),
+            Err(ValueCodecError::RecordValueNotActive {
+                record_type: inner_type,
+            })
+        );
+    }
+
+    fn nested_record_value(active: &ActiveDatabaseRevision) -> RuntimeValue {
+        let inner_type = TypeId::from_bytes([0x31; 16]);
+        let outer_type = TypeId::from_bytes([0x30; 16]);
+        let inner = RecordValue::new(
+            active,
+            inner_type,
+            [(String::from("value"), RuntimeValue::Boolean(true))],
+        )
+        .unwrap();
+        let outer = RecordValue::new(
+            active,
+            outer_type,
+            [(String::from("payload"), RuntimeValue::Record(inner))],
+        )
+        .unwrap();
+        RuntimeValue::Record(outer)
+    }
+
+    fn nested_envelope(marker: &[u8; 4], tag: u8, type_id: TypeId, payload: &[u8]) -> Vec<u8> {
+        let mut bytes = marker.to_vec();
+        bytes.push(tag);
+        bytes.extend_from_slice(&type_id.to_bytes());
+        bytes.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        bytes.extend_from_slice(payload);
+        bytes
+    }
+
+    fn nested_record_payload(fields: &[(FieldId, Vec<u8>)]) -> Vec<u8> {
+        let mut payload = (fields.len() as u32).to_be_bytes().to_vec();
+        for (field, encoded) in fields {
+            payload.extend_from_slice(&field.to_bytes());
+            payload.extend_from_slice(&(encoded.len() as u32).to_be_bytes());
+            payload.extend_from_slice(encoded);
+        }
+        payload
+    }
+
+    fn assemble_nested_envelope(
+        marker: &[u8; 4],
+        inner_tag: u8,
+        inner_type: TypeId,
+        inner_field: FieldId,
+        inner_count: u32,
+        inner_field_length: u32,
+        inner_extra_payload: &[u8],
+    ) -> Vec<u8> {
+        let outer_type = TypeId::from_bytes([0x30; 16]);
+        let outer_field = FieldId::from_bytes([0x3b; 16]);
+        let boolean = nested_envelope(marker, 0x02, BOOLEAN_TYPE_ID, &[1]);
+        let mut inner_payload = inner_count.to_be_bytes().to_vec();
+        inner_payload.extend_from_slice(&inner_field.to_bytes());
+        inner_payload.extend_from_slice(&inner_field_length.to_be_bytes());
+        inner_payload.extend_from_slice(&boolean);
+        inner_payload.extend_from_slice(inner_extra_payload);
+        let inner = nested_envelope(marker, inner_tag, inner_type, &inner_payload);
+        let outer_payload = nested_record_payload(&[(outer_field, inner)]);
+        nested_envelope(marker, 0x0b, outer_type, &outer_payload)
+    }
+
+    #[test]
+    fn registered_codec_has_exact_nested_record_bytes_and_round_trips() {
+        let active = active_nested_record_revision();
+        let standard = active.catalogue_hash_context().standard().unwrap();
+        let registry = registered_opaque_codecs(standard).unwrap();
+        let value = nested_record_value(&active);
+        let inner_type = TypeId::from_bytes([0x31; 16]);
+        let inner_field = FieldId::from_bytes([0x3a; 16]);
+        let expected = assemble_nested_envelope(b"ORV4", 0x0b, inner_type, inner_field, 1, 26, &[]);
+
+        assert_eq!(
+            encode_registered_value(&active, &registry, &value),
+            Ok(expected.clone())
+        );
+        assert_eq!(
+            decode_registered_value(&active, &registry, &expected),
+            Ok(value.clone())
+        );
+        assert_eq!(&expected[0..4], b"ORV4", "the outer marker must be ORV4");
+
+        assert_eq!(
+            encode_value(&value),
+            Err(ValueCodecError::UnsupportedValue),
+            "version one must stay closed for nested records"
+        );
+        assert_eq!(
+            encode_catalogue_value(active.catalogue(), &value),
+            Err(ValueCodecError::UnsupportedValue),
+            "version two must stay closed for nested records"
+        );
+        assert_eq!(decode_value(&expected), Err(ValueCodecError::InvalidMarker));
+        assert_eq!(
+            decode_catalogue_value(active.catalogue(), &expected),
+            Err(ValueCodecError::InvalidMarker)
+        );
+    }
+
+    #[test]
+    fn nested_codec_rejects_inner_marker_crossing() {
+        let active = active_nested_record_revision();
+        let standard = active.catalogue_hash_context().standard().unwrap();
+        let registry = registered_opaque_codecs(standard).unwrap();
+        let value = nested_record_value(&active);
+        let inner_type = TypeId::from_bytes([0x31; 16]);
+        let inner_field = FieldId::from_bytes([0x3a; 16]);
+        let inner_offset = 25 + 4 + 16 + 4;
+
+        let active_bytes =
+            assemble_nested_envelope(b"ORV3", 0x0b, inner_type, inner_field, 1, 26, &[]);
+        assert_eq!(
+            encode_active_value(&active, &value),
+            Ok(active_bytes.clone())
+        );
+        let mut wrong_active = active_bytes.clone();
+        wrong_active[inner_offset..inner_offset + 4].copy_from_slice(b"ORV4");
+        assert_eq!(
+            decode_active_value(&active, &wrong_active),
+            Err(ValueCodecError::InvalidMarker),
+            "an ORV4 inner envelope must be rejected by the ORV3 decoder"
+        );
+
+        let registered_bytes =
+            assemble_nested_envelope(b"ORV4", 0x0b, inner_type, inner_field, 1, 26, &[]);
+        let mut wrong_registered = registered_bytes.clone();
+        wrong_registered[inner_offset..inner_offset + 4].copy_from_slice(b"ORV3");
+        assert_eq!(
+            decode_registered_value(&active, &registry, &wrong_registered),
+            Err(ValueCodecError::InvalidMarker),
+            "an ORV3 inner envelope must be rejected by the ORV4 decoder"
+        );
+    }
+
+    #[test]
+    fn nested_codec_rejects_wrong_inner_tag_and_type() {
+        let active = active_nested_record_revision();
+        let inner_type = TypeId::from_bytes([0x31; 16]);
+        let inner_field = FieldId::from_bytes([0x3a; 16]);
+        for inner_tag in [0x0a, 0x02] {
+            let corrupted =
+                assemble_nested_envelope(b"ORV3", inner_tag, inner_type, inner_field, 1, 26, &[]);
+            assert_eq!(
+                decode_active_value(&active, &corrupted),
+                Err(ValueCodecError::WrongRecordFieldType {
+                    ordinal: 0,
+                    expected: TypeDescriptor::named(inner_type),
+                    tag: inner_tag,
+                    actual: inner_type,
+                })
+            );
+        }
+        let replaced_type = TypeId::from_bytes([0x99; 16]);
+        let corrupted =
+            assemble_nested_envelope(b"ORV3", 0x0b, replaced_type, inner_field, 1, 26, &[]);
+        assert_eq!(
+            decode_active_value(&active, &corrupted),
+            Err(ValueCodecError::WrongRecordFieldType {
+                ordinal: 0,
+                expected: TypeDescriptor::named(inner_type),
+                tag: 0x0b,
+                actual: replaced_type,
+            })
+        );
+    }
+
+    #[test]
+    fn nested_codec_rejects_inner_structure_corruption() {
+        let active = active_nested_record_revision();
+        let inner_type = TypeId::from_bytes([0x31; 16]);
+        let inner_field = FieldId::from_bytes([0x3a; 16]);
+
+        let wrong_count =
+            assemble_nested_envelope(b"ORV3", 0x0b, inner_type, inner_field, 2, 26, &[]);
+        assert_eq!(
+            decode_active_value(&active, &wrong_count),
+            Err(ValueCodecError::WrongRecordFieldCount {
+                expected: 1,
+                actual: 2,
+            })
+        );
+
+        let wrong_field = FieldId::from_bytes([0x99; 16]);
+        let wrong_identity =
+            assemble_nested_envelope(b"ORV3", 0x0b, inner_type, wrong_field, 1, 26, &[]);
+        assert_eq!(
+            decode_active_value(&active, &wrong_identity),
+            Err(ValueCodecError::WrongRecordFieldIdentity {
+                ordinal: 0,
+                expected: inner_field,
+                actual: wrong_field,
+            })
+        );
+
+        let wrong_length =
+            assemble_nested_envelope(b"ORV3", 0x0b, inner_type, inner_field, 1, 10, &[]);
+        assert_eq!(
+            decode_active_value(&active, &wrong_length),
+            Err(ValueCodecError::InvalidRecordFieldLength {
+                ordinal: 0,
+                declared: 10,
+                remaining: 26,
+            })
+        );
+
+        let trailing =
+            assemble_nested_envelope(b"ORV3", 0x0b, inner_type, inner_field, 1, 26, &[0xaa, 0xbb]);
+        assert_eq!(
+            decode_active_value(&active, &trailing),
+            Err(ValueCodecError::TrailingBytes {
+                declared: 50,
+                actual: 52,
+            })
+        );
+    }
+
+    #[test]
+    fn nested_codec_checks_inner_payload_limit_before_truncation() {
+        let active = active_nested_record_revision();
+        let inner_type = TypeId::from_bytes([0x31; 16]);
+        let outer_type = TypeId::from_bytes([0x30; 16]);
+        let outer_field = FieldId::from_bytes([0x3b; 16]);
+        let mut inner_header = b"ORV3".to_vec();
+        inner_header.push(0x0b);
+        inner_header.extend_from_slice(&inner_type.to_bytes());
+        inner_header.extend_from_slice(&((PAYLOAD_LIMIT as u32) + 1).to_be_bytes());
+        assert_eq!(
+            inner_header.len(),
+            25,
+            "inner envelope must carry no payload"
+        );
+
+        let mut outer_payload = 1_u32.to_be_bytes().to_vec();
+        outer_payload.extend_from_slice(&outer_field.to_bytes());
+        outer_payload.extend_from_slice(&(inner_header.len() as u32).to_be_bytes());
+        outer_payload.extend_from_slice(&inner_header);
+        let mut expected = b"ORV3".to_vec();
+        expected.push(0x0b);
+        expected.extend_from_slice(&outer_type.to_bytes());
+        expected.extend_from_slice(&(outer_payload.len() as u32).to_be_bytes());
+        expected.extend_from_slice(&outer_payload);
+
+        assert_eq!(
+            decode_active_value(&active, &expected),
+            Err(ValueCodecError::PayloadTooLarge {
+                actual: PAYLOAD_LIMIT + 1,
+                maximum: PAYLOAD_LIMIT,
+            }),
+            "the declared inner payload limit must be checked before truncation"
+        );
+    }
+
+    #[test]
+    fn nested_record_values_delegate_unchanged_through_frames() {
+        let active = active_nested_record_revision();
+        let standard = active.catalogue_hash_context().standard().unwrap();
+        let registry = registered_opaque_codecs(standard).unwrap();
+        let value = nested_record_value(&active);
+        let inner_type = TypeId::from_bytes([0x31; 16]);
+        let inner_field = FieldId::from_bytes([0x3a; 16]);
+        let parameter = ParameterId::from_bytes([0x5f; 16]);
+        let active_envelope =
+            assemble_nested_envelope(b"ORV3", 0x0b, inner_type, inner_field, 1, 26, &[]);
+        let registered_envelope =
+            assemble_nested_envelope(b"ORV4", 0x0b, inner_type, inner_field, 1, 26, &[]);
+        assert_eq!(active_envelope.len(), 124);
+        assert_eq!(registered_envelope.len(), 124);
+
+        let argument = ClientFrame::CallArgument {
+            stream: 7,
+            parameter,
+            value: value.clone(),
+        };
+        let mut expected_argument = b"ORF3\x02\0".to_vec();
+        expected_argument.extend_from_slice(&7_u64.to_be_bytes());
+        expected_argument.extend_from_slice(&140_u32.to_be_bytes());
+        expected_argument.extend_from_slice(&parameter.to_bytes());
+        expected_argument.extend_from_slice(&active_envelope);
+        assert_eq!(
+            encode_active_client_frame(&active, &argument),
+            Ok(expected_argument.clone())
+        );
+        assert_eq!(
+            decode_active_client_frame(&active, &expected_argument),
+            Ok(argument)
+        );
+        assert_eq!(
+            decode_client_frame(&expected_argument),
+            Err(FrameCodecError::InvalidMarker)
+        );
+        assert_eq!(
+            decode_catalogue_client_frame(active.catalogue(), &expected_argument),
+            Err(FrameCodecError::InvalidMarker)
+        );
+
+        let event_batch = ServerFrame::EventBatch {
+            stream: 7,
+            channel: Channel::ResultValues,
+            events: vec![EventRecord {
+                sequence: 1,
+                event: Event::Value(value.clone()),
+            }],
+        };
+        let mut expected_batch = b"ORF3\x82\0".to_vec();
+        expected_batch.extend_from_slice(&7_u64.to_be_bytes());
+        expected_batch.extend_from_slice(&140_u32.to_be_bytes());
+        expected_batch.push(0x01);
+        expected_batch.extend_from_slice(&1_u16.to_be_bytes());
+        expected_batch.extend_from_slice(&1_u64.to_be_bytes());
+        expected_batch.push(0x01);
+        expected_batch.extend_from_slice(&124_u32.to_be_bytes());
+        expected_batch.extend_from_slice(&active_envelope);
+        assert_eq!(
+            encode_active_server_frame(&active, &event_batch),
+            Ok(expected_batch.clone())
+        );
+        assert_eq!(
+            decode_active_server_frame(&active, &expected_batch),
+            Ok(event_batch)
+        );
+
+        let registered_batch = ServerFrame::EventBatch {
+            stream: 8,
+            channel: Channel::ResultValues,
+            events: vec![EventRecord {
+                sequence: 1,
+                event: Event::Value(value),
+            }],
+        };
+        let mut expected_registered = b"ORF4\x82\0".to_vec();
+        expected_registered.extend_from_slice(&8_u64.to_be_bytes());
+        expected_registered.extend_from_slice(&140_u32.to_be_bytes());
+        expected_registered.push(0x01);
+        expected_registered.extend_from_slice(&1_u16.to_be_bytes());
+        expected_registered.extend_from_slice(&1_u64.to_be_bytes());
+        expected_registered.push(0x01);
+        expected_registered.extend_from_slice(&124_u32.to_be_bytes());
+        expected_registered.extend_from_slice(&registered_envelope);
+        assert_eq!(
+            encode_registered_server_frame(&active, &registry, &registered_batch),
+            Ok(expected_registered.clone())
+        );
+        assert_eq!(
+            decode_registered_server_frame(&active, &registry, &expected_registered),
+            Ok(registered_batch)
+        );
+        assert_eq!(
+            decode_active_server_frame(&active, &expected_registered),
+            Err(FrameCodecError::InvalidMarker),
+            "the ORV4 frame must be rejected by the active frame decoder"
+        );
     }
 
     #[test]
@@ -2090,11 +2763,16 @@ mod tests {
             );
         }
 
-        let mut nested = encoded.clone();
-        nested[53] = 0x0b;
+        let mut record_tag_in_scalar_field = encoded.clone();
+        record_tag_in_scalar_field[53] = 0x0b;
         assert_eq!(
-            decode_active_value(&active, &nested),
-            Err(ValueCodecError::NestedRecordValue { ordinal: 0 })
+            decode_active_value(&active, &record_tag_in_scalar_field),
+            Err(ValueCodecError::WrongRecordFieldType {
+                ordinal: 0,
+                expected: TypeDescriptor::named(BOOLEAN_TYPE_ID),
+                tag: 0x0b,
+                actual: BOOLEAN_TYPE_ID,
+            })
         );
 
         let mut wrong_field_type = encoded.clone();
