@@ -1,3 +1,4 @@
+#[path = "../../orna-kernel-postgres/tests/support/mod.rs"]
 mod support;
 
 use std::{collections::BTreeSet, str::FromStr, sync::Arc};
@@ -23,7 +24,7 @@ use orna_core::{
     },
     types::{ResolvedType, StandardScalar},
 };
-use orna_kernel_postgres::{PostgresKernel, PostgresKernelError};
+use orna_postgres::{PostgresKernel, PostgresKernelError};
 use sha2::{Digest, Sha256};
 use support::{TestDatabase, TestResult, failure, with_test_database};
 use tokio_postgres::{Client, Row};
@@ -63,97 +64,97 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
     (
         1,
         "private kernel catalogue",
-        include_str!("../../orna-postgres/migrations/0001_kernel.sql"),
+        include_str!("../migrations/0001_kernel.sql"),
     ),
     (
         2,
         "revision catalogue integrity",
-        include_str!("../../orna-postgres/migrations/0002_revisions.sql"),
+        include_str!("../migrations/0002_revisions.sql"),
     ),
     (
         3,
         "definition reference integrity",
-        include_str!("../../orna-postgres/migrations/0003_reference_integrity.sql"),
+        include_str!("../migrations/0003_reference_integrity.sql"),
     ),
     (
         4,
         "canonical hash contract v1",
-        include_str!("../../orna-postgres/migrations/0004_canonical_hash_contract.sql"),
+        include_str!("../migrations/0004_canonical_hash_contract.sql"),
     ),
     (
         5,
         "owner-qualified reference targets",
-        include_str!("../../orna-postgres/migrations/0005_owner_qualified_reference_targets.sql"),
+        include_str!("../migrations/0005_owner_qualified_reference_targets.sql"),
     ),
     (
         6,
         "definition reference write evidence",
-        include_str!("../../orna-postgres/migrations/0006_write_reference_evidence.sql"),
+        include_str!("../migrations/0006_write_reference_evidence.sql"),
     ),
     (
         7,
         "standard catalogue type storage",
-        include_str!("../../orna-postgres/migrations/0007_catalogue_types.sql"),
+        include_str!("../migrations/0007_catalogue_types.sql"),
     ),
     (
         8,
         "resolved value type storage",
-        include_str!("../../orna-postgres/migrations/0008_resolved_value_types.sql"),
+        include_str!("../migrations/0008_resolved_value_types.sql"),
     ),
     (
         9,
         "security decision snapshot",
-        include_str!("../../orna-postgres/migrations/0009_security_snapshot.sql"),
+        include_str!("../migrations/0009_security_snapshot.sql"),
     ),
     (
         10,
         "local peer credentials",
-        include_str!("../../orna-postgres/migrations/0010_local_peer_credentials.sql"),
+        include_str!("../migrations/0010_local_peer_credentials.sql"),
     ),
     (
         11,
         "protected security audit",
-        include_str!("../../orna-postgres/migrations/0011_security_audit.sql"),
+        include_str!("../migrations/0011_security_audit.sql"),
     ),
     (
         12,
         "catalogue enum type storage",
-        include_str!("../../orna-postgres/migrations/0012_catalogue_enum_types.sql"),
+        include_str!("../migrations/0012_catalogue_enum_types.sql"),
     ),
     (
         13,
         "resolved enum type storage",
-        include_str!("../../orna-postgres/migrations/0013_resolved_enum_types.sql"),
+        include_str!("../migrations/0013_resolved_enum_types.sql"),
     ),
     (
         14,
         "catalogue enum reference targets",
-        include_str!("../../orna-postgres/migrations/0014_enum_reference_targets.sql"),
+        include_str!("../migrations/0014_enum_reference_targets.sql"),
     ),
     (
         15,
         "catalogue record value storage",
-        include_str!("../../orna-postgres/migrations/0015_catalogue_record_value_types.sql"),
+        include_str!("../migrations/0015_catalogue_record_value_types.sql"),
     ),
     (
         16,
         "resolved record value type storage",
-        include_str!("../../orna-postgres/migrations/0016_resolved_record_value_types.sql"),
+        include_str!("../migrations/0016_resolved_record_value_types.sql"),
     ),
     (
         17,
         "record value field reference targets",
-        include_str!("../../orna-postgres/migrations/0017_record_field_reference_targets.sql"),
+        include_str!("../migrations/0017_record_field_reference_targets.sql"),
     ),
     (
         18,
         "disjoint field reference targets",
-        include_str!("../../orna-postgres/migrations/0018_disjoint_field_reference_targets.sql"),
+        include_str!("../migrations/0018_disjoint_field_reference_targets.sql"),
     ),
     (
         19,
         "standard opaque value storage",
-        include_str!("../../orna-postgres/migrations/0019_standard_opaque_value_types.sql"),
+        include_str!("../migrations/0019_standard_opaque_value_types.sql"),
     ),
 ];
 const MIGRATION_DATA_STEP_SEPARATOR: &[u8] = b"\0orna.kernel.migration-step\0";
