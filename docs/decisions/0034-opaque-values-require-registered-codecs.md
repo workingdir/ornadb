@@ -72,26 +72,22 @@ below is complete.
 
 ## First registered contract
 
-The first runtime contract is `orna.std.value.opaque-token@1`. Standard-library
-version `orna.std/2` adds `std.types.OPAQUE_TOKEN` with
+The first runtime contract is `orna.std.value.opaque-token@1`. The still
+unpublished initial standard library adds `std.types.OPAQUE_TOKEN` with
 `TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 14])` and
 exports it as `std.OPAQUE_TOKEN`. It has no prelude spelling. The type is
 immutable and transient. Its value is exactly sixteen bytes. Every sixteen-byte
 sequence is canonical; every other length is invalid. The codec does not assign
 text, UUID, cryptographic, secret, or database semantics to those bytes.
 
-The accepted `std/2` source, manifest, digest, source revision, catalogue
-revision, and PostgreSQL standard snapshot bind this new definition. Existing
-`std/1` bytes and identities remain historical facts; they are not rewritten.
-The normal standard upgrade mechanism installs `std/2` before an opaque value
-can be used.
-
-`orna.std/2`, its standard catalogue revision, and its retained source revision
-use the reserved identity whose final byte is `2`. The source bundle and
-`std/types.orna` source-unit identities remain the existing final-byte-`1`
-identities. The standard source revision names the previous `std/1` source
-revision as its parent. These facts make the upgrade an append-only revision,
-not an in-place reinterpretation of `std/1`.
+The accepted `orna.std/1` source, manifest, digest, source revision, catalogue
+revision, and PostgreSQL standard snapshot bind this definition before the
+first publication. Their existing final-byte-`1` identities and root source
+revision remain unchanged; their pinned source and digest goldens advance
+together. No released database accepts the earlier development digest, so the
+implementation does not create or persist an artificial predecessor revision.
+After the first publication, any standard semantic change requires a new
+standard-library revision and a normal append-only upgrade.
 
 ## Registered runtime boundary
 
@@ -198,8 +194,8 @@ canonical round trips, wrong-active-revision rejection, wrong-contract
 rejection, bounded arbitrary-input decode, transient-slot rejection, protocol
 version closure, and CLIENT-only execution. It must also prove:
 
-* exact accepted `std/2` source, manifest, identities, digest, upgrade, durable
-  rows, recovery, and rejection of `std/1` where `std/2` is required;
+* exact accepted `std/1` source, manifest, unchanged identities, new digest,
+  durable rows, recovery, and rejection of the superseded development digest;
 * every possible byte value round trips canonically in every one of the sixteen
   token positions, while every other payload length fails;
 * the exact version-2 CLIENT artefact bytes and retained version-1 bytes;
@@ -223,7 +219,7 @@ compiler, canonical-hash, recovery, and live PostgreSQL gates remain required.
 4. Store, recover, and tamper-check the definition and contract.
 5. Amend this decision with the first registered contract, CLIENT artefact, and
    exact ORV4 and ORF4 bytes.
-6. Install and recover the accepted `std/2` opaque definition.
+6. Install and recover the accepted initial-standard opaque definition.
 7. Add checked opaque runtime values and the immutable registry.
 8. Add the closed CLIENT artefact and evaluator host.
 9. Add ORV4, ORF4, and exact protocol-4 negotiation.
