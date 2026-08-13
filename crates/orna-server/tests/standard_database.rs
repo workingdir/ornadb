@@ -35,7 +35,7 @@ use orna_core::{
     types::ResolvedType,
     value::{EnumValue, OpaqueValue, RecordValue, RuntimeValue},
 };
-use orna_kernel_postgres::{AuthenticatedRawCallResult, PostgresKernel, PostgresKernelError};
+use orna_postgres::{AuthenticatedRawCallResult, PostgresKernel, PostgresKernelError};
 use orna_protocol::{
     CallFailure, Channel, ClientFrame, Event, RawCall, ServerAction, ServerFrame,
     decode_active_server_frame, decode_registered_server_frame, decode_server_frame,

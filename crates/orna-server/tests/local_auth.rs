@@ -9,7 +9,7 @@ use orna_core::{
         PrincipalStatus, SecuritySnapshot,
     },
 };
-use orna_kernel_postgres::{PostgresKernel, PostgresKernelError};
+use orna_postgres::{PostgresKernel, PostgresKernelError};
 use orna_server::{LocalAuthenticationError, authenticate_local_stream};
 
 #[path = "../../orna-kernel-postgres/tests/support/mod.rs"]
