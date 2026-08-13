@@ -563,7 +563,7 @@ async fn applies_and_recovers_named_record_definitions() -> TestResult<()> {
             .query(
                 "SELECT field_id, name, ordinal, type_kind, value_type_id,
                         value_standard_library_revision_id, enum_type_id,
-                        source_unit_id, source_start, source_end
+                        source_unit_id, source_start, source_end, record_type_id
                  FROM _orna_kernel.catalogue_record_value_fields
                  WHERE catalogue_revision_id = $1 AND owner_type_id = $2
                  ORDER BY ordinal",
@@ -641,6 +641,7 @@ async fn applies_and_recovers_named_record_definitions() -> TestResult<()> {
                     == i64::from(expected_field_origins[0].source().byte_start())
                 && field_rows[0].try_get::<_, i64>(9)?
                     == i64::from(expected_field_origins[0].source().byte_end())
+                && field_rows[0].try_get::<_, Option<Vec<u8>>>(10)?.is_none()
                 && field_rows[1].try_get::<_, Vec<u8>>(0)?
                     == expected.fields()[1].id().to_bytes().to_vec()
                 && field_rows[1].try_get::<_, String>(1)? == "stage"
@@ -659,6 +660,7 @@ async fn applies_and_recovers_named_record_definitions() -> TestResult<()> {
                     == i64::from(expected_field_origins[1].source().byte_start())
                 && field_rows[1].try_get::<_, i64>(9)?
                     == i64::from(expected_field_origins[1].source().byte_end())
+                && field_rows[1].try_get::<_, Option<Vec<u8>>>(10)?.is_none()
                 && postgres_composite_count == 0,
             "record apply did not preserve its exact protected definition rows",
         )?;
@@ -732,7 +734,7 @@ async fn applies_and_reconnects_a_standard_enum_record_field() -> TestResult<()>
                 "SELECT field_id, name, ordinal, type_kind,
                         value_type_id, value_standard_library_revision_id, enum_type_id,
                         enum_standard_library_revision_id, standard_enum_type_id,
-                        source_unit_id, source_start, source_end
+                        source_unit_id, source_start, source_end, record_type_id
                  FROM _orna_kernel.catalogue_record_value_fields
                  WHERE catalogue_revision_id = $1 AND owner_type_id = $2",
                 &[
@@ -795,6 +797,7 @@ async fn applies_and_reconnects_a_standard_enum_record_field() -> TestResult<()>
                     == expected_origin.source_unit().to_bytes().to_vec()
                 && row.try_get::<_, i64>(10)? == i64::from(expected_origin.byte_start())
                 && row.try_get::<_, i64>(11)? == i64::from(expected_origin.byte_end())
+                && row.try_get::<_, Option<Vec<u8>>>(12)?.is_none()
                 && standard_enum.try_get::<_, Vec<String>>(0)? == expected_enum.name().parts()
                 && standard_enum.try_get::<_, Vec<String>>(1)? == expected_enum.labels()
                 && standard_enum.try_get::<_, Vec<u8>>(2)?
@@ -834,6 +837,221 @@ async fn applies_and_reconnects_a_standard_enum_record_field() -> TestResult<()>
         )
     })
     .await
+}
+#[tokio::test]
+#[cfg(feature = "test-hooks")]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn applies_nested_record_field_targets_through_the_two_trigger_oracle() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel_instance = kernel(&database)?;
+        kernel_instance.bootstrap().await?;
+        let empty = kernel_instance.recover().await?;
+        let version_one = kernel_instance
+            .apply(&candidate(STANDARD_APPLICATION_SOURCE, &empty)?)
+            .await?;
+        let upgrade = orna_standard::prepare_standard_upgrade(&version_one)
+            .map_err(|error| failure(format!("standard upgrade preparation failed: {error}")))?;
+        let version_two = kernel_instance.apply_standard_upgrade(&upgrade).await?;
+        let candidate = standard_application_candidate(
+            NESTED_RECORD_APPLICATION_SOURCE,
+            &version_two,
+            &upgrade,
+        )?;
+        let records = candidate.candidate().record_value_types();
+        if !(records.len() == 2
+            && records[0].name().to_string() == "app.outer"
+            && records[1].name().to_string() == "app.inner")
+        {
+            return Err(failure(format!(
+                "nested candidate did not preserve source declaration order: {:?}",
+                records
+                    .iter()
+                    .map(|record| record.name().to_string())
+                    .collect::<Vec<_>>()
+            )));
+        }
+        let outer = &records[0];
+        let inner = &records[1];
+        let child = outer
+            .fields()
+            .iter()
+            .find(|field| field.name() == "child")
+            .ok_or_else(|| failure("outer record has no child field"))?;
+        let TypeDescriptorKind::Named(target) = child.descriptor().kind() else {
+            return Err(failure(
+                "child field descriptor is not a resolved Named identity",
+            ));
+        };
+        require(
+            target == inner.id(),
+            "child field does not target the exact inner application record identity",
+        )?;
+        let child_origin = candidate
+            .origins()
+            .iter()
+            .find(|origin| {
+                origin.identity()
+                    == DefinitionIdentity::Field {
+                        owner: outer.id(),
+                        field: child.id(),
+                    }
+            })
+            .map(DefinitionOrigin::source)
+            .ok_or_else(|| failure("child field has no declaration origin"))?;
+        require(
+            child_origin.source_unit().to_bytes().to_vec()
+                == candidate
+                    .source()
+                    .units()
+                    .first()
+                    .ok_or_else(|| failure("nested candidate has no source unit"))?
+                    .id()
+                    .to_bytes()
+                    .to_vec(),
+            "child field origin does not slice the candidate source unit",
+        )?;
+        let catalogue_revision = candidate.candidate().revision().to_bytes().to_vec();
+        let outer_type = outer.id().to_bytes().to_vec();
+        let inner_type = inner.id().to_bytes().to_vec();
+        let child_field = child.id().to_bytes().to_vec();
+
+        let session = database.open().await?;
+        install_nested_record_field_oracle_triggers(
+            session.client(),
+            &catalogue_revision,
+            &outer_type,
+            &child_field,
+            &inner_type,
+            &child_origin,
+        )
+        .await?;
+        session.shutdown().await?;
+
+        let before = baseline(&database, &version_two).await?;
+        let error = failed_apply_error(
+            kernel_instance.apply(&candidate).await,
+            "nested record candidate unexpectedly survived the sentinel oracle",
+        )?;
+        match &error {
+            PostgresKernelError::Database(database_error) => {
+                let database_error = database_error.as_db_error().ok_or_else(|| {
+                    failure(format!(
+                        "nested record apply failed without database fields: {error}"
+                    ))
+                })?;
+                if !(database_error.code().code() == "P0001"
+                    && database_error.message() == "ORNA_APPLY_NESTED_RECORD_FIELD_OK")
+                {
+                    return Err(failure(format!(
+                        "nested record apply failed with the wrong sentinel: {error}"
+                    )));
+                }
+            }
+            _ => {
+                return Err(failure(format!(
+                    "nested record apply failed before the P0001 sentinel: {error}"
+                )));
+            }
+        }
+        require_baseline(&database, &before, &kernel_instance).await
+    })
+    .await
+}
+
+#[cfg(feature = "test-hooks")]
+const NESTED_RECORD_APPLICATION_SOURCE: &str = "CREATE SCHEMA app;\n\
+    CREATE TYPE app.outer AS VALUE (child app.inner) IMMUTABLE PERSISTABLE;\n\
+    CREATE TYPE app.inner AS VALUE (flag BOOLEAN) IMMUTABLE PERSISTABLE;\n";
+
+#[cfg(feature = "test-hooks")]
+fn bytea_hex_literal(bytes: &[u8]) -> String {
+    format!(
+        "'\\x{}'::bytea",
+        bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    )
+}
+
+#[cfg(feature = "test-hooks")]
+async fn install_nested_record_field_oracle_triggers(
+    client: &tokio_postgres::Client,
+    catalogue_revision: &[u8],
+    outer_type: &[u8],
+    child_field: &[u8],
+    inner_type: &[u8],
+    child_origin: &SourceOrigin,
+) -> TestResult<()> {
+    let revision = bytea_hex_literal(catalogue_revision);
+    let outer = bytea_hex_literal(outer_type);
+    let child = bytea_hex_literal(child_field);
+    let inner = bytea_hex_literal(inner_type);
+    let source_unit = bytea_hex_literal(&child_origin.source_unit().to_bytes());
+    let source_start = i64::from(child_origin.byte_start());
+    let source_end = i64::from(child_origin.byte_end());
+    client
+        .batch_execute(&format!(
+            "CREATE FUNCTION _orna_kernel.orna_nested_target_ordering_assert()
+             RETURNS trigger LANGUAGE plpgsql AS $function$
+             BEGIN
+                 IF NEW.catalogue_revision_id = {revision} AND NEW.type_id = {inner} THEN
+                     IF NOT EXISTS (
+                         SELECT 1 FROM _orna_kernel.catalogue_record_value_fields
+                         WHERE catalogue_revision_id = {revision}
+                           AND owner_type_id = {outer}
+                           AND field_id = {child}
+                     ) THEN
+                         RAISE EXCEPTION 'ORNA_APPLY_FIELD_BEFORE_TARGET_VIOLATED';
+                     END IF;
+                 END IF;
+                 RETURN NEW;
+             END
+             $function$;
+             CREATE TRIGGER orna_nested_target_ordering
+             BEFORE INSERT ON _orna_kernel.catalogue_record_value_types
+             FOR EACH ROW EXECUTE FUNCTION _orna_kernel.orna_nested_target_ordering_assert();
+             CREATE FUNCTION _orna_kernel.orna_nested_field_tuple_assert()
+             RETURNS trigger LANGUAGE plpgsql AS $function$
+             BEGIN
+                 IF NOT (NEW.owner_type_id = {outer} AND NEW.field_id = {child}) THEN
+                     RETURN NULL;
+                 END IF;
+                 IF NEW.type_kind <> 'record'
+                     OR NEW.record_type_id <> {inner}
+                     OR NEW.value_type_id IS NOT NULL
+                     OR NEW.value_standard_library_revision_id IS NOT NULL
+                     OR NEW.enum_type_id IS NOT NULL
+                     OR NEW.enum_standard_library_revision_id IS NOT NULL
+                     OR NEW.standard_enum_type_id IS NOT NULL
+                     OR NEW.name <> 'child'
+                     OR NEW.ordinal <> 0
+                     OR NEW.source_unit_id <> {source_unit}
+                     OR NEW.source_start <> {source_start}
+                     OR NEW.source_end <> {source_end}
+                 THEN
+                     RAISE EXCEPTION 'ORNA_APPLY_TUPLE_MISMATCH %', NEW;
+                 END IF;
+                 IF NEW.catalogue_revision_id <> {revision} THEN
+                     RAISE EXCEPTION 'ORNA_APPLY_REVISION_MISMATCH %', NEW.catalogue_revision_id;
+                 END IF;
+                 IF NOT EXISTS (
+                     SELECT 1 FROM _orna_kernel.catalogue_record_value_types
+                     WHERE catalogue_revision_id = NEW.catalogue_revision_id
+                       AND type_id = NEW.record_type_id
+                 ) THEN
+                     RAISE EXCEPTION 'ORNA_APPLY_TARGET_MISSING';
+                 END IF;
+                 RAISE EXCEPTION 'ORNA_APPLY_NESTED_RECORD_FIELD_OK';
+             END
+             $function$;
+             CREATE CONSTRAINT TRIGGER orna_nested_field_tuple
+             AFTER INSERT ON _orna_kernel.catalogue_record_value_fields
+             DEFERRABLE INITIALLY DEFERRED
+             FOR EACH ROW EXECUTE FUNCTION _orna_kernel.orna_nested_field_tuple_assert();"
+        ))
+        .await?;
+    Ok(())
 }
 
 #[tokio::test]
@@ -1619,7 +1837,10 @@ async fn baseline(
           (SELECT count(*) FROM _orna_kernel.function_revisions),
           (SELECT count(*) FROM _orna_kernel.function_artifacts),
           (SELECT count(*) FROM _orna_kernel.active_revision),
-          (SELECT count(*) FROM _orna_kernel.definition_references)",
+          (SELECT count(*) FROM _orna_kernel.definition_references),
+          (SELECT count(*) FROM _orna_kernel.catalogue_enum_types),
+          (SELECT count(*) FROM _orna_kernel.catalogue_record_value_types),
+          (SELECT count(*) FROM _orna_kernel.catalogue_record_value_fields)",
             &[],
         )
         .await?;
@@ -1633,7 +1854,7 @@ async fn baseline(
         .into_iter()
         .map(|row| Ok((row.try_get(0)?, row.try_get(1)?)))
         .collect::<Result<Vec<(Vec<u8>, String)>, tokio_postgres::Error>>()?;
-    let counts = (0..16)
+    let counts = (0..19)
         .map(|index| counts.try_get(index))
         .collect::<Result<Vec<i64>, _>>()?;
     let result = Baseline {

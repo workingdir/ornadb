@@ -1400,6 +1400,7 @@ async fn persist_semantics(
                 application_enum_type,
                 enum_standard_library_revision,
                 standard_enum_type,
+                application_record_type,
             } = encoder.record_value_field_columns(candidate, field.descriptor())?;
             let field_origin = origin(
                 candidate.origins(),
@@ -1414,8 +1415,9 @@ async fn persist_semantics(
                         (catalogue_revision_id, owner_type_id, field_id, name, ordinal,
                          type_kind, value_type_id, value_standard_library_revision_id,
                          enum_type_id, enum_standard_library_revision_id,
-                         standard_enum_type_id, source_unit_id, source_start, source_end)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
+                         standard_enum_type_id, record_type_id,
+                         source_unit_id, source_start, source_end)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
                     &[
                         &bytes(catalogue),
                         &bytes(record_type.id()),
@@ -1428,6 +1430,7 @@ async fn persist_semantics(
                         &application_enum_type.map(bytes),
                         &enum_standard_library_revision.map(bytes),
                         &standard_enum_type.map(bytes),
+                        &application_record_type.map(bytes),
                         &bytes(field_origin.source_unit()),
                         &i64::from(field_origin.byte_start()),
                         &i64::from(field_origin.byte_end()),
@@ -2057,6 +2060,7 @@ struct RecordValueFieldColumns {
     application_enum_type: Option<TypeId>,
     enum_standard_library_revision: Option<StandardLibraryRevisionId>,
     standard_enum_type: Option<TypeId>,
+    application_record_type: Option<TypeId>,
 }
 
 /// The one context-aware PostgreSQL projection for candidate type and reference
@@ -2091,7 +2095,9 @@ impl<'a> CandidateEncoder<'a> {
         let class = candidate
             .record_value_field_descriptor_class(descriptor)
             .map_err(|_| {
-                invariant("record value fields must use one supported standard value or enum type")
+                invariant(
+                    "record value fields must use one supported standard value, enum, or record type",
+                )
             })?;
         match class {
             RecordValueFieldDescriptorClass::ApplicationEnum(type_id) => {
@@ -2102,6 +2108,18 @@ impl<'a> CandidateEncoder<'a> {
                     application_enum_type: Some(type_id),
                     enum_standard_library_revision: None,
                     standard_enum_type: None,
+                    application_record_type: None,
+                })
+            }
+            RecordValueFieldDescriptorClass::ApplicationRecord(type_id) => {
+                Ok(RecordValueFieldColumns {
+                    kind: "record",
+                    value_type: None,
+                    value_standard_library_revision: None,
+                    application_enum_type: None,
+                    enum_standard_library_revision: None,
+                    standard_enum_type: None,
+                    application_record_type: Some(type_id),
                 })
             }
             RecordValueFieldDescriptorClass::StandardEnum(type_id) => {
@@ -2116,6 +2134,7 @@ impl<'a> CandidateEncoder<'a> {
                     application_enum_type: None,
                     enum_standard_library_revision: Some(standard_library_revision),
                     standard_enum_type: Some(type_id),
+                    application_record_type: None,
                 })
             }
             RecordValueFieldDescriptorClass::StandardPrimitive(type_id) => {
@@ -2132,6 +2151,7 @@ impl<'a> CandidateEncoder<'a> {
                     application_enum_type: None,
                     enum_standard_library_revision: None,
                     standard_enum_type: None,
+                    application_record_type: None,
                 })
             }
             _ => Err(invariant(
