@@ -153,7 +153,7 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
     (
         19,
         "standard opaque value storage",
-        include_str!("../migrations/0019_standard_opaque_value_types.sql"),
+        include_str!("../../orna-postgres/migrations/0019_standard_opaque_value_types.sql"),
     ),
 ];
 const MIGRATION_DATA_STEP_SEPARATOR: &[u8] = b"\0orna.kernel.migration-step\0";
