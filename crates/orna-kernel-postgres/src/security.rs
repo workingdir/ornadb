@@ -61,6 +61,37 @@ impl PostgresKernel {
         authenticated_session: &AuthenticatedSession,
         function: FunctionId,
     ) -> Result<AuthenticatedRawCallResult, PostgresKernelError> {
+        self.dispatch_authenticated_raw_call_with_options(authenticated_session, function, None)
+            .await
+    }
+
+    /// Pauses raw dispatch after one active and security snapshot is recovered.
+    ///
+    /// The hook exposes one deterministic point to the integration harness. It
+    /// is absent from production builds and does not alter transaction state.
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub async fn dispatch_authenticated_raw_call_with_test_barrier(
+        &self,
+        authenticated_session: &AuthenticatedSession,
+        function: FunctionId,
+        reached: std::sync::Arc<tokio::sync::Barrier>,
+        resume: std::sync::Arc<tokio::sync::Barrier>,
+    ) -> Result<AuthenticatedRawCallResult, PostgresKernelError> {
+        self.dispatch_authenticated_raw_call_with_options(
+            authenticated_session,
+            function,
+            Some(RawDispatchTestBarrier { reached, resume }),
+        )
+        .await
+    }
+
+    async fn dispatch_authenticated_raw_call_with_options(
+        &self,
+        authenticated_session: &AuthenticatedSession,
+        function: FunctionId,
+        test_barrier: Option<RawDispatchTestBarrier>,
+    ) -> Result<AuthenticatedRawCallResult, PostgresKernelError> {
         let mut database_session = self.open().await?;
         let operation = async {
             let mut transaction = database_session
@@ -73,6 +104,7 @@ impl PostgresKernel {
             require_current_migrations(&transaction).await?;
             let active = configure_and_recover(&transaction).await?;
             let security = recover_security_snapshot_for_active(&transaction, &active).await?;
+            pause_after_raw_dispatch_recovery(test_barrier.as_ref()).await;
             let target = InvocationTarget::new(function, active.pair());
 
             let execution = match security.authorise_execute(authenticated_session, target) {
@@ -570,6 +602,26 @@ pub enum RecordArgumentPreflight {
     /// At least one record is stale or incompatible with the active revision.
     Stale,
 }
+
+#[cfg(feature = "test-hooks")]
+struct RawDispatchTestBarrier {
+    reached: std::sync::Arc<tokio::sync::Barrier>,
+    resume: std::sync::Arc<tokio::sync::Barrier>,
+}
+
+#[cfg(feature = "test-hooks")]
+async fn pause_after_raw_dispatch_recovery(test_barrier: Option<&RawDispatchTestBarrier>) {
+    if let Some(test_barrier) = test_barrier {
+        test_barrier.reached.wait().await;
+        test_barrier.resume.wait().await;
+    }
+}
+
+#[cfg(not(feature = "test-hooks"))]
+struct RawDispatchTestBarrier;
+
+#[cfg(not(feature = "test-hooks"))]
+async fn pause_after_raw_dispatch_recovery(_test_barrier: Option<&RawDispatchTestBarrier>) {}
 
 #[cfg(feature = "test-hooks")]
 struct AuthenticatedSelectTestBarrier {
