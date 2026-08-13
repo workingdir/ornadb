@@ -109,7 +109,7 @@ const MIGRATIONS: &[Migration] = &[
         version: 15,
         name: "catalogue record value storage",
         sql: include_str!(
-            "../../../orna-kernel-postgres/migrations/0015_catalogue_record_value_types.sql"
+            "../../migrations/0015_catalogue_record_value_types.sql"
         ),
         data_step: None,
     },

@@ -133,7 +133,7 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
     (
         15,
         "catalogue record value storage",
-        include_str!("../migrations/0015_catalogue_record_value_types.sql"),
+        include_str!("../../orna-postgres/migrations/0015_catalogue_record_value_types.sql"),
     ),
     (
         16,
