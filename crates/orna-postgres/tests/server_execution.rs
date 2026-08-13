@@ -1,5 +1,6 @@
 //! Live PostgreSQL tests for the bounded active SERVER SELECT entry point.
 
+#[path = "../../orna-kernel-postgres/tests/support/mod.rs"]
 mod support;
 
 use std::str::FromStr;
@@ -28,7 +29,7 @@ use orna_core::{
         SecurityAuditOutcome, SecuritySnapshot,
     },
 };
-use orna_kernel_postgres::{
+use orna_postgres::{
     PostgresKernel, PostgresKernelError, ServerSelectError, ServerSelectResult,
 };
 use orna_protocol::{ValueCodecError, encode_active_value};
