@@ -18,10 +18,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-const USAGE: &[u8] = b"Usage:\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna source check <file.orna>\n";
+const USAGE: &[u8] = b"Usage:\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna source check <file.orna>\n  orna raw-call <canonical-function-id>\n";
 const VALID_SOURCE: &[u8] =
     b"CREATE SCHEMA app; CREATE TYPE app.task AS OBJECT (done BOOLEAN NOT NULL);";
 const TERMINAL_REQUIRED: &[u8] = b"orna: backend-shell must be run in an interactive terminal\n";
+const RAW_CALL_CONNECTION_FAILED: &[u8] = b"local raw-call connection failed\n";
 const PROCESS_TIMEOUT: Duration = Duration::from_secs(5);
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
@@ -480,6 +481,33 @@ fn piped_input_and_hostile_environment_have_no_authority() {
     )
     .expect("offline source-check process");
     assert_success(&wait_bounded(child).expect("source check ignores open stdin"));
+}
+
+#[test]
+fn raw_call_uses_only_the_fixed_endpoint_under_hostile_process_state() {
+    assert!(!Path::new("/run/orna/default/orna.sock").exists());
+    let directory = TestDirectory::new("raw-call").expect("test directory");
+    let child = spawn_orna(
+        &directory.0,
+        [
+            OsString::from("raw-call"),
+            OsString::from("function:00000000000000000000000000"),
+        ],
+        [
+            (
+                OsString::from("ORNA_SOCKET"),
+                directory.0.join("hostile.sock").into_os_string(),
+            ),
+            (OsString::from("HOME"), directory.0.clone().into_os_string()),
+            (OsString::from("PATH"), OsString::from("/nonexistent")),
+        ],
+        Stdio::piped(),
+    )
+    .expect("raw-call process");
+    let output = wait_bounded(child).expect("raw-call ignores open stdin");
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    assert_eq!(output.stderr, RAW_CALL_CONNECTION_FAILED);
 }
 
 #[test]
