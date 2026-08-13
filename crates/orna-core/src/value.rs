@@ -481,9 +481,7 @@ impl RecordValue {
                     field: field.id(),
                 });
             }
-            let descriptor = field
-                .type_descriptor()
-                .expect("active record fields have descriptors");
+            let descriptor = field.descriptor();
             let expected = active
                 .record_value_field_descriptor_runtime_type(descriptor)
                 .ok_or_else(|| RecordValueError::UnsupportedFieldType {
