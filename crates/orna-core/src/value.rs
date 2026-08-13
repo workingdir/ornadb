@@ -442,6 +442,7 @@ impl Error for OpaqueValueError {}
 #[derive(Clone, Debug, PartialEq)]
 pub struct RecordValue {
     record_type: TypeId,
+    field_ids: Vec<FieldId>,
     fields: Vec<RuntimeValue>,
 }
 
@@ -490,7 +491,32 @@ impl RecordValue {
                     descriptor: descriptor.clone(),
                 })?;
             let actual = value.resolved_type();
-            if actual != expected || matches!(value, RuntimeValue::Record(_)) {
+            if actual != expected {
+                return Err(RecordValueError::FieldTypeMismatch {
+                    record_type,
+                    field: field.id(),
+                    expected,
+                    actual,
+                });
+            }
+            if let Some(nested_record_type) = application_record_field_target(catalogue, descriptor)
+            {
+                let RuntimeValue::Record(nested) = &value else {
+                    return Err(RecordValueError::FieldTypeMismatch {
+                        record_type,
+                        field: field.id(),
+                        expected,
+                        actual,
+                    });
+                };
+                if !record_value_is_active(active, nested) {
+                    return Err(RecordValueError::InactiveNestedRecord {
+                        record_type,
+                        field: field.id(),
+                        nested_record_type,
+                    });
+                }
+            } else if matches!(value, RuntimeValue::Record(_)) {
                 return Err(RecordValueError::FieldTypeMismatch {
                     record_type,
                     field: field.id(),
@@ -532,6 +558,7 @@ impl RecordValue {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
             record_type,
+            field_ids: definition.fields().iter().map(|field| field.id()).collect(),
             fields,
         })
     }
@@ -545,6 +572,84 @@ impl RecordValue {
     pub fn fields(&self) -> &[RuntimeValue] {
         &self.fields
     }
+}
+
+fn application_record_field_target(
+    catalogue: &CatalogueSnapshot,
+    descriptor: &TypeDescriptor,
+) -> Option<TypeId> {
+    let crate::types::TypeDescriptorKind::Named(type_id) = descriptor.kind() else {
+        return None;
+    };
+    catalogue
+        .record_value_type_by_id(type_id)
+        .map(|definition| definition.id())
+}
+
+fn record_value_is_active(active: &ActiveDatabaseRevision, value: &RecordValue) -> bool {
+    let catalogue = active.catalogue();
+    let Some(definition) = catalogue.record_value_type_by_id(value.record_type) else {
+        return false;
+    };
+    if definition.fields().len() != value.fields.len()
+        || !definition
+            .fields()
+            .iter()
+            .map(|field| field.id())
+            .eq(value.field_ids.iter().copied())
+    {
+        return false;
+    }
+    let Some(standard) = active.catalogue_hash_context().standard() else {
+        return false;
+    };
+    let standard = standard.catalogue();
+
+    definition
+        .fields()
+        .iter()
+        .zip(&value.fields)
+        .all(|(field, field_value)| {
+            if field_value.is_null() {
+                return false;
+            }
+            let Some(expected) =
+                active.record_value_field_descriptor_runtime_type(field.descriptor())
+            else {
+                return false;
+            };
+            if field_value.resolved_type() != expected {
+                return false;
+            }
+            if let Some(nested_record_type) =
+                application_record_field_target(catalogue, field.descriptor())
+            {
+                let RuntimeValue::Record(nested) = field_value else {
+                    return false;
+                };
+                if nested.record_type() != nested_record_type
+                    || !record_value_is_active(active, nested)
+                {
+                    return false;
+                }
+            } else if matches!(field_value, RuntimeValue::Record(_)) {
+                return false;
+            }
+            if let RuntimeValue::Enum(enum_value) = field_value {
+                let active_enum = catalogue
+                    .enum_type_by_id(enum_value.enum_type())
+                    .or_else(|| standard.enum_type_by_id(enum_value.enum_type()));
+                if !active_enum.is_some_and(|enum_type| {
+                    enum_type
+                        .labels()
+                        .iter()
+                        .any(|label| label == enum_value.label())
+                }) {
+                    return false;
+                }
+            }
+            true
+        })
 }
 
 /// An error from validating a named immutable record value.
@@ -604,6 +709,15 @@ pub enum RecordValueError {
         /// The runtime type supplied by the caller.
         actual: ResolvedType,
     },
+    /// A nested record field value is not valid for the active revision.
+    InactiveNestedRecord {
+        /// The active record type identity.
+        record_type: TypeId,
+        /// The nested record field identity.
+        field: FieldId,
+        /// The declared nested record type identity.
+        nested_record_type: TypeId,
+    },
     /// An enum field label is not present in the active enum definition.
     InactiveEnumLabel {
         /// The active record type identity.
@@ -632,6 +746,9 @@ impl fmt::Display for RecordValueError {
             }
             Self::FieldTypeMismatch { .. } => {
                 formatter.write_str("record field value has a type mismatch")
+            }
+            Self::InactiveNestedRecord { .. } => {
+                formatter.write_str("nested record field value is not active")
             }
             Self::InactiveEnumLabel { .. } => {
                 formatter.write_str("record enum field label is not active")
@@ -1151,6 +1268,524 @@ mod tests {
     const STAGE_FIELD: FieldId = FieldId::from_bytes([0x5a; 16]);
     const OPAQUE_NAME: [&str; 3] = ["std", "types", "opaque_token"];
     const OPAQUE_CONTRACT: &str = "orna.std.value.opaque-token@1";
+
+    /// One active revision with an acyclic nested-record catalogue.
+    ///
+    /// `outer.payload` declares `inner` as its Named application-record
+    /// field, and `inner.value` is a pinned-standard Boolean leaf.
+    fn active_nested_record_revision() -> ActiveDatabaseRevision {
+        active_nested_record_revision_with_child_fields(vec![
+            RecordValueFieldDefinition::try_new_descriptor(
+                FieldId::from_bytes([0x3a; 16]),
+                "value",
+                0,
+                TypeDescriptor::named(STANDARD_BOOLEAN),
+            )
+            .unwrap(),
+        ])
+    }
+
+    fn active_nested_record_revision_with_child_fields(
+        child_fields: Vec<RecordValueFieldDefinition>,
+    ) -> ActiveDatabaseRevision {
+        active_nested_record_revision_with_seed(child_fields, 0x58, 0x64)
+    }
+
+    fn active_nested_record_revision_with_seed(
+        child_fields: Vec<RecordValueFieldDefinition>,
+        catalogue_revision_byte: u8,
+        source_revision_byte: u8,
+    ) -> ActiveDatabaseRevision {
+        let standard = verified_standard_with_value_types(vec![standard_boolean_definition()]);
+        let application_schema = SchemaId::from_bytes([0x57; 16]);
+        let catalogue_revision = CatalogueRevisionId::from_bytes([catalogue_revision_byte; 16]);
+        let inner_type = TypeId::from_bytes([0x31; 16]);
+        let outer_type = TypeId::from_bytes([0x30; 16]);
+        let outer_field = FieldId::from_bytes([0x3b; 16]);
+        let child_field_ids = child_fields
+            .iter()
+            .map(|field| field.id())
+            .collect::<Vec<_>>();
+        let catalogue = CatalogueSnapshot::new_with_record_value_types(
+            catalogue_revision,
+            vec![SchemaDefinition::new(
+                application_schema,
+                QualifiedSemanticName::new(["crm"]).unwrap(),
+            )],
+            vec![],
+            vec![],
+            vec![],
+            vec![
+                RecordValueTypeDefinition::new(
+                    inner_type,
+                    QualifiedSemanticName::new(["crm", "inner"]).unwrap(),
+                    child_fields,
+                ),
+                RecordValueTypeDefinition::new(
+                    outer_type,
+                    QualifiedSemanticName::new(["crm", "outer"]).unwrap(),
+                    vec![
+                        RecordValueFieldDefinition::try_new_descriptor(
+                            outer_field,
+                            "payload",
+                            0,
+                            TypeDescriptor::named(inner_type),
+                        )
+                        .unwrap(),
+                    ],
+                ),
+            ],
+            vec![],
+        )
+        .unwrap();
+        let context = CatalogueHashContext::version_two(standard);
+        let application_content = "abcdef";
+        let application_unit = StoredSourceUnit::new(
+            SourceUnitId::from_bytes([0x63; 16]),
+            0,
+            "app/types.orna",
+            application_content,
+            source_unit_content_digest(application_content).unwrap(),
+        )
+        .unwrap();
+        let application_bundle_hash =
+            source_bundle_digest(std::slice::from_ref(&application_unit)).unwrap();
+        let application_source_revision = SourceRevisionId::from_bytes([source_revision_byte; 16]);
+        let application_source = StoredSourceRevision::new(
+            SourceBundleId::from_bytes([0x65; 16]),
+            application_source_revision,
+            None,
+            vec![application_unit],
+            application_bundle_hash,
+            source_revision_record_digest(
+                SourceBundleId::from_bytes([0x65; 16]),
+                None,
+                application_bundle_hash,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let source_unit = SourceUnitId::from_bytes([0x63; 16]);
+        let mut identities = vec![
+            DefinitionIdentity::Schema(application_schema),
+            DefinitionIdentity::ValueType(inner_type),
+        ];
+        identities.extend(
+            child_field_ids
+                .iter()
+                .map(|&field| DefinitionIdentity::Field {
+                    owner: inner_type,
+                    field,
+                }),
+        );
+        identities.push(DefinitionIdentity::ValueType(outer_type));
+        identities.push(DefinitionIdentity::Field {
+            owner: outer_type,
+            field: outer_field,
+        });
+        let origins = identities
+            .into_iter()
+            .enumerate()
+            .map(|(index, identity)| {
+                DefinitionOrigin::new(
+                    identity,
+                    SourceOrigin::new(source_unit, index as u32, index as u32 + 1).unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let catalogue_hash =
+            catalogue_digest_with_context(&context, &catalogue, &[], &[], &origins, &[]).unwrap();
+        ActiveDatabaseRevision::new_with_catalogue_hash_context(
+            ActiveDatabaseRevisionInput::new(
+                RevisionPair::new(application_source_revision, catalogue_revision),
+                application_source,
+                catalogue,
+                catalogue_hash,
+                ActiveRevisionContent::new(vec![], vec![], origins, vec![]),
+            ),
+            context,
+        )
+        .unwrap()
+    }
+
+    /// One active revision with an acyclic chain of 33 application records.
+    ///
+    /// Record `0x20 + index` holds one field pointing at the next record for
+    /// `index < 32`, and the leaf `0x40` holds a pinned-standard Boolean.
+    fn active_record_chain_revision() -> ActiveDatabaseRevision {
+        let standard = verified_standard_with_value_types(vec![standard_boolean_definition()]);
+        let application_schema = SchemaId::from_bytes([0x57; 16]);
+        let catalogue_revision = CatalogueRevisionId::from_bytes([0x58; 16]);
+        let mut records = Vec::new();
+        for index in 0..33_u8 {
+            let record_type = TypeId::from_bytes([0x20 + index; 16]);
+            let field_id = FieldId::from_bytes([0x80 + index; 16]);
+            let target = if index == 32 {
+                STANDARD_BOOLEAN
+            } else {
+                TypeId::from_bytes([0x20 + index + 1; 16])
+            };
+            records.push(RecordValueTypeDefinition::new(
+                record_type,
+                QualifiedSemanticName::new(["crm", &format!("chain_{index}")]).unwrap(),
+                vec![
+                    RecordValueFieldDefinition::try_new_descriptor(
+                        field_id,
+                        if index == 32 { "value" } else { "next" },
+                        0,
+                        TypeDescriptor::named(target),
+                    )
+                    .unwrap(),
+                ],
+            ));
+        }
+        let catalogue = CatalogueSnapshot::new_with_record_value_types(
+            catalogue_revision,
+            vec![SchemaDefinition::new(
+                application_schema,
+                QualifiedSemanticName::new(["crm"]).unwrap(),
+            )],
+            vec![],
+            vec![],
+            vec![],
+            records,
+            vec![],
+        )
+        .unwrap();
+        let context = CatalogueHashContext::version_two(standard);
+        let application_content = "z".repeat(70);
+        let application_unit = StoredSourceUnit::new(
+            SourceUnitId::from_bytes([0x63; 16]),
+            0,
+            "app/chain.orna",
+            &application_content,
+            source_unit_content_digest(&application_content).unwrap(),
+        )
+        .unwrap();
+        let application_bundle_hash =
+            source_bundle_digest(std::slice::from_ref(&application_unit)).unwrap();
+        let application_source_revision = SourceRevisionId::from_bytes([0x64; 16]);
+        let application_source = StoredSourceRevision::new(
+            SourceBundleId::from_bytes([0x65; 16]),
+            application_source_revision,
+            None,
+            vec![application_unit],
+            application_bundle_hash,
+            source_revision_record_digest(
+                SourceBundleId::from_bytes([0x65; 16]),
+                None,
+                application_bundle_hash,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let source_unit = SourceUnitId::from_bytes([0x63; 16]);
+        let mut identities = vec![DefinitionIdentity::Schema(application_schema)];
+        for index in 0..33_u8 {
+            let record_type = TypeId::from_bytes([0x20 + index; 16]);
+            let field_id = FieldId::from_bytes([0x80 + index; 16]);
+            identities.push(DefinitionIdentity::ValueType(record_type));
+            identities.push(DefinitionIdentity::Field {
+                owner: record_type,
+                field: field_id,
+            });
+        }
+        let origins = identities
+            .into_iter()
+            .enumerate()
+            .map(|(index, identity)| {
+                DefinitionOrigin::new(
+                    identity,
+                    SourceOrigin::new(source_unit, index as u32, index as u32 + 1).unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let catalogue_hash =
+            catalogue_digest_with_context(&context, &catalogue, &[], &[], &origins, &[]).unwrap();
+        ActiveDatabaseRevision::new_with_catalogue_hash_context(
+            ActiveDatabaseRevisionInput::new(
+                RevisionPair::new(application_source_revision, catalogue_revision),
+                application_source,
+                catalogue,
+                catalogue_hash,
+                ActiveRevisionContent::new(vec![], vec![], origins, vec![]),
+            ),
+            context,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn nested_record_value_constructs_against_one_active_revision() {
+        let active = active_nested_record_revision();
+        let inner_type = TypeId::from_bytes([0x31; 16]);
+        let outer_type = TypeId::from_bytes([0x30; 16]);
+        let inner = RecordValue::new(
+            &active,
+            inner_type,
+            [(String::from("value"), RuntimeValue::Boolean(true))],
+        )
+        .expect("the flat inner record must construct");
+        assert_eq!(inner.record_type(), inner_type);
+        assert_eq!(inner.fields(), &[RuntimeValue::Boolean(true)]);
+        assert_eq!(
+            RuntimeValue::Record(inner.clone()).resolved_type(),
+            ResolvedType::named(inner_type)
+        );
+
+        let outer = RecordValue::new(
+            &active,
+            outer_type,
+            [(String::from("payload"), RuntimeValue::Record(inner.clone()))],
+        )
+        .expect("nested application record field must be admitted");
+        assert_eq!(outer.record_type(), outer_type);
+        let [RuntimeValue::Record(inner_value)] = outer.fields() else {
+            panic!("outer payload must hold the inner record value");
+        };
+        assert_eq!(
+            inner_value, &inner,
+            "outer must store the equal inner record in declaration order"
+        );
+        assert_eq!(
+            RuntimeValue::Record(outer).resolved_type(),
+            ResolvedType::named(outer_type)
+        );
+    }
+
+    #[test]
+    fn stale_child_record_value_is_rejected_with_exact_inactive_nested_record_error() {
+        let child_type = TypeId::from_bytes([0x31; 16]);
+        let outer_type = TypeId::from_bytes([0x30; 16]);
+        let outer_field = FieldId::from_bytes([0x3b; 16]);
+        let old = active_nested_record_revision();
+        let current = active_nested_record_revision_with_child_fields(vec![
+            RecordValueFieldDefinition::try_new_descriptor(
+                FieldId::from_bytes([0x3a; 16]),
+                "value",
+                0,
+                TypeDescriptor::named(STANDARD_BOOLEAN),
+            )
+            .unwrap(),
+            RecordValueFieldDefinition::try_new_descriptor(
+                FieldId::from_bytes([0x3c; 16]),
+                "checked",
+                1,
+                TypeDescriptor::named(STANDARD_BOOLEAN),
+            )
+            .unwrap(),
+        ]);
+        let old_child = RecordValue::new(
+            &old,
+            child_type,
+            [(String::from("value"), RuntimeValue::Boolean(true))],
+        )
+        .expect("the child must construct under the old revision");
+
+        let error = RecordValue::new(
+            &current,
+            outer_type,
+            [(String::from("payload"), RuntimeValue::Record(old_child))],
+        )
+        .expect_err("a stale child must be rejected by the current outer");
+        assert_eq!(
+            error,
+            RecordValueError::InactiveNestedRecord {
+                record_type: outer_type,
+                field: outer_field,
+                nested_record_type: child_type,
+            }
+        );
+        assert_eq!(error.to_string(), "nested record field value is not active");
+        assert!(std::error::Error::source(&error).is_none());
+    }
+
+    #[test]
+    fn nominal_mismatch_precedes_recursive_activity_checking() {
+        let active = active_nested_record_revision();
+        let child_type = TypeId::from_bytes([0x31; 16]);
+        let outer_type = TypeId::from_bytes([0x30; 16]);
+        let outer_field = FieldId::from_bytes([0x3b; 16]);
+        let inner = RecordValue::new(
+            &active,
+            child_type,
+            [(String::from("value"), RuntimeValue::Boolean(true))],
+        )
+        .expect("the flat inner record must construct");
+        let outer = RecordValue::new(
+            &active,
+            outer_type,
+            [(String::from("payload"), RuntimeValue::Record(inner))],
+        )
+        .expect("a valid nested record must construct");
+
+        let error = RecordValue::new(
+            &active,
+            outer_type,
+            [(String::from("payload"), RuntimeValue::Record(outer))],
+        )
+        .expect_err("a nominal mismatch must be rejected");
+        assert_eq!(
+            error,
+            RecordValueError::FieldTypeMismatch {
+                record_type: outer_type,
+                field: outer_field,
+                expected: ResolvedType::named(child_type),
+                actual: ResolvedType::named(outer_type),
+            }
+        );
+    }
+
+    #[test]
+    fn nested_record_value_carries_no_creation_provenance_identity() {
+        let child_fields = vec![
+            RecordValueFieldDefinition::try_new_descriptor(
+                FieldId::from_bytes([0x3a; 16]),
+                "value",
+                0,
+                TypeDescriptor::named(STANDARD_BOOLEAN),
+            )
+            .unwrap(),
+        ];
+        let old = active_nested_record_revision();
+        let fresh = active_nested_record_revision_with_seed(child_fields, 0x77, 0x78);
+        let child_type = TypeId::from_bytes([0x31; 16]);
+        let outer_type = TypeId::from_bytes([0x30; 16]);
+        let old_child = RecordValue::new(
+            &old,
+            child_type,
+            [(String::from("value"), RuntimeValue::Boolean(true))],
+        )
+        .expect("the child must construct under the old revision");
+
+        let outer = RecordValue::new(
+            &fresh,
+            outer_type,
+            [(
+                String::from("payload"),
+                RuntimeValue::Record(old_child.clone()),
+            )],
+        )
+        .expect("a semantically identical revision must accept the child");
+        assert_eq!(outer.record_type(), outer_type);
+        let [RuntimeValue::Record(inner_value)] = outer.fields() else {
+            panic!("outer payload must hold the child record value");
+        };
+        assert_eq!(inner_value, &old_child);
+        assert_eq!(
+            RuntimeValue::Record(outer).resolved_type(),
+            ResolvedType::named(outer_type)
+        );
+    }
+
+    #[test]
+    fn nested_record_value_chain_walks_32_edges_to_the_boolean_leaf() {
+        let active = active_record_chain_revision();
+        let root_type = TypeId::from_bytes([0x20; 16]);
+        let leaf_type = TypeId::from_bytes([0x40; 16]);
+        let leaf = RecordValue::new(
+            &active,
+            leaf_type,
+            [(String::from("value"), RuntimeValue::Boolean(true))],
+        )
+        .expect("the leaf record must construct");
+        let mut value = RuntimeValue::Record(leaf);
+        for index in (0..32).rev() {
+            let record_type = TypeId::from_bytes([0x20 + index; 16]);
+            value = RuntimeValue::Record(
+                RecordValue::new(&active, record_type, [(String::from("next"), value)])
+                    .expect("each parent record must construct"),
+            );
+        }
+        let RuntimeValue::Record(root) = value else {
+            panic!("the root must be a record value");
+        };
+        assert_eq!(root.record_type(), root_type);
+
+        let mut current = &root;
+        let mut edges = 0;
+        loop {
+            let [field] = current.fields() else {
+                panic!("each chain record must hold exactly one field");
+            };
+            match field {
+                RuntimeValue::Record(next) => {
+                    edges += 1;
+                    current = next;
+                }
+                RuntimeValue::Boolean(stored) => {
+                    assert!(*stored, "the leaf must hold Boolean true");
+                    break;
+                }
+                other => panic!("unexpected chain leaf value {other:?}"),
+            }
+        }
+        assert_eq!(edges, 32, "the root must reach the leaf through 32 edges");
+    }
+
+    #[test]
+    fn reversed_child_declaration_order_is_inactive_in_the_current_revision() {
+        let child_type = TypeId::from_bytes([0x31; 16]);
+        let outer_type = TypeId::from_bytes([0x30; 16]);
+        let old_fields = vec![
+            RecordValueFieldDefinition::try_new_descriptor(
+                FieldId::from_bytes([0x3a; 16]),
+                "a",
+                0,
+                TypeDescriptor::named(STANDARD_BOOLEAN),
+            )
+            .unwrap(),
+            RecordValueFieldDefinition::try_new_descriptor(
+                FieldId::from_bytes([0x3c; 16]),
+                "b",
+                1,
+                TypeDescriptor::named(STANDARD_BOOLEAN),
+            )
+            .unwrap(),
+        ];
+        let current_fields = vec![
+            RecordValueFieldDefinition::try_new_descriptor(
+                FieldId::from_bytes([0x3c; 16]),
+                "b",
+                0,
+                TypeDescriptor::named(STANDARD_BOOLEAN),
+            )
+            .unwrap(),
+            RecordValueFieldDefinition::try_new_descriptor(
+                FieldId::from_bytes([0x3a; 16]),
+                "a",
+                1,
+                TypeDescriptor::named(STANDARD_BOOLEAN),
+            )
+            .unwrap(),
+        ];
+        let old = active_nested_record_revision_with_child_fields(old_fields);
+        let current = active_nested_record_revision_with_child_fields(current_fields);
+        let old_child = RecordValue::new(
+            &old,
+            child_type,
+            [
+                (String::from("a"), RuntimeValue::Boolean(true)),
+                (String::from("b"), RuntimeValue::Boolean(false)),
+            ],
+        )
+        .expect("the child must construct under the old revision");
+
+        let error = RecordValue::new(
+            &current,
+            outer_type,
+            [(String::from("payload"), RuntimeValue::Record(old_child))],
+        )
+        .expect_err("reversed declaration order must be inactive in the current revision");
+        assert_eq!(
+            error,
+            RecordValueError::InactiveNestedRecord {
+                record_type: outer_type,
+                field: FieldId::from_bytes([0x3b; 16]),
+                nested_record_type: child_type,
+            }
+        );
+    }
 
     fn active_record_revision() -> ActiveDatabaseRevision {
         active_record_revision_with_type(RECORD_TYPE)
@@ -1799,7 +2434,7 @@ mod tests {
     }
 
     #[test]
-    fn record_value_equality_is_nominal_and_bound_to_one_active_revision() {
+    fn record_value_equality_is_nominal_across_semantically_identical_revisions() {
         let active = active_record_revision();
         let fields = || {
             [
@@ -1835,6 +2470,136 @@ mod tests {
         )
         .unwrap();
         assert_ne!(record, other);
+
+        // Equality must not bind a creation-revision identity: the same
+        // nominal type and field sequence compare equal across revisions
+        // with different source and catalogue revision IDs.
+        let child_type = TypeId::from_bytes([0x31; 16]);
+        let single_field = vec![
+            RecordValueFieldDefinition::try_new_descriptor(
+                FieldId::from_bytes([0x3a; 16]),
+                "a",
+                0,
+                TypeDescriptor::named(STANDARD_BOOLEAN),
+            )
+            .unwrap(),
+        ];
+        let old = active_nested_record_revision_with_child_fields(single_field.clone());
+        let fresh = active_nested_record_revision_with_seed(single_field, 0x77, 0x78);
+        let left = RecordValue::new(
+            &old,
+            child_type,
+            [(String::from("a"), RuntimeValue::Boolean(true))],
+        )
+        .unwrap();
+        let right = RecordValue::new(
+            &fresh,
+            child_type,
+            [(String::from("a"), RuntimeValue::Boolean(true))],
+        )
+        .unwrap();
+        assert_eq!(
+            left, right,
+            "equality must ignore the creation-revision identity"
+        );
+
+        // A reversed field-ID declaration sequence with identical positional
+        // Boolean values compares unequal.
+        let ab_fields = vec![
+            RecordValueFieldDefinition::try_new_descriptor(
+                FieldId::from_bytes([0x3a; 16]),
+                "a",
+                0,
+                TypeDescriptor::named(STANDARD_BOOLEAN),
+            )
+            .unwrap(),
+            RecordValueFieldDefinition::try_new_descriptor(
+                FieldId::from_bytes([0x3c; 16]),
+                "b",
+                1,
+                TypeDescriptor::named(STANDARD_BOOLEAN),
+            )
+            .unwrap(),
+        ];
+        let ba_fields = vec![
+            RecordValueFieldDefinition::try_new_descriptor(
+                FieldId::from_bytes([0x3c; 16]),
+                "b",
+                0,
+                TypeDescriptor::named(STANDARD_BOOLEAN),
+            )
+            .unwrap(),
+            RecordValueFieldDefinition::try_new_descriptor(
+                FieldId::from_bytes([0x3a; 16]),
+                "a",
+                1,
+                TypeDescriptor::named(STANDARD_BOOLEAN),
+            )
+            .unwrap(),
+        ];
+        let ab = RecordValue::new(
+            &active_nested_record_revision_with_child_fields(ab_fields.clone()),
+            child_type,
+            [
+                (String::from("a"), RuntimeValue::Boolean(true)),
+                (String::from("b"), RuntimeValue::Boolean(false)),
+            ],
+        )
+        .unwrap();
+        let ba = RecordValue::new(
+            &active_nested_record_revision_with_child_fields(ba_fields),
+            child_type,
+            [
+                (String::from("a"), RuntimeValue::Boolean(false)),
+                (String::from("b"), RuntimeValue::Boolean(true)),
+            ],
+        )
+        .unwrap();
+        assert_ne!(
+            ab, ba,
+            "reversed field-ID declaration order must compare unequal"
+        );
+
+        // One replaced field ID with the same names, ordinals, and values
+        // compares unequal.
+        let replaced_fields = vec![
+            RecordValueFieldDefinition::try_new_descriptor(
+                FieldId::from_bytes([0x3d; 16]),
+                "a",
+                0,
+                TypeDescriptor::named(STANDARD_BOOLEAN),
+            )
+            .unwrap(),
+            RecordValueFieldDefinition::try_new_descriptor(
+                FieldId::from_bytes([0x3c; 16]),
+                "b",
+                1,
+                TypeDescriptor::named(STANDARD_BOOLEAN),
+            )
+            .unwrap(),
+        ];
+        let original = RecordValue::new(
+            &active_nested_record_revision_with_child_fields(ab_fields),
+            child_type,
+            [
+                (String::from("a"), RuntimeValue::Boolean(true)),
+                (String::from("b"), RuntimeValue::Boolean(false)),
+            ],
+        )
+        .unwrap();
+        let replaced = RecordValue::new(
+            &active_nested_record_revision_with_child_fields(replaced_fields),
+            child_type,
+            [
+                (String::from("a"), RuntimeValue::Boolean(true)),
+                (String::from("b"), RuntimeValue::Boolean(false)),
+            ],
+        )
+        .unwrap();
+        assert_ne!(
+            original, replaced,
+            "a replaced field ID must compare unequal"
+        );
     }
 
     #[test]
