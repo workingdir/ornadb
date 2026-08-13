@@ -446,6 +446,7 @@ name = "orna-server"
 version = "0.1.0"
 dependencies = [
  "nix",
+ "orna-artifact",
  "orna-client",
  "orna-compiler",
  "orna-core",
