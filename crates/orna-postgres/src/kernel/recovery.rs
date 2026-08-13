@@ -23,7 +23,7 @@ use orna_core::{
         StandardLibrarySnapshot, StoredSourceRevision, StoredSourceUnit,
         VerifiedStandardLibrarySnapshot,
     },
-    types::{ResolvedType, StandardScalar},
+    types::{ResolvedType, StandardScalar, TypeDescriptor},
 };
 use tokio_postgres::{Client, IsolationLevel, Row, Transaction};
 
@@ -1792,8 +1792,18 @@ fn decode_record_value_field(
         LegacyResolvedTypeTupleMember::Field,
     )?;
     let origin = decode_origin(row, &record, DefinitionIdentity::Field { owner, field: id })?;
-    let definition = RecordValueFieldDefinition::try_new(id, name, ordinal, resolved_type)
-        .map_err(|_| record.invariant("legacy scalar cannot form a record field descriptor"))?;
+    let descriptor = match resolved_type {
+        ResolvedType::Named(type_id) | ResolvedType::Value(type_id) => {
+            TypeDescriptor::named(type_id)
+        }
+        ResolvedType::Scalar(_) | ResolvedType::Reference { .. } => {
+            return Err(record.invariant(
+                "record value field tuple must decode to one named descriptor identity",
+            ));
+        }
+    };
+    let definition = RecordValueFieldDefinition::try_new_descriptor(id, name, ordinal, descriptor)
+        .map_err(|_| record.invariant("record value field tuple must use one flat descriptor"))?;
 
     Ok(RecoveredRecordValueField {
         owner,
