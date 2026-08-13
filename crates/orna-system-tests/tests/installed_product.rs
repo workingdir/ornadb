@@ -36,6 +36,17 @@
 //! package workflow runs it against the reproduced package by setting
 //! `ORNA_SYSTEM_TEST_DEBIAN_PACKAGE` and invoking the ignored test exactly,
 //! so the workflow fails closed if the installed product path regresses.
+//!
+//! Every post-install service/data-path invocation made by this scenario
+//! through `setpriv_args` (server run and restart, source apply, security
+//! grant-execute, and raw-call) runs with deliberately poisoned libpq/
+//! PostgreSQL environment values (hostile `PGHOST`, `PGPORT`, `PGDATABASE`,
+//! `PGUSER`, `PGSERVICE`, `PGSERVICEFILE`, `PGDATA`, `PGPASSFILE`, and
+//! `PGOPTIONS`). Those real service-account operations still complete
+//! against the fixed private endpoint, which demonstrates that the packaged
+//! binary does not select an external endpoint from those variables. The
+//! package postinst invokes `/usr/bin/orna` separately through `env -i` and
+//! is excluded from this environment assertion, as is package maintenance.
 
 use std::fmt;
 use std::fs;
@@ -355,11 +366,40 @@ impl InstalledMachine {
         self.exec_args(&args)
     }
 
-    /// The `docker exec` argument vector for one `orna` command as orna.
+    /// The `docker exec` argument vector for one post-install service/data
+    /// path `orna` command as the real service account.
+    ///
+    /// Every invocation made through this helper (server run and restart,
+    /// source apply, security grant-execute, and raw-call) receives the
+    /// fixed private socket selection plus deliberately poisoned standard
+    /// libpq/PostgreSQL environment values as `docker exec --env` pairs.
+    /// Those real service-account operations still complete against the
+    /// fixed private endpoint, which demonstrates the packaged binary does
+    /// not select an external endpoint from them. Package maintenance and
+    /// the postinst invoke `/usr/bin/orna` separately and are not covered
+    /// by this assertion.
     fn setpriv_args(&self, command: &[&str]) -> Vec<String> {
         let mut args = vec![
             "--env".to_string(),
             "PATH=/usr/sbin:/usr/bin:/sbin:/bin".to_string(),
+            "--env".to_string(),
+            "PGHOST=127.0.0.1".to_string(),
+            "--env".to_string(),
+            "PGPORT=1".to_string(),
+            "--env".to_string(),
+            "PGDATABASE=hostile".to_string(),
+            "--env".to_string(),
+            "PGUSER=hostile".to_string(),
+            "--env".to_string(),
+            "PGSERVICE=no_such_service".to_string(),
+            "--env".to_string(),
+            "PGSERVICEFILE=/nonexistent/orna-pg-service.conf".to_string(),
+            "--env".to_string(),
+            "PGDATA=/nonexistent/orna-pg-data".to_string(),
+            "--env".to_string(),
+            "PGPASSFILE=/nonexistent/orna-pg-pass".to_string(),
+            "--env".to_string(),
+            "PGOPTIONS=-csearch_path=hostile".to_string(),
             self.container.clone(),
             "/usr/bin/setpriv".to_string(),
             format!("--reuid={}", self.uid),
