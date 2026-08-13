@@ -79,11 +79,50 @@ pub enum TypeSpecification {
         /// The exact written standard scalar phrase.
         source: SourceSlice,
     },
-    /// A typed reference to an object type.
+    /// A typed reference to another written type specification.
     Reference {
-        /// The object type named by the reference.
-        target: QualifiedName,
-        /// The span from `REF` through the target type name.
+        /// The recursively parsed reference target.
+        target: Box<TypeSpecification>,
+        /// The span from `REF` through the complete target type.
+        span: SourceSpan,
+    },
+    /// An ordered collection type.
+    List {
+        /// The element type.
+        element: Box<TypeSpecification>,
+        /// The complete `LIST<...>` span.
+        span: SourceSpan,
+    },
+    /// A logically unique collection type.
+    Set {
+        /// The element type.
+        element: Box<TypeSpecification>,
+        /// The complete `SET<...>` span.
+        span: SourceSpan,
+    },
+    /// A key/value collection type.
+    Map {
+        /// The key type.
+        key: Box<TypeSpecification>,
+        /// The value type.
+        value: Box<TypeSpecification>,
+        /// The complete `MAP<...>` span.
+        span: SourceSpan,
+    },
+    /// An optional value type.
+    Option {
+        /// The optional value type.
+        value: Box<TypeSpecification>,
+        /// The exact accepted prefix or postfix spelling.
+        spelling: OptionTypeSpelling,
+        /// The complete option type span.
+        span: SourceSpan,
+    },
+    /// An execution-time stream type.
+    Stream {
+        /// The streamed element type.
+        element: Box<TypeSpecification>,
+        /// The complete `STREAM<...>` span.
         span: SourceSpan,
     },
 }
@@ -94,9 +133,23 @@ impl TypeSpecification {
         match self {
             Self::Named(name) => &name.span,
             Self::StandardLargeObject { source, .. } => &source.span,
-            Self::Reference { span, .. } => span,
+            Self::Reference { span, .. }
+            | Self::List { span, .. }
+            | Self::Set { span, .. }
+            | Self::Map { span, .. }
+            | Self::Option { span, .. }
+            | Self::Stream { span, .. } => span,
         }
     }
+}
+
+/// The source spelling used for an optional type constructor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OptionTypeSpelling {
+    /// The `OPTION<T>` prefix form.
+    Prefix,
+    /// The `T?` postfix form.
+    Postfix,
 }
 
 /// The standard large-object scalar phrases recognised by Orna syntax.
@@ -948,7 +1001,7 @@ mod tests {
 
     use super::{
         FunctionReturnType, FunctionSecurity, FunctionTransaction, FunctionVolatility, InsertValue,
-        MutationValue, NullOrdering, OnDeletePolicy, OrderingDirection,
+        MutationValue, NullOrdering, OnDeletePolicy, OptionTypeSpelling, OrderingDirection,
         PrimitiveValueTypePersistence, QueryExpression, RecordConstructorFieldValue,
         SelectQuantifier, ServerFunctionBody, SourceSpan, StandardLargeObjectKind,
         TypeExportTarget, TypeSpecification, parse,
@@ -2113,9 +2166,162 @@ mod tests {
                 assert_eq!(*kind, StandardLargeObjectKind::Character);
                 assert_eq!(source.text, "cHaRaCtEr /* kept */ LaRgE ObJeCt");
             }
-            TypeSpecification::Named(_) | TypeSpecification::Reference { .. } => {
+            _ => {
                 panic!("body must use the standard large object AST form")
             }
+        }
+    }
+
+    #[test]
+    fn parses_constructed_type_specifications_losslessly() {
+        let source = "CREATE TYPE samples.container AS OBJECT (\
+            listed LIST /* kept */ < TEXT >,\
+            unique SET<REF tasks.task>,\
+            indexed MAP<TEXT, OPTION<BOOL>>,\
+            optional TEXT /* first */ ? /* second */ ?,\
+            streamed STREAM<tasks.event>,\
+            recursive REF LIST<TEXT>\
+        );";
+        let parsed = parse(source);
+
+        assert!(parsed.diagnostics().is_empty());
+        assert_eq!(parsed.syntax().text(), source);
+        let fields = &parsed.object_types()[0].fields;
+
+        let TypeSpecification::List { element, span } = &fields[0].type_specification else {
+            panic!("listed must use LIST");
+        };
+        assert_eq!(&source[span.start..span.end], "LIST /* kept */ < TEXT >");
+        assert_named_type(element, "TEXT");
+
+        let TypeSpecification::Set { element, .. } = &fields[1].type_specification else {
+            panic!("unique must use SET");
+        };
+        let TypeSpecification::Reference { target, .. } = element.as_ref() else {
+            panic!("SET element must use REF");
+        };
+        assert_named_type(target, "tasks.task");
+
+        let TypeSpecification::Map { key, value, .. } = &fields[2].type_specification else {
+            panic!("indexed must use MAP");
+        };
+        assert_named_type(key, "TEXT");
+        let TypeSpecification::Option {
+            value,
+            spelling: OptionTypeSpelling::Prefix,
+            ..
+        } = value.as_ref()
+        else {
+            panic!("MAP value must use prefix OPTION");
+        };
+        assert_named_type(value, "BOOL");
+
+        let TypeSpecification::Option {
+            value,
+            spelling: OptionTypeSpelling::Postfix,
+            span,
+        } = &fields[3].type_specification
+        else {
+            panic!("optional must use postfix OPTION");
+        };
+        assert_eq!(
+            &source[span.start..span.end],
+            "TEXT /* first */ ? /* second */ ?"
+        );
+        let TypeSpecification::Option {
+            value,
+            spelling: OptionTypeSpelling::Postfix,
+            ..
+        } = value.as_ref()
+        else {
+            panic!("optional must retain both postfix markers");
+        };
+        assert_named_type(value, "TEXT");
+
+        let TypeSpecification::Stream { element, .. } = &fields[4].type_specification else {
+            panic!("streamed must use STREAM");
+        };
+        assert_named_type(element, "tasks.event");
+
+        let TypeSpecification::Reference { target, .. } = &fields[5].type_specification else {
+            panic!("recursive must use REF");
+        };
+        assert!(matches!(target.as_ref(), TypeSpecification::List { .. }));
+    }
+
+    #[test]
+    fn constructed_type_errors_recover_to_a_later_declaration() {
+        let malformed = "CREATE TYPE samples.bad AS OBJECT (value MAP<TEXT OPTION<BOOL>>);\
+            CREATE SCHEMA recovered;";
+        let parsed = parse(malformed);
+
+        assert_eq!(parsed.syntax().text(), malformed);
+        assert!(parsed.object_types().is_empty());
+        assert_eq!(parsed.schemas().len(), 1);
+        assert_eq!(parsed.diagnostics().len(), 1);
+        assert_eq!(
+            parsed.diagnostics()[0].message,
+            "expected ',' between MAP key and value types"
+        );
+
+        let nested = format!(
+            "CREATE TYPE samples.deep AS OBJECT (value {}TEXT{});CREATE SCHEMA after_depth;",
+            "OPTION<".repeat(33),
+            ">".repeat(33)
+        );
+        let parsed = parse(&nested);
+        assert_eq!(parsed.syntax().text(), nested);
+        assert!(parsed.object_types().is_empty());
+        assert_eq!(parsed.schemas().len(), 1);
+        assert_eq!(parsed.diagnostics().len(), 1);
+        assert_eq!(
+            parsed.diagnostics()[0].message,
+            "type specification exceeds the maximum depth of 32"
+        );
+
+        let mixed = format!(
+            "CREATE TYPE samples.deep AS OBJECT (value LIST<TEXT{}>);CREATE SCHEMA after_mixed;",
+            "?".repeat(32)
+        );
+        let parsed = parse(&mixed);
+        assert_eq!(parsed.syntax().text(), mixed);
+        assert!(parsed.object_types().is_empty());
+        assert_eq!(parsed.schemas().len(), 1);
+        assert_eq!(parsed.diagnostics().len(), 1);
+        assert_eq!(
+            parsed.diagnostics()[0].message,
+            "type specification exceeds the maximum depth of 32"
+        );
+    }
+
+    #[test]
+    fn every_constructed_type_delimiter_failure_is_direct_and_recoverable() {
+        for (written_type, expected) in [
+            ("LIST TEXT", "expected '<' after type constructor"),
+            ("LIST<>", "expected a field type"),
+            ("LIST<TEXT", "expected '>' to close type constructor"),
+            ("MAP<, TEXT>", "expected a field type"),
+            ("MAP<TEXT, >", "expected a field type"),
+            (
+                "MAP<TEXT TEXT>",
+                "expected ',' between MAP key and value types",
+            ),
+        ] {
+            let source = format!(
+                "CREATE TYPE samples.bad AS OBJECT (value {written_type});CREATE SCHEMA recovered;"
+            );
+            let parsed = parse(&source);
+
+            assert_eq!(parsed.syntax().text(), source, "{written_type}");
+            assert!(parsed.object_types().is_empty(), "{written_type}");
+            assert_eq!(parsed.schemas().len(), 1, "{written_type}");
+            assert_eq!(
+                parsed.diagnostics().len(),
+                1,
+                "{written_type}: {:?}",
+                parsed.diagnostics()
+            );
+            assert_eq!(parsed.diagnostics()[0].message, expected, "{written_type}");
         }
     }
 
@@ -3628,12 +3834,13 @@ mod tests {
         assert_eq!(project.on_delete, Some(OnDeletePolicy::Cascade));
         match &project.type_specification {
             TypeSpecification::Reference { target, .. } => {
+                let TypeSpecification::Named(target) = target.as_ref() else {
+                    panic!("project reference target must be named");
+                };
                 assert_eq!(target.parts[0].text, "tasks");
                 assert_eq!(target.parts[1].text, "project");
             }
-            TypeSpecification::Named(_) | TypeSpecification::StandardLargeObject { .. } => {
-                panic!("project must be a reference")
-            }
+            _ => panic!("project must be a reference"),
         }
 
         let completed = &object_type.fields[2];
@@ -4287,12 +4494,15 @@ mod tests {
     fn assert_named_type(type_specification: &TypeSpecification, expected: &str) {
         match type_specification {
             TypeSpecification::Named(name) => {
-                assert_eq!(name.parts.len(), 1);
-                assert_eq!(name.parts[0].text, expected);
+                assert_eq!(
+                    name.parts
+                        .iter()
+                        .map(|part| part.text.as_str())
+                        .collect::<Vec<_>>(),
+                    expected.split('.').collect::<Vec<_>>()
+                );
             }
-            TypeSpecification::StandardLargeObject { .. } | TypeSpecification::Reference { .. } => {
-                panic!("field must use a named type")
-            }
+            _ => panic!("field must use a named type"),
         }
     }
 
@@ -4306,9 +4516,7 @@ mod tests {
                 assert_eq!(*kind, expected_kind);
                 assert_eq!(source.text, expected_source);
             }
-            TypeSpecification::Named(_) | TypeSpecification::Reference { .. } => {
-                panic!("field must use a standard large object type")
-            }
+            _ => panic!("field must use a standard large object type"),
         }
     }
 
@@ -4320,6 +4528,9 @@ mod tests {
     ) {
         match type_specification {
             TypeSpecification::Reference { target, .. } => {
+                let TypeSpecification::Named(target) = target.as_ref() else {
+                    panic!("reference target must be a named type");
+                };
                 assert_eq!(target.parts[0].text, first);
                 assert_eq!(target.parts[1].text, second);
                 if third.is_empty() {
@@ -4328,9 +4539,7 @@ mod tests {
                     assert_eq!(target.parts[2].text, third);
                 }
             }
-            TypeSpecification::Named(_) | TypeSpecification::StandardLargeObject { .. } => {
-                panic!("type must be a reference")
-            }
+            _ => panic!("type must be a reference"),
         }
     }
 }
