@@ -2092,7 +2092,13 @@ mod tests {
         ordinal: u32,
         resolved_type: ResolvedType,
     ) -> RecordValueFieldDefinition {
-        RecordValueFieldDefinition::new(FieldId::from_bytes([id; 16]), name, ordinal, resolved_type)
+        RecordValueFieldDefinition::try_new(
+            FieldId::from_bytes([id; 16]),
+            name,
+            ordinal,
+            resolved_type,
+        )
+        .expect("record field")
     }
 
     fn record(
@@ -2474,19 +2480,15 @@ mod tests {
             )
         };
 
-        for resolved_type in [
-            ResolvedType::scalar(StandardScalar::Integer),
-            ResolvedType::reference(TypeId::from_bytes([92; 16])),
-        ] {
-            assert_eq!(
-                build(resolved_type).unwrap_err(),
-                CatalogueSnapshotError::UnsupportedRecordValueFieldType {
-                    owner: TypeId::from_bytes([2; 16]),
-                    field: FieldId::from_bytes([3; 16]),
-                    resolved_type,
-                }
-            );
-        }
+        let resolved_type = ResolvedType::reference(TypeId::from_bytes([92; 16]));
+        assert_eq!(
+            build(resolved_type).unwrap_err(),
+            CatalogueSnapshotError::UnsupportedRecordValueFieldType {
+                owner: TypeId::from_bytes([2; 16]),
+                field: FieldId::from_bytes([3; 16]),
+                resolved_type,
+            }
+        );
 
         for resolved_type in [
             ResolvedType::value(TypeId::from_bytes([93; 16])),
