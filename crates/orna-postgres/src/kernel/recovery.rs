@@ -88,6 +88,12 @@ struct RecoveredStandardValueType {
     origin: DefinitionOrigin,
 }
 
+struct RecoveredStandardEnumType {
+    schema: SchemaId,
+    definition: EnumTypeDefinition,
+    origin: DefinitionOrigin,
+}
+
 struct RecoveredStandardTypeBinding {
     binding: TypeBinding,
     origin: DefinitionOrigin,
@@ -122,6 +128,15 @@ struct RecoveredRecordValueField {
     owner: TypeId,
     definition: RecordValueFieldDefinition,
     origin: DefinitionOrigin,
+}
+
+struct RecordValueFieldTypeTuple {
+    kind: Option<String>,
+    value_type: Option<TypeId>,
+    value_standard_library_revision: Option<StandardLibraryRevisionId>,
+    application_enum_type: Option<TypeId>,
+    enum_standard_library_revision: Option<StandardLibraryRevisionId>,
+    standard_enum_type: Option<TypeId>,
 }
 
 struct RecoveredField {
@@ -940,13 +955,15 @@ async fn load_standard_catalogue(
 ) -> Result<(CatalogueSnapshot, Vec<DefinitionOrigin>), PostgresKernelError> {
     let schemas = load_standard_schemas(transaction, header.revision).await?;
     let value_types = load_standard_value_types(transaction, header.revision).await?;
+    let enum_types = load_standard_enum_types(transaction, header.revision).await?;
     let bindings = load_standard_type_bindings(transaction, header.revision).await?;
 
     let schema_names = schemas
         .iter()
         .map(|schema| (schema.definition.id(), schema.definition.name().clone()))
         .collect::<BTreeMap<_, _>>();
-    let mut origins = Vec::with_capacity(schemas.len() + value_types.len() + bindings.len());
+    let mut origins =
+        Vec::with_capacity(schemas.len() + value_types.len() + enum_types.len() + bindings.len());
     let schemas = schemas
         .into_iter()
         .map(|schema| {
@@ -960,24 +977,35 @@ async fn load_standard_catalogue(
             "_orna_kernel.standard_catalogue_value_types",
             value_type.definition.id().canonical(),
         );
-        let schema_name = schema_names.get(&value_type.schema).ok_or_else(|| {
-            record.invariant("standard value type schema identity must identify a recovered schema")
-        })?;
-        let name_parts = value_type.definition.name().parts();
-        let namespace = name_parts
-            .get(..name_parts.len().saturating_sub(1))
-            .filter(|parts| !parts.is_empty())
-            .ok_or_else(|| {
-                record
-                    .invariant("standard value type qualified name must contain a schema namespace")
-            })?;
-        if namespace != schema_name.parts() {
-            return Err(record.invariant(
-                "standard value type schema identity must equal the schema named by its namespace",
-            ));
-        }
+        require_standard_definition_schema(
+            &record,
+            &schema_names,
+            value_type.schema,
+            value_type.definition.name(),
+            "standard value type schema identity must identify a recovered schema",
+            "standard value type qualified name must contain a schema namespace",
+            "standard value type schema identity must equal the schema named by its namespace",
+        )?;
         origins.push(value_type.origin);
         definitions.push(value_type.definition);
+    }
+    let mut enum_definitions = Vec::with_capacity(enum_types.len());
+    for enum_type in enum_types {
+        let record = DurableRecord::new(
+            "_orna_kernel.standard_catalogue_enum_types",
+            enum_type.definition.id().canonical(),
+        );
+        require_standard_definition_schema(
+            &record,
+            &schema_names,
+            enum_type.schema,
+            enum_type.definition.name(),
+            "standard enum schema identity must identify a recovered schema",
+            "standard enum qualified name must contain a schema namespace",
+            "standard enum schema identity must equal the schema named by its namespace",
+        )?;
+        origins.push(enum_type.origin);
+        enum_definitions.push(enum_type.definition);
     }
     let bindings = bindings
         .into_iter()
@@ -986,15 +1014,40 @@ async fn load_standard_catalogue(
             binding.binding
         })
         .collect::<Vec<_>>();
-    let catalogue = CatalogueSnapshot::new_with_types(
+    let catalogue = CatalogueSnapshot::new_with_enum_types(
         header.catalogue,
         schemas,
         Vec::new(),
         definitions,
+        enum_definitions,
         bindings,
     )
     .map_err(PostgresKernelError::CatalogueSnapshot)?;
     Ok((catalogue, origins))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn require_standard_definition_schema(
+    record: &DurableRecord,
+    schema_names: &BTreeMap<SchemaId, QualifiedSemanticName>,
+    schema: SchemaId,
+    name: &QualifiedSemanticName,
+    missing_schema_rule: &'static str,
+    missing_namespace_rule: &'static str,
+    mismatch_rule: &'static str,
+) -> Result<(), PostgresKernelError> {
+    let schema_name = schema_names
+        .get(&schema)
+        .ok_or_else(|| record.invariant(missing_schema_rule))?;
+    let name_parts = name.parts();
+    let namespace = name_parts
+        .get(..name_parts.len().saturating_sub(1))
+        .filter(|parts| !parts.is_empty())
+        .ok_or_else(|| record.invariant(missing_namespace_rule))?;
+    if namespace != schema_name.parts() {
+        return Err(record.invariant(mismatch_rule));
+    }
+    Ok(())
 }
 
 async fn load_standard_schemas(
@@ -1213,6 +1266,72 @@ fn recovered_standard_value_definition(
     }
 }
 
+async fn load_standard_enum_types(
+    transaction: &Transaction<'_>,
+    standard: StandardLibraryRevisionId,
+) -> Result<Vec<RecoveredStandardEnumType>, PostgresKernelError> {
+    const RELATION: &str = "_orna_kernel.standard_catalogue_enum_types";
+    let rows = transaction
+        .query(
+            "SELECT standard_library_revision_id, type_id, schema_id, name_parts, labels,
+                    source_unit_id, source_start, source_end
+             FROM _orna_kernel.standard_catalogue_enum_types
+             WHERE standard_library_revision_id = $1
+             ORDER BY type_id",
+            &[&standard.to_bytes().to_vec()],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?;
+    rows.iter()
+        .enumerate()
+        .map(|(index, row)| decode_standard_enum_type(row, index, standard, RELATION))
+        .collect()
+}
+
+fn decode_standard_enum_type(
+    row: &Row,
+    index: usize,
+    expected_standard: StandardLibraryRevisionId,
+    relation: &'static str,
+) -> Result<RecoveredStandardEnumType, PostgresKernelError> {
+    let row_record = DurableRecord::new(relation, format!("row={index}"));
+    require_standard_library_revision(row, &row_record, expected_standard, "enum type")?;
+    let id = TypeId::from_bytes(identity_bytes(
+        row_record.column(row, "type_id", "standard enum identity must be 16 bytes")?,
+        &row_record,
+        "standard enum identity must be 16 bytes",
+    )?);
+    let record = DurableRecord::new(relation, id.canonical());
+    let schema = SchemaId::from_bytes(identity_bytes(
+        record.column(
+            row,
+            "schema_id",
+            "standard enum schema identity must be 16 bytes",
+        )?,
+        &record,
+        "standard enum schema identity must be 16 bytes",
+    )?);
+    let name_parts: Vec<String> = record.column(
+        row,
+        "name_parts",
+        "standard enum name parts must be an exact PostgreSQL text array",
+    )?;
+    let name = QualifiedSemanticName::new(name_parts).map_err(|_| {
+        record.invariant("standard enum name parts must form one exact semantic name")
+    })?;
+    let labels: Vec<String> = record.column(
+        row,
+        "labels",
+        "standard enum labels must be one exact PostgreSQL text array",
+    )?;
+    let origin = decode_origin(row, &record, DefinitionIdentity::ValueType(id))?;
+    Ok(RecoveredStandardEnumType {
+        schema,
+        definition: EnumTypeDefinition::new(id, name, labels),
+        origin,
+    })
+}
+
 async fn load_standard_type_bindings(
     transaction: &Transaction<'_>,
     standard: StandardLibraryRevisionId,
@@ -1221,7 +1340,8 @@ async fn load_standard_type_bindings(
     let rows = transaction
         .query(
             "SELECT standard_library_revision_id, type_binding_id, kind, name_parts,
-                    target_type_id, source_unit_id, source_start, source_end
+                    target_type_kind, target_type_id, target_enum_type_id,
+                    source_unit_id, source_start, source_end
              FROM _orna_kernel.standard_catalogue_type_bindings
              WHERE standard_library_revision_id = $1
              ORDER BY type_binding_id",
@@ -1272,15 +1392,32 @@ fn decode_standard_type_binding(
         "name_parts",
         "standard type binding name parts must be an exact PostgreSQL text array",
     )?;
-    let target = TypeId::from_bytes(identity_bytes(
+    let target_kind: String = record.column(
+        row,
+        "target_type_kind",
+        "standard type binding target kind must be value or enum",
+    )?;
+    let value_target = optional_identity_bytes(
         record.column(
             row,
             "target_type_id",
-            "standard type binding target identity must be 16 bytes",
+            "standard type binding value target must be null or 16 bytes",
         )?,
         &record,
-        "standard type binding target identity must be 16 bytes",
-    )?);
+        "standard type binding value target must be null or 16 bytes",
+    )?
+    .map(TypeId::from_bytes);
+    let enum_target = optional_identity_bytes(
+        record.column(
+            row,
+            "target_enum_type_id",
+            "standard type binding enum target must be null or 16 bytes",
+        )?,
+        &record,
+        "standard type binding enum target must be null or 16 bytes",
+    )?
+    .map(TypeId::from_bytes);
+    let target = decode_standard_binding_target(&target_kind, value_target, enum_target, &record)?;
     let binding = match kind {
         TypeBindingKind::Qualified => {
             let name = QualifiedSemanticName::new(name_parts).map_err(|_| {
@@ -1315,6 +1452,20 @@ fn decode_standard_type_binding(
     Ok(RecoveredStandardTypeBinding { binding, origin })
 }
 
+fn decode_standard_binding_target(
+    kind: &str,
+    value_target: Option<TypeId>,
+    enum_target: Option<TypeId>,
+    record: &DurableRecord,
+) -> Result<TypeId, PostgresKernelError> {
+    match (kind, value_target, enum_target) {
+        ("value", Some(target), None) | ("enum", None, Some(target)) => Ok(target),
+        _ => Err(record.invariant(
+            "standard type binding target kind and identities must form one exact value or enum tuple",
+        )),
+    }
+}
+
 fn require_standard_library_revision(
     row: &Row,
     record: &DurableRecord,
@@ -1335,6 +1486,9 @@ fn require_standard_library_revision(
             "schema" => "standard schema must belong to the selected standard library revision",
             "value type" => {
                 "standard value type must belong to the selected standard library revision"
+            }
+            "enum type" => {
+                "standard enum type must belong to the selected standard library revision"
             }
             _ => "standard type binding must belong to the selected standard library revision",
         }));
@@ -1685,7 +1839,8 @@ async fn load_record_value_fields(
         .query(
             "SELECT catalogue_revision_id, owner_type_id, field_id, name, ordinal,
                     type_kind, value_type_id, value_standard_library_revision_id,
-                    enum_type_id, source_unit_id, source_start, source_end
+                    enum_type_id, enum_standard_library_revision_id,
+                    standard_enum_type_id, source_unit_id, source_start, source_end
              FROM _orna_kernel.catalogue_record_value_fields
              WHERE catalogue_revision_id = $1
              ORDER BY owner_type_id, ordinal, field_id",
@@ -1777,31 +1932,39 @@ fn decode_record_value_field(
         "record value field enum identity must be null or 16 bytes",
     )?
     .map(TypeId::from_bytes);
-    let resolved_type = decode_resolved_type_tuple(
-        ResolvedTypeTuple {
+    let enum_standard_library_revision = optional_identity_bytes(
+        record.column(
+            row,
+            "enum_standard_library_revision_id",
+            "record value field standard enum revision must be null or 16 bytes",
+        )?,
+        &record,
+        "record value field standard enum revision must be null or 16 bytes",
+    )?
+    .map(StandardLibraryRevisionId::from_bytes);
+    let standard_enum_type = optional_identity_bytes(
+        record.column(
+            row,
+            "standard_enum_type_id",
+            "record value field standard enum identity must be null or 16 bytes",
+        )?,
+        &record,
+        "record value field standard enum identity must be null or 16 bytes",
+    )?
+    .map(TypeId::from_bytes);
+    let descriptor = decode_record_value_field_descriptor(
+        RecordValueFieldTypeTuple {
             kind,
-            scalar: None,
-            target: None,
             value_type,
-            standard_library_revision,
-            enum_type,
-            record_type: None,
+            value_standard_library_revision: standard_library_revision,
+            application_enum_type: enum_type,
+            enum_standard_library_revision,
+            standard_enum_type,
         },
         catalogue_hash_context,
         &record,
-        LegacyResolvedTypeTupleMember::Field,
     )?;
     let origin = decode_origin(row, &record, DefinitionIdentity::Field { owner, field: id })?;
-    let descriptor = match resolved_type {
-        ResolvedType::Named(type_id) | ResolvedType::Value(type_id) => {
-            TypeDescriptor::named(type_id)
-        }
-        ResolvedType::Scalar(_) | ResolvedType::Reference { .. } => {
-            return Err(record.invariant(
-                "record value field tuple must decode to one named descriptor identity",
-            ));
-        }
-    };
     let definition = RecordValueFieldDefinition::try_new_descriptor(id, name, ordinal, descriptor)
         .map_err(|_| record.invariant("record value field tuple must use one flat descriptor"))?;
 
@@ -1810,6 +1973,70 @@ fn decode_record_value_field(
         definition,
         origin,
     })
+}
+
+fn decode_record_value_field_descriptor(
+    tuple: RecordValueFieldTypeTuple,
+    catalogue_hash_context: &CatalogueHashContext,
+    record: &DurableRecord,
+) -> Result<TypeDescriptor, PostgresKernelError> {
+    if tuple.enum_standard_library_revision.is_some() || tuple.standard_enum_type.is_some() {
+        let (Some(standard_library_revision), Some(enum_type)) = (
+            tuple.enum_standard_library_revision,
+            tuple.standard_enum_type,
+        ) else {
+            return Err(record.invariant(
+                "record value field type columns must form one exact pinned standard value, application enum, or pinned standard enum tuple",
+            ));
+        };
+        if tuple.kind.as_deref() != Some("enum")
+            || tuple.value_type.is_some()
+            || tuple.value_standard_library_revision.is_some()
+            || tuple.application_enum_type.is_some()
+        {
+            return Err(record.invariant(
+                "record value field type columns must form one exact pinned standard value, application enum, or pinned standard enum tuple",
+            ));
+        }
+        let standard = catalogue_hash_context.standard().ok_or_else(|| {
+            record.invariant(
+                "record value field standard enum requires a version 2 catalogue context",
+            )
+        })?;
+        if standard_library_revision != standard.revision() {
+            return Err(record.invariant(
+                "record value field standard enum revision must equal the selected catalogue pin",
+            ));
+        }
+        if standard.catalogue().enum_type_by_id(enum_type).is_none() {
+            return Err(record.invariant(
+                "record value field standard enum must identify one enum in the selected pinned standard library",
+            ));
+        }
+        return Ok(TypeDescriptor::named(enum_type));
+    }
+
+    let resolved_type = decode_resolved_type_tuple(
+        ResolvedTypeTuple {
+            kind: tuple.kind,
+            scalar: None,
+            target: None,
+            value_type: tuple.value_type,
+            standard_library_revision: tuple.value_standard_library_revision,
+            enum_type: tuple.application_enum_type,
+            record_type: None,
+        },
+        catalogue_hash_context,
+        record,
+        LegacyResolvedTypeTupleMember::Field,
+    )?;
+    match resolved_type {
+        ResolvedType::Named(type_id) | ResolvedType::Value(type_id) => {
+            Ok(TypeDescriptor::named(type_id))
+        }
+        ResolvedType::Scalar(_) | ResolvedType::Reference { .. } => Err(record
+            .invariant("record value field tuple must decode to one named descriptor identity")),
+    }
 }
 
 async fn load_fields(
@@ -3050,11 +3277,12 @@ mod tests {
     use crate::{PostgresKernelError, decode::DurableRecord};
 
     use super::{
-        LegacyResolvedTypeTupleMember, RecoveredCatalogueSemantics, RecoveredFunctionState,
-        RecoveredRecordValueField, RecoveredRecordValueType, RecoveredRevisionHeader,
-        RecoveredSchema, ResolvedTypeTuple, assemble_catalogue_semantics, assemble_revision,
-        decode_catalogue_hash_version, decode_legacy_resolved_type_tuple,
-        decode_legacy_resolved_type_tuple_kind, decode_resolved_type_tuple,
+        LegacyResolvedTypeTupleMember, RecordValueFieldTypeTuple, RecoveredCatalogueSemantics,
+        RecoveredFunctionState, RecoveredRecordValueField, RecoveredRecordValueType,
+        RecoveredRevisionHeader, RecoveredSchema, ResolvedTypeTuple, assemble_catalogue_semantics,
+        assemble_revision, decode_catalogue_hash_version, decode_legacy_resolved_type_tuple,
+        decode_legacy_resolved_type_tuple_kind, decode_record_value_field_descriptor,
+        decode_resolved_type_tuple, decode_standard_binding_target,
         recovered_standard_value_definition, validate_function_type,
     };
 
@@ -3411,6 +3639,145 @@ mod tests {
                 record: failed_record,
                 rule: "field type kind and identity columns must form one exact supported scalar, object, value, enum, or record tuple",
             }) if failed_record == "enum-tuple"
+        ));
+    }
+
+    #[test]
+    fn standard_binding_target_tuple_is_exactly_value_or_enum() {
+        let record = DurableRecord::new(
+            "_orna_kernel.standard_catalogue_type_bindings",
+            "binding-target",
+        );
+        let value = TypeId::from_bytes([0xb1; 16]);
+        let enum_type = TypeId::from_bytes([0xb2; 16]);
+
+        assert_eq!(
+            decode_standard_binding_target("value", Some(value), None, &record)
+                .expect("value binding target"),
+            value,
+        );
+        assert_eq!(
+            decode_standard_binding_target("enum", None, Some(enum_type), &record)
+                .expect("enum binding target"),
+            enum_type,
+        );
+        for (kind, value_target, enum_target) in [
+            ("value", None, None),
+            ("value", None, Some(enum_type)),
+            ("value", Some(value), Some(enum_type)),
+            ("enum", None, None),
+            ("enum", Some(value), None),
+            ("enum", Some(value), Some(enum_type)),
+            ("unknown", Some(value), None),
+        ] {
+            assert!(matches!(
+                decode_standard_binding_target(kind, value_target, enum_target, &record),
+                Err(PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.standard_catalogue_type_bindings",
+                    record: failed_record,
+                    rule: "standard type binding target kind and identities must form one exact value or enum tuple",
+                }) if failed_record == "binding-target"
+            ));
+        }
+    }
+
+    #[test]
+    fn standard_enum_record_tuple_checks_shape_pin_then_membership() {
+        let standard = orna_standard::verify_standard_library_snapshot(
+            orna_standard::retained_standard_library_snapshot()
+                .expect("retained standard snapshot"),
+        )
+        .expect("verified retained standard snapshot");
+        let context = CatalogueHashContext::version_two(standard.clone());
+        let enum_type = TypeId::from_bytes([0xb3; 16]);
+        let record = DurableRecord::new(
+            "_orna_kernel.catalogue_record_value_fields",
+            "standard-enum-tuple",
+        );
+
+        let malformed = decode_record_value_field_descriptor(
+            RecordValueFieldTypeTuple {
+                kind: Some("enum".to_owned()),
+                value_type: None,
+                value_standard_library_revision: None,
+                application_enum_type: Some(enum_type),
+                enum_standard_library_revision: Some(standard.revision()),
+                standard_enum_type: Some(enum_type),
+            },
+            &context,
+            &record,
+        );
+        assert!(matches!(
+            malformed,
+            Err(PostgresKernelError::DurableInvariant {
+                rule: "record value field type columns must form one exact pinned standard value, application enum, or pinned standard enum tuple",
+                ..
+            })
+        ));
+
+        for (revision, type_id) in [(Some(standard.revision()), None), (None, Some(enum_type))] {
+            let partial = decode_record_value_field_descriptor(
+                RecordValueFieldTypeTuple {
+                    kind: Some("enum".to_owned()),
+                    value_type: None,
+                    value_standard_library_revision: None,
+                    application_enum_type: None,
+                    enum_standard_library_revision: revision,
+                    standard_enum_type: type_id,
+                },
+                &context,
+                &record,
+            );
+            assert!(matches!(
+                partial,
+                Err(PostgresKernelError::DurableInvariant {
+                    rule: "record value field type columns must form one exact pinned standard value, application enum, or pinned standard enum tuple",
+                    ..
+                })
+            ));
+        }
+
+        let wrong_pin = decode_record_value_field_descriptor(
+            RecordValueFieldTypeTuple {
+                kind: Some("enum".to_owned()),
+                value_type: None,
+                value_standard_library_revision: None,
+                application_enum_type: None,
+                enum_standard_library_revision: Some(StandardLibraryRevisionId::from_bytes(
+                    [0xb4; 16],
+                )),
+                standard_enum_type: Some(enum_type),
+            },
+            &context,
+            &record,
+        );
+        assert!(matches!(
+            wrong_pin,
+            Err(PostgresKernelError::DurableInvariant {
+                rule: "record value field standard enum revision must equal the selected catalogue pin",
+                ..
+            })
+        ));
+
+        assert!(standard.catalogue().enum_type_by_id(enum_type).is_none());
+        let missing = decode_record_value_field_descriptor(
+            RecordValueFieldTypeTuple {
+                kind: Some("enum".to_owned()),
+                value_type: None,
+                value_standard_library_revision: None,
+                application_enum_type: None,
+                enum_standard_library_revision: Some(standard.revision()),
+                standard_enum_type: Some(enum_type),
+            },
+            &context,
+            &record,
+        );
+        assert!(matches!(
+            missing,
+            Err(PostgresKernelError::DurableInvariant {
+                rule: "record value field standard enum must identify one enum in the selected pinned standard library",
+                ..
+            })
         ));
     }
 
