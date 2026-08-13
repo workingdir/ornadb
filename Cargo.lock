@@ -460,6 +460,7 @@ dependencies = [
  "orna-compiler",
  "orna-core",
  "orna-kernel-postgres",
+ "orna-postgres",
  "orna-postgres-engine",
  "orna-protocol",
  "orna-standard",
