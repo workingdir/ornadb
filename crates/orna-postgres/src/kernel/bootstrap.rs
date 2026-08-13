@@ -24,115 +24,125 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 1,
         name: "private kernel catalogue",
-        sql: include_str!("../migrations/0001_kernel.sql"),
+        sql: include_str!("../../../orna-kernel-postgres/migrations/0001_kernel.sql"),
         data_step: None,
     },
     Migration {
         version: 2,
         name: "revision catalogue integrity",
-        sql: include_str!("../migrations/0002_revisions.sql"),
+        sql: include_str!("../../../orna-kernel-postgres/migrations/0002_revisions.sql"),
         data_step: None,
     },
     Migration {
         version: 3,
         name: "definition reference integrity",
-        sql: include_str!("../migrations/0003_reference_integrity.sql"),
+        sql: include_str!("../../../orna-kernel-postgres/migrations/0003_reference_integrity.sql"),
         data_step: None,
     },
     Migration {
         version: 4,
         name: "canonical hash contract v1",
-        sql: include_str!("../migrations/0004_canonical_hash_contract.sql"),
+        sql: include_str!("../../../orna-kernel-postgres/migrations/0004_canonical_hash_contract.sql"),
         data_step: Some(MigrationDataStep::CanonicalHashV1EmptySeed),
     },
     Migration {
         version: 5,
         name: "owner-qualified reference targets",
-        sql: include_str!("../migrations/0005_owner_qualified_reference_targets.sql"),
+        sql: include_str!("../../../orna-kernel-postgres/migrations/0005_owner_qualified_reference_targets.sql"),
         data_step: None,
     },
     Migration {
         version: 6,
         name: "definition reference write evidence",
-        sql: include_str!("../migrations/0006_write_reference_evidence.sql"),
+        sql: include_str!("../../../orna-kernel-postgres/migrations/0006_write_reference_evidence.sql"),
         data_step: None,
     },
     Migration {
         version: 7,
         name: "standard catalogue type storage",
-        sql: include_str!("../migrations/0007_catalogue_types.sql"),
+        sql: include_str!("../../../orna-kernel-postgres/migrations/0007_catalogue_types.sql"),
         data_step: None,
     },
     Migration {
         version: 8,
         name: "resolved value type storage",
-        sql: include_str!("../migrations/0008_resolved_value_types.sql"),
+        sql: include_str!("../../../orna-kernel-postgres/migrations/0008_resolved_value_types.sql"),
         data_step: None,
     },
     Migration {
         version: 9,
         name: "security decision snapshot",
-        sql: include_str!("../migrations/0009_security_snapshot.sql"),
+        sql: include_str!("../../../orna-kernel-postgres/migrations/0009_security_snapshot.sql"),
         data_step: None,
     },
     Migration {
         version: 10,
         name: "local peer credentials",
-        sql: include_str!("../migrations/0010_local_peer_credentials.sql"),
+        sql: include_str!("../../../orna-kernel-postgres/migrations/0010_local_peer_credentials.sql"),
         data_step: None,
     },
     Migration {
         version: 11,
         name: "protected security audit",
-        sql: include_str!("../migrations/0011_security_audit.sql"),
+        sql: include_str!("../../../orna-kernel-postgres/migrations/0011_security_audit.sql"),
         data_step: None,
     },
     Migration {
         version: 12,
         name: "catalogue enum type storage",
-        sql: include_str!("../migrations/0012_catalogue_enum_types.sql"),
+        sql: include_str!("../../../orna-kernel-postgres/migrations/0012_catalogue_enum_types.sql"),
         data_step: None,
     },
     Migration {
         version: 13,
         name: "resolved enum type storage",
-        sql: include_str!("../migrations/0013_resolved_enum_types.sql"),
+        sql: include_str!("../../../orna-kernel-postgres/migrations/0013_resolved_enum_types.sql"),
         data_step: None,
     },
     Migration {
         version: 14,
         name: "catalogue enum reference targets",
-        sql: include_str!("../migrations/0014_enum_reference_targets.sql"),
+        sql: include_str!("../../../orna-kernel-postgres/migrations/0014_enum_reference_targets.sql"),
         data_step: None,
     },
     Migration {
         version: 15,
         name: "catalogue record value storage",
-        sql: include_str!("../migrations/0015_catalogue_record_value_types.sql"),
+        sql: include_str!(
+            "../../../orna-kernel-postgres/migrations/0015_catalogue_record_value_types.sql"
+        ),
         data_step: None,
     },
     Migration {
         version: 16,
         name: "resolved record value type storage",
-        sql: include_str!("../migrations/0016_resolved_record_value_types.sql"),
+        sql: include_str!(
+            "../../../orna-kernel-postgres/migrations/0016_resolved_record_value_types.sql"
+        ),
         data_step: None,
     },
     Migration {
         version: 17,
         name: "record value field reference targets",
-        sql: include_str!("../migrations/0017_record_field_reference_targets.sql"),
+        sql: include_str!(
+            "../../../orna-kernel-postgres/migrations/0017_record_field_reference_targets.sql"
+        ),
         data_step: None,
     },
     Migration {
         version: 18,
         name: "disjoint field reference targets",
-        sql: include_str!("../migrations/0018_disjoint_field_reference_targets.sql"),
+        sql: include_str!(
+            "../../../orna-kernel-postgres/migrations/0018_disjoint_field_reference_targets.sql"
+        ),
         data_step: None,
     },
     Migration {
         version: 19,
         name: "standard opaque value storage",
-        sql: include_str!("../migrations/0019_standard_opaque_value_types.sql"),
+        sql: include_str!(
+            "../../../orna-kernel-postgres/migrations/0019_standard_opaque_value_types.sql"
+        ),
         data_step: None,
     },
 ];

@@ -21,7 +21,7 @@ use tokio_postgres::{Client, Config, NoTls};
 
 #[path = "kernel/apply.rs"]
 mod apply;
-#[path = "../../orna-kernel-postgres/src/bootstrap.rs"]
+#[path = "kernel/bootstrap.rs"]
 mod bootstrap;
 #[path = "kernel/decode.rs"]
 mod decode;
