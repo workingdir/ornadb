@@ -189,11 +189,15 @@ recursive hash bytes and any required hash-version change.
 
 Catalogue, canonical-hash, and revision errors replace their record-field
 `ResolvedType` payload with the rejected `TypeDescriptor`; their existing
-owner, field, ordering, and display contract remains unchanged. The proof
-requires byte-identical existing record and record-free version-2 goldens,
-exact tag-2 and tag-4 field bytes, rejection of every other leaf category and
-all five constructors, cross-catalogue identity ambiguity before tag selection,
-and no partial catalogue, revision, or digest.
+owner, field, and error ordering remain unchanged. Canonical-hash and revision
+errors retain their fixed display messages. The catalogue error displays
+`field {field} in record value type {owner} has unsupported descriptor {descriptor:?}`.
+It does not preserve the legacy dynamic `ResolvedType` spelling because
+`Value(id)` and `Named(id)` intentionally normalise to the same `Named(id)`
+descriptor. The proof requires byte-identical existing record and record-free
+version-2 goldens, exact tag-2 and tag-4 field bytes, rejection of every other
+leaf category and all five constructors, cross-catalogue identity ambiguity
+before tag selection, and no partial catalogue, revision, or digest.
 
 The descriptor-native constructor is
 `RecordValueFieldDefinition::try_new_descriptor`. It accepts only a flat
