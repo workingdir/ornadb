@@ -107,7 +107,12 @@ impl PostgresKernel {
             pause_after_raw_dispatch_recovery(test_barrier.as_ref()).await;
             let target = InvocationTarget::new(function, active.pair());
 
-            let execution = match security.authorise_execute(authenticated_session, target) {
+            let decision = if function == CATALOGUE_HEALTH_FUNCTION_ID {
+                security.authorise_catalogue_health(authenticated_session, target)
+            } else {
+                security.authorise_execute(authenticated_session, target)
+            };
+            let execution = match decision {
                 ExecuteDecision::Denied(reason) => {
                     append_security_audit_event(
                         &transaction,
@@ -131,6 +136,19 @@ impl PostgresKernel {
                     )
                     .await?;
                     match active.catalogue().function_by_id(function) {
+                        None if function == CATALOGUE_HEALTH_FUNCTION_ID => {
+                            if active.catalogue_hash_context().standard().is_none() {
+                                Err(PostgresKernelError::DurableInvariant {
+                                    relation: "_orna_kernel.active_revision",
+                                    record: active.pair().catalogue().canonical(),
+                                    rule: "catalogue health requires the accepted standard context",
+                                })
+                            } else {
+                                Ok(AuthenticatedRawCallResult::Client(RuntimeValue::Boolean(
+                                    true,
+                                )))
+                            }
+                        }
                         Some(definition) if definition.domain() == FunctionDomain::Client => {
                             evaluate_authorised_client_function(&active, &authorisation)
                                 .map(|result| {

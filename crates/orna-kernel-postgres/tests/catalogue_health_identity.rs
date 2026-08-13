@@ -1,10 +1,14 @@
 mod support;
 
-use orna_core::security::{
-    CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID, LocalPeerCredential, Principal, PrincipalKind,
-    PrincipalStatus, SecuritySnapshot,
+use orna_core::{
+    security::{
+        CATALOGUE_HEALTH_FUNCTION_ID, CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID, InvocationTarget,
+        LocalPeerCredential, Principal, PrincipalKind, PrincipalStatus, SecurityAuditKind,
+        SecurityAuditOutcome, SecuritySnapshot,
+    },
+    value::RuntimeValue,
 };
-use orna_kernel_postgres::{PostgresKernel, PostgresKernelError};
+use orna_kernel_postgres::{AuthenticatedRawCallResult, PostgresKernel, PostgresKernelError};
 use support::{TestResult, failure, with_test_database};
 
 const SERVICE_UID: u32 = 61_018;
@@ -28,6 +32,33 @@ async fn installs_and_preserves_the_exact_catalogue_health_identity() -> TestRes
             session.principal() == CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID
                 && session.active_roles().is_empty(),
             "the installed recovery identity did not authenticate exactly",
+        )?;
+        let result = kernel
+            .dispatch_authenticated_raw_call(&session, CATALOGUE_HEALTH_FUNCTION_ID)
+            .await?;
+        require(
+            result == AuthenticatedRawCallResult::Client(RuntimeValue::Boolean(true)),
+            "catalogue health did not return the exact Boolean value",
+        )?;
+        let audits = kernel.recover_security_audit_events().await?;
+        require(
+            audits.len() == 2,
+            "catalogue health did not append exactly one EXECUTE audit after authentication",
+        )?;
+        let decision = audits[1].decision();
+        require(
+            decision.kind() == SecurityAuditKind::Execute
+                && decision.outcome() == SecurityAuditOutcome::Allowed
+                && decision.session_principal() == Some(CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID)
+                && decision.effective_principal() == Some(CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID)
+                && decision.authorising_principal() == Some(CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID)
+                && decision.target()
+                    == Some(InvocationTarget::new(
+                        CATALOGUE_HEALTH_FUNCTION_ID,
+                        active.pair(),
+                    ))
+                && decision.denial().is_none(),
+            "catalogue health audit facts differ",
         )?;
 
         let missing = SecuritySnapshot::new(active.pair(), vec![], vec![], vec![], vec![])?;
