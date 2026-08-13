@@ -518,6 +518,11 @@ impl ResultRow {
     pub fn values(&self) -> &[RuntimeValue] {
         &self.values
     }
+
+    /// Transfers values in result-column order without cloning their payloads.
+    pub fn into_values(self) -> Vec<RuntimeValue> {
+        self.values
+    }
 }
 
 /// A validated ordered set of SERVER query result rows.
@@ -575,6 +580,11 @@ impl ResultRows {
     /// Returns rows in query result order.
     pub fn rows(&self) -> &[ResultRow] {
         &self.rows
+    }
+
+    /// Transfers rows in query result order without cloning their payloads.
+    pub fn into_rows(self) -> Vec<ResultRow> {
+        self.rows
     }
 }
 
@@ -1355,6 +1365,27 @@ mod tests {
         assert_eq!(rows.columns()[1].name(), "first");
         assert_eq!(rows.rows()[0].values()[0], RuntimeValue::Integer(2));
         assert_eq!(rows.rows()[1].values()[1], RuntimeValue::Boolean(true));
+    }
+
+    #[test]
+    fn transfers_rows_and_values_in_order_without_cloning_payloads() {
+        let bytes = vec![1_u8, 2, 3];
+        let rows = ResultRows::new(
+            [column(
+                "payload",
+                ResolvedType::scalar(StandardScalar::BinaryLargeObject),
+                false,
+            )],
+            [ResultRow::new([RuntimeValue::Bytes(bytes.clone())])],
+        )
+        .unwrap();
+
+        let rows = rows.into_rows();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows.into_iter().next().unwrap().into_values(),
+            [RuntimeValue::Bytes(bytes),]
+        );
     }
 
     #[test]
