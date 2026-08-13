@@ -63,7 +63,7 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
     (
         1,
         "private kernel catalogue",
-        include_str!("../migrations/0001_kernel.sql"),
+        include_str!("../../orna-postgres/migrations/0001_kernel.sql"),
     ),
     (
         2,
