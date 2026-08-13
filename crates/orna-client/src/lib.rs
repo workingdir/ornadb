@@ -60,6 +60,11 @@ impl ClientExecutionResult {
     pub const fn value(&self) -> &RuntimeValue {
         &self.value
     }
+
+    /// Transfers the evaluated value without cloning its payload.
+    pub fn into_value(self) -> RuntimeValue {
+        self.value
+    }
 }
 
 /// An active-revision validation failure for local CLIENT execution.
@@ -571,6 +576,18 @@ mod tests {
             assert_eq!(result.context().function_revision(), function_revision);
             assert_eq!(result.value(), &RuntimeValue::Boolean(value));
         }
+    }
+
+    #[test]
+    fn transfers_the_evaluated_value_without_cloning_its_payload() {
+        let (active, function, _, _) = version_one_active(true);
+
+        assert_eq!(
+            evaluate_client_function(&active, function)
+                .unwrap()
+                .into_value(),
+            RuntimeValue::Boolean(true),
+        );
     }
 
     #[test]
