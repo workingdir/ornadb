@@ -11,6 +11,13 @@ use std::{
 
 use crate::{FunctionId, PrincipalId, SecurityAuditEventId, revision::RevisionPair};
 
+/// The stable identity of the sealed `sys.catalog.health` system function.
+pub const CATALOGUE_HEALTH_FUNCTION_ID: FunctionId =
+    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+
+/// The one exact recovery-command name of the catalogue health function.
+pub const CATALOGUE_HEALTH_FUNCTION_NAME: &str = "sys.catalog.health";
+
 /// The security-relevant kind of an Orna principal.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PrincipalKind {
@@ -914,14 +921,8 @@ impl SecuritySnapshot {
         session: &AuthenticatedSession,
         target: InvocationTarget,
     ) -> ExecuteDecision {
-        if self
-            .bind_authenticated_session(session.principal, session.active_roles.clone())
-            .is_err()
-        {
-            return ExecuteDecision::Denied(ExecuteDenial::InvalidSession);
-        }
-        if target.revision != self.revision {
-            return ExecuteDecision::Denied(ExecuteDenial::RevisionMismatch);
+        if let Err(reason) = self.validate_session_and_revision(session, target) {
+            return ExecuteDecision::Denied(reason);
         }
         if !self.functions.contains(&target.function) {
             return ExecuteDecision::Denied(ExecuteDenial::UnknownFunction);
@@ -944,13 +945,56 @@ impl SecuritySnapshot {
             return ExecuteDecision::Denied(ExecuteDenial::MissingExecuteGrant);
         };
 
-        ExecuteDecision::Allowed(AuthorisedInvocation {
+        ExecuteDecision::Allowed(Self::allowed_invocation(
+            session,
+            target,
+            authorising_principal,
+        ))
+    }
+
+    /// Decides whether an authenticated session may execute catalogue health.
+    ///
+    /// This closed system rule applies only to the exact reserved health
+    /// identity. It does not grant any application function.
+    pub fn authorise_catalogue_health(
+        &self,
+        session: &AuthenticatedSession,
+        target: InvocationTarget,
+    ) -> ExecuteDecision {
+        if let Err(reason) = self.validate_session_and_revision(session, target) {
+            return ExecuteDecision::Denied(reason);
+        }
+        if target.function != CATALOGUE_HEALTH_FUNCTION_ID {
+            return ExecuteDecision::Denied(ExecuteDenial::UnknownFunction);
+        }
+        ExecuteDecision::Allowed(Self::allowed_invocation(session, target, session.principal))
+    }
+
+    fn validate_session_and_revision(
+        &self,
+        session: &AuthenticatedSession,
+        target: InvocationTarget,
+    ) -> Result<(), ExecuteDenial> {
+        self.bind_authenticated_session(session.principal, session.active_roles.clone())
+            .map_err(|_| ExecuteDenial::InvalidSession)?;
+        if target.revision != self.revision {
+            return Err(ExecuteDenial::RevisionMismatch);
+        }
+        Ok(())
+    }
+
+    fn allowed_invocation(
+        session: &AuthenticatedSession,
+        target: InvocationTarget,
+        authorising_principal: PrincipalId,
+    ) -> AuthorisedInvocation {
+        AuthorisedInvocation {
             session_principal: session.principal,
             effective_principal: session.principal,
             active_roles: session.active_roles.clone(),
             authorising_principal,
             target,
-        })
+        }
     }
 }
 
@@ -1375,6 +1419,94 @@ mod tests {
         assert_eq!(
             snapshot.authorise_execute(&session, InvocationTarget::new(OTHER_FUNCTION, REVISION),),
             ExecuteDecision::Denied(ExecuteDenial::MissingExecuteGrant)
+        );
+    }
+
+    #[test]
+    fn catalogue_health_has_one_stable_system_identity_and_name() {
+        assert_eq!(
+            CATALOGUE_HEALTH_FUNCTION_ID.to_bytes(),
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]
+        );
+        assert_eq!(CATALOGUE_HEALTH_FUNCTION_NAME, "sys.catalog.health");
+    }
+
+    #[test]
+    fn authenticated_catalogue_health_needs_no_application_grant() {
+        let snapshot = SecuritySnapshot::new(
+            REVISION,
+            vec![FUNCTION],
+            vec![active(USER, PrincipalKind::Service)],
+            vec![],
+            vec![],
+        )
+        .expect("valid service snapshot");
+        let session = snapshot
+            .bind_authenticated_session(USER, vec![])
+            .expect("active service session should bind");
+        let target = InvocationTarget::new(CATALOGUE_HEALTH_FUNCTION_ID, REVISION);
+
+        let ExecuteDecision::Allowed(evidence) =
+            snapshot.authorise_catalogue_health(&session, target)
+        else {
+            panic!("authenticated catalogue health should be allowed");
+        };
+        assert_eq!(evidence.session_principal(), USER);
+        assert_eq!(evidence.effective_principal(), USER);
+        assert_eq!(evidence.authorising_principal(), USER);
+        assert_eq!(evidence.active_roles(), &[]);
+        assert_eq!(evidence.target(), target);
+
+        assert_eq!(
+            snapshot.authorise_execute(&session, InvocationTarget::new(FUNCTION, REVISION)),
+            ExecuteDecision::Denied(ExecuteDenial::MissingExecuteGrant)
+        );
+    }
+
+    #[test]
+    fn catalogue_health_rejects_every_other_target_or_session() {
+        let enabled = SecuritySnapshot::new(
+            REVISION,
+            vec![FUNCTION],
+            vec![active(USER, PrincipalKind::User)],
+            vec![],
+            vec![],
+        )
+        .expect("valid user snapshot");
+        let session = enabled
+            .bind_authenticated_session(USER, vec![])
+            .expect("active user session should bind");
+        assert_eq!(
+            enabled.authorise_catalogue_health(
+                &session,
+                InvocationTarget::new(CATALOGUE_HEALTH_FUNCTION_ID, OTHER_REVISION),
+            ),
+            ExecuteDecision::Denied(ExecuteDenial::RevisionMismatch)
+        );
+        let application_target = InvocationTarget::new(FUNCTION, REVISION);
+        assert_eq!(
+            enabled.authorise_catalogue_health(&session, application_target),
+            ExecuteDecision::Denied(ExecuteDenial::UnknownFunction)
+        );
+
+        let disabled = SecuritySnapshot::new(
+            REVISION,
+            vec![FUNCTION],
+            vec![Principal::new(
+                USER,
+                PrincipalKind::User,
+                PrincipalStatus::Disabled,
+            )],
+            vec![],
+            vec![],
+        )
+        .expect("disabled principal remains valid catalogue state");
+        assert_eq!(
+            disabled.authorise_catalogue_health(
+                &session,
+                InvocationTarget::new(CATALOGUE_HEALTH_FUNCTION_ID, REVISION),
+            ),
+            ExecuteDecision::Denied(ExecuteDenial::InvalidSession)
         );
     }
 
