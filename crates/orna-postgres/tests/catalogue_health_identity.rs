@@ -1,17 +1,38 @@
 mod support;
 
+use orna_compiler::{
+    StandardApplicationCheckContext, check_standard_application, prepare_standard_application,
+};
 use orna_core::{
+    CatalogueRevisionId, FunctionId, SourceRevisionId,
+    revision::{ActiveDatabaseRevision, DeployableRevision, RevisionPair},
     security::{
-        CATALOGUE_HEALTH_FUNCTION_ID, CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID, InvocationTarget,
-        LocalPeerCredential, Principal, PrincipalKind, PrincipalStatus, SecurityAuditKind,
-        SecurityAuditOutcome, SecuritySnapshot,
+        CATALOGUE_HEALTH_FUNCTION_ID, CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID, ExecuteGrant,
+        InvocationTarget, LocalPeerCredential, Principal, PrincipalKind, PrincipalStatus,
+        SecurityAuditKind, SecurityAuditOutcome, SecuritySnapshot,
     },
+    source::{SourceBundle, SourceUnit},
     value::RuntimeValue,
 };
 use orna_postgres::{AuthenticatedRawCallResult, PostgresKernel, PostgresKernelError};
 use support::{TestResult, failure, with_test_database};
 
 const SERVICE_UID: u32 = 61_018;
+
+/// One complete application source with two active SERVER functions.
+const GRANT_SOURCE: &str = "CREATE SCHEMA grants_test;\n\
+    CREATE TYPE grants_test.probe AS OBJECT (\n\
+      stored BOOLEAN NOT NULL\n\
+    );\n\
+    CREATE SERVER FUNCTION grants_test.create_probe()\n\
+    RETURNS ROWS (created REF grants_test.probe)\n\
+    SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE\n\
+    AS INSERT INTO grants_test.probe AS made (stored)\n\
+    VALUES (TRUE) RETURNING REF(made);\n\
+    CREATE SERVER FUNCTION grants_test.read_probes()\n\
+    RETURNS ROWS (stored BOOLEAN)\n\
+    SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n\
+    AS SELECT probe.stored FROM grants_test.probe probe;\n";
 
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
@@ -176,6 +197,120 @@ async fn generic_security_replacement_cannot_create_the_recovery_identity() -> T
     .await
 }
 
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn fixed_service_grant_targets_exactly_one_active_application_function() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel: PostgresKernel = database.connection_string().parse()?;
+        kernel.bootstrap().await?;
+        let empty = kernel.recover().await?;
+        let upgrade = orna_standard::prepare_standard_upgrade(&empty)?;
+        let standard = kernel.apply_standard_upgrade(&upgrade).await?;
+        kernel.install_catalogue_health_service(SERVICE_UID).await?;
+        let applied = kernel
+            .apply(&application_candidate(GRANT_SOURCE, &standard, &upgrade)?)
+            .await?;
+        let pair = applied.pair();
+        let create_probe = function_id(&applied, &["grants_test", "create_probe"])?;
+        let read_probes = function_id(&applied, &["grants_test", "read_probes"])?;
+        let fixed_grant = ExecuteGrant::new(CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID, create_probe);
+
+        // No application grant exists before the command.
+        let before = kernel.recover_security_snapshot().await?;
+        require(
+            before.revision() == pair,
+            "active revision changed before the grant",
+        )?;
+        require(
+            before.functions().any(|id| id == create_probe)
+                && before.functions().any(|id| id == read_probes),
+            "applied functions are absent from the recovered security snapshot",
+        )?;
+        require(
+            before.execute_grants().next().is_none(),
+            "an application grant existed before the grant command",
+        )?;
+
+        // Grant exactly one active function.
+        let granted = kernel
+            .grant_catalogue_health_service_execute(pair, create_probe)
+            .await?;
+        require(
+            granted.revision() == pair
+                && granted.execute_grants().collect::<Vec<_>>() == [fixed_grant],
+            "the returned snapshot must contain exactly the fixed-service grant",
+        )?;
+
+        // The recovered snapshot proves the same fact.
+        let recovered = kernel.recover_security_snapshot().await?;
+        require(
+            recovered.revision() == pair
+                && recovered.execute_grants().collect::<Vec<_>>() == [fixed_grant]
+                && recovered.functions().any(|id| id == create_probe)
+                && recovered.functions().any(|id| id == read_probes),
+            "the recovered snapshot changed beyond the fixed-service grant",
+        )?;
+
+        // Repeating the same grant is idempotent.
+        let repeated = kernel
+            .grant_catalogue_health_service_execute(pair, create_probe)
+            .await?;
+        require(
+            repeated.execute_grants().collect::<Vec<_>>() == [fixed_grant],
+            "repeating the fixed-service grant changed the snapshot",
+        )?;
+
+        // A different function remains ungranted.
+        let after = kernel.recover_security_snapshot().await?;
+        let grants_after_repeat = after.execute_grants().collect::<Vec<_>>();
+        require(
+            grants_after_repeat == [fixed_grant]
+                && !after
+                    .execute_grants()
+                    .any(|grant| grant.function() == read_probes),
+            "a different active function received a grant",
+        )?;
+
+        // A wrong expected pair fails without changing the snapshot.
+        let wrong_pair = RevisionPair::new(
+            SourceRevisionId::from_bytes([0x11; 16]),
+            CatalogueRevisionId::from_bytes([0x22; 16]),
+        );
+        let stale = kernel
+            .grant_catalogue_health_service_execute(wrong_pair, create_probe)
+            .await
+            .expect_err("a stale expected pair must fail");
+        require(
+            matches!(stale, PostgresKernelError::SecurityRevisionMismatch { .. }),
+            "a stale expected pair returned the wrong typed error",
+        )?;
+        let unchanged = kernel.recover_security_snapshot().await?;
+        require(
+            unchanged.execute_grants().collect::<Vec<_>>() == [fixed_grant],
+            "a stale expected pair changed the security snapshot",
+        )?;
+
+        // An unknown function fails without changing the snapshot.
+        let unknown = FunctionId::from_bytes([0x44; 16]);
+        let missing = kernel
+            .grant_catalogue_health_service_execute(pair, unknown)
+            .await
+            .expect_err("an unknown function must fail");
+        require(
+            matches!(missing, PostgresKernelError::DurableInvariant { .. }),
+            "an unknown function returned the wrong typed error",
+        )?;
+        let unchanged = kernel.recover_security_snapshot().await?;
+        require(
+            unchanged.execute_grants().collect::<Vec<_>>() == [fixed_grant],
+            "an unknown function changed the security snapshot",
+        )?;
+
+        Ok(())
+    })
+    .await
+}
+
 fn require_exact_identity(
     snapshot: &SecuritySnapshot,
     pair: orna_core::revision::RevisionPair,
@@ -217,4 +352,52 @@ fn require(condition: bool, message: &'static str) -> TestResult<()> {
     } else {
         Err(failure(message))
     }
+}
+
+/// Prepare one deployable standard application revision from source.
+fn application_candidate(
+    source: &str,
+    active: &ActiveDatabaseRevision,
+    upgrade: &orna_standard::StandardUpgrade,
+) -> TestResult<DeployableRevision> {
+    let context = StandardApplicationCheckContext::try_new(
+        active.catalogue(),
+        upgrade.checked_standard_library(),
+    )
+    .map_err(|error| failure(format!("standard application context failed: {error}")))?;
+    let bundle = SourceBundle::new([SourceUnit::new("main.orna", source)])?;
+    let report = check_standard_application(&bundle, &context);
+    if !report.diagnostics().is_empty() {
+        return Err(failure(format!(
+            "standard application diagnostics prevented candidate preparation: {:?}",
+            report.diagnostics()
+        )));
+    }
+    Ok(prepare_standard_application(
+        &report,
+        active.pair(),
+        active,
+    )?)
+}
+
+/// The canonical identity of one active catalogue function by exact name.
+fn function_id(active: &ActiveDatabaseRevision, name: &[&str]) -> TestResult<FunctionId> {
+    active
+        .catalogue()
+        .functions()
+        .iter()
+        .find(|function| {
+            function
+                .name()
+                .parts()
+                .iter()
+                .map(String::as_str)
+                .eq(name.iter().copied())
+        })
+        .map(|function| function.id())
+        .ok_or_else(|| {
+            failure(format!(
+                "function {name:?} is absent from the active catalogue"
+            ))
+        })
 }

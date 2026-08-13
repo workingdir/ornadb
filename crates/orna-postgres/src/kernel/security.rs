@@ -652,6 +652,89 @@ impl PostgresKernel {
         finish_security_session(operation, session.shutdown().await)
     }
 
+    /// Grants the fixed catalogue-health service exactly one active application function.
+    ///
+    /// The expected pair prevents a stale source-apply caller from changing
+    /// security for a later catalogue. The operation rebuilds the complete
+    /// snapshot in one serializable transaction and is idempotent for the
+    /// exact existing grant.
+    pub async fn grant_catalogue_health_service_execute(
+        &self,
+        expected: RevisionPair,
+        function: FunctionId,
+    ) -> Result<SecuritySnapshot, PostgresKernelError> {
+        let mut session = self.open().await?;
+        let operation = async {
+            let transaction = session
+                .client
+                .build_transaction()
+                .isolation_level(IsolationLevel::Serializable)
+                .start()
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            require_current_migrations(&transaction).await?;
+            lock_active_revision(&transaction, expected).await?;
+            let active = configure_and_recover(&transaction).await?;
+            lock_catalogue_health_identity(&transaction).await?;
+            let current = recover_security_snapshot_for_active(&transaction, &active).await?;
+            let uid = catalogue_health_service_uid(&current)?.ok_or_else(|| {
+                catalogue_health_identity_error(
+                    "_orna_kernel.security_principals",
+                    "the reserved catalogue health service identity must be complete",
+                )
+            })?;
+            require_catalogue_health_snapshot(&current, uid)?;
+            if function == CATALOGUE_HEALTH_FUNCTION_ID {
+                return Err(PostgresKernelError::DurableInvariant {
+                    relation: "active catalogue",
+                    record: function.canonical(),
+                    rule: "the catalogue health intrinsic cannot receive an application grant",
+                });
+            }
+            if active.catalogue().function_by_id(function).is_none() {
+                return Err(PostgresKernelError::DurableInvariant {
+                    relation: "active catalogue",
+                    record: function.canonical(),
+                    rule: "the requested function must exist in the active application catalogue",
+                });
+            }
+            let mut grants = current.execute_grants().collect::<Vec<_>>();
+            let requested_grant = ExecuteGrant::new(
+                CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID,
+                function,
+            );
+            if !grants.contains(&requested_grant) {
+                grants.push(requested_grant);
+            }
+            let candidate = SecuritySnapshot::new_with_local_peer_credentials(
+                active.pair(),
+                current.functions().collect(),
+                current.principals().collect(),
+                current.memberships().collect(),
+                grants,
+                current.local_peer_credentials().collect(),
+            )
+            .map_err(PostgresKernelError::SecuritySnapshot)?;
+            require_complete_function_set(&transaction, &candidate).await?;
+            insert_execute_grant_if_absent(&transaction, requested_grant).await?;
+            let recovered = recover_security_snapshot_for_active(&transaction, &active).await?;
+            if !security_snapshots_match(&candidate, &recovered) {
+                return Err(PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.security_execute_grants",
+                    record: function.canonical(),
+                    rule: "recovered fixed-service grant does not match the persisted security snapshot",
+                });
+            }
+            transaction
+                .commit()
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            Ok(recovered)
+        }
+        .await;
+        finish_security_session(operation, session.shutdown().await)
+    }
+
     /// Atomically replaces all durable security decision records.
     pub async fn replace_security_snapshot(
         &self,
@@ -748,6 +831,17 @@ fn snapshot_contains_catalogue_health_identity(snapshot: &SecuritySnapshot) -> b
         || snapshot
             .local_peer_credentials()
             .any(|credential| credential.principal() == CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID)
+}
+
+fn security_snapshots_match(left: &SecuritySnapshot, right: &SecuritySnapshot) -> bool {
+    left.revision() == right.revision()
+        && left.functions().eq(right.functions())
+        && left.principals().eq(right.principals())
+        && left.memberships().eq(right.memberships())
+        && left.execute_grants().eq(right.execute_grants())
+        && left
+            .local_peer_credentials()
+            .eq(right.local_peer_credentials())
 }
 
 fn require_catalogue_health_snapshot(
@@ -1099,6 +1193,24 @@ async fn replace_security_rows(
             .await
             .map_err(PostgresKernelError::Database)?;
     }
+    Ok(())
+}
+
+async fn insert_execute_grant_if_absent(
+    transaction: &Transaction<'_>,
+    grant: ExecuteGrant,
+) -> Result<(), PostgresKernelError> {
+    let grantee = grant.grantee().to_bytes().to_vec();
+    let function = grant.function().to_bytes().to_vec();
+    transaction
+        .execute(
+            "INSERT INTO _orna_kernel.security_execute_grants (grantee_id, function_id)
+             VALUES ($1, $2)
+             ON CONFLICT (grantee_id, function_id) DO NOTHING",
+            &[&grantee, &function],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?;
     Ok(())
 }
 
