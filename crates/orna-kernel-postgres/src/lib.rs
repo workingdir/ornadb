@@ -32,7 +32,7 @@ mod storage;
 
 pub use apply::StandardContextIdentity;
 pub use bootstrap::ActiveRevision;
-pub use security::RecordArgumentPreflight;
+pub use security::{AuthenticatedRawCallResult, RecordArgumentPreflight};
 pub use server_execution::{ServerSelectContext, ServerSelectError, ServerSelectResult};
 pub use server_mutation_execution::{
     ServerDeleteCommitState, ServerDeleteContext, ServerDeleteError, ServerDeleteResult,
@@ -160,6 +160,20 @@ pub enum PostgresKernelError {
         /// The fail-closed reason for denying execution.
         reason: ExecuteDenial,
     },
+    /// The active security snapshot denied a raw invocation before domain selection.
+    RawExecuteDenied {
+        /// The active revision pair used for the decision.
+        pair: RevisionPair,
+        /// The requested function identity.
+        function: FunctionId,
+        /// The fail-closed reason for denying execution.
+        reason: ExecuteDenial,
+    },
+    /// An allowed SERVER function is unavailable at the closed raw-call boundary.
+    RawServerTargetUnavailable {
+        /// The exact pure SERVER target validation failure.
+        source: ServerSelectError,
+    },
     /// An authorised CLIENT function could not be evaluated.
     ClientExecution(ClientExecutionError),
     /// A kernel-supplied local peer UID could not establish an Orna session.
@@ -278,6 +292,12 @@ impl fmt::Display for PostgresKernelError {
             Self::ServerExecuteDenied { .. } => {
                 formatter.write_str("SERVER SELECT execution was denied")
             }
+            Self::RawExecuteDenied { .. } => {
+                formatter.write_str("raw function execution was denied")
+            }
+            Self::RawServerTargetUnavailable { source } => {
+                write!(formatter, "raw SERVER target is unavailable: {source}")
+            }
             Self::ClientExecution(error) => {
                 write!(formatter, "CLIENT function execution failed: {error}")
             }
@@ -341,6 +361,7 @@ impl Error for PostgresKernelError {
             Self::LocalPeerAuthentication(error) => Some(error),
             Self::PhysicalPlan(error) => Some(error),
             Self::ServerSelect(error) => Some(error),
+            Self::RawServerTargetUnavailable { source } => Some(source),
             Self::ServerInsert(error) => Some(error),
             Self::ServerUpdate(error) => Some(error),
             Self::ServerDelete(error) => Some(error),
@@ -355,6 +376,7 @@ impl Error for PostgresKernelError {
             | Self::SecurityFunctionSetMismatch
             | Self::ClientExecuteDenied { .. }
             | Self::ServerExecuteDenied { .. }
+            | Self::RawExecuteDenied { .. }
             | Self::DurableInvariant { .. } => None,
         }
     }
@@ -373,7 +395,7 @@ mod tests {
         security::{ExecuteDenial, LocalPeerAuthenticationError},
     };
 
-    use super::{PostgresKernel, PostgresKernelError};
+    use super::{PostgresKernel, PostgresKernelError, ServerSelectError};
 
     #[test]
     fn parses_connection_parameters_without_connecting() {
@@ -494,6 +516,51 @@ mod tests {
                 reason: ExecuteDenial::MissingExecuteGrant,
             } if actual_pair == pair && actual_function == function
         ));
+    }
+
+    #[test]
+    fn raw_execute_denial_does_not_claim_a_function_domain() {
+        let pair = RevisionPair::new(
+            SourceRevisionId::from_bytes([0x21; 16]),
+            CatalogueRevisionId::from_bytes([0x22; 16]),
+        );
+        let function = FunctionId::from_bytes([0x23; 16]);
+        let error = PostgresKernelError::RawExecuteDenied {
+            pair,
+            function,
+            reason: ExecuteDenial::UnknownFunction,
+        };
+
+        assert_eq!(error.to_string(), "raw function execution was denied");
+        assert!(error.source().is_none());
+        assert!(matches!(
+            error,
+            PostgresKernelError::RawExecuteDenied {
+                pair: actual_pair,
+                function: actual_function,
+                reason: ExecuteDenial::UnknownFunction,
+            } if actual_pair == pair && actual_function == function
+        ));
+    }
+
+    #[test]
+    fn unavailable_raw_server_target_retains_its_typed_source() {
+        let function = FunctionId::from_bytes([0x24; 16]);
+        let error = PostgresKernelError::RawServerTargetUnavailable {
+            source: ServerSelectError::RawTarget {
+                function,
+                rule: "test boundary",
+            },
+        };
+
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "raw SERVER target is unavailable: function {} is not an available raw SERVER target: test boundary",
+                function.canonical()
+            )
+        );
+        assert!(error.source().is_some());
     }
 
     #[test]
