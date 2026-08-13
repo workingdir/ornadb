@@ -420,10 +420,10 @@ and PostgreSQL migration, apply, recovery, corruption, and restart behaviour.
 The signed, always-green step-6 sequence is:
 
 1. `docs(types): define nested immutable record fields` changes this decision.
-2. `feat(types): validate nested record field graphs` changes catalogue and
-   revision code in at most three files.
-3. `feat(values): hash and construct nested record values` changes canonical
-   hashing and runtime values in at most three files.
+2. `feat(types): validate nested record field graphs` changes catalogue,
+   revision, and canonical-hash code together, including tag-2 encoding.
+3. `feat(values): construct nested record values` changes runtime values in
+   one file.
 4. `feat(protocol): encode nested record values` changes the protocol codec in
    one file.
 5. `feat(compiler): resolve nested record fields` changes resolver, checked
