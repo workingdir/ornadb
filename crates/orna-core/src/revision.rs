@@ -3334,12 +3334,15 @@ mod tests {
             vec![RecordValueTypeDefinition::new(
                 TypeId::from_bytes(id::<83>()),
                 QualifiedSemanticName::new(["crm", "status"]).unwrap(),
-                vec![RecordValueFieldDefinition::new(
-                    FieldId::from_bytes(id::<84>()),
-                    "active",
-                    0,
-                    ResolvedType::value(TypeId::from_bytes(id::<71>())),
-                )],
+                vec![
+                    RecordValueFieldDefinition::try_new(
+                        FieldId::from_bytes(id::<84>()),
+                        "active",
+                        0,
+                        ResolvedType::value(TypeId::from_bytes(id::<71>())),
+                    )
+                    .unwrap(),
+                ],
             )],
             vec![],
         )
@@ -4361,12 +4364,15 @@ mod tests {
             vec![RecordValueTypeDefinition::new(
                 TypeId::from_bytes(id::<76>()),
                 QualifiedSemanticName::new(["crm", "status"]).unwrap(),
-                vec![RecordValueFieldDefinition::new(
-                    FieldId::from_bytes(id::<77>()),
-                    "active",
-                    0,
-                    ResolvedType::value(TypeId::from_bytes(id::<71>())),
-                )],
+                vec![
+                    RecordValueFieldDefinition::try_new(
+                        FieldId::from_bytes(id::<77>()),
+                        "active",
+                        0,
+                        ResolvedType::value(TypeId::from_bytes(id::<71>())),
+                    )
+                    .unwrap(),
+                ],
             )],
             vec![],
         )
@@ -4424,12 +4430,15 @@ mod tests {
             vec![RecordValueTypeDefinition::new(
                 record_value_type,
                 QualifiedSemanticName::new(["crm", "status"]).unwrap(),
-                vec![RecordValueFieldDefinition::new(
-                    FieldId::from_bytes(id::<77>()),
-                    "active",
-                    0,
-                    ResolvedType::value(TypeId::from_bytes(id::<71>())),
-                )],
+                vec![
+                    RecordValueFieldDefinition::try_new(
+                        FieldId::from_bytes(id::<77>()),
+                        "active",
+                        0,
+                        ResolvedType::value(TypeId::from_bytes(id::<71>())),
+                    )
+                    .unwrap(),
+                ],
             )],
             vec![],
             vec![FunctionDefinition::new(
