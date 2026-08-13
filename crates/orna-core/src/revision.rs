@@ -26,6 +26,7 @@ use crate::{
         CatalogueSnapshot, FunctionDomain, FunctionReturn, ValueTypeDefinition, ValueTypeKind,
         ValueTypeMutability, ValueTypePersistence,
     },
+    security::CATALOGUE_HEALTH_FUNCTION_ID,
     types::{ResolvedType, StandardScalar},
 };
 
@@ -2022,6 +2023,7 @@ fn validate_catalogue_hash_context_coherence(
     origins: &[DefinitionOrigin],
     references: &[DefinitionReference],
 ) -> Result<(), RevisionInvariantError> {
+    reject_reserved_system_function_identity(catalogue)?;
     if matches!(context, CatalogueHashContext::Version1) {
         reject_version_one_value_definitions(catalogue)?;
     }
@@ -2035,6 +2037,20 @@ fn validate_catalogue_hash_context_coherence(
             validate_catalogue_hash_context_version_two(revisions, references)
         }
     }
+}
+
+fn reject_reserved_system_function_identity(
+    catalogue: &CatalogueSnapshot,
+) -> Result<(), RevisionInvariantError> {
+    if catalogue
+        .function_by_id(CATALOGUE_HEALTH_FUNCTION_ID)
+        .is_some()
+    {
+        return Err(RevisionInvariantError::ReservedSystemFunctionIdentity {
+            function: CATALOGUE_HEALTH_FUNCTION_ID,
+        });
+    }
+    Ok(())
 }
 
 fn reject_version_one_value_definitions(
@@ -2688,6 +2704,11 @@ pub enum RevisionInvariantError {
         /// The rejected durable revision position.
         role: DurableCatalogueRevisionRole,
     },
+    /// An application catalogue uses a function identity reserved for the kernel.
+    ReservedSystemFunctionIdentity {
+        /// The rejected reserved system function identity.
+        function: FunctionId,
+    },
     /// A deployable source parent differs from its expected base source.
     DeployableSourceParentMismatch {
         expected: SourceRevisionId,
@@ -2896,6 +2917,9 @@ impl fmt::Display for RevisionInvariantError {
             }
             ReservedOfflineCheckCatalogueRevision { .. } => formatter
                 .write_str("the reserved offline-check catalogue identity cannot be used in a durable revision"),
+            ReservedSystemFunctionIdentity { .. } => formatter.write_str(
+                "the reserved system function identity cannot enter an application catalogue",
+            ),
             DeployableSourceParentMismatch { .. } => {
                 formatter.write_str("deployable source parent does not match expected base")
             }
@@ -3153,12 +3177,26 @@ mod tests {
         object_types: Vec<ObjectTypeDefinition>,
         resolved_type: ResolvedType,
     ) -> CatalogueSnapshot {
+        function_catalogue_with_identity(
+            FunctionId::from_bytes(id::<9>()),
+            function_revision,
+            object_types,
+            resolved_type,
+        )
+    }
+
+    fn function_catalogue_with_identity(
+        function_id: FunctionId,
+        function_revision: FunctionRevisionId,
+        object_types: Vec<ObjectTypeDefinition>,
+        resolved_type: ResolvedType,
+    ) -> CatalogueSnapshot {
         let schema = SchemaDefinition::new(
             SchemaId::from_bytes(id::<8>()),
             QualifiedSemanticName::new(["crm"]).unwrap(),
         );
         let function = FunctionDefinition::new(
-            FunctionId::from_bytes(id::<9>()),
+            function_id,
             QualifiedSemanticName::new(["crm", "lookup"]).unwrap(),
             FunctionDomain::Server,
             vec![],
@@ -4384,6 +4422,61 @@ mod tests {
         assert_eq!(
             active.catalogue_hash_context().version(),
             CatalogueHashVersion::Version1
+        );
+    }
+
+    #[test]
+    fn active_and_deployable_revisions_reject_the_reserved_health_function_identity() {
+        let function = crate::security::CATALOGUE_HEALTH_FUNCTION_ID;
+        let revision = function_revision_fixture(
+            function,
+            FunctionRevisionId::from_bytes(id::<90>()),
+            digest::<90>(),
+            digest::<91>(),
+        );
+        let catalogue = function_catalogue_with_identity(
+            function,
+            revision.id(),
+            vec![],
+            ResolvedType::scalar(StandardScalar::Boolean),
+        );
+        let origins = function_origins(&revision);
+        let expected = RevisionInvariantError::ReservedSystemFunctionIdentity { function };
+        let active_source = source(None);
+
+        let active_error = ActiveDatabaseRevision::new(
+            RevisionPair::new(active_source.id(), catalogue.revision()),
+            active_source,
+            catalogue.clone(),
+            digest::<7>(),
+            vec![],
+            vec![revision.clone()],
+            origins.clone(),
+            vec![],
+        )
+        .unwrap_err();
+        assert_eq!(active_error, expected);
+
+        let expected_base = RevisionPair::new(
+            SourceRevisionId::from_bytes(id::<20>()),
+            CatalogueRevisionId::from_bytes(id::<21>()),
+        );
+        let deployable_error = DeployableRevision::new(
+            expected_base,
+            source(Some(expected_base.source())),
+            expected_base.catalogue(),
+            catalogue,
+            digest::<7>(),
+            origins,
+            vec![],
+            vec![revision],
+            vec![],
+        )
+        .unwrap_err();
+        assert_eq!(deployable_error, expected);
+        assert_eq!(
+            deployable_error.to_string(),
+            "the reserved system function identity cannot enter an application catalogue"
         );
     }
 
