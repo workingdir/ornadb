@@ -7,7 +7,7 @@ use std::{
     path::Path,
 };
 
-use orna_postgres_engine::ENGINE_MANIFEST;
+use orna_postgres::ENGINE_MANIFEST;
 use sha2::{Digest, Sha256};
 
 const DISTRIBUTION_MANIFEST_PATH: &str = "/usr/share/orna/distribution-manifest.toml";
