@@ -16,8 +16,13 @@
 //!    object reference;
 //! 7. invoke the raw SELECT and require the exact canonical Boolean TRUE
 //!    value;
-//! 8. restart the installed server and invoke the raw SELECT again to prove
-//!    the row persists.
+//! 8. repeat both fixed-service grants and prove they stay silent;
+//! 9. apply the checked-in invalid fixture and require a compiler
+//!    diagnostic failure that changes nothing;
+//! 10. invoke the raw INSERT again for a second distinct object and read two
+//!     canonical Boolean TRUE values;
+//! 11. restart the installed server and prove the two rows persist
+//!     byte-identically.
 //!
 //! The test is ignored by default so ordinary gates stay green. The Debian
 //! package workflow runs it against the reproduced package by setting
@@ -224,7 +229,7 @@ impl InstalledMachine {
         Ok((uid.trim().to_string(), gid.trim().to_string()))
     }
 
-    /// Write the checked-in fixture into the container.
+    /// Write one fixture source file into the container.
     fn write_fixture(&self, fixture: &[u8]) -> Result<(), Error> {
         let mut command = Command::new("docker");
         command
@@ -484,11 +489,41 @@ fn assert_denied(label: &'static str, output: Output) -> Result<(), Error> {
     Ok(())
 }
 
-/// Require the exact canonical Boolean TRUE value envelope.
+/// Require one rejected installed source apply.
 ///
-/// Returns the verified output bytes so the caller can compare exact
-/// canonical output across a service restart.
-fn assert_exact_boolean_true(label: &'static str, output: Output) -> Result<Vec<u8>, Error> {
+/// The apply must exit 1, emit no standard output, and write at least one
+/// compiler diagnostic that names the fixture path and an ORNA diagnostic
+/// code on standard error.
+fn assert_source_apply_rejected(output: Output) -> Result<(), Error> {
+    if output.status.code() != Some(1) {
+        return Err(Error::Unexpected {
+            message: format!("source apply must exit 1, got {}", output.status),
+        });
+    }
+    if !output.stdout.is_empty() {
+        return Err(Error::Unexpected {
+            message: format!(
+                "rejected source apply must emit no standard output, got {} bytes",
+                output.stdout.len()
+            ),
+        });
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let has_orna_code = stderr.as_bytes().windows(8).any(|window| {
+        window[0..4] == *b"ORNA" && window[4..8].iter().all(|byte| byte.is_ascii_digit())
+    });
+    if stderr.is_empty() || !stderr.contains("product_test.orna") || !has_orna_code {
+        return Err(Error::Unexpected {
+            message: format!(
+                "rejected source apply must name the fixture and an ORNA code, got {stderr:?}"
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Require the exact canonical Boolean TRUE value envelope.
+fn assert_exact_boolean_true(label: &'static str, output: Output) -> Result<(), Error> {
     let output = require_success(label, output)?;
     if output.stdout != boolean_true_envelope() {
         return Err(Error::Unexpected {
@@ -506,7 +541,7 @@ fn assert_exact_boolean_true(label: &'static str, output: Output) -> Result<Vec<
             ),
         });
     }
-    Ok(output.stdout)
+    Ok(())
 }
 
 /// The canonical `ORV1` envelope for the exact Boolean value TRUE.
@@ -521,6 +556,13 @@ fn boolean_true_envelope() -> Vec<u8> {
     bytes.push(0x01);
     bytes.extend_from_slice(&1_u32.to_be_bytes());
     bytes.push(0x01);
+    bytes
+}
+
+/// Two exact canonical Boolean TRUE envelopes, one per stored row.
+fn two_boolean_true_envelopes() -> Vec<u8> {
+    let mut bytes = boolean_true_envelope();
+    bytes.extend(boolean_true_envelope());
     bytes
 }
 
@@ -828,7 +870,11 @@ impl std::error::Error for Error {
 /// * the grants succeed and write nothing;
 /// * raw INSERT returns one well-formed ORV object reference;
 /// * raw SELECT returns the exact canonical Boolean TRUE value;
-/// * restart preserves the exact canonical SELECT output bytes.
+/// * repeated grants stay silent and idempotent;
+/// * a failed apply preserves the active functions, grants, and rows;
+/// * a second raw INSERT allocates a distinct object identity and the raw
+///   SELECT returns two exact canonical Boolean TRUE values;
+/// * restart preserves the exact two-row canonical SELECT output bytes.
 #[test]
 #[ignore = "requires Docker, ORNA_SYSTEM_TEST_DEBIAN_PACKAGE, and the ADR 0038 commands in the installed orna executable"]
 fn installed_source_apply_grants_raw_insert_and_persists_across_restart() {
@@ -901,24 +947,84 @@ fn installed_source_apply_grants_raw_insert_and_persists_across_restart() {
         "the inserted object reference must name a real row"
     );
 
-    // Raw SELECT returns the exact canonical Boolean TRUE value.
+    // The first raw SELECT returns the exact canonical Boolean TRUE value.
     let before = machine
         .run_as_orna(&["raw-call", read_probes])
         .expect("run raw select call");
-    let before_bytes = assert_exact_boolean_true("orna raw-call read_probes", before)
+    assert_exact_boolean_true("orna raw-call read_probes", before)
         .expect("raw select must return the exact Boolean TRUE value");
 
-    // Restart the installed service and prove the row persists.
+    // Repeated fixed-service grants stay silent and idempotent.
+    for function in [create_probe, read_probes] {
+        let repeated = machine
+            .run_as_orna(&["security", "grant-execute", function])
+            .expect("run repeated installed grant command");
+        require_silent_success("orna security grant-execute repeated", repeated)
+            .expect("repeated grant must succeed silently");
+    }
+
+    // A failed apply must preserve the active revision, grants, and rows.
+    let invalid_fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures")
+        .join("invalid_product_test.orna");
+    let invalid_fixture =
+        fs::read(&invalid_fixture_path).expect("read the checked-in invalid fixture");
+    machine
+        .write_fixture(&invalid_fixture)
+        .expect("replace the fixture with the invalid source");
+    let failed = machine
+        .run_as_orna(&["source", "apply", FIXTURE_PATH])
+        .expect("run installed source apply on the invalid source");
+    assert_source_apply_rejected(failed).expect("invalid source apply must be rejected");
+
+    // The original function identities and grants survive the failed apply.
+    let second = machine
+        .run_as_orna(&["raw-call", create_probe])
+        .expect("run raw insert call after failed apply");
+    let second = require_success("orna raw-call create_probe after failed apply", second)
+        .expect("raw insert must still succeed");
+    let second_reference = parse_reference_envelope(&second.stdout)
+        .expect("raw insert after failed apply must return one ORV reference");
+    assert!(
+        second_reference.type_id != [0; 16] && !second_reference.object_is_zero(),
+        "the second inserted object reference must name a real row"
+    );
+    assert_ne!(
+        second_reference.object, reference.object,
+        "each raw INSERT must allocate a distinct object identity"
+    );
+
+    // Two stored rows emit exactly two canonical Boolean TRUE envelopes.
+    let two_rows = machine
+        .run_as_orna(&["raw-call", read_probes])
+        .expect("run raw select call after second insert");
+    let two_rows = require_success("orna raw-call read_probes two rows", two_rows)
+        .expect("raw select must succeed after the second insert");
+    assert!(
+        two_rows.stderr.is_empty(),
+        "raw select must keep standard error empty"
+    );
+    assert_eq!(
+        &two_rows.stdout,
+        &two_boolean_true_envelopes(),
+        "two rows must emit exactly two concatenated Boolean TRUE envelopes"
+    );
+
+    // Restart the installed service and prove both rows persist byte-identically.
     machine
         .restart_server()
         .expect("installed server must restart cleanly");
     let after = machine
         .run_as_orna(&["raw-call", read_probes])
         .expect("run raw select call after restart");
-    let after_bytes = assert_exact_boolean_true("orna raw-call read_probes after restart", after)
-        .expect("raw select must return the exact Boolean TRUE value after restart");
+    let after = require_success("orna raw-call read_probes after restart", after)
+        .expect("raw select must succeed after restart");
+    assert!(
+        after.stderr.is_empty(),
+        "raw select after restart must keep standard error empty"
+    );
     assert_eq!(
-        after_bytes, before_bytes,
-        "restart must preserve the exact canonical output bytes"
+        &after.stdout, &two_rows.stdout,
+        "restart must preserve the exact two-row canonical output bytes"
     );
 }
