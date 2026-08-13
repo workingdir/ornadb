@@ -23,14 +23,17 @@ use std::{
 
 use orna_core::{
     catalogue::CatalogueSnapshot, revision::ActiveDatabaseRevision, security::AuthenticatedSession,
+    value::OpaqueCodecRegistry,
 };
 use orna_kernel_postgres::{PostgresKernel, PostgresKernelError};
 use orna_protocol::{
     ClientAction, ClientFrame, ConnectionError, FrameCodecError, MAX_FRAME_PAYLOAD_LENGTH,
     ProtocolConnection, RawCall, ServerAction, ServerFrame, decode_active_client_frame,
-    decode_catalogue_client_frame, decode_client_frame, encode_active_server_frame,
-    encode_catalogue_server_frame, encode_server_frame,
+    decode_catalogue_client_frame, decode_client_frame, decode_registered_client_frame,
+    encode_active_server_frame, encode_catalogue_server_frame, encode_registered_server_frame,
+    encode_server_frame,
 };
+use orna_standard::{RegisteredOpaqueCodecsError, registered_opaque_codecs};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     net::{
@@ -47,9 +50,11 @@ use crate::{RawClientDispatch, authenticate_local_stream};
 const CLIENT_HELLO: [u8; 12] = *b"ORNA\x01\x00\x00\x01\x00\x00\x00\x00";
 const CLIENT_CATALOGUE_HELLO: [u8; 12] = *b"ORNA\x01\x00\x00\x02\x00\x00\x00\x00";
 const CLIENT_ACTIVE_HELLO: [u8; 12] = *b"ORNA\x01\x00\x00\x03\x00\x00\x00\x00";
+const CLIENT_REGISTERED_HELLO: [u8; 12] = *b"ORNA\x01\x00\x00\x04\x00\x00\x00\x00";
 const SERVER_ACK: [u8; 12] = *b"ORNA\x81\x00\x00\x01\x00\x00\x00\x00";
 const SERVER_CATALOGUE_ACK: [u8; 12] = *b"ORNA\x81\x00\x00\x02\x00\x00\x00\x00";
 const SERVER_ACTIVE_ACK: [u8; 12] = *b"ORNA\x81\x00\x00\x03\x00\x00\x00\x00";
+const SERVER_REGISTERED_ACK: [u8; 12] = *b"ORNA\x81\x00\x00\x04\x00\x00\x00\x00";
 const FRAME_HEADER_LENGTH: usize = 18;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const FRAME_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -63,6 +68,7 @@ enum RawProtocolVersion {
     One,
     Catalogue(Arc<CatalogueSnapshot>),
     Active(Arc<ActiveDatabaseRevision>),
+    Registered(Arc<ActiveDatabaseRevision>, Arc<OpaqueCodecRegistry>),
 }
 
 impl RawProtocolVersion {
@@ -71,6 +77,9 @@ impl RawProtocolVersion {
             Self::One => decode_client_frame(encoded),
             Self::Catalogue(catalogue) => decode_catalogue_client_frame(catalogue, encoded),
             Self::Active(active) => decode_active_client_frame(active, encoded),
+            Self::Registered(active, registry) => {
+                decode_registered_client_frame(active, registry, encoded)
+            }
         }
     }
 
@@ -79,6 +88,9 @@ impl RawProtocolVersion {
             Self::One => encode_server_frame(frame),
             Self::Catalogue(catalogue) => encode_catalogue_server_frame(catalogue, frame),
             Self::Active(active) => encode_active_server_frame(active, frame),
+            Self::Registered(active, registry) => {
+                encode_registered_server_frame(active, registry, frame)
+            }
         }
     }
 
@@ -91,6 +103,9 @@ impl RawProtocolVersion {
             Self::One => connection.receive(frame),
             Self::Catalogue(catalogue) => connection.receive_catalogue(catalogue, frame),
             Self::Active(active) => connection.receive_active(active, frame),
+            Self::Registered(active, registry) => {
+                connection.receive_registered(active, registry, frame)
+            }
         }
     }
 
@@ -103,6 +118,9 @@ impl RawProtocolVersion {
             Self::One => connection.apply(action),
             Self::Catalogue(catalogue) => connection.apply_catalogue(catalogue, action),
             Self::Active(active) => connection.apply_active(active, action),
+            Self::Registered(active, registry) => {
+                connection.apply_registered(active, registry, action)
+            }
         }
     }
 }
@@ -112,6 +130,7 @@ enum RequestedProtocol {
     One,
     Catalogue,
     Active,
+    Registered,
 }
 
 impl RequestedProtocol {
@@ -120,6 +139,7 @@ impl RequestedProtocol {
             Self::One => &SERVER_ACK,
             Self::Catalogue => &SERVER_CATALOGUE_ACK,
             Self::Active => &SERVER_ACTIVE_ACK,
+            Self::Registered => &SERVER_REGISTERED_ACK,
         }
     }
 }
@@ -129,6 +149,7 @@ fn requested_protocol(hello: &[u8; 12]) -> Option<RequestedProtocol> {
         CLIENT_HELLO => Some(RequestedProtocol::One),
         CLIENT_CATALOGUE_HELLO => Some(RequestedProtocol::Catalogue),
         CLIENT_ACTIVE_HELLO => Some(RequestedProtocol::Active),
+        CLIENT_REGISTERED_HELLO => Some(RequestedProtocol::Registered),
         _ => None,
     }
 }
@@ -205,6 +226,11 @@ pub enum LocalRawSocketError {
         /// The protected active-revision recovery failure.
         source: Box<PostgresKernelError>,
     },
+    /// The authenticated version-4 connection could not bind its opaque registry.
+    OpaqueRegistry {
+        /// The checked-in opaque codec registry failure.
+        source: RegisteredOpaqueCodecsError,
+    },
     /// Socket I/O failed or ended within a required envelope.
     Io {
         /// The socket failure.
@@ -243,6 +269,7 @@ impl fmt::Display for LocalRawSocketError {
             Self::Authentication { .. } => "local raw socket authentication failed",
             Self::Catalogue { .. } => "local raw socket catalogue recovery failed",
             Self::ActiveRevision { .. } => "local raw socket active revision recovery failed",
+            Self::OpaqueRegistry { .. } => "local raw socket opaque registry validation failed",
             Self::Io { .. } => "local raw socket I/O failed",
             Self::Frame { .. } => "local raw socket frame is invalid",
             Self::Connection { .. } => "local raw socket state is invalid",
@@ -258,6 +285,7 @@ impl Error for LocalRawSocketError {
             Self::Authentication { source } => Some(source),
             Self::Catalogue { source } => Some(source),
             Self::ActiveRevision { source } => Some(source),
+            Self::OpaqueRegistry { source } => Some(source),
             Self::Io { source } => Some(source),
             Self::Frame { source } => Some(source),
             Self::Connection { source } => Some(source),
@@ -623,8 +651,8 @@ fn sync_directory(path: &Path) -> Result<(), LocalRawSocketServerError> {
 /// # Errors
 ///
 /// Returns [`LocalRawSocketError`] for handshake, authentication, active-state
-/// recovery, capacity, I/O, codec, state-machine, or protected task failures.
-/// No error text is written to the client.
+/// recovery, opaque-registry validation, capacity, I/O, codec, state-machine,
+/// or protected task failures. No error text is written to the client.
 pub async fn serve_local_raw_stream(
     kernel: PostgresKernel,
     stream: StandardUnixStream,
@@ -748,6 +776,21 @@ async fn negotiate_and_drive(
                     }
                 })?;
                 RawProtocolVersion::Active(Arc::new(active))
+            }
+            RequestedProtocol::Registered => {
+                let active = Arc::new(kernel.recover().await.map_err(|source| {
+                    LocalRawSocketError::ActiveRevision {
+                        source: Box::new(source),
+                    }
+                })?);
+                let standard = active.catalogue_hash_context().standard().ok_or(
+                    LocalRawSocketError::OpaqueRegistry {
+                        source: RegisteredOpaqueCodecsError::UnacceptedStandardSnapshot,
+                    },
+                )?;
+                let registry = registered_opaque_codecs(standard)
+                    .map_err(|source| LocalRawSocketError::OpaqueRegistry { source })?;
+                RawProtocolVersion::Registered(active, Arc::new(registry))
             }
         };
     drop(authentication_permit);
@@ -1456,6 +1499,10 @@ mod tests {
             CLIENT_ACTIVE_HELLO,
             *b"ORNA\x01\x00\x00\x03\x00\x00\x00\x00"
         );
+        assert_eq!(
+            CLIENT_REGISTERED_HELLO,
+            *b"ORNA\x01\x00\x00\x04\x00\x00\x00\x00"
+        );
         assert_eq!(SERVER_ACK, *b"ORNA\x81\x00\x00\x01\x00\x00\x00\x00");
         assert_eq!(
             SERVER_CATALOGUE_ACK,
@@ -1463,11 +1510,19 @@ mod tests {
         );
         assert_eq!(SERVER_ACTIVE_ACK, *b"ORNA\x81\x00\x00\x03\x00\x00\x00\x00");
         assert_eq!(
+            SERVER_REGISTERED_ACK,
+            *b"ORNA\x81\x00\x00\x04\x00\x00\x00\x00"
+        );
+        assert_eq!(
             requested_protocol(&CLIENT_ACTIVE_HELLO),
             Some(RequestedProtocol::Active)
         );
         assert_eq!(
-            requested_protocol(b"ORNA\x01\x00\x00\x04\x00\x00\x00\x00"),
+            requested_protocol(&CLIENT_REGISTERED_HELLO),
+            Some(RequestedProtocol::Registered)
+        );
+        assert_eq!(
+            requested_protocol(b"ORNA\x01\x00\x00\x05\x00\x00\x00\x00"),
             None
         );
 
