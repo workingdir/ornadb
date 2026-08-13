@@ -1,5 +1,6 @@
 //! Live PostgreSQL tests for atomic single-row SERVER mutation execution.
 
+#[path = "../../orna-kernel-postgres/tests/support/mod.rs"]
 mod support;
 
 use std::{collections::BTreeSet, str::FromStr};
@@ -29,7 +30,7 @@ use orna_core::{
     types::ResolvedType,
     value::{EnumValue, FunctionArgument, RecordValue, RuntimeFloat, RuntimeValue},
 };
-use orna_kernel_postgres::{
+use orna_postgres::{
     PostgresKernel, PostgresKernelError, ServerDeleteCommitState, ServerDeleteError,
     ServerDeleteResult, ServerInsertCommitState, ServerInsertError, ServerInsertResult,
     ServerMutationError, ServerUpdateCommitState, ServerUpdateError, ServerUpdateResult,
@@ -3441,7 +3442,7 @@ fn require_delete_restricted(
 }
 
 fn require_context(
-    context: orna_kernel_postgres::ServerInsertContext,
+    context: orna_postgres::ServerInsertContext,
     pair: RevisionPair,
     function: FunctionId,
     revision: FunctionRevisionId,
