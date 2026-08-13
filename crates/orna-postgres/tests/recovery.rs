@@ -1,3 +1,4 @@
+#[path = "../../orna-kernel-postgres/tests/support/mod.rs"]
 mod support;
 
 use std::{
@@ -44,7 +45,7 @@ use orna_core::{
     types::{ResolvedType, StandardScalar},
     value::RuntimeValue,
 };
-use orna_kernel_postgres::{PostgresKernel, PostgresKernelError};
+use orna_postgres::{PostgresKernel, PostgresKernelError};
 use support::{TestDatabase, TestResult, failure, with_test_database};
 
 const SCHEMA_SOURCE: &str = "schema café;\n";
