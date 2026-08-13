@@ -1350,6 +1350,7 @@ impl ActiveDatabaseRevision {
         let standard = self.catalogue_hash_context.standard()?.catalogue();
         match classify_record_value_field_descriptor(&self.catalogue, standard, descriptor).ok()? {
             RecordValueFieldDescriptorClass::ApplicationEnum(type_id)
+            | RecordValueFieldDescriptorClass::ApplicationRecord(type_id)
             | RecordValueFieldDescriptorClass::StandardEnum(type_id) => {
                 Some(ResolvedType::named(type_id))
             }
@@ -2285,32 +2286,50 @@ fn validate_record_value_field_types(
     let CatalogueHashContext::Version2 { standard } = context else {
         return Ok(());
     };
-    for record_value_type in catalogue.record_value_types() {
-        for field in record_value_type.fields() {
-            match classify_record_value_field_descriptor(
-                catalogue,
-                standard.catalogue(),
-                field.descriptor(),
-            ) {
-                Ok(_) => {}
-                Err(RecordValueFieldDescriptorClassificationError::Unsupported) => {
-                    return Err(RevisionInvariantError::UnsupportedRecordValueFieldType {
-                        record_value_type: record_value_type.id(),
-                        field: field.id(),
-                        descriptor: field.descriptor().clone(),
-                    });
-                }
-                Err(RecordValueFieldDescriptorClassificationError::Ambiguous { type_id }) => {
-                    return Err(RevisionInvariantError::AmbiguousRecordValueFieldType {
-                        record_value_type: record_value_type.id(),
-                        field: field.id(),
-                        type_id,
-                    });
-                }
-            }
+    validate_record_value_field_descriptors(catalogue, standard.catalogue()).map_err(|error| {
+        match error {
+            RecordValueFieldDescriptorValidationError::Unsupported {
+                record_value_type,
+                field,
+                descriptor,
+            } => RevisionInvariantError::UnsupportedRecordValueFieldType {
+                record_value_type,
+                field,
+                descriptor,
+            },
+            RecordValueFieldDescriptorValidationError::Ambiguous {
+                record_value_type,
+                field,
+                type_id,
+            } => RevisionInvariantError::AmbiguousRecordValueFieldType {
+                record_value_type,
+                field,
+                type_id,
+            },
+            RecordValueFieldDescriptorValidationError::RecursiveRecordValueField {
+                record_value_type,
+                field,
+                nested_record_value_type,
+            } => RevisionInvariantError::RecursiveRecordValueField {
+                record_value_type,
+                field,
+                nested_record_value_type,
+            },
+            RecordValueFieldDescriptorValidationError::RecordValueNestingTooDeep {
+                record_value_type,
+                field,
+                nested_record_value_type,
+                maximum,
+                actual,
+            } => RevisionInvariantError::RecordValueNestingTooDeep {
+                record_value_type,
+                field,
+                nested_record_value_type,
+                maximum,
+                actual,
+            },
         }
-    }
-    Ok(())
+    })
 }
 
 /// The durable storage class of one admitted record-value field descriptor.
@@ -2319,6 +2338,8 @@ fn validate_record_value_field_types(
 pub enum RecordValueFieldDescriptorClass {
     /// An application enum identity.
     ApplicationEnum(TypeId),
+    /// An application record-value identity.
+    ApplicationRecord(TypeId),
     /// A pinned-standard enum identity.
     StandardEnum(TypeId),
     /// An accepted immutable, persistable pinned-standard primitive identity.
@@ -2361,6 +2382,225 @@ pub(crate) enum RecordValueFieldDescriptorClassificationError {
     Ambiguous { type_id: TypeId },
 }
 
+/// A failure that prevents a candidate from admitting record-value fields.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum RecordValueFieldDescriptorValidationError {
+    Unsupported {
+        record_value_type: TypeId,
+        field: FieldId,
+        descriptor: TypeDescriptor,
+    },
+    Ambiguous {
+        record_value_type: TypeId,
+        field: FieldId,
+        type_id: TypeId,
+    },
+    RecursiveRecordValueField {
+        record_value_type: TypeId,
+        field: FieldId,
+        nested_record_value_type: TypeId,
+    },
+    RecordValueNestingTooDeep {
+        record_value_type: TypeId,
+        field: FieldId,
+        nested_record_value_type: TypeId,
+        maximum: u32,
+        actual: u32,
+    },
+}
+
+const MAXIMUM_RECORD_VALUE_NESTING: u32 = 32;
+
+#[derive(Clone, Copy)]
+struct RecordValueFieldGraphEdge {
+    field: FieldId,
+    nested_record_value_type: TypeId,
+}
+
+#[derive(Clone, Copy)]
+struct RecordValueFieldCycleFrame {
+    owner: TypeId,
+    next_edge: usize,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum RecordValueFieldGraphVisitState {
+    Grey,
+    Black,
+}
+
+/// Classifies every record field before it checks the complete dependency graph.
+///
+/// The order and phase boundaries are part of the version-2 catalogue contract.
+pub(crate) fn validate_record_value_field_descriptors(
+    catalogue: &CatalogueSnapshot,
+    standard: &CatalogueSnapshot,
+) -> Result<(), RecordValueFieldDescriptorValidationError> {
+    let mut record_value_types = catalogue.record_value_types().iter().collect::<Vec<_>>();
+    record_value_types.sort_by_key(|record_value_type| record_value_type.id().to_bytes());
+
+    let mut edges_by_owner = HashMap::with_capacity(record_value_types.len());
+    for record_value_type in &record_value_types {
+        let mut fields = record_value_type.fields().iter().collect::<Vec<_>>();
+        fields.sort_by_key(|field| (field.ordinal(), field.id().to_bytes()));
+
+        let mut outgoing = Vec::new();
+        for field in fields {
+            match classify_record_value_field_descriptor(catalogue, standard, field.descriptor()) {
+                Ok(RecordValueFieldDescriptorClass::ApplicationRecord(
+                    nested_record_value_type,
+                )) => outgoing.push(RecordValueFieldGraphEdge {
+                    field: field.id(),
+                    nested_record_value_type,
+                }),
+                Ok(
+                    RecordValueFieldDescriptorClass::ApplicationEnum(_)
+                    | RecordValueFieldDescriptorClass::StandardEnum(_)
+                    | RecordValueFieldDescriptorClass::StandardPrimitive(_),
+                ) => {}
+                Err(RecordValueFieldDescriptorClassificationError::Unsupported) => {
+                    return Err(RecordValueFieldDescriptorValidationError::Unsupported {
+                        record_value_type: record_value_type.id(),
+                        field: field.id(),
+                        descriptor: field.descriptor().clone(),
+                    });
+                }
+                Err(RecordValueFieldDescriptorClassificationError::Ambiguous { type_id }) => {
+                    return Err(RecordValueFieldDescriptorValidationError::Ambiguous {
+                        record_value_type: record_value_type.id(),
+                        field: field.id(),
+                        type_id,
+                    });
+                }
+            }
+        }
+        edges_by_owner.insert(record_value_type.id(), outgoing);
+    }
+
+    let roots = record_value_types
+        .iter()
+        .map(|record_value_type| record_value_type.id())
+        .collect::<Vec<_>>();
+    validate_record_value_field_cycles(&roots, &edges_by_owner)?;
+    validate_record_value_field_nesting(&roots, &edges_by_owner)
+}
+
+fn validate_record_value_field_cycles(
+    roots: &[TypeId],
+    edges_by_owner: &HashMap<TypeId, Vec<RecordValueFieldGraphEdge>>,
+) -> Result<(), RecordValueFieldDescriptorValidationError> {
+    let mut states = HashMap::with_capacity(roots.len());
+    for &root in roots {
+        if states.contains_key(&root) {
+            continue;
+        }
+        states.insert(root, RecordValueFieldGraphVisitState::Grey);
+        let mut stack = vec![RecordValueFieldCycleFrame {
+            owner: root,
+            next_edge: 0,
+        }];
+
+        loop {
+            let next = {
+                let Some(frame) = stack.last_mut() else {
+                    break;
+                };
+                let owner = frame.owner;
+                let edge = edges_by_owner
+                    .get(&owner)
+                    .and_then(|edges| edges.get(frame.next_edge))
+                    .copied();
+                if edge.is_some() {
+                    frame.next_edge += 1;
+                }
+                edge.map(|edge| (owner, edge))
+            };
+
+            let Some((owner, edge)) = next else {
+                let completed = stack
+                    .pop()
+                    .expect("record cycle stack must retain the completed frame");
+                states.insert(completed.owner, RecordValueFieldGraphVisitState::Black);
+                continue;
+            };
+
+            match states.get(&edge.nested_record_value_type) {
+                Some(RecordValueFieldGraphVisitState::Grey) => {
+                    return Err(
+                        RecordValueFieldDescriptorValidationError::RecursiveRecordValueField {
+                            record_value_type: owner,
+                            field: edge.field,
+                            nested_record_value_type: edge.nested_record_value_type,
+                        },
+                    );
+                }
+                Some(RecordValueFieldGraphVisitState::Black) => {}
+                None => {
+                    states.insert(
+                        edge.nested_record_value_type,
+                        RecordValueFieldGraphVisitState::Grey,
+                    );
+                    stack.push(RecordValueFieldCycleFrame {
+                        owner: edge.nested_record_value_type,
+                        next_edge: 0,
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_record_value_field_nesting(
+    roots: &[TypeId],
+    edges_by_owner: &HashMap<TypeId, Vec<RecordValueFieldGraphEdge>>,
+) -> Result<(), RecordValueFieldDescriptorValidationError> {
+    let mut greatest_validated_depth = HashMap::with_capacity(roots.len());
+    for &root in roots {
+        visit_record_value_field_nesting(root, 0, edges_by_owner, &mut greatest_validated_depth)?;
+    }
+    Ok(())
+}
+
+fn visit_record_value_field_nesting(
+    owner: TypeId,
+    depth: u32,
+    edges_by_owner: &HashMap<TypeId, Vec<RecordValueFieldGraphEdge>>,
+    greatest_validated_depth: &mut HashMap<TypeId, u32>,
+) -> Result<(), RecordValueFieldDescriptorValidationError> {
+    if greatest_validated_depth
+        .get(&owner)
+        .is_some_and(|previous| *previous >= depth)
+    {
+        return Ok(());
+    }
+    greatest_validated_depth.insert(owner, depth);
+
+    if let Some(edges) = edges_by_owner.get(&owner) {
+        for edge in edges {
+            let nested_depth = depth + 1;
+            if nested_depth > MAXIMUM_RECORD_VALUE_NESTING {
+                return Err(
+                    RecordValueFieldDescriptorValidationError::RecordValueNestingTooDeep {
+                        record_value_type: owner,
+                        field: edge.field,
+                        nested_record_value_type: edge.nested_record_value_type,
+                        maximum: MAXIMUM_RECORD_VALUE_NESTING,
+                        actual: nested_depth,
+                    },
+                );
+            }
+            visit_record_value_field_nesting(
+                edge.nested_record_value_type,
+                nested_depth,
+                edges_by_owner,
+                greatest_validated_depth,
+            )?;
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn classify_record_value_field_descriptor(
     catalogue: &CatalogueSnapshot,
     standard: &CatalogueSnapshot,
@@ -2370,15 +2610,19 @@ pub(crate) fn classify_record_value_field_descriptor(
         return Err(RecordValueFieldDescriptorClassificationError::Unsupported);
     };
     let application_enum = catalogue.enum_type_by_id(type_id).is_some();
+    let application_record = catalogue.record_value_type_by_id(type_id).is_some();
     let standard_enum = standard.enum_type_by_id(type_id).is_some();
     let standard_scalar = standard
         .value_type_by_id(type_id)
         .and_then(accepted_record_scalar);
-    if application_enum && (standard_enum || standard_scalar.is_some()) {
+    if (application_enum || application_record) && (standard_enum || standard_scalar.is_some()) {
         return Err(RecordValueFieldDescriptorClassificationError::Ambiguous { type_id });
     }
     if application_enum {
         return Ok(RecordValueFieldDescriptorClass::ApplicationEnum(type_id));
+    }
+    if application_record {
+        return Ok(RecordValueFieldDescriptorClass::ApplicationRecord(type_id));
     }
     if standard_enum {
         return Ok(RecordValueFieldDescriptorClass::StandardEnum(type_id));
@@ -2938,6 +3182,28 @@ pub enum RevisionInvariantError {
         /// The conflicting type identity.
         type_id: TypeId,
     },
+    /// Record fields form a recursive by-value dependency.
+    RecursiveRecordValueField {
+        /// The record value type owning the rejected field.
+        record_value_type: TypeId,
+        /// The edge that closes the cycle.
+        field: FieldId,
+        /// The active record value type already on the dependency path.
+        nested_record_value_type: TypeId,
+    },
+    /// Record fields exceed the maximum by-value nesting depth.
+    RecordValueNestingTooDeep {
+        /// The record value type owning the rejected field.
+        record_value_type: TypeId,
+        /// The edge that exceeds the maximum depth.
+        field: FieldId,
+        /// The record value type selected by the rejected edge.
+        nested_record_value_type: TypeId,
+        /// The accepted maximum number of record-valued edges.
+        maximum: u32,
+        /// The first depth outside the accepted maximum.
+        actual: u32,
+    },
     /// A type-name binding was paired with a version-1 catalogue hash.
     TypeBindingRequiresCatalogueHashVersionTwo {
         /// The incompatible direct binding.
@@ -3187,6 +3453,12 @@ impl fmt::Display for RevisionInvariantError {
             AmbiguousRecordValueFieldType { .. } => formatter.write_str(
                 "record field type is present in both application and standard catalogues",
             ),
+            RecursiveRecordValueField { .. } => {
+                formatter.write_str("record value fields must not form a recursive cycle")
+            }
+            RecordValueNestingTooDeep { .. } => {
+                formatter.write_str("record value nesting exceeds the maximum depth")
+            }
             TypeBindingRequiresCatalogueHashVersionTwo { .. } => {
                 formatter.write_str("type-name bindings require catalogue hash version 2")
             }
@@ -3312,7 +3584,7 @@ mod tests {
             RecordValueFieldDefinition, RecordValueTypeDefinition, SchemaDefinition, TypeBinding,
             ValueTypeDefinition, ValueTypeMutability, ValueTypePersistence,
         },
-        types::{ResolvedType, StandardScalar, TypeDescriptorKind},
+        types::{ResolvedType, StandardScalar, TypeDescriptor, TypeDescriptorKind},
     };
 
     const fn id<const BYTE: u8>() -> [u8; 16] {
@@ -4535,6 +4807,740 @@ mod tests {
                 field: FieldId::from_bytes(id::<78>()),
             },
         ));
+    }
+
+    fn record_graph_standard() -> CatalogueSnapshot {
+        CatalogueSnapshot::new(CatalogueRevisionId::from_bytes(id::<150>()), vec![], vec![])
+            .unwrap()
+    }
+
+    fn record_graph_standard_with_boolean() -> CatalogueSnapshot {
+        CatalogueSnapshot::new_with_types(
+            CatalogueRevisionId::from_bytes(id::<151>()),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes(id::<152>()),
+                QualifiedSemanticName::new(["std"]).unwrap(),
+            )],
+            vec![],
+            vec![ValueTypeDefinition::primitive(
+                TypeId::from_bytes(id::<71>()),
+                QualifiedSemanticName::new(["std", "boolean"]).unwrap(),
+                ValueTypeMutability::Immutable,
+                ValueTypePersistence::Persistable,
+                "orna.kernel.value.boolean@1",
+            )],
+            vec![],
+        )
+        .unwrap()
+    }
+
+    fn record_graph_schema() -> SchemaDefinition {
+        SchemaDefinition::new(
+            SchemaId::from_bytes(id::<8>()),
+            QualifiedSemanticName::new(["crm"]).unwrap(),
+        )
+    }
+
+    fn record_graph_type(
+        record_byte: u8,
+        name: &str,
+        fields: Vec<(u8, u32, TypeId)>,
+    ) -> RecordValueTypeDefinition {
+        let fields = fields
+            .into_iter()
+            .map(|(field_byte, ordinal, target)| {
+                RecordValueFieldDefinition::try_new_descriptor(
+                    FieldId::from_bytes([field_byte; 16]),
+                    format!("edge_{ordinal}"),
+                    ordinal,
+                    TypeDescriptor::named(target),
+                )
+                .unwrap()
+            })
+            .collect();
+        RecordValueTypeDefinition::new(
+            TypeId::from_bytes([record_byte; 16]),
+            QualifiedSemanticName::new(["crm", name]).unwrap(),
+            fields,
+        )
+    }
+
+    fn record_graph_catalogue(records: Vec<RecordValueTypeDefinition>) -> CatalogueSnapshot {
+        CatalogueSnapshot::new_with_record_value_types(
+            CatalogueRevisionId::from_bytes(id::<152>()),
+            vec![record_graph_schema()],
+            vec![],
+            vec![],
+            vec![],
+            records,
+            vec![],
+        )
+        .unwrap()
+    }
+
+    fn record_graph_type_with_id(
+        id: [u8; 16],
+        name: &str,
+        fields: Vec<([u8; 16], u32, TypeId)>,
+    ) -> RecordValueTypeDefinition {
+        let fields = fields
+            .into_iter()
+            .map(|(field_id, ordinal, target)| {
+                RecordValueFieldDefinition::try_new_descriptor(
+                    FieldId::from_bytes(field_id),
+                    format!("edge_{ordinal}"),
+                    ordinal,
+                    TypeDescriptor::named(target),
+                )
+                .unwrap()
+            })
+            .collect();
+        RecordValueTypeDefinition::new(
+            TypeId::from_bytes(id),
+            QualifiedSemanticName::new(["crm", name]).unwrap(),
+            fields,
+        )
+    }
+
+    /// A deterministic record identity for one chain index beyond one byte.
+    fn index_type_id(index: u32) -> [u8; 16] {
+        let value = index + 0x1000;
+        let mut bytes = [0; 16];
+        bytes[0] = (value >> 8) as u8;
+        bytes[1] = value as u8;
+        bytes
+    }
+
+    /// A deterministic field identity for one chain index beyond one byte.
+    fn index_field_id(index: u32) -> [u8; 16] {
+        let mut bytes = index_type_id(index);
+        bytes[15] = 0x01;
+        bytes
+    }
+
+    fn record_graph_origins_for(catalogue: &CatalogueSnapshot) -> Vec<DefinitionOrigin> {
+        let source_unit = SourceUnitId::from_bytes(id::<3>());
+        let mut identities = vec![DefinitionIdentity::Schema(SchemaId::from_bytes(id::<8>()))];
+        for record in catalogue.record_value_types() {
+            identities.push(DefinitionIdentity::ValueType(record.id()));
+            for field in record.fields() {
+                identities.push(DefinitionIdentity::Field {
+                    owner: record.id(),
+                    field: field.id(),
+                });
+            }
+        }
+        identities
+            .into_iter()
+            .enumerate()
+            .map(|(index, identity)| {
+                DefinitionOrigin::new(
+                    identity,
+                    SourceOrigin::new(source_unit, index as u32, index as u32 + 1).unwrap(),
+                )
+            })
+            .collect()
+    }
+
+    fn validate_record_graph(
+        records: Vec<RecordValueTypeDefinition>,
+    ) -> Result<(), RecordValueFieldDescriptorValidationError> {
+        validate_record_value_field_descriptors(
+            &record_graph_catalogue(records),
+            &record_graph_standard_with_boolean(),
+        )
+    }
+
+    #[test]
+    fn record_value_field_application_record_provenance_and_active_projection() {
+        let record_a = record_graph_type(
+            200,
+            "record_a",
+            vec![(210, 0, TypeId::from_bytes(id::<201>()))],
+        );
+        let record_b = record_graph_type(
+            201,
+            "record_b",
+            vec![(211, 0, TypeId::from_bytes(id::<71>()))],
+        );
+        let catalogue = record_graph_catalogue(vec![record_a.clone(), record_b.clone()]);
+
+        assert_eq!(
+            classify_record_value_field_descriptor(
+                &catalogue,
+                &record_graph_standard(),
+                &TypeDescriptor::named(TypeId::from_bytes(id::<200>())),
+            ),
+            Ok(RecordValueFieldDescriptorClass::ApplicationRecord(
+                TypeId::from_bytes(id::<200>())
+            ))
+        );
+        assert_eq!(
+            classify_record_value_field_descriptor(
+                &catalogue,
+                &record_graph_standard(),
+                &TypeDescriptor::named(TypeId::from_bytes(id::<201>())),
+            ),
+            Ok(RecordValueFieldDescriptorClass::ApplicationRecord(
+                TypeId::from_bytes(id::<201>())
+            ))
+        );
+        assert_eq!(
+            classify_record_value_field_descriptor(
+                &catalogue,
+                &record_graph_standard(),
+                &TypeDescriptor::reference(TypeId::from_bytes(id::<200>())),
+            ),
+            Err(RecordValueFieldDescriptorClassificationError::Unsupported)
+        );
+
+        let active = active_for_flat_type_conversion(catalogue, standard_context());
+        assert_eq!(
+            active.record_value_field_descriptor_runtime_type(&TypeDescriptor::named(
+                TypeId::from_bytes(id::<200>())
+            )),
+            Some(ResolvedType::named(TypeId::from_bytes(id::<200>())))
+        );
+        assert_eq!(
+            active.record_value_field_descriptor_runtime_type(&TypeDescriptor::named(
+                TypeId::from_bytes(id::<71>())
+            )),
+            Some(ResolvedType::scalar(StandardScalar::Boolean))
+        );
+        assert_eq!(
+            active.record_value_field_descriptor_runtime_type(&TypeDescriptor::reference(
+                TypeId::from_bytes(id::<200>())
+            )),
+            None
+        );
+        assert_eq!(validate_record_graph(vec![record_a, record_b]), Ok(()));
+    }
+
+    #[test]
+    fn record_value_field_self_cycle_is_rejected_exactly() {
+        let record_a = record_graph_type(
+            200,
+            "record_a",
+            vec![(210, 0, TypeId::from_bytes(id::<200>()))],
+        );
+        assert_eq!(
+            validate_record_graph(vec![record_a]).unwrap_err(),
+            RecordValueFieldDescriptorValidationError::RecursiveRecordValueField {
+                record_value_type: TypeId::from_bytes(id::<200>()),
+                field: FieldId::from_bytes(id::<210>()),
+                nested_record_value_type: TypeId::from_bytes(id::<200>()),
+            }
+        );
+    }
+
+    #[test]
+    fn record_value_field_three_cycle_closes_at_the_exact_back_edge() {
+        let record_a = record_graph_type(
+            200,
+            "record_a",
+            vec![(210, 0, TypeId::from_bytes(id::<201>()))],
+        );
+        let record_b = record_graph_type(
+            201,
+            "record_b",
+            vec![(211, 0, TypeId::from_bytes(id::<202>()))],
+        );
+        let record_c = record_graph_type(
+            202,
+            "record_c",
+            vec![(212, 0, TypeId::from_bytes(id::<200>()))],
+        );
+        assert_eq!(
+            validate_record_graph(vec![record_a, record_b, record_c]).unwrap_err(),
+            RecordValueFieldDescriptorValidationError::RecursiveRecordValueField {
+                record_value_type: TypeId::from_bytes(id::<202>()),
+                field: FieldId::from_bytes(id::<212>()),
+                nested_record_value_type: TypeId::from_bytes(id::<200>()),
+            }
+        );
+    }
+
+    #[test]
+    fn record_value_field_cycle_selection_is_deterministic_across_orders() {
+        // The A-B-C-A cycle must report the same closing edge when the record
+        // input order is reversed.
+        let forward = vec![
+            record_graph_type(
+                200,
+                "record_a",
+                vec![(210, 0, TypeId::from_bytes(id::<201>()))],
+            ),
+            record_graph_type(
+                201,
+                "record_b",
+                vec![(211, 0, TypeId::from_bytes(id::<202>()))],
+            ),
+            record_graph_type(
+                202,
+                "record_c",
+                vec![(212, 0, TypeId::from_bytes(id::<200>()))],
+            ),
+        ];
+        let reversed = forward.iter().rev().cloned().collect::<Vec<_>>();
+        let expected = RecordValueFieldDescriptorValidationError::RecursiveRecordValueField {
+            record_value_type: TypeId::from_bytes(id::<202>()),
+            field: FieldId::from_bytes(id::<212>()),
+            nested_record_value_type: TypeId::from_bytes(id::<200>()),
+        };
+        assert_eq!(validate_record_graph(forward).unwrap_err(), expected);
+        assert_eq!(validate_record_graph(reversed).unwrap_err(), expected);
+
+        // The closing edge is selected by ordinal, not by input field order.
+        let first_field_first = vec![
+            record_graph_type(
+                200,
+                "record_a",
+                vec![
+                    (210, 0, TypeId::from_bytes(id::<201>())),
+                    (214, 1, TypeId::from_bytes(id::<202>())),
+                ],
+            ),
+            record_graph_type(
+                201,
+                "record_b",
+                vec![(211, 0, TypeId::from_bytes(id::<200>()))],
+            ),
+            record_graph_type(
+                202,
+                "record_c",
+                vec![(212, 0, TypeId::from_bytes(id::<71>()))],
+            ),
+        ];
+        assert_eq!(
+            validate_record_graph(first_field_first).unwrap_err(),
+            RecordValueFieldDescriptorValidationError::RecursiveRecordValueField {
+                record_value_type: TypeId::from_bytes(id::<201>()),
+                field: FieldId::from_bytes(id::<211>()),
+                nested_record_value_type: TypeId::from_bytes(id::<200>()),
+            }
+        );
+        let second_field_first = vec![
+            record_graph_type(
+                200,
+                "record_a",
+                vec![
+                    (214, 0, TypeId::from_bytes(id::<201>())),
+                    (210, 1, TypeId::from_bytes(id::<202>())),
+                ],
+            ),
+            record_graph_type(
+                201,
+                "record_b",
+                vec![(211, 0, TypeId::from_bytes(id::<200>()))],
+            ),
+            record_graph_type(
+                202,
+                "record_c",
+                vec![(212, 0, TypeId::from_bytes(id::<71>()))],
+            ),
+        ];
+        assert_eq!(
+            validate_record_graph(second_field_first).unwrap_err(),
+            RecordValueFieldDescriptorValidationError::RecursiveRecordValueField {
+                record_value_type: TypeId::from_bytes(id::<201>()),
+                field: FieldId::from_bytes(id::<211>()),
+                nested_record_value_type: TypeId::from_bytes(id::<200>()),
+            }
+        );
+    }
+
+    #[test]
+    fn record_value_field_diamond_dag_is_accepted() {
+        let records = vec![
+            record_graph_type(
+                200,
+                "record_a",
+                vec![
+                    (210, 0, TypeId::from_bytes(id::<201>())),
+                    (214, 1, TypeId::from_bytes(id::<202>())),
+                ],
+            ),
+            record_graph_type(
+                201,
+                "record_b",
+                vec![(211, 0, TypeId::from_bytes(id::<203>()))],
+            ),
+            record_graph_type(
+                202,
+                "record_c",
+                vec![(212, 0, TypeId::from_bytes(id::<203>()))],
+            ),
+            record_graph_type(
+                203,
+                "record_d",
+                vec![(213, 0, TypeId::from_bytes(id::<71>()))],
+            ),
+        ];
+        assert_eq!(validate_record_graph(records), Ok(()));
+    }
+
+    #[test]
+    fn record_value_field_classification_errors_precede_cycles() {
+        // The application catalogue also defines a record at the standard
+        // boolean identity, so record_a's first field is ambiguous, while the
+        // record_a -> record_b -> record_a cycle exists. Classification runs
+        // before cycle detection, so the ambiguous field must win.
+        let colliding = record_graph_type(
+            71,
+            "record_71",
+            vec![(215, 0, TypeId::from_bytes(id::<201>()))],
+        );
+        let record_a = record_graph_type(
+            200,
+            "record_a",
+            vec![
+                (210, 0, TypeId::from_bytes(id::<71>())),
+                (214, 1, TypeId::from_bytes(id::<201>())),
+            ],
+        );
+        let record_b = record_graph_type(
+            201,
+            "record_b",
+            vec![(211, 0, TypeId::from_bytes(id::<200>()))],
+        );
+        let catalogue = record_graph_catalogue(vec![colliding, record_a, record_b]);
+        let error = validate_record_value_field_descriptors(
+            &catalogue,
+            &record_graph_standard_with_boolean(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            RecordValueFieldDescriptorValidationError::Ambiguous {
+                record_value_type: TypeId::from_bytes(id::<200>()),
+                field: FieldId::from_bytes(id::<210>()),
+                type_id: TypeId::from_bytes(id::<71>()),
+            }
+        );
+    }
+
+    #[test]
+    fn record_value_field_cycles_precede_depth() {
+        let record_a = record_graph_type(
+            200,
+            "record_a",
+            vec![
+                (210, 0, TypeId::from_bytes(id::<201>())),
+                (214, 1, TypeId::from_bytes(id::<202>())),
+            ],
+        );
+        let record_b = record_graph_type(
+            201,
+            "record_b",
+            vec![(211, 0, TypeId::from_bytes(id::<200>()))],
+        );
+        let chain = (0..40)
+            .map(|index| {
+                let record_byte = 202 + index as u8;
+                let next_byte = if index == 39 {
+                    71
+                } else {
+                    202 + index as u8 + 1
+                };
+                record_graph_type(
+                    record_byte,
+                    &format!("chain_{index}"),
+                    vec![(250, 0, TypeId::from_bytes([next_byte; 16]))],
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut records = vec![record_a, record_b];
+        records.extend(chain);
+        assert_eq!(
+            validate_record_graph(records).unwrap_err(),
+            RecordValueFieldDescriptorValidationError::RecursiveRecordValueField {
+                record_value_type: TypeId::from_bytes(id::<201>()),
+                field: FieldId::from_bytes(id::<211>()),
+                nested_record_value_type: TypeId::from_bytes(id::<200>()),
+            }
+        );
+    }
+
+    #[test]
+    fn record_value_field_nesting_accepts_32_edges_and_rejects_33_exactly() {
+        let accepted = (0..33)
+            .map(|index| {
+                let next_byte = if index == 32 {
+                    71
+                } else {
+                    200 + index as u8 + 1
+                };
+                record_graph_type(
+                    200 + index as u8,
+                    &format!("chain_{index}"),
+                    vec![(210 + index as u8, 0, TypeId::from_bytes([next_byte; 16]))],
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(validate_record_graph(accepted), Ok(()));
+
+        let too_deep = (0..34)
+            .map(|index| {
+                let next_byte = if index == 33 {
+                    71
+                } else {
+                    200 + index as u8 + 1
+                };
+                record_graph_type(
+                    200 + index as u8,
+                    &format!("chain_{index}"),
+                    vec![(210 + index as u8, 0, TypeId::from_bytes([next_byte; 16]))],
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            validate_record_graph(too_deep).unwrap_err(),
+            RecordValueFieldDescriptorValidationError::RecordValueNestingTooDeep {
+                record_value_type: TypeId::from_bytes(id::<232>()),
+                field: FieldId::from_bytes(id::<242>()),
+                nested_record_value_type: TypeId::from_bytes(id::<233>()),
+                maximum: 32,
+                actual: 33,
+            }
+        );
+    }
+
+    #[test]
+    fn record_value_field_long_acyclic_chain_returns_the_exact_depth_error_without_crashing() {
+        let chain = (0..4096)
+            .map(|index| {
+                let next = if index == 4095 {
+                    TypeId::from_bytes([71; 16])
+                } else {
+                    TypeId::from_bytes(index_type_id(index + 1))
+                };
+                record_graph_type_with_id(
+                    index_type_id(index),
+                    &format!("chain_{index}"),
+                    vec![(index_field_id(index), 0, next)],
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            validate_record_graph(chain).unwrap_err(),
+            RecordValueFieldDescriptorValidationError::RecordValueNestingTooDeep {
+                record_value_type: TypeId::from_bytes(index_type_id(32)),
+                field: FieldId::from_bytes(index_field_id(32)),
+                nested_record_value_type: TypeId::from_bytes(index_type_id(33)),
+                maximum: 32,
+                actual: 33,
+            }
+        );
+    }
+
+    #[test]
+    fn record_value_field_shared_suffix_memoisation_still_fails_on_a_later_deep_root() {
+        let shallow_root = record_graph_type(
+            2,
+            "shallow_root",
+            vec![(212, 0, TypeId::from_bytes([3; 16]))],
+        );
+        let suffix_leaf = record_graph_type(
+            3,
+            "suffix_leaf",
+            vec![(213, 0, TypeId::from_bytes([71; 16]))],
+        );
+        let deep_root =
+            record_graph_type(4, "deep_root", vec![(214, 0, TypeId::from_bytes([5; 16]))]);
+        let deep_chain = (0..32)
+            .map(|index| {
+                let next = if index == 31 {
+                    TypeId::from_bytes([3; 16])
+                } else {
+                    TypeId::from_bytes([5 + index as u8 + 1; 16])
+                };
+                record_graph_type(
+                    5 + index as u8,
+                    &format!("deep_{index}"),
+                    vec![(215 + index as u8, 0, next)],
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut records = vec![shallow_root, suffix_leaf, deep_root];
+        records.extend(deep_chain);
+        assert_eq!(
+            validate_record_graph(records).unwrap_err(),
+            RecordValueFieldDescriptorValidationError::RecordValueNestingTooDeep {
+                record_value_type: TypeId::from_bytes([36; 16]),
+                field: FieldId::from_bytes([246; 16]),
+                nested_record_value_type: TypeId::from_bytes([3; 16]),
+                maximum: 32,
+                actual: 33,
+            }
+        );
+    }
+
+    fn deployable_with(
+        catalogue: CatalogueSnapshot,
+        context: CatalogueHashContext,
+    ) -> Result<DeployableRevision, RevisionInvariantError> {
+        let expected_base = RevisionPair::new(
+            SourceRevisionId::from_bytes(id::<78>()),
+            CatalogueRevisionId::from_bytes(id::<79>()),
+        );
+        DeployableRevision::new_with_catalogue_hash_context(
+            DeployableRevisionInput::new(
+                expected_base,
+                source(Some(expected_base.source())),
+                expected_base.catalogue(),
+                catalogue.clone(),
+                digest::<7>(),
+                DeployableRevisionContent::new(
+                    record_graph_origins_for(&catalogue),
+                    vec![],
+                    vec![],
+                    vec![],
+                )
+                .with_current_function_revisions(vec![]),
+            ),
+            context,
+        )
+    }
+
+    #[test]
+    fn deployable_classification_returns_application_record_for_nested_targets() {
+        let catalogue = record_graph_catalogue(vec![
+            record_graph_type(
+                200,
+                "outer",
+                vec![(210, 0, TypeId::from_bytes(id::<201>()))],
+            ),
+            record_graph_type(201, "inner", vec![(211, 0, TypeId::from_bytes(id::<71>()))]),
+        ]);
+        let deployable = deployable_with(catalogue, standard_context())
+            .expect("nested record catalogue must admit");
+        assert_eq!(
+            deployable.record_value_field_descriptor_class(&TypeDescriptor::named(
+                TypeId::from_bytes(id::<200>())
+            )),
+            Ok(RecordValueFieldDescriptorClass::ApplicationRecord(
+                TypeId::from_bytes(id::<200>())
+            ))
+        );
+        assert_eq!(
+            deployable.record_value_field_descriptor_class(&TypeDescriptor::named(
+                TypeId::from_bytes(id::<201>())
+            )),
+            Ok(RecordValueFieldDescriptorClass::ApplicationRecord(
+                TypeId::from_bytes(id::<201>())
+            ))
+        );
+    }
+
+    #[test]
+    fn revision_admission_maps_cycles_and_depth_to_exact_errors() {
+        let cyclic = record_graph_catalogue(vec![record_graph_type(
+            200,
+            "record_a",
+            vec![(210, 0, TypeId::from_bytes([200; 16]))],
+        )]);
+        let expected_cycle = RevisionInvariantError::RecursiveRecordValueField {
+            record_value_type: TypeId::from_bytes([200; 16]),
+            field: FieldId::from_bytes([210; 16]),
+            nested_record_value_type: TypeId::from_bytes([200; 16]),
+        };
+        let deployable_error = deployable_with(cyclic.clone(), standard_context())
+            .expect_err("a self cycle must fail deployable admission");
+        assert_eq!(deployable_error, expected_cycle);
+        assert_eq!(
+            deployable_error.to_string(),
+            "record value fields must not form a recursive cycle"
+        );
+
+        let source = source(None);
+        let pair = RevisionPair::new(source.id(), cyclic.revision());
+        let active_origins = record_graph_origins_for(&cyclic);
+        let active_error = ActiveDatabaseRevision::new_with_catalogue_hash_context(
+            ActiveDatabaseRevisionInput::new(
+                pair,
+                source,
+                cyclic,
+                digest::<7>(),
+                ActiveRevisionContent::new(vec![], vec![], active_origins, vec![]),
+            ),
+            standard_context(),
+        )
+        .expect_err("a self cycle must fail active admission");
+        assert_eq!(active_error, expected_cycle);
+
+        let too_deep = record_graph_catalogue(
+            (0..34)
+                .map(|index| {
+                    let next_byte = if index == 33 {
+                        71
+                    } else {
+                        200 + index as u8 + 1
+                    };
+                    record_graph_type(
+                        200 + index as u8,
+                        &format!("chain_{index}"),
+                        vec![(210 + index as u8, 0, TypeId::from_bytes([next_byte; 16]))],
+                    )
+                })
+                .collect(),
+        );
+        let expected_depth = RevisionInvariantError::RecordValueNestingTooDeep {
+            record_value_type: TypeId::from_bytes([232; 16]),
+            field: FieldId::from_bytes([242; 16]),
+            nested_record_value_type: TypeId::from_bytes([233; 16]),
+            maximum: 32,
+            actual: 33,
+        };
+        let deployable_depth = deployable_with(too_deep.clone(), standard_context())
+            .expect_err("a depth-33 chain must fail deployable admission");
+        assert_eq!(deployable_depth, expected_depth);
+        assert_eq!(
+            deployable_depth.to_string(),
+            "record value nesting exceeds the maximum depth"
+        );
+    }
+
+    #[test]
+    fn application_record_colliding_with_a_standard_enum_is_ambiguous() {
+        let candidate = record_graph_catalogue(vec![
+            record_graph_type(
+                75,
+                "colliding",
+                vec![(210, 0, TypeId::from_bytes([200; 16]))],
+            ),
+            record_graph_type(200, "leaf", vec![(211, 0, TypeId::from_bytes([71; 16]))]),
+        ]);
+        let deployable = deployable_with(candidate, flat_type_standard_context())
+            .expect("colliding record catalogue must admit");
+        assert_eq!(
+            deployable.record_value_field_descriptor_class(&TypeDescriptor::named(
+                TypeId::from_bytes([75; 16])
+            )),
+            Err(RecordValueFieldDescriptorError::Ambiguous {
+                type_id: TypeId::from_bytes([75; 16]),
+            })
+        );
+
+        let with_field = record_graph_catalogue(vec![
+            record_graph_type(
+                75,
+                "colliding",
+                vec![(211, 0, TypeId::from_bytes([71; 16]))],
+            ),
+            record_graph_type(200, "user", vec![(210, 0, TypeId::from_bytes([75; 16]))]),
+        ]);
+        let expected = RevisionInvariantError::AmbiguousRecordValueFieldType {
+            record_value_type: TypeId::from_bytes([200; 16]),
+            field: FieldId::from_bytes([210; 16]),
+            type_id: TypeId::from_bytes([75; 16]),
+        };
+        let error = deployable_with(with_field, flat_type_standard_context())
+            .expect_err("an ambiguous record field must fail admission");
+        assert_eq!(error, expected);
+        assert_eq!(
+            error.to_string(),
+            "record field type is present in both application and standard catalogues"
+        );
     }
 
     fn catalogue_with_record_value_slot() -> CatalogueSnapshot {
