@@ -36,7 +36,7 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 3,
         name: "definition reference integrity",
-        sql: include_str!("../../../orna-kernel-postgres/migrations/0003_reference_integrity.sql"),
+        sql: include_str!("../../migrations/0003_reference_integrity.sql"),
         data_step: None,
     },
     Migration {

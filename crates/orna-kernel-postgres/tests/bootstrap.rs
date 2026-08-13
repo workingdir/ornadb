@@ -73,7 +73,7 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
     (
         3,
         "definition reference integrity",
-        include_str!("../migrations/0003_reference_integrity.sql"),
+        include_str!("../../orna-postgres/migrations/0003_reference_integrity.sql"),
     ),
     (
         4,
