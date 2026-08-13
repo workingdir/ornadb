@@ -193,7 +193,7 @@ mod tests {
             DeployableRevisionContent, DeployableRevisionInput, RevisionPair, SourceOrigin,
             StoredSourceRevision, StoredSourceUnit,
         },
-        types::ResolvedType,
+        types::{ResolvedType, TypeDescriptor},
     };
 
     use super::*;
@@ -573,11 +573,11 @@ mod tests {
                 record_type,
                 semantic_name(&["private_words", "status"]),
                 vec![
-                    RecordValueFieldDefinition::try_new(
+                    RecordValueFieldDefinition::try_new_descriptor(
                         FieldId::from_bytes([0x57; 16]),
                         "active",
                         0,
-                        ResolvedType::value(boolean),
+                        TypeDescriptor::named(boolean),
                     )
                     .unwrap(),
                 ],

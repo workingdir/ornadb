@@ -1352,7 +1352,7 @@ mod tests {
             CatalogueHashContext, CatalogueHashVersion, DefinitionIdentity, DefinitionOrigin,
             RevisionPair, SourceOrigin, StoredSourceRevision, StoredSourceUnit,
         },
-        types::{ResolvedType, StandardScalar},
+        types::{ResolvedType, StandardScalar, TypeDescriptor},
     };
 
     use super::{
@@ -1667,11 +1667,11 @@ mod tests {
                 record_type,
                 name(&["test", "status"]),
                 vec![
-                    RecordValueFieldDefinition::try_new(
+                    RecordValueFieldDefinition::try_new_descriptor(
                         FieldId::from_bytes([0x3e; 16]),
                         "active",
                         0,
-                        ResolvedType::value(boolean),
+                        TypeDescriptor::named(boolean),
                     )
                     .unwrap(),
                 ],
