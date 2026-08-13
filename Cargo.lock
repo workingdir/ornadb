@@ -439,6 +439,9 @@ dependencies = [
 [[package]]
 name = "orna-postgres-engine"
 version = "0.1.0"
+dependencies = [
+ "orna-postgres",
+]
 
 [[package]]
 name = "orna-protocol"
