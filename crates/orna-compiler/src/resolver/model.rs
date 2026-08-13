@@ -1341,7 +1341,7 @@ impl CheckedStandardSchema {
     }
 }
 
-/// One primitive value type confirmed against a verified standard-library snapshot.
+/// One primitive or opaque value type confirmed against a verified standard snapshot.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CheckedStandardValueType {
     pub(super) id: TypeId,
@@ -1447,7 +1447,7 @@ impl CheckedStandardLibrary {
         &self.schemas
     }
 
-    /// Returns checked primitive value types in source order.
+    /// Returns checked primitive and opaque value types in source order.
     pub fn value_types(&self) -> &[CheckedStandardValueType] {
         &self.value_types
     }
