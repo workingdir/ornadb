@@ -102,7 +102,7 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 14,
         name: "catalogue enum reference targets",
-        sql: include_str!("../../../orna-kernel-postgres/migrations/0014_enum_reference_targets.sql"),
+        sql: include_str!("../../migrations/0014_enum_reference_targets.sql"),
         data_step: None,
     },
     Migration {
