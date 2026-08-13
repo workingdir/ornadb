@@ -29,7 +29,7 @@ mod decode;
 mod physical;
 #[path = "../../orna-kernel-postgres/src/recovery.rs"]
 mod recovery;
-#[path = "../../orna-kernel-postgres/src/security.rs"]
+#[path = "kernel/security.rs"]
 mod security;
 #[path = "../../orna-kernel-postgres/src/server_execution.rs"]
 mod server_execution;
