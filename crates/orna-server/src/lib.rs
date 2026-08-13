@@ -3,6 +3,7 @@
 mod backend_shell;
 mod embedded;
 mod local_auth;
+mod raw_call;
 mod raw_client_dispatch;
 mod raw_socket;
 mod upgrade;
@@ -15,6 +16,7 @@ pub use embedded::{
     run_embedded_server, start_embedded_postmaster,
 };
 pub use local_auth::{LocalAuthenticationError, authenticate_local_stream};
+pub use raw_call::{LocalRawCallError, LocalRawCallOutcome, run_local_raw_call};
 pub use raw_client_dispatch::{RawClientDispatch, RawClientDispatchResult};
 pub use raw_socket::{
     LocalRawSocketError, LocalRawSocketResources, LocalRawSocketServer, LocalRawSocketServerError,
