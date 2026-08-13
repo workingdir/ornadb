@@ -61,3 +61,5 @@ source-of-truth or authority rules.
   [Enum Types Are Ordered Catalogue Values](0029-catalogue-enum-value-types.md)
 * **work ADR 0030:**
   [One Authenticated, Authorised, Audited SERVER SELECT](0030-authenticated-server-select.md)
+* **work ADR 0031:**
+  [Named Immutable Records Are Nominal Catalogue Values](0031-named-immutable-record-values.md)
