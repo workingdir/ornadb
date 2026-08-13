@@ -58,7 +58,7 @@ separate release action.
 - [x] Extend catalogue-backed types with accepted enum identity, syntax,
   catalogue, storage, codec, protocol, and first SERVER execution slices.
 - [x] Add a separately accepted record value type.
-- [ ] Add a separately accepted opaque value type.
+- [x] Add a separately accepted opaque value type.
 
 ## Completed foundations
 
