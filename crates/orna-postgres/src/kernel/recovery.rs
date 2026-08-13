@@ -1792,10 +1792,12 @@ fn decode_record_value_field(
         LegacyResolvedTypeTupleMember::Field,
     )?;
     let origin = decode_origin(row, &record, DefinitionIdentity::Field { owner, field: id })?;
+    let definition = RecordValueFieldDefinition::try_new(id, name, ordinal, resolved_type)
+        .map_err(|_| record.invariant("legacy scalar cannot form a record field descriptor"))?;
 
     Ok(RecoveredRecordValueField {
         owner,
-        definition: RecordValueFieldDefinition::new(id, name, ordinal, resolved_type),
+        definition,
         origin,
     })
 }
@@ -3173,22 +3175,24 @@ mod tests {
                 vec![
                     RecoveredRecordValueField {
                         owner: record_id,
-                        definition: RecordValueFieldDefinition::new(
+                        definition: RecordValueFieldDefinition::try_new(
                             first_field,
                             "enabled",
                             0,
                             ResolvedType::value(TypeId::from_bytes([0x98; 16])),
-                        ),
+                        )
+                        .expect("record field"),
                         origin: test_origin(first_identity, 2),
                     },
                     RecoveredRecordValueField {
                         owner: record_id,
-                        definition: RecordValueFieldDefinition::new(
+                        definition: RecordValueFieldDefinition::try_new(
                             second_field,
                             "stage",
                             1,
                             ResolvedType::named(enum_id),
-                        ),
+                        )
+                        .expect("record field"),
                         origin: test_origin(second_identity, 3),
                     },
                 ],
