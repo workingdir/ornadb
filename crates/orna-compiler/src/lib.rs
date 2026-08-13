@@ -308,7 +308,7 @@ mod tests {
             CatalogueSnapshot, FunctionDefinition, FunctionDomain, FunctionReturn,
             FunctionSecurity, FunctionTransaction, FunctionVolatility, ObjectTypeDefinition,
             PreludeTypeName, QualifiedSemanticName, SchemaDefinition, TypeBinding,
-            ValueTypeDefinition, ValueTypeMutability, ValueTypePersistence,
+            ValueTypeDefinition, ValueTypeKind, ValueTypeMutability, ValueTypePersistence,
         },
         revision::{
             ActiveDatabaseRevision, ActiveDatabaseRevisionInput, ActiveRevisionContent,
@@ -2997,7 +2997,7 @@ mod tests {
             0x00, 0x02,
         ],
     ];
-    const CANONICAL_TYPE_IDS: [[u8; 16]; 13] = [
+    const CANONICAL_TYPE_IDS: [[u8; 16]; 14] = [
         [
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             0x00, 0x01,
@@ -3050,84 +3050,108 @@ mod tests {
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             0x00, 0x0d,
         ],
+        [
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x0e,
+        ],
     ];
     const CANONICAL_STANDARD_DIGEST: [u8; 32] = [
-        0xe5, 0x3c, 0x41, 0xa3, 0x5e, 0x1a, 0x09, 0x23, 0x80, 0x18, 0x8f, 0xd2, 0x0d, 0x24, 0xb6,
-        0x32, 0x2a, 0xe8, 0x2c, 0x2d, 0x50, 0xdf, 0xb5, 0xdd, 0x05, 0x31, 0x00, 0xb5, 0x1c, 0x3b,
-        0x7e, 0x9c,
+        0xbe, 0x61, 0x9c, 0xaa, 0xf6, 0xb2, 0x0b, 0xb7, 0xf8, 0xbc, 0x8d, 0xf9, 0x56, 0xd4, 0x89,
+        0xad, 0xe4, 0x9b, 0xc8, 0xdf, 0xe0, 0x3c, 0xd6, 0xd9, 0x64, 0x70, 0x5b, 0x30, 0x23, 0x5b,
+        0x08, 0x1d,
     ];
 
     #[derive(Clone, Copy)]
     struct CanonicalValueTypeFact {
         name: &'static str,
+        kind: ValueTypeKind,
         representation_contract: &'static str,
         persistence: ValueTypePersistence,
     }
 
-    const CANONICAL_VALUE_TYPE_FACTS: [CanonicalValueTypeFact; 13] = [
+    const CANONICAL_VALUE_TYPE_FACTS: [CanonicalValueTypeFact; 14] = [
         CanonicalValueTypeFact {
             name: "std.types.boolean",
+            kind: ValueTypeKind::Primitive,
             representation_contract: "orna.kernel.value.boolean@1",
             persistence: ValueTypePersistence::Persistable,
         },
         CanonicalValueTypeFact {
             name: "std.types.integer",
+            kind: ValueTypeKind::Primitive,
             representation_contract: "orna.kernel.value.integer@1",
             persistence: ValueTypePersistence::Persistable,
         },
         CanonicalValueTypeFact {
             name: "std.types.bigint",
+            kind: ValueTypeKind::Primitive,
             representation_contract: "orna.kernel.value.bigint@1",
             persistence: ValueTypePersistence::Persistable,
         },
         CanonicalValueTypeFact {
             name: "std.types.float",
+            kind: ValueTypeKind::Primitive,
             representation_contract: "orna.kernel.value.float@1",
             persistence: ValueTypePersistence::Persistable,
         },
         CanonicalValueTypeFact {
             name: "std.types.decimal",
+            kind: ValueTypeKind::Primitive,
             representation_contract: "orna.kernel.value.decimal@1",
             persistence: ValueTypePersistence::Persistable,
         },
         CanonicalValueTypeFact {
             name: "std.types.character_large_object",
+            kind: ValueTypeKind::Primitive,
             representation_contract: "orna.kernel.value.character-large-object@1",
             persistence: ValueTypePersistence::Persistable,
         },
         CanonicalValueTypeFact {
             name: "std.types.binary_large_object",
+            kind: ValueTypeKind::Primitive,
             representation_contract: "orna.kernel.value.binary-large-object@1",
             persistence: ValueTypePersistence::Persistable,
         },
         CanonicalValueTypeFact {
             name: "std.types.uuid",
+            kind: ValueTypeKind::Primitive,
             representation_contract: "orna.kernel.value.uuid@1",
             persistence: ValueTypePersistence::Persistable,
         },
         CanonicalValueTypeFact {
             name: "std.types.date",
+            kind: ValueTypeKind::Primitive,
             representation_contract: "orna.kernel.value.date@1",
             persistence: ValueTypePersistence::Persistable,
         },
         CanonicalValueTypeFact {
             name: "std.types.time",
+            kind: ValueTypeKind::Primitive,
             representation_contract: "orna.kernel.value.time@1",
             persistence: ValueTypePersistence::Persistable,
         },
         CanonicalValueTypeFact {
             name: "std.types.timestamp",
+            kind: ValueTypeKind::Primitive,
             representation_contract: "orna.kernel.value.timestamp@1",
             persistence: ValueTypePersistence::Persistable,
         },
         CanonicalValueTypeFact {
             name: "std.types.duration",
+            kind: ValueTypeKind::Primitive,
             representation_contract: "orna.kernel.value.duration@1",
             persistence: ValueTypePersistence::Persistable,
         },
         CanonicalValueTypeFact {
             name: "std.types.void",
+            kind: ValueTypeKind::Primitive,
             representation_contract: "orna.kernel.value.void@1",
+            persistence: ValueTypePersistence::Transient,
+        },
+        CanonicalValueTypeFact {
+            name: "std.types.opaque_token",
+            kind: ValueTypeKind::Opaque,
+            representation_contract: "orna.std.value.opaque-token@1",
             persistence: ValueTypePersistence::Transient,
         },
     ];
@@ -3154,7 +3178,7 @@ mod tests {
         target_type_index: usize,
     }
 
-    const CANONICAL_BINDING_FACTS: [CanonicalBindingFact; 30] = [
+    const CANONICAL_BINDING_FACTS: [CanonicalBindingFact; 31] = [
         CanonicalBindingFact {
             kind: CanonicalBindingKind::Qualified,
             name: "std.boolean",
@@ -3305,9 +3329,14 @@ mod tests {
             name: "void",
             target_type_index: 12,
         },
+        CanonicalBindingFact {
+            kind: CanonicalBindingKind::Qualified,
+            name: "std.opaque_token",
+            target_type_index: 13,
+        },
     ];
 
-    const CANONICAL_BINDING_IDS: [[u8; 16]; 30] = [
+    const CANONICAL_BINDING_IDS: [[u8; 16]; 31] = [
         [
             0x53, 0xf1, 0x37, 0x1e, 0xaf, 0xef, 0x9a, 0xe5, 0x34, 0x7f, 0x15, 0x5c, 0xf1, 0xdd,
             0x4d, 0x31,
@@ -3428,6 +3457,10 @@ mod tests {
             0x56, 0xc5, 0x04, 0xe2, 0xf8, 0x07, 0xce, 0x24, 0xd3, 0x61, 0x11, 0xe6, 0x4a, 0x01,
             0x73, 0xfb,
         ],
+        [
+            0x4d, 0xab, 0x42, 0x83, 0x03, 0x1f, 0xcd, 0x81, 0xb5, 0x8d, 0x09, 0xd8, 0x87, 0x63,
+            0x46, 0xae,
+        ],
     ];
 
     #[derive(Clone, Copy)]
@@ -3444,7 +3477,7 @@ mod tests {
         byte_end: u32,
     }
 
-    const CANONICAL_DECLARATION_FACTS: [CanonicalDeclarationFact; 45] = [
+    const CANONICAL_DECLARATION_FACTS: [CanonicalDeclarationFact; 47] = [
         CanonicalDeclarationFact {
             identity: CanonicalDeclarationIdentity::Schema(0),
             byte_start: 0,
@@ -3670,12 +3703,22 @@ mod tests {
             byte_start: 3232,
             byte_end: 3272,
         },
+        CanonicalDeclarationFact {
+            identity: CanonicalDeclarationIdentity::ValueType(13),
+            byte_start: 3274,
+            byte_end: 3405,
+        },
+        CanonicalDeclarationFact {
+            identity: CanonicalDeclarationIdentity::TypeBinding(30),
+            byte_start: 3407,
+            byte_end: 3462,
+        },
     ];
-    const CANONICAL_VALUE_TYPE_ORIGIN_INDICES: [usize; 13] =
-        [2, 6, 10, 13, 16, 19, 23, 27, 30, 33, 36, 39, 42];
-    const CANONICAL_BINDING_ORIGIN_INDICES: [usize; 30] = [
+    const CANONICAL_VALUE_TYPE_ORIGIN_INDICES: [usize; 14] =
+        [2, 6, 10, 13, 16, 19, 23, 27, 30, 33, 36, 39, 42, 45];
+    const CANONICAL_BINDING_ORIGIN_INDICES: [usize; 31] = [
         3, 4, 5, 7, 8, 9, 11, 12, 14, 15, 17, 18, 20, 21, 22, 24, 25, 26, 28, 29, 31, 32, 34, 35,
-        37, 38, 40, 41, 43, 44,
+        37, 38, 40, 41, 43, 44, 46,
     ];
 
     #[test]
@@ -3821,17 +3864,17 @@ mod tests {
             checked.verified_snapshot().digest().to_bytes(),
             CANONICAL_STANDARD_DIGEST
         );
-        assert_eq!(CANONICAL_STANDARD_SOURCE.len(), 3273);
+        assert_eq!(CANONICAL_STANDARD_SOURCE.len(), 3463);
 
         assert_eq!(checked.schemas().len(), 2);
-        assert_eq!(checked.value_types().len(), 13);
+        assert_eq!(checked.value_types().len(), 14);
         assert_eq!(
             checked
                 .type_bindings()
                 .iter()
                 .filter(|binding| binding.kind() == orna_core::catalogue::TypeBindingKind::Qualified)
                 .count(),
-            13
+            14
         );
         assert_eq!(
             checked
@@ -3855,10 +3898,7 @@ mod tests {
             let expected = CANONICAL_VALUE_TYPE_FACTS[index];
             assert_eq!(value_type.id().to_bytes(), CANONICAL_TYPE_IDS[index]);
             assert_eq!(value_type.name().to_string(), expected.name);
-            assert_eq!(
-                value_type.kind(),
-                orna_core::catalogue::ValueTypeKind::Primitive
-            );
+            assert_eq!(value_type.kind(), expected.kind);
             assert_eq!(value_type.mutability(), ValueTypeMutability::Immutable);
             assert_eq!(value_type.persistence(), expected.persistence);
             assert_eq!(
@@ -5119,13 +5159,25 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(index, fact)| {
-                ValueTypeDefinition::primitive(
-                    TypeId::from_bytes(CANONICAL_TYPE_IDS[index]),
-                    semantic_name_from_dotted(fact.name),
-                    ValueTypeMutability::Immutable,
-                    fact.persistence,
-                    fact.representation_contract,
-                )
+                let id = TypeId::from_bytes(CANONICAL_TYPE_IDS[index]);
+                let name = semantic_name_from_dotted(fact.name);
+                match fact.kind {
+                    ValueTypeKind::Primitive => ValueTypeDefinition::primitive(
+                        id,
+                        name,
+                        ValueTypeMutability::Immutable,
+                        fact.persistence,
+                        fact.representation_contract,
+                    ),
+                    ValueTypeKind::Opaque => {
+                        ValueTypeDefinition::opaque(id, name, fact.representation_contract)
+                    }
+                    _ => {
+                        unreachable!(
+                            "the canonical fixture contains only primitive and opaque values"
+                        )
+                    }
+                }
             })
             .collect();
         let type_bindings = CANONICAL_BINDING_FACTS

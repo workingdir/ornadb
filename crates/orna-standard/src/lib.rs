@@ -17,7 +17,8 @@ use orna_core::{
     catalogue::{
         CatalogueSnapshot, CatalogueSnapshotError, PreludeTypeName, PreludeTypeNameError,
         QualifiedSemanticName, SchemaDefinition, SemanticNameError, TypeBinding, TypeBindingError,
-        TypeLookupName, ValueTypeDefinition, ValueTypeMutability, ValueTypePersistence,
+        TypeLookupName, ValueTypeDefinition, ValueTypeKind, ValueTypeMutability,
+        ValueTypePersistence,
     },
     revision::{
         ActiveDatabaseRevision, DefinitionIdentity, DefinitionOrigin, DeployableRevision,
@@ -102,8 +103,11 @@ pub const DURATION_TYPE_ID: TypeId = TypeId::from_bytes(reserved_id(12));
 /// The stable identity of `std.types.void`.
 pub const VOID_TYPE_ID: TypeId = TypeId::from_bytes(reserved_id(13));
 
+/// The stable identity of `std.types.opaque_token`.
+pub const OPAQUE_TOKEN_TYPE_ID: TypeId = TypeId::from_bytes(reserved_id(14));
+
 /// All initial standard type identities in manifest order.
-pub const STANDARD_TYPE_IDS: [TypeId; 13] = [
+pub const STANDARD_TYPE_IDS: [TypeId; 14] = [
     BOOLEAN_TYPE_ID,
     INTEGER_TYPE_ID,
     BIGINT_TYPE_ID,
@@ -117,6 +121,7 @@ pub const STANDARD_TYPE_IDS: [TypeId; 13] = [
     TIMESTAMP_TYPE_ID,
     DURATION_TYPE_ID,
     VOID_TYPE_ID,
+    OPAQUE_TOKEN_TYPE_ID,
 ];
 
 const fn reserved_id(final_byte: u8) -> [u8; 16] {
@@ -127,20 +132,20 @@ const fn reserved_id(final_byte: u8) -> [u8; 16] {
 
 const RETAINED_STANDARD_SOURCE: &str = include_str!("../../../stdlib/std/types.orna");
 const ACCEPTED_SOURCE_CONTENT_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0xe8, 0x44, 0xeb, 0xda, 0x2f, 0x3d, 0xe3, 0x85, 0xa9, 0xf7, 0xf1, 0x93, 0x02, 0x1b, 0xc1, 0xab,
-    0xbd, 0x48, 0x63, 0xd6, 0x1f, 0xe6, 0xaf, 0x7b, 0xef, 0x43, 0xed, 0x4e, 0x60, 0xf9, 0x2f, 0xea,
+    0x5d, 0x53, 0x60, 0x01, 0xab, 0xc7, 0x54, 0xcf, 0x2c, 0xde, 0x9f, 0xf4, 0xed, 0x50, 0xb2, 0x2d,
+    0xe8, 0xbb, 0x70, 0x04, 0x0a, 0x69, 0x1b, 0xc2, 0xec, 0x50, 0xbd, 0x6c, 0x65, 0xe5, 0x25, 0xf4,
 ]);
 const ACCEPTED_SOURCE_BUNDLE_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0xf3, 0x02, 0x93, 0xaa, 0x3c, 0x40, 0x68, 0xe2, 0xcb, 0x4e, 0x19, 0xb8, 0x15, 0xae, 0x50, 0x77,
-    0x33, 0x89, 0x31, 0x56, 0x2a, 0xf0, 0xee, 0x1c, 0xd4, 0x44, 0xe9, 0xb0, 0xb4, 0xe0, 0x86, 0x16,
+    0xd8, 0x0e, 0x8f, 0x73, 0x88, 0x78, 0x2d, 0x73, 0x0e, 0x4d, 0x6c, 0x5a, 0x6f, 0xcd, 0x4a, 0x56,
+    0x42, 0xa4, 0x81, 0xcb, 0x65, 0x6d, 0x6e, 0x5f, 0xca, 0x35, 0x9a, 0x69, 0xf3, 0x72, 0x63, 0xeb,
 ]);
 const ACCEPTED_SOURCE_REVISION_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0x0f, 0x64, 0xa1, 0x0e, 0xc8, 0xe6, 0x20, 0xc0, 0xbd, 0xdf, 0x40, 0x2c, 0xc1, 0xd2, 0x5c, 0x16,
-    0xaa, 0x84, 0x7c, 0x48, 0xfb, 0x6a, 0x0a, 0xf7, 0x36, 0x7f, 0x8e, 0x76, 0xb2, 0x83, 0xf0, 0x1c,
+    0x40, 0x0e, 0xb4, 0x35, 0x5d, 0xa2, 0x8f, 0x41, 0xf4, 0xd4, 0xae, 0x8c, 0x06, 0x21, 0x24, 0x89,
+    0xbe, 0x60, 0xf6, 0xd8, 0x7c, 0x6d, 0x8e, 0xf3, 0x0c, 0x29, 0x1c, 0xc8, 0x3b, 0x2c, 0xfb, 0x6b,
 ]);
 const ACCEPTED_STANDARD_LIBRARY_DIGEST: Sha256Digest = Sha256Digest::from_bytes([
-    0xe5, 0x3c, 0x41, 0xa3, 0x5e, 0x1a, 0x09, 0x23, 0x80, 0x18, 0x8f, 0xd2, 0x0d, 0x24, 0xb6, 0x32,
-    0x2a, 0xe8, 0x2c, 0x2d, 0x50, 0xdf, 0xb5, 0xdd, 0x05, 0x31, 0x00, 0xb5, 0x1c, 0x3b, 0x7e, 0x9c,
+    0xbe, 0x61, 0x9c, 0xaa, 0xf6, 0xb2, 0x0b, 0xb7, 0xf8, 0xbc, 0x8d, 0xf9, 0x56, 0xd4, 0x89, 0xad,
+    0xe4, 0x9b, 0xc8, 0xdf, 0xe0, 0x3c, 0xd6, 0xd9, 0x64, 0x70, 0x5b, 0x30, 0x23, 0x5b, 0x08, 0x1d,
 ]);
 
 #[derive(Clone, Copy)]
@@ -261,9 +266,12 @@ const VALUE_TYPE_FACTS: [ValueTypeFact; 13] = [
     },
 ];
 
+const OPAQUE_TOKEN_LOCAL_NAME: &str = "opaque_token";
+const OPAQUE_TOKEN_CONTRACT: &str = "orna.std.value.opaque-token@1";
+
 // This order is part of the accepted manifest: each value type's qualified
 // binding comes first, followed by that type's prelude bindings.
-const EXPECTED_TYPE_BINDING_IDS: [[u8; 16]; 30] = [
+const EXPECTED_TYPE_BINDING_IDS: [[u8; 16]; 31] = [
     [
         0x53, 0xf1, 0x37, 0x1e, 0xaf, 0xef, 0x9a, 0xe5, 0x34, 0x7f, 0x15, 0x5c, 0xf1, 0xdd, 0x4d,
         0x31,
@@ -384,6 +392,10 @@ const EXPECTED_TYPE_BINDING_IDS: [[u8; 16]; 30] = [
         0x56, 0xc5, 0x04, 0xe2, 0xf8, 0x07, 0xce, 0x24, 0xd3, 0x61, 0x11, 0xe6, 0x4a, 0x01, 0x73,
         0xfb,
     ],
+    [
+        0x4d, 0xab, 0x42, 0x83, 0x03, 0x1f, 0xcd, 0x81, 0xb5, 0x8d, 0x09, 0xd8, 0x87, 0x63, 0x46,
+        0xae,
+    ],
 ];
 
 /// The source-independent facts required to recognise the initial standard library.
@@ -451,7 +463,7 @@ pub fn standard_library_manifest() -> Result<StandardLibraryManifest, StandardLi
             semantic_name("std.types", ["std", "types"])?,
         ),
     ];
-    let mut value_types = Vec::with_capacity(VALUE_TYPE_FACTS.len());
+    let mut value_types = Vec::with_capacity(VALUE_TYPE_FACTS.len() + 1);
     for fact in VALUE_TYPE_FACTS {
         value_types.push(ValueTypeDefinition::primitive(
             fact.id,
@@ -464,6 +476,14 @@ pub fn standard_library_manifest() -> Result<StandardLibraryManifest, StandardLi
             fact.representation_contract,
         ));
     }
+    value_types.push(ValueTypeDefinition::opaque(
+        OPAQUE_TOKEN_TYPE_ID,
+        semantic_name(
+            "std.types.opaque_token",
+            ["std", "types", OPAQUE_TOKEN_LOCAL_NAME],
+        )?,
+        OPAQUE_TOKEN_CONTRACT,
+    ));
     let type_bindings = build_type_bindings(&EXPECTED_TYPE_BINDING_IDS)?;
     let catalogue = CatalogueSnapshot::new_with_types(
         STANDARD_CATALOGUE_REVISION_ID,
@@ -510,6 +530,17 @@ fn build_type_bindings(
             bindings.push(binding);
         }
     }
+
+    let qualified_name = semantic_name("std.opaque_token", ["std", OPAQUE_TOKEN_LOCAL_NAME])?;
+    let qualified_lookup = TypeLookupName::qualified(qualified_name.clone());
+    let binding =
+        TypeBinding::qualified(qualified_name, OPAQUE_TOKEN_TYPE_ID).map_err(|source| {
+            StandardLibraryManifestError::TypeBinding {
+                name: qualified_lookup,
+                source,
+            }
+        })?;
+    bindings.push(binding);
 
     validate_binding_identities(&bindings, expected_ids)?;
     Ok(bindings)
@@ -959,7 +990,8 @@ fn reconcile_retained_source(
 
     let catalogue = manifest.catalogue();
     if parsed.schemas().len() != catalogue.schemas().len()
-        || parsed.primitive_value_types().len() != catalogue.value_types().len()
+        || parsed.primitive_value_types().len() + parsed.opaque_value_types().len()
+            != catalogue.value_types().len()
         || parsed.type_exports().len() != catalogue.type_bindings().len()
     {
         return Err(StandardLibraryError::RetainedSourceMismatch);
@@ -1032,7 +1064,45 @@ fn reconcile_retained_source(
         }
     }
 
-    if binding_index != catalogue.type_bindings().len() || declarations.len() != 45 {
+    let declaration = parsed
+        .opaque_value_types()
+        .first()
+        .ok_or(StandardLibraryError::RetainedSourceMismatch)?;
+    let definition = catalogue
+        .value_types()
+        .get(VALUE_TYPE_FACTS.len())
+        .ok_or(StandardLibraryError::RetainedSourceMismatch)?;
+    if parsed.opaque_value_types().len() != 1
+        || definition.kind() != ValueTypeKind::Opaque
+        || !matches_qualified_name(&declaration.name, definition.name())
+        || decode_sql_string_literal(&declaration.kernel_contract.text).as_deref()
+            != Some(definition.representation_contract())
+        || definition.persistence() != ValueTypePersistence::Transient
+    {
+        return Err(StandardLibraryError::RetainedSourceMismatch);
+    }
+    declarations.push((
+        declaration.span.clone(),
+        DefinitionIdentity::ValueType(definition.id()),
+    ));
+    let qualified = catalogue
+        .type_bindings()
+        .get(binding_index)
+        .ok_or(StandardLibraryError::RetainedSourceMismatch)?;
+    let export = parsed
+        .type_exports()
+        .get(binding_index)
+        .ok_or(StandardLibraryError::RetainedSourceMismatch)?;
+    if !matches_qualified_export(export, definition.name(), definition.id(), qualified) {
+        return Err(StandardLibraryError::RetainedSourceMismatch);
+    }
+    declarations.push((
+        export.span.clone(),
+        DefinitionIdentity::TypeBinding(qualified.id()),
+    ));
+    binding_index += 1;
+
+    if binding_index != catalogue.type_bindings().len() || declarations.len() != 47 {
         return Err(StandardLibraryError::RetainedSourceMismatch);
     }
 
@@ -1174,12 +1244,12 @@ mod tests {
         BIGINT_TYPE_ID, BINARY_LARGE_OBJECT_TYPE_ID, BOOLEAN_TYPE_ID,
         CHARACTER_LARGE_OBJECT_TYPE_ID, DATE_TYPE_ID, DECIMAL_TYPE_ID, DURATION_TYPE_ID,
         EXPECTED_TYPE_BINDING_IDS, FLOAT_TYPE_ID, INTEGER_TYPE_ID, LANGUAGE_VERSION_IDENTITY,
-        SOURCE_LOGICAL_PATH, STANDARD_CATALOGUE_REVISION_ID, STANDARD_LIBRARY_REVISION_ID,
-        STANDARD_LIBRARY_VERSION_IDENTITY, STANDARD_SOURCE_BUNDLE_ID, STANDARD_SOURCE_REVISION_ID,
-        STANDARD_SOURCE_UNIT_ID, STANDARD_TYPE_IDS, STD_SCHEMA_ID, STD_TYPES_SCHEMA_ID,
-        StandardLibraryError, StandardLibraryManifestError, StandardUpgradeError, TIME_TYPE_ID,
-        TIMESTAMP_TYPE_ID, UUID_TYPE_ID, VOID_TYPE_ID, build_type_bindings,
-        prepare_standard_upgrade, prepare_standard_upgrade_with,
+        OPAQUE_TOKEN_TYPE_ID, SOURCE_LOGICAL_PATH, STANDARD_CATALOGUE_REVISION_ID,
+        STANDARD_LIBRARY_REVISION_ID, STANDARD_LIBRARY_VERSION_IDENTITY, STANDARD_SOURCE_BUNDLE_ID,
+        STANDARD_SOURCE_REVISION_ID, STANDARD_SOURCE_UNIT_ID, STANDARD_TYPE_IDS, STD_SCHEMA_ID,
+        STD_TYPES_SCHEMA_ID, StandardLibraryError, StandardLibraryManifestError,
+        StandardUpgradeError, TIME_TYPE_ID, TIMESTAMP_TYPE_ID, UUID_TYPE_ID, VOID_TYPE_ID,
+        build_type_bindings, prepare_standard_upgrade, prepare_standard_upgrade_with,
         retained_standard_library_snapshot, retained_standard_library_snapshot_from_source,
         standard_library_manifest, verify_standard_library_snapshot,
     };
@@ -1307,6 +1377,13 @@ CREATE TYPE std.types.VOID AS VALUE PRIMITIVE
 EXPORT TYPE std.types.VOID AS std.VOID;
 
 EXPORT TYPE std.VOID TO PRELUDE AS VOID;
+
+CREATE TYPE std.types.OPAQUE_TOKEN AS VALUE OPAQUE
+    KERNEL CONTRACT 'orna.std.value.opaque-token@1'
+    IMMUTABLE
+    TRANSIENT;
+
+EXPORT TYPE std.types.OPAQUE_TOKEN AS std.OPAQUE_TOKEN;
 "#;
 
     fn empty_active_revision() -> ActiveDatabaseRevision {
@@ -1652,18 +1729,19 @@ EXPORT TYPE std.VOID TO PRELUDE AS VOID;
         let parsed = orna_syntax::parse(source);
 
         assert_eq!(source, EXPECTED_RETAINED_STANDARD_SOURCE);
-        assert_eq!(source.len(), 3273);
+        assert_eq!(source.len(), 3463);
         assert!(source.is_ascii());
         assert!(!source.as_bytes().starts_with(&[0xef, 0xbb, 0xbf]));
         assert!(!source.contains('\r'));
         assert!(source.ends_with('\n'));
         assert!(!source[..source.len() - 1].ends_with('\n'));
-        assert_eq!(source.matches(';').count(), 45);
+        assert_eq!(source.matches(';').count(), 47);
         assert!(parsed.diagnostics().is_empty());
         assert_eq!(parsed.syntax().text(), source);
         assert_eq!(parsed.schemas().len(), 2);
         assert_eq!(parsed.primitive_value_types().len(), 13);
-        assert_eq!(parsed.type_exports().len(), 30);
+        assert_eq!(parsed.opaque_value_types().len(), 1);
+        assert_eq!(parsed.type_exports().len(), 31);
         assert!(parsed.object_types().is_empty());
         assert!(parsed.field_renames().is_empty());
         assert!(parsed.server_functions().is_empty());
@@ -1671,33 +1749,33 @@ EXPORT TYPE std.VOID TO PRELUDE AS VOID;
         assert_eq!(
             snapshot.source().units()[0].content_hash().to_bytes(),
             [
-                0xe8, 0x44, 0xeb, 0xda, 0x2f, 0x3d, 0xe3, 0x85, 0xa9, 0xf7, 0xf1, 0x93, 0x02, 0x1b,
-                0xc1, 0xab, 0xbd, 0x48, 0x63, 0xd6, 0x1f, 0xe6, 0xaf, 0x7b, 0xef, 0x43, 0xed, 0x4e,
-                0x60, 0xf9, 0x2f, 0xea,
+                0x5d, 0x53, 0x60, 0x01, 0xab, 0xc7, 0x54, 0xcf, 0x2c, 0xde, 0x9f, 0xf4, 0xed, 0x50,
+                0xb2, 0x2d, 0xe8, 0xbb, 0x70, 0x04, 0x0a, 0x69, 0x1b, 0xc2, 0xec, 0x50, 0xbd, 0x6c,
+                0x65, 0xe5, 0x25, 0xf4,
             ]
         );
         assert_eq!(
             snapshot.source().bundle_hash().to_bytes(),
             [
-                0xf3, 0x02, 0x93, 0xaa, 0x3c, 0x40, 0x68, 0xe2, 0xcb, 0x4e, 0x19, 0xb8, 0x15, 0xae,
-                0x50, 0x77, 0x33, 0x89, 0x31, 0x56, 0x2a, 0xf0, 0xee, 0x1c, 0xd4, 0x44, 0xe9, 0xb0,
-                0xb4, 0xe0, 0x86, 0x16,
+                0xd8, 0x0e, 0x8f, 0x73, 0x88, 0x78, 0x2d, 0x73, 0x0e, 0x4d, 0x6c, 0x5a, 0x6f, 0xcd,
+                0x4a, 0x56, 0x42, 0xa4, 0x81, 0xcb, 0x65, 0x6d, 0x6e, 0x5f, 0xca, 0x35, 0x9a, 0x69,
+                0xf3, 0x72, 0x63, 0xeb,
             ]
         );
         assert_eq!(
             snapshot.source().revision_hash().to_bytes(),
             [
-                0x0f, 0x64, 0xa1, 0x0e, 0xc8, 0xe6, 0x20, 0xc0, 0xbd, 0xdf, 0x40, 0x2c, 0xc1, 0xd2,
-                0x5c, 0x16, 0xaa, 0x84, 0x7c, 0x48, 0xfb, 0x6a, 0x0a, 0xf7, 0x36, 0x7f, 0x8e, 0x76,
-                0xb2, 0x83, 0xf0, 0x1c,
+                0x40, 0x0e, 0xb4, 0x35, 0x5d, 0xa2, 0x8f, 0x41, 0xf4, 0xd4, 0xae, 0x8c, 0x06, 0x21,
+                0x24, 0x89, 0xbe, 0x60, 0xf6, 0xd8, 0x7c, 0x6d, 0x8e, 0xf3, 0x0c, 0x29, 0x1c, 0xc8,
+                0x3b, 0x2c, 0xfb, 0x6b,
             ]
         );
         assert_eq!(
             snapshot.digest().to_bytes(),
             [
-                0xe5, 0x3c, 0x41, 0xa3, 0x5e, 0x1a, 0x09, 0x23, 0x80, 0x18, 0x8f, 0xd2, 0x0d, 0x24,
-                0xb6, 0x32, 0x2a, 0xe8, 0x2c, 0x2d, 0x50, 0xdf, 0xb5, 0xdd, 0x05, 0x31, 0x00, 0xb5,
-                0x1c, 0x3b, 0x7e, 0x9c,
+                0xbe, 0x61, 0x9c, 0xaa, 0xf6, 0xb2, 0x0b, 0xb7, 0xf8, 0xbc, 0x8d, 0xf9, 0x56, 0xd4,
+                0x89, 0xad, 0xe4, 0x9b, 0xc8, 0xdf, 0xe0, 0x3c, 0xd6, 0xd9, 0x64, 0x70, 0x5b, 0x30,
+                0x23, 0x5b, 0x08, 0x1d,
             ]
         );
     }
@@ -1798,7 +1876,7 @@ EXPORT TYPE std.VOID TO PRELUDE AS VOID;
         let parsed = orna_syntax::parse(&crossed);
 
         assert!(parsed.diagnostics().is_empty());
-        assert_eq!(parsed.type_exports().len(), 30);
+        assert_eq!(parsed.type_exports().len(), 31);
         assert!(matches!(
             retained_standard_library_snapshot_from_source(&crossed),
             Err(super::StandardLibraryError::RetainedSourceMismatch)
@@ -1879,6 +1957,8 @@ EXPORT TYPE std.VOID TO PRELUDE AS VOID;
             (3068, 3189),
             (3191, 3230),
             (3232, 3272),
+            (3274, 3405),
+            (3407, 3462),
         ];
         let expected_source_unit =
             orna_core::SourceUnitId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
@@ -2048,11 +2128,18 @@ EXPORT TYPE std.VOID TO PRELUDE AS VOID;
                 0x56, 0xc5, 0x04, 0xe2, 0xf8, 0x07, 0xce, 0x24, 0xd3, 0x61, 0x11, 0xe6, 0x4a, 0x01,
                 0x73, 0xfb,
             ])),
+            DefinitionIdentity::ValueType(orna_core::TypeId::from_bytes([
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 14,
+            ])),
+            DefinitionIdentity::TypeBinding(orna_core::TypeBindingId::from_bytes([
+                0x4d, 0xab, 0x42, 0x83, 0x03, 0x1f, 0xcd, 0x81, 0xb5, 0x8d, 0x09, 0xd8, 0x87, 0x63,
+                0x46, 0xae,
+            ])),
         ];
 
-        assert_eq!(expected_spans.len(), 45);
-        assert_eq!(expected_identities.len(), 45);
-        assert_eq!(snapshot.origins().len(), 45);
+        assert_eq!(expected_spans.len(), 47);
+        assert_eq!(expected_identities.len(), 47);
+        assert_eq!(snapshot.origins().len(), 47);
         for ((origin, identity), (start, end)) in snapshot
             .origins()
             .iter()
@@ -2070,8 +2157,8 @@ EXPORT TYPE std.VOID TO PRELUDE AS VOID;
         }
         assert_eq!(snapshot.origins()[0].source().byte_start(), 0);
         assert_eq!(snapshot.origins()[1].source().byte_start(), 19);
-        assert_eq!(snapshot.origins()[44].source().byte_end(), 3272);
-        assert_eq!(&source[3272..], "\n");
+        assert_eq!(snapshot.origins()[46].source().byte_end(), 3462);
+        assert_eq!(&source[3462..], "\n");
     }
 
     #[test]
@@ -2232,9 +2319,9 @@ EXPORT TYPE std.VOID TO PRELUDE AS VOID;
             accepted.catalogue().clone(),
             accepted.origins().to_vec(),
             orna_core::revision::Sha256Digest::from_bytes([
-                0xfe, 0xc6, 0x2f, 0x84, 0x6e, 0x9b, 0x7c, 0xfa, 0x4f, 0x8a, 0xb7, 0x22, 0xcc, 0x22,
-                0x02, 0x9b, 0x06, 0xe0, 0xce, 0xba, 0xe7, 0xd4, 0x1c, 0xea, 0xe6, 0xd8, 0x35, 0xdf,
-                0x66, 0x44, 0xe8, 0xd6,
+                0x19, 0x65, 0xe6, 0xcb, 0xeb, 0x68, 0x77, 0xa6, 0xab, 0xea, 0x13, 0x14, 0xe9, 0x12,
+                0xbe, 0xc5, 0xef, 0x12, 0xa9, 0x5b, 0xd3, 0x57, 0xdc, 0xee, 0xc9, 0xef, 0xb4, 0x54,
+                0xf8, 0x4a, 0x98, 0xb2,
             ]),
         )
         .expect("the alternate standard snapshot is structurally valid");
@@ -2246,14 +2333,14 @@ EXPORT TYPE std.VOID TO PRELUDE AS VOID;
             verify_standard_library_snapshot(non_golden),
             Err(super::StandardLibraryError::AcceptedDigestMismatch { expected, actual })
                 if expected == orna_core::revision::Sha256Digest::from_bytes([
-                    0xe5, 0x3c, 0x41, 0xa3, 0x5e, 0x1a, 0x09, 0x23, 0x80, 0x18, 0x8f, 0xd2, 0x0d,
-                    0x24, 0xb6, 0x32, 0x2a, 0xe8, 0x2c, 0x2d, 0x50, 0xdf, 0xb5, 0xdd, 0x05, 0x31,
-                    0x00, 0xb5, 0x1c, 0x3b, 0x7e, 0x9c,
+                    0xbe, 0x61, 0x9c, 0xaa, 0xf6, 0xb2, 0x0b, 0xb7, 0xf8, 0xbc, 0x8d, 0xf9, 0x56,
+                    0xd4, 0x89, 0xad, 0xe4, 0x9b, 0xc8, 0xdf, 0xe0, 0x3c, 0xd6, 0xd9, 0x64, 0x70,
+                    0x5b, 0x30, 0x23, 0x5b, 0x08, 0x1d,
                 ])
                 && actual == orna_core::revision::Sha256Digest::from_bytes([
-                    0xfe, 0xc6, 0x2f, 0x84, 0x6e, 0x9b, 0x7c, 0xfa, 0x4f, 0x8a, 0xb7, 0x22, 0xcc,
-                    0x22, 0x02, 0x9b, 0x06, 0xe0, 0xce, 0xba, 0xe7, 0xd4, 0x1c, 0xea, 0xe6, 0xd8,
-                    0x35, 0xdf, 0x66, 0x44, 0xe8, 0xd6,
+                    0x19, 0x65, 0xe6, 0xcb, 0xeb, 0x68, 0x77, 0xa6, 0xab, 0xea, 0x13, 0x14, 0xe9,
+                    0x12, 0xbe, 0xc5, 0xef, 0x12, 0xa9, 0x5b, 0xd3, 0x57, 0xdc, 0xee, 0xc9, 0xef,
+                    0xb4, 0x54, 0xf8, 0x4a, 0x98, 0xb2,
                 ])
         ));
     }
@@ -2267,78 +2354,98 @@ EXPORT TYPE std.VOID TO PRELUDE AS VOID;
                 BOOLEAN_TYPE_ID,
                 "std.types.boolean",
                 "orna.kernel.value.boolean@1",
+                ValueTypeKind::Primitive,
                 ValueTypePersistence::Persistable,
             ),
             (
                 INTEGER_TYPE_ID,
                 "std.types.integer",
                 "orna.kernel.value.integer@1",
+                ValueTypeKind::Primitive,
                 ValueTypePersistence::Persistable,
             ),
             (
                 BIGINT_TYPE_ID,
                 "std.types.bigint",
                 "orna.kernel.value.bigint@1",
+                ValueTypeKind::Primitive,
                 ValueTypePersistence::Persistable,
             ),
             (
                 FLOAT_TYPE_ID,
                 "std.types.float",
                 "orna.kernel.value.float@1",
+                ValueTypeKind::Primitive,
                 ValueTypePersistence::Persistable,
             ),
             (
                 DECIMAL_TYPE_ID,
                 "std.types.decimal",
                 "orna.kernel.value.decimal@1",
+                ValueTypeKind::Primitive,
                 ValueTypePersistence::Persistable,
             ),
             (
                 CHARACTER_LARGE_OBJECT_TYPE_ID,
                 "std.types.character_large_object",
                 "orna.kernel.value.character-large-object@1",
+                ValueTypeKind::Primitive,
                 ValueTypePersistence::Persistable,
             ),
             (
                 BINARY_LARGE_OBJECT_TYPE_ID,
                 "std.types.binary_large_object",
                 "orna.kernel.value.binary-large-object@1",
+                ValueTypeKind::Primitive,
                 ValueTypePersistence::Persistable,
             ),
             (
                 UUID_TYPE_ID,
                 "std.types.uuid",
                 "orna.kernel.value.uuid@1",
+                ValueTypeKind::Primitive,
                 ValueTypePersistence::Persistable,
             ),
             (
                 DATE_TYPE_ID,
                 "std.types.date",
                 "orna.kernel.value.date@1",
+                ValueTypeKind::Primitive,
                 ValueTypePersistence::Persistable,
             ),
             (
                 TIME_TYPE_ID,
                 "std.types.time",
                 "orna.kernel.value.time@1",
+                ValueTypeKind::Primitive,
                 ValueTypePersistence::Persistable,
             ),
             (
                 TIMESTAMP_TYPE_ID,
                 "std.types.timestamp",
                 "orna.kernel.value.timestamp@1",
+                ValueTypeKind::Primitive,
                 ValueTypePersistence::Persistable,
             ),
             (
                 DURATION_TYPE_ID,
                 "std.types.duration",
                 "orna.kernel.value.duration@1",
+                ValueTypeKind::Primitive,
                 ValueTypePersistence::Persistable,
             ),
             (
                 VOID_TYPE_ID,
                 "std.types.void",
                 "orna.kernel.value.void@1",
+                ValueTypeKind::Primitive,
+                ValueTypePersistence::Transient,
+            ),
+            (
+                OPAQUE_TOKEN_TYPE_ID,
+                "std.types.opaque_token",
+                "orna.std.value.opaque-token@1",
+                ValueTypeKind::Opaque,
                 ValueTypePersistence::Transient,
             ),
         ];
@@ -2360,6 +2467,7 @@ EXPORT TYPE std.VOID TO PRELUDE AS VOID;
                 [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 11],
                 [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 12],
                 [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 13],
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 14],
             ]
         );
         assert_eq!(catalogue.schemas()[0].name().to_string(), "std");
@@ -2367,12 +2475,12 @@ EXPORT TYPE std.VOID TO PRELUDE AS VOID;
         assert!(catalogue.object_types().is_empty());
         assert!(catalogue.functions().is_empty());
         assert_eq!(catalogue.value_types().len(), expected.len());
-        for (definition, (id, name, contract, persistence)) in
+        for (definition, (id, name, contract, kind, persistence)) in
             catalogue.value_types().iter().zip(expected)
         {
             assert_eq!(definition.id(), id);
             assert_eq!(definition.name().to_string(), name);
-            assert_eq!(definition.kind(), ValueTypeKind::Primitive);
+            assert_eq!(definition.kind(), kind);
             assert_eq!(definition.mutability(), ValueTypeMutability::Immutable);
             assert_eq!(definition.persistence(), persistence);
             assert_eq!(definition.representation_contract(), contract);
@@ -2661,6 +2769,15 @@ EXPORT TYPE std.VOID TO PRELUDE AS VOID;
                     0x01, 0x73, 0xfb,
                 ],
             },
+            ExpectedBinding {
+                kind: TypeBindingKind::Qualified,
+                name: "std.opaque_token",
+                target: OPAQUE_TOKEN_TYPE_ID,
+                id: [
+                    0x4d, 0xab, 0x42, 0x83, 0x03, 0x1f, 0xcd, 0x81, 0xb5, 0x8d, 0x09, 0xd8, 0x87,
+                    0x63, 0x46, 0xae,
+                ],
+            },
         ];
         let manifest = standard_library_manifest().expect("the accepted manifest must be valid");
         let catalogue = manifest.catalogue();
@@ -2672,7 +2789,7 @@ EXPORT TYPE std.VOID TO PRELUDE AS VOID;
                 .iter()
                 .filter(|binding| binding.kind() == TypeBindingKind::Qualified)
                 .count(),
-            13
+            14
         );
         assert_eq!(
             catalogue
@@ -2745,17 +2862,17 @@ EXPORT TYPE std.VOID TO PRELUDE AS VOID;
 
     #[test]
     fn binding_identity_count_drift_fails_before_identity_comparison() {
-        let shorter = build_type_bindings(&EXPECTED_TYPE_BINDING_IDS[..29]).unwrap_err();
+        let shorter = build_type_bindings(&EXPECTED_TYPE_BINDING_IDS[..30]).unwrap_err();
         assert_eq!(
             shorter,
             StandardLibraryManifestError::TypeBindingCountMismatch {
-                expected: 29,
-                actual: 30,
+                expected: 30,
+                actual: 31,
             }
         );
         assert_eq!(
             shorter.to_string(),
-            "the standard library manifest has 30 type bindings, expected 29"
+            "the standard library manifest has 31 type bindings, expected 30"
         );
         assert!(shorter.source().is_none());
 
@@ -2765,13 +2882,13 @@ EXPORT TYPE std.VOID TO PRELUDE AS VOID;
         assert_eq!(
             longer,
             StandardLibraryManifestError::TypeBindingCountMismatch {
-                expected: 31,
-                actual: 30,
+                expected: 32,
+                actual: 31,
             }
         );
         assert_eq!(
             longer.to_string(),
-            "the standard library manifest has 30 type bindings, expected 31"
+            "the standard library manifest has 31 type bindings, expected 32"
         );
         assert!(longer.source().is_none());
     }
