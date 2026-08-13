@@ -6,4 +6,7 @@
 pub use orna_kernel_postgres::*;
 
 #[cfg(feature = "embedded")]
-pub use orna_postgres_engine::*;
+mod engine;
+
+#[cfg(feature = "embedded")]
+pub use engine::*;
