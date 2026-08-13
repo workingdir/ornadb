@@ -25,7 +25,7 @@ use orna_core::{
     catalogue::CatalogueSnapshot, revision::ActiveDatabaseRevision, security::AuthenticatedSession,
     value::OpaqueCodecRegistry,
 };
-use orna_kernel_postgres::{PostgresKernel, PostgresKernelError};
+use orna_postgres::{PostgresKernel, PostgresKernelError};
 use orna_protocol::{
     ClientAction, ClientFrame, ConnectionError, FrameCodecError, MAX_FRAME_PAYLOAD_LENGTH,
     ProtocolConnection, RawCall, ServerAction, ServerFrame, decode_active_client_frame,
@@ -1312,7 +1312,7 @@ async fn write_all_until_shutdown<W: tokio::io::AsyncWrite + Unpin>(
     }
 }
 
-fn report_private_dispatch_source(source: &orna_kernel_postgres::PostgresKernelError) {
+fn report_private_dispatch_source(source: &orna_postgres::PostgresKernelError) {
     let _ = writeln!(
         io::stderr().lock(),
         "orna: protected raw client dispatch failed: {source}"
