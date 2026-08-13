@@ -4121,12 +4121,13 @@ mod tests {
             catalogue_digest_with_context(&context, &catalogue, &[], &[], &origins, &[]).unwrap()
         };
         let field = |id: u8, name, ordinal, resolved_type| {
-            RecordValueFieldDefinition::new(
+            RecordValueFieldDefinition::try_new(
                 FieldId::from_bytes([id; 16]),
                 name,
                 ordinal,
                 resolved_type,
             )
+            .expect("record field")
         };
         let base_fields = || {
             vec![
@@ -4192,12 +4193,15 @@ mod tests {
                 vec![RecordValueTypeDefinition::new(
                     TypeId::from_bytes(id::<42>()),
                     QualifiedSemanticName::new(["crm", "status"]).unwrap(),
-                    vec![RecordValueFieldDefinition::new(
-                        FieldId::from_bytes(id::<43>()),
-                        "value",
-                        0,
-                        resolved_type,
-                    )],
+                    vec![
+                        RecordValueFieldDefinition::try_new(
+                            FieldId::from_bytes(id::<43>()),
+                            "value",
+                            0,
+                            resolved_type,
+                        )
+                        .expect("record field"),
+                    ],
                 )],
                 vec![],
             )
