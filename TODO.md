@@ -57,7 +57,7 @@ separate release action.
 - [ ] Add the accepted invocation, authorisation, and public protocol slices.
 - [x] Extend catalogue-backed types with accepted enum identity, syntax,
   catalogue, storage, codec, protocol, and first SERVER execution slices.
-- [ ] Add a separately accepted record value type.
+- [x] Add a separately accepted record value type.
 - [ ] Add a separately accepted opaque value type.
 
 ## Completed foundations
