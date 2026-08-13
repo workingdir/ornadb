@@ -1187,13 +1187,20 @@ mod tests {
                 record_type,
                 QualifiedSemanticName::new(["crm", "flag"]).unwrap(),
                 vec![
-                    RecordValueFieldDefinition::new(record_field, "enabled", 0, first_field_type),
-                    RecordValueFieldDefinition::new(
+                    RecordValueFieldDefinition::try_new(
+                        record_field,
+                        "enabled",
+                        0,
+                        first_field_type,
+                    )
+                    .unwrap(),
+                    RecordValueFieldDefinition::try_new(
                         second_record_field,
                         "verified",
                         1,
                         second_field_type,
-                    ),
+                    )
+                    .unwrap(),
                 ],
             )],
             vec![],
