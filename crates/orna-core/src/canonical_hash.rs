@@ -28,9 +28,9 @@ use crate::{
         DefinitionReference, DefinitionReferenceKind, DefinitionReferenceTarget,
         ExecutableArtifact, ExecutableArtifactKind, ExpressionArtifact, FunctionRevisionRecord,
         FunctionSemanticHashVersion, RecordValueFieldDescriptorClass,
-        RecordValueFieldDescriptorError, Sha256Digest, SourceOrigin, StandardLibraryDigestVersion,
-        StandardLibrarySnapshot, StoredSourceRevision, StoredSourceUnit,
-        VerifiedStandardLibrarySnapshot, classify_record_value_field_descriptor,
+        RecordValueFieldDescriptorClassificationError, Sha256Digest, SourceOrigin,
+        StandardLibraryDigestVersion, StandardLibrarySnapshot, StoredSourceRevision,
+        StoredSourceUnit, VerifiedStandardLibrarySnapshot, classify_record_value_field_descriptor,
         function_accepts_opaque_client_return, reference_kind_accepts_target,
     },
     types::{ResolvedType, StandardScalar, TypeDescriptor},
@@ -1029,14 +1029,14 @@ fn canonical_record_value_field_type(
 ) -> Result<RecordValueFieldDescriptorClass, CanonicalHashError> {
     classify_record_value_field_descriptor(catalogue, standard, descriptor).map_err(|error| {
         match error {
-            RecordValueFieldDescriptorError::Unsupported => {
+            RecordValueFieldDescriptorClassificationError::Unsupported => {
                 CanonicalHashError::UnsupportedRecordValueFieldType {
                     record_value_type,
                     field,
                     descriptor: descriptor.clone(),
                 }
             }
-            RecordValueFieldDescriptorError::Ambiguous { type_id } => {
+            RecordValueFieldDescriptorClassificationError::Ambiguous { type_id } => {
                 CanonicalHashError::AmbiguousRecordValueFieldType {
                     record_value_type,
                     field,
