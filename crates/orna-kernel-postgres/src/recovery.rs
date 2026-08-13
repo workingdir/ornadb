@@ -13,7 +13,7 @@ use orna_core::{
         CatalogueSnapshot, EnumTypeDefinition, FieldDefinition, ObjectTypeDefinition,
         OnDeleteAction, PreludeTypeName, QualifiedSemanticName, RecordValueFieldDefinition,
         RecordValueTypeDefinition, SchemaDefinition, TypeBinding, TypeBindingKind,
-        ValueTypeDefinition, ValueTypeMutability, ValueTypePersistence,
+        ValueTypeDefinition, ValueTypeKind, ValueTypeMutability, ValueTypePersistence,
     },
     revision::{
         ActiveDatabaseRevision, ActiveDatabaseRevisionInput, ActiveRevisionContent,
@@ -1112,13 +1112,16 @@ fn decode_standard_value_type(
     let value_kind: String = record.column(
         row,
         "value_kind",
-        "standard value type kind must be primitive",
+        "standard value type kind must be primitive or opaque",
     )?;
-    exact_enum(
+    let kind = exact_enum(
         &value_kind,
-        &[("primitive", ())],
+        &[
+            ("primitive", ValueTypeKind::Primitive),
+            ("opaque", ValueTypeKind::Opaque),
+        ],
         &record,
-        "standard value type kind must be primitive",
+        "standard value type kind must be primitive or opaque",
     )?;
     let mutability: String = record.column(
         row,
@@ -1150,23 +1153,63 @@ fn decode_standard_value_type(
         "representation_contract",
         "standard value type representation contract must be PostgreSQL text",
     )?;
+    let origin = decode_origin(row, &record, DefinitionIdentity::ValueType(id))?;
+    Ok(RecoveredStandardValueType {
+        schema,
+        definition: recovered_standard_value_definition(
+            &record,
+            id,
+            name,
+            kind,
+            persistence,
+            representation_contract,
+        )?,
+        origin,
+    })
+}
+
+fn recovered_standard_value_definition(
+    record: &DurableRecord,
+    id: TypeId,
+    name: QualifiedSemanticName,
+    kind: ValueTypeKind,
+    persistence: ValueTypePersistence,
+    representation_contract: String,
+) -> Result<ValueTypeDefinition, PostgresKernelError> {
     if representation_contract.is_empty() {
         return Err(
             record.invariant("standard value type representation contract must not be empty")
         );
     }
-    let origin = decode_origin(row, &record, DefinitionIdentity::ValueType(id))?;
-    Ok(RecoveredStandardValueType {
-        schema,
-        definition: ValueTypeDefinition::primitive(
+    match kind {
+        ValueTypeKind::Primitive => Ok(ValueTypeDefinition::primitive(
             id,
             name,
             ValueTypeMutability::Immutable,
             persistence,
             representation_contract,
-        ),
-        origin,
-    })
+        )),
+        ValueTypeKind::Opaque => {
+            if persistence != ValueTypePersistence::Transient {
+                return Err(record.invariant("standard opaque value type must be transient"));
+            }
+            if representation_contract.len() > 128
+                || !representation_contract
+                    .bytes()
+                    .all(|byte| (0x20..=0x7e).contains(&byte))
+            {
+                return Err(record.invariant(
+                    "standard opaque value type contract must be 1 to 128 printable ASCII bytes",
+                ));
+            }
+            Ok(ValueTypeDefinition::opaque(
+                id,
+                name,
+                representation_contract,
+            ))
+        }
+        _ => Err(record.invariant("standard value type kind is not recoverable")),
+    }
 }
 
 async fn load_standard_type_bindings(
@@ -2982,7 +3025,7 @@ mod tests {
         },
         catalogue::{
             CatalogueSnapshot, EnumTypeDefinition, QualifiedSemanticName,
-            RecordValueFieldDefinition, SchemaDefinition,
+            RecordValueFieldDefinition, SchemaDefinition, ValueTypeKind, ValueTypePersistence,
         },
         revision::{
             CatalogueHashContext, CatalogueHashVersion, DefinitionIdentity, DefinitionOrigin,
@@ -2998,7 +3041,8 @@ mod tests {
         RecoveredRecordValueField, RecoveredRecordValueType, RecoveredRevisionHeader,
         RecoveredSchema, ResolvedTypeTuple, assemble_catalogue_semantics, assemble_revision,
         decode_catalogue_hash_version, decode_legacy_resolved_type_tuple,
-        decode_legacy_resolved_type_tuple_kind, decode_resolved_type_tuple, validate_function_type,
+        decode_legacy_resolved_type_tuple_kind, decode_resolved_type_tuple,
+        recovered_standard_value_definition, validate_function_type,
     };
 
     fn test_origin(identity: DefinitionIdentity, start: u32) -> DefinitionOrigin {
@@ -3007,6 +3051,76 @@ mod tests {
             SourceOrigin::new(SourceUnitId::from_bytes([0x91; 16]), start, start + 1)
                 .expect("test source origin"),
         )
+    }
+
+    #[test]
+    fn recovers_only_the_closed_opaque_standard_definition_shape() {
+        let record = DurableRecord::new(
+            "_orna_kernel.standard_catalogue_value_types",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        );
+        let id = TypeId::from_bytes([0xaa; 16]);
+        let name =
+            QualifiedSemanticName::new(["std", "example", "token"]).expect("opaque value name");
+        let definition = recovered_standard_value_definition(
+            &record,
+            id,
+            name.clone(),
+            ValueTypeKind::Opaque,
+            ValueTypePersistence::Transient,
+            "std.example.token@1".to_owned(),
+        )
+        .expect("exact opaque definition");
+
+        assert_eq!(definition.id(), id);
+        assert_eq!(definition.name(), &name);
+        assert_eq!(definition.kind(), ValueTypeKind::Opaque);
+        assert_eq!(definition.persistence(), ValueTypePersistence::Transient);
+        assert_eq!(definition.representation_contract(), "std.example.token@1");
+        assert!(
+            recovered_standard_value_definition(
+                &record,
+                id,
+                name.clone(),
+                ValueTypeKind::Opaque,
+                ValueTypePersistence::Persistable,
+                "std.example.token@1".to_owned(),
+            )
+            .is_err()
+        );
+        assert!(
+            recovered_standard_value_definition(
+                &record,
+                id,
+                name.clone(),
+                ValueTypeKind::Opaque,
+                ValueTypePersistence::Transient,
+                String::new(),
+            )
+            .is_err()
+        );
+        assert!(
+            recovered_standard_value_definition(
+                &record,
+                id,
+                name.clone(),
+                ValueTypeKind::Opaque,
+                ValueTypePersistence::Transient,
+                "x".repeat(129),
+            )
+            .is_err()
+        );
+        assert!(
+            recovered_standard_value_definition(
+                &record,
+                id,
+                name,
+                ValueTypeKind::Opaque,
+                ValueTypePersistence::Transient,
+                "std.example.\ntoken@1".to_owned(),
+            )
+            .is_err()
+        );
     }
 
     #[test]
