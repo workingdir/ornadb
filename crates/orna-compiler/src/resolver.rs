@@ -5506,12 +5506,14 @@ mod tests {
         assert_eq!(record.name().to_string(), "app.status");
         assert_eq!(record.fields().len(), 2);
         assert_eq!(
-            record.fields()[0].resolved_type(),
-            ResolvedType::Value(TypeId::from_bytes([3; 16]))
+            record.fields()[0].type_descriptor(),
+            Some(&orna_core::types::TypeDescriptor::named(
+                TypeId::from_bytes([3; 16])
+            ))
         );
         assert_eq!(
-            record.fields()[1].resolved_type(),
-            ResolvedType::Named(enum_type.id())
+            record.fields()[1].type_descriptor(),
+            Some(&orna_core::types::TypeDescriptor::named(enum_type.id()))
         );
         let unit = prepared.source().units()[0].id();
         assert!(prepared.origins().iter().any(|origin| {
