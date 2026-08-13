@@ -414,21 +414,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "orna-kernel-postgres"
-version = "0.1.0"
-dependencies = [
- "orna-client",
- "orna-compiler",
- "orna-core",
- "orna-postgres",
- "orna-protocol",
- "orna-standard",
- "sha2",
- "tokio",
- "tokio-postgres",
-]
-
-[[package]]
 name = "orna-postgres"
 version = "0.1.0"
 dependencies = [
