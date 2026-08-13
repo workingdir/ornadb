@@ -5,7 +5,7 @@ use std::{
 };
 
 use orna_core::security::AuthenticatedSession;
-use orna_kernel_postgres::{PostgresKernel, PostgresKernelError};
+use orna_postgres::{PostgresKernel, PostgresKernelError};
 
 /// A failure while authenticating a connected local client.
 #[derive(Debug)]
