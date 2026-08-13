@@ -53,6 +53,7 @@ const EXPECTED_KERNEL_TABLES: &[&str] = &[
     "source_bundles",
     "source_revisions",
     "source_units",
+    "standard_catalogue_enum_types",
     "standard_catalogue_schemas",
     "standard_catalogue_type_bindings",
     "standard_catalogue_value_types",
@@ -155,6 +156,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "standard opaque value storage",
         include_str!("../migrations/0019_standard_opaque_value_types.sql"),
     ),
+    (
+        20,
+        "standard enum record field storage",
+        include_str!("../migrations/0020_standard_enum_record_fields.sql"),
+    ),
 ];
 const MIGRATION_DATA_STEP_SEPARATOR: &[u8] = b"\0orna.kernel.migration-step\0";
 const CANONICAL_HASH_V1_EMPTY_SEED_STEP: &[u8] = b"canonical-hash-v1-empty-seed/v1";
@@ -174,6 +180,7 @@ const ORIGIN_TABLES: &[&str] = &[
     "catalogue_fields",
     "catalogue_record_value_fields",
     "catalogue_record_value_types",
+    "standard_catalogue_enum_types",
     "catalogue_expressions",
     "catalogue_functions",
     "catalogue_function_parameters",
@@ -240,6 +247,8 @@ fn is_later_catalogue_relation(relation: &str) -> bool {
     relation.starts_with("security_")
         || relation.starts_with("catalogue_enum_types")
         || relation.starts_with("catalogue_record_value")
+        || relation.starts_with("standard_catalogue_enum_types")
+        || relation.starts_with("std_cat_enum_types_")
         || relation == "definition_references_enum_type_target_index"
         || relation.starts_with("definition_references_record_")
 }
@@ -619,6 +628,32 @@ fn standard_opaque_value_storage_is_the_registered_version_nineteen() -> TestRes
     )
 }
 
+#[test]
+fn standard_enum_record_fields_are_the_registered_version_twenty() -> TestResult<()> {
+    let Some((version, name, sql)) = MIGRATIONS.get(19).copied() else {
+        return Err(failure(
+            "standard enum record field storage migration is not registered",
+        ));
+    };
+    require(version == 20, format!("migration is version {version}"))?;
+    require(
+        name == "standard enum record field storage",
+        format!("migration has unexpected name {name:?}"),
+    )?;
+    require(
+        sql.contains("CREATE TABLE _orna_kernel.standard_catalogue_enum_types")
+            && sql.contains("target_type_kind IN ('value', 'enum')")
+            && sql.contains("target_enum_type_id")
+            && sql.contains("enum_standard_library_revision_id")
+            && sql.contains("standard_enum_type_id")
+            && sql.contains("cat_record_value_fields_std_enum_fk")
+            && sql.contains("DEFERRABLE INITIALLY DEFERRED")
+            && !sql.contains("CREATE TYPE")
+            && !sql.contains("LANGUAGE"),
+        "standard enum migration does not preserve its protected relational contract",
+    )
+}
+
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
 async fn bootstrap_creates_one_recoverable_empty_revision() -> TestResult<()> {
@@ -729,8 +764,8 @@ async fn bootstrap_upgrades_v5_write_reference_evidence_without_mutating_semanti
 
         let after = snapshot_upgrade_state(&database).await?;
         require(
-            after.migrations.len() == 19 && after.migrations[..5] == before.migrations[..],
-            format!("v6-v19 changed prior migration records: {:?}", after.migrations),
+            after.migrations.len() == 20 && after.migrations[..5] == before.migrations[..],
+            format!("v6-v20 changed prior migration records: {:?}", after.migrations),
         )?;
         require(
             after.migrations[5]
@@ -859,6 +894,15 @@ async fn bootstrap_upgrades_v5_write_reference_evidence_without_mutating_semanti
             format!("v19 migration record is not exact: {:?}", after.migrations[18]),
         )?;
         require(
+            after.migrations[19]
+                == (
+                    20,
+                    "standard enum record field storage".to_owned(),
+                    expected_migration_checksum(20, MIGRATIONS[19].2),
+                ),
+            format!("v20 migration record is not exact: {:?}", after.migrations[19]),
+        )?;
+        require(
             after.active_pair == before.active_pair,
             "v6 changed the active revision pair",
         )?;
@@ -944,7 +988,7 @@ async fn bootstrap_upgrades_registered_v6_without_standard_rows() -> TestResult<
 
         let after = snapshot_upgrade_state(&database).await?;
         require(
-            after.migrations.len() == 19
+            after.migrations.len() == 20
                 && after.migrations[..6] == before.migrations[..]
                 && after.migrations[6]
                     == (
@@ -1063,6 +1107,15 @@ async fn bootstrap_upgrades_registered_v6_without_standard_rows() -> TestResult<
             format!("v19 migration record is not exact: {:?}", after.migrations[18]),
         )?;
         require(
+            after.migrations[19]
+                == (
+                    20,
+                    "standard enum record field storage".to_owned(),
+                    expected_migration_checksum(20, MIGRATIONS[19].2),
+                ),
+            format!("v20 migration record is not exact: {:?}", after.migrations[19]),
+        )?;
+        require(
             after.active_pair == before.active_pair
                 && after.source_unit_count == before.source_unit_count
                 && after.references == before.references
@@ -1136,7 +1189,7 @@ async fn bootstrap_upgrades_registered_v7_without_resolved_value_rows() -> TestR
         let after_surface = snapshot_catalogue_surface(&database).await?;
         let after_target_fks = snapshot_application_target_foreign_keys(&database).await?;
         require(
-            after.migrations.len() == 19
+            after.migrations.len() == 20
                 && after.migrations[..7] == before.migrations[..]
                 && after.migrations[7]
                     == (
@@ -1209,6 +1262,12 @@ async fn bootstrap_upgrades_registered_v7_without_resolved_value_rows() -> TestR
                         19,
                         "standard opaque value storage".to_owned(),
                         expected_migration_checksum(19, MIGRATIONS[18].2),
+                    )
+                && after.migrations[19]
+                    == (
+                        20,
+                        "standard enum record field storage".to_owned(),
+                        expected_migration_checksum(20, MIGRATIONS[19].2),
                     ),
             format!("v7 upgrade produced unexpected migrations: {:?}", after.migrations),
         )?;
@@ -1957,6 +2016,25 @@ async fn inspect_standard_catalogue_schema(client: &Client) -> TestResult<()> {
             ][..],
         ),
         (
+            "standard_catalogue_enum_types",
+            &[
+                (
+                    "standard_library_revision_id",
+                    "bytea",
+                    "bytea",
+                    "NO",
+                    Some(""),
+                ),
+                ("type_id", "bytea", "bytea", "NO", Some("")),
+                ("schema_id", "bytea", "bytea", "NO", Some("")),
+                ("name_parts", "ARRAY", "_text", "NO", Some("")),
+                ("labels", "ARRAY", "_text", "NO", Some("")),
+                ("source_unit_id", "bytea", "bytea", "NO", Some("")),
+                ("source_start", "bigint", "int8", "NO", Some("")),
+                ("source_end", "bigint", "int8", "NO", Some("")),
+            ][..],
+        ),
+        (
             "standard_catalogue_type_bindings",
             &[
                 (
@@ -1969,10 +2047,18 @@ async fn inspect_standard_catalogue_schema(client: &Client) -> TestResult<()> {
                 ("type_binding_id", "bytea", "bytea", "NO", Some("")),
                 ("kind", "text", "text", "NO", Some("")),
                 ("name_parts", "ARRAY", "_text", "NO", Some("")),
-                ("target_type_id", "bytea", "bytea", "NO", Some("")),
+                ("target_type_id", "bytea", "bytea", "YES", Some("")),
                 ("source_unit_id", "bytea", "bytea", "NO", Some("")),
                 ("source_start", "bigint", "int8", "NO", Some("")),
                 ("source_end", "bigint", "int8", "NO", Some("")),
+                (
+                    "target_type_kind",
+                    "text",
+                    "text",
+                    "NO",
+                    Some("'value'::text"),
+                ),
+                ("target_enum_type_id", "bytea", "bytea", "YES", Some("")),
             ][..],
         ),
     ] {
@@ -2423,6 +2509,14 @@ async fn inspect_record_value_storage(client: &Client) -> TestResult<()> {
             ("source_unit_id", "bytea", "bytea", "NO", Some("")),
             ("source_start", "bigint", "int8", "NO", Some("")),
             ("source_end", "bigint", "int8", "NO", Some("")),
+            (
+                "enum_standard_library_revision_id",
+                "bytea",
+                "bytea",
+                "YES",
+                Some(""),
+            ),
+            ("standard_enum_type_id", "bytea", "bytea", "YES", Some("")),
         ],
     )
     .await?;
@@ -2450,6 +2544,21 @@ async fn inspect_record_value_storage(client: &Client) -> TestResult<()> {
         ),
         (
             "catalogue_record_value_fields",
+            "cat_record_value_fields_type_check",
+            "enum_standard_library_revision_id IS NOT NULL",
+        ),
+        (
+            "catalogue_record_value_fields",
+            "cat_record_value_fields_enum_std_rev_length",
+            "octet_length(enum_standard_library_revision_id) = 16",
+        ),
+        (
+            "catalogue_record_value_fields",
+            "cat_record_value_fields_std_enum_id_length",
+            "octet_length(standard_enum_type_id) = 16",
+        ),
+        (
+            "catalogue_record_value_fields",
             "cat_record_value_fields_owner_fk",
             "REFERENCES _orna_kernel.catalogue_record_value_types",
         ),
@@ -2467,6 +2576,16 @@ async fn inspect_record_value_storage(client: &Client) -> TestResult<()> {
             "catalogue_record_value_fields",
             "cat_record_value_fields_enum_type_fk",
             "REFERENCES _orna_kernel.catalogue_enum_types",
+        ),
+        (
+            "catalogue_record_value_fields",
+            "cat_record_value_fields_enum_pin_fk",
+            "REFERENCES _orna_kernel.catalogue_revisions",
+        ),
+        (
+            "catalogue_record_value_fields",
+            "cat_record_value_fields_std_enum_fk",
+            "REFERENCES _orna_kernel.standard_catalogue_enum_types",
         ),
     ] {
         require_constraint(client, table, constraint, fragment).await?;
@@ -2656,7 +2775,7 @@ async fn inspect_column_contract(
     Ok(())
 }
 
-fn exact_0007_constraint_definition(constraint: &str) -> Option<&'static str> {
+fn exact_standard_catalogue_constraint_definition(constraint: &str) -> Option<&'static str> {
     Some(match constraint {
         "std_lib_rev_pkey" => "PRIMARY KEY (id)",
         "std_lib_rev_id_length" => "CHECK ((octet_length(id) = 16))",
@@ -2728,6 +2847,31 @@ fn exact_0007_constraint_definition(constraint: &str) -> Option<&'static str> {
         "std_cat_value_types_source_unit_fk" => {
             "FOREIGN KEY (source_unit_id) REFERENCES _orna_kernel.source_units(id)"
         }
+        "std_cat_enum_types_pkey" => "PRIMARY KEY (standard_library_revision_id, type_id)",
+        "std_cat_enum_types_std_lib_rev_id_length" => {
+            "CHECK ((octet_length(standard_library_revision_id) = 16))"
+        }
+        "std_cat_enum_types_std_lib_rev_fk" => {
+            "FOREIGN KEY (standard_library_revision_id) REFERENCES _orna_kernel.standard_library_revisions(id)"
+        }
+        "std_cat_enum_types_type_id_length" => "CHECK ((octet_length(type_id) = 16))",
+        "std_cat_enum_types_schema_id_length" => "CHECK ((octet_length(schema_id) = 16))",
+        "std_cat_enum_types_schema_fk" => {
+            "FOREIGN KEY (standard_library_revision_id, schema_id) REFERENCES _orna_kernel.standard_catalogue_schemas(standard_library_revision_id, schema_id)"
+        }
+        "std_cat_enum_types_name_parts_check" => {
+            "CHECK (((cardinality(name_parts) >= 2) AND (array_position(name_parts, NULL::text) IS NULL) AND (array_position(name_parts, ''::text) IS NULL)))"
+        }
+        "std_cat_enum_types_name_key" => "UNIQUE (standard_library_revision_id, name_parts)",
+        "std_cat_enum_types_labels_check" => {
+            "CHECK (((cardinality(labels) > 0) AND (array_position(labels, NULL::text) IS NULL)))"
+        }
+        "standard_catalogue_enum_types_source_origin_check" => {
+            "CHECK (((octet_length(source_unit_id) = 16) AND (source_start >= 0) AND (source_start <= '4294967295'::bigint) AND (source_end >= source_start) AND (source_end <= '4294967295'::bigint)))"
+        }
+        "standard_catalogue_enum_types_source_unit_fk" => {
+            "FOREIGN KEY (source_unit_id) REFERENCES _orna_kernel.source_units(id)"
+        }
         "std_cat_type_bindings_pkey" => {
             "PRIMARY KEY (standard_library_revision_id, type_binding_id)"
         }
@@ -2754,6 +2898,18 @@ fn exact_0007_constraint_definition(constraint: &str) -> Option<&'static str> {
         }
         "std_cat_type_bindings_target_type_fk" => {
             "FOREIGN KEY (standard_library_revision_id, target_type_id) REFERENCES _orna_kernel.standard_catalogue_value_types(standard_library_revision_id, type_id)"
+        }
+        "std_cat_type_bindings_target_type_kind_check" => {
+            "CHECK ((target_type_kind = ANY (ARRAY['value'::text, 'enum'::text])))"
+        }
+        "std_cat_type_bindings_target_shape_check" => {
+            "CHECK ((((target_type_kind = 'value'::text) AND (target_type_id IS NOT NULL) AND (target_enum_type_id IS NULL)) OR ((target_type_kind = 'enum'::text) AND (target_type_id IS NULL) AND (target_enum_type_id IS NOT NULL))))"
+        }
+        "std_cat_type_bindings_target_enum_id_length" => {
+            "CHECK (((target_enum_type_id IS NULL) OR (octet_length(target_enum_type_id) = 16)))"
+        }
+        "std_cat_type_bindings_target_enum_fk" => {
+            "FOREIGN KEY (standard_library_revision_id, target_enum_type_id) REFERENCES _orna_kernel.standard_catalogue_enum_types(standard_library_revision_id, type_id)"
         }
         "std_cat_type_bindings_source_origin_check" => {
             "CHECK (((octet_length(source_unit_id) = 16) AND (source_start >= 0) AND (source_start <= '4294967295'::bigint) AND (source_end >= source_start) AND (source_end <= '4294967295'::bigint)))"
@@ -2954,6 +3110,61 @@ async fn inspect_standard_catalogue_constraints(client: &Client) -> TestResult<(
             "FOREIGN KEY (source_unit_id) REFERENCES _orna_kernel.source_units(id)",
         ),
         (
+            "standard_catalogue_enum_types",
+            "std_cat_enum_types_pkey",
+            "PRIMARY KEY (standard_library_revision_id, type_id)",
+        ),
+        (
+            "standard_catalogue_enum_types",
+            "std_cat_enum_types_std_lib_rev_id_length",
+            "octet_length(standard_library_revision_id) = 16",
+        ),
+        (
+            "standard_catalogue_enum_types",
+            "std_cat_enum_types_std_lib_rev_fk",
+            "FOREIGN KEY (standard_library_revision_id) REFERENCES _orna_kernel.standard_library_revisions(id)",
+        ),
+        (
+            "standard_catalogue_enum_types",
+            "std_cat_enum_types_type_id_length",
+            "octet_length(type_id) = 16",
+        ),
+        (
+            "standard_catalogue_enum_types",
+            "std_cat_enum_types_schema_id_length",
+            "octet_length(schema_id) = 16",
+        ),
+        (
+            "standard_catalogue_enum_types",
+            "std_cat_enum_types_schema_fk",
+            "FOREIGN KEY (standard_library_revision_id, schema_id) REFERENCES _orna_kernel.standard_catalogue_schemas(standard_library_revision_id, schema_id)",
+        ),
+        (
+            "standard_catalogue_enum_types",
+            "std_cat_enum_types_name_parts_check",
+            "cardinality(name_parts) >= 2",
+        ),
+        (
+            "standard_catalogue_enum_types",
+            "std_cat_enum_types_name_key",
+            "UNIQUE (standard_library_revision_id, name_parts)",
+        ),
+        (
+            "standard_catalogue_enum_types",
+            "std_cat_enum_types_labels_check",
+            "cardinality(labels) > 0",
+        ),
+        (
+            "standard_catalogue_enum_types",
+            "standard_catalogue_enum_types_source_origin_check",
+            "source_start <= '4294967295'::bigint",
+        ),
+        (
+            "standard_catalogue_enum_types",
+            "standard_catalogue_enum_types_source_unit_fk",
+            "FOREIGN KEY (source_unit_id) REFERENCES _orna_kernel.source_units(id)",
+        ),
+        (
             "standard_catalogue_type_bindings",
             "std_cat_type_bindings_pkey",
             "PRIMARY KEY (standard_library_revision_id, type_binding_id)",
@@ -3000,6 +3211,26 @@ async fn inspect_standard_catalogue_constraints(client: &Client) -> TestResult<(
         ),
         (
             "standard_catalogue_type_bindings",
+            "std_cat_type_bindings_target_type_kind_check",
+            "target_type_kind = ANY (ARRAY['value'::text, 'enum'::text])",
+        ),
+        (
+            "standard_catalogue_type_bindings",
+            "std_cat_type_bindings_target_shape_check",
+            "target_enum_type_id IS NOT NULL",
+        ),
+        (
+            "standard_catalogue_type_bindings",
+            "std_cat_type_bindings_target_enum_id_length",
+            "octet_length(target_enum_type_id) = 16",
+        ),
+        (
+            "standard_catalogue_type_bindings",
+            "std_cat_type_bindings_target_enum_fk",
+            "FOREIGN KEY (standard_library_revision_id, target_enum_type_id) REFERENCES _orna_kernel.standard_catalogue_enum_types(standard_library_revision_id, type_id)",
+        ),
+        (
+            "standard_catalogue_type_bindings",
             "std_cat_type_bindings_source_origin_check",
             "source_start <= '4294967295'::bigint",
         ),
@@ -3039,8 +3270,8 @@ async fn inspect_standard_catalogue_constraints(client: &Client) -> TestResult<(
             "semantic_hash_version = ANY (ARRAY[1, 2])",
         ),
     ] {
-        let expected_definition = exact_0007_constraint_definition(constraint)
-            .ok_or_else(|| failure(format!("missing exact 0007 contract for {constraint}")))?;
+        let expected_definition = exact_standard_catalogue_constraint_definition(constraint)
+            .ok_or_else(|| failure(format!("missing exact standard contract for {constraint}")))?;
         require_exact_constraint(client, table, constraint, expected_definition, false, false)
             .await?;
     }
@@ -3097,6 +3328,7 @@ async fn inspect_standard_catalogue_indexes(client: &Client) -> TestResult<()> {
 async fn inspect_standard_catalogue_privileges(client: &Client) -> TestResult<()> {
     for table in [
         "standard_library_revisions",
+        "standard_catalogue_enum_types",
         "standard_catalogue_schemas",
         "standard_catalogue_value_types",
         "standard_catalogue_type_bindings",
@@ -3597,7 +3829,8 @@ async fn inspect_origin_columns(client: &Client) -> TestResult<()> {
         let nullability = match *table {
             "catalogue_enum_types"
             | "catalogue_record_value_fields"
-            | "catalogue_record_value_types" => "NO",
+            | "catalogue_record_value_types"
+            | "standard_catalogue_enum_types" => "NO",
             _ => "YES",
         };
         let expected_columns = BTreeSet::from([
