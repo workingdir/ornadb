@@ -5588,3 +5588,344 @@ fn installed_additive_source_activates_isolated_new_schema_with_stable_old_ident
         "the added reader must emit exactly three Boolean FALSE envelopes"
     );
 }
+
+/// Installed public-boundary journey for one required unique reference field.
+///
+/// The test installs the exact checked-in `product_test_unique_reference.orna`
+/// fixture and applies it. It requires exactly three sorted qualified-name
+/// mappings with pairwise distinct function identities, proves that only
+/// `create_assignment` declares the `p_owner` reference parameter, and proves
+/// every raw call is denied before any grant, including `create_assignment`
+/// with a syntactically valid synthetic owner reference.
+///
+/// After granting the three exact functions, `create_owner` returns two
+/// distinct real owner references with one nonzero target type. Inserting an
+/// assignment for owner A returns a real assignment reference with a
+/// different target type; retrying owner A fails with the exact public
+/// `INTERNAL_FAILURE` line, and the public reference reader returns exactly
+/// owner A. Inserting owner B succeeds, and the reader returns the unordered
+/// multiset {A, B}. Reapplying the exact same source keeps the complete
+/// function and parameter discovery vector and both rows without any repeated
+/// grant. A restart preserves both rows. Retrying owner A through the
+/// original identities and the retained grant fails again with the exact
+/// `INTERNAL_FAILURE` line, and the reader still returns exactly {A, B}.
+///
+/// The test claims only public uniqueness, rollback, identity and grant
+/// retention, replay, restart, and persistence through the packaged
+/// `/usr/bin/orna` commands and raw-call ORV envelopes. It makes no claim
+/// about private SQLSTATEs, constraint names, private audit records, the
+/// private conflict type, physical storage, or row ordering.
+#[test]
+#[ignore = "requires Docker, ORNA_SYSTEM_TEST_DEBIAN_PACKAGE, and the installed orna executable"]
+fn installed_unique_reference_insert_rolls_back_and_persists_across_replay_and_restart() {
+    let package = std::env::var("ORNA_SYSTEM_TEST_DEBIAN_PACKAGE")
+        .expect("ORNA_SYSTEM_TEST_DEBIAN_PACKAGE must point at the reproduced .deb package");
+    let artifact = FrozenPackageArtifact::new(PackageFormat::Debian, &package)
+        .expect("freeze the reproduced Debian package");
+    let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures")
+        .join("product_test_unique_reference.orna");
+    let fixture = fs::read(&fixture_path).expect("read the checked-in unique reference fixture");
+
+    let machine = InstalledMachine::start(&artifact, &fixture)
+        .expect("start the installed Debian test machine");
+
+    // Apply the exact fixture and require the three sorted mappings.
+    let apply = machine
+        .run_as_orna(&["source", "apply", FIXTURE_PATH])
+        .expect("run installed source apply");
+    let apply = require_success("orna source apply", apply).expect("source apply must succeed");
+    assert!(
+        apply.stderr.is_empty(),
+        "source apply must keep standard error empty"
+    );
+    let document = parse_apply_document(&apply.stdout).expect("source apply JSON must parse");
+    let expected_order = [
+        vec![
+            "unique_reference_test".to_string(),
+            "create_assignment".to_string(),
+        ],
+        vec![
+            "unique_reference_test".to_string(),
+            "create_owner".to_string(),
+        ],
+        vec![
+            "unique_reference_test".to_string(),
+            "read_assignment_owners".to_string(),
+        ],
+    ];
+    let actual_order = document
+        .functions
+        .iter()
+        .map(|function| function.names().to_vec())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual_order, expected_order,
+        "apply must report the three function entries sorted by qualified name"
+    );
+    let create_owner = document
+        .function_id(&["unique_reference_test", "create_owner"])
+        .expect("apply must report create_owner");
+    let create_assignment = document
+        .function_id(&["unique_reference_test", "create_assignment"])
+        .expect("apply must report create_assignment");
+    let read_assignment_owners = document
+        .function_id(&["unique_reference_test", "read_assignment_owners"])
+        .expect("apply must report read_assignment_owners");
+    let identities = [create_owner, create_assignment, read_assignment_owners];
+    for (index, left) in identities.iter().enumerate() {
+        for right in &identities[index + 1..] {
+            assert_ne!(
+                left, right,
+                "the three function identities must be pairwise distinct"
+            );
+        }
+    }
+    let owner_parameter = document
+        .parameter_id(&["unique_reference_test", "create_assignment"], "p_owner")
+        .expect("apply must report create_assignment.p_owner");
+    for name in ["create_owner", "read_assignment_owners"] {
+        let entry = document
+            .functions
+            .iter()
+            .find(|entry| {
+                entry
+                    .names()
+                    .iter()
+                    .map(String::as_str)
+                    .eq(["unique_reference_test", name].iter().copied())
+            })
+            .expect("apply must report the function entry");
+        assert!(
+            entry.parameters().is_empty(),
+            "{name} must declare no parameters"
+        );
+    }
+    let assignment_entry = document
+        .functions
+        .iter()
+        .find(|entry| {
+            entry.names().iter().map(String::as_str).eq([
+                "unique_reference_test",
+                "create_assignment",
+            ]
+            .iter()
+            .copied())
+        })
+        .expect("apply must report create_assignment");
+    assert_eq!(
+        assignment_entry.parameters().len(),
+        1,
+        "create_assignment must declare exactly one parameter"
+    );
+    let declared = &assignment_entry.parameters()[0];
+    assert_eq!(
+        declared.name(),
+        "p_owner",
+        "create_assignment must declare exactly the p_owner parameter"
+    );
+    assert_eq!(
+        declared.parameter_id(),
+        owner_parameter,
+        "the declared parameter must equal the discovered identity"
+    );
+
+    // Source apply grants nothing: every raw call is denied before any grant.
+    // The assignment denial carries a syntactically valid synthetic owner
+    // reference, proving authorisation precedes argument and row validation.
+    let pre_grant_owner = reference_orv1_envelope([0x11; 16], [0x22; 16]);
+    let denied_assignment = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", create_assignment, owner_parameter],
+            &pre_grant_owner,
+        )
+        .expect("run denied assignment call");
+    assert_denied("assignment before grant", denied_assignment)
+        .expect("create_assignment must be denied before its grant");
+    for function in [create_owner, read_assignment_owners] {
+        let denied = machine
+            .run_as_orna(&["raw-call", function])
+            .expect("run denied raw call");
+        assert_denied("raw call before grant", denied).expect("raw call must be denied");
+    }
+
+    // Grant the three exact functions.
+    for function in identities {
+        let granted = machine
+            .run_as_orna(&["security", "grant-execute", function])
+            .expect("run installed grant command");
+        require_silent_success("orna security grant-execute", granted)
+            .expect("grant must succeed silently");
+    }
+
+    // Create two distinct owners and retain their exact ORV1 references.
+    let owner_a_call = machine
+        .run_as_orna(&["raw-call", create_owner])
+        .expect("run owner A create call");
+    let owner_a_call = require_value_success("orna raw-call create_owner A", owner_a_call)
+        .expect("owner A create must succeed");
+    let owner_a = parse_reference_envelope(&owner_a_call.stdout)
+        .expect("owner A create must return one ORV reference");
+    let owner_b_call = machine
+        .run_as_orna(&["raw-call", create_owner])
+        .expect("run owner B create call");
+    let owner_b_call = require_value_success("orna raw-call create_owner B", owner_b_call)
+        .expect("owner B create must succeed");
+    let owner_b = parse_reference_envelope(&owner_b_call.stdout)
+        .expect("owner B create must return one ORV reference");
+    assert!(
+        owner_a.type_id != [0; 16] && owner_b.type_id != [0; 16],
+        "both owners must name a real nonzero target type"
+    );
+    assert!(
+        !owner_a.object_is_zero() && !owner_b.object_is_zero(),
+        "both owners must name real nonzero rows"
+    );
+    assert_eq!(
+        owner_a.type_id, owner_b.type_id,
+        "both owners must share one target type"
+    );
+    assert_ne!(
+        owner_a.object, owner_b.object,
+        "the two owners must be distinct objects"
+    );
+
+    // Insert an assignment for owner A: the created assignment reference has
+    // a different target type and a nonzero object identity.
+    let owner_a_selector = reference_orv1_envelope(owner_a.type_id, owner_a.object);
+    let assignment_a_call = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", create_assignment, owner_parameter],
+            &owner_a_selector,
+        )
+        .expect("run assignment for owner A");
+    let assignment_a_call =
+        require_value_success("orna raw-call create_assignment A", assignment_a_call)
+            .expect("assignment A must succeed");
+    let assignment_a = parse_reference_envelope(&assignment_a_call.stdout)
+        .expect("assignment A must return one ORV reference");
+    assert!(
+        assignment_a.type_id != [0; 16] && !assignment_a.object_is_zero(),
+        "assignment A must name a real nonzero assignment row"
+    );
+    assert_ne!(
+        assignment_a.type_id, owner_a.type_id,
+        "the assignment reference must use a different target type from the owner"
+    );
+
+    // Retrying owner A fails with the exact public INTERNAL_FAILURE line, and
+    // the public reference reader returns exactly owner A.
+    let duplicate_a = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", create_assignment, owner_parameter],
+            &owner_a_selector,
+        )
+        .expect("run duplicate assignment for owner A");
+    assert_exact_raw_call_failure(
+        "orna raw-call create_assignment duplicate A",
+        duplicate_a,
+        "raw call failed: INTERNAL_FAILURE\n",
+    )
+    .expect("the duplicate assignment must close as a public INTERNAL_FAILURE");
+    assert_reference_reader_returns(
+        &machine,
+        read_assignment_owners,
+        &[&owner_a],
+        "orna raw-call read_assignment_owners after duplicate A",
+    )
+    .expect("the reader must return exactly owner A after the duplicate");
+
+    // Inserting owner B succeeds, and the reader returns {A, B} without any
+    // row-order reliance.
+    let owner_b_selector = reference_orv1_envelope(owner_b.type_id, owner_b.object);
+    let assignment_b_call = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", create_assignment, owner_parameter],
+            &owner_b_selector,
+        )
+        .expect("run assignment for owner B");
+    let assignment_b_call =
+        require_value_success("orna raw-call create_assignment B", assignment_b_call)
+            .expect("assignment B must succeed");
+    let assignment_b = parse_reference_envelope(&assignment_b_call.stdout)
+        .expect("assignment B must return one ORV reference");
+    assert!(
+        assignment_b.type_id != [0; 16] && !assignment_b.object_is_zero(),
+        "assignment B must name a real nonzero assignment row"
+    );
+    assert_eq!(
+        assignment_b.type_id, assignment_a.type_id,
+        "both assignments must share the assignment target type"
+    );
+    assert_ne!(
+        assignment_b.object, assignment_a.object,
+        "the two assignments must be distinct objects"
+    );
+    assert_reference_reader_returns(
+        &machine,
+        read_assignment_owners,
+        &[&owner_a, &owner_b],
+        "orna raw-call read_assignment_owners two owners",
+    )
+    .expect("the reader must return exactly the unordered owner multiset A and B");
+
+    // Exact source replay keeps the complete function and parameter discovery
+    // vector and both rows without any repeated grant.
+    let replay = machine
+        .run_as_orna(&["source", "apply", FIXTURE_PATH])
+        .expect("run installed source apply on the same fixture");
+    let replay = require_success("orna source apply replay", replay)
+        .expect("unique reference replay must succeed");
+    assert!(
+        replay.stderr.is_empty(),
+        "unique reference replay must keep standard error empty"
+    );
+    let replay_document =
+        parse_apply_document(&replay.stdout).expect("unique reference replay JSON must parse");
+    assert_eq!(
+        replay_document.functions, document.functions,
+        "the replay must keep the complete function and parameter discovery vector"
+    );
+    assert_reference_reader_returns(
+        &machine,
+        read_assignment_owners,
+        &[&owner_a, &owner_b],
+        "orna raw-call read_assignment_owners after replay",
+    )
+    .expect("the replay must preserve both assignment rows");
+
+    // A restart keeps grants and both rows.
+    machine
+        .restart_server()
+        .expect("installed server must restart cleanly");
+    assert_reference_reader_returns(
+        &machine,
+        read_assignment_owners,
+        &[&owner_a, &owner_b],
+        "orna raw-call read_assignment_owners after restart",
+    )
+    .expect("the restart must preserve both assignment rows");
+
+    // Retrying owner A through the original identities and the retained grant
+    // fails again with the exact public INTERNAL_FAILURE line, and the reader
+    // still returns exactly {A, B}.
+    let duplicate_a_after_restart = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", create_assignment, owner_parameter],
+            &owner_a_selector,
+        )
+        .expect("run duplicate assignment for owner A after restart");
+    assert_exact_raw_call_failure(
+        "orna raw-call create_assignment duplicate A after restart",
+        duplicate_a_after_restart,
+        "raw call failed: INTERNAL_FAILURE\n",
+    )
+    .expect("the post-restart duplicate must close as a public INTERNAL_FAILURE");
+    assert_reference_reader_returns(
+        &machine,
+        read_assignment_owners,
+        &[&owner_a, &owner_b],
+        "orna raw-call read_assignment_owners final",
+    )
+    .expect("the final reader must still return exactly the unordered owner multiset A and B");
+}
