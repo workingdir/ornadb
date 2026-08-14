@@ -50,6 +50,15 @@ pub fn plan_physical_changes(
             .ok_or(PhysicalPlanError::UnsupportedObjectDrop {
                 object_type: active_object.id(),
             })?;
+        let appended_value_type = candidate_object
+            .fields()
+            .get(active_object.fields().len()..)
+            .and_then(|added| {
+                let [field] = added else {
+                    return None;
+                };
+                field.resolved_type().value_type()
+            });
         let active_projection = project_physical_object(active_revision, active_object)?;
         let candidate_projection = project_physical_object(candidate_revision, candidate_object)?;
         if active_projection != candidate_projection {
@@ -58,10 +67,14 @@ pub fn plan_physical_changes(
                     object_type: active_object.id(),
                 });
             }
-            let field = appended_nullable_boolean_field(&active_projection, &candidate_projection)
-                .ok_or(PhysicalPlanError::UnsupportedExistingObjectChange {
-                    object_type: active_object.id(),
-                })?;
+            let field = appended_nullable_value_scalar_field(
+                &active_projection,
+                &candidate_projection,
+                appended_value_type,
+            )
+            .ok_or(PhysicalPlanError::UnsupportedExistingObjectChange {
+                object_type: active_object.id(),
+            })?;
             add_field = Some(AddField {
                 object_type: active_object.id(),
                 field,
@@ -88,15 +101,27 @@ pub fn plan_physical_changes(
     })
 }
 
-fn appended_nullable_boolean_field(
+fn appended_nullable_value_scalar_field(
     active: &CreateObject,
     candidate: &CreateObject,
+    appended_value_type: Option<TypeId>,
 ) -> Option<CreateField> {
     let added = candidate.fields.strip_prefix(active.fields.as_slice())?;
     let [field] = added else {
         return None;
     };
-    if field.field_type != PhysicalFieldType::Scalar(StandardScalar::Boolean)
+    if appended_value_type.is_none()
+        || !matches!(
+            field.field_type,
+            PhysicalFieldType::Scalar(
+                StandardScalar::Boolean
+                    | StandardScalar::Integer
+                    | StandardScalar::BigInt
+                    | StandardScalar::Float
+                    | StandardScalar::CharacterLargeObject
+                    | StandardScalar::BinaryLargeObject
+            )
+        )
         || !field.nullable
         || field.unique
     {
@@ -608,24 +633,35 @@ mod tests {
 
     #[test]
     fn plans_one_appended_nullable_boolean_field_on_an_existing_object() {
+        let boolean = TypeId::from_bytes([0xd1; 16]);
+        let standard = verified_standard(vec![standard_value_type(
+            boolean,
+            "orna.kernel.value.boolean@1",
+            ValueTypePersistence::Persistable,
+        )]);
         let existing = field(
             FIRST_FIELD,
             "first_value",
             0,
-            ResolvedType::scalar(StandardScalar::Boolean),
+            ResolvedType::Value(boolean),
             false,
         );
         let appended = field(
             SECOND_FIELD,
             "second_value",
             1,
-            ResolvedType::scalar(StandardScalar::Boolean),
+            ResolvedType::Value(boolean),
             true,
         );
-        let active = active(vec![object(FIRST_TYPE, "first", vec![existing.clone()])], 1);
-        let candidate = candidate(
+        let active = active_version_two(
+            vec![object(FIRST_TYPE, "first", vec![existing.clone()])],
+            standard.clone(),
+            1,
+        );
+        let candidate = candidate_version_two(
             &active,
             vec![object(FIRST_TYPE, "first", vec![existing, appended])],
+            standard,
             2,
         );
 
@@ -689,7 +725,13 @@ mod tests {
 
     #[test]
     fn semantic_name_changes_do_not_block_one_appended_nullable_boolean() {
-        let active = active(
+        let boolean = TypeId::from_bytes([0xd1; 16]);
+        let standard = verified_standard(vec![standard_value_type(
+            boolean,
+            "orna.kernel.value.boolean@1",
+            ValueTypePersistence::Persistable,
+        )]);
+        let active = active_version_two(
             vec![object(
                 FIRST_TYPE,
                 "first",
@@ -697,13 +739,14 @@ mod tests {
                     FIRST_FIELD,
                     "first_value",
                     0,
-                    ResolvedType::scalar(StandardScalar::Boolean),
+                    ResolvedType::Value(boolean),
                     false,
                 )],
             )],
+            standard.clone(),
             1,
         );
-        let candidate = candidate(
+        let candidate = candidate_version_two(
             &active,
             vec![object(
                 FIRST_TYPE,
@@ -713,18 +756,19 @@ mod tests {
                         FIRST_FIELD,
                         "renamed_value",
                         0,
-                        ResolvedType::scalar(StandardScalar::Boolean),
+                        ResolvedType::Value(boolean),
                         false,
                     ),
                     field(
                         SECOND_FIELD,
                         "second_value",
                         1,
-                        ResolvedType::scalar(StandardScalar::Boolean),
+                        ResolvedType::Value(boolean),
                         true,
                     ),
                 ],
             )],
+            standard,
             2,
         );
 
@@ -748,7 +792,13 @@ mod tests {
 
     #[test]
     fn one_new_object_and_one_appended_field_share_one_plan() {
-        let active = active(
+        let boolean = TypeId::from_bytes([0xd1; 16]);
+        let standard = verified_standard(vec![standard_value_type(
+            boolean,
+            "orna.kernel.value.boolean@1",
+            ValueTypePersistence::Persistable,
+        )]);
+        let active = active_version_two(
             vec![object(
                 FIRST_TYPE,
                 "first",
@@ -756,13 +806,14 @@ mod tests {
                     FIRST_FIELD,
                     "first_value",
                     0,
-                    ResolvedType::scalar(StandardScalar::Boolean),
+                    ResolvedType::Value(boolean),
                     false,
                 )],
             )],
+            standard.clone(),
             1,
         );
-        let candidate = candidate(
+        let candidate = candidate_version_two(
             &active,
             vec![
                 object(
@@ -773,14 +824,14 @@ mod tests {
                             FIRST_FIELD,
                             "first_value",
                             0,
-                            ResolvedType::scalar(StandardScalar::Boolean),
+                            ResolvedType::Value(boolean),
                             false,
                         ),
                         field(
                             SECOND_FIELD,
                             "second_value",
                             1,
-                            ResolvedType::scalar(StandardScalar::Boolean),
+                            ResolvedType::Value(boolean),
                             true,
                         ),
                     ],
@@ -792,11 +843,12 @@ mod tests {
                         FIRST_FIELD,
                         "only",
                         0,
-                        ResolvedType::scalar(StandardScalar::Boolean),
+                        ResolvedType::Value(boolean),
                         false,
                     )],
                 ),
             ],
+            standard,
             2,
         );
 
@@ -1025,7 +1077,13 @@ mod tests {
 
     #[test]
     fn two_existing_objects_each_appending_a_field_reject_on_the_second() {
-        let active = active(
+        let boolean = TypeId::from_bytes([0xd1; 16]);
+        let standard = verified_standard(vec![standard_value_type(
+            boolean,
+            "orna.kernel.value.boolean@1",
+            ValueTypePersistence::Persistable,
+        )]);
+        let active = active_version_two(
             vec![
                 object(
                     FIRST_TYPE,
@@ -1034,7 +1092,7 @@ mod tests {
                         FIRST_FIELD,
                         "value",
                         0,
-                        ResolvedType::scalar(StandardScalar::Boolean),
+                        ResolvedType::Value(boolean),
                         false,
                     )],
                 ),
@@ -1045,32 +1103,27 @@ mod tests {
                         FIRST_FIELD,
                         "value",
                         0,
-                        ResolvedType::scalar(StandardScalar::Boolean),
+                        ResolvedType::Value(boolean),
                         false,
                     )],
                 ),
             ],
+            standard.clone(),
             1,
         );
-        let candidate = candidate(
+        let candidate = candidate_version_two(
             &active,
             vec![
                 object(
                     FIRST_TYPE,
                     "first",
                     vec![
-                        field(
-                            FIRST_FIELD,
-                            "value",
-                            0,
-                            ResolvedType::scalar(StandardScalar::Boolean),
-                            false,
-                        ),
+                        field(FIRST_FIELD, "value", 0, ResolvedType::Value(boolean), false),
                         field(
                             SECOND_FIELD,
                             "second_value",
                             1,
-                            ResolvedType::scalar(StandardScalar::Boolean),
+                            ResolvedType::Value(boolean),
                             true,
                         ),
                     ],
@@ -1079,23 +1132,18 @@ mod tests {
                     SECOND_TYPE,
                     "second",
                     vec![
-                        field(
-                            FIRST_FIELD,
-                            "value",
-                            0,
-                            ResolvedType::scalar(StandardScalar::Boolean),
-                            false,
-                        ),
+                        field(FIRST_FIELD, "value", 0, ResolvedType::Value(boolean), false),
                         field(
                             SECOND_FIELD,
                             "second_value",
                             1,
-                            ResolvedType::scalar(StandardScalar::Boolean),
+                            ResolvedType::Value(boolean),
                             true,
                         ),
                     ],
                 ),
             ],
+            standard,
             2,
         );
 
@@ -1168,6 +1216,807 @@ mod tests {
                 object_type: FIRST_TYPE,
             }),
             "the existing-object error must precede any new-object planning"
+        );
+    }
+
+    #[test]
+    fn appends_each_admitted_nullable_value_scalar_with_exact_identity() {
+        let admitted = [
+            (0xd1, "orna.kernel.value.boolean@1", StandardScalar::Boolean),
+            (0xd2, "orna.kernel.value.integer@1", StandardScalar::Integer),
+            (0xd3, "orna.kernel.value.bigint@1", StandardScalar::BigInt),
+            (0xd4, "orna.kernel.value.float@1", StandardScalar::Float),
+            (
+                0xd5,
+                "orna.kernel.value.character-large-object@1",
+                StandardScalar::CharacterLargeObject,
+            ),
+            (
+                0xd6,
+                "orna.kernel.value.binary-large-object@1",
+                StandardScalar::BinaryLargeObject,
+            ),
+        ];
+        let standard = verified_standard(
+            admitted
+                .iter()
+                .map(|(id, contract, _)| {
+                    standard_value_type(
+                        TypeId::from_bytes([*id; 16]),
+                        contract,
+                        ValueTypePersistence::Persistable,
+                    )
+                })
+                .collect(),
+        );
+        let active = active_version_two(
+            vec![object(
+                FIRST_TYPE,
+                "first",
+                vec![field(
+                    FIRST_FIELD,
+                    "stored",
+                    0,
+                    ResolvedType::Value(TypeId::from_bytes([0xd1; 16])),
+                    false,
+                )],
+            )],
+            standard.clone(),
+            1,
+        );
+
+        for (index, (id, _, scalar)) in admitted.into_iter().enumerate() {
+            let value_type = TypeId::from_bytes([id; 16]);
+            let candidate = candidate_version_two(
+                &active,
+                vec![object(
+                    FIRST_TYPE,
+                    "first",
+                    vec![
+                        field(
+                            FIRST_FIELD,
+                            "stored",
+                            0,
+                            ResolvedType::Value(TypeId::from_bytes([0xd1; 16])),
+                            false,
+                        ),
+                        field(
+                            SECOND_FIELD,
+                            "added",
+                            1,
+                            ResolvedType::Value(value_type),
+                            true,
+                        ),
+                    ],
+                )],
+                standard.clone(),
+                u8::try_from(index + 2).unwrap(),
+            );
+
+            let plan = plan_physical_changes(&active, &candidate).unwrap();
+            assert!(
+                plan.create_objects().is_empty(),
+                "one appended field must not plan a new object relation"
+            );
+            let add_field = plan
+                .add_field()
+                .expect("one admitted value append must be planned");
+            assert_eq!(
+                add_field.object_type(),
+                FIRST_TYPE,
+                "the append must target the existing object"
+            );
+            assert_eq!(
+                add_field.field(),
+                &CreateField {
+                    field_id: SECOND_FIELD,
+                    field_type: PhysicalFieldType::Scalar(scalar),
+                    nullable: true,
+                    unique: false,
+                },
+                "the append must carry the exact scalar, identity, and nullability"
+            );
+        }
+    }
+
+    #[test]
+    fn value_appends_that_break_existing_object_causality_keep_exact_rejections() {
+        let boolean = TypeId::from_bytes([0xd1; 16]);
+        let standard = verified_standard(vec![standard_value_type(
+            boolean,
+            "orna.kernel.value.boolean@1",
+            ValueTypePersistence::Persistable,
+        )]);
+        let stored = field(
+            FIRST_FIELD,
+            "stored",
+            0,
+            ResolvedType::Value(boolean),
+            false,
+        );
+        let appended = field(SECOND_FIELD, "added", 1, ResolvedType::Value(boolean), true);
+        let active = active_version_two(
+            vec![object(FIRST_TYPE, "first", vec![stored.clone()])],
+            standard.clone(),
+            1,
+        );
+        let expected = Err(PhysicalPlanError::UnsupportedExistingObjectChange {
+            object_type: FIRST_TYPE,
+        });
+
+        // A required appended value field stays closed.
+        let required = candidate_version_two(
+            &active,
+            vec![object(
+                FIRST_TYPE,
+                "first",
+                vec![
+                    stored.clone(),
+                    field(
+                        SECOND_FIELD,
+                        "added",
+                        1,
+                        ResolvedType::Value(boolean),
+                        false,
+                    ),
+                ],
+            )],
+            standard.clone(),
+            2,
+        );
+        assert_eq!(
+            plan_physical_changes(&active, &required),
+            expected,
+            "a required appended value field must stay closed"
+        );
+
+        // A value field inserted before the active prefix stays closed.
+        let inserted = candidate_version_two(
+            &active,
+            vec![object(
+                FIRST_TYPE,
+                "first",
+                vec![
+                    field(
+                        FieldId::from_bytes([22; 16]),
+                        "inserted",
+                        0,
+                        ResolvedType::Value(boolean),
+                        true,
+                    ),
+                    field(
+                        FIRST_FIELD,
+                        "stored",
+                        1,
+                        ResolvedType::Value(boolean),
+                        false,
+                    ),
+                ],
+            )],
+            standard.clone(),
+            3,
+        );
+        assert_eq!(
+            plan_physical_changes(&active, &inserted),
+            expected,
+            "an inserted value field before the prefix must stay closed"
+        );
+
+        // Two appended value fields stay closed.
+        let two = candidate_version_two(
+            &active,
+            vec![object(
+                FIRST_TYPE,
+                "first",
+                vec![
+                    stored,
+                    appended,
+                    field(
+                        FieldId::from_bytes([22; 16]),
+                        "extra",
+                        2,
+                        ResolvedType::Value(boolean),
+                        true,
+                    ),
+                ],
+            )],
+            standard.clone(),
+            4,
+        );
+        assert_eq!(
+            plan_physical_changes(&active, &two),
+            expected,
+            "two appended value fields must stay closed"
+        );
+
+        // Reordered value fields stay closed against their own two-field pair.
+        let active_two = active_version_two(
+            vec![object(
+                FIRST_TYPE,
+                "first",
+                vec![
+                    field(FIRST_FIELD, "first", 0, ResolvedType::Value(boolean), false),
+                    field(
+                        SECOND_FIELD,
+                        "second",
+                        1,
+                        ResolvedType::Value(boolean),
+                        true,
+                    ),
+                ],
+            )],
+            standard.clone(),
+            5,
+        );
+        let reordered = candidate_version_two(
+            &active_two,
+            vec![object(
+                FIRST_TYPE,
+                "first",
+                vec![
+                    field(
+                        SECOND_FIELD,
+                        "second",
+                        0,
+                        ResolvedType::Value(boolean),
+                        true,
+                    ),
+                    field(FIRST_FIELD, "first", 1, ResolvedType::Value(boolean), false),
+                ],
+            )],
+            standard,
+            6,
+        );
+        assert_eq!(
+            plan_physical_changes(&active_two, &reordered),
+            expected,
+            "reordered value fields must stay closed"
+        );
+    }
+
+    #[test]
+    fn multiple_invalid_existing_object_changes_never_expose_a_partial_plan() {
+        let boolean = TypeId::from_bytes([0xd1; 16]);
+        let standard = verified_standard(vec![standard_value_type(
+            boolean,
+            "orna.kernel.value.boolean@1",
+            ValueTypePersistence::Persistable,
+        )]);
+        let active = active_version_two(
+            vec![
+                object(
+                    FIRST_TYPE,
+                    "first",
+                    vec![field(
+                        FIRST_FIELD,
+                        "stored",
+                        0,
+                        ResolvedType::Value(boolean),
+                        false,
+                    )],
+                ),
+                object(
+                    SECOND_TYPE,
+                    "second",
+                    vec![field(
+                        FIRST_FIELD,
+                        "stored",
+                        0,
+                        ResolvedType::Value(boolean),
+                        false,
+                    )],
+                ),
+            ],
+            standard.clone(),
+            1,
+        );
+        let candidate = candidate_version_two(
+            &active,
+            vec![
+                object(
+                    FIRST_TYPE,
+                    "first",
+                    vec![
+                        field(
+                            FIRST_FIELD,
+                            "stored",
+                            0,
+                            ResolvedType::Value(boolean),
+                            false,
+                        ),
+                        field(
+                            SECOND_FIELD,
+                            "added",
+                            1,
+                            ResolvedType::Value(boolean),
+                            false,
+                        ),
+                    ],
+                ),
+                object(
+                    SECOND_TYPE,
+                    "second",
+                    vec![
+                        field(
+                            FieldId::from_bytes([22; 16]),
+                            "inserted",
+                            0,
+                            ResolvedType::Value(boolean),
+                            true,
+                        ),
+                        field(
+                            FIRST_FIELD,
+                            "stored",
+                            1,
+                            ResolvedType::Value(boolean),
+                            false,
+                        ),
+                    ],
+                ),
+            ],
+            standard,
+            2,
+        );
+
+        assert!(
+            matches!(
+                plan_physical_changes(&active, &candidate),
+                Err(PhysicalPlanError::UnsupportedExistingObjectChange { .. })
+            ),
+            "multiple invalid existing-object changes must expose no partial plan"
+        );
+    }
+
+    #[test]
+    fn legacy_resolved_scalars_do_not_admit_an_appended_field() {
+        let active = active(
+            vec![object(
+                FIRST_TYPE,
+                "first",
+                vec![field(
+                    FIRST_FIELD,
+                    "stored",
+                    0,
+                    ResolvedType::scalar(StandardScalar::Boolean),
+                    false,
+                )],
+            )],
+            1,
+        );
+        for (index, scalar) in [
+            StandardScalar::Boolean,
+            StandardScalar::Integer,
+            StandardScalar::BigInt,
+            StandardScalar::Float,
+            StandardScalar::CharacterLargeObject,
+            StandardScalar::BinaryLargeObject,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let candidate = candidate(
+                &active,
+                vec![object(
+                    FIRST_TYPE,
+                    "first",
+                    vec![
+                        field(
+                            FIRST_FIELD,
+                            "stored",
+                            0,
+                            ResolvedType::scalar(StandardScalar::Boolean),
+                            false,
+                        ),
+                        field(SECOND_FIELD, "added", 1, ResolvedType::scalar(scalar), true),
+                    ],
+                )],
+                10 + index as u8,
+            );
+            assert_eq!(
+                plan_physical_changes(&active, &candidate),
+                Err(PhysicalPlanError::UnsupportedExistingObjectChange {
+                    object_type: FIRST_TYPE,
+                }),
+                "a legacy scalar must not admit an existing-object field append"
+            );
+        }
+    }
+
+    #[test]
+    fn appended_value_fields_retain_closed_value_contracts() {
+        let boolean = TypeId::from_bytes([0xd1; 16]);
+        let closed = [
+            (0xe1, "orna.kernel.value.decimal@1"),
+            (0xe2, "orna.kernel.value.uuid@1"),
+            (0xe3, "orna.kernel.value.date@1"),
+            (0xe4, "orna.kernel.value.time@1"),
+            (0xe5, "orna.kernel.value.timestamp@1"),
+            (0xe6, "orna.kernel.value.duration@1"),
+        ];
+        let mut value_types = vec![standard_value_type(
+            boolean,
+            "orna.kernel.value.boolean@1",
+            ValueTypePersistence::Persistable,
+        )];
+        value_types.extend(closed.iter().map(|(id, contract)| {
+            standard_value_type(
+                TypeId::from_bytes([*id; 16]),
+                contract,
+                ValueTypePersistence::Persistable,
+            )
+        }));
+        let standard = verified_standard(value_types);
+        let active = active_version_two(
+            vec![object(
+                FIRST_TYPE,
+                "first",
+                vec![field(
+                    FIRST_FIELD,
+                    "stored",
+                    0,
+                    ResolvedType::Value(boolean),
+                    false,
+                )],
+            )],
+            standard.clone(),
+            1,
+        );
+        for (index, (id, _)) in closed.into_iter().enumerate() {
+            let candidate = candidate_version_two(
+                &active,
+                vec![object(
+                    FIRST_TYPE,
+                    "first",
+                    vec![
+                        field(
+                            FIRST_FIELD,
+                            "stored",
+                            0,
+                            ResolvedType::Value(boolean),
+                            false,
+                        ),
+                        field(
+                            SECOND_FIELD,
+                            "added",
+                            1,
+                            ResolvedType::Value(TypeId::from_bytes([id; 16])),
+                            true,
+                        ),
+                    ],
+                )],
+                standard.clone(),
+                u8::try_from(index + 2).unwrap(),
+            );
+            assert_eq!(
+                plan_physical_changes(&active, &candidate),
+                Err(PhysicalPlanError::UnsupportedExistingObjectChange {
+                    object_type: FIRST_TYPE,
+                }),
+                "a closed value contract must not admit an existing-object field append"
+            );
+        }
+    }
+
+    #[test]
+    fn appended_value_fields_retain_unsupported_and_transient_contract_errors() {
+        // The missing and opaque wrong-contract cases cannot reach planning.
+        // The revision constructor rejects a field whose value type is absent
+        // from the pinned standard, and a field that resolves to an opaque
+        // value type. `ValueTypeMutability` exposes exactly one constructible
+        // variant, `Immutable`, so a non-immutable definition cannot be built.
+        // The projection-level `MissingValueTypeDefinition` and opaque-contract
+        // errors remain covered by the direct projection tests above.
+        let boolean = TypeId::from_bytes([0xd1; 16]);
+        let standard = verified_standard(vec![
+            standard_value_type(
+                boolean,
+                "orna.kernel.value.boolean@1",
+                ValueTypePersistence::Persistable,
+            ),
+            standard_value_type(
+                TypeId::from_bytes([0xe7; 16]),
+                "orna.kernel.value.custom@1",
+                ValueTypePersistence::Persistable,
+            ),
+            standard_value_type(
+                TypeId::from_bytes([0xe8; 16]),
+                "orna.kernel.value.boolean@1",
+                ValueTypePersistence::Transient,
+            ),
+        ]);
+        let active = active_version_two(
+            vec![object(
+                FIRST_TYPE,
+                "first",
+                vec![field(
+                    FIRST_FIELD,
+                    "stored",
+                    0,
+                    ResolvedType::Value(boolean),
+                    false,
+                )],
+            )],
+            standard.clone(),
+            1,
+        );
+
+        let cases = [
+            (
+                TypeId::from_bytes([0xe7; 16]),
+                PhysicalPlanError::UnsupportedValueTypeContract {
+                    object_type: FIRST_TYPE,
+                    field: SECOND_FIELD,
+                    value_type: TypeId::from_bytes([0xe7; 16]),
+                    contract: "orna.kernel.value.custom@1".to_owned(),
+                },
+            ),
+            (
+                TypeId::from_bytes([0xe8; 16]),
+                PhysicalPlanError::TransientValueType {
+                    object_type: FIRST_TYPE,
+                    field: SECOND_FIELD,
+                    value_type: TypeId::from_bytes([0xe8; 16]),
+                },
+            ),
+        ];
+        for (index, (value_type, expected)) in cases.into_iter().enumerate() {
+            let candidate = candidate_version_two(
+                &active,
+                vec![object(
+                    FIRST_TYPE,
+                    "first",
+                    vec![
+                        field(
+                            FIRST_FIELD,
+                            "stored",
+                            0,
+                            ResolvedType::Value(boolean),
+                            false,
+                        ),
+                        field(
+                            SECOND_FIELD,
+                            "added",
+                            1,
+                            ResolvedType::Value(value_type),
+                            true,
+                        ),
+                    ],
+                )],
+                standard.clone(),
+                u8::try_from(index + 2).unwrap(),
+            );
+            assert_eq!(
+                plan_physical_changes(&active, &candidate),
+                Err(expected),
+                "the appended field must retain its exact value-contract error"
+            );
+        }
+    }
+
+    #[test]
+    fn appended_void_value_field_keeps_the_void_projection_error() {
+        let boolean = TypeId::from_bytes([0xd1; 16]);
+        let void = TypeId::from_bytes([0xeb; 16]);
+        let standard = verified_standard(vec![
+            standard_value_type(
+                boolean,
+                "orna.kernel.value.boolean@1",
+                ValueTypePersistence::Persistable,
+            ),
+            standard_value_type(
+                void,
+                "orna.kernel.value.void@1",
+                ValueTypePersistence::Persistable,
+            ),
+        ]);
+        let active = active_version_two(
+            vec![object(
+                FIRST_TYPE,
+                "first",
+                vec![field(
+                    FIRST_FIELD,
+                    "stored",
+                    0,
+                    ResolvedType::Value(boolean),
+                    false,
+                )],
+            )],
+            standard.clone(),
+            1,
+        );
+        let candidate = candidate_version_two(
+            &active,
+            vec![object(
+                FIRST_TYPE,
+                "first",
+                vec![
+                    field(
+                        FIRST_FIELD,
+                        "stored",
+                        0,
+                        ResolvedType::Value(boolean),
+                        false,
+                    ),
+                    field(SECOND_FIELD, "added", 1, ResolvedType::Value(void), true),
+                ],
+            )],
+            standard,
+            2,
+        );
+
+        assert_eq!(
+            plan_physical_changes(&active, &candidate),
+            Err(PhysicalPlanError::UnsupportedVoidField {
+                object_type: FIRST_TYPE,
+                field: SECOND_FIELD,
+            }),
+            "an appended VOID field must keep the void projection error"
+        );
+    }
+
+    #[test]
+    fn value_appended_field_projection_errors_precede_admission_rejection() {
+        let boolean = TypeId::from_bytes([0xd1; 16]);
+        let standard = verified_standard(vec![standard_value_type(
+            boolean,
+            "orna.kernel.value.boolean@1",
+            ValueTypePersistence::Persistable,
+        )]);
+        let active = active_version_two(
+            vec![object(
+                FIRST_TYPE,
+                "first",
+                vec![field(
+                    FIRST_FIELD,
+                    "stored",
+                    0,
+                    ResolvedType::Value(boolean),
+                    false,
+                )],
+            )],
+            standard.clone(),
+            1,
+        );
+        let stored = field(
+            FIRST_FIELD,
+            "stored",
+            0,
+            ResolvedType::Value(boolean),
+            false,
+        );
+
+        let defaulted = candidate_version_two(
+            &active,
+            vec![object(
+                FIRST_TYPE,
+                "first",
+                vec![
+                    stored.clone(),
+                    field_with_options(
+                        SECOND_FIELD,
+                        "added",
+                        1,
+                        ResolvedType::Value(boolean),
+                        true,
+                        false,
+                        Some(ExpressionId::from_bytes([0x51; 16])),
+                        None,
+                    ),
+                ],
+            )],
+            standard.clone(),
+            2,
+        );
+        assert_eq!(
+            plan_physical_changes(&active, &defaulted),
+            Err(PhysicalPlanError::UnsupportedFieldDefault {
+                object_type: FIRST_TYPE,
+                field: SECOND_FIELD,
+            }),
+            "a defaulted appended value field must keep the default projection error"
+        );
+
+        let unique = candidate_version_two(
+            &active,
+            vec![object(
+                FIRST_TYPE,
+                "first",
+                vec![
+                    stored.clone(),
+                    field_with_options(
+                        SECOND_FIELD,
+                        "added",
+                        1,
+                        ResolvedType::Value(boolean),
+                        true,
+                        true,
+                        None,
+                        None,
+                    ),
+                ],
+            )],
+            standard.clone(),
+            3,
+        );
+        assert_eq!(
+            plan_physical_changes(&active, &unique),
+            Err(PhysicalPlanError::UnsupportedUniqueField {
+                object_type: FIRST_TYPE,
+                field: SECOND_FIELD,
+            }),
+            "a unique appended value field must keep the unique projection error"
+        );
+
+        let delete = candidate_version_two(
+            &active,
+            vec![object(
+                FIRST_TYPE,
+                "first",
+                vec![
+                    stored,
+                    field_with_options(
+                        SECOND_FIELD,
+                        "added",
+                        1,
+                        ResolvedType::Value(boolean),
+                        true,
+                        false,
+                        None,
+                        Some(OnDeleteAction::Restrict),
+                    ),
+                ],
+            )],
+            standard,
+            4,
+        );
+        assert_eq!(
+            plan_physical_changes(&active, &delete),
+            Err(PhysicalPlanError::InvalidDeleteAction {
+                object_type: FIRST_TYPE,
+                field: SECOND_FIELD,
+            }),
+            "an appended value field with a delete action must keep the delete projection error"
+        );
+    }
+
+    #[test]
+    fn replayed_value_pairs_plan_no_field_operation() {
+        let boolean = TypeId::from_bytes([0xd1; 16]);
+        let standard = verified_standard(vec![standard_value_type(
+            boolean,
+            "orna.kernel.value.boolean@1",
+            ValueTypePersistence::Persistable,
+        )]);
+        let fields = vec![
+            field(
+                FIRST_FIELD,
+                "stored",
+                0,
+                ResolvedType::Value(boolean),
+                false,
+            ),
+            field(SECOND_FIELD, "added", 1, ResolvedType::Value(boolean), true),
+        ];
+        let active = active_version_two(
+            vec![object(FIRST_TYPE, "first", fields.clone())],
+            standard.clone(),
+            1,
+        );
+        let candidate = candidate_version_two(
+            &active,
+            vec![object(FIRST_TYPE, "first", fields)],
+            standard,
+            2,
+        );
+
+        let plan = plan_physical_changes(&active, &candidate).unwrap();
+        assert!(
+            plan.create_objects().is_empty(),
+            "an exact value replay must not plan a new object"
+        );
+        assert!(
+            plan.add_field().is_none(),
+            "an exact value replay must not plan a field addition"
         );
     }
 
