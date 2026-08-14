@@ -3175,25 +3175,31 @@ fn decode_mixed_reader_values(
 /// fixture reapplies and restarts without changing the observable rows.
 ///
 /// The test installs the exact checked-in `product_test_predicates.orna`
-/// fixture, applies it, and requires exactly six sorted qualified-name
+/// fixture, applies it, and requires exactly seven sorted qualified-name
 /// mappings with pairwise distinct function identities. It then proves:
 ///
-/// * all six raw calls are denied before any grant;
-/// * after granting all six functions the three readers succeed empty;
+/// * all seven raw calls are denied before any grant;
+/// * after granting all seven functions the four readers succeed empty;
 /// * rows where marker and visible carry opposite truth (TRUE rows have
 ///   marker FALSE and visible TRUE, the FALSE row has marker TRUE and
 ///   visible FALSE, and the omitted-nullable row has marker TRUE) decode
 ///   through `read_all` as the sorted multiset
 ///   [None, Some(false), Some(true), Some(true)], while the bare-predicate
 ///   readers project marker and return [false, false] and [false], causally
-///   separating the visible predicate from the marker projection;
-/// * reapplying the exact same fixture keeps the complete six-entry function
-///   vector, grants, and rows;
-/// * a restart keeps every reader result;
+///   separating the visible predicate from the marker projection, and
+///   `read_visible_distinct` returns the sorted multiset
+///   [None, Some(false), Some(true)];
+/// * reapplying the exact same fixture keeps the complete seven-entry function
+///   vector, grants, and rows, and `read_visible_distinct` stays
+///   [None, Some(false), Some(true)];
+/// * a restart keeps every reader result, including `read_visible_distinct`
+///   at [None, Some(false), Some(true)];
 /// * post-restart creates through the surviving grants add one TRUE, one
 ///   FALSE, and one omitted-nullable row, and the final sorted multisets are
-///   [None, None, false, false, true, true, true], [false, false, false],
-///   and [false].
+///   `read_all` [None, None, false, false, true, true, true] with duplicate
+///   NULL, FALSE, and TRUE values, `read_matching` [false, false, false],
+///   `read_matching_distinct` [false], and `read_visible_distinct`
+///   [None, Some(false), Some(true)].
 ///
 /// All observations go through the packaged `/usr/bin/orna` public commands
 /// and raw-call ORV envelopes. The test makes no claim about physical
@@ -3213,7 +3219,7 @@ fn installed_nullable_boolean_predicates_filter_and_distinct_across_replay_and_r
     let machine = InstalledMachine::start(&artifact, &fixture)
         .expect("start the installed Debian test machine");
 
-    // Apply the exact fixture and require the six sorted mappings.
+    // Apply the exact fixture and require the seven sorted mappings.
     let apply = machine
         .run_as_orna(&["source", "apply", FIXTURE_PATH])
         .expect("run installed source apply");
@@ -3233,6 +3239,10 @@ fn installed_nullable_boolean_predicates_filter_and_distinct_across_replay_and_r
             "predicate_test".to_string(),
             "read_matching_distinct".to_string(),
         ],
+        vec![
+            "predicate_test".to_string(),
+            "read_visible_distinct".to_string(),
+        ],
     ];
     let actual_order = document
         .functions
@@ -3241,7 +3251,7 @@ fn installed_nullable_boolean_predicates_filter_and_distinct_across_replay_and_r
         .collect::<Vec<_>>();
     assert_eq!(
         actual_order, expected_order,
-        "apply must report the six function entries sorted by qualified name"
+        "apply must report the seven function entries sorted by qualified name"
     );
     let create_true = document
         .function_id(&["predicate_test", "create_true"])
@@ -3261,6 +3271,9 @@ fn installed_nullable_boolean_predicates_filter_and_distinct_across_replay_and_r
     let read_matching_distinct = document
         .function_id(&["predicate_test", "read_matching_distinct"])
         .expect("apply must report read_matching_distinct");
+    let read_visible_distinct = document
+        .function_id(&["predicate_test", "read_visible_distinct"])
+        .expect("apply must report read_visible_distinct");
     let identities = [
         create_true,
         create_false,
@@ -3268,12 +3281,13 @@ fn installed_nullable_boolean_predicates_filter_and_distinct_across_replay_and_r
         read_all,
         read_matching,
         read_matching_distinct,
+        read_visible_distinct,
     ];
     for (index, left) in identities.iter().enumerate() {
         for right in &identities[index + 1..] {
             assert_ne!(
                 left, right,
-                "the six function identities must be pairwise distinct"
+                "the seven function identities must be pairwise distinct"
             );
         }
     }
@@ -3286,7 +3300,7 @@ fn installed_nullable_boolean_predicates_filter_and_distinct_across_replay_and_r
         assert_denied("raw call before grant", denied).expect("raw call must be denied");
     }
 
-    // Grant all six functions through the fixed-service command.
+    // Grant all seven functions through the fixed-service command.
     for function in identities {
         let granted = machine
             .run_as_orna(&["security", "grant-execute", function])
@@ -3295,8 +3309,13 @@ fn installed_nullable_boolean_predicates_filter_and_distinct_across_replay_and_r
             .expect("grant must succeed silently");
     }
 
-    // All three readers initially succeed with empty streams.
-    for function in [read_all, read_matching, read_matching_distinct] {
+    // All four readers initially succeed with empty streams.
+    for function in [
+        read_all,
+        read_matching,
+        read_matching_distinct,
+        read_visible_distinct,
+    ] {
         let empty = machine
             .run_as_orna(&["raw-call", function])
             .expect("run empty raw select");
@@ -3370,6 +3389,18 @@ fn installed_nullable_boolean_predicates_filter_and_distinct_across_replay_and_r
         [false],
         "read_matching_distinct must decode as exactly one FALSE value"
     );
+    let mut visible_distinct = decode_mixed_reader_values(
+        &machine,
+        read_visible_distinct,
+        "orna raw-call read_visible_distinct",
+    )
+    .expect("read_visible_distinct must decode");
+    visible_distinct.sort_unstable();
+    assert_eq!(
+        visible_distinct,
+        [None, Some(false), Some(true)],
+        "read_visible_distinct must decode as one NULL, one FALSE, and one TRUE value"
+    );
 
     // Exact source replay keeps the complete mapping, grants, and rows.
     let replay = machine
@@ -3385,7 +3416,18 @@ fn installed_nullable_boolean_predicates_filter_and_distinct_across_replay_and_r
         parse_apply_document(&replay.stdout).expect("predicates replay JSON must parse");
     assert_eq!(
         replay_document.functions, document.functions,
-        "the replay must keep the complete six-entry function vector"
+        "the replay must keep the complete seven-entry function vector"
+    );
+    let mut visible_after_replay = decode_mixed_reader_values(
+        &machine,
+        read_visible_distinct,
+        "orna raw-call read_visible_distinct after replay",
+    )
+    .expect("read_visible_distinct must decode after replay");
+    visible_after_replay.sort_unstable();
+    assert_eq!(
+        visible_after_replay, visible_distinct,
+        "read_visible_distinct must stay unchanged after replay"
     );
 
     // Restart preserves every reader result.
@@ -3420,6 +3462,17 @@ fn installed_nullable_boolean_predicates_filter_and_distinct_across_replay_and_r
     assert_eq!(
         distinct_after_restart, matching_distinct,
         "read_matching_distinct must stay unchanged after restart"
+    );
+    let mut visible_after_restart = decode_mixed_reader_values(
+        &machine,
+        read_visible_distinct,
+        "orna raw-call read_visible_distinct after restart",
+    )
+    .expect("read_visible_distinct must decode after restart");
+    visible_after_restart.sort_unstable();
+    assert_eq!(
+        visible_after_restart, visible_distinct,
+        "read_visible_distinct must stay unchanged after restart"
     );
 
     // Post-restart creates through the surviving grants add three objects.
@@ -3476,5 +3529,17 @@ fn installed_nullable_boolean_predicates_filter_and_distinct_across_replay_and_r
         distinct_final,
         [false],
         "read_matching_distinct must decode as exactly one FALSE value"
+    );
+    let mut visible_final = decode_mixed_reader_values(
+        &machine,
+        read_visible_distinct,
+        "orna raw-call read_visible_distinct",
+    )
+    .expect("read_visible_distinct must decode");
+    visible_final.sort_unstable();
+    assert_eq!(
+        visible_final,
+        [None, Some(false), Some(true)],
+        "read_visible_distinct must stay one NULL, one FALSE, and one TRUE value"
     );
 }

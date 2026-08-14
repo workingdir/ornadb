@@ -37,3 +37,8 @@ CREATE SERVER FUNCTION predicate_test.read_matching_distinct()
 RETURNS ROWS (marker BOOLEAN)
 SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE
 AS SELECT DISTINCT entry.marker FROM predicate_test.entry entry WHERE entry.visible;
+
+CREATE SERVER FUNCTION predicate_test.read_visible_distinct()
+RETURNS ROWS (visible BOOLEAN)
+SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE
+AS SELECT DISTINCT entry.visible FROM predicate_test.entry entry;
