@@ -1175,14 +1175,20 @@ fn validate_raw_call_argument_shape(
         [argument]
             if matches!(
                 argument.value(),
-                RuntimeValue::Boolean(_) | RuntimeValue::Reference { .. }
+                RuntimeValue::Boolean(_)
+                    | RuntimeValue::Integer(_)
+                    | RuntimeValue::BigInt(_)
+                    | RuntimeValue::Float(_)
+                    | RuntimeValue::Text(_)
+                    | RuntimeValue::Bytes(_)
+                    | RuntimeValue::Reference { .. }
             ) =>
         {
             Ok(())
         }
         _ => Err(raw_call_target_unavailable(
             function,
-            "raw calls accept zero arguments or one Boolean or Reference argument",
+            "raw calls accept zero arguments or one supported scalar or Reference argument",
         )),
     }
 }
