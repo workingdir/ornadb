@@ -81,3 +81,5 @@ source-of-truth or authority rules.
   [Canonical Collection Values Use ORV5 and ORF5](0039-canonical-collection-value-codec.md)
 * **work ADR 0040:**
   [Canonical Raw Calls Bind One Boolean INSERT Argument](0040-canonical-raw-call-argument.md)
+* **work ADR 0041:**
+  [Canonical Raw Calls Select UPDATE and DELETE by Reference](0041-canonical-raw-reference-mutations.md)
