@@ -6,6 +6,7 @@ SHELL := /bin/bash
 .NOTPARALLEL:
 
 REPOSITORY_ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/../..)
+CHANGELOG := $(REPOSITORY_ROOT)/packaging/debian/changelog
 TARGET_ROOT ?= $(REPOSITORY_ROOT)/target/debian-package
 PAYLOAD_ROOT := $(TARGET_ROOT)/payload
 PACKAGE_ROOT := $(TARGET_ROOT)/root
@@ -18,7 +19,38 @@ RUST_LINK_FLAGS := -C link-arg=-Wl,--build-id=none
 RUSTFLAGS := --remap-path-prefix=/workspace=$(RUST_PATH_REMAP) $(RUST_LINK_FLAGS)
 ENGINE_IMAGE := orna-postgresql-engine:debian12-amd64-1
 
-.PHONY: build package verify clean
+.PHONY: development-package release-package validate-development-identity \
+	build assemble-package verify clean package
+
+package:
+	@printf '%s\n' '[debian] error: select development-package or release-package explicitly' >&2; \
+	exit 1
+
+development-package: validate-development-identity build assemble-package verify
+
+release-package:
+	@printf '%s\n' '[debian] error: release-package is closed until the accepted 1.0 product baseline permits 1.0.0-1' >&2; \
+	exit 1
+
+validate-development-identity:
+	+@command -v dpkg-parsechangelog >/dev/null || { \
+		printf '%s\n' '[debian] error: dpkg-parsechangelog is required to read the package identity' >&2; exit 1; }; \
+	[[ -f "$(CHANGELOG)" && ! -L "$(CHANGELOG)" ]] || { \
+		printf '%s\n' '[debian] error: changelog is absent or symbolic' >&2; exit 1; }; \
+	source="$$(dpkg-parsechangelog -l"$(CHANGELOG)" -S Source)"; \
+	version="$$(dpkg-parsechangelog -l"$(CHANGELOG)" -S Version)"; \
+	suite="$$(dpkg-parsechangelog -l"$(CHANGELOG)" -S Distribution)"; \
+	upstream_version="$${version%-*}"; debian_revision="$${version##*-}"; \
+	workspace_version="$$(sed -n '/^\[workspace.package\]/,/^\[/ { s/^version = "\\([^"\\]*\\)"/\\1/p }' "$(REPOSITORY_ROOT)/Cargo.toml")"; \
+	[[ "$${source}" == 'orna' && "$${version}" == '0.1.0-1' \
+		&& "$${upstream_version}" == '0.1.0' && "$${debian_revision}" == '1' \
+		&& "$${suite}" == 'UNRELEASED' && "$${workspace_version}" == "$${upstream_version}" ]] || { \
+		printf '%s\n' '[debian] error: development-package requires orna (0.1.0-1) UNRELEASED' >&2; exit 1; }; \
+	grep -Fx 'Package: orna' "$(REPOSITORY_ROOT)/packaging/debian/control" >/dev/null \
+		&& grep -Fx 'Version: 0.1.0-1' "$(REPOSITORY_ROOT)/packaging/debian/control" >/dev/null \
+		&& grep -Fx 'Architecture: amd64' "$(REPOSITORY_ROOT)/packaging/debian/control" >/dev/null \
+		&& [[ "$(notdir $(PACKAGE))" == 'orna_0.1.0-1_amd64.deb' ]] || { \
+		printf '%s\n' '[debian] error: current literal package identity does not match the changelog' >&2; exit 1; }
 
 build:
 	@target_name='$(notdir $(TARGET_ROOT))'; \
@@ -28,7 +60,7 @@ build:
 	rm -rf -- "$(TARGET_ROOT)"; \
 	mkdir -m 0700 -p -- "$(TARGET_ROOT)"; \
 	for build_root in "$(BUILD_ONE)" "$(BUILD_TWO)"; do \
-		$(MAKE) -C "$(REPOSITORY_ROOT)/postgresql" manifest \
+		make -C "$(REPOSITORY_ROOT)/postgresql" manifest \
 			TARGET_ROOT="$${build_root}/postgresql"; \
 		mkdir -m 0700 -p -- "$${build_root}/cargo-home" "$${build_root}/cargo"; \
 		docker run --rm --network=none --platform linux/amd64 \
@@ -99,7 +131,7 @@ build:
 		>"$(PAYLOAD_ROOT)/usr/share/orna/distribution-manifest.toml"; \
 	find "$(PAYLOAD_ROOT)" -exec touch -h -d '@$(SOURCE_DATE_EPOCH)' -- {} +
 
-package: build
+assemble-package:
 	@mkdir -m 0755 -p -- "$(PACKAGE_ROOT)/DEBIAN"; \
 	install -m 0644 -- "$(REPOSITORY_ROOT)/packaging/debian/control" \
 		"$(PACKAGE_ROOT)/DEBIAN/control"; \
@@ -118,9 +150,7 @@ package: build
 	done <"$(REPOSITORY_ROOT)/packaging/debian/orna.install"; \
 	find "$(PACKAGE_ROOT)" -exec touch -h -d '@$(SOURCE_DATE_EPOCH)' -- {} +; \
 	SOURCE_DATE_EPOCH='$(SOURCE_DATE_EPOCH)' dpkg-deb --root-owner-group \
-		--build "$(PACKAGE_ROOT)" "$(PACKAGE)"; \
-	$(MAKE) -f "$(REPOSITORY_ROOT)/packaging/debian/rules" verify \
-		TARGET_ROOT="$(TARGET_ROOT)"
+		--build "$(PACKAGE_ROOT)" "$(PACKAGE)"
 
 verify:
 	@[[ -f "$(PACKAGE)" ]] || { printf '%s\n' '[debian] error: package is absent' >&2; exit 1; }; \
