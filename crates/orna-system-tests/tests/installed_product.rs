@@ -5119,3 +5119,472 @@ fn installed_nullable_update_sets_stored_null_via_reference_selector() {
         "the final UPDATE must leave exactly three NULL rows"
     );
 }
+
+/// Installed public-boundary tracer for additive source activation.
+///
+/// The test installs the exact checked-in `product_test.orna` fixture and
+/// applies it. It requires exactly two sorted qualified-name mappings with
+/// pairwise distinct identities, proves both raw calls are denied before any
+/// grant, grants both, creates one real TRUE probe row, and requires the
+/// reader to return the exact canonical Boolean TRUE envelope.
+///
+/// The fixture is then replaced through the machine API with the checked-in
+/// `product_test_additive.orna` source and applied again. The second public
+/// JSON document must report exactly four sorted qualified-name mappings
+/// (`added_test.create_entry`, `added_test.read_entries`,
+/// `product_test.create_probe`, `product_test.read_probes`). The two
+/// `product_test` function identities must equal the original identities, and
+/// the two `added_test` identities must be pairwise distinct and distinct
+/// from both original identities.
+///
+/// Without any repeated grant, the original reader still returns the exact
+/// TRUE envelope, the original create still succeeds through the surviving
+/// grant and returns a second same-type distinct-object reference, and the
+/// original reader then returns exactly two canonical Boolean TRUE envelopes.
+/// Before any new grant, both `added_test` raw calls are denied. After
+/// granting only the two `added_test` functions, the added create returns a
+/// real nonzero reference whose target type differs from the `product_test`
+/// target, the added reader returns the exact canonical Boolean FALSE
+/// envelope, and the original reader still returns exactly two TRUE
+/// envelopes.
+///
+/// Reapplying the exact same additive fixture returns a replay public JSON
+/// document whose complete function discovery vector equals the first
+/// additive document, and no grant is repeated. A second added create through
+/// the original identity returns a same-target distinct-object reference, the
+/// added reader returns exactly two canonical Boolean FALSE envelopes, and
+/// the product_test reader still returns exactly two TRUE envelopes. A
+/// restart of the installed service through the machine API keeps both exact
+/// two-envelope results. After restart, one create through each original
+/// identity, again without any repeated grant, returns references with each
+/// schema's original target type, real nonzero identities, and object ids
+/// distinct from every prior reference in that schema; the target types still
+/// differ across schemas. The final readers return exactly three canonical
+/// Boolean TRUE envelopes for product_test and exactly three canonical
+/// Boolean FALSE envelopes for added_test.
+///
+/// The test claims only public packaged `/usr/bin/orna` commands, public ORV1
+/// outputs, additive source activation, stable old identities, grants, and
+/// rows, isolated new behaviour, and replay/restart preservation of those
+/// observations. It makes no claim about private storage, physical DDL, or
+/// row ordering.
+#[test]
+#[ignore = "requires Docker, ORNA_SYSTEM_TEST_DEBIAN_PACKAGE, and the installed orna executable"]
+fn installed_additive_source_activates_isolated_new_schema_with_stable_old_identities_grants_and_rows()
+ {
+    let package = std::env::var("ORNA_SYSTEM_TEST_DEBIAN_PACKAGE")
+        .expect("ORNA_SYSTEM_TEST_DEBIAN_PACKAGE must point at the reproduced .deb package");
+    let artifact = FrozenPackageArtifact::new(PackageFormat::Debian, &package)
+        .expect("freeze the reproduced Debian package");
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+    let original_fixture =
+        fs::read(manifest.join("product_test.orna")).expect("read the checked-in product fixture");
+    let additive_fixture = fs::read(manifest.join("product_test_additive.orna"))
+        .expect("read the checked-in additive fixture");
+
+    let machine = InstalledMachine::start(&artifact, &original_fixture)
+        .expect("start the installed Debian test machine");
+
+    // Apply the original one-file fixture and require the two sorted mappings.
+    let apply = machine
+        .run_as_orna(&["source", "apply", FIXTURE_PATH])
+        .expect("run installed source apply");
+    let apply = require_success("orna source apply", apply).expect("source apply must succeed");
+    assert!(
+        apply.stderr.is_empty(),
+        "original source apply must keep standard error empty"
+    );
+    let document = parse_apply_document(&apply.stdout).expect("source apply JSON must parse");
+    let original_order = [
+        vec!["product_test".to_string(), "create_probe".to_string()],
+        vec!["product_test".to_string(), "read_probes".to_string()],
+    ];
+    let actual_order = document
+        .functions
+        .iter()
+        .map(|function| function.names().to_vec())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual_order, original_order,
+        "apply must report the two function entries sorted by qualified name"
+    );
+    let create_probe = document
+        .function_id(&["product_test", "create_probe"])
+        .expect("apply must report create_probe");
+    let read_probes = document
+        .function_id(&["product_test", "read_probes"])
+        .expect("apply must report read_probes");
+    assert_ne!(
+        create_probe, read_probes,
+        "the two original function identities must be pairwise distinct"
+    );
+
+    // Both raw calls are denied before any grant, then both are granted.
+    for function in [create_probe, read_probes] {
+        let denied = machine
+            .run_as_orna(&["raw-call", function])
+            .expect("run denied raw call");
+        assert_denied("raw call before grant", denied).expect("raw call must be denied");
+    }
+    for function in [create_probe, read_probes] {
+        let granted = machine
+            .run_as_orna(&["security", "grant-execute", function])
+            .expect("run installed grant command");
+        require_silent_success("orna security grant-execute", granted)
+            .expect("grant must succeed silently");
+    }
+
+    // Create one TRUE probe row and require the exact TRUE reader envelope.
+    let first_created = machine
+        .run_as_orna(&["raw-call", create_probe])
+        .expect("run first create call");
+    let first_created = require_value_success("orna raw-call create_probe first", first_created)
+        .expect("first create must succeed");
+    let first_reference = parse_reference_envelope(&first_created.stdout)
+        .expect("first create must return one ORV reference");
+    assert!(
+        first_reference.type_id != [0; 16] && !first_reference.object_is_zero(),
+        "the first created reference must name a real target type and row"
+    );
+    let first_read = machine
+        .run_as_orna(&["raw-call", read_probes])
+        .expect("run first read call");
+    assert_exact_boolean_true("orna raw-call read_probes first", first_read)
+        .expect("the first reader must return the exact Boolean TRUE value");
+
+    // Replace the fixture with the additive source and apply it.
+    machine
+        .write_fixture(&additive_fixture)
+        .expect("replace the fixture with the additive source");
+    let applied = machine
+        .run_as_orna(&["source", "apply", FIXTURE_PATH])
+        .expect("run installed source apply on the additive fixture");
+    let applied = require_success("orna source apply additive", applied)
+        .expect("additive source apply must succeed");
+    assert!(
+        applied.stderr.is_empty(),
+        "additive source apply must keep standard error empty"
+    );
+    let additive_document =
+        parse_apply_document(&applied.stdout).expect("additive source apply JSON must parse");
+    let additive_order = [
+        vec!["added_test".to_string(), "create_entry".to_string()],
+        vec!["added_test".to_string(), "read_entries".to_string()],
+        vec!["product_test".to_string(), "create_probe".to_string()],
+        vec!["product_test".to_string(), "read_probes".to_string()],
+    ];
+    let actual_additive_order = additive_document
+        .functions
+        .iter()
+        .map(|function| function.names().to_vec())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual_additive_order, additive_order,
+        "the additive apply must report the four function entries sorted by qualified name"
+    );
+    let additive_create_probe = additive_document
+        .function_id(&["product_test", "create_probe"])
+        .expect("additive apply must report create_probe");
+    let additive_read_probes = additive_document
+        .function_id(&["product_test", "read_probes"])
+        .expect("additive apply must report read_probes");
+    assert_eq!(
+        additive_create_probe, create_probe,
+        "create_probe identity must be stable across the additive apply"
+    );
+    assert_eq!(
+        additive_read_probes, read_probes,
+        "read_probes identity must be stable across the additive apply"
+    );
+    let added_create_entry = additive_document
+        .function_id(&["added_test", "create_entry"])
+        .expect("additive apply must report create_entry");
+    let added_read_entries = additive_document
+        .function_id(&["added_test", "read_entries"])
+        .expect("additive apply must report read_entries");
+    for (left, right) in [
+        (added_create_entry, added_read_entries),
+        (added_create_entry, create_probe),
+        (added_create_entry, read_probes),
+        (added_read_entries, create_probe),
+        (added_read_entries, read_probes),
+    ] {
+        assert_ne!(
+            left, right,
+            "the added identities must be pairwise distinct and distinct from both originals"
+        );
+    }
+
+    // Without any repeated grant the old row, reader, create, and grant stay.
+    let surviving_read = machine
+        .run_as_orna(&["raw-call", read_probes])
+        .expect("run read call after additive apply");
+    assert_exact_boolean_true(
+        "orna raw-call read_probes after additive apply",
+        surviving_read,
+    )
+    .expect("the surviving row must still return the exact Boolean TRUE value");
+    let second_created = machine
+        .run_as_orna(&["raw-call", create_probe])
+        .expect("run second create call after additive apply");
+    let second_created = require_value_success("orna raw-call create_probe second", second_created)
+        .expect("second create must succeed through the surviving grant");
+    let second_reference = parse_reference_envelope(&second_created.stdout)
+        .expect("second create must return one ORV reference");
+    assert_ne!(
+        second_reference.type_id, [0; 16],
+        "the second created reference must name a real target type"
+    );
+    assert!(
+        !second_reference.object_is_zero(),
+        "the second created reference must name a real row"
+    );
+    assert_eq!(
+        second_reference.type_id, first_reference.type_id,
+        "both product_test creates must target the same object type"
+    );
+    assert_ne!(
+        second_reference.object, first_reference.object,
+        "each product_test create must allocate a distinct object identity"
+    );
+    let two_probes = machine
+        .run_as_orna(&["raw-call", read_probes])
+        .expect("run read call after second create");
+    let two_probes = require_value_success("orna raw-call read_probes two rows", two_probes)
+        .expect("two-row read must succeed");
+    assert_eq!(
+        two_probes.stdout.as_slice(),
+        two_boolean_true_envelopes().as_slice(),
+        "the product_test reader must emit exactly two canonical Boolean TRUE envelopes"
+    );
+
+    // The added functions are denied before their grant.
+    for function in [added_create_entry, added_read_entries] {
+        let denied = machine
+            .run_as_orna(&["raw-call", function])
+            .expect("run denied added call");
+        assert_denied("added call before grant", denied).expect("added call must be denied");
+    }
+
+    // Grant only the two added functions and exercise the isolated schema.
+    for function in [added_create_entry, added_read_entries] {
+        let granted = machine
+            .run_as_orna(&["security", "grant-execute", function])
+            .expect("run installed grant command for the added function");
+        require_silent_success("orna security grant-execute added", granted)
+            .expect("added grant must succeed silently");
+    }
+    let added_created = machine
+        .run_as_orna(&["raw-call", added_create_entry])
+        .expect("run added create call");
+    let added_created = require_value_success("orna raw-call create_entry", added_created)
+        .expect("added create must succeed");
+    let added_reference = parse_reference_envelope(&added_created.stdout)
+        .expect("added create must return one ORV reference");
+    assert!(
+        added_reference.type_id != [0; 16] && !added_reference.object_is_zero(),
+        "the added created reference must name a real target type and row"
+    );
+    assert_ne!(
+        added_reference.type_id, first_reference.type_id,
+        "the added object type must differ from the product_test object type"
+    );
+    let added_read = machine
+        .run_as_orna(&["raw-call", added_read_entries])
+        .expect("run added read call");
+    let added_read = require_value_success("orna raw-call read_entries", added_read)
+        .expect("added read must succeed");
+    assert_eq!(
+        added_read.stdout.as_slice(),
+        boolean_orv1_envelope(Some(false)).as_slice(),
+        "the added reader must return the exact canonical Boolean FALSE value"
+    );
+    let probes_after_added = machine
+        .run_as_orna(&["raw-call", read_probes])
+        .expect("run product_test read after added create");
+    let probes_after_added =
+        require_value_success("orna raw-call read_probes after added", probes_after_added)
+            .expect("product_test read must succeed after the added create");
+    assert_eq!(
+        probes_after_added.stdout.as_slice(),
+        two_boolean_true_envelopes().as_slice(),
+        "the added create must not change the two product_test TRUE rows"
+    );
+
+    // Reapply the exact additive fixture; the discovery vector must be
+    // identical and no grant is repeated.
+    let replay = machine
+        .run_as_orna(&["source", "apply", FIXTURE_PATH])
+        .expect("run installed source apply on the additive fixture");
+    let replay = require_success("orna source apply replay", replay)
+        .expect("additive fixture replay must succeed");
+    assert!(
+        replay.stderr.is_empty(),
+        "fixture replay must keep standard error empty"
+    );
+    let replay_document =
+        parse_apply_document(&replay.stdout).expect("fixture replay JSON must parse");
+    assert_eq!(
+        replay_document.functions, additive_document.functions,
+        "the replay must keep the complete function discovery vector including all identities"
+    );
+
+    // A second added create returns a same-target distinct-object reference.
+    let second_added_created = machine
+        .run_as_orna(&["raw-call", added_create_entry])
+        .expect("run second added create call");
+    let second_added_created =
+        require_value_success("orna raw-call create_entry second", second_added_created)
+            .expect("second added create must succeed through the surviving grant");
+    let second_added_reference = parse_reference_envelope(&second_added_created.stdout)
+        .expect("second added create must return one ORV reference");
+    assert!(
+        second_added_reference.type_id != [0; 16] && !second_added_reference.object_is_zero(),
+        "the second added reference must name a real target type and row"
+    );
+    assert_eq!(
+        second_added_reference.type_id, added_reference.type_id,
+        "both added creates must target the same object type"
+    );
+    assert_ne!(
+        second_added_reference.object, added_reference.object,
+        "each added create must allocate a distinct object identity"
+    );
+
+    // Both readers return exactly two envelopes after the second added row.
+    let mut two_false_envelopes = boolean_orv1_envelope(Some(false));
+    two_false_envelopes.extend(boolean_orv1_envelope(Some(false)));
+    let added_two = machine
+        .run_as_orna(&["raw-call", added_read_entries])
+        .expect("run added read call after second create");
+    let added_two = require_value_success("orna raw-call read_entries two rows", added_two)
+        .expect("two-row added read must succeed");
+    assert_eq!(
+        added_two.stdout.as_slice(),
+        two_false_envelopes.as_slice(),
+        "the added reader must emit exactly two canonical Boolean FALSE envelopes"
+    );
+    let probes_two = machine
+        .run_as_orna(&["raw-call", read_probes])
+        .expect("run product_test read after second added create");
+    let probes_two = require_value_success("orna raw-call read_probes two rows", probes_two)
+        .expect("two-row product_test read must succeed");
+    assert_eq!(
+        probes_two.stdout.as_slice(),
+        two_boolean_true_envelopes().as_slice(),
+        "the product_test reader must still emit exactly two Boolean TRUE envelopes"
+    );
+
+    // A restart keeps both exact two-envelope results.
+    machine
+        .restart_server()
+        .expect("installed server must restart cleanly");
+    let after_restart_added = machine
+        .run_as_orna(&["raw-call", added_read_entries])
+        .expect("run added read call after restart");
+    let after_restart_added = require_value_success(
+        "orna raw-call read_entries after restart",
+        after_restart_added,
+    )
+    .expect("added read must succeed after restart");
+    assert_eq!(
+        after_restart_added.stdout.as_slice(),
+        two_false_envelopes.as_slice(),
+        "the restart must preserve the two added FALSE envelopes"
+    );
+    let after_restart_probes = machine
+        .run_as_orna(&["raw-call", read_probes])
+        .expect("run product_test read after restart");
+    let after_restart_probes = require_value_success(
+        "orna raw-call read_probes after restart",
+        after_restart_probes,
+    )
+    .expect("product_test read must succeed after restart");
+    assert_eq!(
+        after_restart_probes.stdout.as_slice(),
+        two_boolean_true_envelopes().as_slice(),
+        "the restart must preserve the two product_test TRUE envelopes"
+    );
+
+    // One create through each original identity without any repeated grant.
+    let third_probe_created = machine
+        .run_as_orna(&["raw-call", create_probe])
+        .expect("run third product_test create call");
+    let third_probe_created =
+        require_value_success("orna raw-call create_probe third", third_probe_created)
+            .expect("third product_test create must succeed after restart");
+    let third_probe_reference = parse_reference_envelope(&third_probe_created.stdout)
+        .expect("third product_test create must return one ORV reference");
+    assert!(
+        third_probe_reference.type_id != [0; 16] && !third_probe_reference.object_is_zero(),
+        "the third product_test reference must name a real target type and row"
+    );
+    assert_eq!(
+        third_probe_reference.type_id, first_reference.type_id,
+        "the third product_test reference must keep the original target type"
+    );
+    assert_ne!(
+        third_probe_reference.object, first_reference.object,
+        "the third product_test reference must be distinct from the first"
+    );
+    assert_ne!(
+        third_probe_reference.object, second_reference.object,
+        "the third product_test reference must be distinct from the second"
+    );
+    let third_added_created = machine
+        .run_as_orna(&["raw-call", added_create_entry])
+        .expect("run third added create call");
+    let third_added_created =
+        require_value_success("orna raw-call create_entry third", third_added_created)
+            .expect("third added create must succeed after restart");
+    let third_added_reference = parse_reference_envelope(&third_added_created.stdout)
+        .expect("third added create must return one ORV reference");
+    assert!(
+        third_added_reference.type_id != [0; 16] && !third_added_reference.object_is_zero(),
+        "the third added reference must name a real target type and row"
+    );
+    assert_eq!(
+        third_added_reference.type_id, added_reference.type_id,
+        "the third added reference must keep the original added target type"
+    );
+    assert_ne!(
+        third_added_reference.object, added_reference.object,
+        "the third added reference must be distinct from the first"
+    );
+    assert_ne!(
+        third_added_reference.object, second_added_reference.object,
+        "the third added reference must be distinct from the second"
+    );
+    assert_ne!(
+        third_probe_reference.type_id, third_added_reference.type_id,
+        "the target types must still differ across schemas"
+    );
+
+    // Final reads: exactly three TRUE and three FALSE envelopes.
+    let mut three_true_envelopes = boolean_orv1_envelope(Some(true));
+    three_true_envelopes.extend(boolean_orv1_envelope(Some(true)));
+    three_true_envelopes.extend(boolean_orv1_envelope(Some(true)));
+    let final_probes = machine
+        .run_as_orna(&["raw-call", read_probes])
+        .expect("run final product_test read");
+    let final_probes = require_value_success("orna raw-call read_probes final", final_probes)
+        .expect("final product_test read must succeed");
+    assert_eq!(
+        final_probes.stdout.as_slice(),
+        three_true_envelopes.as_slice(),
+        "the product_test reader must emit exactly three Boolean TRUE envelopes"
+    );
+    let mut three_false_envelopes = boolean_orv1_envelope(Some(false));
+    three_false_envelopes.extend(boolean_orv1_envelope(Some(false)));
+    three_false_envelopes.extend(boolean_orv1_envelope(Some(false)));
+    let final_added = machine
+        .run_as_orna(&["raw-call", added_read_entries])
+        .expect("run final added read");
+    let final_added = require_value_success("orna raw-call read_entries final", final_added)
+        .expect("final added read must succeed");
+    assert_eq!(
+        final_added.stdout.as_slice(),
+        three_false_envelopes.as_slice(),
+        "the added reader must emit exactly three Boolean FALSE envelopes"
+    );
+}
