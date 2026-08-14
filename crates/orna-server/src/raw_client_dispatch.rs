@@ -1,6 +1,10 @@
 //! Protected dispatch for the current raw CLIENT and SERVER call subset.
 
-use orna_core::{InvocationId, security::AuthenticatedSession, value::RuntimeValue};
+use orna_core::{
+    InvocationId,
+    security::AuthenticatedSession,
+    value::{FunctionArgument, RuntimeValue},
+};
 use orna_postgres::{AuthenticatedRawCallResult, PostgresKernel, PostgresKernelError};
 use orna_protocol::{CallFailure, Event, RawCall, ServerAction};
 
@@ -51,16 +55,31 @@ impl RawClientDispatch {
     ///
     /// CLIENT success returns one typed value action followed by completion.
     /// SERVER success returns one value action per row followed by completion.
-    /// A call
-    /// with arguments returns `TARGET_UNAVAILABLE`. Calls containing a record
-    /// first complete the closed transactional record preflight; other
-    /// argument-bearing calls do not open PostgreSQL. Raw execute denial
-    /// returns `EXECUTE_DENIED`, an unavailable SERVER target returns
+    /// Exactly one Boolean argument enters the protected kernel path. Other
+    /// argument shapes return `TARGET_UNAVAILABLE`. Calls containing a record
+    /// first complete the closed transactional record preflight; other closed
+    /// argument shapes do not open PostgreSQL. Raw execute denial returns
+    /// `EXECUTE_DENIED`, an unavailable raw target returns
     /// `TARGET_UNAVAILABLE`, a CLIENT evaluator error returns
     /// `CLIENT_EVALUATION_FAILED`, and every other kernel error returns
     /// `INTERNAL_FAILURE`. The result retains the private typed kernel source
     /// for trusted diagnostics only.
     pub async fn finish(self) -> RawClientDispatchResult {
+        if let Some(argument) = one_boolean_argument(&self.call) {
+            return match self
+                .kernel
+                .dispatch_authenticated_raw_call_with_arguments(
+                    &self.session,
+                    self.call.function,
+                    &[argument],
+                )
+                .await
+            {
+                Ok(result) => RawClientDispatchResult::success(self.stream, result),
+                Err(source) => RawClientDispatchResult::from_kernel_error(self.stream, source),
+            };
+        }
+
         if !self.call.arguments.is_empty() {
             let records = self
                 .call
@@ -93,6 +112,16 @@ impl RawClientDispatch {
             Err(source) => RawClientDispatchResult::from_kernel_error(self.stream, source),
         }
     }
+}
+
+fn one_boolean_argument(call: &RawCall) -> Option<FunctionArgument> {
+    let [argument] = call.arguments.as_slice() else {
+        return None;
+    };
+    let RuntimeValue::Boolean(value) = &argument.value else {
+        return None;
+    };
+    FunctionArgument::new(argument.parameter, RuntimeValue::Boolean(*value)).ok()
 }
 
 /// The closed public actions and private diagnostic source for one dispatch.
@@ -131,7 +160,8 @@ impl RawClientDispatchResult {
         let (failure, operational_failure) = match source {
             PostgresKernelError::RawExecuteDenied { .. } => (CallFailure::ExecuteDenied, false),
             PostgresKernelError::ClientExecution(_) => (CallFailure::ClientEvaluationFailed, false),
-            PostgresKernelError::RawServerTargetUnavailable { .. } => {
+            PostgresKernelError::RawCallTargetUnavailable { .. }
+            | PostgresKernelError::RawServerTargetUnavailable { .. } => {
                 (CallFailure::TargetUnavailable, false)
             }
             _ => (CallFailure::InternalFailure, true),
@@ -237,43 +267,155 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn non_empty_call_never_opens_postgres_and_returns_only_redacted_target_failure() {
-        let call = RawCall {
+    async fn invalid_argument_shapes_never_open_postgres_and_close_redacted() {
+        for (stream, arguments) in [
+            (
+                7,
+                vec![CallArgument {
+                    parameter: ParameterId::from_bytes([5; 16]),
+                    value: RuntimeValue::Integer(1),
+                }],
+            ),
+            (
+                8,
+                vec![
+                    CallArgument {
+                        parameter: ParameterId::from_bytes([5; 16]),
+                        value: RuntimeValue::Boolean(true),
+                    },
+                    CallArgument {
+                        parameter: ParameterId::from_bytes([6; 16]),
+                        value: RuntimeValue::Boolean(false),
+                    },
+                ],
+            ),
+        ] {
+            let call = RawCall {
+                function: FUNCTION,
+                arguments,
+            };
+            let dispatch =
+                RawClientDispatch::new(unavailable_kernel(), test_session(), stream, call);
+            let invocation = dispatch.invocation();
+            assert_eq!(
+                dispatch.accepted_action(),
+                ServerAction::Accepted { stream, invocation }
+            );
+
+            let result = dispatch.finish().await;
+            assert!(result.source().is_none());
+            assert_eq!(
+                result.actions(),
+                &[ServerAction::Failed {
+                    stream,
+                    failure: CallFailure::TargetUnavailable,
+                }]
+            );
+            let failure = ServerFrame::CallFailed {
+                stream,
+                failure: CallFailure::TargetUnavailable,
+            };
+            let encoded = encode_server_frame(&failure).expect("closed failure encodes");
+            assert_eq!(&encoded[18..], &[0x02, 0x00, 0x01, 0x00]);
+            assert_eq!(
+                result.action_after_cancellation(),
+                ServerAction::Cancelled { stream }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn one_boolean_argument_reaches_the_protected_kernel_path() {
+        // One Boolean argument is an active raw argument dispatch, not a local
+        // closure. An unreachable kernel must produce an operational internal
+        // failure that retains its private typed source, which a local
+        // redacted closure could never produce.
+        for (stream, value) in [
+            (9, RuntimeValue::Boolean(true)),
+            (10, RuntimeValue::Boolean(false)),
+        ] {
+            let call = RawCall {
+                function: FUNCTION,
+                arguments: vec![CallArgument {
+                    parameter: ParameterId::from_bytes([5; 16]),
+                    value,
+                }],
+            };
+            let dispatch =
+                RawClientDispatch::new(unavailable_kernel(), test_session(), stream, call);
+            let result = dispatch.finish().await;
+            assert!(
+                result.source().is_some(),
+                "one Boolean argument must retain the private kernel source"
+            );
+            assert_eq!(
+                result.actions(),
+                &[ServerAction::Failed {
+                    stream,
+                    failure: CallFailure::InternalFailure,
+                }]
+            );
+            assert_eq!(
+                result.action_after_cancellation(),
+                ServerAction::Failed {
+                    stream,
+                    failure: CallFailure::InternalFailure,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn one_boolean_argument_preserves_parameter_identity_and_value() {
+        let converted = one_boolean_argument(&RawCall {
             function: FUNCTION,
             arguments: vec![CallArgument {
                 parameter: ParameterId::from_bytes([5; 16]),
                 value: RuntimeValue::Boolean(true),
             }],
-        };
+        })
+        .expect("one Boolean argument must convert");
+        assert_eq!(converted.parameter(), ParameterId::from_bytes([5; 16]));
+        assert_eq!(converted.value(), &RuntimeValue::Boolean(true));
 
-        let dispatch = RawClientDispatch::new(unavailable_kernel(), test_session(), 7, call);
-        let invocation = dispatch.invocation();
-        assert_eq!(
-            dispatch.accepted_action(),
-            ServerAction::Accepted {
-                stream: 7,
-                invocation,
-            }
-        );
+        let converted = one_boolean_argument(&RawCall {
+            function: FUNCTION,
+            arguments: vec![CallArgument {
+                parameter: ParameterId::from_bytes([6; 16]),
+                value: RuntimeValue::Boolean(false),
+            }],
+        })
+        .expect("one Boolean argument must convert");
+        assert_eq!(converted.parameter(), ParameterId::from_bytes([6; 16]));
+        assert_eq!(converted.value(), &RuntimeValue::Boolean(false));
 
-        let result = dispatch.finish().await;
-        assert!(result.source().is_none());
-        assert_eq!(
-            result.actions(),
-            &[ServerAction::Failed {
-                stream: 7,
-                failure: CallFailure::TargetUnavailable,
-            }]
+        // The conversion boundary rejects every other shape before dispatch:
+        // one Integer and two Booleans both close at the helper itself.
+        assert!(
+            one_boolean_argument(&RawCall {
+                function: FUNCTION,
+                arguments: vec![CallArgument {
+                    parameter: ParameterId::from_bytes([5; 16]),
+                    value: RuntimeValue::Integer(1),
+                }],
+            })
+            .is_none()
         );
-        let failure = ServerFrame::CallFailed {
-            stream: 7,
-            failure: CallFailure::TargetUnavailable,
-        };
-        let encoded = encode_server_frame(&failure).expect("closed failure encodes");
-        assert_eq!(&encoded[18..], &[0x02, 0x00, 0x01, 0x00]);
-        assert_eq!(
-            result.action_after_cancellation(),
-            ServerAction::Cancelled { stream: 7 }
+        assert!(
+            one_boolean_argument(&RawCall {
+                function: FUNCTION,
+                arguments: vec![
+                    CallArgument {
+                        parameter: ParameterId::from_bytes([5; 16]),
+                        value: RuntimeValue::Boolean(true),
+                    },
+                    CallArgument {
+                        parameter: ParameterId::from_bytes([6; 16]),
+                        value: RuntimeValue::Boolean(false),
+                    },
+                ],
+            })
+            .is_none()
         );
     }
 
@@ -409,6 +551,32 @@ mod tests {
         assert_eq!(
             unavailable.action_after_cancellation(),
             ServerAction::Cancelled { stream: 11 }
+        );
+
+        let call_unavailable = RawClientDispatchResult::from_kernel_error(
+            13,
+            PostgresKernelError::RawCallTargetUnavailable {
+                function: FUNCTION,
+                rule: "test",
+            },
+        );
+        assert!(matches!(
+            call_unavailable.source(),
+            Some(PostgresKernelError::RawCallTargetUnavailable {
+                function,
+                rule,
+            }) if *function == FUNCTION && *rule == "test"
+        ));
+        assert_eq!(
+            call_unavailable.actions(),
+            &[ServerAction::Failed {
+                stream: 13,
+                failure: CallFailure::TargetUnavailable,
+            }]
+        );
+        assert_eq!(
+            call_unavailable.action_after_cancellation(),
+            ServerAction::Cancelled { stream: 13 }
         );
 
         let operational = RawClientDispatchResult::from_kernel_error(
