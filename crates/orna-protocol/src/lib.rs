@@ -1157,7 +1157,7 @@ mod tests {
             StoredSourceRevision, StoredSourceUnit,
         },
         types::{ResolvedType, StandardScalar, TypeDescriptor},
-        value::{EnumValue, OpaqueValue, RecordValue, RuntimeFloat},
+        value::{EnumValue, OpaqueValue, RecordValue, RuntimeFloat, RuntimeValue},
     };
     use orna_standard::{
         BIGINT_TYPE_ID, BINARY_LARGE_OBJECT_TYPE_ID, BOOLEAN_TYPE_ID,
@@ -3439,6 +3439,150 @@ mod tests {
             let _ = decode_registered_client_frame(&active, &registry, &encoded);
             let _ = decode_registered_server_frame(&active, &registry, &encoded);
         }
+    }
+
+    fn constructed_collection_values(active: &ActiveDatabaseRevision) -> Vec<RuntimeValue> {
+        let option = TypeDescriptor::option(TypeDescriptor::named(BOOLEAN_TYPE_ID)).unwrap();
+        let list = TypeDescriptor::list(TypeDescriptor::named(BOOLEAN_TYPE_ID)).unwrap();
+        let map = TypeDescriptor::map(
+            TypeDescriptor::named(BOOLEAN_TYPE_ID),
+            TypeDescriptor::named(BOOLEAN_TYPE_ID),
+        )
+        .unwrap();
+        vec![
+            RuntimeValue::option(active, option, Some(RuntimeValue::Boolean(true))).unwrap(),
+            RuntimeValue::list(active, list, vec![RuntimeValue::Boolean(true)]).unwrap(),
+            RuntimeValue::map(
+                active,
+                map,
+                vec![(RuntimeValue::Boolean(true), RuntimeValue::Boolean(true))],
+            )
+            .unwrap(),
+        ]
+    }
+
+    #[test]
+    fn constructed_collection_values_stay_closed_to_the_legacy_orv_encoders() {
+        let active = active_record_revision();
+        let standard = active.catalogue_hash_context().standard().unwrap();
+        let registry = registered_opaque_codecs(standard).unwrap();
+        for value in constructed_collection_values(&active) {
+            assert_eq!(encode_value(&value), Err(ValueCodecError::UnsupportedValue));
+            assert_eq!(
+                encode_catalogue_value(active.catalogue(), &value),
+                Err(ValueCodecError::UnsupportedValue)
+            );
+            assert_eq!(
+                encode_active_value(&active, &value),
+                Err(ValueCodecError::UnsupportedValue)
+            );
+            assert_eq!(
+                encode_registered_value(&active, &registry, &value),
+                Err(ValueCodecError::UnsupportedValue)
+            );
+        }
+    }
+
+    #[test]
+    fn constructed_collection_values_stay_closed_to_both_orf_value_paths() {
+        let active = active_record_revision();
+        let standard = active.catalogue_hash_context().standard().unwrap();
+        let registry = registered_opaque_codecs(standard).unwrap();
+        let parameter = ParameterId::from_bytes([0x5f; 16]);
+        for value in constructed_collection_values(&active) {
+            let argument = ClientFrame::CallArgument {
+                stream: 7,
+                parameter,
+                value: value.clone(),
+            };
+            assert_eq!(
+                encode_client_frame(&argument),
+                Err(FrameCodecError::Value {
+                    source: ValueCodecError::UnsupportedValue,
+                })
+            );
+            assert_eq!(
+                encode_catalogue_client_frame(active.catalogue(), &argument),
+                Err(FrameCodecError::Value {
+                    source: ValueCodecError::UnsupportedValue,
+                })
+            );
+            assert_eq!(
+                encode_active_client_frame(&active, &argument),
+                Err(FrameCodecError::Value {
+                    source: ValueCodecError::UnsupportedValue,
+                })
+            );
+            assert_eq!(
+                encode_registered_client_frame(&active, &registry, &argument),
+                Err(FrameCodecError::Value {
+                    source: ValueCodecError::UnsupportedValue,
+                })
+            );
+
+            let batch = ServerFrame::EventBatch {
+                stream: 7,
+                channel: Channel::ResultValues,
+                events: vec![EventRecord {
+                    sequence: 1,
+                    event: Event::Value(value),
+                }],
+            };
+            assert_eq!(
+                encode_server_frame(&batch),
+                Err(FrameCodecError::Value {
+                    source: ValueCodecError::UnsupportedValue,
+                })
+            );
+            assert_eq!(
+                encode_catalogue_server_frame(active.catalogue(), &batch),
+                Err(FrameCodecError::Value {
+                    source: ValueCodecError::UnsupportedValue,
+                })
+            );
+            assert_eq!(
+                encode_active_server_frame(&active, &batch),
+                Err(FrameCodecError::Value {
+                    source: ValueCodecError::UnsupportedValue,
+                })
+            );
+            assert_eq!(
+                encode_registered_server_frame(&active, &registry, &batch),
+                Err(FrameCodecError::Value {
+                    source: ValueCodecError::UnsupportedValue,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn supported_flat_values_prove_the_orf_value_rejection_is_causal() {
+        let active = active_record_revision();
+        let standard = active.catalogue_hash_context().standard().unwrap();
+        let registry = registered_opaque_codecs(standard).unwrap();
+        let parameter = ParameterId::from_bytes([0x5f; 16]);
+        let argument = ClientFrame::CallArgument {
+            stream: 7,
+            parameter,
+            value: RuntimeValue::Boolean(true),
+        };
+        assert!(encode_client_frame(&argument).is_ok());
+        assert!(encode_catalogue_client_frame(active.catalogue(), &argument).is_ok());
+        assert!(encode_active_client_frame(&active, &argument).is_ok());
+        assert!(encode_registered_client_frame(&active, &registry, &argument).is_ok());
+
+        let batch = ServerFrame::EventBatch {
+            stream: 7,
+            channel: Channel::ResultValues,
+            events: vec![EventRecord {
+                sequence: 1,
+                event: Event::Value(RuntimeValue::Boolean(true)),
+            }],
+        };
+        assert!(encode_server_frame(&batch).is_ok());
+        assert!(encode_catalogue_server_frame(active.catalogue(), &batch).is_ok());
+        assert!(encode_active_server_frame(&active, &batch).is_ok());
+        assert!(encode_registered_server_frame(&active, &registry, &batch).is_ok());
     }
 
     fn encoded_value(tag: u8, type_id: TypeId, payload: &[u8]) -> Vec<u8> {
