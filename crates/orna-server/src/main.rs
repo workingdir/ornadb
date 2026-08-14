@@ -5,8 +5,8 @@ use std::{
 };
 
 use orna_core::{
-    FunctionId, ParameterId as RawCallParameterId,
     security::{CATALOGUE_HEALTH_FUNCTION_ID, CATALOGUE_HEALTH_FUNCTION_NAME},
+    FunctionId, ParameterId as RawCallParameterId,
 };
 use orna_protocol::CallFailure;
 
@@ -14,10 +14,11 @@ mod package_maintenance;
 mod security_admin;
 mod source_check;
 
-const USAGE: &str = "Usage:\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna security grant-execute <canonical-function-id>\n  orna raw-call <canonical-function-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id>";
+const USAGE: &str = "Usage:\n  orna --version\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna security grant-execute <canonical-function-id>\n  orna raw-call <canonical-function-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id>";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Command {
+    Version,
     Run,
     BackendShell,
     Upgrade,
@@ -44,6 +45,17 @@ fn main() -> ExitCode {
     };
 
     match command {
+        Command::Version => {
+            let stdout = io::stdout();
+            let mut stdout = stdout.lock();
+            match writeln!(stdout, "orna {}", env!("CARGO_PKG_VERSION")) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    write_stderr_line(&error.to_string());
+                    ExitCode::from(1)
+                }
+            }
+        }
         Command::Run => match orna_server::run_embedded_server() {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
@@ -148,6 +160,9 @@ where
     let _argv0 = args.next();
 
     match args.next().as_deref() {
+        Some(value) if value == OsStr::new("--version") => {
+            args.next().is_none().then_some(Command::Version)
+        }
         Some(value) if value == OsStr::new("server") => {
             let command = match args.next().as_deref() {
                 Some(value) if value == OsStr::new("run") => Command::Run,
@@ -248,6 +263,37 @@ mod tests {
             parse_command(arguments(&["orna", "server", "upgrade"])),
             Some(Command::Upgrade)
         );
+    }
+
+    #[test]
+    fn accepts_the_exact_sole_version_command() {
+        assert_eq!(
+            parse_command(arguments(&["orna", "--version"])),
+            Some(Command::Version)
+        );
+        assert_eq!(
+            parse_command(arguments(&["/usr/bin/orna", "--version"])),
+            Some(Command::Version)
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_and_extra_version_shapes() {
+        for values in [
+            vec!["orna"],
+            vec!["orna", "-v"],
+            vec!["orna", "-version"],
+            vec!["orna", "version"],
+            vec!["orna", "--Version"],
+            vec!["orna", "--version=0.1.0"],
+            vec!["orna", "--version", "0.1.0"],
+            vec!["orna", "--version", "extra"],
+            vec!["orna", "--version", "--version"],
+            vec!["orna", "server", "--version"],
+            vec!["orna", "--", "--version"],
+        ] {
+            assert_eq!(parse_command(arguments(&values)), None, "{values:?}");
+        }
     }
 
     #[test]
@@ -522,7 +568,7 @@ mod tests {
     fn usage_diagnostic_is_exact() {
         assert_eq!(
             USAGE,
-            "Usage:\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna security grant-execute <canonical-function-id>\n  orna raw-call <canonical-function-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id>"
+            "Usage:\n  orna --version\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna security grant-execute <canonical-function-id>\n  orna raw-call <canonical-function-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id>"
         );
     }
 }
