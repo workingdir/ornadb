@@ -131,9 +131,10 @@ lookup algorithm.
    `crates/orna-core/src/revision.rs`. Test logic remains in those owned module
    test sections.
 3. `feat(core): authorise mandatory system entry` changes
-   `crates/orna-core/src/security.rs` only and replaces the health-only
-   decision with the closed registry-backed decision while retaining its
-   compatibility method.
+   `crates/orna-core/src/system.rs` and `crates/orna-core/src/security.rs`. It
+   moves the catalogue-health compatibility constants to the sealed registry,
+   replaces the health-only decision with the closed registry-backed decision,
+   and retains the health-only compatibility method.
 4. Begin the separately accepted sealed `sys.invoke` type-family decision only
    after the canonical constructed-value transport prerequisite is complete.
 
