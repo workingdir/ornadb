@@ -510,11 +510,15 @@ fn require_silent_success(label: &'static str, output: Output) -> Result<Output,
     Ok(output)
 }
 
-/// Require the exact closed denied outcome of a raw call.
+/// Require one closed raw-call failure with the exact standard-error line.
 ///
-/// A denied raw call exits 1, emits no value, and prints the exact
-/// `raw call failed: EXECUTE_DENIED` line on standard error.
-fn assert_denied(label: &'static str, output: Output) -> Result<(), Error> {
+/// The call must exit 1, emit no value, and print exactly `line` on standard
+/// error.
+fn assert_exact_raw_call_failure(
+    label: &'static str,
+    output: Output,
+    line: &str,
+) -> Result<(), Error> {
     if output.status.code() != Some(1) {
         return Err(Error::Unexpected {
             message: format!("{label} must exit 1, got {}", output.status),
@@ -529,12 +533,28 @@ fn assert_denied(label: &'static str, output: Output) -> Result<(), Error> {
         });
     }
     let stderr = String::from_utf8_lossy(&output.stderr);
-    if stderr != "raw call failed: EXECUTE_DENIED\n" {
+    if stderr != line {
         return Err(Error::Unexpected {
-            message: format!("{label} must print the exact denied line, got {stderr:?}"),
+            message: format!("{label} must print the exact line, got {stderr:?}"),
         });
     }
     Ok(())
+}
+
+/// Require the exact closed denied outcome of a raw call.
+///
+/// A denied raw call exits 1, emits no value, and prints the exact
+/// `raw call failed: EXECUTE_DENIED` line on standard error.
+fn assert_denied(label: &'static str, output: Output) -> Result<(), Error> {
+    assert_exact_raw_call_failure(label, output, "raw call failed: EXECUTE_DENIED\n")
+}
+
+/// Require the exact closed target-unavailable outcome of a raw call.
+///
+/// A raw call with no usable target exits 1, emits no value, and prints the
+/// exact `raw call failed: TARGET_UNAVAILABLE` line on standard error.
+fn assert_target_unavailable(label: &'static str, output: Output) -> Result<(), Error> {
+    assert_exact_raw_call_failure(label, output, "raw call failed: TARGET_UNAVAILABLE\n")
 }
 
 /// Require one rejected installed source apply.
@@ -3542,4 +3562,171 @@ fn installed_nullable_boolean_predicates_filter_and_distinct_across_replay_and_r
         [None, Some(false), Some(true)],
         "read_visible_distinct must stay one NULL, one FALSE, and one TRUE value"
     );
+}
+
+/// Prove that an unavailable parameterised mutation stays closed and empty
+/// through the installed product's public raw-call path, and that the exact
+/// fixture reapplies and restarts without changing the observable state.
+///
+/// The test installs the exact checked-in `product_test_unavailable_insert.orna`
+/// fixture, applies it, and requires exactly two sorted qualified-name
+/// mappings with pairwise distinct function identities. It then proves:
+///
+/// * both raw calls are denied before any grant;
+/// * after granting both functions the reader succeeds empty;
+/// * invoking the parameterised create with only its function identity and
+///   no arguments exits 1 with empty standard output and the exact
+///   `raw call failed: TARGET_UNAVAILABLE` line, and no row appears;
+/// * reapplying the exact same fixture keeps the complete two-entry function
+///   vector, grants, and rows, and the unavailable mutation stays closed;
+/// * a restart keeps both grants and the empty state, and the unavailable
+///   mutation stays closed again.
+///
+/// All observations go through the packaged `/usr/bin/orna` public commands
+/// and raw-call ORV envelopes. The test makes no claim about physical
+/// storage, private rows, or row ordering.
+#[test]
+#[ignore = "requires Docker, ORNA_SYSTEM_TEST_DEBIAN_PACKAGE, and the installed orna executable"]
+fn installed_parameterised_mutation_stays_unavailable_and_empty_across_replay_and_restart() {
+    let package = std::env::var("ORNA_SYSTEM_TEST_DEBIAN_PACKAGE")
+        .expect("ORNA_SYSTEM_TEST_DEBIAN_PACKAGE must point at the reproduced .deb package");
+    let artifact = FrozenPackageArtifact::new(PackageFormat::Debian, &package)
+        .expect("freeze the reproduced Debian package");
+    let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures")
+        .join("product_test_unavailable_insert.orna");
+    let fixture = fs::read(&fixture_path).expect("read the checked-in unavailable insert fixture");
+
+    let machine = InstalledMachine::start(&artifact, &fixture)
+        .expect("start the installed Debian test machine");
+
+    // Apply the exact fixture and require the two sorted mappings.
+    let apply = machine
+        .run_as_orna(&["source", "apply", FIXTURE_PATH])
+        .expect("run installed source apply");
+    let apply = require_success("orna source apply", apply).expect("source apply must succeed");
+    assert!(
+        apply.stderr.is_empty(),
+        "source apply must keep standard error empty"
+    );
+    let document = parse_apply_document(&apply.stdout).expect("source apply JSON must parse");
+    let expected_order = [
+        vec![
+            "unavailable_insert_test".to_string(),
+            "create_entry".to_string(),
+        ],
+        vec![
+            "unavailable_insert_test".to_string(),
+            "read_entries".to_string(),
+        ],
+    ];
+    let actual_order = document
+        .functions
+        .iter()
+        .map(|(names, _)| names.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual_order, expected_order,
+        "apply must report the two function entries sorted by qualified name"
+    );
+    let create_entry = document
+        .function_id(&["unavailable_insert_test", "create_entry"])
+        .expect("apply must report create_entry");
+    let read_entries = document
+        .function_id(&["unavailable_insert_test", "read_entries"])
+        .expect("apply must report read_entries");
+    assert_ne!(
+        create_entry, read_entries,
+        "the two function identities must be pairwise distinct"
+    );
+
+    // Both raw calls are denied before any grant.
+    for function in [create_entry, read_entries] {
+        let denied = machine
+            .run_as_orna(&["raw-call", function])
+            .expect("run denied raw call");
+        assert_denied("raw call before grant", denied).expect("raw call must be denied");
+    }
+
+    // Grant both functions through the fixed-service command.
+    for function in [create_entry, read_entries] {
+        let granted = machine
+            .run_as_orna(&["security", "grant-execute", function])
+            .expect("run installed grant command");
+        require_silent_success("orna security grant-execute", granted)
+            .expect("grant must succeed silently");
+    }
+
+    // The reader initially succeeds with empty output.
+    let empty = machine
+        .run_as_orna(&["raw-call", read_entries])
+        .expect("run empty raw select");
+    require_silent_success("orna raw-call read_entries empty", empty)
+        .expect("empty read must exit 0 with empty streams");
+
+    // The parameterised create with no arguments is unavailable and inserts
+    // nothing.
+    let unavailable = machine
+        .run_as_orna(&["raw-call", create_entry])
+        .expect("run unavailable raw call");
+    assert_target_unavailable("raw call with no arguments", unavailable)
+        .expect("raw call must be target unavailable");
+    let after_unavailable = machine
+        .run_as_orna(&["raw-call", read_entries])
+        .expect("run empty raw select after unavailable call");
+    require_silent_success(
+        "orna raw-call read_entries after unavailable call",
+        after_unavailable,
+    )
+    .expect("the reader must stay successful and empty");
+
+    // Exact source replay keeps the complete mapping, grants, and rows.
+    let replay = machine
+        .run_as_orna(&["source", "apply", FIXTURE_PATH])
+        .expect("run installed source apply on the same fixture");
+    let replay = require_success("orna source apply replay", replay)
+        .expect("unavailable replay must succeed");
+    assert!(
+        replay.stderr.is_empty(),
+        "unavailable replay must keep standard error empty"
+    );
+    let replay_document =
+        parse_apply_document(&replay.stdout).expect("unavailable replay JSON must parse");
+    assert_eq!(
+        replay_document.functions, document.functions,
+        "the replay must keep the complete two-entry function vector"
+    );
+
+    // No re-grant: the unavailable mutation stays closed and empty.
+    let unavailable_after_replay = machine
+        .run_as_orna(&["raw-call", create_entry])
+        .expect("run unavailable raw call after replay");
+    assert_target_unavailable("raw call after replay", unavailable_after_replay)
+        .expect("raw call must stay target unavailable");
+    let empty_after_replay = machine
+        .run_as_orna(&["raw-call", read_entries])
+        .expect("run empty raw select after replay");
+    require_silent_success(
+        "orna raw-call read_entries after replay",
+        empty_after_replay,
+    )
+    .expect("the reader must stay successful and empty after replay");
+
+    // Restart keeps both grants and the empty state.
+    machine
+        .restart_server()
+        .expect("installed server must restart cleanly");
+    let unavailable_after_restart = machine
+        .run_as_orna(&["raw-call", create_entry])
+        .expect("run unavailable raw call after restart");
+    assert_target_unavailable("raw call after restart", unavailable_after_restart)
+        .expect("raw call must stay target unavailable after restart");
+    let empty_after_restart = machine
+        .run_as_orna(&["raw-call", read_entries])
+        .expect("run empty raw select after restart");
+    require_silent_success(
+        "orna raw-call read_entries after restart",
+        empty_after_restart,
+    )
+    .expect("the reader must stay successful and empty after restart");
 }

@@ -1,0 +1,16 @@
+CREATE SCHEMA unavailable_insert_test;
+
+CREATE TYPE unavailable_insert_test.entry AS OBJECT (
+    stored BOOLEAN NOT NULL
+);
+
+CREATE SERVER FUNCTION unavailable_insert_test.create_entry(p_stored BOOLEAN)
+RETURNS ROWS (created REF unavailable_insert_test.entry)
+SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE
+AS INSERT INTO unavailable_insert_test.entry AS made (stored)
+VALUES (p_stored) RETURNING REF(made);
+
+CREATE SERVER FUNCTION unavailable_insert_test.read_entries()
+RETURNS ROWS (stored BOOLEAN)
+SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE
+AS SELECT entry.stored FROM unavailable_insert_test.entry entry;
