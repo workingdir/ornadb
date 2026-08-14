@@ -1492,6 +1492,287 @@ pub(crate) const fn raw_server_insert_target_is_unavailable(error: &ServerInsert
     }
 }
 
+/// The exact SERVER mutation family selected by one raw reference argument.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RawServerReferenceMutation {
+    /// One accepted version-2 identity-selected UPDATE.
+    Update,
+    /// One accepted version-3 identity-selected DELETE.
+    Delete,
+}
+
+/// Selects a superficial raw reference-mutation artifact candidate.
+///
+/// This classification deliberately stops before decoding or validating the
+/// target. The authorised caller opens a savepoint only for one of these two
+/// artifact families, then the normal mutation validator remains authoritative.
+pub(crate) fn raw_server_reference_mutation_target(
+    active: &ActiveDatabaseRevision,
+    function_id: FunctionId,
+) -> Option<RawServerReferenceMutation> {
+    let function = active.catalogue().function_by_id(function_id)?;
+    let revision = active.function_revisions().iter().find(|revision| {
+        revision.function() == function_id && revision.id() == function.current_revision()
+    })?;
+    let artifact = revision.artifact();
+    if function.domain() != FunctionDomain::Server
+        || artifact.kind() != ExecutableArtifactKind::Server
+        || artifact.format() != server_mutation_plan::FORMAT_IDENTITY
+    {
+        return None;
+    }
+    match artifact.version() {
+        server_mutation_plan::UPDATE_FORMAT_VERSION => Some(RawServerReferenceMutation::Update),
+        server_mutation_plan::DELETE_FORMAT_VERSION => Some(RawServerReferenceMutation::Delete),
+        _ => None,
+    }
+}
+
+/// Executes one pinned raw SERVER UPDATE or DELETE selected by a reference.
+///
+/// The caller owns recovery, authorisation, audit, savepoint, and commit. This
+/// entry neither opens a session nor starts or commits a transaction.
+pub(crate) async fn execute_authorised_raw_server_reference_mutation(
+    transaction: &Transaction<'_>,
+    active: &ActiveDatabaseRevision,
+    authorisation: &AuthorisedInvocation,
+    operation: RawServerReferenceMutation,
+    arguments: &[FunctionArgument],
+) -> Result<Vec<RuntimeValue>, PostgresKernelError> {
+    let target = authorisation.target();
+    if target.revision() != active.pair() {
+        return Err(PostgresKernelError::DurableInvariant {
+            relation: "active catalogue",
+            record: target.function().canonical(),
+            rule: "raw reference mutation authorisation target must match the active pair",
+        });
+    }
+    let function = active
+        .catalogue()
+        .function_by_id(target.function())
+        .ok_or_else(|| match operation {
+            RawServerReferenceMutation::Update => {
+                update_error(ServerUpdateError::FunctionNotActive {
+                    pair: active.pair(),
+                    function: target.function(),
+                })
+            }
+            RawServerReferenceMutation::Delete => {
+                delete_error(ServerDeleteError::FunctionNotActive {
+                    pair: active.pair(),
+                    function: target.function(),
+                })
+            }
+        })?;
+    let context = ServerMutationContext::new(
+        active.pair(),
+        target.function(),
+        function.current_revision(),
+    );
+    match operation {
+        RawServerReferenceMutation::Update => {
+            validate_raw_reference_update_shape(active, function, arguments)
+                .map_err(|error| update_not_committed(context, error))?;
+            let (result, _) =
+                execute_active_update(transaction, active, function, context, arguments)
+                    .await
+                    .map_err(|error| update_not_committed(context, error))?;
+            Ok(result_rows_values(result.rows()))
+        }
+        RawServerReferenceMutation::Delete => {
+            validate_raw_reference_delete_shape(active, function, arguments)
+                .map_err(|error| delete_not_committed(context, error))?;
+            let result = execute_active_delete(transaction, active, function, context, arguments)
+                .await
+                .map_err(|error| delete_not_committed(context, error))?;
+            Ok(result_rows_values(result.rows()))
+        }
+    }
+}
+
+fn validate_raw_reference_update_shape(
+    active: &ActiveDatabaseRevision,
+    function: &FunctionDefinition,
+    arguments: &[FunctionArgument],
+) -> Result<(), PostgresKernelError> {
+    let [parameter] = function.parameters() else {
+        return Err(function_signature_error(
+            function.id(),
+            "a raw reference UPDATE must declare only its selector parameter",
+        ));
+    };
+    let [argument] = arguments else {
+        return Err(argument_error(
+            None,
+            "raw reference mutations accept exactly one reference argument",
+        ));
+    };
+    let RuntimeValue::Reference { target, .. } = argument.value() else {
+        return Err(argument_error(
+            Some(argument.parameter()),
+            "raw reference mutations accept exactly one reference argument",
+        ));
+    };
+    let artifact = active_function_artifact(active, function)?;
+    let plan = ServerMutationPlan::decode(artifact.payload())
+        .map_err(ServerMutationError::PlanDecode)
+        .map_err(server_error)?;
+    let Some(selector) = plan.selector() else {
+        return Err(plan_invariant(
+            "raw reference UPDATE must contain a selector",
+        ));
+    };
+    if selector.owner() != function.id()
+        || selector.parameter() != parameter.id()
+        || argument.parameter() != parameter.id()
+        || parameter.resolved_type() != ResolvedType::reference(plan.target())
+        || *target != plan.target()
+    {
+        return Err(argument_error(
+            Some(argument.parameter()),
+            "raw reference UPDATE selector must match its sole active parameter and target",
+        ));
+    }
+    if plan.assignments().iter().any(|assignment| {
+        !matches!(
+            assignment.expression().kind(),
+            MutationExpressionKind::BooleanLiteral { .. } | MutationExpressionKind::TypedNull
+        )
+    }) {
+        return Err(function_signature_error(
+            function.id(),
+            "raw reference UPDATE assignments must use only literal values",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_raw_reference_delete_shape(
+    active: &ActiveDatabaseRevision,
+    function: &FunctionDefinition,
+    arguments: &[FunctionArgument],
+) -> Result<(), PostgresKernelError> {
+    let [parameter] = function.parameters() else {
+        return Err(function_signature_error(
+            function.id(),
+            "a raw reference DELETE must declare only its selector parameter",
+        ));
+    };
+    let [argument] = arguments else {
+        return Err(argument_error(
+            None,
+            "raw reference mutations accept exactly one reference argument",
+        ));
+    };
+    let RuntimeValue::Reference { target, .. } = argument.value() else {
+        return Err(argument_error(
+            Some(argument.parameter()),
+            "raw reference mutations accept exactly one reference argument",
+        ));
+    };
+    let artifact = active_function_artifact(active, function)?;
+    let plan = ServerDeletePlan::decode(artifact.payload())
+        .map_err(ServerMutationError::PlanDecode)
+        .map_err(server_error)?;
+    let selector = plan.selector();
+    if selector.owner() != function.id()
+        || selector.parameter() != parameter.id()
+        || argument.parameter() != parameter.id()
+        || parameter.resolved_type() != ResolvedType::reference(plan.target())
+        || *target != plan.target()
+    {
+        return Err(argument_error(
+            Some(argument.parameter()),
+            "raw reference DELETE selector must match its sole active parameter and target",
+        ));
+    }
+    Ok(())
+}
+
+fn active_function_artifact<'a>(
+    active: &'a ActiveDatabaseRevision,
+    function: &FunctionDefinition,
+) -> Result<&'a orna_core::revision::ExecutableArtifact, PostgresKernelError> {
+    active
+        .function_revisions()
+        .iter()
+        .find(|revision| {
+            revision.function() == function.id() && revision.id() == function.current_revision()
+        })
+        .map(|revision| revision.artifact())
+        .ok_or_else(|| {
+            server_error(ServerMutationError::CurrentRevision {
+                function: function.id(),
+                revision: function.current_revision(),
+            })
+        })
+}
+
+fn result_rows_values(rows: &ResultRows) -> Vec<RuntimeValue> {
+    rows.rows()
+        .iter()
+        .flat_map(|row| row.values().iter().cloned())
+        .collect()
+}
+
+/// Reports whether an UPDATE failure is a closed raw target rejection.
+pub(crate) const fn raw_server_update_target_is_unavailable(error: &ServerUpdateError) -> bool {
+    match error {
+        ServerUpdateError::FunctionNotActive { .. } => true,
+        ServerUpdateError::NotCommitted { source, .. } => {
+            raw_reference_mutation_failure_is_unavailable(source)
+        }
+        ServerUpdateError::Unavailable { .. }
+        | ServerUpdateError::CommitRejected { .. }
+        | ServerUpdateError::CommitOutcomeUnknown { .. }
+        | ServerUpdateError::CommittedButShutdownFailed { .. } => false,
+    }
+}
+
+/// Reports whether a DELETE failure is a closed raw target rejection.
+pub(crate) const fn raw_server_delete_target_is_unavailable(error: &ServerDeleteError) -> bool {
+    match error {
+        ServerDeleteError::FunctionNotActive { .. } => true,
+        ServerDeleteError::NotCommitted { source, .. } => {
+            raw_reference_mutation_failure_is_unavailable(source)
+        }
+        ServerDeleteError::Unavailable { .. }
+        | ServerDeleteError::DeleteRestricted { .. }
+        | ServerDeleteError::CommitRejected { .. }
+        | ServerDeleteError::CommitOutcomeUnknown { .. }
+        | ServerDeleteError::CommittedButShutdownFailed { .. } => false,
+    }
+}
+
+const fn raw_reference_mutation_failure_is_unavailable(error: &ServerMutationError) -> bool {
+    match error {
+        ServerMutationError::FunctionNotActive { .. }
+        | ServerMutationError::FunctionSignature { .. }
+        | ServerMutationError::Artifact { .. }
+        | ServerMutationError::PlanDecode(_)
+        | ServerMutationError::PlanInvariant { .. }
+        | ServerMutationError::ReferenceEvidence { .. }
+        | ServerMutationError::Argument { .. }
+        | ServerMutationError::ComplexityLimit { .. } => true,
+        ServerMutationError::NotCommitted { source, .. } => {
+            raw_reference_mutation_failure_is_unavailable(source)
+        }
+        ServerMutationError::Kernel { .. }
+        | ServerMutationError::Database { .. }
+        | ServerMutationError::CurrentRevision { .. }
+        | ServerMutationError::PreparedResult { .. }
+        | ServerMutationError::RowDecode { .. }
+        | ServerMutationError::ValueInvariant { .. }
+        | ServerMutationError::ResultRows(_)
+        | ServerMutationError::RecordValue(_)
+        | ServerMutationError::ValueCodec(_)
+        | ServerMutationError::UniqueReferenceConflict { .. }
+        | ServerMutationError::CommitRejected { .. }
+        | ServerMutationError::CommitOutcomeUnknown { .. }
+        | ServerMutationError::CommittedButShutdownFailed { .. } => false,
+    }
+}
+
 async fn execute_active_update(
     transaction: &Transaction<'_>,
     active: &ActiveDatabaseRevision,
@@ -5995,6 +6276,242 @@ mod tests {
             *source,
             ServerMutationError::PlanInvariant { rule: "test" },
         ));
+    }
+
+    fn config_error() -> tokio_postgres::Error {
+        "port=invalid"
+            .parse::<tokio_postgres::Config>()
+            .expect_err("invalid port must fail to parse")
+    }
+
+    #[test]
+    fn raw_reference_update_target_unavailability_pins_nested_mutation_failures() {
+        let context = ServerUpdateContext::new(
+            RevisionPair::new(
+                SourceRevisionId::from_bytes([0x76; 16]),
+                CatalogueRevisionId::from_bytes([0x77; 16]),
+            ),
+            FUNCTION,
+            REVISION,
+        );
+        let unavailable = [
+            ServerMutationError::FunctionSignature {
+                function: FUNCTION,
+                rule: "the raw reference UPDATE signature is unsupported",
+            },
+            ServerMutationError::Argument {
+                parameter: Some(PARAMETER_SELECTOR),
+                rule: "the raw reference UPDATE selector must match its sole active parameter and target",
+            },
+        ];
+        for source in unavailable {
+            assert!(
+                raw_server_update_target_is_unavailable(&ServerUpdateError::NotCommitted {
+                    context,
+                    source: Box::new(source),
+                }),
+                "a nested UPDATE failure must close as an unavailable raw target",
+            );
+        }
+        let internal = [
+            ServerMutationError::CurrentRevision {
+                function: FUNCTION,
+                revision: REVISION,
+            },
+            ServerMutationError::ValueInvariant {
+                rule: "the generated result contract is violated",
+            },
+        ];
+        for source in internal {
+            assert!(
+                !raw_server_update_target_is_unavailable(&ServerUpdateError::NotCommitted {
+                    context,
+                    source: Box::new(source),
+                }),
+                "a nested mutation failure must stay internal",
+            );
+        }
+        assert!(
+            raw_server_update_target_is_unavailable(&ServerUpdateError::FunctionNotActive {
+                pair: context.pair(),
+                function: FUNCTION,
+            }),
+            "an inactive UPDATE function must close as unavailable",
+        );
+        for error in [
+            ServerUpdateError::Unavailable {
+                source: Box::new(PostgresKernelError::CatalogueInvariant("test")),
+            },
+            ServerUpdateError::CommitRejected {
+                context,
+                target: TARGET,
+                selector: SELECTED_OBJECT,
+                matched: true,
+                source: config_error(),
+            },
+            ServerUpdateError::CommitOutcomeUnknown {
+                context,
+                target: TARGET,
+                selector: SELECTED_OBJECT,
+                matched: true,
+                source: config_error(),
+            },
+        ] {
+            assert!(
+                !raw_server_update_target_is_unavailable(&error),
+                "the UPDATE outcome {error:?} must stay internal",
+            );
+        }
+    }
+
+    #[test]
+    fn raw_reference_delete_target_unavailability_pins_nested_mutation_failures() {
+        let context = ServerDeleteContext::new(
+            RevisionPair::new(
+                SourceRevisionId::from_bytes([0x76; 16]),
+                CatalogueRevisionId::from_bytes([0x77; 16]),
+            ),
+            FUNCTION,
+            REVISION,
+        );
+        let unavailable = [
+            ServerMutationError::FunctionSignature {
+                function: FUNCTION,
+                rule: "the raw reference DELETE signature is unsupported",
+            },
+            ServerMutationError::Argument {
+                parameter: Some(PARAMETER_SELECTOR),
+                rule: "the raw reference DELETE selector must match its sole active parameter and target",
+            },
+        ];
+        for source in unavailable {
+            assert!(
+                raw_server_delete_target_is_unavailable(&ServerDeleteError::NotCommitted {
+                    context,
+                    source: Box::new(source),
+                }),
+                "a nested DELETE failure must close as an unavailable raw target",
+            );
+        }
+        let internal = [
+            ServerMutationError::CurrentRevision {
+                function: FUNCTION,
+                revision: REVISION,
+            },
+            ServerMutationError::ValueInvariant {
+                rule: "the generated result contract is violated",
+            },
+        ];
+        for source in internal {
+            assert!(
+                !raw_server_delete_target_is_unavailable(&ServerDeleteError::NotCommitted {
+                    context,
+                    source: Box::new(source),
+                }),
+                "a nested mutation failure must stay internal",
+            );
+        }
+        assert!(
+            raw_server_delete_target_is_unavailable(&ServerDeleteError::FunctionNotActive {
+                pair: context.pair(),
+                function: FUNCTION,
+            }),
+            "an inactive DELETE function must close as unavailable",
+        );
+        for error in [
+            ServerDeleteError::Unavailable {
+                source: Box::new(PostgresKernelError::CatalogueInvariant("test")),
+            },
+            ServerDeleteError::DeleteRestricted {
+                context,
+                target: TARGET,
+                selector: SELECTED_OBJECT,
+                source: config_error(),
+            },
+            ServerDeleteError::CommitRejected {
+                context,
+                target: TARGET,
+                selector: SELECTED_OBJECT,
+                matched: true,
+                source: config_error(),
+            },
+            ServerDeleteError::CommitOutcomeUnknown {
+                context,
+                target: TARGET,
+                selector: SELECTED_OBJECT,
+                matched: true,
+                source: config_error(),
+            },
+        ] {
+            assert!(
+                !raw_server_delete_target_is_unavailable(&error),
+                "the DELETE outcome {error:?} must stay internal",
+            );
+        }
+    }
+
+    #[test]
+    fn raw_reference_mutation_failure_classification_is_closed() {
+        for failure in [
+            ServerMutationError::FunctionNotActive {
+                pair: RevisionPair::new(
+                    SourceRevisionId::from_bytes([0x76; 16]),
+                    CatalogueRevisionId::from_bytes([0x77; 16]),
+                ),
+                function: FUNCTION,
+            },
+            ServerMutationError::FunctionSignature {
+                function: FUNCTION,
+                rule: "the raw reference mutation signature is unsupported",
+            },
+            ServerMutationError::Artifact {
+                function: FUNCTION,
+                rule: "the current revision lacks the mutation artifact",
+            },
+            ServerMutationError::PlanInvariant {
+                rule: "the mutation plan disagrees with the active catalogue",
+            },
+            ServerMutationError::ReferenceEvidence {
+                function: FUNCTION,
+                rule: "the durable definition references do not prove the mutation body",
+            },
+            ServerMutationError::Argument {
+                parameter: Some(PARAMETER_SELECTOR),
+                rule: "the raw reference mutation selector must match its sole active parameter and target",
+            },
+            ServerMutationError::ComplexityLimit {
+                category: "test",
+                maximum: 1,
+            },
+        ] {
+            assert!(
+                raw_reference_mutation_failure_is_unavailable(&failure),
+                "the mutation failure {failure:?} must close as unavailable",
+            );
+        }
+        for failure in [
+            ServerMutationError::Kernel {
+                source: Box::new(PostgresKernelError::CatalogueInvariant("test")),
+            },
+            ServerMutationError::Database {
+                source: config_error(),
+            },
+            ServerMutationError::CurrentRevision {
+                function: FUNCTION,
+                revision: REVISION,
+            },
+            ServerMutationError::PreparedResult {
+                rule: "the prepared result shape differs",
+            },
+            ServerMutationError::ValueInvariant {
+                rule: "the generated result contract is violated",
+            },
+        ] {
+            assert!(
+                !raw_reference_mutation_failure_is_unavailable(&failure),
+                "the mutation failure {failure:?} must stay internal",
+            );
+        }
     }
 
     #[test]
