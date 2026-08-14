@@ -457,6 +457,14 @@ struct SuccessDocument {
 struct SuccessFunction {
     qualified_name: Vec<String>,
     function_id: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    parameters: Vec<SuccessParameter>,
+}
+
+#[derive(Serialize)]
+struct SuccessParameter {
+    name: String,
+    parameter_id: String,
 }
 
 fn build_success_document(
@@ -467,17 +475,30 @@ fn build_success_document(
         .functions()
         .iter()
         .filter(|function| function.id() != CATALOGUE_HEALTH_FUNCTION_ID)
-        .map(|function| (function.name().parts().to_vec(), function.id()))
         .collect::<Vec<_>>();
-    functions.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    functions.sort_by(|left, right| {
+        left.name()
+            .parts()
+            .cmp(right.name().parts())
+            .then_with(|| left.id().cmp(&right.id()))
+    });
     let functions = functions
         .into_iter()
-        .map(
-            |(qualified_name, function_id): (Vec<String>, FunctionId)| SuccessFunction {
-                qualified_name,
+        .map(|function| {
+            let function_id: FunctionId = function.id();
+            SuccessFunction {
+                qualified_name: function.name().parts().to_vec(),
                 function_id: function_id.canonical(),
-            },
-        )
+                parameters: function
+                    .parameters()
+                    .iter()
+                    .map(|parameter| SuccessParameter {
+                        name: parameter.name().to_owned(),
+                        parameter_id: parameter.id().canonical(),
+                    })
+                    .collect(),
+            }
+        })
         .collect();
     let document = SuccessDocument {
         source_revision: pair.source().canonical(),
@@ -528,4 +549,148 @@ fn escape_message(message: &str) -> String {
         }
     }
     escaped
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use orna_core::catalogue::{
+        CatalogueSnapshot, FunctionDefinition, FunctionDomain, FunctionReturn,
+        FunctionReturnColumnDefinition, FunctionSecurity, FunctionTransaction, FunctionVolatility,
+        ParameterDefinition, QualifiedSemanticName, SchemaDefinition,
+    };
+    use orna_core::types::{ResolvedType, StandardScalar};
+    use orna_core::{
+        CatalogueRevisionId, FunctionRevisionId, ParameterId, SchemaId, SourceRevisionId,
+    };
+
+    const PARAMETERISED_FUNCTION_ID: FunctionId = FunctionId::from_bytes([0x41; 16]);
+    const EMPTY_FUNCTION_ID: FunctionId = FunctionId::from_bytes([0x5a; 16]);
+    const FIRST_PARAMETER_ID: ParameterId = ParameterId::from_bytes([0x12; 16]);
+    const SECOND_PARAMETER_ID: ParameterId = ParameterId::from_bytes([0x11; 16]);
+
+    fn schema(id: u8, parts: &[&str]) -> SchemaDefinition {
+        SchemaDefinition::new(
+            SchemaId::from_bytes([id; 16]),
+            QualifiedSemanticName::new(parts.iter().copied()).expect("valid schema name"),
+        )
+    }
+
+    fn parameter(id: ParameterId, name: &str, ordinal: u32) -> ParameterDefinition {
+        ParameterDefinition::new(
+            id,
+            name,
+            ordinal,
+            ResolvedType::scalar(StandardScalar::Boolean),
+            None,
+        )
+    }
+
+    fn function(
+        id: FunctionId,
+        parts: &[&str],
+        parameters: Vec<ParameterDefinition>,
+    ) -> FunctionDefinition {
+        FunctionDefinition::new(
+            id,
+            QualifiedSemanticName::new(parts.iter().copied()).expect("valid function name"),
+            FunctionDomain::Server,
+            parameters,
+            FunctionReturn::Rows(vec![FunctionReturnColumnDefinition::new(
+                "created",
+                0,
+                ResolvedType::scalar(StandardScalar::Boolean),
+            )]),
+            FunctionRevisionId::from_bytes([0x21; 16]),
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::Atomic),
+            FunctionVolatility::Volatile,
+        )
+    }
+
+    fn catalogue(revision: CatalogueRevisionId) -> CatalogueSnapshot {
+        CatalogueSnapshot::new_with_functions(
+            revision,
+            vec![schema(0x61, &["a"]), schema(0x7a, &["z"])],
+            vec![],
+            vec![
+                // Supplied in reverse semantic-name order on purpose.
+                function(EMPTY_FUNCTION_ID, &["z", "empty"], vec![]),
+                function(
+                    PARAMETERISED_FUNCTION_ID,
+                    &["a", "parameterised"],
+                    vec![
+                        parameter(FIRST_PARAMETER_ID, "first", 0),
+                        parameter(SECOND_PARAMETER_ID, "second", 1),
+                    ],
+                ),
+                // The catalogue health identity must never appear in discovery.
+                function(CATALOGUE_HEALTH_FUNCTION_ID, &["a", "health"], vec![]),
+            ],
+        )
+        .expect("catalogue must validate")
+    }
+
+    fn split_document(bytes: &[u8]) -> (&[u8], &[u8]) {
+        let marker = b"\"functions\":[";
+        let start = bytes
+            .windows(marker.len())
+            .position(|window| window == marker)
+            .expect("success document must carry the functions array");
+        (&bytes[..start], &bytes[start..])
+    }
+
+    #[test]
+    fn success_document_sorts_functions_and_renders_ordered_parameters() {
+        let source_revision = SourceRevisionId::from_bytes([0x31; 16]);
+        let catalogue_revision = CatalogueRevisionId::from_bytes([0x32; 16]);
+        let pair = RevisionPair::new(source_revision, catalogue_revision);
+        let document = build_success_document(pair, &catalogue(catalogue_revision))
+            .expect("success document must build");
+        let expected = format!(
+            "{{\"source_revision\":\"{}\",\"catalogue_revision\":\"{}\",\"functions\":[{{\"qualified_name\":[\"a\",\"parameterised\"],\"function_id\":\"{}\",\"parameters\":[{{\"name\":\"first\",\"parameter_id\":\"{}\"}},{{\"name\":\"second\",\"parameter_id\":\"{}\"}}]}},{{\"qualified_name\":[\"z\",\"empty\"],\"function_id\":\"{}\"}}]}}\n",
+            source_revision.canonical(),
+            catalogue_revision.canonical(),
+            PARAMETERISED_FUNCTION_ID.canonical(),
+            FIRST_PARAMETER_ID.canonical(),
+            SECOND_PARAMETER_ID.canonical(),
+            EMPTY_FUNCTION_ID.canonical(),
+        );
+        assert_eq!(document.as_bytes(), expected.as_bytes());
+    }
+
+    #[test]
+    fn success_document_replay_keeps_the_function_discovery_suffix() {
+        let first_revision = CatalogueRevisionId::from_bytes([0x32; 16]);
+        let first = build_success_document(
+            RevisionPair::new(SourceRevisionId::from_bytes([0x31; 16]), first_revision),
+            &catalogue(first_revision),
+        )
+        .expect("first success document must build");
+        let second_revision = CatalogueRevisionId::from_bytes([0x42; 16]);
+        let second = build_success_document(
+            RevisionPair::new(SourceRevisionId::from_bytes([0x41; 16]), second_revision),
+            &catalogue(second_revision),
+        )
+        .expect("second success document must build");
+        let (first_prefix, first_suffix) = split_document(first.as_bytes());
+        let (second_prefix, second_suffix) = split_document(second.as_bytes());
+        assert_ne!(first_prefix, second_prefix, "revision prefix must advance");
+        assert_eq!(
+            first_suffix, second_suffix,
+            "the function discovery suffix must stay byte-identical"
+        );
+        assert!(
+            second_prefix
+                .windows(second_revision.canonical().len())
+                .any(|window| window == second_revision.canonical().as_bytes()),
+            "the second prefix must carry the exact new catalogue revision"
+        );
+        assert!(
+            !second_prefix
+                .windows(first_revision.canonical().len())
+                .any(|window| window == first_revision.canonical().as_bytes()),
+            "the second prefix must not carry the old catalogue revision"
+        );
+    }
 }
