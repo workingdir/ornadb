@@ -9,14 +9,12 @@ use std::{
     time::SystemTime,
 };
 
-use crate::{FunctionId, PrincipalId, SecurityAuditEventId, revision::RevisionPair};
+use crate::{
+    FunctionId, PrincipalId, SecurityAuditEventId, revision::RevisionPair,
+    system::system_function_by_id,
+};
 
-/// The stable identity of the sealed `sys.catalog.health` system function.
-pub const CATALOGUE_HEALTH_FUNCTION_ID: FunctionId =
-    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
-
-/// The one exact recovery-command name of the catalogue health function.
-pub const CATALOGUE_HEALTH_FUNCTION_NAME: &str = "sys.catalog.health";
+pub use crate::system::{CATALOGUE_HEALTH_FUNCTION_ID, CATALOGUE_HEALTH_FUNCTION_NAME};
 
 /// The stable principal reserved for installed catalogue-health recovery.
 pub const CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID: PrincipalId =
@@ -956,6 +954,32 @@ impl SecuritySnapshot {
         ))
     }
 
+    /// Decides whether an authenticated session may enter a sealed system function.
+    ///
+    /// This closed rule admits only an exact identity in the mandatory system
+    /// registry. It does not grant any application function or authorise a
+    /// target carried by a system-function request.
+    pub fn authorise_system_function(
+        &self,
+        session: &AuthenticatedSession,
+        target: InvocationTarget,
+    ) -> ExecuteDecision {
+        if let Err(reason) = self.validate_session_and_revision(session, target) {
+            return ExecuteDecision::Denied(reason);
+        }
+        Self::authorise_system_function_after_validation(session, target)
+    }
+
+    fn authorise_system_function_after_validation(
+        session: &AuthenticatedSession,
+        target: InvocationTarget,
+    ) -> ExecuteDecision {
+        if system_function_by_id(target.function).is_none() {
+            return ExecuteDecision::Denied(ExecuteDenial::UnknownFunction);
+        }
+        ExecuteDecision::Allowed(Self::allowed_invocation(session, target, session.principal))
+    }
+
     /// Decides whether an authenticated session may execute catalogue health.
     ///
     /// This closed system rule applies only to the exact reserved health
@@ -971,7 +995,7 @@ impl SecuritySnapshot {
         if target.function != CATALOGUE_HEALTH_FUNCTION_ID {
             return ExecuteDecision::Denied(ExecuteDenial::UnknownFunction);
         }
-        ExecuteDecision::Allowed(Self::allowed_invocation(session, target, session.principal))
+        Self::authorise_system_function_after_validation(session, target)
     }
 
     fn validate_session_and_revision(
@@ -1469,6 +1493,169 @@ mod tests {
             snapshot.authorise_execute(&session, InvocationTarget::new(FUNCTION, REVISION)),
             ExecuteDecision::Denied(ExecuteDenial::MissingExecuteGrant)
         );
+    }
+
+    #[test]
+    fn authenticated_user_and_service_enter_every_registered_system_function_without_a_grant() {
+        // The system entry decision must not depend on a stored application
+        // grant and must not consult the application function set, which
+        // deliberately excludes the sealed identities.
+        for kind in [PrincipalKind::User, PrincipalKind::Service] {
+            let snapshot = SecuritySnapshot::new(
+                REVISION,
+                vec![FUNCTION],
+                vec![active(USER, kind)],
+                vec![],
+                vec![],
+            )
+            .expect("valid authenticated snapshot");
+            let session = snapshot
+                .bind_authenticated_session(USER, vec![])
+                .expect("active session should bind");
+
+            for system_function in crate::system::SYSTEM_FUNCTIONS {
+                let target = InvocationTarget::new(system_function.id(), REVISION);
+                let ExecuteDecision::Allowed(evidence) =
+                    snapshot.authorise_system_function(&session, target)
+                else {
+                    panic!("a registered system function must be authorised without a grant");
+                };
+                assert_eq!(evidence.session_principal(), USER);
+                assert_eq!(evidence.effective_principal(), USER);
+                assert_eq!(evidence.authorising_principal(), USER);
+                assert_eq!(evidence.active_roles(), &[]);
+                assert_eq!(evidence.target(), target);
+            }
+
+            assert_eq!(
+                snapshot.authorise_execute(&session, InvocationTarget::new(FUNCTION, REVISION)),
+                ExecuteDecision::Denied(ExecuteDenial::MissingExecuteGrant)
+            );
+        }
+    }
+
+    #[test]
+    fn system_entry_decision_preserves_exact_denials_and_precedence() {
+        let enabled = SecuritySnapshot::new(
+            REVISION,
+            vec![FUNCTION],
+            vec![active(USER, PrincipalKind::User)],
+            vec![],
+            vec![ExecuteGrant::new(USER, FUNCTION)],
+        )
+        .expect("granted snapshot should validate");
+        let session = enabled
+            .bind_authenticated_session(USER, vec![])
+            .expect("active user session should bind");
+        let invoke = crate::system::SYS_INVOKE_FUNCTION_ID;
+
+        // A stale revision is rejected before the registry lookup.
+        assert_eq!(
+            enabled.authorise_system_function(
+                &session,
+                InvocationTarget::new(invoke, OTHER_REVISION),
+            ),
+            ExecuteDecision::Denied(ExecuteDenial::RevisionMismatch)
+        );
+        // An identity outside the registry and the application set is unknown.
+        assert_eq!(
+            enabled.authorise_system_function(
+                &session,
+                InvocationTarget::new(OTHER_FUNCTION, REVISION),
+            ),
+            ExecuteDecision::Denied(ExecuteDenial::UnknownFunction)
+        );
+        // The direct grant opens ordinary execution but never the closed
+        // system entry, which admits only exact registered system functions.
+        assert!(
+            matches!(
+                enabled.authorise_execute(&session, InvocationTarget::new(FUNCTION, REVISION)),
+                ExecuteDecision::Allowed(_)
+            ),
+            "the direct grant must authorise ordinary application execution"
+        );
+        assert_eq!(
+            enabled.authorise_system_function(&session, InvocationTarget::new(FUNCTION, REVISION),),
+            ExecuteDecision::Denied(ExecuteDenial::UnknownFunction)
+        );
+        // A session is revalidated against the deciding snapshot, so the
+        // disabled-principal snapshot denies the same session state.
+        let disabled = SecuritySnapshot::new(
+            REVISION,
+            vec![FUNCTION],
+            vec![Principal::new(
+                USER,
+                PrincipalKind::User,
+                PrincipalStatus::Disabled,
+            )],
+            vec![],
+            vec![],
+        )
+        .expect("disabled principal remains durable snapshot state");
+        assert_eq!(
+            disabled.authorise_system_function(&session, InvocationTarget::new(invoke, REVISION)),
+            ExecuteDecision::Denied(ExecuteDenial::InvalidSession)
+        );
+        // The retained compatibility method stays health-only and never
+        // admits the registered invocation gateway.
+        assert_eq!(
+            enabled.authorise_catalogue_health(&session, InvocationTarget::new(invoke, REVISION)),
+            ExecuteDecision::Denied(ExecuteDenial::UnknownFunction)
+        );
+    }
+
+    #[test]
+    fn authorise_system_function_rejects_hostile_session_state() {
+        let snapshot = SecuritySnapshot::new(
+            REVISION,
+            vec![FUNCTION],
+            vec![
+                active(USER, PrincipalKind::User),
+                active(ROLE, PrincipalKind::Role),
+            ],
+            vec![],
+            vec![],
+        )
+        .expect("hostile-state snapshot should validate");
+        let target = InvocationTarget::new(crate::system::SYS_INVOKE_FUNCTION_ID, REVISION);
+
+        // The public binder already rejects the role and the unreachable
+        // role, so the denial inside authorise_system_function is the same
+        // session validation and not a separate rule.
+        assert_eq!(
+            snapshot.bind_authenticated_session(ROLE, vec![]),
+            Err(SessionBindingError::RoleCannotAuthenticate)
+        );
+        assert_eq!(
+            snapshot.bind_authenticated_session(USER, vec![ROLE]),
+            Err(SessionBindingError::UnreachableActiveRole)
+        );
+
+        // Sessions are constructed inside the module boundary to prove that
+        // authorisation never trusts pre-bound session state.
+        let unknown_principal = AuthenticatedSession {
+            principal: OTHER_PRINCIPAL,
+            active_roles: vec![],
+        };
+        let role_pretending = AuthenticatedSession {
+            principal: ROLE,
+            active_roles: vec![],
+        };
+        let user_with_unreachable_role = AuthenticatedSession {
+            principal: USER,
+            active_roles: vec![ROLE],
+        };
+
+        for hostile in [
+            &unknown_principal,
+            &role_pretending,
+            &user_with_unreachable_role,
+        ] {
+            assert_eq!(
+                snapshot.authorise_system_function(hostile, target),
+                ExecuteDecision::Denied(ExecuteDenial::InvalidSession)
+            );
+        }
     }
 
     #[test]

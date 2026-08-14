@@ -15,7 +15,12 @@
 
 use crate::{FunctionId, catalogue::QualifiedSemanticName};
 
-pub use crate::security::{CATALOGUE_HEALTH_FUNCTION_ID, CATALOGUE_HEALTH_FUNCTION_NAME};
+/// The stable identity of the sealed `sys.catalog.health` function.
+pub const CATALOGUE_HEALTH_FUNCTION_ID: FunctionId =
+    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+
+/// The exact resolved name of the sealed catalogue-health function.
+pub const CATALOGUE_HEALTH_FUNCTION_NAME: &str = "sys.catalog.health";
 
 /// The stable identity of the mandatory sealed `sys.invoke` function.
 pub const SYS_INVOKE_FUNCTION_ID: FunctionId =
