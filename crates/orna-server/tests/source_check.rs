@@ -1,5 +1,7 @@
 #![cfg(unix)]
 
+mod support;
+
 use nix::{sys::stat::Mode, unistd::mkfifo};
 use std::{
     collections::BTreeMap,
@@ -18,7 +20,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-const USAGE: &[u8] = b"Usage:\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna security grant-execute <canonical-function-id>\n  orna raw-call <canonical-function-id>\n";
 const VALID_SOURCE: &[u8] =
     b"CREATE SCHEMA app; CREATE TYPE app.task AS OBJECT (done BOOLEAN NOT NULL);";
 const TERMINAL_REQUIRED: &[u8] = b"orna: backend-shell must be run in an interactive terminal\n";
@@ -127,7 +128,7 @@ fn assert_read_failure(output: &Output, path: &[u8]) {
 fn assert_usage(output: &Output) {
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
-    assert_eq!(output.stderr, USAGE);
+    assert_eq!(output.stderr, support::EXPECTED_USAGE);
 }
 
 fn assert_success(output: &Output) {
