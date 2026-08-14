@@ -573,7 +573,7 @@ fn assert_source_apply_rejected(output: Output) -> Result<(), Error> {
 /// Require the exact canonical Boolean TRUE value envelope.
 fn assert_exact_boolean_true(label: &'static str, output: Output) -> Result<(), Error> {
     let output = require_success(label, output)?;
-    if output.stdout != boolean_true_envelope() {
+    if output.stdout != boolean_orv1_envelope(Some(true)) {
         return Err(Error::Unexpected {
             message: format!(
                 "{label} must emit the exact canonical Boolean TRUE envelope, got {} bytes",
@@ -592,25 +592,41 @@ fn assert_exact_boolean_true(label: &'static str, output: Output) -> Result<(), 
     Ok(())
 }
 
-/// The canonical `ORV1` envelope for the exact Boolean value TRUE.
+/// The canonical `ORV1` envelope for one Boolean value.
 ///
-/// Layout: `ORV1`, the BOOLEAN tag, the 16-byte BOOLEAN type identity, the
-/// 4-byte big-endian payload length, and one payload byte for TRUE.
-fn boolean_true_envelope() -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(26);
-    bytes.extend_from_slice(b"ORV1");
-    bytes.push(0x02);
-    bytes.extend_from_slice(&[0; 15]);
-    bytes.push(0x01);
-    bytes.extend_from_slice(&1_u32.to_be_bytes());
-    bytes.push(0x01);
-    bytes
+/// `None` emits the typed Boolean NULL envelope: `ORV1`, the NULL-SCALAR
+/// tag, the 16-byte BOOLEAN type identity, and a zero payload length with no
+/// payload bytes. `Some(value)` emits the exact Boolean envelope: `ORV1`,
+/// the BOOLEAN tag, the 16-byte BOOLEAN type identity, the 4-byte big-endian
+/// payload length, and one payload byte for FALSE or TRUE.
+fn boolean_orv1_envelope(value: Option<bool>) -> Vec<u8> {
+    match value {
+        Some(value) => {
+            let mut bytes = Vec::with_capacity(26);
+            bytes.extend_from_slice(b"ORV1");
+            bytes.push(0x02);
+            bytes.extend_from_slice(&[0; 15]);
+            bytes.push(0x01);
+            bytes.extend_from_slice(&1_u32.to_be_bytes());
+            bytes.push(u8::from(value));
+            bytes
+        }
+        None => {
+            let mut bytes = Vec::with_capacity(25);
+            bytes.extend_from_slice(b"ORV1");
+            bytes.push(0x00);
+            bytes.extend_from_slice(&[0; 15]);
+            bytes.push(0x01);
+            bytes.extend_from_slice(&0_u32.to_be_bytes());
+            bytes
+        }
+    }
 }
 
 /// Two exact canonical Boolean TRUE envelopes, one per stored row.
 fn two_boolean_true_envelopes() -> Vec<u8> {
-    let mut bytes = boolean_true_envelope();
-    bytes.extend(boolean_true_envelope());
+    let mut bytes = boolean_orv1_envelope(Some(true));
+    bytes.extend(boolean_orv1_envelope(Some(true)));
     bytes
 }
 
@@ -1704,5 +1720,240 @@ fn installed_field_rename_preserves_function_identities_and_values_across_restar
         four_values,
         [false, false, true, true],
         "the four rows must hold two FALSE and two TRUE values"
+    );
+}
+
+/// Prove that an omitted nullable object field persists as a typed Boolean
+/// NULL while a present nullable field persists its exact FALSE value.
+///
+/// The test installs the exact checked-in `product_test_nullable.orna`
+/// fixture, applies it, and requires exactly four qualified-name/function-ID
+/// mappings. Both readers are denied before any grant. After granting all
+/// four functions it proves through the public raw-call path only:
+///
+/// * both readers initially exit 0 with empty standard output and error;
+/// * `create_omitted` returns one valid ORV1 reference and `read_omitted`
+///   returns exactly one typed Boolean NULL envelope while `read_present`
+///   stays empty;
+/// * `create_present` returns a second valid reference with the same target
+///   type and a distinct object identity, `read_omitted` stays byte-identical,
+///   and `read_present` returns exactly Boolean FALSE;
+/// * a restart keeps both reader outputs byte-identical.
+///
+/// All observations go through the packaged `/usr/bin/orna` public commands
+/// and raw-call ORV envelopes. The test makes no claim about private rows,
+/// SQL columns, field identities, or physical storage.
+#[test]
+#[ignore = "requires Docker, ORNA_SYSTEM_TEST_DEBIAN_PACKAGE, and the installed orna executable"]
+fn installed_nullable_field_persists_omitted_and_present_values_across_restart() {
+    let package = std::env::var("ORNA_SYSTEM_TEST_DEBIAN_PACKAGE")
+        .expect("ORNA_SYSTEM_TEST_DEBIAN_PACKAGE must point at the reproduced .deb package");
+    let artifact = FrozenPackageArtifact::new(PackageFormat::Debian, &package)
+        .expect("freeze the reproduced Debian package");
+    let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures")
+        .join("product_test_nullable.orna");
+    let fixture = fs::read(&fixture_path).expect("read the checked-in nullable fixture");
+
+    let machine = InstalledMachine::start(&artifact, &fixture)
+        .expect("start the installed Debian test machine");
+
+    // Apply the exact fixture and require all four function mappings.
+    let apply = machine
+        .run_as_orna(&["source", "apply", FIXTURE_PATH])
+        .expect("run installed source apply");
+    let apply = require_success("orna source apply", apply).expect("source apply must succeed");
+    assert!(
+        apply.stderr.is_empty(),
+        "source apply must keep standard error empty"
+    );
+    let document = parse_apply_document(&apply.stdout).expect("source apply JSON must parse");
+    assert_eq!(
+        document.functions.len(),
+        4,
+        "apply must report exactly four function entries"
+    );
+    let expected_order = [
+        vec!["nullable_test".to_string(), "create_omitted".to_string()],
+        vec!["nullable_test".to_string(), "create_present".to_string()],
+        vec!["nullable_test".to_string(), "read_omitted".to_string()],
+        vec!["nullable_test".to_string(), "read_present".to_string()],
+    ];
+    let actual_order = document
+        .functions
+        .iter()
+        .map(|(names, _)| names.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual_order, expected_order,
+        "apply must report the four function entries sorted by qualified name"
+    );
+    let create_omitted = document
+        .function_id(&["nullable_test", "create_omitted"])
+        .expect("apply must report create_omitted");
+    let create_present = document
+        .function_id(&["nullable_test", "create_present"])
+        .expect("apply must report create_present");
+    let read_omitted = document
+        .function_id(&["nullable_test", "read_omitted"])
+        .expect("apply must report read_omitted");
+    let read_present = document
+        .function_id(&["nullable_test", "read_present"])
+        .expect("apply must report read_present");
+
+    // Both readers are denied before any grant.
+    for function in [read_omitted, read_present] {
+        let denied = machine
+            .run_as_orna(&["raw-call", function])
+            .expect("run denied raw call");
+        assert_denied("raw call before grant", denied).expect("raw call must be denied");
+    }
+
+    // Grant all four functions through the fixed-service command.
+    for function in [create_omitted, create_present, read_omitted, read_present] {
+        let granted = machine
+            .run_as_orna(&["security", "grant-execute", function])
+            .expect("run installed grant command");
+        require_silent_success("orna security grant-execute", granted)
+            .expect("grant must succeed silently");
+    }
+
+    // Both readers initially exit 0 with empty streams.
+    for function in [read_omitted, read_present] {
+        let empty = machine
+            .run_as_orna(&["raw-call", function])
+            .expect("run empty raw select");
+        require_silent_success("orna raw-call empty select", empty)
+            .expect("empty select must exit 0 with empty streams");
+    }
+
+    // create_omitted inserts marker FALSE and omits the optional field.
+    let first = machine
+        .run_as_orna(&["raw-call", create_omitted])
+        .expect("run raw omitted insert");
+    let first = require_success("orna raw-call create_omitted", first)
+        .expect("omitted insert must succeed");
+    assert!(
+        first.stderr.is_empty(),
+        "omitted insert must keep standard error empty"
+    );
+    let reference = parse_reference_envelope(&first.stdout)
+        .expect("omitted insert must return one ORV reference");
+    assert!(
+        reference.type_id != [0; 16] && !reference.object_is_zero(),
+        "the omitted insert must return a real object reference"
+    );
+
+    // read_omitted returns exactly one typed Boolean NULL envelope.
+    let null_output = machine
+        .run_as_orna(&["raw-call", read_omitted])
+        .expect("run raw null select");
+    let null_output = require_success("orna raw-call read_omitted", null_output)
+        .expect("null select must succeed");
+    assert!(
+        null_output.stderr.is_empty(),
+        "null select must keep standard error empty"
+    );
+    assert_eq!(
+        null_output.stdout.as_slice(),
+        boolean_orv1_envelope(None).as_slice(),
+        "read_omitted must emit exactly one Boolean NULL envelope"
+    );
+
+    // read_present still returns nothing.
+    let present_empty = machine
+        .run_as_orna(&["raw-call", read_present])
+        .expect("run raw present empty select");
+    require_silent_success("orna raw-call read_present empty", present_empty)
+        .expect("present select must stay empty");
+
+    // create_present inserts marker TRUE with optional FALSE.
+    let second = machine
+        .run_as_orna(&["raw-call", create_present])
+        .expect("run raw present insert");
+    let second = require_success("orna raw-call create_present", second)
+        .expect("present insert must succeed");
+    assert!(
+        second.stderr.is_empty(),
+        "present insert must keep standard error empty"
+    );
+    let second_reference = parse_reference_envelope(&second.stdout)
+        .expect("present insert must return one ORV reference");
+    assert!(
+        second_reference.type_id != [0; 16] && !second_reference.object_is_zero(),
+        "the present insert must return a real object reference"
+    );
+    assert_eq!(
+        second_reference.type_id, reference.type_id,
+        "both creates must reference the same object type"
+    );
+    assert_ne!(
+        second_reference.object, reference.object,
+        "each create must allocate a distinct object identity"
+    );
+
+    // read_omitted stays byte-identical.
+    let null_again = machine
+        .run_as_orna(&["raw-call", read_omitted])
+        .expect("run raw null select again");
+    let null_again = require_success("orna raw-call read_omitted again", null_again)
+        .expect("null select must succeed");
+    assert!(
+        null_again.stderr.is_empty(),
+        "null select must keep standard error empty"
+    );
+    assert_eq!(
+        null_again.stdout.as_slice(),
+        null_output.stdout.as_slice(),
+        "read_omitted output must be byte-identical"
+    );
+
+    // read_present returns exactly Boolean FALSE.
+    let false_output = machine
+        .run_as_orna(&["raw-call", read_present])
+        .expect("run raw present select");
+    let false_output = require_success("orna raw-call read_present", false_output)
+        .expect("present select must succeed");
+    assert!(
+        false_output.stderr.is_empty(),
+        "present select must keep standard error empty"
+    );
+    assert_eq!(
+        false_output.stdout.as_slice(),
+        boolean_orv1_envelope(Some(false)).as_slice(),
+        "read_present must emit exactly one Boolean FALSE envelope"
+    );
+
+    // Restart preserves both reader outputs byte-identically.
+    machine
+        .restart_server()
+        .expect("installed server must restart cleanly");
+    let null_after = machine
+        .run_as_orna(&["raw-call", read_omitted])
+        .expect("run raw null select after restart");
+    let null_after = require_success("orna raw-call read_omitted after restart", null_after)
+        .expect("null select after restart must succeed");
+    assert!(
+        null_after.stderr.is_empty(),
+        "null select after restart must keep standard error empty"
+    );
+    assert_eq!(
+        null_after.stdout.as_slice(),
+        null_output.stdout.as_slice(),
+        "read_omitted must stay byte-identical after restart"
+    );
+    let false_after = machine
+        .run_as_orna(&["raw-call", read_present])
+        .expect("run raw present select after restart");
+    let false_after = require_success("orna raw-call read_present after restart", false_after)
+        .expect("present select after restart must succeed");
+    assert!(
+        false_after.stderr.is_empty(),
+        "present select after restart must keep standard error empty"
+    );
+    assert_eq!(
+        false_after.stdout.as_slice(),
+        false_output.stdout.as_slice(),
+        "read_present must stay byte-identical after restart"
     );
 }
