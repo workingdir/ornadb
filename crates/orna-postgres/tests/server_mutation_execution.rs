@@ -20,24 +20,26 @@ use orna_compiler::{
     StandardApplicationCheckContext, check, check_standard_application, prepare,
     prepare_standard_application,
 };
+#[cfg(feature = "test-hooks")]
+use orna_core::security::{
+    CATALOGUE_HEALTH_FUNCTION_ID, CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID, ExecuteGrant,
+    InvocationTarget, SecurityAuditKind, SecurityAuditOutcome,
+};
 use orna_core::{
     FieldId, FunctionId, FunctionRevisionId, ObjectId, ParameterId, TypeId,
     revision::{
         ActiveDatabaseRevision, DeployableRevision, RevisionPair, VerifiedStandardLibrarySnapshot,
     },
-    security::{
-        CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID, ExecuteGrant, SecurityAuditKind,
-        SecurityAuditOutcome,
-    },
     source::{SourceBundle, SourceUnit},
     types::ResolvedType,
     value::{EnumValue, FunctionArgument, RecordValue, RuntimeFloat, RuntimeValue},
 };
+#[cfg(feature = "test-hooks")]
+use orna_postgres::AuthenticatedRawCallResult;
 use orna_postgres::{
-    AuthenticatedRawCallResult, PostgresKernel, PostgresKernelError, ServerDeleteCommitState,
-    ServerDeleteError, ServerDeleteResult, ServerInsertCommitState, ServerInsertError,
-    ServerInsertResult, ServerMutationError, ServerUpdateCommitState, ServerUpdateError,
-    ServerUpdateResult,
+    PostgresKernel, PostgresKernelError, ServerDeleteCommitState, ServerDeleteError,
+    ServerDeleteResult, ServerInsertCommitState, ServerInsertError, ServerInsertResult,
+    ServerMutationError, ServerUpdateCommitState, ServerUpdateError, ServerUpdateResult,
 };
 use orna_protocol::encode_active_value;
 use support::{TestDatabase, TestResult, TestSession, failure, with_test_database};
@@ -101,6 +103,7 @@ const MUTATION_SOURCE: &str = "CREATE SCHEMA tasks;\n\
     AS DELETE FROM tasks.owner AS deleted_owner\n\
     WHERE REF(deleted_owner) = p_owner RETURNING TRUE;\n";
 
+#[cfg(feature = "test-hooks")]
 const RAW_INSERT_SOURCE: &str = "CREATE SCHEMA raw_insert_test;\n\
     CREATE TYPE raw_insert_test.probe AS OBJECT (\n\
       stored BOOLEAN NOT NULL,\n\
@@ -119,8 +122,16 @@ const RAW_INSERT_SOURCE: &str = "CREATE SCHEMA raw_insert_test;\n\
     RETURNS ROWS (created REF raw_insert_test.probe)\n\
     SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE\n\
     AS INSERT INTO raw_insert_test.probe AS made (stored, note)\n\
-    VALUES (TRUE, p_name) RETURNING REF(made);\n";
+    VALUES (TRUE, p_name) RETURNING REF(made);\n\
+    CREATE SERVER FUNCTION raw_insert_test.create_flagged(p_stored BOOLEAN)\n\
+    RETURNS ROWS (created REF raw_insert_test.probe)\n\
+    SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE\n\
+    AS INSERT INTO raw_insert_test.probe AS made (stored)\n\
+    VALUES (p_stored) RETURNING REF(made);\n\
+    CREATE CLIENT FUNCTION raw_insert_test.client_boolean()\n\
+    RETURNS BOOLEAN RETURN TRUE;\n";
 
+#[cfg(feature = "test-hooks")]
 const SERVICE_UID: u32 = 61_018;
 
 const RECORD_MUTATION_SOURCE: &str = "CREATE SCHEMA record_mutation;\n\
@@ -2025,6 +2036,7 @@ fn kernel(database: &TestDatabase) -> TestResult<PostgresKernel> {
     Ok(PostgresKernel::from_str(&database.connection_string())?)
 }
 
+#[cfg(feature = "test-hooks")]
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
 async fn authenticated_raw_insert_is_denied_then_granted_and_audited() -> TestResult<()> {
@@ -2116,7 +2128,8 @@ async fn authenticated_raw_insert_is_denied_then_granted_and_audited() -> TestRe
             "raw SELECT must return exactly the stored Boolean true value",
         )?;
 
-        // An allowed-but-invalid raw mutation target is TARGET_UNAVAILABLE.
+        // An allowed-but-invalid raw mutation target closes as an unavailable
+        // authorised raw call target under ADR 0040.
         kernel
             .grant_catalogue_health_service_execute(pair, create_named)
             .await?;
@@ -2127,7 +2140,7 @@ async fn authenticated_raw_insert_is_denied_then_granted_and_audited() -> TestRe
         require(
             matches!(
                 unavailable,
-                PostgresKernelError::RawServerTargetUnavailable { .. }
+                PostgresKernelError::RawCallTargetUnavailable { .. }
             ),
             "an invalid raw mutation target returned the wrong typed error",
         )?;
@@ -2159,6 +2172,374 @@ async fn authenticated_raw_insert_is_denied_then_granted_and_audited() -> TestRe
             "raw dispatch audit kinds and outcomes differ",
         )?;
 
+        // ADR 0040: a parameterised Boolean SERVER INSERT target stores its
+        // Boolean argument. Its exact ParameterId comes from the compiled
+        // active catalogue, never from source text or a fixed identity.
+        let create_flagged = raw_function_id(&applied, &["raw_insert_test", "create_flagged"])?;
+        let create_flagged_definition = applied
+            .catalogue()
+            .function_by_id(create_flagged)
+            .ok_or_else(|| failure("create_flagged is absent from the active catalogue"))?;
+        let stored_parameter = create_flagged_definition
+            .parameter_by_name("p_stored")
+            .ok_or_else(|| failure("create_flagged.p_stored is absent from the active catalogue"))?
+            .id();
+        let create_flagged_revision = create_flagged_definition.current_revision();
+        let mut wrong_parameter_bytes = stored_parameter.to_bytes();
+        wrong_parameter_bytes[0] ^= 0x01;
+        let wrong_parameter = ParameterId::from_bytes(wrong_parameter_bytes);
+        require(
+            wrong_parameter != stored_parameter,
+            "the deliberately wrong parameter must differ from the declared parameter",
+        )?;
+        let wrong_parameter_argument =
+            FunctionArgument::new(wrong_parameter, RuntimeValue::Boolean(true))?;
+        let client_boolean = raw_function_id(&applied, &["raw_insert_test", "client_boolean"])?;
+
+        // Authorisation wins over argument validation: before its grant, even a
+        // wrong-parameter Boolean call is denied and creates no row.
+        let denied_with_argument = kernel
+            .dispatch_authenticated_raw_call_with_arguments(
+                &session,
+                create_flagged,
+                std::slice::from_ref(&wrong_parameter_argument),
+            )
+            .await
+            .expect_err("an ungranted raw INSERT must be denied before argument validation");
+        require(
+            matches!(
+                denied_with_argument,
+                PostgresKernelError::RawExecuteDenied { .. }
+            ),
+            "pre-grant raw INSERT with arguments returned the wrong typed error",
+        )?;
+        let after_denied = kernel
+            .dispatch_authenticated_raw_call(&session, read_probes)
+            .await?;
+        require(
+            matches!(
+                after_denied,
+                AuthenticatedRawCallResult::Server(values)
+                    if values == [RuntimeValue::Boolean(true)]
+            ),
+            "the denied raw INSERT with arguments must not create any row",
+        )?;
+
+        // After the grant, the wrong ParameterId fails as a generic unavailable
+        // raw target, rolls back its savepoint, and keeps the allowed audit.
+        kernel
+            .grant_catalogue_health_service_execute(pair, create_flagged)
+            .await?;
+        let wrong_parameter_unavailable = kernel
+            .dispatch_authenticated_raw_call_with_arguments(
+                &session,
+                create_flagged,
+                std::slice::from_ref(&wrong_parameter_argument),
+            )
+            .await
+            .expect_err("a wrong parameter id must make the raw INSERT target unavailable");
+        require(
+            matches!(
+                wrong_parameter_unavailable,
+                PostgresKernelError::RawCallTargetUnavailable { .. }
+            ),
+            "a wrong parameter id returned the wrong typed error",
+        )?;
+        let after_wrong_parameter = kernel
+            .dispatch_authenticated_raw_call(&session, read_probes)
+            .await?;
+        require(
+            matches!(
+                after_wrong_parameter,
+                AuthenticatedRawCallResult::Server(values)
+                    if values == [RuntimeValue::Boolean(true)]
+            ),
+            "a wrong parameter id must not create any row",
+        )?;
+
+        // A real PostgreSQL row write then fails through an AFTER INSERT
+        // trigger. The raw dispatch pauses after recovery while the harness
+        // installs the trigger, then resumes and fails the write. The typed
+        // ServerInsert database failure must survive the raw dispatch
+        // unchanged, and the tentative row must roll back.
+        let reached = Arc::new(tokio::sync::Barrier::new(2));
+        let resume = Arc::new(tokio::sync::Barrier::new(2));
+        let executor = kernel.clone();
+        let execution_session = session.clone();
+        let triggered_arguments = vec![FunctionArgument::new(
+            stored_parameter,
+            RuntimeValue::Boolean(true),
+        )?];
+        let execution_reached = reached.clone();
+        let execution_resume = resume.clone();
+        let execution = tokio::spawn(async move {
+            executor
+                .dispatch_authenticated_raw_call_with_arguments_and_test_barrier(
+                    &execution_session,
+                    create_flagged,
+                    &triggered_arguments,
+                    execution_reached,
+                    execution_resume,
+                )
+                .await
+        });
+        // The helper waits for recovery, installs the trigger, resumes the
+        // dispatch, awaits the task, and removes the trigger before it
+        // returns. Cleanup runs even when the dispatch task fails, times out,
+        // or unexpectedly commits.
+        let triggered = finish_triggered_failure(
+            &database,
+            probe,
+            TriggerKind::AfterRow,
+            execution,
+            reached,
+            resume,
+            "triggered raw dispatch",
+        )
+        .await?;
+        let (context, source) = match triggered {
+            PostgresKernelError::ServerInsert(ServerInsertError::NotCommitted {
+                context,
+                source,
+            }) => (context, source),
+            other => {
+                return Err(failure(format!(
+                    "triggered raw dispatch returned {other:?}"
+                )));
+            }
+        };
+        require_context(
+            context,
+            applied.pair(),
+            create_flagged,
+            create_flagged_revision,
+        )?;
+        let source = match source.as_ref() {
+            ServerInsertError::Database { source } => source,
+            other => {
+                return Err(failure(format!(
+                    "triggered raw dispatch returned {other:?}"
+                )));
+            }
+        };
+        let code = source
+            .as_db_error()
+            .map(|error| error.code())
+            .ok_or_else(|| failure("triggered raw dispatch has no database error code"))?;
+        require(
+            code == &SqlState::RAISE_EXCEPTION,
+            "triggered raw dispatch error code differs",
+        )?;
+        let after_trigger = kernel
+            .dispatch_authenticated_raw_call(&session, read_probes)
+            .await?;
+        require(
+            matches!(
+                after_trigger,
+                AuthenticatedRawCallResult::Server(values)
+                    if values == [RuntimeValue::Boolean(true)]
+            ),
+            "the triggered raw INSERT must roll back its tentative row",
+        )?;
+
+        // The exact ParameterId binds TRUE then FALSE, each returning a real
+        // probe reference with a distinct nonzero object identity.
+        let inserted_true = kernel
+            .dispatch_authenticated_raw_call_with_arguments(
+                &session,
+                create_flagged,
+                &[FunctionArgument::new(
+                    stored_parameter,
+                    RuntimeValue::Boolean(true),
+                )?],
+            )
+            .await?;
+        let inserted_false = kernel
+            .dispatch_authenticated_raw_call_with_arguments(
+                &session,
+                create_flagged,
+                &[FunctionArgument::new(
+                    stored_parameter,
+                    RuntimeValue::Boolean(false),
+                )?],
+            )
+            .await?;
+        let true_values = match inserted_true {
+            AuthenticatedRawCallResult::Server(values) if values.len() == 1 => values,
+            other => {
+                return Err(failure(format!(
+                    "the TRUE raw INSERT must return exactly one Server value, got {other:?}"
+                )));
+            }
+        };
+        let RuntimeValue::Reference {
+            target: true_target,
+            object: true_object,
+        } = &true_values[0]
+        else {
+            return Err(failure("the TRUE raw INSERT must return a probe reference"));
+        };
+        let false_values = match inserted_false {
+            AuthenticatedRawCallResult::Server(values) if values.len() == 1 => values,
+            other => {
+                return Err(failure(format!(
+                    "the FALSE raw INSERT must return exactly one Server value, got {other:?}"
+                )));
+            }
+        };
+        let RuntimeValue::Reference {
+            target: false_target,
+            object: false_object,
+        } = &false_values[0]
+        else {
+            return Err(failure(
+                "the FALSE raw INSERT must return a probe reference",
+            ));
+        };
+        require(
+            *true_target == probe
+                && *true_object != ObjectId::from_bytes([0; 16])
+                && *false_target == probe
+                && *false_object != ObjectId::from_bytes([0; 16])
+                && true_object != false_object,
+            "argument raw INSERTs must return distinct real probe references",
+        )?;
+
+        // The stored Boolean multiset now contains the parameter-free TRUE, the
+        // argument TRUE, and the argument FALSE, in no particular row order.
+        let multiset = kernel
+            .dispatch_authenticated_raw_call(&session, read_probes)
+            .await?;
+        let multiset = match multiset {
+            AuthenticatedRawCallResult::Server(values) => values,
+            other => {
+                return Err(failure(format!(
+                    "raw SELECT must return Server values, got {other:?}"
+                )));
+            }
+        };
+        require(
+            multiset.len() == 3
+                && multiset
+                    .iter()
+                    .filter(|value| **value == RuntimeValue::Boolean(true))
+                    .count()
+                    == 2
+                && multiset
+                    .iter()
+                    .filter(|value| **value == RuntimeValue::Boolean(false))
+                    .count()
+                    == 1,
+            "raw SELECT must return the parameter-free TRUE plus the argument TRUE and FALSE",
+        )?;
+
+        // One Boolean argument rejects every non-INSERT raw target: the health
+        // intrinsic, an active CLIENT function, and the granted SERVER SELECT.
+        kernel
+            .grant_catalogue_health_service_execute(pair, client_boolean)
+            .await?;
+        for (target, label) in [
+            (CATALOGUE_HEALTH_FUNCTION_ID, "the health intrinsic"),
+            (client_boolean, "the active CLIENT function"),
+            (read_probes, "the granted SERVER SELECT"),
+        ] {
+            let rejected = kernel
+                .dispatch_authenticated_raw_call_with_arguments(
+                    &session,
+                    target,
+                    std::slice::from_ref(&wrong_parameter_argument),
+                )
+                .await
+                .expect_err("a Boolean argument must reject a non-INSERT raw target");
+            require(
+                matches!(
+                    rejected,
+                    PostgresKernelError::RawCallTargetUnavailable { .. }
+                ),
+                format!("{label} with an argument returned the wrong typed error"),
+            )?;
+        }
+        let after_rejected = kernel
+            .dispatch_authenticated_raw_call(&session, read_probes)
+            .await?;
+        let after_rejected = match after_rejected {
+            AuthenticatedRawCallResult::Server(values) => values,
+            other => {
+                return Err(failure(format!(
+                    "raw SELECT must return Server values, got {other:?}"
+                )));
+            }
+        };
+        require(
+            after_rejected.len() == 3
+                && after_rejected
+                    .iter()
+                    .filter(|value| **value == RuntimeValue::Boolean(true))
+                    .count()
+                    == 2
+                && after_rejected
+                    .iter()
+                    .filter(|value| **value == RuntimeValue::Boolean(false))
+                    .count()
+                    == 1,
+            "rejected argument calls must not change any stored row",
+        )?;
+
+        // Audit index 7 is the denied wrong-parameter call before its grant.
+        // Audit index 9 is the allowed wrong-parameter call: its audit survived
+        // the savepoint rollback. Audit index 11 is the triggered write
+        // failure: its allowed audit survived that rollback, then every later
+        // dispatch was allowed.
+        let audits = kernel.recover_security_audit_events().await?;
+        require(audits.len() == 20, "raw dispatch audit count differs")?;
+        require(
+            audits[0].decision().kind() == SecurityAuditKind::Authentication
+                && audits[0].decision().outcome() == SecurityAuditOutcome::Allowed
+                && audits[1].decision().kind() == SecurityAuditKind::Execute
+                && audits[1].decision().outcome() == SecurityAuditOutcome::Denied
+                && audits[2..7].iter().all(|event| {
+                    event.decision().kind() == SecurityAuditKind::Execute
+                        && event.decision().outcome() == SecurityAuditOutcome::Allowed
+                })
+                && audits[7].decision().kind() == SecurityAuditKind::Execute
+                && audits[7].decision().outcome() == SecurityAuditOutcome::Denied
+                && audits[7]
+                    .decision()
+                    .target()
+                    .map(InvocationTarget::function)
+                    == Some(create_flagged)
+                && audits[8..].iter().all(|event| {
+                    event.decision().kind() == SecurityAuditKind::Execute
+                        && event.decision().outcome() == SecurityAuditOutcome::Allowed
+                })
+                && audits[9]
+                    .decision()
+                    .target()
+                    .map(InvocationTarget::function)
+                    == Some(create_flagged)
+                && audits[11]
+                    .decision()
+                    .target()
+                    .map(InvocationTarget::function)
+                    == Some(create_flagged)
+                && audits[16]
+                    .decision()
+                    .target()
+                    .map(InvocationTarget::function)
+                    == Some(CATALOGUE_HEALTH_FUNCTION_ID)
+                && audits[17]
+                    .decision()
+                    .target()
+                    .map(InvocationTarget::function)
+                    == Some(client_boolean)
+                && audits[18]
+                    .decision()
+                    .target()
+                    .map(InvocationTarget::function)
+                    == Some(read_probes),
+            "raw dispatch audit kinds, outcomes, and targets differ",
+        )?;
+
         // Public recovery proves the exact fixed-service grant set.
         let mut grants = kernel
             .recover_security_snapshot()
@@ -2170,11 +2551,13 @@ async fn authenticated_raw_insert_is_denied_then_granted_and_audited() -> TestRe
             ExecuteGrant::new(CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID, create_probe),
             ExecuteGrant::new(CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID, read_probes),
             ExecuteGrant::new(CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID, create_named),
+            ExecuteGrant::new(CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID, create_flagged),
+            ExecuteGrant::new(CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID, client_boolean),
         ];
         expected.sort();
         require(
             grants == expected,
-            "recovered grants must contain exactly the three fixed-service grants",
+            "recovered grants must contain exactly the five fixed-service grants",
         )?;
 
         Ok(())
@@ -4287,6 +4670,7 @@ fn name_is(actual: &[String], expected: &[&str]) -> bool {
         .eq(expected.iter().copied())
 }
 
+#[cfg(feature = "test-hooks")]
 /// The canonical identity of one active catalogue function by exact name.
 fn raw_function_id(active: &ActiveDatabaseRevision, name: &[&str]) -> TestResult<FunctionId> {
     active
