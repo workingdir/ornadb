@@ -8076,3 +8076,606 @@ fn installed_scalar_insert_binds_exact_values_and_survives_replay_and_restart() 
     )
     .expect("read_bytes must return exactly two stored byte sequences");
 }
+
+/// Decode a stream of nullable ORV1 scalar envelopes of one exact type.
+///
+/// Every envelope must start with the ORV1 marker, carry the exact standard
+/// type identity, and declare a complete payload. A typed NULL envelope uses
+/// tag `0x00` with payload length zero and decodes as `None`. Any other
+/// envelope must carry the exact scalar `tag` and decodes as `Some` with its
+/// raw payload bytes. A wrong tag, a wrong type identity, a truncated
+/// payload, or trailing bytes fail the whole stream.
+fn decode_nullable_scalar_payloads(
+    bytes: &[u8],
+    tag: u8,
+    type_byte: u8,
+) -> Option<Vec<Option<Vec<u8>>>> {
+    let mut values = Vec::new();
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let remaining = &bytes[offset..];
+        if remaining.len() < 25
+            || &remaining[0..4] != b"ORV1"
+            || remaining[5..20] != [0; 15]
+            || remaining[20] != type_byte
+        {
+            return None;
+        }
+        let length = u32::from_be_bytes(remaining[21..25].try_into().ok()?) as usize;
+        if remaining.len() < 25 + length {
+            return None;
+        }
+        match remaining[4] {
+            0x00 if length == 0 => values.push(None),
+            value if value == tag => values.push(Some(remaining[25..25 + length].to_vec())),
+            _ => return None,
+        }
+        offset += 25 + length;
+    }
+    Some(values)
+}
+
+/// Decode a stream of nullable canonical ORV1 Integer envelopes in order.
+///
+/// A typed NULL is `None`; a value must be exactly four payload bytes and
+/// decodes as `Some(i32)`. Returns `None` when any envelope is malformed,
+/// wrong-length, or trailing bytes remain.
+fn decode_nullable_integer_envelopes(bytes: &[u8]) -> Option<Vec<Option<i32>>> {
+    let values = decode_nullable_scalar_payloads(bytes, 0x03, 0x02)?;
+    let mut integers = Vec::with_capacity(values.len());
+    for payload in values {
+        match payload {
+            None => integers.push(None),
+            Some(bytes) => integers.push(Some(i32::from_be_bytes(bytes.try_into().ok()?))),
+        }
+    }
+    Some(integers)
+}
+
+/// Decode a stream of nullable canonical ORV1 Text envelopes in order.
+///
+/// A typed NULL is `None`; a value must be exact UTF-8 and decodes as
+/// `Some(String)`. Returns `None` when any envelope is malformed, not valid
+/// UTF-8, or trailing bytes remain.
+fn decode_nullable_text_envelopes(bytes: &[u8]) -> Option<Vec<Option<String>>> {
+    let values = decode_nullable_scalar_payloads(bytes, 0x06, 0x06)?;
+    let mut texts = Vec::with_capacity(values.len());
+    for payload in values {
+        match payload {
+            None => texts.push(None),
+            Some(bytes) => texts.push(Some(String::from_utf8(bytes).ok()?)),
+        }
+    }
+    Some(texts)
+}
+
+/// Prove one added nullable scalar field journey through the installed
+/// product's public apply, grant, raw-call, replay, and restart path.
+///
+/// The fixture is `fixtures/product_test.orna` applied first, then the exact
+/// checked-in expanded fixture named by `fixture_name`, which keeps
+/// `stored BOOLEAN NOT NULL` and adds one nullable `added` field of the scalar
+/// type. The journey asserts:
+///
+/// * the original apply reports exactly the two sorted create/read mappings,
+///   both raw calls are denied before grant and succeed silently after, one
+///   create stores TRUE, and the reader returns exactly one TRUE;
+/// * the expanded apply reports exactly four sorted mappings, the two
+///   original identities stay stable, exactly `create_probe_with_added`
+///   declares the canonical `p_added` parameter while every other function
+///   declares none, the two new functions are denied then granted;
+/// * the pre-transition row reads as one typed NULL, the unchanged old
+///   creator adds a second typed NULL, and the new creator with the exact
+///   explicit argument envelope stores `explicit_value`;
+/// * the three creates share one nonzero target type and pairwise distinct
+///   object identities, `read_added` decodes as the unordered
+///   [None, None, Some(explicit)] multiset, and `read_probes` stays all TRUE;
+/// * an exact expanded replay keeps the complete function and parameter
+///   discovery vector and every value without any re-grant;
+/// * a restart preserves the multiset and every callable grant, after which
+///   the old creator adds a fourth typed NULL and the new creator adds a
+///   second explicit value, leaving [None, None, None, Some, Some] unordered
+///   with all five stored rows TRUE.
+fn run_added_nullable_scalar_journey<T>(
+    fixture_name: &str,
+    explicit_envelope: Vec<u8>,
+    decode_added: impl Fn(&[u8]) -> Option<Vec<Option<T>>>,
+    explicit_value: T,
+) -> Result<(), Error>
+where
+    T: Ord + Clone + fmt::Debug,
+{
+    let package = std::env::var("ORNA_SYSTEM_TEST_DEBIAN_PACKAGE")
+        .expect("ORNA_SYSTEM_TEST_DEBIAN_PACKAGE must point at the reproduced .deb package");
+    let artifact = FrozenPackageArtifact::new(PackageFormat::Debian, &package)
+        .expect("freeze the reproduced Debian package");
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+    let original =
+        fs::read(manifest.join("product_test.orna")).expect("read the checked-in product fixture");
+    let expanded =
+        fs::read(manifest.join(fixture_name)).expect("read the checked-in added nullable fixture");
+
+    let machine = InstalledMachine::start(&artifact, &original)
+        .expect("start the installed Debian test machine");
+
+    // Apply the original one-field source and require the two sorted mappings.
+    let apply = machine
+        .run_as_orna(&["source", "apply", FIXTURE_PATH])
+        .expect("run installed source apply");
+    let apply = require_success("orna source apply", apply).expect("source apply must succeed");
+    assert!(
+        apply.stderr.is_empty(),
+        "source apply must keep standard error empty"
+    );
+    let document = parse_apply_document(&apply.stdout).expect("source apply JSON must parse");
+    let expected_order = [
+        vec!["product_test".to_string(), "create_probe".to_string()],
+        vec!["product_test".to_string(), "read_probes".to_string()],
+    ];
+    let actual_order = document
+        .functions
+        .iter()
+        .map(|function| function.names().to_vec())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual_order, expected_order,
+        "apply must report the two function entries sorted by qualified name"
+    );
+    let create_probe = document
+        .function_id(&["product_test", "create_probe"])
+        .expect("apply must report create_probe");
+    let read_probes = document
+        .function_id(&["product_test", "read_probes"])
+        .expect("apply must report read_probes");
+    assert_ne!(
+        create_probe, read_probes,
+        "the two original identities must be pairwise distinct"
+    );
+    for function in [create_probe, read_probes] {
+        let denied = machine
+            .run_as_orna(&["raw-call", function])
+            .expect("run denied raw call");
+        assert_denied("raw call before grant", denied).expect("raw call must be denied");
+    }
+    for function in [create_probe, read_probes] {
+        let granted = machine
+            .run_as_orna(&["security", "grant-execute", function])
+            .expect("run installed grant command");
+        require_silent_success("orna security grant-execute", granted)
+            .expect("grant must succeed silently");
+    }
+
+    // One live TRUE row through the unchanged creator.
+    let first_call = machine
+        .run_as_orna(&["raw-call", create_probe])
+        .expect("run first create call");
+    let first_call = require_value_success("orna raw-call create_probe first", first_call)
+        .expect("first create must succeed");
+    let first_probe = parse_reference_envelope(&first_call.stdout)
+        .expect("first create must return one ORV reference");
+    let first_stored =
+        decode_reader_values(&machine, read_probes, "orna raw-call read_probes first")
+            .expect("first read must decode");
+    assert_eq!(first_stored, vec![true], "the first row must store TRUE");
+
+    // Replace the fixture with the complete expanded source and apply it.
+    machine
+        .write_fixture(&expanded)
+        .expect("replace the fixture with the expanded source");
+    let expanded_apply = machine
+        .run_as_orna(&["source", "apply", FIXTURE_PATH])
+        .expect("run installed source apply on the expanded fixture");
+    let expanded_apply = require_success("orna source apply expanded", expanded_apply)
+        .expect("expanded source apply must succeed");
+    assert!(
+        expanded_apply.stderr.is_empty(),
+        "expanded source apply must keep standard error empty"
+    );
+    let expanded_document = parse_apply_document(&expanded_apply.stdout)
+        .expect("expanded source apply JSON must parse");
+    let expanded_order = [
+        vec!["product_test".to_string(), "create_probe".to_string()],
+        vec![
+            "product_test".to_string(),
+            "create_probe_with_added".to_string(),
+        ],
+        vec!["product_test".to_string(), "read_added".to_string()],
+        vec!["product_test".to_string(), "read_probes".to_string()],
+    ];
+    let actual_expanded_order = expanded_document
+        .functions
+        .iter()
+        .map(|function| function.names().to_vec())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual_expanded_order, expanded_order,
+        "the expanded apply must report the four function entries sorted by qualified name"
+    );
+    let expanded_create_probe = expanded_document
+        .function_id(&["product_test", "create_probe"])
+        .expect("expanded apply must report create_probe");
+    let expanded_read_probes = expanded_document
+        .function_id(&["product_test", "read_probes"])
+        .expect("expanded apply must report read_probes");
+    assert_eq!(
+        expanded_create_probe, create_probe,
+        "create_probe identity must be stable across the field addition"
+    );
+    assert_eq!(
+        expanded_read_probes, read_probes,
+        "read_probes identity must be stable across the field addition"
+    );
+    let create_probe_with_added = expanded_document
+        .function_id(&["product_test", "create_probe_with_added"])
+        .expect("expanded apply must report create_probe_with_added");
+    let read_added = expanded_document
+        .function_id(&["product_test", "read_added"])
+        .expect("expanded apply must report read_added");
+    for (left, right) in [
+        (create_probe_with_added, read_added),
+        (create_probe_with_added, create_probe),
+        (create_probe_with_added, read_probes),
+        (read_added, create_probe),
+        (read_added, read_probes),
+    ] {
+        assert_ne!(
+            left, right,
+            "the new identities must be pairwise distinct and distinct from both originals"
+        );
+    }
+
+    // Exactly the new creator declares the canonical p_added parameter; every
+    // other function declares none.
+    let p_added = expanded_document
+        .parameter_id(&["product_test", "create_probe_with_added"], "p_added")
+        .expect("expanded apply must report create_probe_with_added.p_added");
+    for names in [
+        ["product_test", "create_probe"],
+        ["product_test", "read_added"],
+        ["product_test", "read_probes"],
+    ] {
+        let entry = expanded_document
+            .functions
+            .iter()
+            .find(|function| {
+                function
+                    .names()
+                    .iter()
+                    .map(String::as_str)
+                    .eq(names.iter().copied())
+            })
+            .expect("expanded apply must report the unchanged entry");
+        assert!(
+            entry.parameters().is_empty(),
+            "the unchanged functions must declare no parameters"
+        );
+    }
+    let added_entry = expanded_document
+        .functions
+        .iter()
+        .find(|function| {
+            function.names().iter().map(String::as_str).eq([
+                "product_test",
+                "create_probe_with_added",
+            ]
+            .iter()
+            .copied())
+        })
+        .expect("expanded apply must report create_probe_with_added");
+    assert_eq!(
+        added_entry.parameters().len(),
+        1,
+        "the new creator must declare exactly one parameter"
+    );
+    assert_eq!(
+        added_entry.parameters()[0].name(),
+        "p_added",
+        "the new creator must declare exactly the p_added parameter"
+    );
+    assert_eq!(
+        added_entry.parameters()[0].parameter_id(),
+        p_added,
+        "the declared p_added identity must equal the discovered identity"
+    );
+
+    // The new functions are denied before their explicit grants.
+    for function in [create_probe_with_added, read_added] {
+        let denied = machine
+            .run_as_orna(&["raw-call", function])
+            .expect("run denied new raw call");
+        assert_denied("new raw call before grant", denied).expect("new raw call must be denied");
+    }
+    for function in [create_probe_with_added, read_added] {
+        let granted = machine
+            .run_as_orna(&["security", "grant-execute", function])
+            .expect("run installed grant command for the new function");
+        require_silent_success("orna security grant-execute new", granted)
+            .expect("new grant must succeed silently");
+    }
+
+    // The pre-transition row reads as one typed NULL.
+    let mut added_before = run_reader_and_decode(
+        &machine,
+        read_added,
+        "orna raw-call read_added first",
+        |bytes| decode_added(bytes),
+        "nullable scalar envelopes",
+    )
+    .expect("first added read must decode");
+    added_before.sort();
+    assert_eq!(
+        added_before,
+        vec![None],
+        "the pre-transition row must read as a typed NULL"
+    );
+
+    // The unchanged old creator after the transition yields another NULL.
+    let second_call = machine
+        .run_as_orna(&["raw-call", create_probe])
+        .expect("run unchanged old creator call");
+    let second_call = require_value_success("orna raw-call create_probe second", second_call)
+        .expect("old creator must succeed after the transition");
+    let second_probe = parse_reference_envelope(&second_call.stdout)
+        .expect("second create must return one ORV reference");
+    let mut added_two = run_reader_and_decode(
+        &machine,
+        read_added,
+        "orna raw-call read_added two",
+        |bytes| decode_added(bytes),
+        "nullable scalar envelopes",
+    )
+    .expect("two-row added read must decode");
+    added_two.sort();
+    assert_eq!(
+        added_two,
+        vec![None, None],
+        "the old creator's omitted field must read as NULL"
+    );
+
+    // The new creator yields its explicit scalar value.
+    let third_call = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", create_probe_with_added, p_added],
+            &explicit_envelope,
+        )
+        .expect("run new creator call");
+    let third_call = require_value_success("orna raw-call create_probe_with_added", third_call)
+        .expect("new creator must succeed");
+    let third_probe = parse_reference_envelope(&third_call.stdout)
+        .expect("new creator must return one ORV reference");
+    let mut added_three = run_reader_and_decode(
+        &machine,
+        read_added,
+        "orna raw-call read_added three",
+        |bytes| decode_added(bytes),
+        "nullable scalar envelopes",
+    )
+    .expect("three-row added read must decode");
+    added_three.sort();
+    assert_eq!(
+        added_three,
+        vec![None, None, Some(explicit_value.clone())],
+        "the new creator must store its explicit scalar"
+    );
+    let mut stored_three =
+        decode_reader_values(&machine, read_probes, "orna raw-call read_probes three")
+            .expect("three-row stored read must decode");
+    stored_three.sort();
+    assert_eq!(
+        stored_three,
+        vec![true, true, true],
+        "all three rows must store TRUE"
+    );
+
+    // All three references share one nonzero probe target type and distinct
+    // nonzero object identities.
+    assert!(
+        first_probe.type_id != [0; 16]
+            && second_probe.type_id != [0; 16]
+            && third_probe.type_id != [0; 16],
+        "all three probes must name the real nonzero target type"
+    );
+    assert!(
+        !first_probe.object_is_zero()
+            && !second_probe.object_is_zero()
+            && !third_probe.object_is_zero(),
+        "all three probes must name real nonzero rows"
+    );
+    assert_eq!(
+        first_probe.type_id, second_probe.type_id,
+        "the first and second probes must share the target type"
+    );
+    assert_eq!(
+        second_probe.type_id, third_probe.type_id,
+        "the second and third probes must share the target type"
+    );
+    assert_ne!(
+        first_probe.object, second_probe.object,
+        "the first and second probes must be distinct objects"
+    );
+    assert_ne!(
+        second_probe.object, third_probe.object,
+        "the second and third probes must be distinct objects"
+    );
+    assert_ne!(
+        first_probe.object, third_probe.object,
+        "the first and third probes must be distinct objects"
+    );
+
+    // Exact expanded-source replay without regrant keeps the complete
+    // discovery vector and every value.
+    let replay = machine
+        .run_as_orna(&["source", "apply", FIXTURE_PATH])
+        .expect("run installed source apply on the expanded fixture");
+    let replay =
+        require_success("orna source apply replay", replay).expect("expanded replay must succeed");
+    assert!(
+        replay.stderr.is_empty(),
+        "expanded replay must keep standard error empty"
+    );
+    let replay_document =
+        parse_apply_document(&replay.stdout).expect("expanded replay JSON must parse");
+    assert_eq!(
+        replay_document.functions, expanded_document.functions,
+        "the replay must keep the complete function and parameter discovery vector"
+    );
+    assert_eq!(
+        replay_document
+            .parameter_id(&["product_test", "create_probe_with_added"], "p_added")
+            .expect("the replay must keep create_probe_with_added.p_added"),
+        p_added,
+        "the replay must keep the exact canonical parameter identity"
+    );
+    let mut added_replay = run_reader_and_decode(
+        &machine,
+        read_added,
+        "orna raw-call read_added after replay",
+        |bytes| decode_added(bytes),
+        "nullable scalar envelopes",
+    )
+    .expect("post-replay added read must decode");
+    added_replay.sort();
+    assert_eq!(
+        added_replay,
+        vec![None, None, Some(explicit_value.clone())],
+        "the replay must preserve the added multiset"
+    );
+    let mut stored_replay = decode_reader_values(
+        &machine,
+        read_probes,
+        "orna raw-call read_probes after replay",
+    )
+    .expect("post-replay stored read must decode");
+    stored_replay.sort();
+    assert_eq!(
+        stored_replay,
+        vec![true, true, true],
+        "the replay must preserve the stored values"
+    );
+
+    // A restart preserves the unordered multiset and every callable grant.
+    machine
+        .restart_server()
+        .expect("installed server must restart cleanly");
+    let mut added_restart = run_reader_and_decode(
+        &machine,
+        read_added,
+        "orna raw-call read_added after restart",
+        |bytes| decode_added(bytes),
+        "nullable scalar envelopes",
+    )
+    .expect("post-restart added read must decode");
+    added_restart.sort();
+    assert_eq!(
+        added_restart,
+        vec![None, None, Some(explicit_value.clone())],
+        "the restart must preserve the added multiset"
+    );
+    let mut stored_restart = decode_reader_values(
+        &machine,
+        read_probes,
+        "orna raw-call read_probes after restart",
+    )
+    .expect("post-restart stored read must decode");
+    stored_restart.sort();
+    assert_eq!(
+        stored_restart,
+        vec![true, true, true],
+        "the restart must preserve the stored values"
+    );
+
+    // Every callable grant survives the restart: both creators still work
+    // and the readers follow the evolving multiset.
+    let fourth_call = machine
+        .run_as_orna(&["raw-call", create_probe])
+        .expect("run old creator after restart");
+    require_value_success("orna raw-call create_probe after restart", fourth_call)
+        .expect("old creator must succeed after restart");
+    let mut added_four = run_reader_and_decode(
+        &machine,
+        read_added,
+        "orna raw-call read_added four",
+        |bytes| decode_added(bytes),
+        "nullable scalar envelopes",
+    )
+    .expect("four-row added read must decode");
+    added_four.sort();
+    assert_eq!(
+        added_four,
+        vec![None, None, None, Some(explicit_value.clone())],
+        "the old creator grant must stay callable"
+    );
+    let fifth_call = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", create_probe_with_added, p_added],
+            &explicit_envelope,
+        )
+        .expect("run new creator after restart");
+    require_value_success(
+        "orna raw-call create_probe_with_added after restart",
+        fifth_call,
+    )
+    .expect("new creator must succeed after restart");
+    let mut added_five = run_reader_and_decode(
+        &machine,
+        read_added,
+        "orna raw-call read_added five",
+        |bytes| decode_added(bytes),
+        "nullable scalar envelopes",
+    )
+    .expect("five-row added read must decode");
+    added_five.sort();
+    assert_eq!(
+        added_five,
+        vec![
+            None,
+            None,
+            None,
+            Some(explicit_value.clone()),
+            Some(explicit_value.clone()),
+        ],
+        "the new creator grant must stay callable"
+    );
+    let mut stored_five =
+        decode_reader_values(&machine, read_probes, "orna raw-call read_probes five")
+            .expect("five-row stored read must decode");
+    stored_five.sort();
+    assert_eq!(
+        stored_five,
+        vec![true, true, true, true, true],
+        "all five rows must store TRUE"
+    );
+
+    Ok(())
+}
+
+/// Prove that adding a nullable INTEGER field keeps the pre-transition row
+/// as a typed NULL and binds the exact `i32::MIN` argument through the
+/// installed product's public apply, grant, raw-call, replay, and restart
+/// path.
+#[test]
+#[ignore = "requires Docker, ORNA_SYSTEM_TEST_DEBIAN_PACKAGE, and the installed orna executable"]
+fn installed_added_nullable_integer_field_survives_live_rows_grants_replay_and_restart() {
+    run_added_nullable_scalar_journey(
+        "product_test_added_nullable_integer.orna",
+        integer_orv1_envelope(i32::MIN),
+        decode_nullable_integer_envelopes,
+        i32::MIN,
+    )
+    .expect("the added nullable INTEGER journey must pass");
+}
+
+/// Prove that adding a nullable TEXT field keeps the pre-transition row as a
+/// typed NULL and binds the exact `EXACT_TEXT` argument through the installed
+/// product's public apply, grant, raw-call, replay, and restart path.
+#[test]
+#[ignore = "requires Docker, ORNA_SYSTEM_TEST_DEBIAN_PACKAGE, and the installed orna executable"]
+fn installed_added_nullable_text_field_survives_live_rows_grants_replay_and_restart() {
+    run_added_nullable_scalar_journey(
+        "product_test_added_nullable_text.orna",
+        text_orv1_envelope(EXACT_TEXT),
+        decode_nullable_text_envelopes,
+        EXACT_TEXT.to_string(),
+    )
+    .expect("the added nullable TEXT journey must pass");
+}
