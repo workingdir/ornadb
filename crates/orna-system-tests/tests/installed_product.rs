@@ -5599,9 +5599,12 @@ fn installed_additive_source_activates_isolated_new_schema_with_stable_old_ident
 /// with a syntactically valid synthetic owner reference.
 ///
 /// After granting the three exact functions, `create_owner` returns two
-/// distinct real owner references with one nonzero target type. Inserting an
-/// assignment for owner A returns a real assignment reference with a
-/// different target type; retrying owner A fails with the exact public
+/// distinct real owner references with one nonzero target type. A
+/// syntactically valid owner reference to a deterministically missing nonzero
+/// object identity closes as the exact public `INTERNAL_FAILURE` line before
+/// any assignment exists, and the public reader proves zero assignment rows.
+/// Inserting an assignment for owner A returns a real assignment reference
+/// with a different target type; retrying owner A fails with the exact public
 /// `INTERNAL_FAILURE` line, and the public reference reader returns exactly
 /// owner A. Inserting owner B succeeds, and the reader returns the unordered
 /// multiset {A, B}. Reapplying the exact same source keeps the complete
@@ -5609,9 +5612,13 @@ fn installed_additive_source_activates_isolated_new_schema_with_stable_old_ident
 /// grant. A restart preserves both rows. Retrying owner A through the
 /// original identities and the retained grant fails again with the exact
 /// `INTERNAL_FAILURE` line, and the reader still returns exactly {A, B}.
+/// Repeating the same missing-object call after exact replay and again
+/// after restart fails identically through the retained grant, and the
+/// reader still returns exactly {A, B}.
 ///
-/// The test claims only public uniqueness, rollback, identity and grant
-/// retention, replay, restart, and persistence through the packaged
+/// The test claims only public uniqueness, rollback, missing-target
+/// rejection across replay and restart, identity and grant retention,
+/// replay, restart, and persistence through the packaged
 /// `/usr/bin/orna` commands and raw-call ORV envelopes. It makes no claim
 /// about private SQLSTATEs, constraint names, private audit records, the
 /// private conflict type, physical storage, or row ordering.
@@ -5790,6 +5797,38 @@ fn installed_unique_reference_insert_rolls_back_and_persists_across_replay_and_r
         "the two owners must be distinct objects"
     );
 
+    // A missing-referenced-object proof: one syntactically valid owner
+    // reference to a deterministically missing nonzero object identity must
+    // close as a public INTERNAL_FAILURE and roll back before any assignment
+    // exists. Only the two observed owner objects exist in this isolated
+    // machine, so a fixed candidate that differs from both is guaranteed to
+    // name no row.
+    let missing_object = [[0xaa; 16], [0xbb; 16], [0xcc; 16], [0xdd; 16]]
+        .into_iter()
+        .find(|candidate| *candidate != owner_a.object && *candidate != owner_b.object)
+        .expect("a fixed candidate must differ from both observed owner object ids");
+    let missing_selector = reference_orv1_envelope(owner_a.type_id, missing_object);
+    let missing = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", create_assignment, owner_parameter],
+            &missing_selector,
+        )
+        .expect("run missing-owner assignment call");
+    assert_exact_raw_call_failure(
+        "orna raw-call create_assignment missing owner",
+        missing,
+        "raw call failed: INTERNAL_FAILURE\n",
+    )
+    .expect("the missing-owner assignment must close as a public INTERNAL_FAILURE");
+    let empty_after_missing = machine
+        .run_as_orna(&["raw-call", read_assignment_owners])
+        .expect("run assignment reader after missing owner");
+    require_silent_success(
+        "orna raw-call read_assignment_owners after missing owner",
+        empty_after_missing,
+    )
+    .expect("the missing-owner assignment must leave zero assignment rows");
+
     // Insert an assignment for owner A: the created assignment reference has
     // a different target type and a nonzero object identity.
     let owner_a_selector = reference_orv1_envelope(owner_a.type_id, owner_a.object);
@@ -5886,13 +5925,29 @@ fn installed_unique_reference_insert_rolls_back_and_persists_across_replay_and_r
         replay_document.functions, document.functions,
         "the replay must keep the complete function and parameter discovery vector"
     );
+
+    // The same missing-object call fails identically immediately after the
+    // replay, before any restart, proving the rejection survives exact
+    // source replay and its rollback keeps both rows.
+    let missing_after_replay = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", create_assignment, owner_parameter],
+            &missing_selector,
+        )
+        .expect("run missing-owner assignment call after replay");
+    assert_exact_raw_call_failure(
+        "orna raw-call create_assignment missing owner after replay",
+        missing_after_replay,
+        "raw call failed: INTERNAL_FAILURE\n",
+    )
+    .expect("the post-replay missing-owner assignment must close as a public INTERNAL_FAILURE");
     assert_reference_reader_returns(
         &machine,
         read_assignment_owners,
         &[&owner_a, &owner_b],
-        "orna raw-call read_assignment_owners after replay",
+        "orna raw-call read_assignment_owners after replay and missing owner",
     )
-    .expect("the replay must preserve both assignment rows");
+    .expect("the post-replay missing-owner call must preserve exactly the owners A and B");
 
     // A restart keeps grants and both rows.
     machine
@@ -5921,13 +5976,28 @@ fn installed_unique_reference_insert_rolls_back_and_persists_across_replay_and_r
         "raw call failed: INTERNAL_FAILURE\n",
     )
     .expect("the post-restart duplicate must close as a public INTERNAL_FAILURE");
+
+    // Repeating the same missing-object call after restart fails identically
+    // through the original identities and the retained grant.
+    let missing_after_restart = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", create_assignment, owner_parameter],
+            &missing_selector,
+        )
+        .expect("run missing-owner assignment call after restart");
+    assert_exact_raw_call_failure(
+        "orna raw-call create_assignment missing owner after restart",
+        missing_after_restart,
+        "raw call failed: INTERNAL_FAILURE\n",
+    )
+    .expect("the post-restart missing-owner assignment must close as a public INTERNAL_FAILURE");
     assert_reference_reader_returns(
         &machine,
         read_assignment_owners,
         &[&owner_a, &owner_b],
-        "orna raw-call read_assignment_owners final",
+        "orna raw-call read_assignment_owners after restart and missing owner",
     )
-    .expect("the final reader must still return exactly the unordered owner multiset A and B");
+    .expect("the post-restart missing-owner call must preserve exactly the owners A and B");
 }
 
 /// One decoded ORV1 reference envelope, or one typed NULL whose nominal type
