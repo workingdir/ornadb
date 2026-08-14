@@ -52,7 +52,7 @@ jobs:
           ORNA_SYSTEM_TEST_DEBIAN_PACKAGE: "${{ github.workspace }}/target/debian-package/orna_0.1.0-1_amd64.deb"
         run: >-
           cargo test --frozen --package orna-system-tests --test installed_product
-          -- --ignored --exact installed_source_apply_grants_raw_insert_and_persists_across_restart
+          -- --ignored --test-threads=1
       - name: Upload the reproduced package and manifests
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
