@@ -4,7 +4,7 @@ Section: database
 Priority: optional
 Architecture: amd64
 Maintainer: Kieran Drewett <kieran@drewett.dev>
-Depends: libc6 (>= 2.36), libgcc-s1, systemd
+Depends: libc6:amd64 (>= 2.36), libc6:amd64 (<< 2.37), libc-bin (>= 2.36), libc-bin (<< 2.37), dash, libgcc-s1, systemd
 Homepage: https://github.com/workingdir/ornadb
 Description: OrnaDB database server
  OrnaDB is a typed database server with a statically linked private
