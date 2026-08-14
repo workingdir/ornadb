@@ -37,7 +37,10 @@ use orna_core::{
     types::ResolvedType,
     value::{EnumValue, OpaqueValue, RecordValue, RuntimeValue},
 };
-use orna_postgres::{AuthenticatedRawCallResult, PostgresKernel, PostgresKernelError};
+use orna_postgres::{
+    AuthenticatedRawCallResult, PostgresKernel, PostgresKernelError, ServerInsertError,
+    ServerMutationError,
+};
 use orna_protocol::{
     CallFailure, Channel, ClientFrame, Event, RawCall, ServerAction, ServerFrame,
     decode_active_server_frame, decode_registered_server_frame, decode_server_frame,
@@ -88,6 +91,18 @@ const RAW_CLIENT_FUNCTION_SOURCE: &str = "CREATE SCHEMA app;\n\
     AS DELETE FROM app.flag AS alias\n\
     WHERE REF(alias) = p_flag\n\
     RETURNING TRUE;\n\
+    CREATE TYPE app.assignment AS OBJECT (\n\
+      owner REF app.flag NOT NULL UNIQUE, marker BOOLEAN NOT NULL\n\
+    );\n\
+    CREATE SERVER FUNCTION app.create_assignment(p_flag REF app.flag)\n\
+    RETURNS ROWS (created_assignment REF app.assignment)\n\
+    SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE\n\
+    AS INSERT INTO app.assignment AS made_assignment (owner, marker)\n\
+    VALUES (p_flag, TRUE) RETURNING REF(made_assignment);\n\
+    CREATE SERVER FUNCTION app.read_assignments()\n\
+    RETURNS ROWS (marker BOOLEAN)\n\
+    SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n\
+    AS SELECT assignment.marker FROM app.assignment assignment;\n\
     CREATE CLIENT FUNCTION app.enabled() RETURNS BOOLEAN RETURN TRUE;\n";
 const RAW_CLIENT_USER: PrincipalId = PrincipalId::from_bytes([0x71; 16]);
 const RAW_CLIENT_UNGRANTED_USER: PrincipalId = PrincipalId::from_bytes([0x72; 16]);
@@ -1338,6 +1353,344 @@ async fn server_raw_reference_mutation_authority_selection_and_audit() -> TestRe
         require(
             recovered.pair() == active.pair(),
             "server reference mutations must not change the active revision pair",
+        )?;
+
+        require_no_database_sessions(&database).await
+    })
+    .await
+}
+
+/// One authenticated raw reference-INSERT authority journey through the
+/// public server adapter.
+///
+/// The test installs the shared raw CLIENT fixture plus the additive
+/// `app.assignment` unique-reference pair, discovers every identity from the
+/// active catalogue, and creates one real owner reference through the public
+/// adapter. A wrong-parameter reference call is denied before its grant and
+/// creates no assignment. After the grant, the same wrong parameter closes as
+/// `CallFailure::TargetUnavailable` without adding a row, a correct reference
+/// call succeeds and returns one assignment reference, and the duplicate call
+/// is redacted as public `CallFailure::InternalFailure` while retaining the
+/// private typed `UniqueReferenceConflict` source. The public reader exposes
+/// exactly one dependent row after the duplicate. The exact audit
+/// outcome/target sequence and the unchanged active revision are asserted.
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn server_raw_reference_insert_authority() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = kernel(&database)?;
+        let (active, _standard_upgrade, _client_function, server_function) =
+            install_raw_client_fixture(&kernel).await?;
+        let flag_type = active
+            .catalogue()
+            .object_types()
+            .iter()
+            .find(|object| object.name().parts() == ["app", "flag"])
+            .ok_or_else(|| failure("the raw reference INSERT fixture is missing app.flag"))?
+            .id();
+        let assignment_type = active
+            .catalogue()
+            .object_types()
+            .iter()
+            .find(|object| object.name().parts() == ["app", "assignment"])
+            .ok_or_else(|| failure("the raw reference INSERT fixture is missing app.assignment"))?
+            .id();
+        let create_flagged = active
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|function| function.name().parts() == ["app", "create_flagged"])
+            .ok_or_else(|| {
+                failure("the raw reference INSERT fixture is missing app.create_flagged")
+            })?
+            .id();
+        let create_assignment = active
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|function| function.name().parts() == ["app", "create_assignment"])
+            .ok_or_else(|| {
+                failure("the raw reference INSERT fixture is missing app.create_assignment")
+            })?
+            .id();
+        let read_assignments = active
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|function| function.name().parts() == ["app", "read_assignments"])
+            .ok_or_else(|| {
+                failure("the raw reference INSERT fixture is missing app.read_assignments")
+            })?
+            .id();
+        let p_value = active
+            .catalogue()
+            .function_by_id(create_flagged)
+            .ok_or_else(|| failure("create_flagged is absent from the active catalogue"))?
+            .parameter_by_name("p_value")
+            .ok_or_else(|| failure("create_flagged.p_value is absent from the active catalogue"))?
+            .id();
+        let p_flag = active
+            .catalogue()
+            .function_by_id(create_assignment)
+            .ok_or_else(|| failure("create_assignment is absent from the active catalogue"))?
+            .parameter_by_name("p_flag")
+            .ok_or_else(|| failure("create_assignment.p_flag is absent from the active catalogue"))?
+            .id();
+        let mut wrong_parameter_bytes = p_flag.to_bytes();
+        wrong_parameter_bytes[0] ^= 0x01;
+        let wrong_parameter = ParameterId::from_bytes(wrong_parameter_bytes);
+        require(
+            wrong_parameter != p_flag,
+            "the deliberately wrong parameter must differ from the declared parameter",
+        )?;
+        let functions = active
+            .catalogue()
+            .functions()
+            .iter()
+            .map(|function| function.id())
+            .collect::<Vec<_>>();
+
+        // Grant only the owner create, the reader, and the assignment reader;
+        // the assignment create stays unauthorised for the denial proof.
+        let read_only = SecuritySnapshot::new(
+            active.pair(),
+            functions.clone(),
+            vec![Principal::new(
+                RAW_CLIENT_USER,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            vec![],
+            vec![
+                ExecuteGrant::new(RAW_CLIENT_USER, create_flagged),
+                ExecuteGrant::new(RAW_CLIENT_USER, server_function),
+                ExecuteGrant::new(RAW_CLIENT_USER, read_assignments),
+            ],
+        )?;
+        let security = kernel.replace_security_snapshot(&read_only).await?;
+        let session = security.bind_authenticated_session(RAW_CLIENT_USER, vec![])?;
+
+        // One real owner reference through the public adapter.
+        let owner =
+            create_flag_reference(&kernel, &session, create_flagged, p_value, flag_type, 1).await?;
+
+        // The identical wrong-parameter call is denied before its grant,
+        // proving authorisation precedes argument validation.
+        let denied = RawClientDispatch::new(
+            kernel.clone(),
+            session.clone(),
+            2,
+            RawCall {
+                function: create_assignment,
+                arguments: vec![orna_protocol::CallArgument {
+                    parameter: wrong_parameter,
+                    value: owner.clone(),
+                }],
+            },
+        )
+        .finish()
+        .await;
+        require_dispatch_failure(
+            &denied,
+            2,
+            CallFailure::ExecuteDenied,
+            matches!(
+                denied.source(),
+                Some(PostgresKernelError::RawExecuteDenied {
+                    reason: ExecuteDenial::MissingExecuteGrant,
+                    ..
+                })
+            ),
+            "an ungranted raw reference INSERT was not denied before dispatch",
+        )?;
+        let zero_before = read_flag_values(&kernel, &session, read_assignments, 3).await?;
+        require(
+            zero_before.is_empty(),
+            "the denied raw reference INSERT must leave zero assignments",
+        )?;
+
+        // Grant the assignment create, then bind a fresh session.
+        let granted = SecuritySnapshot::new(
+            active.pair(),
+            functions,
+            vec![Principal::new(
+                RAW_CLIENT_USER,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            vec![],
+            vec![
+                ExecuteGrant::new(RAW_CLIENT_USER, create_flagged),
+                ExecuteGrant::new(RAW_CLIENT_USER, server_function),
+                ExecuteGrant::new(RAW_CLIENT_USER, read_assignments),
+                ExecuteGrant::new(RAW_CLIENT_USER, create_assignment),
+            ],
+        )?;
+        let security = kernel.replace_security_snapshot(&granted).await?;
+        let session = security.bind_authenticated_session(RAW_CLIENT_USER, vec![])?;
+
+        // The wrong parameter closes as an unavailable target after the grant
+        // without adding any assignment row.
+        let wrong = RawClientDispatch::new(
+            kernel.clone(),
+            session.clone(),
+            4,
+            RawCall {
+                function: create_assignment,
+                arguments: vec![orna_protocol::CallArgument {
+                    parameter: wrong_parameter,
+                    value: owner.clone(),
+                }],
+            },
+        )
+        .finish()
+        .await;
+        require_dispatch_failure(
+            &wrong,
+            4,
+            CallFailure::TargetUnavailable,
+            matches!(
+                wrong.source(),
+                Some(PostgresKernelError::RawCallTargetUnavailable { function, .. })
+                    if *function == create_assignment
+            ),
+            "a wrong INSERT ParameterId did not close as an unavailable target",
+        )?;
+        let zero_after_wrong = read_flag_values(&kernel, &session, read_assignments, 5).await?;
+        require(
+            zero_after_wrong.is_empty(),
+            "the wrong INSERT ParameterId must not add any assignment row",
+        )?;
+
+        // The correct reference call succeeds and returns one assignment
+        // reference whose target differs from the owner type.
+        let created = RawClientDispatch::new(
+            kernel.clone(),
+            session.clone(),
+            6,
+            RawCall {
+                function: create_assignment,
+                arguments: vec![orna_protocol::CallArgument {
+                    parameter: p_flag,
+                    value: owner.clone(),
+                }],
+            },
+        )
+        .finish()
+        .await;
+        require(
+            created.source().is_none(),
+            "the raw reference INSERT must not retain a kernel source",
+        )?;
+        let [
+            ServerAction::Events {
+                stream: events_stream,
+                events,
+            },
+            ServerAction::Completed {
+                stream: completed_stream,
+            },
+        ] = created.actions()
+        else {
+            return Err(failure(
+                "the raw reference INSERT must return one event batch and completion",
+            ));
+        };
+        require(
+            *events_stream == 6 && *completed_stream == 6,
+            "the raw reference INSERT must use the exact stream",
+        )?;
+        let [Event::Value(RuntimeValue::Reference { target, object })] = events.as_slice() else {
+            return Err(failure(
+                "the raw reference INSERT must return one assignment reference",
+            ));
+        };
+        require(
+            *target == assignment_type
+                && *target != flag_type
+                && *object != ObjectId::from_bytes([0; 16]),
+            "the assignment reference must name the assignment type and a real nonzero row",
+        )?;
+
+        // The duplicate call is redacted as a public internal failure while
+        // retaining the private typed unique-reference conflict source.
+        let duplicate = RawClientDispatch::new(
+            kernel.clone(),
+            session.clone(),
+            7,
+            RawCall {
+                function: create_assignment,
+                arguments: vec![orna_protocol::CallArgument {
+                    parameter: p_flag,
+                    value: owner.clone(),
+                }],
+            },
+        )
+        .finish()
+        .await;
+        require_dispatch_failure(
+            &duplicate,
+            7,
+            CallFailure::InternalFailure,
+            matches!(
+                duplicate.source(),
+                Some(PostgresKernelError::ServerInsert(
+                    ServerInsertError::NotCommitted { source: inner, .. }
+                )) if matches!(inner.as_ref(), ServerMutationError::UniqueReferenceConflict { .. })
+            ),
+            "the duplicate raw reference INSERT was not redacted with its private conflict source",
+        )?;
+
+        // The public reader exposes exactly one dependent row after the
+        // duplicate.
+        let one = read_flag_values(&kernel, &session, read_assignments, 8).await?;
+        require(
+            one == [RuntimeValue::Boolean(true)],
+            "the public reader must expose exactly one TRUE assignment after the duplicate",
+        )?;
+
+        // Authentication is session binding here, so every audit is Execute
+        // with exact outcomes and targets in dispatch order.
+        let events = kernel.recover_security_audit_events().await?;
+        require(
+            events.len() == 8
+                && events[0].decision().kind() == SecurityAuditKind::Execute
+                && events[0].decision().outcome() == SecurityAuditOutcome::Allowed
+                && events[0].decision().target()
+                    == Some(InvocationTarget::new(create_flagged, active.pair()))
+                && events[1].decision().outcome() == SecurityAuditOutcome::Denied
+                && events[1].decision().denial()
+                    == Some(SecurityAuditDenial::Execute(
+                        ExecuteDenial::MissingExecuteGrant,
+                    ))
+                && events[1].decision().target()
+                    == Some(InvocationTarget::new(create_assignment, active.pair()))
+                && events[2].decision().outcome() == SecurityAuditOutcome::Allowed
+                && events[2].decision().target()
+                    == Some(InvocationTarget::new(read_assignments, active.pair()))
+                && events[3].decision().outcome() == SecurityAuditOutcome::Allowed
+                && events[3].decision().target()
+                    == Some(InvocationTarget::new(create_assignment, active.pair()))
+                && events[4].decision().outcome() == SecurityAuditOutcome::Allowed
+                && events[4].decision().target()
+                    == Some(InvocationTarget::new(read_assignments, active.pair()))
+                && events[5].decision().outcome() == SecurityAuditOutcome::Allowed
+                && events[5].decision().target()
+                    == Some(InvocationTarget::new(create_assignment, active.pair()))
+                && events[6].decision().outcome() == SecurityAuditOutcome::Allowed
+                && events[6].decision().target()
+                    == Some(InvocationTarget::new(create_assignment, active.pair()))
+                && events[7].decision().outcome() == SecurityAuditOutcome::Allowed
+                && events[7].decision().target()
+                    == Some(InvocationTarget::new(read_assignments, active.pair())),
+            "raw reference INSERT changed the exact durable audit sequence",
+        )?;
+
+        // The active revision pair is unchanged.
+        let recovered = kernel.recover().await?;
+        require(
+            recovered.pair() == active.pair(),
+            "raw reference INSERTs must not change the active revision pair",
         )?;
 
         require_no_database_sessions(&database).await
