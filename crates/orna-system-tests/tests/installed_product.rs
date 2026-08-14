@@ -7187,3 +7187,892 @@ fn installed_version_reports_the_exact_canonical_product_version() {
         version.stderr.len()
     );
 }
+
+/// The exact canonical IEEE-754 binary64 bit pattern of the finite value 0.1.
+const EXACT_FLOAT_BITS: u64 = 0x3fb9_9999_9999_999a;
+
+/// The exact UTF-8 text stored and read by the raw TEXT journey.
+///
+/// The value is `caf\u{e9} e\u{301}\n\t\u{65e5}\u{672c}`: a precomposed
+/// `caf\u{e9}`, a space, an `e` with a decomposed combining acute accent, a
+/// line feed, a tab, and the Japanese "Nihon" pair. The raw path must not
+/// normalise, trim, or rewrite any of those bytes.
+const EXACT_TEXT: &str = "caf\u{e9} e\u{301}\n\t\u{65e5}\u{672c}";
+
+/// The exact bytes stored and read by the raw BYTES journey.
+const EXACT_BYTES: &[u8] = &[0x00, 0xff, 0x7f, 0x00, 0x01];
+
+/// The exact Text argument that must close as an unavailable raw target.
+const U0000_TEXT: &str = "a\u{0}b";
+
+/// The canonical `ORV1` envelope for one signed 32-bit integer value.
+///
+/// The layout is `ORV1`, the INTEGER tag `0x03`, the 16-byte standard INTEGER
+/// type identity, the 4-byte big-endian payload length, and the 4-byte
+/// big-endian two's-complement value.
+fn integer_orv1_envelope(value: i32) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(29);
+    bytes.extend_from_slice(b"ORV1");
+    bytes.push(0x03);
+    bytes.extend_from_slice(&[0; 15]);
+    bytes.push(0x02);
+    bytes.extend_from_slice(&4_u32.to_be_bytes());
+    bytes.extend_from_slice(&value.to_be_bytes());
+    bytes
+}
+
+/// The canonical `ORV1` envelope for one signed 64-bit integer value.
+///
+/// The layout is `ORV1`, the BIGINT tag `0x04`, the 16-byte standard BIGINT
+/// type identity, the 4-byte big-endian payload length, and the 8-byte
+/// big-endian two's-complement value.
+fn bigint_orv1_envelope(value: i64) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(33);
+    bytes.extend_from_slice(b"ORV1");
+    bytes.push(0x04);
+    bytes.extend_from_slice(&[0; 15]);
+    bytes.push(0x03);
+    bytes.extend_from_slice(&8_u32.to_be_bytes());
+    bytes.extend_from_slice(&value.to_be_bytes());
+    bytes
+}
+
+/// The canonical `ORV1` envelope for one finite IEEE-754 binary64 float.
+///
+/// The value is passed as its exact bit pattern. The layout is `ORV1`, the
+/// FLOAT tag `0x05`, the 16-byte standard FLOAT type identity, the 4-byte
+/// big-endian payload length, and the 8-byte big-endian IEEE-754 bits.
+fn float_orv1_envelope(bits: u64) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(33);
+    bytes.extend_from_slice(b"ORV1");
+    bytes.push(0x05);
+    bytes.extend_from_slice(&[0; 15]);
+    bytes.push(0x04);
+    bytes.extend_from_slice(&8_u32.to_be_bytes());
+    bytes.extend_from_slice(&bits.to_be_bytes());
+    bytes
+}
+
+/// The canonical `ORV1` envelope for one UTF-8 text value.
+///
+/// The layout is `ORV1`, the TEXT tag `0x06`, the 16-byte standard
+/// CHARACTER LARGE OBJECT type identity, the 4-byte big-endian payload
+/// length, and the exact UTF-8 bytes.
+fn text_orv1_envelope(text: &str) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(25 + text.len());
+    bytes.extend_from_slice(b"ORV1");
+    bytes.push(0x06);
+    bytes.extend_from_slice(&[0; 15]);
+    bytes.push(0x06);
+    bytes.extend_from_slice(&(text.len() as u32).to_be_bytes());
+    bytes.extend_from_slice(text.as_bytes());
+    bytes
+}
+
+/// The canonical `ORV1` envelope for one arbitrary byte value.
+///
+/// The layout is `ORV1`, the BYTES tag `0x07`, the 16-byte standard
+/// BINARY LARGE OBJECT type identity, the 4-byte big-endian payload length,
+/// and the exact payload bytes.
+fn bytes_orv1_envelope(bytes: &[u8]) -> Vec<u8> {
+    let mut encoded = Vec::with_capacity(25 + bytes.len());
+    encoded.extend_from_slice(b"ORV1");
+    encoded.push(0x07);
+    encoded.extend_from_slice(&[0; 15]);
+    encoded.push(0x07);
+    encoded.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+    encoded.extend_from_slice(bytes);
+    encoded
+}
+
+/// Decode a stream of one canonical ORV1 scalar envelope shape.
+///
+/// Every envelope must start with the ORV1 marker, carry the exact tag and
+/// standard type identity, and declare a complete payload. When `required` is
+/// set, every envelope must declare exactly that payload length. Returns the
+/// raw payload bytes in order, or `None` when any envelope is malformed,
+/// truncated, wrong-length, or trailing bytes remain.
+fn decode_scalar_payloads(
+    bytes: &[u8],
+    tag: u8,
+    type_byte: u8,
+    required: Option<usize>,
+) -> Option<Vec<Vec<u8>>> {
+    let mut payloads = Vec::new();
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let remaining = &bytes[offset..];
+        if remaining.len() < 25
+            || &remaining[0..4] != b"ORV1"
+            || remaining[4] != tag
+            || remaining[5..20] != [0; 15]
+            || remaining[20] != type_byte
+        {
+            return None;
+        }
+        let length = u32::from_be_bytes(remaining[21..25].try_into().ok()?) as usize;
+        if required.is_some_and(|expected| length != expected) || remaining.len() < 25 + length {
+            return None;
+        }
+        payloads.push(remaining[25..25 + length].to_vec());
+        offset += 25 + length;
+    }
+    Some(payloads)
+}
+
+/// Decode a stream of complete canonical ORV1 Integer envelopes in order.
+///
+/// Returns `None` when any envelope is malformed or trailing bytes remain.
+fn decode_integer_envelopes(bytes: &[u8]) -> Option<Vec<i32>> {
+    decode_scalar_payloads(bytes, 0x03, 0x02, Some(4))?
+        .into_iter()
+        .map(|payload| Some(i32::from_be_bytes(payload.try_into().ok()?)))
+        .collect()
+}
+
+/// Decode a stream of complete canonical ORV1 BigInt envelopes in order.
+///
+/// Returns `None` when any envelope is malformed or trailing bytes remain.
+fn decode_bigint_envelopes(bytes: &[u8]) -> Option<Vec<i64>> {
+    decode_scalar_payloads(bytes, 0x04, 0x03, Some(8))?
+        .into_iter()
+        .map(|payload| Some(i64::from_be_bytes(payload.try_into().ok()?)))
+        .collect()
+}
+
+/// Decode a stream of complete canonical ORV1 Float envelopes in order.
+///
+/// Each value is returned as its exact IEEE-754 binary64 bit pattern. Returns
+/// `None` when any envelope is malformed or trailing bytes remain.
+fn decode_float_envelopes(bytes: &[u8]) -> Option<Vec<u64>> {
+    decode_scalar_payloads(bytes, 0x05, 0x04, Some(8))?
+        .into_iter()
+        .map(|payload| Some(u64::from_be_bytes(payload.try_into().ok()?)))
+        .collect()
+}
+
+/// Decode a stream of complete canonical ORV1 Text envelopes in order.
+///
+/// Every payload must be exact UTF-8. Returns `None` when any envelope is
+/// malformed or trailing bytes remain.
+fn decode_text_envelopes(bytes: &[u8]) -> Option<Vec<String>> {
+    decode_scalar_payloads(bytes, 0x06, 0x06, None)?
+        .into_iter()
+        .map(|payload| String::from_utf8(payload).ok())
+        .collect()
+}
+
+/// Decode a stream of complete canonical ORV1 Bytes envelopes in order.
+///
+/// Returns `None` when any envelope is malformed or trailing bytes remain.
+fn decode_bytes_envelopes(bytes: &[u8]) -> Option<Vec<Vec<u8>>> {
+    decode_scalar_payloads(bytes, 0x07, 0x07, None)
+}
+
+/// Run one granted raw scalar reader and require the exact decoded values.
+///
+/// The reader must exit 0 with empty standard error, and its output must
+/// decode as exactly the given expected values in order.
+fn require_scalar_reader_returns<T>(
+    machine: &InstalledMachine,
+    function: &str,
+    label: &'static str,
+    expected: Vec<T>,
+    decode: impl FnOnce(&[u8]) -> Option<Vec<T>>,
+) -> Result<(), Error>
+where
+    T: PartialEq + fmt::Debug,
+{
+    let actual = run_reader_and_decode(
+        machine,
+        function,
+        label,
+        decode,
+        "complete scalar envelopes",
+    )?;
+    if actual != expected {
+        return Err(Error::Unexpected {
+            message: format!("{label} must return exactly {expected:?}, got {actual:?}"),
+        });
+    }
+    Ok(())
+}
+
+/// Prove the installed product's canonical raw scalar INSERT journey of work
+/// ADR 0045 through the packaged `/usr/bin/orna` public commands.
+///
+/// The fixture is the exact checked-in `fixtures/product_test_scalar_insert.orna`
+/// source with five one-field NOT NULL objects, five single-parameter
+/// INSERT/RETURNING REF functions, and five parameter-free readers. Every
+/// product step runs through `/usr/bin/orna` public commands as the `orna`
+/// service account. The test asserts:
+///
+/// * apply reports the ten sorted qualified-name mappings, a canonical
+///   `p_value` parameter identity on every writer, and no parameter on any
+///   reader;
+/// * every writer raw call is `EXECUTE_DENIED` before any grant;
+/// * granting only the five readers leaves every reader successful and empty,
+///   proving the denied writers created no row;
+/// * after granting the five writers, Text U+0000 closes as
+///   `TARGET_UNAVAILABLE` and creates no row;
+/// * each exact boundary or representative value inserts a distinct nonzero
+///   typed reference, and each public reader returns exactly the stored value
+///   or byte pattern;
+/// * an exact source replay keeps the complete ten-entry function vector
+///   including parameters, and the grants and rows survive without regrant;
+/// * a restart keeps the grants and rows, and one further call of each new
+///   scalar type with the original discovered identities stores a second exact
+///   value per type.
+///
+/// The Boolean and Reference INSERT journeys are proven by the separate
+/// installed Boolean and Reference tests and are not duplicated here.
+#[test]
+#[ignore = "requires Docker, ORNA_SYSTEM_TEST_DEBIAN_PACKAGE, and the ADR 0045 scalar INSERT commands in the installed orna executable"]
+fn installed_scalar_insert_binds_exact_values_and_survives_replay_and_restart() {
+    let package = std::env::var("ORNA_SYSTEM_TEST_DEBIAN_PACKAGE")
+        .expect("ORNA_SYSTEM_TEST_DEBIAN_PACKAGE must point at the reproduced .deb package");
+    let artifact = FrozenPackageArtifact::new(PackageFormat::Debian, &package)
+        .expect("freeze the reproduced Debian package");
+    let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures")
+        .join("product_test_scalar_insert.orna");
+    let fixture = fs::read(&fixture_path).expect("read the checked-in scalar insert fixture");
+
+    let machine = InstalledMachine::start(&artifact, &fixture)
+        .expect("start the installed Debian test machine");
+
+    // Apply the exact fixture and require the ten sorted mappings.
+    let apply = machine
+        .run_as_orna(&["source", "apply", FIXTURE_PATH])
+        .expect("run installed source apply");
+    let apply = require_success("orna source apply", apply).expect("source apply must succeed");
+    assert!(
+        apply.stderr.is_empty(),
+        "source apply must keep standard error empty"
+    );
+    let document = parse_apply_document(&apply.stdout).expect("source apply JSON must parse");
+    let expected_order = [
+        vec![
+            "scalar_insert_test".to_string(),
+            "create_bigint".to_string(),
+        ],
+        vec!["scalar_insert_test".to_string(), "create_bytes".to_string()],
+        vec!["scalar_insert_test".to_string(), "create_float".to_string()],
+        vec!["scalar_insert_test".to_string(), "create_int".to_string()],
+        vec!["scalar_insert_test".to_string(), "create_text".to_string()],
+        vec!["scalar_insert_test".to_string(), "read_bigints".to_string()],
+        vec!["scalar_insert_test".to_string(), "read_bytes".to_string()],
+        vec!["scalar_insert_test".to_string(), "read_floats".to_string()],
+        vec!["scalar_insert_test".to_string(), "read_ints".to_string()],
+        vec!["scalar_insert_test".to_string(), "read_texts".to_string()],
+    ];
+    let actual_order = document
+        .functions
+        .iter()
+        .map(|function| function.names().to_vec())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual_order, expected_order,
+        "apply must report the ten function entries sorted by qualified name"
+    );
+
+    // Resolve the ten identities and prove they are pairwise distinct.
+    let create_int = document
+        .function_id(&["scalar_insert_test", "create_int"])
+        .expect("apply must report create_int");
+    let create_bigint = document
+        .function_id(&["scalar_insert_test", "create_bigint"])
+        .expect("apply must report create_bigint");
+    let create_float = document
+        .function_id(&["scalar_insert_test", "create_float"])
+        .expect("apply must report create_float");
+    let create_text = document
+        .function_id(&["scalar_insert_test", "create_text"])
+        .expect("apply must report create_text");
+    let create_bytes = document
+        .function_id(&["scalar_insert_test", "create_bytes"])
+        .expect("apply must report create_bytes");
+    let read_ints = document
+        .function_id(&["scalar_insert_test", "read_ints"])
+        .expect("apply must report read_ints");
+    let read_bigints = document
+        .function_id(&["scalar_insert_test", "read_bigints"])
+        .expect("apply must report read_bigints");
+    let read_floats = document
+        .function_id(&["scalar_insert_test", "read_floats"])
+        .expect("apply must report read_floats");
+    let read_texts = document
+        .function_id(&["scalar_insert_test", "read_texts"])
+        .expect("apply must report read_texts");
+    let read_bytes = document
+        .function_id(&["scalar_insert_test", "read_bytes"])
+        .expect("apply must report read_bytes");
+    let identities = [
+        create_int,
+        create_bigint,
+        create_float,
+        create_text,
+        create_bytes,
+        read_ints,
+        read_bigints,
+        read_floats,
+        read_texts,
+        read_bytes,
+    ];
+    for (index, left) in identities.iter().enumerate() {
+        for right in &identities[index + 1..] {
+            assert_ne!(
+                left, right,
+                "the ten function identities must be pairwise distinct"
+            );
+        }
+    }
+
+    // Every writer declares exactly one p_value parameter; every reader
+    // declares none.
+    for name in [
+        "create_bigint",
+        "create_bytes",
+        "create_float",
+        "create_int",
+        "create_text",
+    ] {
+        let entry = document
+            .functions
+            .iter()
+            .find(|function| {
+                function
+                    .names()
+                    .iter()
+                    .map(String::as_str)
+                    .eq(["scalar_insert_test", name].iter().copied())
+            })
+            .expect("apply must report the writer entry");
+        assert_eq!(
+            entry.parameters().len(),
+            1,
+            "each writer must declare exactly one parameter"
+        );
+        assert_eq!(
+            entry.parameters()[0].name(),
+            "p_value",
+            "each writer must declare exactly the p_value parameter"
+        );
+    }
+    for name in [
+        "read_bigints",
+        "read_bytes",
+        "read_floats",
+        "read_ints",
+        "read_texts",
+    ] {
+        let entry = document
+            .functions
+            .iter()
+            .find(|function| {
+                function
+                    .names()
+                    .iter()
+                    .map(String::as_str)
+                    .eq(["scalar_insert_test", name].iter().copied())
+            })
+            .expect("apply must report the reader entry");
+        assert!(
+            entry.parameters().is_empty(),
+            "each reader must declare no parameters"
+        );
+    }
+
+    // Discover the five canonical parameter identities and prove they are
+    // pairwise distinct.
+    let p_int = document
+        .parameter_id(&["scalar_insert_test", "create_int"], "p_value")
+        .expect("apply must report create_int.p_value");
+    let p_bigint = document
+        .parameter_id(&["scalar_insert_test", "create_bigint"], "p_value")
+        .expect("apply must report create_bigint.p_value");
+    let p_float = document
+        .parameter_id(&["scalar_insert_test", "create_float"], "p_value")
+        .expect("apply must report create_float.p_value");
+    let p_text = document
+        .parameter_id(&["scalar_insert_test", "create_text"], "p_value")
+        .expect("apply must report create_text.p_value");
+    let p_bytes = document
+        .parameter_id(&["scalar_insert_test", "create_bytes"], "p_value")
+        .expect("apply must report create_bytes.p_value");
+    let parameter_ids = [p_int, p_bigint, p_float, p_text, p_bytes];
+    for (index, left) in parameter_ids.iter().enumerate() {
+        for right in &parameter_ids[index + 1..] {
+            assert_ne!(
+                left, right,
+                "each writer parameter must carry a distinct canonical identity"
+            );
+        }
+    }
+
+    // Before any grant, every writer raw call with its exact argument
+    // envelope is denied and nothing is stored.
+    assert_eq!(
+        EXACT_FLOAT_BITS,
+        0.1_f64.to_bits(),
+        "the exact FLOAT constant must be the canonical 0.1 bit pattern"
+    );
+    for (writer, parameter, envelope) in [
+        (create_int, p_int, integer_orv1_envelope(i32::MIN)),
+        (create_bigint, p_bigint, bigint_orv1_envelope(i64::MAX)),
+        (create_float, p_float, float_orv1_envelope(EXACT_FLOAT_BITS)),
+        (create_text, p_text, text_orv1_envelope(EXACT_TEXT)),
+        (create_bytes, p_bytes, bytes_orv1_envelope(EXACT_BYTES)),
+    ] {
+        let denied = machine
+            .run_as_orna_with_stdin(&["raw-call", writer, parameter], &envelope)
+            .expect("run denied writer raw call");
+        assert_denied("writer raw call before grant", denied)
+            .expect("writer raw call must be denied before grant");
+    }
+
+    // Grant only the five readers, then prove the denied writers created no
+    // row: every reader succeeds with completely empty output.
+    for reader in [read_ints, read_bigints, read_floats, read_texts, read_bytes] {
+        let granted = machine
+            .run_as_orna(&["security", "grant-execute", reader])
+            .expect("run installed reader grant command");
+        require_silent_success("orna security grant-execute reader", granted)
+            .expect("reader grant must succeed silently");
+    }
+    for reader in [read_ints, read_bigints, read_floats, read_texts, read_bytes] {
+        let empty = machine
+            .run_as_orna(&["raw-call", reader])
+            .expect("run empty raw reader after denied writers");
+        require_silent_success("orna raw-call reader empty", empty)
+            .expect("the denied writers must leave the reader empty");
+    }
+
+    // Grant the five writers.
+    for writer in [
+        create_int,
+        create_bigint,
+        create_float,
+        create_text,
+        create_bytes,
+    ] {
+        let granted = machine
+            .run_as_orna(&["security", "grant-execute", writer])
+            .expect("run installed writer grant command");
+        require_silent_success("orna security grant-execute writer", granted)
+            .expect("writer grant must succeed silently");
+    }
+
+    // Text U+0000 is an authorised target failure after the grant: it closes
+    // as TARGET_UNAVAILABLE, creates no row, and never reaches the driver.
+    let u0000 = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", create_text, p_text],
+            &text_orv1_envelope(U0000_TEXT),
+        )
+        .expect("run U+0000 raw Text call");
+    assert_target_unavailable("Text U+0000 raw call", u0000)
+        .expect("Text U+0000 must close as target unavailable");
+    let no_text = machine
+        .run_as_orna(&["raw-call", read_texts])
+        .expect("run empty raw Text reader after U+0000");
+    require_silent_success("orna raw-call read_texts after U+0000", no_text)
+        .expect("the U+0000 call must create no row");
+
+    // Each exact scalar binds its discovered ParameterId and stores the exact
+    // value; every INSERT returns one nonzero typed reference.
+    let inserted_int = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", create_int, p_int],
+            &integer_orv1_envelope(i32::MIN),
+        )
+        .expect("run exact INT raw call");
+    let inserted_int = require_value_success("orna raw-call create_int", inserted_int)
+        .expect("INT create must succeed");
+    let int_reference = parse_reference_envelope(&inserted_int.stdout)
+        .expect("INT create must return one ORV reference");
+    assert!(
+        int_reference.type_id != [0; 16] && !int_reference.object_is_zero(),
+        "the INT create reference must name a real target type and row"
+    );
+    require_scalar_reader_returns(
+        &machine,
+        read_ints,
+        "orna raw-call read_ints one value",
+        vec![i32::MIN],
+        decode_integer_envelopes,
+    )
+    .expect("read_ints must return exactly the stored INT value");
+
+    let inserted_bigint = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", create_bigint, p_bigint],
+            &bigint_orv1_envelope(i64::MAX),
+        )
+        .expect("run exact BIGINT raw call");
+    let inserted_bigint = require_value_success("orna raw-call create_bigint", inserted_bigint)
+        .expect("BIGINT create must succeed");
+    let bigint_reference = parse_reference_envelope(&inserted_bigint.stdout)
+        .expect("BIGINT create must return one ORV reference");
+    assert!(
+        bigint_reference.type_id != [0; 16] && !bigint_reference.object_is_zero(),
+        "the BIGINT create reference must name a real target type and row"
+    );
+    require_scalar_reader_returns(
+        &machine,
+        read_bigints,
+        "orna raw-call read_bigints one value",
+        vec![i64::MAX],
+        decode_bigint_envelopes,
+    )
+    .expect("read_bigints must return exactly the stored BIGINT value");
+
+    let inserted_float = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", create_float, p_float],
+            &float_orv1_envelope(EXACT_FLOAT_BITS),
+        )
+        .expect("run exact FLOAT raw call");
+    let inserted_float = require_value_success("orna raw-call create_float", inserted_float)
+        .expect("FLOAT create must succeed");
+    let float_reference = parse_reference_envelope(&inserted_float.stdout)
+        .expect("FLOAT create must return one ORV reference");
+    assert!(
+        float_reference.type_id != [0; 16] && !float_reference.object_is_zero(),
+        "the FLOAT create reference must name a real target type and row"
+    );
+    require_scalar_reader_returns(
+        &machine,
+        read_floats,
+        "orna raw-call read_floats one value",
+        vec![EXACT_FLOAT_BITS],
+        decode_float_envelopes,
+    )
+    .expect("read_floats must return exactly the stored 0.1 bit pattern");
+
+    let inserted_text = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", create_text, p_text],
+            &text_orv1_envelope(EXACT_TEXT),
+        )
+        .expect("run exact TEXT raw call");
+    let inserted_text = require_value_success("orna raw-call create_text", inserted_text)
+        .expect("TEXT create must succeed");
+    let text_reference = parse_reference_envelope(&inserted_text.stdout)
+        .expect("TEXT create must return one ORV reference");
+    assert!(
+        text_reference.type_id != [0; 16] && !text_reference.object_is_zero(),
+        "the TEXT create reference must name a real target type and row"
+    );
+    require_scalar_reader_returns(
+        &machine,
+        read_texts,
+        "orna raw-call read_texts one value",
+        vec![EXACT_TEXT.to_string()],
+        decode_text_envelopes,
+    )
+    .expect("read_texts must return exactly the stored UTF-8 text");
+
+    let inserted_bytes = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", create_bytes, p_bytes],
+            &bytes_orv1_envelope(EXACT_BYTES),
+        )
+        .expect("run exact BYTES raw call");
+    let inserted_bytes = require_value_success("orna raw-call create_bytes", inserted_bytes)
+        .expect("BYTES create must succeed");
+    let bytes_reference = parse_reference_envelope(&inserted_bytes.stdout)
+        .expect("BYTES create must return one ORV reference");
+    assert!(
+        bytes_reference.type_id != [0; 16] && !bytes_reference.object_is_zero(),
+        "the BYTES create reference must name a real target type and row"
+    );
+    require_scalar_reader_returns(
+        &machine,
+        read_bytes,
+        "orna raw-call read_bytes one value",
+        vec![EXACT_BYTES.to_vec()],
+        decode_bytes_envelopes,
+    )
+    .expect("read_bytes must return exactly the stored byte sequence");
+
+    // Each scalar INSERT allocates a distinct object identity.
+    let objects = [
+        int_reference.object,
+        bigint_reference.object,
+        float_reference.object,
+        text_reference.object,
+        bytes_reference.object,
+    ];
+    for (index, left) in objects.iter().enumerate() {
+        for right in &objects[index + 1..] {
+            assert_ne!(
+                left, right,
+                "each scalar INSERT must allocate a distinct object identity"
+            );
+        }
+    }
+
+    // Exact source replay keeps the complete mapping including parameters,
+    // and no re-grant is needed.
+    let replay = machine
+        .run_as_orna(&["source", "apply", FIXTURE_PATH])
+        .expect("run installed source apply on the same fixture");
+    let replay =
+        require_success("orna source apply replay", replay).expect("fixture replay must succeed");
+    assert!(
+        replay.stderr.is_empty(),
+        "fixture replay must keep standard error empty"
+    );
+    let replay_document =
+        parse_apply_document(&replay.stdout).expect("fixture replay JSON must parse");
+    assert_eq!(
+        replay_document.functions, document.functions,
+        "the replay must keep the complete ten-entry function vector including parameters"
+    );
+    assert_eq!(
+        replay_document
+            .parameter_id(&["scalar_insert_test", "create_int"], "p_value")
+            .expect("the replay must keep create_int.p_value"),
+        p_int,
+        "the replay must keep the exact canonical parameter identities"
+    );
+    for reader in [read_ints, read_bigints, read_floats, read_texts, read_bytes] {
+        let after_replay = machine
+            .run_as_orna(&["raw-call", reader])
+            .expect("run raw reader after replay");
+        require_success("orna raw-call reader after replay", after_replay)
+            .expect("the reader grant must survive the replay");
+    }
+    require_scalar_reader_returns(
+        &machine,
+        read_ints,
+        "orna raw-call read_ints after replay",
+        vec![i32::MIN],
+        decode_integer_envelopes,
+    )
+    .expect("read_ints must stay exact after replay");
+    require_scalar_reader_returns(
+        &machine,
+        read_bigints,
+        "orna raw-call read_bigints after replay",
+        vec![i64::MAX],
+        decode_bigint_envelopes,
+    )
+    .expect("read_bigints must stay exact after replay");
+    require_scalar_reader_returns(
+        &machine,
+        read_floats,
+        "orna raw-call read_floats after replay",
+        vec![EXACT_FLOAT_BITS],
+        decode_float_envelopes,
+    )
+    .expect("read_floats must stay exact after replay");
+    require_scalar_reader_returns(
+        &machine,
+        read_texts,
+        "orna raw-call read_texts after replay",
+        vec![EXACT_TEXT.to_string()],
+        decode_text_envelopes,
+    )
+    .expect("read_texts must stay exact after replay");
+    require_scalar_reader_returns(
+        &machine,
+        read_bytes,
+        "orna raw-call read_bytes after replay",
+        vec![EXACT_BYTES.to_vec()],
+        decode_bytes_envelopes,
+    )
+    .expect("read_bytes must stay exact after replay");
+
+    // Restart keeps the grants and rows; one further call of each new scalar
+    // type uses the original discovered identities and stores a second exact
+    // value.
+    machine
+        .restart_server()
+        .expect("installed server must restart cleanly");
+    require_scalar_reader_returns(
+        &machine,
+        read_ints,
+        "orna raw-call read_ints after restart",
+        vec![i32::MIN],
+        decode_integer_envelopes,
+    )
+    .expect("read_ints must survive the restart");
+    require_scalar_reader_returns(
+        &machine,
+        read_bigints,
+        "orna raw-call read_bigints after restart",
+        vec![i64::MAX],
+        decode_bigint_envelopes,
+    )
+    .expect("read_bigints must survive the restart");
+    require_scalar_reader_returns(
+        &machine,
+        read_floats,
+        "orna raw-call read_floats after restart",
+        vec![EXACT_FLOAT_BITS],
+        decode_float_envelopes,
+    )
+    .expect("read_floats must survive the restart");
+    require_scalar_reader_returns(
+        &machine,
+        read_texts,
+        "orna raw-call read_texts after restart",
+        vec![EXACT_TEXT.to_string()],
+        decode_text_envelopes,
+    )
+    .expect("read_texts must survive the restart");
+    require_scalar_reader_returns(
+        &machine,
+        read_bytes,
+        "orna raw-call read_bytes after restart",
+        vec![EXACT_BYTES.to_vec()],
+        decode_bytes_envelopes,
+    )
+    .expect("read_bytes must survive the restart");
+
+    let after_int = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", create_int, p_int],
+            &integer_orv1_envelope(i32::MIN),
+        )
+        .expect("run post-restart INT raw call");
+    let after_int = require_value_success("orna raw-call create_int after restart", after_int)
+        .expect("INT create must succeed after restart");
+    let after_int_reference = parse_reference_envelope(&after_int.stdout)
+        .expect("post-restart INT create must return one ORV reference");
+    assert_eq!(
+        after_int_reference.type_id, int_reference.type_id,
+        "the post-restart INT create must target the same object type"
+    );
+    assert!(
+        after_int_reference.object != int_reference.object && !after_int_reference.object_is_zero(),
+        "the post-restart INT create must allocate a distinct real row"
+    );
+
+    let after_bigint = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", create_bigint, p_bigint],
+            &bigint_orv1_envelope(i64::MAX),
+        )
+        .expect("run post-restart BIGINT raw call");
+    let after_bigint =
+        require_value_success("orna raw-call create_bigint after restart", after_bigint)
+            .expect("BIGINT create must succeed after restart");
+    let after_bigint_reference = parse_reference_envelope(&after_bigint.stdout)
+        .expect("post-restart BIGINT create must return one ORV reference");
+    assert_eq!(
+        after_bigint_reference.type_id, bigint_reference.type_id,
+        "the post-restart BIGINT create must target the same object type"
+    );
+    assert!(
+        after_bigint_reference.object != bigint_reference.object
+            && !after_bigint_reference.object_is_zero(),
+        "the post-restart BIGINT create must allocate a distinct real row"
+    );
+
+    let after_float = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", create_float, p_float],
+            &float_orv1_envelope(EXACT_FLOAT_BITS),
+        )
+        .expect("run post-restart FLOAT raw call");
+    let after_float =
+        require_value_success("orna raw-call create_float after restart", after_float)
+            .expect("FLOAT create must succeed after restart");
+    let after_float_reference = parse_reference_envelope(&after_float.stdout)
+        .expect("post-restart FLOAT create must return one ORV reference");
+    assert_eq!(
+        after_float_reference.type_id, float_reference.type_id,
+        "the post-restart FLOAT create must target the same object type"
+    );
+    assert!(
+        after_float_reference.object != float_reference.object
+            && !after_float_reference.object_is_zero(),
+        "the post-restart FLOAT create must allocate a distinct real row"
+    );
+
+    let after_text = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", create_text, p_text],
+            &text_orv1_envelope(EXACT_TEXT),
+        )
+        .expect("run post-restart TEXT raw call");
+    let after_text = require_value_success("orna raw-call create_text after restart", after_text)
+        .expect("TEXT create must succeed after restart");
+    let after_text_reference = parse_reference_envelope(&after_text.stdout)
+        .expect("post-restart TEXT create must return one ORV reference");
+    assert_eq!(
+        after_text_reference.type_id, text_reference.type_id,
+        "the post-restart TEXT create must target the same object type"
+    );
+    assert!(
+        after_text_reference.object != text_reference.object
+            && !after_text_reference.object_is_zero(),
+        "the post-restart TEXT create must allocate a distinct real row"
+    );
+
+    let after_bytes = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", create_bytes, p_bytes],
+            &bytes_orv1_envelope(EXACT_BYTES),
+        )
+        .expect("run post-restart BYTES raw call");
+    let after_bytes =
+        require_value_success("orna raw-call create_bytes after restart", after_bytes)
+            .expect("BYTES create must succeed after restart");
+    let after_bytes_reference = parse_reference_envelope(&after_bytes.stdout)
+        .expect("post-restart BYTES create must return one ORV reference");
+    assert_eq!(
+        after_bytes_reference.type_id, bytes_reference.type_id,
+        "the post-restart BYTES create must target the same object type"
+    );
+    assert!(
+        after_bytes_reference.object != bytes_reference.object
+            && !after_bytes_reference.object_is_zero(),
+        "the post-restart BYTES create must allocate a distinct real row"
+    );
+
+    // Every reader now returns exactly two copies of its exact stored value.
+    require_scalar_reader_returns(
+        &machine,
+        read_ints,
+        "orna raw-call read_ints two values",
+        vec![i32::MIN, i32::MIN],
+        decode_integer_envelopes,
+    )
+    .expect("read_ints must return exactly two stored INT values");
+    require_scalar_reader_returns(
+        &machine,
+        read_bigints,
+        "orna raw-call read_bigints two values",
+        vec![i64::MAX, i64::MAX],
+        decode_bigint_envelopes,
+    )
+    .expect("read_bigints must return exactly two stored BIGINT values");
+    require_scalar_reader_returns(
+        &machine,
+        read_floats,
+        "orna raw-call read_floats two values",
+        vec![EXACT_FLOAT_BITS, EXACT_FLOAT_BITS],
+        decode_float_envelopes,
+    )
+    .expect("read_floats must return exactly two stored 0.1 bit patterns");
+    require_scalar_reader_returns(
+        &machine,
+        read_texts,
+        "orna raw-call read_texts two values",
+        vec![EXACT_TEXT.to_string(), EXACT_TEXT.to_string()],
+        decode_text_envelopes,
+    )
+    .expect("read_texts must return exactly two stored UTF-8 texts");
+    require_scalar_reader_returns(
+        &machine,
+        read_bytes,
+        "orna raw-call read_bytes two values",
+        vec![EXACT_BYTES.to_vec(), EXACT_BYTES.to_vec()],
+        decode_bytes_envelopes,
+    )
+    .expect("read_bytes must return exactly two stored byte sequences");
+}
