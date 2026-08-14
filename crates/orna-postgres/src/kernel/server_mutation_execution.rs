@@ -1388,6 +1388,21 @@ pub(crate) async fn execute_authorised_raw_server_insert(
     active: &ActiveDatabaseRevision,
     authorisation: &AuthorisedInvocation,
 ) -> Result<RuntimeValue, PostgresKernelError> {
+    execute_authorised_raw_server_insert_with_arguments(transaction, active, authorisation, &[])
+        .await
+}
+
+/// Executes one pinned raw SERVER `INSERT` with zero or one Boolean argument.
+///
+/// The caller owns recovery, authorisation, audit, savepoint, and commit. This
+/// entry validates the raw argument shape, then delegates stable identity and
+/// type binding to the normal active INSERT executor.
+pub(crate) async fn execute_authorised_raw_server_insert_with_arguments(
+    transaction: &Transaction<'_>,
+    active: &ActiveDatabaseRevision,
+    authorisation: &AuthorisedInvocation,
+    arguments: &[FunctionArgument],
+) -> Result<RuntimeValue, PostgresKernelError> {
     let target = authorisation.target();
     if target.revision() != active.pair() {
         return Err(PostgresKernelError::DurableInvariant {
@@ -1405,24 +1420,46 @@ pub(crate) async fn execute_authorised_raw_server_insert(
                 function: target.function(),
             })
         })?;
-    if !function.parameters().is_empty() {
-        return Err(server_error(ServerInsertError::Argument {
-            parameter: None,
-            rule: "raw SERVER INSERT calls must have zero parameters",
-        }));
-    }
+    validate_raw_server_insert_argument_shape(function, arguments)?;
     let context = ServerInsertContext::new(
         active.pair(),
         target.function(),
         function.current_revision(),
     );
-    let (result, _) = execute_active_insert(transaction, active, function, context, &[])
+    let (result, _) = execute_active_insert(transaction, active, function, context, arguments)
         .await
         .map_err(|error| not_committed(context, error))?;
     Ok(RuntimeValue::Reference {
         target: result.target(),
         object: result.object(),
     })
+}
+
+fn validate_raw_server_insert_argument_shape(
+    function: &FunctionDefinition,
+    arguments: &[FunctionArgument],
+) -> Result<(), PostgresKernelError> {
+    if arguments.is_empty() {
+        if function.parameters().is_empty() {
+            return Ok(());
+        }
+        return Err(argument_error(
+            None,
+            "raw SERVER INSERT calls must have zero parameters",
+        ));
+    }
+
+    match arguments {
+        [argument] if matches!(argument.value(), RuntimeValue::Boolean(_)) => Ok(()),
+        [argument] => Err(argument_error(
+            Some(argument.parameter()),
+            "raw SERVER INSERT calls accept only one Boolean argument",
+        )),
+        _ => Err(argument_error(
+            None,
+            "raw SERVER INSERT calls accept only one Boolean argument",
+        )),
+    }
 }
 
 /// Reports whether an INSERT failure is a closed raw target rejection.
@@ -3486,7 +3523,7 @@ mod tests {
             QualifiedSemanticName, SchemaDefinition,
         },
         types::StandardScalar,
-        value::RuntimeFloat,
+        value::{RuntimeFloat, RuntimeValue},
     };
 
     use super::*;
@@ -4116,6 +4153,169 @@ mod tests {
                 assert_eq!(
                     rule,
                     "every INSERT SERVER function parameter must use a supported active type"
+                );
+            }
+            other => panic!("unexpected mutation error: {other:?}"),
+        }
+    }
+
+    fn raw_boolean_function() -> FunctionDefinition {
+        function(
+            FunctionDomain::Server,
+            vec![ParameterDefinition::new(
+                PARAMETER_TITLE,
+                "raw_flag",
+                0,
+                ResolvedType::scalar(StandardScalar::Boolean),
+                None,
+            )],
+            rows_reference(TARGET),
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::Atomic),
+            FunctionVolatility::Volatile,
+        )
+    }
+
+    fn raw_text_parameter_function() -> FunctionDefinition {
+        function(
+            FunctionDomain::Server,
+            vec![ParameterDefinition::new(
+                PARAMETER_TITLE,
+                "raw_title",
+                0,
+                ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+                None,
+            )],
+            rows_reference(TARGET),
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::Atomic),
+            FunctionVolatility::Volatile,
+        )
+    }
+
+    fn raw_zero_parameter_function() -> FunctionDefinition {
+        function(
+            FunctionDomain::Server,
+            vec![],
+            rows_reference(TARGET),
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::Atomic),
+            FunctionVolatility::Volatile,
+        )
+    }
+
+    #[test]
+    fn raw_insert_argument_shape_accepts_zero_parameters_and_rejects_extra_arguments() {
+        let zero = raw_zero_parameter_function();
+        validate_raw_server_insert_argument_shape(&zero, &[]).unwrap();
+
+        let parameterised = raw_boolean_function();
+        let error = expect_insert_error(
+            validate_raw_server_insert_argument_shape(&parameterised, &[]).unwrap_err(),
+        );
+        match error {
+            ServerInsertError::Argument { parameter, rule } => {
+                assert_eq!(parameter, None);
+                assert_eq!(rule, "raw SERVER INSERT calls must have zero parameters");
+            }
+            other => panic!("unexpected mutation error: {other:?}"),
+        }
+
+        let two = [
+            FunctionArgument::new(PARAMETER_TITLE, RuntimeValue::Boolean(true)).unwrap(),
+            FunctionArgument::new(
+                ParameterId::from_bytes([0x71; 16]),
+                RuntimeValue::Boolean(false),
+            )
+            .unwrap(),
+        ];
+        let error = expect_insert_error(
+            validate_raw_server_insert_argument_shape(&parameterised, &two).unwrap_err(),
+        );
+        match error {
+            ServerInsertError::Argument { parameter, rule } => {
+                assert_eq!(parameter, None);
+                assert_eq!(
+                    rule,
+                    "raw SERVER INSERT calls accept only one Boolean argument"
+                );
+            }
+            other => panic!("unexpected mutation error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn raw_insert_boolean_argument_binds_through_the_existing_argument_validator() {
+        let catalogue = catalogue(target_fields(OTHER), true, Vec::new());
+        let function = raw_boolean_function();
+        for value in [true, false] {
+            let argument =
+                FunctionArgument::new(PARAMETER_TITLE, RuntimeValue::Boolean(value)).unwrap();
+            validate_raw_server_insert_argument_shape(&function, std::slice::from_ref(&argument))
+                .unwrap();
+            let validated = validate_arguments(&catalogue, &function, &[argument]).unwrap();
+            assert_eq!(validated[&PARAMETER_TITLE], BindValue::Boolean(value));
+        }
+    }
+
+    #[test]
+    fn raw_insert_unknown_parameter_passes_shape_but_fails_argument_validation() {
+        let catalogue = catalogue(target_fields(OTHER), true, Vec::new());
+        let function = raw_boolean_function();
+        let unknown = ParameterId::from_bytes([0x72; 16]);
+        let argument = FunctionArgument::new(unknown, RuntimeValue::Boolean(true)).unwrap();
+        validate_raw_server_insert_argument_shape(&function, std::slice::from_ref(&argument))
+            .unwrap();
+        let error = expect_insert_error(
+            validate_arguments(&catalogue, &function, &[argument]).unwrap_err(),
+        );
+        match error {
+            ServerInsertError::Argument { parameter, rule } => {
+                assert_eq!(parameter, Some(unknown));
+                assert_eq!(
+                    rule,
+                    "an argument was supplied for a parameter that this function does not declare"
+                );
+            }
+            other => panic!("unexpected mutation error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn raw_insert_boolean_against_text_parameter_fails_argument_validation() {
+        let catalogue = catalogue(target_fields(OTHER), true, Vec::new());
+        let function = raw_text_parameter_function();
+        let argument = FunctionArgument::new(PARAMETER_TITLE, RuntimeValue::Boolean(true)).unwrap();
+        validate_raw_server_insert_argument_shape(&function, std::slice::from_ref(&argument))
+            .unwrap();
+        let error = expect_insert_error(
+            validate_arguments(&catalogue, &function, &[argument]).unwrap_err(),
+        );
+        match error {
+            ServerInsertError::Argument { parameter, rule } => {
+                assert_eq!(parameter, Some(PARAMETER_TITLE));
+                assert_eq!(
+                    rule,
+                    "the argument type does not match the declared parameter type"
+                );
+            }
+            other => panic!("unexpected mutation error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn raw_insert_rejects_a_non_boolean_single_argument_at_the_shape_boundary() {
+        let function = raw_boolean_function();
+        let argument = FunctionArgument::new(PARAMETER_TITLE, RuntimeValue::Integer(1)).unwrap();
+        let error = expect_insert_error(
+            validate_raw_server_insert_argument_shape(&function, &[argument]).unwrap_err(),
+        );
+        match error {
+            ServerInsertError::Argument { parameter, rule } => {
+                assert_eq!(parameter, Some(PARAMETER_TITLE));
+                assert_eq!(
+                    rule,
+                    "raw SERVER INSERT calls accept only one Boolean argument"
                 );
             }
             other => panic!("unexpected mutation error: {other:?}"),
