@@ -1,0 +1,22 @@
+CREATE SCHEMA reference_test;
+
+CREATE TYPE reference_test.entry AS OBJECT (
+    stored BOOLEAN NOT NULL
+);
+
+CREATE SERVER FUNCTION reference_test.create_true()
+RETURNS ROWS (created REF reference_test.entry)
+SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE
+AS INSERT INTO reference_test.entry AS made (stored)
+VALUES (TRUE) RETURNING REF(made);
+
+CREATE SERVER FUNCTION reference_test.create_false()
+RETURNS ROWS (created REF reference_test.entry)
+SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE
+AS INSERT INTO reference_test.entry AS made (stored)
+VALUES (FALSE) RETURNING REF(made);
+
+CREATE SERVER FUNCTION reference_test.read_entries()
+RETURNS ROWS (entry REF reference_test.entry)
+SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE
+AS SELECT REF(entry) FROM reference_test.entry entry;
