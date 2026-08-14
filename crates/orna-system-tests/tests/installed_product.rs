@@ -740,11 +740,66 @@ fn parse_reference_envelope(bytes: &[u8]) -> Result<OrvReference, Error> {
     Ok(OrvReference { type_id, object })
 }
 
+/// One parsed parameter declaration of an application function entry.
+///
+/// The name is the exact parameter name, the identity is the canonical
+/// `parameter:<id>` value.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ParameterEntry {
+    name: String,
+    parameter_id: String,
+}
+
+impl ParameterEntry {
+    /// The exact parameter name.
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The canonical parameter identity.
+    fn parameter_id(&self) -> &str {
+        &self.parameter_id
+    }
+}
+
 /// One parsed application function entry.
 ///
-/// The first element is the exact qualified name parts, the second is the
-/// canonical `function:<id>` identity.
-type FunctionEntry = (Vec<String>, String);
+/// The qualified name parts, the canonical `function:<id>` identity, and the
+/// ordered parameter declarations, empty for a parameter-free function.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FunctionEntry {
+    names: Vec<String>,
+    function_id: String,
+    parameters: Vec<ParameterEntry>,
+}
+
+impl FunctionEntry {
+    /// The exact qualified name parts.
+    fn names(&self) -> &[String] {
+        &self.names
+    }
+
+    /// The canonical function identity.
+    fn function_id(&self) -> &str {
+        &self.function_id
+    }
+
+    /// The ordered parameter declarations.
+    fn parameters(&self) -> &[ParameterEntry] {
+        &self.parameters
+    }
+
+    /// The parameter identity for one exact parameter name.
+    fn parameter_id(&self, name: &str) -> Result<&str, Error> {
+        self.parameters
+            .iter()
+            .find(|parameter| parameter.name() == name)
+            .map(|parameter| parameter.parameter_id())
+            .ok_or_else(|| Error::Unexpected {
+                message: format!("function {} lacks the parameter {name:?}", self.function_id),
+            })
+    }
+}
 
 /// The parsed success document of `orna source apply`.
 struct ApplyDocument {
@@ -758,11 +813,35 @@ impl ApplyDocument {
     fn function_id(&self, name: &[&str]) -> Result<&str, Error> {
         self.functions
             .iter()
-            .find(|(parts, _)| parts.iter().map(String::as_str).eq(name.iter().copied()))
-            .map(|(_, id)| id.as_str())
+            .find(|function| {
+                function
+                    .names()
+                    .iter()
+                    .map(String::as_str)
+                    .eq(name.iter().copied())
+            })
+            .map(|function| function.function_id())
             .ok_or_else(|| Error::Unexpected {
                 message: format!("source apply functions lack the qualified name {name:?}"),
             })
+    }
+
+    /// The parameter identity for one exact parameter name of one function.
+    fn parameter_id(&self, function: &[&str], parameter: &str) -> Result<&str, Error> {
+        let entry = self
+            .functions
+            .iter()
+            .find(|candidate| {
+                candidate
+                    .names()
+                    .iter()
+                    .map(String::as_str)
+                    .eq(function.iter().copied())
+            })
+            .ok_or_else(|| Error::Unexpected {
+                message: format!("source apply functions lack the qualified name {function:?}"),
+            })?;
+        entry.parameter_id(parameter)
     }
 }
 
@@ -850,9 +929,12 @@ fn parse_apply_document(bytes: &[u8]) -> Result<ApplyDocument, Error> {
 
 /// Parse the exact `functions` array entries of the success document.
 ///
-/// Each entry is
-/// `{"qualified_name":["schema","function"],"function_id":"function:<id>"}`,
-/// separated by commas and closed by `]`.
+/// A parameter-free entry is
+/// `{"qualified_name":["schema","function"],"function_id":"function:<id>"}`.
+/// A parameterised entry appends exactly
+/// `,"parameters":[{"name":"<name>","parameter_id":"parameter:<id>"},...]`
+/// after the function identity. Entries are separated by commas and closed
+/// by `]`. The parameters array is optional, non-empty, and preserves order.
 fn parse_functions(text: &str) -> Result<(Vec<FunctionEntry>, &str), Error> {
     let mut rest = text;
     let mut functions = Vec::new();
@@ -897,10 +979,53 @@ fn parse_functions(text: &str) -> Result<(Vec<FunctionEntry>, &str), Error> {
             });
         }
         rest = &rest[id_end + 1..];
-        rest = rest.strip_prefix('}').ok_or_else(|| Error::Unexpected {
-            message: "source apply function entry is not closed".to_string(),
-        })?;
-        functions.push((names, id.to_string()));
+        let (parameters, next) = match rest.strip_prefix(",\"parameters\":[") {
+            Some(after_marker) => {
+                if after_marker.starts_with(']') {
+                    return Err(Error::Unexpected {
+                        message: "source apply parameters must be a non-empty array".to_string(),
+                    });
+                }
+                let mut parameters = Vec::new();
+                let mut params_rest = after_marker;
+                loop {
+                    let (parameter, after) = parse_parameter(params_rest)?;
+                    parameters.push(parameter);
+                    params_rest = after;
+                    match params_rest.strip_prefix(']') {
+                        Some(tail) => {
+                            rest = tail;
+                            break;
+                        }
+                        None => {
+                            params_rest =
+                                params_rest
+                                    .strip_prefix(',')
+                                    .ok_or_else(|| Error::Unexpected {
+                                        message: "source apply parameters must be comma separated"
+                                            .to_string(),
+                                    })?;
+                        }
+                    }
+                }
+                let rest = rest.strip_prefix('}').ok_or_else(|| Error::Unexpected {
+                    message: "source apply function entry is not closed".to_string(),
+                })?;
+                (parameters, rest)
+            }
+            None => {
+                let rest = rest.strip_prefix('}').ok_or_else(|| Error::Unexpected {
+                    message: "source apply function entry is not closed".to_string(),
+                })?;
+                (Vec::new(), rest)
+            }
+        };
+        rest = next;
+        functions.push(FunctionEntry {
+            names,
+            function_id: id.to_string(),
+            parameters,
+        });
 
         match rest.strip_prefix(']') {
             Some(tail) => return Ok((functions, tail)),
@@ -910,6 +1035,253 @@ fn parse_functions(text: &str) -> Result<(Vec<FunctionEntry>, &str), Error> {
                 })?;
             }
         }
+    }
+}
+
+/// Parse one exact parameter object of a function entry.
+///
+/// The object is `{"name":"<name>","parameter_id":"parameter:<id>"}` with
+/// exact key order and a canonical 26-character base32 parameter identity.
+/// Every deviation is rejected with a closed message.
+fn parse_parameter(text: &str) -> Result<(ParameterEntry, &str), Error> {
+    const PARAMETER_ID_ALPHABET: &[u8] = b"0123456789abcdefghjkmnpqrstvwxyz";
+    let rest = text.strip_prefix('{').ok_or_else(|| Error::Unexpected {
+        message: "source apply parameters must be objects".to_string(),
+    })?;
+    let name_marker = "\"name\":\"";
+    let rest = rest
+        .strip_prefix(name_marker)
+        .ok_or_else(|| Error::Unexpected {
+            message: "source apply parameter must start with its name".to_string(),
+        })?;
+    let name_end = rest.find('"').ok_or_else(|| Error::Unexpected {
+        message: "source apply parameter name is not closed".to_string(),
+    })?;
+    let name = &rest[..name_end];
+    if name.is_empty() {
+        return Err(Error::Unexpected {
+            message: "source apply parameter name must be non-empty".to_string(),
+        });
+    }
+    let rest = &rest[name_end..];
+    let id_marker = "\",\"parameter_id\":\"parameter:";
+    let rest = rest
+        .strip_prefix(id_marker)
+        .ok_or_else(|| Error::Unexpected {
+            message: "source apply parameter must continue with its parameter identity".to_string(),
+        })?;
+    let id_end = rest.find('"').ok_or_else(|| Error::Unexpected {
+        message: "source apply parameter identity is not closed".to_string(),
+    })?;
+    let id = &rest[..id_end];
+    if id.len() != 26 {
+        return Err(Error::Unexpected {
+            message: "source apply parameter identity must be 26 canonical characters".to_string(),
+        });
+    }
+    let mut final_value = 0_usize;
+    for (index, character) in id.bytes().enumerate() {
+        let Some(value) = PARAMETER_ID_ALPHABET
+            .iter()
+            .position(|candidate| *candidate == character)
+        else {
+            return Err(Error::Unexpected {
+                message: format!(
+                    "source apply parameter identity contains an invalid character: {character:?}"
+                ),
+            });
+        };
+        if index == 25 {
+            final_value = value;
+        }
+    }
+    if final_value & 0b11 != 0 {
+        return Err(Error::Unexpected {
+            message: "source apply parameter identity final character is not canonical".to_string(),
+        });
+    }
+    let rest = &rest[id_end + 1..];
+    let rest = rest.strip_prefix('}').ok_or_else(|| Error::Unexpected {
+        message: "source apply parameter object is not closed".to_string(),
+    })?;
+    Ok((
+        ParameterEntry {
+            name: name.to_string(),
+            parameter_id: format!("parameter:{id}"),
+        },
+        rest,
+    ))
+}
+
+/// One exact apply document line with the given functions-array body.
+fn apply_document_line(functions: &str) -> String {
+    format!(
+        "{{\"source_revision\":\"source-revision:s\",\"catalogue_revision\":\"catalogue-revision:c\",\"functions\":[{functions}]}}\n"
+    )
+}
+
+#[test]
+fn apply_document_parser_accepts_the_exact_zero_parameter_form() {
+    let document = parse_apply_document(
+        apply_document_line(
+            "{\"qualified_name\":[\"schema\",\"fn\"],\"function_id\":\"function:abc\"}",
+        )
+        .as_bytes(),
+    )
+    .expect("the zero-parameter document must parse");
+    assert_eq!(document.functions.len(), 1);
+    let function = &document.functions[0];
+    assert_eq!(function.names(), &["schema".to_string(), "fn".to_string()]);
+    assert_eq!(function.function_id(), "function:abc");
+    assert!(function.parameters().is_empty());
+    assert_eq!(
+        document
+            .function_id(&["schema", "fn"])
+            .expect("function identity"),
+        "function:abc"
+    );
+}
+
+#[test]
+fn apply_document_parser_accepts_exact_ordered_parameters() {
+    let document = parse_apply_document(
+        apply_document_line(
+            "{\"qualified_name\":[\"schema\",\"fn\"],\"function_id\":\"function:abc\",\"parameters\":[{\"name\":\"first\",\"parameter_id\":\"parameter:00000000000000000000000000\"},{\"name\":\"second\",\"parameter_id\":\"parameter:00000000000000000000000004\"}]}",
+        )
+        .as_bytes(),
+    )
+    .expect("the parameterised document must parse");
+    assert_eq!(document.functions.len(), 1);
+    let function = &document.functions[0];
+    assert_eq!(function.function_id(), "function:abc");
+    assert_eq!(function.parameters().len(), 2);
+    assert_eq!(function.parameters()[0].name(), "first");
+    assert_eq!(
+        function.parameters()[0].parameter_id(),
+        "parameter:00000000000000000000000000"
+    );
+    assert_eq!(function.parameters()[1].name(), "second");
+    assert_eq!(
+        function.parameters()[1].parameter_id(),
+        "parameter:00000000000000000000000004"
+    );
+    assert_eq!(
+        function
+            .parameter_id("first")
+            .expect("first parameter identity"),
+        "parameter:00000000000000000000000000"
+    );
+    assert_eq!(
+        function
+            .parameter_id("second")
+            .expect("second parameter identity"),
+        "parameter:00000000000000000000000004"
+    );
+    assert_eq!(
+        document
+            .parameter_id(&["schema", "fn"], "first")
+            .expect("first parameter identity by function"),
+        "parameter:00000000000000000000000000"
+    );
+    assert_eq!(
+        document
+            .parameter_id(&["schema", "fn"], "second")
+            .expect("second parameter identity by function"),
+        "parameter:00000000000000000000000004"
+    );
+    assert!(
+        document.parameter_id(&["schema", "fn"], "missing").is_err(),
+        "an unknown parameter name must be rejected by the function accessor"
+    );
+}
+
+#[test]
+fn apply_document_parser_omits_parameters_only_when_absent() {
+    let without = parse_apply_document(
+        apply_document_line(
+            "{\"qualified_name\":[\"schema\",\"fn\"],\"function_id\":\"function:abc\"}",
+        )
+        .as_bytes(),
+    )
+    .expect("the zero-parameter document must parse");
+    assert!(without.functions[0].parameters().is_empty());
+
+    let with_one = parse_apply_document(
+        apply_document_line(
+            "{\"qualified_name\":[\"schema\",\"fn\"],\"function_id\":\"function:abc\",\"parameters\":[{\"name\":\"p\",\"parameter_id\":\"parameter:00000000000000000000000000\"}]}",
+        )
+        .as_bytes(),
+    )
+    .expect("the one-parameter document must parse");
+    assert_eq!(with_one.functions[0].parameters().len(), 1);
+    assert_eq!(
+        with_one.functions[0]
+            .parameter_id("p")
+            .expect("parameter identity"),
+        "parameter:00000000000000000000000000"
+    );
+}
+
+#[test]
+fn apply_document_parser_rejects_invalid_parameter_shapes() {
+    let cases = [
+        "{\"qualified_name\":[\"schema\",\"fn\"],\"function_id\":\"function:abc\",\"parameters\":[]}",
+        "{\"qualified_name\":[\"schema\",\"fn\"],\"function_id\":\"function:abc\",\"parameters\":[{\"parameter_id\":\"parameter:00000000000000000000000000\",\"name\":\"p\"}]}",
+        "{\"qualified_name\":[\"schema\",\"fn\"],\"function_id\":\"function:abc\",\"parameters\":[{\"name\":\"p\",\"parameter_id\":\"parameter:00000000000000000000000000\",\"extra\":1}]}",
+        "{\"qualified_name\":[\"schema\",\"fn\"],\"function_id\":\"function:abc\",\"parameters\":[{\"name\":\"p\",\"parameter_id\":\"id:x\"}]}",
+        "{\"qualified_name\":[\"schema\",\"fn\"],\"function_id\":\"function:abc\",\"parameters\":[{\"name\":\",\"parameter_id\":\"parameter:00000000000000000000000000\"}]}",
+        "{\"qualified_name\":[\"schema\",\"fn\"],\"function_id\":\"function:abc\",\"parameters\":[{\"name\":\"p\",\"parameter_id\":\"parameter:\"}]}",
+        "{\"qualified_name\":[\"schema\",\"fn\"],\"function_id\":\"function:abc\",\"parameters\":[{\"name\":\"a\",\"parameter_id\":\"parameter:00000000000000000000000000\"}{\"name\":\"b\",\"parameter_id\":\"parameter:00000000000000000000000004\"}]}",
+    ];
+    for case in cases {
+        let result = parse_apply_document(apply_document_line(case).as_bytes());
+        assert!(
+            matches!(result, Err(Error::Unexpected { .. })),
+            "invalid parameter shape must be rejected: {case}"
+        );
+    }
+}
+
+#[test]
+fn apply_document_parser_rejects_invalid_canonical_parameter_ids() {
+    let cases = [
+        "parameter:0000000000000000000000000",
+        "parameter:000000000000000000000000000",
+        "parameter:iiiiiiiiiiiiiiiiiiiiiiiiii",
+        "parameter:llllllllllllllllllllllllll",
+        "parameter:oooooooooooooooooooooooooo",
+        "parameter:uuuuuuuuuuuuuuuuuuuuuuuuuu",
+        "parameter:AAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "parameter:00000000000000000000000001",
+    ];
+    for parameter_id in cases {
+        let document = format!(
+            "{{\"source_revision\":\"source-revision:s\",\"catalogue_revision\":\"catalogue-revision:c\",\"functions\":[{{\"qualified_name\":[\"schema\",\"fn\"],\"function_id\":\"function:abc\",\"parameters\":[{{\"name\":\"p\",\"parameter_id\":\"{parameter_id}\"}}]}}]}}\n"
+        );
+        let result = parse_apply_document(document.as_bytes());
+        assert!(
+            matches!(result, Err(Error::Unexpected { .. })),
+            "non-canonical parameter identity must be rejected: {parameter_id}"
+        );
+    }
+}
+
+#[test]
+fn apply_document_parser_rejects_truncated_parameter_shapes() {
+    let cases = [
+        "{\"qualified_name\":[\"schema\",\"fn\"],\"function_id\":\"function:abc\",\"parameters\":",
+        "{\"qualified_name\":[\"schema\",\"fn\"],\"function_id\":\"function:abc\",\"parameters\":[{\"name\":\"p",
+        "{\"qualified_name\":[\"schema\",\"fn\"],\"function_id\":\"function:abc\",\"parameters\":[{\"name\":\"p\",\"parameter_id\":\"parameter:",
+        "{\"qualified_name\":[\"schema\",\"fn\"],\"function_id\":\"function:abc\",\"parameters\":[{\"name\":\"p\",\"parameter_id\":\"parameter:00000000000000000000000000\"}",
+        "{\"qualified_name\":[\"schema\",\"fn\"],\"function_id\":\"function:abc\",\"parameters\":[{\"name\":\"p\",\"parameter_id\":\"parameter:00000000000000000000000000\"}]junk}",
+        "{\"qualified_name\":[\"schema\",\"fn\"],\"parameters\":[{\"name\":\"p\",\"parameter_id\":\"parameter:00000000000000000000000000\"}],\"function_id\":\"function:abc\"}",
+    ];
+    for case in cases {
+        let result = parse_apply_document(apply_document_line(case).as_bytes());
+        assert!(
+            matches!(result, Err(Error::Unexpected { .. })),
+            "truncated parameter shape must be rejected: {case}"
+        );
     }
 }
 
@@ -1802,7 +2174,7 @@ fn installed_nullable_field_persists_omitted_and_present_values_across_restart()
     let actual_order = document
         .functions
         .iter()
-        .map(|(names, _)| names.clone())
+        .map(|function| function.names().to_vec())
         .collect::<Vec<_>>();
     assert_eq!(
         actual_order, expected_order,
@@ -2039,7 +2411,7 @@ fn installed_schema_isolation_persists_separate_relations_across_restart() {
     let actual_order = document
         .functions
         .iter()
-        .map(|(names, _)| names.clone())
+        .map(|function| function.names().to_vec())
         .collect::<Vec<_>>();
     assert_eq!(
         actual_order, expected_order,
@@ -2451,7 +2823,7 @@ fn installed_distinct_eliminates_duplicate_stored_values_across_reapply_and_rest
     let actual_order = document
         .functions
         .iter()
-        .map(|(names, _)| names.clone())
+        .map(|function| function.names().to_vec())
         .collect::<Vec<_>>();
     assert_eq!(
         actual_order, expected_order,
@@ -2901,7 +3273,7 @@ fn installed_reference_reader_returns_stored_object_references_across_replay_and
     let actual_order = document
         .functions
         .iter()
-        .map(|(names, _)| names.clone())
+        .map(|function| function.names().to_vec())
         .collect::<Vec<_>>();
     assert_eq!(
         actual_order, expected_order,
@@ -3267,7 +3639,7 @@ fn installed_nullable_boolean_predicates_filter_and_distinct_across_replay_and_r
     let actual_order = document
         .functions
         .iter()
-        .map(|(names, _)| names.clone())
+        .map(|function| function.names().to_vec())
         .collect::<Vec<_>>();
     assert_eq!(
         actual_order, expected_order,
@@ -3623,7 +3995,7 @@ fn installed_parameterised_mutation_stays_unavailable_and_empty_across_replay_an
     let actual_order = document
         .functions
         .iter()
-        .map(|(names, _)| names.clone())
+        .map(|function| function.names().to_vec())
         .collect::<Vec<_>>();
     assert_eq!(
         actual_order, expected_order,
