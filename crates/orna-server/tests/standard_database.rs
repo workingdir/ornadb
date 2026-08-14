@@ -12,7 +12,7 @@ use orna_compiler::{
 };
 use orna_core::{
     CatalogueRevisionId, FunctionId, FunctionRevisionId, ObjectId, ParameterId, PrincipalId,
-    SourceRevisionId,
+    SourceRevisionId, TypeId,
     canonical_hash::{
         artifact_payload_digest, catalogue_digest_with_context,
         function_semantic_digest_with_version,
@@ -28,9 +28,10 @@ use orna_core::{
         FunctionRevisionRecord, FunctionSemanticHashVersion, RevisionPair,
     },
     security::{
-        ExecuteDenial, ExecuteGrant, InvocationTarget, LocalPeerAuthenticationError,
-        LocalPeerCredential, Principal, PrincipalKind, PrincipalStatus, SecurityAuditDenial,
-        SecurityAuditKind, SecurityAuditOutcome, SecuritySnapshot,
+        AuthenticatedSession, ExecuteDenial, ExecuteGrant, InvocationTarget,
+        LocalPeerAuthenticationError, LocalPeerCredential, Principal, PrincipalKind,
+        PrincipalStatus, SecurityAuditDenial, SecurityAuditKind, SecurityAuditOutcome,
+        SecuritySnapshot,
     },
     source::{SourceBundle, SourceUnit},
     types::ResolvedType,
@@ -74,6 +75,19 @@ const RAW_CLIENT_FUNCTION_SOURCE: &str = "CREATE SCHEMA app;\n\
     SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE\n\
     AS INSERT INTO app.flag AS made (value)\n\
     VALUES (p_value) RETURNING REF(made);\n\
+    CREATE SERVER FUNCTION app.update_false(p_flag REF app.flag)\n\
+    RETURNS ROWS (updated REF app.flag)\n\
+    SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE\n\
+    AS UPDATE app.flag AS alias\n\
+    SET value = FALSE\n\
+    WHERE REF(alias) = p_flag\n\
+    RETURNING REF(alias);\n\
+    CREATE SERVER FUNCTION app.delete_flag(p_flag REF app.flag)\n\
+    RETURNS ROWS (deleted BOOLEAN)\n\
+    SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE\n\
+    AS DELETE FROM app.flag AS alias\n\
+    WHERE REF(alias) = p_flag\n\
+    RETURNING TRUE;\n\
     CREATE CLIENT FUNCTION app.enabled() RETURNS BOOLEAN RETURN TRUE;\n";
 const RAW_CLIENT_USER: PrincipalId = PrincipalId::from_bytes([0x71; 16]);
 const RAW_CLIENT_UNGRANTED_USER: PrincipalId = PrincipalId::from_bytes([0x72; 16]);
@@ -942,6 +956,397 @@ async fn raw_argument_authority_denies_then_grants_and_audits_each_dispatch() ->
 
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
+async fn server_raw_reference_mutation_authority_selection_and_audit() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = kernel(&database)?;
+        let (active, _standard_upgrade, _client_function, server_function) =
+            install_raw_client_fixture(&kernel).await?;
+        let flag_type = active
+            .catalogue()
+            .object_types()
+            .iter()
+            .find(|object| object.name().parts() == ["app", "flag"])
+            .ok_or_else(|| failure("the reference fixture is missing app.flag"))?
+            .id();
+        let create_flagged = active
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|function| function.name().parts() == ["app", "create_flagged"])
+            .ok_or_else(|| failure("the reference fixture is missing app.create_flagged"))?
+            .id();
+        let update_false = active
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|function| function.name().parts() == ["app", "update_false"])
+            .ok_or_else(|| failure("the reference fixture is missing app.update_false"))?
+            .id();
+        let delete_flag = active
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|function| function.name().parts() == ["app", "delete_flag"])
+            .ok_or_else(|| failure("the reference fixture is missing app.delete_flag"))?
+            .id();
+        let p_value = active
+            .catalogue()
+            .function_by_id(create_flagged)
+            .ok_or_else(|| failure("create_flagged is absent from the active catalogue"))?
+            .parameter_by_name("p_value")
+            .ok_or_else(|| failure("create_flagged.p_value is absent from the active catalogue"))?
+            .id();
+        let p_flag = active
+            .catalogue()
+            .function_by_id(update_false)
+            .ok_or_else(|| failure("update_false is absent from the active catalogue"))?
+            .parameter_by_name("p_flag")
+            .ok_or_else(|| failure("update_false.p_flag is absent from the active catalogue"))?
+            .id();
+        let delete_parameter = active
+            .catalogue()
+            .function_by_id(delete_flag)
+            .ok_or_else(|| failure("delete_flag is absent from the active catalogue"))?
+            .parameter_by_name("p_flag")
+            .ok_or_else(|| failure("delete_flag.p_flag is absent from the active catalogue"))?
+            .id();
+        let mut wrong_parameter_bytes = p_flag.to_bytes();
+        wrong_parameter_bytes[0] ^= 0x01;
+        let wrong_parameter = ParameterId::from_bytes(wrong_parameter_bytes);
+        require(
+            wrong_parameter != p_flag,
+            "the deliberately wrong parameter must differ from the declared parameter",
+        )?;
+        let functions = active
+            .catalogue()
+            .functions()
+            .iter()
+            .map(|function| function.id())
+            .collect::<Vec<_>>();
+
+        // Grant only the writer and the reader; the reference mutations stay
+        // unauthorised for the denial proof.
+        let read_only = SecuritySnapshot::new(
+            active.pair(),
+            functions.clone(),
+            vec![Principal::new(
+                RAW_CLIENT_USER,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            vec![],
+            vec![
+                ExecuteGrant::new(RAW_CLIENT_USER, create_flagged),
+                ExecuteGrant::new(RAW_CLIENT_USER, server_function),
+            ],
+        )?;
+        let security = kernel.replace_security_snapshot(&read_only).await?;
+        let session = security.bind_authenticated_session(RAW_CLIENT_USER, vec![])?;
+
+        // Create two distinct rows and retain both exact references.
+        let first =
+            create_flag_reference(&kernel, &session, create_flagged, p_value, flag_type, 1).await?;
+        let second =
+            create_flag_reference(&kernel, &session, create_flagged, p_value, flag_type, 2).await?;
+        require(
+            first != second,
+            "the two created references must be distinct",
+        )?;
+
+        // The identical invalid binding is denied before its grant, proving
+        // authorisation precedes argument binding.
+        let denied = RawClientDispatch::new(
+            kernel.clone(),
+            session.clone(),
+            3,
+            RawCall {
+                function: update_false,
+                arguments: vec![orna_protocol::CallArgument {
+                    parameter: wrong_parameter,
+                    value: second.clone(),
+                }],
+            },
+        )
+        .finish()
+        .await;
+        require_dispatch_failure(
+            &denied,
+            3,
+            CallFailure::ExecuteDenied,
+            matches!(
+                denied.source(),
+                Some(PostgresKernelError::RawExecuteDenied {
+                    reason: ExecuteDenial::MissingExecuteGrant,
+                    ..
+                })
+            ),
+            "an ungranted invalid-binding UPDATE was not denied before dispatch",
+        )?;
+
+        // Grant create, read, update, and delete, then bind a fresh session.
+        let granted = SecuritySnapshot::new(
+            active.pair(),
+            functions,
+            vec![Principal::new(
+                RAW_CLIENT_USER,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            vec![],
+            vec![
+                ExecuteGrant::new(RAW_CLIENT_USER, create_flagged),
+                ExecuteGrant::new(RAW_CLIENT_USER, server_function),
+                ExecuteGrant::new(RAW_CLIENT_USER, update_false),
+                ExecuteGrant::new(RAW_CLIENT_USER, delete_flag),
+            ],
+        )?;
+        let security = kernel.replace_security_snapshot(&granted).await?;
+        let session = security.bind_authenticated_session(RAW_CLIENT_USER, vec![])?;
+
+        // UPDATE selects the first row and returns the identical reference.
+        let updated = RawClientDispatch::new(
+            kernel.clone(),
+            session.clone(),
+            4,
+            RawCall {
+                function: update_false,
+                arguments: vec![orna_protocol::CallArgument {
+                    parameter: p_flag,
+                    value: first.clone(),
+                }],
+            },
+        )
+        .finish()
+        .await;
+        require(
+            updated.source().is_none(),
+            "the Reference UPDATE must not retain a kernel source",
+        )?;
+        let [
+            ServerAction::Events { stream: 4, events },
+            ServerAction::Completed { stream: 4 },
+        ] = updated.actions()
+        else {
+            return Err(failure(
+                "the Reference UPDATE must return one event batch and completion",
+            ));
+        };
+        let [Event::Value(updated_reference)] = events.as_slice() else {
+            return Err(failure("the Reference UPDATE must return one reference"));
+        };
+        require(
+            *updated_reference == first,
+            "the Reference UPDATE must return exactly the identical input reference",
+        )?;
+
+        // The reader returns exactly one FALSE and one TRUE in no row order.
+        let mixed = read_flag_values(&kernel, &session, server_function, 5).await?;
+        require(
+            mixed.len() == 2
+                && mixed
+                    .iter()
+                    .filter(|value| **value == RuntimeValue::Boolean(false))
+                    .count()
+                    == 1
+                && mixed
+                    .iter()
+                    .filter(|value| **value == RuntimeValue::Boolean(true))
+                    .count()
+                    == 1,
+            "the Reference UPDATE must select exactly one row",
+        )?;
+
+        // The same invalid binding closes as unavailable after the grant, and
+        // the preserved read proves the second row stayed TRUE: an erroneous
+        // post-grant execution would have made it FALSE.
+        let wrong = RawClientDispatch::new(
+            kernel.clone(),
+            session.clone(),
+            6,
+            RawCall {
+                function: update_false,
+                arguments: vec![orna_protocol::CallArgument {
+                    parameter: wrong_parameter,
+                    value: second.clone(),
+                }],
+            },
+        )
+        .finish()
+        .await;
+        require_dispatch_failure(
+            &wrong,
+            6,
+            CallFailure::TargetUnavailable,
+            matches!(
+                wrong.source(),
+                Some(PostgresKernelError::RawCallTargetUnavailable { function, .. })
+                    if *function == update_false
+            ),
+            "a wrong UPDATE ParameterId did not close as an unavailable target",
+        )?;
+        let preserved = read_flag_values(&kernel, &session, server_function, 7).await?;
+        require(
+            preserved.len() == 2
+                && preserved
+                    .iter()
+                    .filter(|value| **value == RuntimeValue::Boolean(false))
+                    .count()
+                    == 1
+                && preserved
+                    .iter()
+                    .filter(|value| **value == RuntimeValue::Boolean(true))
+                    .count()
+                    == 1,
+            "the wrong UPDATE ParameterId must preserve both rows",
+        )?;
+
+        // DELETE the first row and prove the reader keeps only the second.
+        let deleted = RawClientDispatch::new(
+            kernel.clone(),
+            session.clone(),
+            8,
+            RawCall {
+                function: delete_flag,
+                arguments: vec![orna_protocol::CallArgument {
+                    parameter: delete_parameter,
+                    value: first.clone(),
+                }],
+            },
+        )
+        .finish()
+        .await;
+        require(
+            deleted.source().is_none()
+                && deleted.actions()
+                    == [
+                        ServerAction::Events {
+                            stream: 8,
+                            events: vec![Event::Value(RuntimeValue::Boolean(true))],
+                        },
+                        ServerAction::Completed { stream: 8 },
+                    ],
+            "the reference DELETE must return exactly one TRUE value",
+        )?;
+        let one_true = read_flag_values(&kernel, &session, server_function, 9).await?;
+        require(
+            one_true == [RuntimeValue::Boolean(true)],
+            "the reference DELETE must leave exactly the second row TRUE",
+        )?;
+
+        // Repeated DELETE and UPDATE of the deleted reference both complete
+        // with no value events.
+        let repeated = RawClientDispatch::new(
+            kernel.clone(),
+            session.clone(),
+            10,
+            RawCall {
+                function: delete_flag,
+                arguments: vec![orna_protocol::CallArgument {
+                    parameter: delete_parameter,
+                    value: first.clone(),
+                }],
+            },
+        )
+        .finish()
+        .await;
+        require(
+            repeated.source().is_none()
+                && repeated.actions() == [ServerAction::Completed { stream: 10 }],
+            "the repeated reference DELETE must complete with no value events",
+        )?;
+        let deleted_update = RawClientDispatch::new(
+            kernel.clone(),
+            session.clone(),
+            11,
+            RawCall {
+                function: update_false,
+                arguments: vec![orna_protocol::CallArgument {
+                    parameter: p_flag,
+                    value: first.clone(),
+                }],
+            },
+        )
+        .finish()
+        .await;
+        require(
+            deleted_update.source().is_none()
+                && deleted_update.actions() == [ServerAction::Completed { stream: 11 }],
+            "the UPDATE of the deleted reference must complete with no value events",
+        )?;
+
+        // The final read shows only the second TRUE row.
+        let final_read = read_flag_values(&kernel, &session, server_function, 12).await?;
+        require(
+            final_read == [RuntimeValue::Boolean(true)],
+            "the final read must show only the second TRUE row",
+        )?;
+
+        // Authentication is session binding here, so every audit is Execute
+        // with exact outcomes and targets in dispatch order.
+        let events = kernel.recover_security_audit_events().await?;
+        require(
+            events.len() == 12,
+            "server reference mutation audit count differs",
+        )?;
+        require(
+            events[0].decision().kind() == SecurityAuditKind::Execute
+                && events[0].decision().outcome() == SecurityAuditOutcome::Allowed
+                && events[0].decision().target()
+                    == Some(InvocationTarget::new(create_flagged, active.pair()))
+                && events[1].decision().outcome() == SecurityAuditOutcome::Allowed
+                && events[1].decision().target()
+                    == Some(InvocationTarget::new(create_flagged, active.pair()))
+                && events[2].decision().outcome() == SecurityAuditOutcome::Denied
+                && events[2].decision().denial()
+                    == Some(SecurityAuditDenial::Execute(
+                        ExecuteDenial::MissingExecuteGrant,
+                    ))
+                && events[2].decision().target()
+                    == Some(InvocationTarget::new(update_false, active.pair()))
+                && events[3].decision().outcome() == SecurityAuditOutcome::Allowed
+                && events[3].decision().target()
+                    == Some(InvocationTarget::new(update_false, active.pair()))
+                && events[4].decision().outcome() == SecurityAuditOutcome::Allowed
+                && events[4].decision().target()
+                    == Some(InvocationTarget::new(server_function, active.pair()))
+                && events[5].decision().outcome() == SecurityAuditOutcome::Allowed
+                && events[5].decision().target()
+                    == Some(InvocationTarget::new(update_false, active.pair()))
+                && events[6].decision().outcome() == SecurityAuditOutcome::Allowed
+                && events[6].decision().target()
+                    == Some(InvocationTarget::new(server_function, active.pair()))
+                && events[7].decision().outcome() == SecurityAuditOutcome::Allowed
+                && events[7].decision().target()
+                    == Some(InvocationTarget::new(delete_flag, active.pair()))
+                && events[8].decision().outcome() == SecurityAuditOutcome::Allowed
+                && events[8].decision().target()
+                    == Some(InvocationTarget::new(server_function, active.pair()))
+                && events[9].decision().outcome() == SecurityAuditOutcome::Allowed
+                && events[9].decision().target()
+                    == Some(InvocationTarget::new(delete_flag, active.pair()))
+                && events[10].decision().outcome() == SecurityAuditOutcome::Allowed
+                && events[10].decision().target()
+                    == Some(InvocationTarget::new(update_false, active.pair()))
+                && events[11].decision().outcome() == SecurityAuditOutcome::Allowed
+                && events[11].decision().target()
+                    == Some(InvocationTarget::new(server_function, active.pair())),
+            "server reference mutation changed the exact durable audit sequence",
+        )?;
+
+        // The active revision pair is unchanged.
+        let recovered = kernel.recover().await?;
+        require(
+            recovered.pair() == active.pair(),
+            "server reference mutations must not change the active revision pair",
+        )?;
+
+        require_no_database_sessions(&database).await
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
 async fn serves_the_actual_local_peer_through_the_raw_socket_protocol() -> TestResult<()> {
     with_test_database(|database| async move {
         let kernel = kernel(&database)?;
@@ -1620,6 +2025,131 @@ fn raw_call(function: FunctionId) -> RawCall {
         function,
         arguments: vec![],
     }
+}
+
+async fn create_flag_reference(
+    kernel: &PostgresKernel,
+    session: &AuthenticatedSession,
+    create_flagged: FunctionId,
+    p_value: ParameterId,
+    flag_type: TypeId,
+    stream: u64,
+) -> TestResult<RuntimeValue> {
+    let result = RawClientDispatch::new(
+        kernel.clone(),
+        session.clone(),
+        stream,
+        RawCall {
+            function: create_flagged,
+            arguments: vec![orna_protocol::CallArgument {
+                parameter: p_value,
+                value: RuntimeValue::Boolean(true),
+            }],
+        },
+    )
+    .finish()
+    .await;
+    require(
+        result.source().is_none(),
+        "the reference create must not retain a kernel source",
+    )?;
+    let [
+        ServerAction::Events {
+            stream: events_stream,
+            events,
+        },
+        ServerAction::Completed {
+            stream: completed_stream,
+        },
+    ] = result.actions()
+    else {
+        return Err(failure(
+            "the reference create must return one event batch and completion",
+        ));
+    };
+    require(
+        *events_stream == stream && *completed_stream == stream,
+        "the reference create must use the exact stream",
+    )?;
+    let [Event::Value(RuntimeValue::Reference { target, object })] = events.as_slice() else {
+        return Err(failure("the reference create must return one reference"));
+    };
+    require(
+        *target == flag_type && *object != ObjectId::from_bytes([0; 16]),
+        "the reference create returned the wrong reference",
+    )?;
+    Ok(RuntimeValue::Reference {
+        target: *target,
+        object: *object,
+    })
+}
+
+async fn read_flag_values(
+    kernel: &PostgresKernel,
+    session: &AuthenticatedSession,
+    server_function: FunctionId,
+    stream: u64,
+) -> TestResult<Vec<RuntimeValue>> {
+    let result = RawClientDispatch::new(
+        kernel.clone(),
+        session.clone(),
+        stream,
+        raw_call(server_function),
+    )
+    .finish()
+    .await;
+    require(
+        result.source().is_none(),
+        "the raw read must not retain a kernel source",
+    )?;
+    let mut values = Vec::new();
+    let mut completed = false;
+    for action in result.actions() {
+        match action {
+            ServerAction::Events {
+                stream: action_stream,
+                events,
+            } => {
+                require(
+                    !completed,
+                    "the raw read must not emit events after completion",
+                )?;
+                require(
+                    *action_stream == stream,
+                    "the raw read must use the exact stream",
+                )?;
+                for event in events {
+                    let Event::Value(value) = event else {
+                        return Err(failure("the raw read must return value events"));
+                    };
+                    values.push(value.clone());
+                }
+            }
+            ServerAction::Completed {
+                stream: action_stream,
+            } => {
+                require(
+                    !completed,
+                    "the raw read must contain exactly one completion",
+                )?;
+                require(
+                    *action_stream == stream,
+                    "the raw read must use the exact stream",
+                )?;
+                completed = true;
+            }
+            other => {
+                return Err(failure(format!(
+                    "the raw read returned an unexpected action {other:?}"
+                )));
+            }
+        }
+    }
+    require(
+        completed,
+        "the raw read must terminate with exactly one completion",
+    )?;
+    Ok(values)
 }
 
 async fn send_active_protocol_frame(
