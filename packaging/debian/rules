@@ -12,7 +12,6 @@ PAYLOAD_ROOT := $(TARGET_ROOT)/payload
 PACKAGE_ROOT := $(TARGET_ROOT)/root
 BUILD_ONE := $(TARGET_ROOT)/build-one
 BUILD_TWO := $(TARGET_ROOT)/build-two
-PACKAGE := $(TARGET_ROOT)/orna_0.1.0-1_amd64.deb
 SOURCE_DATE_EPOCH := 1778528675
 RUST_PATH_REMAP := /usr/src/orna
 RUST_LINK_FLAGS := -C link-arg=-Wl,--build-id=none
@@ -41,16 +40,17 @@ validate-development-identity:
 	version="$$(dpkg-parsechangelog -l"$(CHANGELOG)" -S Version)"; \
 	suite="$$(dpkg-parsechangelog -l"$(CHANGELOG)" -S Distribution)"; \
 	upstream_version="$${version%-*}"; debian_revision="$${version##*-}"; \
+	architecture="$$(dpkg --print-architecture)"; \
 	workspace_version="$$(sed -n '/^\[workspace.package\]/,/^\[/ { s/^version = "\\([^"\\]*\\)"/\\1/p }' "$(REPOSITORY_ROOT)/Cargo.toml")"; \
 	[[ "$${source}" == 'orna' && "$${version}" == '0.1.0-1' \
 		&& "$${upstream_version}" == '0.1.0' && "$${debian_revision}" == '1' \
-		&& "$${suite}" == 'UNRELEASED' && "$${workspace_version}" == "$${upstream_version}" ]] || { \
+		&& "$${suite}" == 'UNRELEASED' && "$${architecture}" == 'amd64' \
+		&& "$${workspace_version}" == "$${upstream_version}" ]] || { \
 		printf '%s\n' '[debian] error: development-package requires orna (0.1.0-1) UNRELEASED' >&2; exit 1; }; \
-	grep -Fx 'Package: orna' "$(REPOSITORY_ROOT)/packaging/debian/control" >/dev/null \
-		&& grep -Fx 'Version: 0.1.0-1' "$(REPOSITORY_ROOT)/packaging/debian/control" >/dev/null \
-		&& grep -Fx 'Architecture: amd64' "$(REPOSITORY_ROOT)/packaging/debian/control" >/dev/null \
-		&& [[ "$(notdir $(PACKAGE))" == 'orna_0.1.0-1_amd64.deb' ]] || { \
-		printf '%s\n' '[debian] error: current literal package identity does not match the changelog' >&2; exit 1; }
+	grep -Fx 'Package: @PACKAGE@' "$(REPOSITORY_ROOT)/packaging/debian/control" >/dev/null \
+		&& grep -Fx 'Version: @VERSION@' "$(REPOSITORY_ROOT)/packaging/debian/control" >/dev/null \
+		&& grep -Fx 'Architecture: @ARCHITECTURE@' "$(REPOSITORY_ROOT)/packaging/debian/control" >/dev/null || { \
+		printf '%s\n' '[debian] error: control identity placeholders are not exact' >&2; exit 1; }
 
 build:
 	@target_name='$(notdir $(TARGET_ROOT))'; \
@@ -132,9 +132,22 @@ build:
 	find "$(PAYLOAD_ROOT)" -exec touch -h -d '@$(SOURCE_DATE_EPOCH)' -- {} +
 
 assemble-package:
-	@mkdir -m 0755 -p -- "$(PACKAGE_ROOT)/DEBIAN"; \
-	install -m 0644 -- "$(REPOSITORY_ROOT)/packaging/debian/control" \
-		"$(PACKAGE_ROOT)/DEBIAN/control"; \
+	@source="$$(dpkg-parsechangelog -l"$(CHANGELOG)" -S Source)"; \
+	version="$$(dpkg-parsechangelog -l"$(CHANGELOG)" -S Version)"; \
+	architecture="$$(dpkg --print-architecture)"; \
+	package="$(TARGET_ROOT)/$${source}_$${version}_$${architecture}.deb"; \
+	[[ "$${architecture}" == 'amd64' ]] || { \
+		printf '%s\n' '[debian] error: Debian package assembly requires amd64' >&2; exit 1; }; \
+	mkdir -m 0755 -p -- "$(PACKAGE_ROOT)/DEBIAN"; \
+	sed -e "s/@PACKAGE@/$${source}/g" -e "s/@VERSION@/$${version}/g" \
+		-e "s/@ARCHITECTURE@/$${architecture}/g" \
+		"$(REPOSITORY_ROOT)/packaging/debian/control" >"$(PACKAGE_ROOT)/DEBIAN/control"; \
+	! grep -q '@[A-Z][A-Z_]*@' "$(PACKAGE_ROOT)/DEBIAN/control" || { \
+		printf '%s\n' '[debian] error: rendered control contains an identity placeholder' >&2; exit 1; }; \
+	grep -Fx "Package: $${source}" "$(PACKAGE_ROOT)/DEBIAN/control" >/dev/null \
+		&& grep -Fx "Version: $${version}" "$(PACKAGE_ROOT)/DEBIAN/control" >/dev/null \
+		&& grep -Fx "Architecture: $${architecture}" "$(PACKAGE_ROOT)/DEBIAN/control" >/dev/null || { \
+		printf '%s\n' '[debian] error: rendered control identity does not match the changelog' >&2; exit 1; }; \
 	printf '%s\n' '/etc/orna/instances/default.toml' \
 		>"$(PACKAGE_ROOT)/DEBIAN/conffiles"; \
 	for script in preinst prerm postinst; do \
@@ -150,10 +163,14 @@ assemble-package:
 	done <"$(REPOSITORY_ROOT)/packaging/debian/orna.install"; \
 	find "$(PACKAGE_ROOT)" -exec touch -h -d '@$(SOURCE_DATE_EPOCH)' -- {} +; \
 	SOURCE_DATE_EPOCH='$(SOURCE_DATE_EPOCH)' dpkg-deb --root-owner-group \
-		--build "$(PACKAGE_ROOT)" "$(PACKAGE)"
+		--build "$(PACKAGE_ROOT)" "$${package}"
 
 verify:
-	@[[ -f "$(PACKAGE)" ]] || { printf '%s\n' '[debian] error: package is absent' >&2; exit 1; }; \
+	@source="$$(dpkg-parsechangelog -l"$(CHANGELOG)" -S Source)"; \
+	version="$$(dpkg-parsechangelog -l"$(CHANGELOG)" -S Version)"; \
+	architecture="$$(dpkg --print-architecture)"; \
+	package="$(TARGET_ROOT)/$${source}_$${version}_$${architecture}.deb"; \
+	[[ -f "$${package}" ]] || { printf '%s\n' '[debian] error: package is absent' >&2; exit 1; }; \
 	mapfile -t control_files < <(find "$(PACKAGE_ROOT)/DEBIAN" -maxdepth 1 \
 		-type f -printf '%f\n' | LC_ALL=C sort); \
 	[[ "$${control_files[*]}" == 'conffiles control postinst preinst prerm' ]] || { \
@@ -180,7 +197,7 @@ verify:
 	readelf --dynamic "$(PACKAGE_ROOT)/usr/bin/orna" >"$(TARGET_ROOT)/orna.dynamic"; \
 	! grep -Eqi 'NEEDED.*(libpq|libz|postgres)' "$(TARGET_ROOT)/orna.dynamic" || { \
 		printf '%s\n' '[debian] error: Orna has a dynamic PostgreSQL dependency' >&2; exit 1; }; \
-	printf '%s\n' "[debian] verified one-executable package $(PACKAGE)"
+	printf '%s\n' "[debian] verified one-executable package $${package}"
 
 clean:
 	@target_name='$(notdir $(TARGET_ROOT))'; \
