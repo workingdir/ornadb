@@ -238,9 +238,7 @@ impl PostgresKernel {
                             let reference_mutation = reference_argument
                                 .then(|| raw_server_reference_mutation_target(&active, function))
                                 .flatten();
-                            if raw_server_insert_target_is_selected(&active, function)
-                                && !reference_argument
-                            {
+                            if raw_server_insert_target_is_selected(&active, function) {
                                 let savepoint = transaction
                                     .savepoint("raw_server_insert_execution")
                                     .await
