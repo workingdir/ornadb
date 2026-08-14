@@ -22,8 +22,8 @@ use orna_compiler::{
 };
 #[cfg(feature = "test-hooks")]
 use orna_core::security::{
-    CATALOGUE_HEALTH_FUNCTION_ID, CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID, ExecuteGrant,
-    InvocationTarget, SecurityAuditKind, SecurityAuditOutcome,
+    AuthenticatedSession, CATALOGUE_HEALTH_FUNCTION_ID, CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID,
+    ExecuteDenial, ExecuteGrant, InvocationTarget, SecurityAuditKind, SecurityAuditOutcome,
 };
 use orna_core::{
     FieldId, FunctionId, FunctionRevisionId, ObjectId, ParameterId, TypeId,
@@ -130,6 +130,46 @@ const RAW_INSERT_SOURCE: &str = "CREATE SCHEMA raw_insert_test;\n\
     VALUES (p_stored) RETURNING REF(made);\n\
     CREATE CLIENT FUNCTION raw_insert_test.client_boolean()\n\
     RETURNS BOOLEAN RETURN TRUE;\n";
+
+#[cfg(feature = "test-hooks")]
+const RAW_REFERENCE_UPDATE_SOURCE: &str = "CREATE SCHEMA raw_reference_test;\n\
+    CREATE TYPE raw_reference_test.probe AS OBJECT (\n\
+      stored BOOLEAN NOT NULL,\n\
+      linked REF raw_reference_test.probe\n\
+    );\n\
+    CREATE SERVER FUNCTION raw_reference_test.create_probe()\n\
+    RETURNS ROWS (created REF raw_reference_test.probe)\n\
+    SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE\n\
+    AS INSERT INTO raw_reference_test.probe AS made (stored)\n\
+    VALUES (TRUE) RETURNING REF(made);\n\
+    CREATE SERVER FUNCTION raw_reference_test.update_false(p_probe REF raw_reference_test.probe)\n\
+    RETURNS ROWS (updated REF raw_reference_test.probe)\n\
+    SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE\n\
+    AS UPDATE raw_reference_test.probe AS alias\n\
+    SET stored = FALSE\n\
+    WHERE REF(alias) = p_probe\n\
+    RETURNING REF(alias);\n\
+    CREATE SERVER FUNCTION raw_reference_test.delete_probe(p_probe REF raw_reference_test.probe)\n\
+    RETURNS ROWS (deleted BOOLEAN)\n\
+    SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE\n\
+    AS DELETE FROM raw_reference_test.probe AS alias\n\
+    WHERE REF(alias) = p_probe\n\
+    RETURNING TRUE;\n\
+    CREATE SERVER FUNCTION raw_reference_test.read_probes()\n\
+    RETURNS ROWS (stored BOOLEAN)\n\
+    SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n\
+    AS SELECT probe.stored FROM raw_reference_test.probe probe;\n\
+    CREATE SERVER FUNCTION raw_reference_test.update_link(p_probe REF raw_reference_test.probe)\n\
+    RETURNS ROWS (updated REF raw_reference_test.probe)\n\
+    SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE\n\
+    AS UPDATE raw_reference_test.probe AS alias\n\
+    SET linked = p_probe\n\
+    WHERE REF(alias) = p_probe\n\
+    RETURNING REF(alias);\n\
+    CREATE SERVER FUNCTION raw_reference_test.read_links()\n\
+    RETURNS ROWS (linked REF raw_reference_test.probe)\n\
+    SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n\
+    AS SELECT probe.linked FROM raw_reference_test.probe probe;\n";
 
 #[cfg(feature = "test-hooks")]
 const SERVICE_UID: u32 = 61_018;
@@ -2565,6 +2605,718 @@ async fn authenticated_raw_insert_is_denied_then_granted_and_audited() -> TestRe
     .await
 }
 
+#[cfg(feature = "test-hooks")]
+async fn create_probe_reference(
+    kernel: &PostgresKernel,
+    session: &AuthenticatedSession,
+    create_probe: FunctionId,
+) -> TestResult<RuntimeValue> {
+    let created = kernel
+        .dispatch_authenticated_raw_call(session, create_probe)
+        .await?;
+    let created = match created {
+        AuthenticatedRawCallResult::Server(values) if values.len() == 1 => values,
+        other => {
+            return Err(failure(format!(
+                "raw INSERT must return exactly one Server value, got {other:?}"
+            )));
+        }
+    };
+    let RuntimeValue::Reference { target, object } = &created[0] else {
+        return Err(failure("raw INSERT must return an object reference"));
+    };
+    require(
+        *object != ObjectId::from_bytes([0; 16]),
+        "the created reference must name a real row",
+    )?;
+    Ok(RuntimeValue::Reference {
+        target: *target,
+        object: *object,
+    })
+}
+
+#[cfg(feature = "test-hooks")]
+async fn read_probe_values(
+    kernel: &PostgresKernel,
+    session: &AuthenticatedSession,
+    read_probes: FunctionId,
+) -> TestResult<Vec<RuntimeValue>> {
+    let read = kernel
+        .dispatch_authenticated_raw_call(session, read_probes)
+        .await?;
+    match read {
+        AuthenticatedRawCallResult::Server(values) => Ok(values),
+        other => Err(failure(format!(
+            "raw SELECT must return Server values, got {other:?}"
+        ))),
+    }
+}
+
+#[cfg(feature = "test-hooks")]
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn authenticated_raw_reference_mutation_authority_and_selection() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel: PostgresKernel = database.connection_string().parse()?;
+        kernel.bootstrap().await?;
+        let empty = kernel.recover().await?;
+        let upgrade = orna_standard::prepare_standard_upgrade(&empty)?;
+        let standard = kernel.apply_standard_upgrade(&upgrade).await?;
+        let applied = kernel
+            .apply(&standard_application_candidate(
+                RAW_REFERENCE_UPDATE_SOURCE,
+                &standard,
+                &upgrade,
+            )?)
+            .await?;
+        let pair = applied.pair();
+        let create_probe = raw_function_id(&applied, &["raw_reference_test", "create_probe"])?;
+        let update_false = raw_function_id(&applied, &["raw_reference_test", "update_false"])?;
+        let delete_probe = raw_function_id(&applied, &["raw_reference_test", "delete_probe"])?;
+        let read_probes = raw_function_id(&applied, &["raw_reference_test", "read_probes"])?;
+        let update_parameter = applied
+            .catalogue()
+            .function_by_id(update_false)
+            .ok_or_else(|| failure("update_false is absent from the active catalogue"))?
+            .parameter_by_name("p_probe")
+            .ok_or_else(|| failure("update_false.p_probe is absent from the active catalogue"))?
+            .id();
+        let delete_parameter = applied
+            .catalogue()
+            .function_by_id(delete_probe)
+            .ok_or_else(|| failure("delete_probe is absent from the active catalogue"))?
+            .parameter_by_name("p_probe")
+            .ok_or_else(|| failure("delete_probe.p_probe is absent from the active catalogue"))?
+            .id();
+        let mut wrong_parameter_bytes = update_parameter.to_bytes();
+        wrong_parameter_bytes[0] ^= 0x01;
+        let wrong_parameter = ParameterId::from_bytes(wrong_parameter_bytes);
+        kernel.install_catalogue_health_service(SERVICE_UID).await?;
+        let session = kernel.authenticate_local_peer(SERVICE_UID).await?;
+
+        // Grant only the writer and the reader, so the reference mutations
+        // stay unauthorised for the denial proof.
+        for function in [create_probe, read_probes] {
+            kernel
+                .grant_catalogue_health_service_execute(pair, function)
+                .await?;
+        }
+
+        // Create two distinct rows and retain both exact references.
+        let first = create_probe_reference(&kernel, &session, create_probe).await?;
+        let second = create_probe_reference(&kernel, &session, create_probe).await?;
+        let RuntimeValue::Reference {
+            target: first_target,
+            object: first_object,
+        } = &first
+        else {
+            return Err(failure("first created value is not a reference"));
+        };
+        let RuntimeValue::Reference {
+            target: second_target,
+            object: second_object,
+        } = &second
+        else {
+            return Err(failure("second created value is not a reference"));
+        };
+        require(
+            first_target == second_target && *first_target != TypeId::from_bytes([0; 16]),
+            "both created references must share one nonzero target type",
+        )?;
+        require(
+            *first_object != *second_object
+                && *first_object != ObjectId::from_bytes([0; 16])
+                && *second_object != ObjectId::from_bytes([0; 16]),
+            "the two created references must name distinct nonzero rows",
+        )?;
+        let mut wrong_target_bytes = first_target.to_bytes();
+        wrong_target_bytes[0] ^= 0x01;
+        let wrong_target_id = TypeId::from_bytes(wrong_target_bytes);
+        require(
+            wrong_target_id != *first_target,
+            "the deliberately wrong target must differ from the created target",
+        )?;
+
+        // A wrong-binding reference UPDATE before its grant is denied before
+        // binding validation, and both rows stay unchanged.
+        let denied = kernel
+            .dispatch_authenticated_raw_call_with_arguments(
+                &session,
+                update_false,
+                &[FunctionArgument::new(wrong_parameter, first.clone())?],
+            )
+            .await
+            .expect_err("reference UPDATE before its grant must be denied");
+        require(
+            matches!(
+                denied,
+                PostgresKernelError::RawExecuteDenied {
+                    pair: denied_pair,
+                    function: denied_function,
+                    reason: ExecuteDenial::MissingExecuteGrant,
+                } if denied_pair == pair && denied_function == update_false
+            ),
+            "pre-grant wrong-binding UPDATE returned the wrong typed denial",
+        )?;
+        let two_true = read_probe_values(&kernel, &session, read_probes).await?;
+        require(
+            two_true.len() == 2
+                && two_true
+                    .iter()
+                    .filter(|value| **value == RuntimeValue::Boolean(true))
+                    .count()
+                    == 2,
+            "the denied reference UPDATE must leave both rows TRUE",
+        )?;
+
+        // Grant the two reference mutations.
+        for function in [update_false, delete_probe] {
+            kernel
+                .grant_catalogue_health_service_execute(pair, function)
+                .await?;
+        }
+
+        // The same wrong-binding argument is rejected after the grant as an
+        // unavailable raw target, retaining an allowed audit.
+        let wrong_binding = kernel
+            .dispatch_authenticated_raw_call_with_arguments(
+                &session,
+                update_false,
+                &[FunctionArgument::new(wrong_parameter, first.clone())?],
+            )
+            .await
+            .expect_err("the same wrong-binding argument must reject the reference UPDATE");
+        require(
+            matches!(
+                wrong_binding,
+                PostgresKernelError::RawCallTargetUnavailable { function, rule }
+                    if function == update_false
+                        && rule == "raw SERVER UPDATE reference target is unavailable"
+            ),
+            "the wrong-binding argument returned the wrong typed error",
+        )?;
+        let wrong_target = kernel
+            .dispatch_authenticated_raw_call_with_arguments(
+                &session,
+                update_false,
+                &[FunctionArgument::new(
+                    update_parameter,
+                    RuntimeValue::Reference {
+                        target: wrong_target_id,
+                        object: *first_object,
+                    },
+                )?],
+            )
+            .await
+            .expect_err("a wrong target TypeId must reject the reference UPDATE");
+        require(
+            matches!(
+                wrong_target,
+                PostgresKernelError::RawCallTargetUnavailable { function, rule }
+                    if function == update_false
+                        && rule == "raw SERVER UPDATE reference target is unavailable"
+            ),
+            "a wrong target TypeId returned the wrong typed error",
+        )?;
+        let unchanged = read_probe_values(&kernel, &session, read_probes).await?;
+        require(
+            unchanged.len() == 2
+                && unchanged
+                    .iter()
+                    .filter(|value| **value == RuntimeValue::Boolean(true))
+                    .count()
+                    == 2,
+            "the rejected reference UPDATEs must leave both rows TRUE",
+        )?;
+
+        // The UPDATE selects exactly the first row: the reader returns one
+        // FALSE and one TRUE in no particular order.
+        let updated = kernel
+            .dispatch_authenticated_raw_call_with_arguments(
+                &session,
+                update_false,
+                &[FunctionArgument::new(update_parameter, first.clone())?],
+            )
+            .await?;
+        require(
+            matches!(
+                updated,
+                AuthenticatedRawCallResult::Server(values)
+                    if values == [first.clone()]
+            ),
+            "the reference UPDATE must return the identical input reference",
+        )?;
+        let mixed = read_probe_values(&kernel, &session, read_probes).await?;
+        require(
+            mixed.len() == 2
+                && mixed
+                    .iter()
+                    .filter(|value| **value == RuntimeValue::Boolean(true))
+                    .count()
+                    == 1
+                && mixed
+                    .iter()
+                    .filter(|value| **value == RuntimeValue::Boolean(false))
+                    .count()
+                    == 1,
+            "the UPDATE must select exactly one row: one FALSE and one TRUE value",
+        )?;
+
+        // DELETE selects exactly the first row, then repeats as an empty
+        // success, leaving the second row in place.
+        let deleted = kernel
+            .dispatch_authenticated_raw_call_with_arguments(
+                &session,
+                delete_probe,
+                &[FunctionArgument::new(delete_parameter, first.clone())?],
+            )
+            .await?;
+        require(
+            matches!(
+                deleted,
+                AuthenticatedRawCallResult::Server(values)
+                    if values == [RuntimeValue::Boolean(true)]
+            ),
+            "the reference DELETE must return exactly one TRUE value",
+        )?;
+        let one_true = read_probe_values(&kernel, &session, read_probes).await?;
+        require(
+            one_true == [RuntimeValue::Boolean(true)],
+            "the reference DELETE must leave exactly the second row TRUE",
+        )?;
+
+        // An exact UPDATE using the deleted reference matches no row and
+        // completes empty, leaving the surviving row unchanged.
+        let updated_deleted = kernel
+            .dispatch_authenticated_raw_call_with_arguments(
+                &session,
+                update_false,
+                &[FunctionArgument::new(update_parameter, first.clone())?],
+            )
+            .await?;
+        require(
+            matches!(
+                updated_deleted,
+                AuthenticatedRawCallResult::Server(values) if values.is_empty()
+            ),
+            "the UPDATE of a deleted reference must complete with an empty value list",
+        )?;
+        let still_one_after_update = read_probe_values(&kernel, &session, read_probes).await?;
+        require(
+            still_one_after_update == [RuntimeValue::Boolean(true)],
+            "the UPDATE of a deleted reference must leave the surviving row unchanged",
+        )?;
+
+        let repeated = kernel
+            .dispatch_authenticated_raw_call_with_arguments(
+                &session,
+                delete_probe,
+                &[FunctionArgument::new(delete_parameter, first.clone())?],
+            )
+            .await?;
+        require(
+            matches!(
+                repeated,
+                AuthenticatedRawCallResult::Server(values) if values.is_empty()
+            ),
+            "the repeated reference DELETE must complete with an empty value list",
+        )?;
+        let still_one = read_probe_values(&kernel, &session, read_probes).await?;
+        require(
+            still_one == [RuntimeValue::Boolean(true)],
+            "the repeated reference DELETE must leave the second row unchanged",
+        )?;
+
+        // The allowed rejections retained allowed audits before the savepoint
+        // rollback; every dispatch decision is exact.
+        let audits = kernel.recover_security_audit_events().await?;
+        require(
+            audits.len() == 16,
+            "raw reference mutation audit count differs",
+        )?;
+        require(
+            audits[0].decision().kind() == SecurityAuditKind::Authentication
+                && audits[0].decision().outcome() == SecurityAuditOutcome::Allowed
+                && audits[1..]
+                    .iter()
+                    .all(|event| event.decision().kind() == SecurityAuditKind::Execute)
+                && audits[1].decision().outcome() == SecurityAuditOutcome::Allowed
+                && audits[1].decision().target() == Some(InvocationTarget::new(create_probe, pair))
+                && audits[2].decision().outcome() == SecurityAuditOutcome::Allowed
+                && audits[2].decision().target() == Some(InvocationTarget::new(create_probe, pair))
+                && audits[3].decision().kind() == SecurityAuditKind::Execute
+                && audits[3].decision().outcome() == SecurityAuditOutcome::Denied
+                && audits[3].decision().target() == Some(InvocationTarget::new(update_false, pair))
+                && audits[4].decision().outcome() == SecurityAuditOutcome::Allowed
+                && audits[4].decision().target() == Some(InvocationTarget::new(read_probes, pair))
+                && audits[5].decision().outcome() == SecurityAuditOutcome::Allowed
+                && audits[5].decision().target() == Some(InvocationTarget::new(update_false, pair))
+                && audits[6].decision().outcome() == SecurityAuditOutcome::Allowed
+                && audits[6].decision().target() == Some(InvocationTarget::new(update_false, pair))
+                && audits[7].decision().outcome() == SecurityAuditOutcome::Allowed
+                && audits[7].decision().target() == Some(InvocationTarget::new(read_probes, pair))
+                && audits[8].decision().outcome() == SecurityAuditOutcome::Allowed
+                && audits[8].decision().target() == Some(InvocationTarget::new(update_false, pair))
+                && audits[9].decision().outcome() == SecurityAuditOutcome::Allowed
+                && audits[9].decision().target() == Some(InvocationTarget::new(read_probes, pair))
+                && audits[10].decision().outcome() == SecurityAuditOutcome::Allowed
+                && audits[10].decision().target()
+                    == Some(InvocationTarget::new(delete_probe, pair))
+                && audits[11].decision().outcome() == SecurityAuditOutcome::Allowed
+                && audits[11].decision().target() == Some(InvocationTarget::new(read_probes, pair))
+                && audits[12].decision().outcome() == SecurityAuditOutcome::Allowed
+                && audits[12].decision().target()
+                    == Some(InvocationTarget::new(update_false, pair))
+                && audits[13].decision().outcome() == SecurityAuditOutcome::Allowed
+                && audits[13].decision().target() == Some(InvocationTarget::new(read_probes, pair))
+                && audits[14].decision().outcome() == SecurityAuditOutcome::Allowed
+                && audits[14].decision().target()
+                    == Some(InvocationTarget::new(delete_probe, pair))
+                && audits[15].decision().outcome() == SecurityAuditOutcome::Allowed
+                && audits[15].decision().target() == Some(InvocationTarget::new(read_probes, pair)),
+            "raw reference mutation audit kinds, outcomes, and targets differ",
+        )?;
+
+        // The recovered grant set is exactly the four fixed-service targets.
+        let mut grants = kernel
+            .recover_security_snapshot()
+            .await?
+            .execute_grants()
+            .collect::<Vec<_>>();
+        grants.sort();
+        let mut expected = vec![
+            ExecuteGrant::new(CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID, create_probe),
+            ExecuteGrant::new(CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID, update_false),
+            ExecuteGrant::new(CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID, delete_probe),
+            ExecuteGrant::new(CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID, read_probes),
+        ];
+        expected.sort();
+        require(
+            grants == expected,
+            "recovered grants must contain exactly the four fixed-service grants",
+        )?;
+
+        // The active revision pair is unchanged throughout.
+        let recovered = kernel.recover().await?;
+        require(
+            recovered.pair() == pair,
+            "raw reference mutations must not change the active revision pair",
+        )?;
+
+        Ok(())
+    })
+    .await
+}
+
+#[cfg(feature = "test-hooks")]
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn authenticated_raw_reference_update_rejects_non_literal_assignment_after_audit()
+-> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel: PostgresKernel = database.connection_string().parse()?;
+        kernel.bootstrap().await?;
+        let empty = kernel.recover().await?;
+        let upgrade = orna_standard::prepare_standard_upgrade(&empty)?;
+        let standard = kernel.apply_standard_upgrade(&upgrade).await?;
+        let applied = kernel
+            .apply(&standard_application_candidate(
+                RAW_REFERENCE_UPDATE_SOURCE,
+                &standard,
+                &upgrade,
+            )?)
+            .await?;
+        let pair = applied.pair();
+        let probe = applied
+            .catalogue()
+            .object_types()
+            .iter()
+            .find(|object| name_is(object.name().parts(), &["raw_reference_test", "probe"]))
+            .ok_or_else(|| failure("probe object type is absent"))?
+            .id();
+        let create_probe = raw_function_id(&applied, &["raw_reference_test", "create_probe"])?;
+        let update_link = raw_function_id(&applied, &["raw_reference_test", "update_link"])?;
+        let read_links = raw_function_id(&applied, &["raw_reference_test", "read_links"])?;
+        let p_probe = applied
+            .catalogue()
+            .function_by_id(update_link)
+            .ok_or_else(|| failure("update_link is absent from the active catalogue"))?
+            .parameter_by_name("p_probe")
+            .ok_or_else(|| failure("update_link.p_probe is absent from the active catalogue"))?
+            .id();
+        kernel.install_catalogue_health_service(SERVICE_UID).await?;
+        let session = kernel.authenticate_local_peer(SERVICE_UID).await?;
+
+        // Grant the three fixed-service targets.
+        for function in [create_probe, update_link, read_links] {
+            kernel
+                .grant_catalogue_health_service_execute(pair, function)
+                .await?;
+        }
+
+        // Create one row and retain its exact reference.
+        let reference = create_probe_reference(&kernel, &session, create_probe).await?;
+
+        // A Reference argument against the parameter-free reader closes as an
+        // unavailable raw target, retaining an allowed audit.
+        let rejected_read = kernel
+            .dispatch_authenticated_raw_call_with_arguments(
+                &session,
+                read_links,
+                &[FunctionArgument::new(p_probe, reference.clone())?],
+            )
+            .await
+            .expect_err("a Reference argument must reject the parameter-free reader");
+        require(
+            matches!(
+                rejected_read,
+                PostgresKernelError::RawCallTargetUnavailable { function, rule }
+                    if function == read_links
+                        && rule
+                            == "raw call arguments require a supported active SERVER mutation target"
+            ),
+            "the Reference-bearing read_links call returned the wrong typed error",
+        )?;
+
+        // The public reader exposes the exact typed NULL reference for the
+        // one unlinked row.
+        let initial = read_probe_values(&kernel, &session, read_links).await?;
+        require(
+            matches!(
+                initial.as_slice(),
+                [RuntimeValue::Null(null)]
+                    if null.resolved_type() == ResolvedType::reference(probe)
+            ),
+            "read_links must initially return the exact typed NULL reference",
+        )?;
+
+        // update_link assigns a non-literal parameter expression, so it must
+        // close as an unavailable raw target before any assignment runs.
+        let rejected = kernel
+            .dispatch_authenticated_raw_call_with_arguments(
+                &session,
+                update_link,
+                &[FunctionArgument::new(p_probe, reference.clone())?],
+            )
+            .await
+            .expect_err("a non-literal assignment UPDATE must be rejected");
+        require(
+            matches!(
+                rejected,
+                PostgresKernelError::RawCallTargetUnavailable { function, rule }
+                    if function == update_link
+                        && rule == "raw SERVER UPDATE reference target is unavailable"
+            ),
+            "the non-literal assignment UPDATE returned the wrong typed error",
+        )?;
+
+        // The reader still exposes the exact typed NULL reference.
+        let after = read_probe_values(&kernel, &session, read_links).await?;
+        require(
+            matches!(
+                after.as_slice(),
+                [RuntimeValue::Null(null)]
+                    if null.resolved_type() == ResolvedType::reference(probe)
+            ),
+            "the rejected UPDATE must not assign the linked reference",
+        )?;
+
+        // Authentication, then allowed create, rejected Reference-bearing
+        // read, ordinary read, rejected update, and final read, with the two
+        // rejected audits retained at their exact targets.
+        let audits = kernel.recover_security_audit_events().await?;
+        require(audits.len() == 6, "raw reference audit count differs")?;
+        require(
+            audits[0].decision().kind() == SecurityAuditKind::Authentication
+                && audits[0].decision().outcome() == SecurityAuditOutcome::Allowed
+                && audits[1..]
+                    .iter()
+                    .all(|event| event.decision().kind() == SecurityAuditKind::Execute)
+                && audits[1].decision().outcome() == SecurityAuditOutcome::Allowed
+                && audits[1].decision().target() == Some(InvocationTarget::new(create_probe, pair))
+                && audits[2].decision().outcome() == SecurityAuditOutcome::Allowed
+                && audits[2].decision().target() == Some(InvocationTarget::new(read_links, pair))
+                && audits[3].decision().outcome() == SecurityAuditOutcome::Allowed
+                && audits[3].decision().target() == Some(InvocationTarget::new(read_links, pair))
+                && audits[4].decision().outcome() == SecurityAuditOutcome::Allowed
+                && audits[4].decision().target() == Some(InvocationTarget::new(update_link, pair))
+                && audits[5].decision().outcome() == SecurityAuditOutcome::Allowed
+                && audits[5].decision().target() == Some(InvocationTarget::new(read_links, pair)),
+            "raw reference audit kinds, outcomes, and targets differ",
+        )?;
+
+        // The active revision pair is unchanged.
+        let recovered = kernel.recover().await?;
+        require(
+            recovered.pair() == pair,
+            "the rejected raw reference UPDATE must not change the active revision pair",
+        )?;
+
+        Ok(())
+    })
+    .await
+}
+
+#[cfg(feature = "test-hooks")]
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn authenticated_raw_reference_update_database_failure_rolls_back_rows_and_retains_audit()
+-> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel: PostgresKernel = database.connection_string().parse()?;
+        kernel.bootstrap().await?;
+        let empty = kernel.recover().await?;
+        let upgrade = orna_standard::prepare_standard_upgrade(&empty)?;
+        let standard = kernel.apply_standard_upgrade(&upgrade).await?;
+        let applied = kernel
+            .apply(&standard_application_candidate(
+                RAW_REFERENCE_UPDATE_SOURCE,
+                &standard,
+                &upgrade,
+            )?)
+            .await?;
+        let pair = applied.pair();
+        let probe = applied
+            .catalogue()
+            .object_types()
+            .iter()
+            .find(|object| name_is(object.name().parts(), &["raw_reference_test", "probe"]))
+            .ok_or_else(|| failure("probe object type is absent"))?
+            .id();
+        let create_probe = raw_function_id(&applied, &["raw_reference_test", "create_probe"])?;
+        let update_false = raw_function_id(&applied, &["raw_reference_test", "update_false"])?;
+        let read_probes = raw_function_id(&applied, &["raw_reference_test", "read_probes"])?;
+        let update_false_definition = applied
+            .catalogue()
+            .function_by_id(update_false)
+            .ok_or_else(|| failure("update_false is absent from the active catalogue"))?;
+        let p_probe = update_false_definition
+            .parameter_by_name("p_probe")
+            .ok_or_else(|| failure("update_false.p_probe is absent from the active catalogue"))?
+            .id();
+        let update_false_revision = update_false_definition.current_revision();
+        kernel.install_catalogue_health_service(SERVICE_UID).await?;
+        let session = kernel.authenticate_local_peer(SERVICE_UID).await?;
+
+        // Grant the three fixed-service targets.
+        for function in [create_probe, update_false, read_probes] {
+            kernel
+                .grant_catalogue_health_service_execute(pair, function)
+                .await?;
+        }
+
+        // Two rows: the first is the UPDATE target, the second is unrelated.
+        let first = create_probe_reference(&kernel, &session, create_probe).await?;
+        let second = create_probe_reference(&kernel, &session, create_probe).await?;
+        require(
+            first != second,
+            "the two created references must be distinct",
+        )?;
+
+        // A real PostgreSQL UPDATE then fails through an AFTER UPDATE trigger.
+        // The dispatch pauses after recovery while the harness installs the
+        // trigger, then resumes and fails the write. The typed ServerUpdate
+        // database failure must survive the raw dispatch unchanged, the
+        // savepoint must roll back the tentative row, and the allowed audit
+        // must commit.
+        let reached = Arc::new(tokio::sync::Barrier::new(2));
+        let resume = Arc::new(tokio::sync::Barrier::new(2));
+        let executor = kernel.clone();
+        let execution_session = session.clone();
+        let triggered_arguments = vec![FunctionArgument::new(p_probe, first.clone())?];
+        let execution_reached = reached.clone();
+        let execution_resume = resume.clone();
+        let execution = tokio::spawn(async move {
+            executor
+                .dispatch_authenticated_raw_call_with_arguments_and_test_barrier(
+                    &execution_session,
+                    update_false,
+                    &triggered_arguments,
+                    execution_reached,
+                    execution_resume,
+                )
+                .await
+        });
+        let triggered = finish_triggered_failure(
+            &database,
+            probe,
+            TriggerKind::AfterUpdate,
+            execution,
+            reached,
+            resume,
+            "triggered raw UPDATE",
+        )
+        .await?;
+        let (context, source) = match triggered {
+            PostgresKernelError::ServerUpdate(ServerUpdateError::NotCommitted {
+                context,
+                source,
+            }) => (context, source),
+            other => {
+                return Err(failure(format!("triggered raw UPDATE returned {other:?}")));
+            }
+        };
+        require_context(context, pair, update_false, update_false_revision)?;
+        let source = match source.as_ref() {
+            ServerMutationError::Database { source } => source,
+            other => {
+                return Err(failure(format!("triggered raw UPDATE returned {other:?}")));
+            }
+        };
+        let code = source
+            .as_db_error()
+            .map(|error| error.code())
+            .ok_or_else(|| failure("triggered raw UPDATE has no database error code"))?;
+        require(
+            code == &SqlState::RAISE_EXCEPTION,
+            "triggered raw UPDATE error code differs",
+        )?;
+
+        // The savepoint rolled back: the target row stays TRUE and the
+        // unrelated second row stays TRUE.
+        let values = read_probe_values(&kernel, &session, read_probes).await?;
+        require(
+            values.len() == 2
+                && values
+                    .iter()
+                    .filter(|value| **value == RuntimeValue::Boolean(true))
+                    .count()
+                    == 2,
+            "the failed UPDATE must leave both rows TRUE",
+        )?;
+
+        // The allowed UPDATE audit was retained across the rollback.
+        let audits = kernel.recover_security_audit_events().await?;
+        require(audits.len() == 5, "raw reference audit count differs")?;
+        require(
+            audits[0].decision().kind() == SecurityAuditKind::Authentication
+                && audits[0].decision().outcome() == SecurityAuditOutcome::Allowed
+                && audits[1..]
+                    .iter()
+                    .all(|event| event.decision().kind() == SecurityAuditKind::Execute)
+                && audits[1].decision().outcome() == SecurityAuditOutcome::Allowed
+                && audits[1].decision().target() == Some(InvocationTarget::new(create_probe, pair))
+                && audits[2].decision().outcome() == SecurityAuditOutcome::Allowed
+                && audits[2].decision().target() == Some(InvocationTarget::new(create_probe, pair))
+                && audits[3].decision().outcome() == SecurityAuditOutcome::Allowed
+                && audits[3].decision().target() == Some(InvocationTarget::new(update_false, pair))
+                && audits[4].decision().outcome() == SecurityAuditOutcome::Allowed
+                && audits[4].decision().target() == Some(InvocationTarget::new(read_probes, pair)),
+            "raw reference audit kinds, outcomes, and targets differ",
+        )?;
+
+        // The active revision pair is unchanged.
+        let recovered = kernel.recover().await?;
+        require(
+            recovered.pair() == pair,
+            "the failed raw reference UPDATE must not change the active revision pair",
+        )?;
+
+        Ok(())
+    })
+    .await
+}
+
 fn hostile_kernel(database: &TestDatabase) -> TestResult<PostgresKernel> {
     let mut config = database.config()?;
     config.options("-c search_path=public,pg_catalog");
@@ -4139,6 +4891,7 @@ async fn require_unchanged_state(
 #[derive(Clone, Copy)]
 enum TriggerKind {
     AfterRow,
+    AfterUpdate,
     DeferredConstraint,
     DeferredDeleteConstraint,
     UnrelatedUniqueViolation,
@@ -4263,6 +5016,11 @@ async fn install_failure_trigger(
             "CREATE TRIGGER test_fail_after_insert AFTER INSERT",
             "RAISE EXCEPTION 'forced insert failure';",
         ),
+        TriggerKind::AfterUpdate => (
+            "test_fail_after_update",
+            "CREATE TRIGGER test_fail_after_update AFTER UPDATE",
+            "RAISE EXCEPTION 'forced update failure';",
+        ),
         TriggerKind::DeferredConstraint => (
             "test_fail_deferred_insert",
             "CREATE CONSTRAINT TRIGGER test_fail_deferred_insert AFTER INSERT",
@@ -4280,7 +5038,7 @@ async fn install_failure_trigger(
         ),
     };
     let deferred = match kind {
-        TriggerKind::AfterRow => "",
+        TriggerKind::AfterRow | TriggerKind::AfterUpdate => "",
         TriggerKind::DeferredConstraint | TriggerKind::DeferredDeleteConstraint => {
             " DEFERRABLE INITIALLY DEFERRED"
         }
@@ -4312,6 +5070,7 @@ async fn remove_failure_trigger(
 ) -> TestResult<()> {
     let name = match kind {
         TriggerKind::AfterRow => "test_fail_after_insert",
+        TriggerKind::AfterUpdate => "test_fail_after_update",
         TriggerKind::DeferredConstraint => "test_fail_deferred_insert",
         TriggerKind::DeferredDeleteConstraint => "test_fail_deferred_delete",
         TriggerKind::UnrelatedUniqueViolation => "test_unrelated_unique",
