@@ -7146,3 +7146,44 @@ fn installed_appended_nullable_field_survives_live_rows_grants_replay_and_restar
         "all five rows must store TRUE"
     );
 }
+
+/// Prove that the installed development package reports the exact canonical
+/// product version through the top-level `orna --version` command.
+///
+/// The test installs the exact frozen `.deb` in a clean Debian container with
+/// the same machine setup as the other installed-product scenarios, then runs
+/// the installed `/usr/bin/orna --version` as the real `orna` service account
+/// through the shared `run_as_orna` helper. It requires exit status 0, the
+/// exact `orna 0.1.0\n` standard output line, and completely empty standard
+/// error. This is the public command-side evidence for work ADR 0047's
+/// canonical `orna --version` output contract.
+#[test]
+#[ignore = "requires Docker, ORNA_SYSTEM_TEST_DEBIAN_PACKAGE, and the installed orna executable"]
+fn installed_version_reports_the_exact_canonical_product_version() {
+    let package = std::env::var("ORNA_SYSTEM_TEST_DEBIAN_PACKAGE")
+        .expect("ORNA_SYSTEM_TEST_DEBIAN_PACKAGE must point at the reproduced .deb package");
+    let artifact = FrozenPackageArtifact::new(PackageFormat::Debian, &package)
+        .expect("freeze the reproduced Debian package");
+    let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures")
+        .join("product_test.orna");
+    let fixture = fs::read(&fixture_path).expect("read the checked-in product fixture");
+
+    let machine = InstalledMachine::start(&artifact, &fixture)
+        .expect("start the installed Debian test machine");
+
+    let version = machine
+        .run_as_orna(&["--version"])
+        .expect("run installed orna --version");
+    let version =
+        require_success("orna --version", version).expect("orna --version must exit with status 0");
+    assert_eq!(
+        version.stdout, b"orna 0.1.0\n",
+        "orna --version must emit the exact canonical version line"
+    );
+    assert!(
+        version.stderr.is_empty(),
+        "orna --version must keep standard error empty, got {} bytes",
+        version.stderr.len()
+    );
+}
