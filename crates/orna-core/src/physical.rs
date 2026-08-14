@@ -42,6 +42,7 @@ pub fn plan_physical_changes(
     let active_revision = PhysicalRevision::Active(active);
     let candidate_revision = PhysicalRevision::Deployable(candidate);
 
+    let mut add_field = None;
     for active_object in active.catalogue().object_types() {
         let candidate_object = candidate
             .candidate()
@@ -52,8 +53,18 @@ pub fn plan_physical_changes(
         let active_projection = project_physical_object(active_revision, active_object)?;
         let candidate_projection = project_physical_object(candidate_revision, candidate_object)?;
         if active_projection != candidate_projection {
-            return Err(PhysicalPlanError::UnsupportedExistingObjectChange {
+            if add_field.is_some() {
+                return Err(PhysicalPlanError::UnsupportedExistingObjectChange {
+                    object_type: active_object.id(),
+                });
+            }
+            let field = appended_nullable_boolean_field(&active_projection, &candidate_projection)
+                .ok_or(PhysicalPlanError::UnsupportedExistingObjectChange {
+                    object_type: active_object.id(),
+                })?;
+            add_field = Some(AddField {
                 object_type: active_object.id(),
+                field,
             });
         }
     }
@@ -71,7 +82,27 @@ pub fn plan_physical_changes(
         .map(|object_type| project_physical_object(candidate_revision, object_type))
         .collect::<Result<_, _>>()?;
 
-    Ok(PhysicalPlan { create_objects })
+    Ok(PhysicalPlan {
+        create_objects,
+        add_field,
+    })
+}
+
+fn appended_nullable_boolean_field(
+    active: &CreateObject,
+    candidate: &CreateObject,
+) -> Option<CreateField> {
+    let added = candidate.fields.strip_prefix(active.fields.as_slice())?;
+    let [field] = added else {
+        return None;
+    };
+    if field.field_type != PhysicalFieldType::Scalar(StandardScalar::Boolean)
+        || !field.nullable
+        || field.unique
+    {
+        return None;
+    }
+    Some(field.clone())
 }
 
 /// Projects an active catalogue into physical object storage facts.
@@ -105,12 +136,37 @@ impl PhysicalCatalogue {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PhysicalPlan {
     create_objects: Vec<CreateObject>,
+    add_field: Option<AddField>,
 }
 
 impl PhysicalPlan {
     /// Returns new durable object relations in candidate catalogue order.
     pub fn create_objects(&self) -> &[CreateObject] {
         &self.create_objects
+    }
+
+    /// Returns the one admitted existing-object field addition, when present.
+    pub const fn add_field(&self) -> Option<&AddField> {
+        self.add_field.as_ref()
+    }
+}
+
+/// One appended field on one existing durable object.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AddField {
+    object_type: TypeId,
+    field: CreateField,
+}
+
+impl AddField {
+    /// Returns the stable identity of the existing object type.
+    pub const fn object_type(&self) -> TypeId {
+        self.object_type
+    }
+
+    /// Returns the appended field's backend-neutral physical projection.
+    pub const fn field(&self) -> &CreateField {
+        &self.field
     }
 }
 
@@ -133,7 +189,7 @@ impl CreateObject {
     }
 }
 
-/// One field in a new durable object relation.
+/// One backend-neutral physical field projection.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CreateField {
     field_id: FieldId,
@@ -545,7 +601,573 @@ mod tests {
             plan_physical_changes(&active, &candidate).unwrap(),
             PhysicalPlan {
                 create_objects: Vec::new(),
+                add_field: None,
             }
+        );
+    }
+
+    #[test]
+    fn plans_one_appended_nullable_boolean_field_on_an_existing_object() {
+        let existing = field(
+            FIRST_FIELD,
+            "first_value",
+            0,
+            ResolvedType::scalar(StandardScalar::Boolean),
+            false,
+        );
+        let appended = field(
+            SECOND_FIELD,
+            "second_value",
+            1,
+            ResolvedType::scalar(StandardScalar::Boolean),
+            true,
+        );
+        let active = active(vec![object(FIRST_TYPE, "first", vec![existing.clone()])], 1);
+        let candidate = candidate(
+            &active,
+            vec![object(FIRST_TYPE, "first", vec![existing, appended])],
+            2,
+        );
+
+        let plan = plan_physical_changes(&active, &candidate).unwrap();
+        assert!(
+            plan.create_objects().is_empty(),
+            "appending one field must not plan a new object relation"
+        );
+        let add_field = plan.add_field().expect("one field append must be planned");
+        assert_eq!(
+            add_field.object_type(),
+            FIRST_TYPE,
+            "the appended field must belong to the existing object type"
+        );
+        let planned = add_field.field();
+        assert_eq!(
+            planned.field_id(),
+            SECOND_FIELD,
+            "the appended field must be the second field"
+        );
+        assert_eq!(
+            planned.field_type(),
+            PhysicalFieldType::Scalar(StandardScalar::Boolean),
+            "the appended field must be a Boolean scalar"
+        );
+        assert!(planned.nullable(), "the appended field must be nullable");
+        assert!(!planned.unique(), "the appended field must not be unique");
+    }
+
+    #[test]
+    fn replayed_existing_object_with_both_fields_plans_no_change() {
+        let fields = vec![
+            field(
+                FIRST_FIELD,
+                "first_value",
+                0,
+                ResolvedType::scalar(StandardScalar::Boolean),
+                false,
+            ),
+            field(
+                SECOND_FIELD,
+                "second_value",
+                1,
+                ResolvedType::scalar(StandardScalar::Boolean),
+                true,
+            ),
+        ];
+        let active = active(vec![object(FIRST_TYPE, "first", fields.clone())], 1);
+        let candidate = candidate(&active, vec![object(FIRST_TYPE, "first", fields)], 2);
+
+        let plan = plan_physical_changes(&active, &candidate).unwrap();
+        assert!(
+            plan.create_objects().is_empty(),
+            "an exact replay must not plan any new object"
+        );
+        assert!(
+            plan.add_field().is_none(),
+            "an exact replay must not plan any field addition"
+        );
+    }
+
+    #[test]
+    fn semantic_name_changes_do_not_block_one_appended_nullable_boolean() {
+        let active = active(
+            vec![object(
+                FIRST_TYPE,
+                "first",
+                vec![field(
+                    FIRST_FIELD,
+                    "first_value",
+                    0,
+                    ResolvedType::scalar(StandardScalar::Boolean),
+                    false,
+                )],
+            )],
+            1,
+        );
+        let candidate = candidate(
+            &active,
+            vec![object(
+                FIRST_TYPE,
+                "renamed",
+                vec![
+                    field(
+                        FIRST_FIELD,
+                        "renamed_value",
+                        0,
+                        ResolvedType::scalar(StandardScalar::Boolean),
+                        false,
+                    ),
+                    field(
+                        SECOND_FIELD,
+                        "second_value",
+                        1,
+                        ResolvedType::scalar(StandardScalar::Boolean),
+                        true,
+                    ),
+                ],
+            )],
+            2,
+        );
+
+        let plan = plan_physical_changes(&active, &candidate).unwrap();
+        assert!(
+            plan.create_objects().is_empty(),
+            "a renamed existing object must not plan a new relation"
+        );
+        let add_field = plan
+            .add_field()
+            .expect("the renamed object must plan its addition");
+        assert_eq!(add_field.object_type(), FIRST_TYPE);
+        let planned = add_field.field();
+        assert_eq!(planned.field_id(), SECOND_FIELD);
+        assert_eq!(
+            planned.field_type(),
+            PhysicalFieldType::Scalar(StandardScalar::Boolean)
+        );
+        assert!(planned.nullable() && !planned.unique());
+    }
+
+    #[test]
+    fn one_new_object_and_one_appended_field_share_one_plan() {
+        let active = active(
+            vec![object(
+                FIRST_TYPE,
+                "first",
+                vec![field(
+                    FIRST_FIELD,
+                    "first_value",
+                    0,
+                    ResolvedType::scalar(StandardScalar::Boolean),
+                    false,
+                )],
+            )],
+            1,
+        );
+        let candidate = candidate(
+            &active,
+            vec![
+                object(
+                    FIRST_TYPE,
+                    "first",
+                    vec![
+                        field(
+                            FIRST_FIELD,
+                            "first_value",
+                            0,
+                            ResolvedType::scalar(StandardScalar::Boolean),
+                            false,
+                        ),
+                        field(
+                            SECOND_FIELD,
+                            "second_value",
+                            1,
+                            ResolvedType::scalar(StandardScalar::Boolean),
+                            true,
+                        ),
+                    ],
+                ),
+                object(
+                    SECOND_TYPE,
+                    "second",
+                    vec![field(
+                        FIRST_FIELD,
+                        "only",
+                        0,
+                        ResolvedType::scalar(StandardScalar::Boolean),
+                        false,
+                    )],
+                ),
+            ],
+            2,
+        );
+
+        let plan = plan_physical_changes(&active, &candidate).unwrap();
+        let [created] = plan.create_objects() else {
+            panic!("one new object must be planned");
+        };
+        assert_eq!(created.type_id(), SECOND_TYPE);
+        assert_eq!(created.fields().len(), 1);
+        let add_field = plan
+            .add_field()
+            .expect("the field addition must be planned");
+        assert_eq!(add_field.object_type(), FIRST_TYPE);
+        assert_eq!(add_field.field().field_id(), SECOND_FIELD);
+    }
+
+    #[test]
+    fn rejected_field_edits_keep_the_exact_existing_object_error() {
+        let active = active(
+            vec![object(
+                FIRST_TYPE,
+                "first",
+                vec![field(
+                    FIRST_FIELD,
+                    "first_value",
+                    0,
+                    ResolvedType::scalar(StandardScalar::Boolean),
+                    false,
+                )],
+            )],
+            1,
+        );
+        let cases = [
+            // Appended required Boolean.
+            vec![
+                field(
+                    FIRST_FIELD,
+                    "first_value",
+                    0,
+                    ResolvedType::scalar(StandardScalar::Boolean),
+                    false,
+                ),
+                field(
+                    SECOND_FIELD,
+                    "second_value",
+                    1,
+                    ResolvedType::scalar(StandardScalar::Boolean),
+                    false,
+                ),
+            ],
+            // Appended nullable non-Boolean scalar.
+            vec![
+                field(
+                    FIRST_FIELD,
+                    "first_value",
+                    0,
+                    ResolvedType::scalar(StandardScalar::Boolean),
+                    false,
+                ),
+                field(
+                    SECOND_FIELD,
+                    "second_value",
+                    1,
+                    ResolvedType::scalar(StandardScalar::Integer),
+                    true,
+                ),
+            ],
+            // Reordered rather than appended.
+            vec![
+                field(
+                    SECOND_FIELD,
+                    "second_value",
+                    0,
+                    ResolvedType::scalar(StandardScalar::Boolean),
+                    true,
+                ),
+                field(
+                    FIRST_FIELD,
+                    "first_value",
+                    1,
+                    ResolvedType::scalar(StandardScalar::Boolean),
+                    false,
+                ),
+            ],
+            // The active field type changed.
+            vec![field(
+                FIRST_FIELD,
+                "first_value",
+                0,
+                ResolvedType::scalar(StandardScalar::Integer),
+                false,
+            )],
+            // The active field nullability changed.
+            vec![field(
+                FIRST_FIELD,
+                "first_value",
+                0,
+                ResolvedType::scalar(StandardScalar::Boolean),
+                true,
+            )],
+            // Two appended nullable Boolean fields.
+            vec![
+                field(
+                    FIRST_FIELD,
+                    "first_value",
+                    0,
+                    ResolvedType::scalar(StandardScalar::Boolean),
+                    false,
+                ),
+                field(
+                    SECOND_FIELD,
+                    "second_value",
+                    1,
+                    ResolvedType::scalar(StandardScalar::Boolean),
+                    true,
+                ),
+                field(
+                    FieldId::from_bytes([22; 16]),
+                    "third_value",
+                    2,
+                    ResolvedType::scalar(StandardScalar::Boolean),
+                    true,
+                ),
+            ],
+        ];
+        for fields in cases {
+            let candidate = candidate(&active, vec![object(FIRST_TYPE, "first", fields)], 2);
+            assert_eq!(
+                plan_physical_changes(&active, &candidate),
+                Err(PhysicalPlanError::UnsupportedExistingObjectChange {
+                    object_type: FIRST_TYPE,
+                }),
+                "the rejected field edit must close as the exact existing-object error"
+            );
+        }
+    }
+
+    #[test]
+    fn defaulted_and_unique_appended_fields_keep_their_exact_projection_errors() {
+        let active = active(
+            vec![object(
+                FIRST_TYPE,
+                "first",
+                vec![field(
+                    FIRST_FIELD,
+                    "first_value",
+                    0,
+                    ResolvedType::scalar(StandardScalar::Boolean),
+                    false,
+                )],
+            )],
+            1,
+        );
+        let defaulted = candidate(
+            &active,
+            vec![object(
+                FIRST_TYPE,
+                "first",
+                vec![
+                    field(
+                        FIRST_FIELD,
+                        "first_value",
+                        0,
+                        ResolvedType::scalar(StandardScalar::Boolean),
+                        false,
+                    ),
+                    field_with_options(
+                        SECOND_FIELD,
+                        "second_value",
+                        1,
+                        ResolvedType::scalar(StandardScalar::Boolean),
+                        true,
+                        false,
+                        Some(ExpressionId::from_bytes([0x51; 16])),
+                        None,
+                    ),
+                ],
+            )],
+            2,
+        );
+        assert_eq!(
+            plan_physical_changes(&active, &defaulted),
+            Err(PhysicalPlanError::UnsupportedFieldDefault {
+                object_type: FIRST_TYPE,
+                field: SECOND_FIELD,
+            }),
+            "a defaulted appended field must retain the exact default error"
+        );
+
+        let unique = candidate(
+            &active,
+            vec![object(
+                FIRST_TYPE,
+                "first",
+                vec![
+                    field(
+                        FIRST_FIELD,
+                        "first_value",
+                        0,
+                        ResolvedType::scalar(StandardScalar::Boolean),
+                        false,
+                    ),
+                    field_with_options(
+                        SECOND_FIELD,
+                        "second_value",
+                        1,
+                        ResolvedType::scalar(StandardScalar::Boolean),
+                        true,
+                        true,
+                        None,
+                        None,
+                    ),
+                ],
+            )],
+            2,
+        );
+        assert_eq!(
+            plan_physical_changes(&active, &unique),
+            Err(PhysicalPlanError::UnsupportedUniqueField {
+                object_type: FIRST_TYPE,
+                field: SECOND_FIELD,
+            }),
+            "a unique appended field must retain the exact projection error"
+        );
+    }
+
+    #[test]
+    fn two_existing_objects_each_appending_a_field_reject_on_the_second() {
+        let active = active(
+            vec![
+                object(
+                    FIRST_TYPE,
+                    "first",
+                    vec![field(
+                        FIRST_FIELD,
+                        "value",
+                        0,
+                        ResolvedType::scalar(StandardScalar::Boolean),
+                        false,
+                    )],
+                ),
+                object(
+                    SECOND_TYPE,
+                    "second",
+                    vec![field(
+                        FIRST_FIELD,
+                        "value",
+                        0,
+                        ResolvedType::scalar(StandardScalar::Boolean),
+                        false,
+                    )],
+                ),
+            ],
+            1,
+        );
+        let candidate = candidate(
+            &active,
+            vec![
+                object(
+                    FIRST_TYPE,
+                    "first",
+                    vec![
+                        field(
+                            FIRST_FIELD,
+                            "value",
+                            0,
+                            ResolvedType::scalar(StandardScalar::Boolean),
+                            false,
+                        ),
+                        field(
+                            SECOND_FIELD,
+                            "second_value",
+                            1,
+                            ResolvedType::scalar(StandardScalar::Boolean),
+                            true,
+                        ),
+                    ],
+                ),
+                object(
+                    SECOND_TYPE,
+                    "second",
+                    vec![
+                        field(
+                            FIRST_FIELD,
+                            "value",
+                            0,
+                            ResolvedType::scalar(StandardScalar::Boolean),
+                            false,
+                        ),
+                        field(
+                            SECOND_FIELD,
+                            "second_value",
+                            1,
+                            ResolvedType::scalar(StandardScalar::Boolean),
+                            true,
+                        ),
+                    ],
+                ),
+            ],
+            2,
+        );
+
+        assert_eq!(
+            plan_physical_changes(&active, &candidate),
+            Err(PhysicalPlanError::UnsupportedExistingObjectChange {
+                object_type: SECOND_TYPE,
+            }),
+            "the second existing-object addition must reject the whole plan"
+        );
+    }
+
+    #[test]
+    fn invalid_existing_object_transition_hides_a_valid_new_object() {
+        let active = active(
+            vec![object(
+                FIRST_TYPE,
+                "first",
+                vec![field(
+                    FIRST_FIELD,
+                    "first_value",
+                    0,
+                    ResolvedType::scalar(StandardScalar::Boolean),
+                    false,
+                )],
+            )],
+            1,
+        );
+        let candidate = candidate(
+            &active,
+            vec![
+                object(
+                    FIRST_TYPE,
+                    "first",
+                    vec![
+                        field(
+                            FIRST_FIELD,
+                            "first_value",
+                            0,
+                            ResolvedType::scalar(StandardScalar::Boolean),
+                            false,
+                        ),
+                        field(
+                            SECOND_FIELD,
+                            "second_value",
+                            1,
+                            ResolvedType::scalar(StandardScalar::Boolean),
+                            false,
+                        ),
+                    ],
+                ),
+                object(
+                    SECOND_TYPE,
+                    "second",
+                    vec![field(
+                        FIRST_FIELD,
+                        "only",
+                        0,
+                        ResolvedType::scalar(StandardScalar::Boolean),
+                        false,
+                    )],
+                ),
+            ],
+            2,
+        );
+
+        assert_eq!(
+            plan_physical_changes(&active, &candidate),
+            Err(PhysicalPlanError::UnsupportedExistingObjectChange {
+                object_type: FIRST_TYPE,
+            }),
+            "the existing-object error must precede any new-object planning"
         );
     }
 
@@ -820,6 +1442,7 @@ mod tests {
                             unique: false,
                         }],
                     }],
+                    add_field: None,
                 })
             };
             assert_eq!(plan_physical_changes(&active, &candidate), expected);
@@ -898,6 +1521,7 @@ mod tests {
             plan_physical_changes(&legacy_active, &value_candidate),
             Ok(PhysicalPlan {
                 create_objects: Vec::new(),
+                add_field: None,
             })
         );
     }
@@ -1577,6 +2201,7 @@ mod tests {
             plan_physical_changes(&active, &candidate),
             Ok(PhysicalPlan {
                 create_objects: Vec::new(),
+                add_field: None,
             })
         );
     }
@@ -1619,6 +2244,7 @@ mod tests {
             plan_physical_changes(&active, &candidate),
             Ok(PhysicalPlan {
                 create_objects: Vec::new(),
+                add_field: None,
             })
         );
     }
