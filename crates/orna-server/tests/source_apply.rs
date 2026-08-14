@@ -12,6 +12,8 @@
 
 #![cfg(unix)]
 
+mod support;
+
 use nix::{sys::stat::Mode, unistd::mkfifo};
 use std::{
     collections::BTreeMap,
@@ -29,7 +31,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-const USAGE: &[u8] = b"Usage:\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna security grant-execute <canonical-function-id>\n  orna raw-call <canonical-function-id>\n";
 const VALID_SOURCE: &[u8] =
     b"CREATE SCHEMA app; CREATE TYPE app.task AS OBJECT (done BOOLEAN NOT NULL);";
 const PROCESS_TIMEOUT: Duration = Duration::from_secs(5);
@@ -356,7 +357,8 @@ fn usage_shape_failures_all_fail_closed_with_exact_usage() {
             "arguments {arguments:?} must emit no standard output"
         );
         assert_eq!(
-            output.stderr, USAGE,
+            output.stderr,
+            support::EXPECTED_USAGE,
             "arguments {arguments:?} must print the exact global usage"
         );
         let after = snapshot(directory.path()).expect("snapshot scratch after invocation");

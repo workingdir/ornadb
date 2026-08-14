@@ -18,6 +18,8 @@
 
 #![cfg(unix)]
 
+mod support;
+
 use std::{
     ffi::OsString,
     fs,
@@ -35,7 +37,6 @@ use std::{
 
 use orna_core::FunctionId;
 
-const USAGE: &[u8] = b"Usage:\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna security grant-execute <canonical-function-id>\n  orna raw-call <canonical-function-id>\n";
 const PROCESS_TIMEOUT: Duration = Duration::from_secs(5);
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
@@ -328,7 +329,8 @@ fn malformed_command_shapes_all_fail_closed_with_exact_usage() {
             "arguments {arguments:?} must emit no standard output"
         );
         assert_eq!(
-            output.stderr, USAGE,
+            output.stderr,
+            support::EXPECTED_USAGE,
             "arguments {arguments:?} must print the exact global usage"
         );
         let after = snapshot(directory.path()).expect("snapshot scratch after invocation");
