@@ -55,17 +55,17 @@ impl RawClientDispatch {
     ///
     /// CLIENT success returns one typed value action followed by completion.
     /// SERVER success returns one value action per row followed by completion.
-    /// Exactly one Boolean argument enters the protected kernel path. Other
-    /// argument shapes return `TARGET_UNAVAILABLE`. Calls containing a record
-    /// first complete the closed transactional record preflight; other closed
-    /// argument shapes do not open PostgreSQL. Raw execute denial returns
+    /// Exactly one Boolean or Reference argument enters the protected kernel
+    /// path. Other argument shapes return `TARGET_UNAVAILABLE`. Calls containing
+    /// a record first complete the closed transactional record preflight; other
+    /// closed argument shapes do not open PostgreSQL. Raw execute denial returns
     /// `EXECUTE_DENIED`, an unavailable raw target returns
     /// `TARGET_UNAVAILABLE`, a CLIENT evaluator error returns
     /// `CLIENT_EVALUATION_FAILED`, and every other kernel error returns
     /// `INTERNAL_FAILURE`. The result retains the private typed kernel source
     /// for trusted diagnostics only.
     pub async fn finish(self) -> RawClientDispatchResult {
-        if let Some(argument) = one_boolean_argument(&self.call) {
+        if let Some(argument) = one_boolean_or_reference_argument(&self.call) {
             return match self
                 .kernel
                 .dispatch_authenticated_raw_call_with_arguments(
@@ -114,14 +114,19 @@ impl RawClientDispatch {
     }
 }
 
-fn one_boolean_argument(call: &RawCall) -> Option<FunctionArgument> {
+fn one_boolean_or_reference_argument(call: &RawCall) -> Option<FunctionArgument> {
     let [argument] = call.arguments.as_slice() else {
         return None;
     };
-    let RuntimeValue::Boolean(value) = &argument.value else {
-        return None;
+    let value = match &argument.value {
+        RuntimeValue::Boolean(value) => RuntimeValue::Boolean(*value),
+        RuntimeValue::Reference { target, object } => RuntimeValue::Reference {
+            target: *target,
+            object: *object,
+        },
+        _ => return None,
     };
-    FunctionArgument::new(argument.parameter, RuntimeValue::Boolean(*value)).ok()
+    FunctionArgument::new(argument.parameter, value).ok()
 }
 
 /// The closed public actions and private diagnostic source for one dispatch.
@@ -222,7 +227,8 @@ mod tests {
 
     use orna_client::ClientExecutionError;
     use orna_core::{
-        CatalogueRevisionId, FunctionId, ParameterId, PrincipalId, SourceRevisionId,
+        CatalogueRevisionId, FunctionId, ObjectId, ParameterId, PrincipalId, SourceRevisionId,
+        TypeId,
         revision::RevisionPair,
         security::{
             AuthenticatedSession, ExecuteDenial, Principal, PrincipalKind, PrincipalStatus,
@@ -365,9 +371,47 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn one_reference_argument_reaches_the_protected_kernel_path() {
+        // One Reference argument is an active raw argument dispatch, not a
+        // local closure. An unreachable kernel must produce an operational
+        // internal failure that retains its private typed source, which a
+        // local redacted closure could never produce.
+        let call = RawCall {
+            function: FUNCTION,
+            arguments: vec![CallArgument {
+                parameter: ParameterId::from_bytes([5; 16]),
+                value: RuntimeValue::Reference {
+                    target: TypeId::from_bytes([0x71; 16]),
+                    object: ObjectId::from_bytes([0x72; 16]),
+                },
+            }],
+        };
+        let dispatch = RawClientDispatch::new(unavailable_kernel(), test_session(), 11, call);
+        let result = dispatch.finish().await;
+        assert!(
+            result.source().is_some(),
+            "one Reference argument must retain the private kernel source"
+        );
+        assert_eq!(
+            result.actions(),
+            &[ServerAction::Failed {
+                stream: 11,
+                failure: CallFailure::InternalFailure,
+            }]
+        );
+        assert_eq!(
+            result.action_after_cancellation(),
+            ServerAction::Failed {
+                stream: 11,
+                failure: CallFailure::InternalFailure,
+            }
+        );
+    }
+
     #[test]
-    fn one_boolean_argument_preserves_parameter_identity_and_value() {
-        let converted = one_boolean_argument(&RawCall {
+    fn one_boolean_or_reference_argument_preserves_parameter_identity_and_value() {
+        let converted = one_boolean_or_reference_argument(&RawCall {
             function: FUNCTION,
             arguments: vec![CallArgument {
                 parameter: ParameterId::from_bytes([5; 16]),
@@ -378,7 +422,7 @@ mod tests {
         assert_eq!(converted.parameter(), ParameterId::from_bytes([5; 16]));
         assert_eq!(converted.value(), &RuntimeValue::Boolean(true));
 
-        let converted = one_boolean_argument(&RawCall {
+        let converted = one_boolean_or_reference_argument(&RawCall {
             function: FUNCTION,
             arguments: vec![CallArgument {
                 parameter: ParameterId::from_bytes([6; 16]),
@@ -389,10 +433,25 @@ mod tests {
         assert_eq!(converted.parameter(), ParameterId::from_bytes([6; 16]));
         assert_eq!(converted.value(), &RuntimeValue::Boolean(false));
 
+        let reference = RuntimeValue::Reference {
+            target: TypeId::from_bytes([0x71; 16]),
+            object: ObjectId::from_bytes([0x72; 16]),
+        };
+        let converted = one_boolean_or_reference_argument(&RawCall {
+            function: FUNCTION,
+            arguments: vec![CallArgument {
+                parameter: ParameterId::from_bytes([7; 16]),
+                value: reference.clone(),
+            }],
+        })
+        .expect("one Reference argument must convert");
+        assert_eq!(converted.parameter(), ParameterId::from_bytes([7; 16]));
+        assert_eq!(converted.value(), &reference);
+
         // The conversion boundary rejects every other shape before dispatch:
         // one Integer and two Booleans both close at the helper itself.
         assert!(
-            one_boolean_argument(&RawCall {
+            one_boolean_or_reference_argument(&RawCall {
                 function: FUNCTION,
                 arguments: vec![CallArgument {
                     parameter: ParameterId::from_bytes([5; 16]),
@@ -402,7 +461,7 @@ mod tests {
             .is_none()
         );
         assert!(
-            one_boolean_argument(&RawCall {
+            one_boolean_or_reference_argument(&RawCall {
                 function: FUNCTION,
                 arguments: vec![
                     CallArgument {
