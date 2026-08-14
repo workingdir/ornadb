@@ -1,0 +1,31 @@
+CREATE SCHEMA reference_mutation_test;
+
+CREATE TYPE reference_mutation_test.entry AS OBJECT (
+    stored BOOLEAN NOT NULL
+);
+
+CREATE SERVER FUNCTION reference_mutation_test.create_true()
+RETURNS ROWS (created REF reference_mutation_test.entry)
+SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE
+AS INSERT INTO reference_mutation_test.entry AS made (stored)
+VALUES (TRUE) RETURNING REF(made);
+
+CREATE SERVER FUNCTION reference_mutation_test.update_false(p_entry REF reference_mutation_test.entry)
+RETURNS ROWS (updated REF reference_mutation_test.entry)
+SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE
+AS UPDATE reference_mutation_test.entry AS alias
+SET stored = FALSE
+WHERE REF(alias) = p_entry
+RETURNING REF(alias);
+
+CREATE SERVER FUNCTION reference_mutation_test.delete_entry(p_entry REF reference_mutation_test.entry)
+RETURNS ROWS (deleted BOOLEAN)
+SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE
+AS DELETE FROM reference_mutation_test.entry AS alias
+WHERE REF(alias) = p_entry
+RETURNING TRUE;
+
+CREATE SERVER FUNCTION reference_mutation_test.read_entries()
+RETURNS ROWS (stored BOOLEAN)
+SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE
+AS SELECT entry.stored FROM reference_mutation_test.entry entry;
