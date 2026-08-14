@@ -1,8 +1,8 @@
-Package: orna
-Version: 0.1.0-1
+Package: @PACKAGE@
+Version: @VERSION@
 Section: database
 Priority: optional
-Architecture: amd64
+Architecture: @ARCHITECTURE@
 Maintainer: Kieran Drewett <kieran@drewett.dev>
 Depends: libc6:amd64 (>= 2.36), libc6:amd64 (<< 2.37), libc-bin (>= 2.36), libc-bin (<< 2.37), dash, libgcc-s1, systemd
 Homepage: https://github.com/workingdir/ornadb
