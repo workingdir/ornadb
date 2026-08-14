@@ -11,7 +11,8 @@ use orna_compiler::{
     prepare_standard_application,
 };
 use orna_core::{
-    CatalogueRevisionId, FunctionId, FunctionRevisionId, PrincipalId, SourceRevisionId,
+    CatalogueRevisionId, FunctionId, FunctionRevisionId, ObjectId, ParameterId, PrincipalId,
+    SourceRevisionId,
     canonical_hash::{
         artifact_payload_digest, catalogue_digest_with_context,
         function_semantic_digest_with_version,
@@ -68,6 +69,11 @@ const RAW_CLIENT_FUNCTION_SOURCE: &str = "CREATE SCHEMA app;\n\
     CREATE TYPE app.flag AS OBJECT (value BOOLEAN NOT NULL);\n\
     CREATE SERVER FUNCTION app.read() RETURNS ROWS (value BOOLEAN)\n\
     TRANSACTION READ ONLY VOLATILITY STABLE AS SELECT f.value FROM app.flag f;\n\
+    CREATE SERVER FUNCTION app.create_flagged(p_value BOOLEAN)\n\
+    RETURNS ROWS (created REF app.flag)\n\
+    SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE\n\
+    AS INSERT INTO app.flag AS made (value)\n\
+    VALUES (p_value) RETURNING REF(made);\n\
     CREATE CLIENT FUNCTION app.enabled() RETURNS BOOLEAN RETURN TRUE;\n";
 const RAW_CLIENT_USER: PrincipalId = PrincipalId::from_bytes([0x71; 16]);
 const RAW_CLIENT_UNGRANTED_USER: PrincipalId = PrincipalId::from_bytes([0x72; 16]);
@@ -588,6 +594,347 @@ async fn dispatches_raw_client_calls_through_security_audit_and_evaluation() -> 
                 }),
             "raw dispatch snapshot race did not bind its audit decision to the recovered revision",
         )?;
+        require_no_database_sessions(&database).await
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn raw_argument_authority_denies_then_grants_and_audits_each_dispatch() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = kernel(&database)?;
+        let (active, _standard_upgrade, _client_function, server_function) =
+            install_raw_client_fixture(&kernel).await?;
+        let flag_type = active
+            .catalogue()
+            .object_types()
+            .iter()
+            .find(|object| object.name().parts() == ["app", "flag"])
+            .ok_or_else(|| failure("the raw argument fixture is missing app.flag"))?
+            .id();
+        let create_flagged = active
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|function| function.name().parts() == ["app", "create_flagged"])
+            .ok_or_else(|| failure("the raw argument fixture is missing app.create_flagged"))?
+            .id();
+        let p_value = active
+            .catalogue()
+            .function_by_id(create_flagged)
+            .ok_or_else(|| failure("create_flagged is absent from the active catalogue"))?
+            .parameter_by_name("p_value")
+            .ok_or_else(|| failure("create_flagged.p_value is absent from the active catalogue"))?
+            .id();
+        let mut wrong_parameter_bytes = p_value.to_bytes();
+        wrong_parameter_bytes[0] ^= 0x01;
+        let wrong_parameter = ParameterId::from_bytes(wrong_parameter_bytes);
+        require(
+            wrong_parameter != p_value,
+            "the deliberately wrong parameter must differ from the declared parameter",
+        )?;
+        let functions = active
+            .catalogue()
+            .functions()
+            .iter()
+            .map(|function| function.id())
+            .collect::<Vec<_>>();
+
+        // A read-only grant denies the parameterised INSERT before any row.
+        let read_only = SecuritySnapshot::new(
+            active.pair(),
+            functions.clone(),
+            vec![Principal::new(
+                RAW_CLIENT_USER,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            vec![],
+            vec![ExecuteGrant::new(RAW_CLIENT_USER, server_function)],
+        )?;
+        let security = kernel.replace_security_snapshot(&read_only).await?;
+        let session = security.bind_authenticated_session(RAW_CLIENT_USER, vec![])?;
+
+        let denied = RawClientDispatch::new(
+            kernel.clone(),
+            session.clone(),
+            1,
+            RawCall {
+                function: create_flagged,
+                arguments: vec![orna_protocol::CallArgument {
+                    parameter: p_value,
+                    value: RuntimeValue::Boolean(true),
+                }],
+            },
+        )
+        .finish()
+        .await;
+        require_dispatch_failure(
+            &denied,
+            1,
+            CallFailure::ExecuteDenied,
+            matches!(
+                denied.source(),
+                Some(PostgresKernelError::RawExecuteDenied {
+                    reason: ExecuteDenial::MissingExecuteGrant,
+                    ..
+                })
+            ),
+            "an ungranted raw argument INSERT was not denied before dispatch",
+        )?;
+        let empty = RawClientDispatch::new(kernel.clone(), session, 2, raw_call(server_function))
+            .finish()
+            .await;
+        require(
+            empty.source().is_none() && empty.actions() == [ServerAction::Completed { stream: 2 }],
+            "the denied raw argument INSERT must leave the read empty",
+        )?;
+
+        // Grant the INSERT and the read together, then bind a fresh session.
+        let granted = SecuritySnapshot::new(
+            active.pair(),
+            functions,
+            vec![Principal::new(
+                RAW_CLIENT_USER,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            vec![],
+            vec![
+                ExecuteGrant::new(RAW_CLIENT_USER, create_flagged),
+                ExecuteGrant::new(RAW_CLIENT_USER, server_function),
+            ],
+        )?;
+        let security = kernel.replace_security_snapshot(&granted).await?;
+        let session = security.bind_authenticated_session(RAW_CLIENT_USER, vec![])?;
+
+        // TRUE with the exact discovered ParameterId returns one reference.
+        let inserted_true = RawClientDispatch::new(
+            kernel.clone(),
+            session.clone(),
+            3,
+            RawCall {
+                function: create_flagged,
+                arguments: vec![orna_protocol::CallArgument {
+                    parameter: p_value,
+                    value: RuntimeValue::Boolean(true),
+                }],
+            },
+        )
+        .finish()
+        .await;
+        let [
+            ServerAction::Events { stream: 3, events },
+            ServerAction::Completed { stream: 3 },
+        ] = inserted_true.actions()
+        else {
+            return Err(failure(
+                "the TRUE raw argument INSERT must return one event batch and completion",
+            ));
+        };
+        let [Event::Value(RuntimeValue::Reference { target, object })] = events.as_slice() else {
+            return Err(failure(
+                "the TRUE raw argument INSERT did not return one reference",
+            ));
+        };
+        require(
+            *target == flag_type && *object != ObjectId::from_bytes([0; 16]),
+            "the TRUE raw argument INSERT returned the wrong reference",
+        )?;
+        let true_object = *object;
+
+        // The parameter-free read observes the stored TRUE row.
+        let read_true = RawClientDispatch::new(
+            kernel.clone(),
+            session.clone(),
+            4,
+            raw_call(server_function),
+        )
+        .finish()
+        .await;
+        require(
+            read_true.source().is_none()
+                && read_true.actions()
+                    == [
+                        ServerAction::Events {
+                            stream: 4,
+                            events: vec![Event::Value(RuntimeValue::Boolean(true))],
+                        },
+                        ServerAction::Completed { stream: 4 },
+                    ],
+            "the TRUE raw argument INSERT did not become visible to the read",
+        )?;
+
+        // A wrong ParameterId closes as TARGET_UNAVAILABLE with a retained
+        // private create_flagged source, stays non-operational under
+        // cancellation, and adds no row.
+        let wrong_target = RawClientDispatch::new(
+            kernel.clone(),
+            session.clone(),
+            5,
+            RawCall {
+                function: create_flagged,
+                arguments: vec![orna_protocol::CallArgument {
+                    parameter: wrong_parameter,
+                    value: RuntimeValue::Boolean(true),
+                }],
+            },
+        )
+        .finish()
+        .await;
+        require_dispatch_failure(
+            &wrong_target,
+            5,
+            CallFailure::TargetUnavailable,
+            matches!(
+                wrong_target.source(),
+                Some(PostgresKernelError::RawCallTargetUnavailable { function, .. })
+                    if *function == create_flagged
+            ),
+            "a wrong raw argument ParameterId did not close as an unavailable target",
+        )?;
+        require(
+            wrong_target.action_after_cancellation() == ServerAction::Cancelled { stream: 5 },
+            "a wrong raw argument ParameterId must remain non-operational under cancellation",
+        )?;
+        let unchanged = RawClientDispatch::new(
+            kernel.clone(),
+            session.clone(),
+            6,
+            raw_call(server_function),
+        )
+        .finish()
+        .await;
+        require(
+            unchanged.source().is_none()
+                && unchanged.actions()
+                    == [
+                        ServerAction::Events {
+                            stream: 6,
+                            events: vec![Event::Value(RuntimeValue::Boolean(true))],
+                        },
+                        ServerAction::Completed { stream: 6 },
+                    ],
+            "a wrong raw argument ParameterId must not add any row",
+        )?;
+
+        // FALSE with the exact discovered ParameterId returns a second
+        // distinct nonzero object reference for the same app.flag type.
+        let inserted_false = RawClientDispatch::new(
+            kernel.clone(),
+            session.clone(),
+            7,
+            RawCall {
+                function: create_flagged,
+                arguments: vec![orna_protocol::CallArgument {
+                    parameter: p_value,
+                    value: RuntimeValue::Boolean(false),
+                }],
+            },
+        )
+        .finish()
+        .await;
+        let [
+            ServerAction::Events { stream: 7, events },
+            ServerAction::Completed { stream: 7 },
+        ] = inserted_false.actions()
+        else {
+            return Err(failure(
+                "the FALSE raw argument INSERT must return one event batch and completion",
+            ));
+        };
+        let [Event::Value(RuntimeValue::Reference { target, object })] = events.as_slice() else {
+            return Err(failure(
+                "the FALSE raw argument INSERT did not return one reference",
+            ));
+        };
+        require(
+            *target == flag_type
+                && *object != ObjectId::from_bytes([0; 16])
+                && *object != true_object,
+            "the FALSE raw argument INSERT returned the wrong distinct reference",
+        )?;
+
+        // The read returns exactly one TRUE and one FALSE in no particular
+        // row order.
+        let read_both =
+            RawClientDispatch::new(kernel.clone(), session, 8, raw_call(server_function))
+                .finish()
+                .await;
+        let [
+            ServerAction::Events { stream: 8, events },
+            ServerAction::Events {
+                stream: 8,
+                events: second_events,
+            },
+            ServerAction::Completed { stream: 8 },
+        ] = read_both.actions()
+        else {
+            return Err(failure(
+                "the argument SELECT must return two event batches and completion",
+            ));
+        };
+        let [Event::Value(first_value)] = events.as_slice() else {
+            return Err(failure(
+                "the argument SELECT did not return one first value",
+            ));
+        };
+        let [Event::Value(second_value)] = second_events.as_slice() else {
+            return Err(failure(
+                "the argument SELECT did not return one second value",
+            ));
+        };
+        let ordered_ok = (first_value == &RuntimeValue::Boolean(true)
+            && second_value == &RuntimeValue::Boolean(false))
+            || (first_value == &RuntimeValue::Boolean(false)
+                && second_value == &RuntimeValue::Boolean(true));
+        require(
+            ordered_ok,
+            "the argument SELECT must return exactly one TRUE and one FALSE in any order",
+        )?;
+
+        // Eight execute audits in dispatch order: the pre-grant denial, then
+        // every allowed dispatch including the wrong-parameter closure whose
+        // allowed audit survived its savepoint rollback.
+        let events = kernel.recover_security_audit_events().await?;
+        require(
+            events.len() == 8,
+            "raw argument authority audit count differs",
+        )?;
+        require(
+            events[0].decision().kind() == SecurityAuditKind::Execute
+                && events[0].decision().outcome() == SecurityAuditOutcome::Denied
+                && events[0].decision().denial()
+                    == Some(SecurityAuditDenial::Execute(
+                        ExecuteDenial::MissingExecuteGrant,
+                    ))
+                && events[0].decision().target()
+                    == Some(InvocationTarget::new(create_flagged, active.pair()))
+                && events[1].decision().outcome() == SecurityAuditOutcome::Allowed
+                && events[1].decision().target()
+                    == Some(InvocationTarget::new(server_function, active.pair()))
+                && events[2].decision().outcome() == SecurityAuditOutcome::Allowed
+                && events[2].decision().target()
+                    == Some(InvocationTarget::new(create_flagged, active.pair()))
+                && events[3].decision().outcome() == SecurityAuditOutcome::Allowed
+                && events[3].decision().target()
+                    == Some(InvocationTarget::new(server_function, active.pair()))
+                && events[4].decision().outcome() == SecurityAuditOutcome::Allowed
+                && events[4].decision().target()
+                    == Some(InvocationTarget::new(create_flagged, active.pair()))
+                && events[5].decision().outcome() == SecurityAuditOutcome::Allowed
+                && events[5].decision().target()
+                    == Some(InvocationTarget::new(server_function, active.pair()))
+                && events[6].decision().outcome() == SecurityAuditOutcome::Allowed
+                && events[6].decision().target()
+                    == Some(InvocationTarget::new(create_flagged, active.pair()))
+                && events[7].decision().outcome() == SecurityAuditOutcome::Allowed
+                && events[7].decision().target()
+                    == Some(InvocationTarget::new(server_function, active.pair())),
+            "raw argument authority changed the exact durable audit sequence",
+        )?;
+
         require_no_database_sessions(&database).await
     })
     .await
