@@ -4739,3 +4739,383 @@ fn installed_reference_mutations_update_delete_and_survive_replay_and_restart() 
     require_silent_success("orna raw-call read_entries final", final_read)
         .expect("the final reader must be empty");
 }
+
+/// Installed public-boundary journey for a nullable Boolean UPDATE through
+/// exact reference selectors in the installed product.
+///
+/// The test installs the exact checked-in
+/// `product_test_nullable_update.orna` fixture and applies it. It requires
+/// exactly four sorted qualified-name mappings with pairwise distinct
+/// function identities, and proves that only `update_null` declares the
+/// `p_entry` reference parameter. All four raw calls are denied before any
+/// grant, including `update_null` with a syntactically valid synthetic
+/// reference selector. After granting the four exact functions, `create_true`
+/// and `create_false` each return one real object reference with the same
+/// nonzero target type and distinct nonzero object ids. The unordered reader
+/// first returns `[Some(false), Some(true)]`. Calling `update_null` with the
+/// TRUE reference and its canonical parameter id returns status 0, empty
+/// standard error, and stdout byte-identical to the supplied selector
+/// envelope. The unordered reader then returns `[None, Some(false)]`,
+/// causally proving the UPDATE moved only the selected row to a typed NULL.
+///
+/// Reapplying the exact same fixture returns a second public JSON document
+/// whose complete function discovery vector, including every function and
+/// parameter identity, equals the first, and no grant is repeated. A third
+/// `create_true` call through the original function id returns a third
+/// distinct reference with the same target type, and `update_null` on that
+/// selector returns the selector envelope exactly. The unordered reader now
+/// returns `[None, None, Some(false)]`. A restart of the installed service
+/// through the machine API keeps that exact multiset. After restart,
+/// `update_null` on the original FALSE reference returns its selector
+/// envelope exactly, and the final unordered reader returns
+/// `[None, None, None]`.
+///
+/// All observations go through the packaged `/usr/bin/orna` public commands
+/// and raw-call ORV envelopes. The test makes no claim about physical
+/// storage, private rows, or row ordering.
+#[test]
+#[ignore = "requires Docker, ORNA_SYSTEM_TEST_DEBIAN_PACKAGE, and the installed orna executable"]
+fn installed_nullable_update_sets_stored_null_via_reference_selector() {
+    let package = std::env::var("ORNA_SYSTEM_TEST_DEBIAN_PACKAGE")
+        .expect("ORNA_SYSTEM_TEST_DEBIAN_PACKAGE must point at the reproduced .deb package");
+    let artifact = FrozenPackageArtifact::new(PackageFormat::Debian, &package)
+        .expect("freeze the reproduced Debian package");
+    let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures")
+        .join("product_test_nullable_update.orna");
+    let fixture = fs::read(&fixture_path).expect("read the checked-in nullable update fixture");
+
+    let machine = InstalledMachine::start(&artifact, &fixture)
+        .expect("start the installed Debian test machine");
+
+    // Apply the exact fixture and require the four sorted mappings.
+    let apply = machine
+        .run_as_orna(&["source", "apply", FIXTURE_PATH])
+        .expect("run installed source apply");
+    let apply = require_success("orna source apply", apply).expect("source apply must succeed");
+    assert!(
+        apply.stderr.is_empty(),
+        "source apply must keep standard error empty"
+    );
+    let document = parse_apply_document(&apply.stdout).expect("source apply JSON must parse");
+    let expected_order = [
+        vec![
+            "nullable_update_test".to_string(),
+            "create_false".to_string(),
+        ],
+        vec![
+            "nullable_update_test".to_string(),
+            "create_true".to_string(),
+        ],
+        vec![
+            "nullable_update_test".to_string(),
+            "read_entries".to_string(),
+        ],
+        vec![
+            "nullable_update_test".to_string(),
+            "update_null".to_string(),
+        ],
+    ];
+    let actual_order = document
+        .functions
+        .iter()
+        .map(|function| function.names().to_vec())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual_order, expected_order,
+        "apply must report the four function entries sorted by qualified name"
+    );
+    let create_true = document
+        .function_id(&["nullable_update_test", "create_true"])
+        .expect("apply must report create_true");
+    let create_false = document
+        .function_id(&["nullable_update_test", "create_false"])
+        .expect("apply must report create_false");
+    let read_entries = document
+        .function_id(&["nullable_update_test", "read_entries"])
+        .expect("apply must report read_entries");
+    let update_null = document
+        .function_id(&["nullable_update_test", "update_null"])
+        .expect("apply must report update_null");
+    for (left, right) in [
+        (create_true, create_false),
+        (create_true, read_entries),
+        (create_true, update_null),
+        (create_false, read_entries),
+        (create_false, update_null),
+        (read_entries, update_null),
+    ] {
+        assert_ne!(
+            left, right,
+            "the four function identities must be pairwise distinct"
+        );
+    }
+    let update_parameter = document
+        .parameter_id(&["nullable_update_test", "update_null"], "p_entry")
+        .expect("apply must report update_null.p_entry");
+    for name in ["create_false", "create_true", "read_entries"] {
+        let entry = document
+            .functions
+            .iter()
+            .find(|entry| {
+                entry
+                    .names()
+                    .iter()
+                    .map(String::as_str)
+                    .eq(["nullable_update_test", name].iter().copied())
+            })
+            .expect("apply must report the function entry");
+        assert!(
+            entry.parameters().is_empty(),
+            "{name} must declare no parameters"
+        );
+    }
+    let update_entry = document
+        .functions
+        .iter()
+        .find(|entry| {
+            entry
+                .names()
+                .iter()
+                .map(String::as_str)
+                .eq(["nullable_update_test", "update_null"].iter().copied())
+        })
+        .expect("apply must report update_null");
+    assert_eq!(
+        update_entry.parameters().len(),
+        1,
+        "update_null must declare exactly one parameter"
+    );
+    let declared = &update_entry.parameters()[0];
+    assert_eq!(
+        declared.name(),
+        "p_entry",
+        "update_null must declare exactly the p_entry parameter"
+    );
+    assert_eq!(
+        declared.parameter_id(),
+        update_parameter,
+        "the declared parameter must equal the discovered identity"
+    );
+
+    // Every create, read, and update call is denied before any grant. The
+    // update selector is a syntactically valid synthetic reference because
+    // no row exists yet.
+    let denied_create_true = machine
+        .run_as_orna(&["raw-call", create_true])
+        .expect("run denied create_true call");
+    assert_denied("create_true before grant", denied_create_true)
+        .expect("create_true must be denied");
+    let denied_create_false = machine
+        .run_as_orna(&["raw-call", create_false])
+        .expect("run denied create_false call");
+    assert_denied("create_false before grant", denied_create_false)
+        .expect("create_false must be denied");
+    let denied_read = machine
+        .run_as_orna(&["raw-call", read_entries])
+        .expect("run denied read call");
+    assert_denied("read before grant", denied_read).expect("read must be denied");
+    let pre_grant_selector = reference_orv1_envelope([0x11; 16], [0x22; 16]);
+    let denied_update = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", update_null, update_parameter],
+            &pre_grant_selector,
+        )
+        .expect("run denied update call");
+    assert_denied("update before grant", denied_update).expect("update must be denied");
+
+    // Grant the four exact functions.
+    for function in [create_true, create_false, read_entries, update_null] {
+        let granted = machine
+            .run_as_orna(&["security", "grant-execute", function])
+            .expect("run installed grant command");
+        require_silent_success("orna security grant-execute", granted)
+            .expect("grant must succeed silently");
+    }
+
+    // Create one TRUE and one FALSE row.
+    let true_created = machine
+        .run_as_orna(&["raw-call", create_true])
+        .expect("run TRUE create call");
+    let true_created = require_value_success("orna raw-call create_true", true_created)
+        .expect("TRUE create must succeed");
+    let true_reference = parse_reference_envelope(&true_created.stdout)
+        .expect("TRUE create must return one ORV reference");
+    let false_created = machine
+        .run_as_orna(&["raw-call", create_false])
+        .expect("run FALSE create call");
+    let false_created = require_value_success("orna raw-call create_false", false_created)
+        .expect("FALSE create must succeed");
+    let false_reference = parse_reference_envelope(&false_created.stdout)
+        .expect("FALSE create must return one ORV reference");
+    assert!(
+        !true_reference.object_is_zero() && !false_reference.object_is_zero(),
+        "both created references must name real rows"
+    );
+    assert_ne!(
+        true_reference.type_id, [0; 16],
+        "the created references must target a real nonzero object type"
+    );
+    assert_eq!(
+        true_reference.type_id, false_reference.type_id,
+        "both created references must target the same object type"
+    );
+    assert_ne!(
+        true_reference.object, false_reference.object,
+        "the two created references must be distinct"
+    );
+
+    // The reader returns exactly one FALSE and one TRUE value.
+    let mut two_values = decode_mixed_reader_values(
+        &machine,
+        read_entries,
+        "orna raw-call read_entries two values",
+    )
+    .expect("two-value read must decode");
+    two_values.sort();
+    assert_eq!(
+        two_values,
+        vec![Some(false), Some(true)],
+        "the two created rows must store FALSE and TRUE"
+    );
+
+    // UPDATE the TRUE row through its canonical parameter and require the
+    // returned reference to be byte-identical to the supplied selector.
+    let true_selector = reference_orv1_envelope(true_reference.type_id, true_reference.object);
+    let updated = machine
+        .run_as_orna_with_stdin(&["raw-call", update_null, update_parameter], &true_selector)
+        .expect("run NULL UPDATE call");
+    let updated = require_value_success("orna raw-call update_null TRUE", updated)
+        .expect("NULL UPDATE must succeed");
+    assert_eq!(
+        updated.stdout, true_selector,
+        "the UPDATE must return a reference byte-identical to the selector"
+    );
+
+    // The reader causally proves the TRUE row moved to a typed NULL while
+    // the FALSE row survives.
+    let mut after_update = decode_mixed_reader_values(
+        &machine,
+        read_entries,
+        "orna raw-call read_entries after update",
+    )
+    .expect("post-update read must decode");
+    after_update.sort();
+    assert_eq!(
+        after_update,
+        vec![None, Some(false)],
+        "the UPDATE must move only the selected row to NULL"
+    );
+
+    // Reapplying the exact fixture returns the identical complete discovery
+    // vector, and the grants survive without re-granting.
+    let replay = machine
+        .run_as_orna(&["source", "apply", FIXTURE_PATH])
+        .expect("run installed source apply on the same fixture");
+    let replay =
+        require_success("orna source apply replay", replay).expect("fixture replay must succeed");
+    assert!(
+        replay.stderr.is_empty(),
+        "fixture replay must keep standard error empty"
+    );
+    let replay_document =
+        parse_apply_document(&replay.stdout).expect("fixture replay JSON must parse");
+    assert_eq!(
+        replay_document.functions, document.functions,
+        "the replay must keep the complete function discovery vector including all identities"
+    );
+
+    // A third create through the original function id returns a third
+    // distinct reference, and update_null returns its selector exactly.
+    let third_created = machine
+        .run_as_orna(&["raw-call", create_true])
+        .expect("run third create call");
+    let third_created = require_value_success("orna raw-call create_true third", third_created)
+        .expect("third create must succeed");
+    let third_reference = parse_reference_envelope(&third_created.stdout)
+        .expect("third create must return one ORV reference");
+    assert!(
+        !third_reference.object_is_zero(),
+        "the third created reference must name a real row"
+    );
+    assert_eq!(
+        third_reference.type_id, true_reference.type_id,
+        "the third created reference must target the same object type"
+    );
+    assert_ne!(
+        third_reference.object, true_reference.object,
+        "the third created reference must be distinct from the TRUE reference"
+    );
+    assert_ne!(
+        third_reference.object, false_reference.object,
+        "the third created reference must be distinct from the FALSE reference"
+    );
+    let third_selector = reference_orv1_envelope(third_reference.type_id, third_reference.object);
+    let updated_third = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", update_null, update_parameter],
+            &third_selector,
+        )
+        .expect("run NULL UPDATE on the third row");
+    let updated_third = require_value_success("orna raw-call update_null third", updated_third)
+        .expect("third NULL UPDATE must succeed");
+    assert_eq!(
+        updated_third.stdout, third_selector,
+        "the third UPDATE must return a reference byte-identical to the selector"
+    );
+
+    // The reader now returns one FALSE and two NULL rows.
+    let mut three_values = decode_mixed_reader_values(
+        &machine,
+        read_entries,
+        "orna raw-call read_entries three values",
+    )
+    .expect("three-value read must decode");
+    three_values.sort();
+    assert_eq!(
+        three_values,
+        vec![None, None, Some(false)],
+        "the replay and third UPDATE must leave exactly one FALSE and two NULL rows"
+    );
+
+    // A restart keeps the grants, rows, and the exact mixed multiset.
+    machine
+        .restart_server()
+        .expect("installed server must restart cleanly");
+    let mut after_restart = decode_mixed_reader_values(
+        &machine,
+        read_entries,
+        "orna raw-call read_entries after restart",
+    )
+    .expect("post-restart read must decode");
+    after_restart.sort();
+    assert_eq!(
+        after_restart,
+        vec![None, None, Some(false)],
+        "the restart must preserve the exact mixed multiset"
+    );
+
+    // UPDATE the original FALSE row after restart and read all NULLs.
+    let false_selector = reference_orv1_envelope(false_reference.type_id, false_reference.object);
+    let updated_false = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", update_null, update_parameter],
+            &false_selector,
+        )
+        .expect("run NULL UPDATE on the original FALSE row");
+    let updated_false = require_value_success("orna raw-call update_null FALSE", updated_false)
+        .expect("FALSE NULL UPDATE must succeed after restart");
+    assert_eq!(
+        updated_false.stdout, false_selector,
+        "the FALSE UPDATE must return a reference byte-identical to the selector"
+    );
+    let mut final_values =
+        decode_mixed_reader_values(&machine, read_entries, "orna raw-call read_entries final")
+            .expect("final read must decode");
+    final_values.sort();
+    assert_eq!(
+        final_values,
+        vec![None, None, None],
+        "the final UPDATE must leave exactly three NULL rows"
+    );
+}
