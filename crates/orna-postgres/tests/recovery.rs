@@ -7405,7 +7405,8 @@ async fn require_no_session_leaks(database: &TestDatabase) -> TestResult<()> {
                 "SELECT count(*) FILTER (WHERE state = 'idle in transaction'),
                         count(*) FILTER (WHERE pid <> pg_catalog.pg_backend_pid())
                  FROM pg_catalog.pg_stat_activity
-                 WHERE datname = pg_catalog.current_database()",
+                 WHERE datname = pg_catalog.current_database()
+                   AND backend_type = 'client backend'",
                 &[],
             )
             .await?;
