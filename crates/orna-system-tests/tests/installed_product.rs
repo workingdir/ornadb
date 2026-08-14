@@ -1957,3 +1957,361 @@ fn installed_nullable_field_persists_omitted_and_present_values_across_restart()
         "read_present must stay byte-identical after restart"
     );
 }
+
+/// Prove that two schemas with identically named object types and functions
+/// stay isolated through the installed product's public grant and raw-call
+/// path, and that both relations persist across a restart.
+///
+/// The test installs the exact checked-in `product_test_schemas.orna`
+/// fixture, applies it, and requires exactly four sorted qualified-name
+/// mappings with pairwise distinct function identities. It then proves:
+///
+/// * all four raw calls are denied before any grant;
+/// * granting only the north create/read leaves both south calls denied;
+/// * north creates one TRUE row and reads exactly TRUE while south stays
+///   empty and denied;
+/// * granting only the south reader lets south read empty even though north
+///   already holds a row, while south create stays denied;
+/// * granting the south create inserts one FALSE row with a different target
+///   type from north, and each relation reads its own exact value;
+/// * a second north create returns the same target type with a distinct
+///   object identity, north reads exactly two TRUE envelopes, and south stays
+///   exactly one FALSE;
+/// * after a restart both reader outputs stay byte-identical, the south
+///   create grant survives, a second south create returns the same target
+///   type with a distinct object identity, and south reads exactly two FALSE
+///   envelopes while north stays exactly two TRUE.
+///
+/// All observations go through the packaged `/usr/bin/orna` public commands
+/// and raw-call ORV envelopes. The test makes no claim about private rows,
+/// SQL columns, field identities, physical storage, or row ordering.
+#[test]
+#[ignore = "requires Docker, ORNA_SYSTEM_TEST_DEBIAN_PACKAGE, and the installed orna executable"]
+fn installed_schema_isolation_persists_separate_relations_across_restart() {
+    let package = std::env::var("ORNA_SYSTEM_TEST_DEBIAN_PACKAGE")
+        .expect("ORNA_SYSTEM_TEST_DEBIAN_PACKAGE must point at the reproduced .deb package");
+    let artifact = FrozenPackageArtifact::new(PackageFormat::Debian, &package)
+        .expect("freeze the reproduced Debian package");
+    let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures")
+        .join("product_test_schemas.orna");
+    let fixture = fs::read(&fixture_path).expect("read the checked-in schemas fixture");
+
+    let machine = InstalledMachine::start(&artifact, &fixture)
+        .expect("start the installed Debian test machine");
+
+    // Apply the exact fixture and require the four sorted mappings.
+    let apply = machine
+        .run_as_orna(&["source", "apply", FIXTURE_PATH])
+        .expect("run installed source apply");
+    let apply = require_success("orna source apply", apply).expect("source apply must succeed");
+    assert!(
+        apply.stderr.is_empty(),
+        "source apply must keep standard error empty"
+    );
+    let document = parse_apply_document(&apply.stdout).expect("source apply JSON must parse");
+    let expected_order = [
+        vec!["north".to_string(), "create_entry".to_string()],
+        vec!["north".to_string(), "read_entries".to_string()],
+        vec!["south".to_string(), "create_entry".to_string()],
+        vec!["south".to_string(), "read_entries".to_string()],
+    ];
+    let actual_order = document
+        .functions
+        .iter()
+        .map(|(names, _)| names.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual_order, expected_order,
+        "apply must report the four function entries sorted by qualified name"
+    );
+    let north_create = document
+        .function_id(&["north", "create_entry"])
+        .expect("apply must report north.create_entry");
+    let north_read = document
+        .function_id(&["north", "read_entries"])
+        .expect("apply must report north.read_entries");
+    let south_create = document
+        .function_id(&["south", "create_entry"])
+        .expect("apply must report south.create_entry");
+    let south_read = document
+        .function_id(&["south", "read_entries"])
+        .expect("apply must report south.read_entries");
+    let identities = [north_create, north_read, south_create, south_read];
+    for (index, left) in identities.iter().enumerate() {
+        for right in &identities[index + 1..] {
+            assert_ne!(
+                left, right,
+                "the four function identities must be pairwise distinct"
+            );
+        }
+    }
+
+    // All four raw calls are denied before any grant.
+    for function in identities {
+        let denied = machine
+            .run_as_orna(&["raw-call", function])
+            .expect("run denied raw call");
+        assert_denied("raw call before grant", denied).expect("raw call must be denied");
+    }
+
+    // Grant only the north create and read.
+    for function in [north_create, north_read] {
+        let granted = machine
+            .run_as_orna(&["security", "grant-execute", function])
+            .expect("run installed grant command");
+        require_silent_success("orna security grant-execute north", granted)
+            .expect("north grant must succeed silently");
+    }
+
+    // Both south calls remain denied while north read succeeds empty.
+    for function in [south_create, south_read] {
+        let denied = machine
+            .run_as_orna(&["raw-call", function])
+            .expect("run denied south raw call");
+        assert_denied("south raw call after north grant", denied)
+            .expect("south raw call must remain denied");
+    }
+    let north_empty = machine
+        .run_as_orna(&["raw-call", north_read])
+        .expect("run empty north raw select");
+    require_silent_success("orna raw-call north read empty", north_empty)
+        .expect("north read must succeed empty");
+
+    // north.create_entry returns a real reference and north reads TRUE.
+    let n1_call = machine
+        .run_as_orna(&["raw-call", north_create])
+        .expect("run north raw insert");
+    let n1_call = require_success("orna raw-call north create_entry", n1_call)
+        .expect("north insert must succeed");
+    assert!(
+        n1_call.stderr.is_empty(),
+        "north insert must keep standard error empty"
+    );
+    let n1 = parse_reference_envelope(&n1_call.stdout)
+        .expect("north insert must return one ORV reference");
+    assert!(
+        n1.type_id != [0; 16] && !n1.object_is_zero(),
+        "the north insert must return a real object reference"
+    );
+    assert_exact_boolean_true(
+        "orna raw-call north read_entries",
+        machine
+            .run_as_orna(&["raw-call", north_read])
+            .expect("run north raw select"),
+    )
+    .expect("north read must return the exact Boolean TRUE value");
+
+    // Grant only the south reader: south reads empty, south create stays denied.
+    let granted = machine
+        .run_as_orna(&["security", "grant-execute", south_read])
+        .expect("run installed grant command");
+    require_silent_success("orna security grant-execute south read", granted)
+        .expect("south read grant must succeed silently");
+    let denied = machine
+        .run_as_orna(&["raw-call", south_create])
+        .expect("run denied south create raw call");
+    assert_denied("south create after read grant", denied)
+        .expect("south create must remain denied");
+    let south_empty = machine
+        .run_as_orna(&["raw-call", south_read])
+        .expect("run empty south raw select");
+    require_silent_success("orna raw-call south read empty", south_empty)
+        .expect("south read must succeed empty even though north holds a row");
+
+    // Grant the south create and insert one FALSE row.
+    let granted = machine
+        .run_as_orna(&["security", "grant-execute", south_create])
+        .expect("run installed grant command");
+    require_silent_success("orna security grant-execute south create", granted)
+        .expect("south create grant must succeed silently");
+    let s1_call = machine
+        .run_as_orna(&["raw-call", south_create])
+        .expect("run south raw insert");
+    let s1_call = require_success("orna raw-call south create_entry", s1_call)
+        .expect("south insert must succeed");
+    assert!(
+        s1_call.stderr.is_empty(),
+        "south insert must keep standard error empty"
+    );
+    let s1 = parse_reference_envelope(&s1_call.stdout)
+        .expect("south insert must return one ORV reference");
+    assert!(
+        s1.type_id != [0; 16] && !s1.object_is_zero(),
+        "the south insert must return a real object reference"
+    );
+    assert_ne!(
+        n1.type_id, s1.type_id,
+        "north and south objects must use different target types"
+    );
+    let south_false = machine
+        .run_as_orna(&["raw-call", south_read])
+        .expect("run south raw select");
+    let south_false = require_success("orna raw-call south read_entries", south_false)
+        .expect("south read must succeed");
+    assert!(
+        south_false.stderr.is_empty(),
+        "south read must keep standard error empty"
+    );
+    assert_eq!(
+        south_false.stdout.as_slice(),
+        boolean_orv1_envelope(Some(false)).as_slice(),
+        "south read must emit exactly one Boolean FALSE envelope"
+    );
+    assert_exact_boolean_true(
+        "orna raw-call north read_entries after south insert",
+        machine
+            .run_as_orna(&["raw-call", north_read])
+            .expect("run north raw select after south insert"),
+    )
+    .expect("north read must remain the exact Boolean TRUE value");
+
+    // A second north create keeps the target type and a distinct object.
+    let n2_call = machine
+        .run_as_orna(&["raw-call", north_create])
+        .expect("run second north raw insert");
+    let n2_call = require_success("orna raw-call north create_entry again", n2_call)
+        .expect("second north insert must succeed");
+    assert!(
+        n2_call.stderr.is_empty(),
+        "second north insert must keep standard error empty"
+    );
+    let n2 = parse_reference_envelope(&n2_call.stdout)
+        .expect("second north insert must return one ORV reference");
+    assert!(
+        n2.type_id != [0; 16] && !n2.object_is_zero(),
+        "the second north insert must return a real object reference"
+    );
+    assert_eq!(
+        n2.type_id, n1.type_id,
+        "north inserts must reference the same target type"
+    );
+    assert_ne!(
+        n2.object, n1.object,
+        "north inserts must allocate distinct object identities"
+    );
+    let north_two = machine
+        .run_as_orna(&["raw-call", north_read])
+        .expect("run north raw select after second insert");
+    let north_two = require_success("orna raw-call north read_entries two rows", north_two)
+        .expect("north read must succeed");
+    assert!(
+        north_two.stderr.is_empty(),
+        "north read must keep standard error empty"
+    );
+    assert_eq!(
+        north_two.stdout.as_slice(),
+        two_boolean_true_envelopes().as_slice(),
+        "north read must emit exactly two Boolean TRUE envelopes"
+    );
+    let south_one = machine
+        .run_as_orna(&["raw-call", south_read])
+        .expect("run south raw select after north insert");
+    let south_one = require_success("orna raw-call south read_entries one row", south_one)
+        .expect("south read must succeed");
+    assert!(
+        south_one.stderr.is_empty(),
+        "south read must keep standard error empty"
+    );
+    assert_eq!(
+        south_one.stdout.as_slice(),
+        boolean_orv1_envelope(Some(false)).as_slice(),
+        "south read must stay exactly one Boolean FALSE envelope"
+    );
+
+    // Restart preserves both reader outputs byte-identically.
+    machine
+        .restart_server()
+        .expect("installed server must restart cleanly");
+    let north_after = machine
+        .run_as_orna(&["raw-call", north_read])
+        .expect("run north raw select after restart");
+    let north_after = require_success(
+        "orna raw-call north read_entries after restart",
+        north_after,
+    )
+    .expect("north read after restart must succeed");
+    assert!(
+        north_after.stderr.is_empty(),
+        "north read after restart must keep standard error empty"
+    );
+    assert_eq!(
+        north_after.stdout.as_slice(),
+        north_two.stdout.as_slice(),
+        "north read must stay byte-identical after restart"
+    );
+    let south_after = machine
+        .run_as_orna(&["raw-call", south_read])
+        .expect("run south raw select after restart");
+    let south_after = require_success(
+        "orna raw-call south read_entries after restart",
+        south_after,
+    )
+    .expect("south read after restart must succeed");
+    assert!(
+        south_after.stderr.is_empty(),
+        "south read after restart must keep standard error empty"
+    );
+    assert_eq!(
+        south_after.stdout.as_slice(),
+        south_one.stdout.as_slice(),
+        "south read must stay byte-identical after restart"
+    );
+
+    // The south create grant survived: a second south FALSE object.
+    let s2_call = machine
+        .run_as_orna(&["raw-call", south_create])
+        .expect("run second south raw insert");
+    let s2_call = require_success("orna raw-call south create_entry again", s2_call)
+        .expect("second south insert must succeed");
+    assert!(
+        s2_call.stderr.is_empty(),
+        "second south insert must keep standard error empty"
+    );
+    let s2 = parse_reference_envelope(&s2_call.stdout)
+        .expect("second south insert must return one ORV reference");
+    assert!(
+        s2.type_id != [0; 16] && !s2.object_is_zero(),
+        "the second south insert must return a real object reference"
+    );
+    assert_eq!(
+        s2.type_id, s1.type_id,
+        "south inserts must reference the same target type"
+    );
+    assert_ne!(
+        s2.object, s1.object,
+        "south inserts must allocate distinct object identities"
+    );
+
+    // South reads exactly two FALSE envelopes; north stays exactly two TRUE.
+    let mut south_two_expected = boolean_orv1_envelope(Some(false));
+    south_two_expected.extend(boolean_orv1_envelope(Some(false)));
+    let south_two = machine
+        .run_as_orna(&["raw-call", south_read])
+        .expect("run south raw select after second insert");
+    let south_two = require_success("orna raw-call south read_entries two rows", south_two)
+        .expect("south read must succeed");
+    assert!(
+        south_two.stderr.is_empty(),
+        "south read must keep standard error empty"
+    );
+    assert_eq!(
+        south_two.stdout.as_slice(),
+        south_two_expected.as_slice(),
+        "south read must emit exactly two Boolean FALSE envelopes"
+    );
+    let north_final = machine
+        .run_as_orna(&["raw-call", north_read])
+        .expect("run north raw select after south insert");
+    let north_final = require_success("orna raw-call north read_entries final", north_final)
+        .expect("north read must succeed");
+    assert!(
+        north_final.stderr.is_empty(),
+        "north read must keep standard error empty"
+    );
+    assert_eq!(
+        north_final.stdout.as_slice(),
+        north_after.stdout.as_slice(),
+        "north read must stay exactly two TRUE envelopes"
+    );
+}
