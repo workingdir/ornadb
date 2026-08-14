@@ -1,0 +1,467 @@
+# ADR 0047: The First 1.0 Release Uses One Authenticated Debian Authority
+
+**Status:** Accepted
+
+## Context
+
+Orna can build and test the current `0.1.0-1` development Debian package, but
+a retained CI package is not a production release. Development packaging and
+protected release packaging need different entry points and gates. The
+repository also does not yet define the complete product scope that must be
+accepted for Orna 1.0.
+
+This decision fixes the release mechanism for a future first production
+release. It does not state that the current language, server, operational,
+documentation, or compatibility scope is complete.
+
+## Decision
+
+The first production release is the Debian 12 amd64 package version
+`1.0.0-1`. Its upstream product version is `1.0.0`, its Debian revision is
+`1`, and its source tag is `v1.0.0`.
+
+The Debian build has two explicit modes and no implicit mode:
+
+* `make -f packaging/debian/rules development-package` accepts only the
+  current `orna (0.1.0-1) UNRELEASED; urgency=medium` changelog entry. It does
+  not require a source tag, cannot request a production signature, and cannot
+  publish. Ordinary CI uses only this mode.
+* `make -f packaging/debian/rules release-package` is the protected mode. For
+  the first release, it accepts only the released
+  `orna (1.0.0-1) bookworm; urgency=medium` entry and exact signed `v1.0.0`
+  tag. It requires every product and release gate in this decision.
+
+The generic `package` target must not select between these modes. A caller
+must name one mode. Neither an environment variable nor a command-line
+version override can change the accepted version or release state.
+
+The authenticated Debian package and repository remain the only production
+distribution authority under work ADR 0019. A CI retention artifact, a local
+`.deb`, a GitHub release attachment, an executable, a manifest, a software
+bill of materials (SBOM), or a detached signature is not a second production
+distribution authority.
+
+Acceptance of this release mechanism does not authorise the `1.0.0` version
+change or publication. A separate accepted 1.0 product acceptance baseline is
+mandatory before the release authority can declare, tag, sign, or publish
+`1.0.0-1`.
+
+## Canonical release identity
+
+`packaging/debian/changelog` is the sole checked-in authority for the complete
+Debian package version and release state. During development its first entry
+must declare exactly:
+
+```text
+orna (0.1.0-1) UNRELEASED; urgency=medium
+```
+
+The final release commit replaces that entry with exactly:
+
+```text
+orna (1.0.0-1) bookworm; urgency=medium
+```
+
+The protected entry must be complete, dated, and released. Protected mode
+cannot use `UNRELEASED`; development mode cannot use `bookworm` or another
+released suite. `dpkg-parsechangelog` supplies both builders with the complete
+Debian version, upstream version, Debian revision, source package name, target
+suite, and release state. The build and publication workflows must not contain
+another manually maintained package-version literal.
+
+The `version` field in `Cargo.toml`'s `[workspace.package]` table owns one
+upstream product version. Every crate manifest uses `version.workspace = true`;
+no child manifest contains a product-version literal. The public
+`orna --version` output uses
+`env!("CARGO_PKG_VERSION")` from `orna-server` and prints exactly
+`orna <upstream-version>` followed by one newline.
+
+The following protected-mode identities must agree before a release build
+starts:
+
+| Identity | Required value or derivation |
+| --- | --- |
+| Debian source and binary package version | exact `1.0.0-1` from `packaging/debian/changelog` |
+| Cargo workspace version | exact upstream part `1.0.0` |
+| Public command version | exact upstream part `1.0.0` |
+| Distribution manifest product version | exact upstream part `1.0.0` |
+| Distribution manifest Debian version | exact complete version `1.0.0-1` |
+| Package filename and repository record | derived from the complete Debian version, package name, and architecture |
+| Source tag | exact `v1.0.0` on the release commit |
+
+Development mode must reject any identity other than the exact unreleased
+`0.1.0-1` development identity. Protected mode must reject a missing
+changelog, an unreleased entry, another suite, another Debian revision, a
+Cargo or command mismatch, a dirty source tree, a tag mismatch, or a version
+supplied through an environment variable. The release commit is the exact
+source authority. The tag identifies that commit but cannot change its
+contents.
+
+## Package copyright, licences, notices, and SBOM
+
+The production package must install this exact release-document inventory:
+
+```text
+/usr/share/doc/orna/changelog.Debian.gz
+/usr/share/doc/orna/copyright
+/usr/share/doc/orna/POSTGRESQL-LICENSE
+/usr/share/doc/orna/THIRD-PARTY-NOTICES
+/usr/share/doc/orna/sbom.spdx.json
+```
+
+The files have these owners:
+
+* `packaging/debian/changelog` owns the source text for
+  `changelog.Debian.gz`. The package build compresses it reproducibly.
+* `packaging/debian/copyright` is the checked-in Debian copyright and licence
+  document authority. It owns the Debian rendering and the Orna-owned and
+  embedded PostgreSQL mappings. The Orna-owned source remains `Apache-2.0`.
+  Its external Rust sections are an exact projection of
+  `dependency-licences.toml`; they cannot introduce an independent component,
+  holder, or licence authority. A package-level declaration cannot replace a
+  required licence text.
+* The embedded PostgreSQL build accepted by work ADR 0019 owns the exact
+  `POSTGRESQL-LICENSE` bytes from the pinned PostgreSQL source. The Debian
+  package copies those bytes without rewriting them.
+* `packaging/debian/dependency-licences.toml` is the checked-in exact external
+  Rust dependency licence and source inventory. Its primary key is the
+  Cargo.lock triple `(name, version, checksum)`. Each record also contains the
+  exact Cargo.lock source, canonical source URL, source revision when
+  applicable, SPDX licence expression, copyright holders, required notice
+  paths, and the SHA-256 digest of each licence or notice input. Records are
+  sorted by the byte order of name, version, then checksum. A name and version
+  without the Cargo.lock checksum is not an identity. Orna workspace packages
+  are owned by the Orna copyright record instead of this external inventory.
+* The deterministic release-evidence generator owns
+  `THIRD-PARTY-NOTICES`. It reads only the locked Rust closure, the pinned
+  `dependency-licences.toml` records, the pinned PostgreSQL source and
+  prepared-source inventories, and the changelog identity. It emits every
+  notice required by code or data present in the final package. An SBOM
+  identifier is not a substitute for required notice text.
+* The same generator owns `sbom.spdx.json`. It emits deterministic SPDX 2.3
+  JSON for `/usr/bin/orna`, the statically linked Rust dependency closure, the
+  embedded PostgreSQL source and support assets, and the other package data
+  inputs. It records package versions, source revisions, checksums, declared
+  and concluded licences, and relationships. It does not hash the enclosing
+  `.deb`, itself, or the later distribution manifest. The distribution
+  manifest and signed repository chain bind those final bytes without a
+  circular checksum.
+
+The package build must fail on an unknown component, a missing copyright or
+licence mapping, a required but missing notice, a component present in only
+one of the notice and SBOM views, a non-deterministic output, or a difference
+between an SBOM checksum and the final package input. It must generate the
+notice and SBOM after the final dependency closure is fixed and before the
+distribution manifest is finalised.
+
+The generator must compare the complete selected external Cargo.lock closure
+with `dependency-licences.toml` in both directions. It rejects a missing,
+extra, duplicate, unsorted, differently sourced, or checksum-mismatched
+record. An external dependency without a Cargo.lock checksum is outside the
+first release policy and fails protected mode until a later accepted
+source-identity rule replaces this constraint.
+
+The distribution manifest binds the exact SHA-256 digest of each installed
+release document and of the final package payload inventory. The signed Debian
+repository metadata then binds the exact `.deb` bytes. The copyright file,
+notices, SBOM, and manifests provide evidence. None is a signing or publication
+authority.
+
+## Checked-in release policy
+
+`packaging/debian/release-policy.toml` is the sole checked-in release trust and
+publication policy. Its strict, versioned schema contains:
+
+* the full allowed OpenPGP fingerprints for signed source-tag authorities,
+  with activation time, retirement time when set, and `active` or `revoked`
+  state;
+* the one full active Debian repository signing-key fingerprint;
+* the exact path and SHA-256 digest of the checked-in public keyring
+  `packaging/debian/orna-archive-keyring.gpg`;
+* the accepted package name, `bookworm` suite and codename, `main` component,
+  `amd64` architecture, tag pattern, and 14-day repository validity period;
+  and
+* the publisher format, repository generation format, and required protected
+  approval class.
+
+The policy contains public trust facts only. It contains no private key,
+passphrase, credential, signing socket, repository endpoint, storage token, or
+approval secret. The protected environment supplies those capabilities after
+policy validation.
+
+Protected mode verifies a source tag with OpenPGP and accepts it only when the
+full primary-key fingerprint or full signing-subkey fingerprint maps to one
+active, time-valid policy authority. Short key identifiers are forbidden. The
+Debian signer must return a signature whose full fingerprint equals the one
+active repository fingerprint and whose public key bytes equal the checked-in
+keyring.
+
+Key rotation is an append-first policy change. A signed policy commit adds the
+new public key and fingerprint before first use, then a later signed policy
+commit retires the old authority after the overlap period. Revocation is a
+signed policy change that marks the fingerprint `revoked`; protected mode
+rejects it immediately for new tags or repository metadata. Historical
+fingerprints remain recorded and cannot become active again without a new
+accepted release-security decision. Replacing keyring bytes, changing a
+fingerprint, or changing a validity window is a reviewed policy change and
+cannot occur inside a release job.
+
+## Debian signing and publication authority
+
+The release authority owns the Debian repository signing key and the final
+publication decision. The private key stays in the protected release signer.
+It cannot enter source control, a developer host, an ordinary pull-request or
+push job, a CI retention artifact, the `.deb`, or the installed system.
+
+The protected publisher must receive the exact reproduced `.deb` and release
+evidence from the accepted release commit. Before signing, it must:
+
+1. verify the signed `v1.0.0` tag and its exact commit;
+2. verify the accepted 1.0 product baseline for that commit;
+3. rebuild the package twice in the accepted release environment and compare
+   the exact `.deb`, manifests, notices, SBOM, and installed inventory;
+4. run the complete work ADR 0019 clean-machine package and lifecycle gate;
+5. verify the exact version, suite, architecture, predecessor, licence, and
+   SBOM rules in this decision; and
+6. require a separate explicit publication approval from the release
+   authority.
+
+`packaging/debian/publish-repository.sh` is the one publisher interface. It
+accepts only this command shape:
+
+```text
+packaging/debian/publish-repository.sh publish \
+  --policy packaging/debian/release-policy.toml \
+  --candidate <verified-candidate-directory> \
+  --generation <unsigned-decimal-generation> \
+  --expected-current <unsigned-decimal-generation> \
+  --approval <protected-approval-file>
+```
+
+The protected environment supplies the signer and repository capabilities.
+The interface does not accept an endpoint, key path, key fingerprint,
+publication time, validity duration, package version, suite, component,
+architecture, or output path from the caller. It reads those public facts from
+the checked-in policy, reads the package identity from the verified candidate,
+and reads publication time from the protected publisher's trusted UTC clock
+after approval.
+
+The publisher creates one new immutable
+`generations/<20-digit-zero-padded-generation>/` tree. It writes the package
+to `pool/main/o/orna/orna_1.0.0-1_amd64.deb` within that tree. It writes the
+exact index to `dists/bookworm/main/binary-amd64/Packages` and its reproducible
+compressed form to `Packages.gz`. Both records contain the exact package size
+and SHA-256 digest. It then generates `dists/bookworm/Release` with the exact
+index digests, suite, codename, `main` component, `amd64` architecture,
+generation, canonical `Date`, and a `Valid-Until` exactly 14 days after
+`Date`. The signed custom field is exactly `X-Orna-Generation`. The protected
+Debian key signs those exact `Release` bytes as both `InRelease` and
+`Release.gpg`.
+
+The generation must equal `expected-current + 1`. The publisher compares
+`expected-current` with the durable promoted generation and rejects a stale,
+equal, skipped, reused, non-decimal, or overflowing generation before signing.
+Before the first publication, the durable current generation is exactly zero
+and no generation-zero tree exists.
+It also rejects an existing generation path or any byte difference at an
+existing immutable package path. After it has written, synchronised, and
+verified the complete signed generation, it atomically promotes the repository
+`current` reference with a compare-and-swap against `expected-current`.
+Clients can see either the prior complete generation or the new complete
+generation. A failed promotion leaves the prior `current` unchanged and the
+new unpromoted generation cannot become a client authority.
+
+`Date` is the protected UTC clock value at whole-second precision. It must be
+later than the promoted generation's signed `Date`; clock rollback fails
+before signing. `Valid-Until` is derived only by adding exactly 14 times 24
+hours to that value. Neither field can come from candidate content or caller
+input.
+
+The supported installation path uses APT with the exact checked-in Orna public
+key installed in its dedicated keyring. Its source configuration names that
+keyring with `signed-by` and explicitly enables `Check-Valid-Until`. APT must
+verify the repository signature, the signed index chain, the `.deb` digest,
+and the 14-day expiry before dpkg receives the package. The supported client
+configuration cannot set `check-valid-until=no`, `trusted=yes`,
+`allow-insecure=yes`, or another expiry or signature bypass. An unsigned
+repository, an expired or wrong key, changed metadata, a changed package, a
+missing hash, or a partial publication fails closed.
+
+The keyring reaches a client through a separately authenticated bootstrap
+channel. A client cannot download the keyring from the unauthenticated form of
+the repository that the keyring is intended to authenticate.
+
+The `.deb` has no independent embedded or detached product signature. Its
+authentication comes from the signed Debian repository chain required by work
+ADR 0019.
+
+This is Debian repository authentication, not a detached runtime signature.
+Work ADR 0017's superseded Ed25519 runtime archive, accepted-runtime record,
+runtime key, runtime signature, and manifest-first verification scheme must
+not return. The embedded-engine and distribution manifests remain integrity
+bindings inside the authenticated package as required by work ADR 0019.
+
+## First-release predecessor rule
+
+`1.0.0-1` is the first production release. It accepts no production package
+or embedded-engine predecessor. Its distribution manifest contains exactly:
+
+```text
+accepted_predecessor_engines = []
+supported_forward_edges = []
+```
+
+The production gate uses a clean Debian 12 amd64 installation. An existing
+development or `0.x` installation is not an accepted upgrade source and does
+not gain a compatibility promise from the 1.0 release. Package maintenance
+must not convert, relabel, or open its durable instance as a 1.0 instance.
+The protected `1.0.0-1` maintainer scripts accept only Debian's first-install
+call shapes. They reject every `upgrade <old-version>` call before the package
+maintenance `begin` operation or any durable state change. Development-mode
+package update tests remain non-production evidence and cannot create a
+production predecessor edge.
+
+For a clean 1.0 instance, `orna server upgrade` proves the current-engine
+no-op and exits successfully. It rejects every other recorded engine before
+entering PostgreSQL. This preserves work ADR 0019's first-release rule. The
+first later release that accepts a predecessor must name the exact predecessor
+engine and forward edge and must implement the durable transition before it
+can publish.
+
+## CI retention artifacts
+
+The existing seven-day workflow upload is short-lived review and diagnosis
+evidence. It is not a release candidate repository, a mirror, an operator
+installation path, or a production distribution. It can never satisfy the
+publication gate, even when its package bytes later match the released bytes.
+
+Ordinary CI has read-only repository permissions, no Debian signing key, no
+publication credential, and no production repository write path. Its artifact
+name and workflow output must identify the upload as non-production evidence.
+Only the protected publisher can move independently reproduced bytes into the
+authenticated Debian repository.
+
+Ordinary CI invokes only `development-package`. It must fail if that target
+selects a released changelog entry, accepts `1.0.0-1`, requests the protected
+signer, or calls the publisher. Protected release infrastructure invokes only
+`release-package` and must fail if it sees `UNRELEASED` or `0.1.0-1`.
+
+## Release-mechanism acceptance criteria
+
+The release mechanism is implemented only when tests prove all of these facts:
+
+* development mode accepts only the exact unreleased `0.1.0-1` identity and
+  cannot sign or publish, while protected mode accepts only the exact released
+  `1.0.0-1` identity and complete release gates;
+* the root workspace version is the only Cargo product-version literal, every
+  child manifest inherits it, `orna --version` has the exact output above, and
+  every checked-in mismatch fails before compilation while every generated
+  mismatch fails before signing;
+* two isolated release builds produce byte-identical `.deb`, manifest,
+  changelog, copyright, licence, notice, SBOM, and payload bytes;
+* the exact release-document inventory is installed, manifest-bound, and
+  complete for the final embedded dependency closure;
+* every selected external Cargo.lock `(name, version, checksum)` has exactly
+  one matching checked-in dependency licence and source record, and every
+  extra, missing, changed, unsorted, or checksum-less external record fails;
+* the SPDX 2.3 SBOM and third-party notices agree with each other and with the
+  final package, and changed or unknown closure members fail the build;
+* protected mode accepts only an active policy-listed full OpenPGP source-tag
+  signer fingerprint and exact policy-bound Debian signer and public keyring,
+  while unknown, retired, revoked, short, changed, or out-of-window identities
+  fail before publication;
+* the protected publisher accepts only the exact signed tag commit, accepted
+  product baseline, successful production gates, and explicit publication
+  approval;
+* a clean APT client accepts the signed repository chain and package, while
+  wrong-key, unsigned, expired, changed, and partial states fail closed;
+* publication creates one immutable next generation, rejects stale, equal,
+  skipped, reused, or raced generations, preserves the prior current state on
+  failure, atomically promotes only a complete signed generation, and rejects
+  replay of a prior generation;
+* `Date` is canonical UTC, `Valid-Until` is exactly 14 days later, and the
+  supported APT configuration enforces signature and expiry checks without a
+  bypass;
+* first installation succeeds, every package predecessor is rejected before
+  package maintenance begins, and current-engine upgrade no-op and
+  foreign-engine rejection preserve the empty predecessor and edge sets;
+* ordinary CI can retain non-production evidence but cannot sign or publish;
+* no runtime archive, runtime Ed25519 key, detached runtime signature, or
+  accepted-runtime record is generated, installed, or published; and
+* no RPM package or RPM repository is built, signed, tested, or published.
+
+Passing these criteria accepts only the mechanism. It does not accept the
+product scope and does not permit a 1.0 release by itself.
+
+## Later 1.0 product acceptance baseline
+
+Before any commit changes the declared product version to `1.0.0`, a separate
+versioned 1.0 product acceptance baseline must be accepted in the repository.
+That baseline must name the complete supported public language, commands,
+protocols, persistence, security, installation, recovery, upgrade,
+compatibility, operator documentation, and known-limit surface for the first
+production release. It must map each mandatory claim to exact required
+evidence and must state each deferred surface without implying support. That
+evidence must pass on the baseline commit and again on the final release
+commit.
+
+The baseline is a product-scope decision, not a checklist inferred from this
+ADR, the current TODO, passing unit tests, or the existence of a package. The
+release authority must verify its explicit acceptance and evidence before it
+permits the `1.0.0` version commit, signed tag, repository signature, or
+publication. A missing, proposed, incomplete, waived, or failing baseline
+stops the release.
+
+## Signed implementation sequence
+
+Each row is one signed Conventional Commit. Each commit changes only the exact
+one to three files in that row and leaves the repository buildable and green.
+Every row before the product-baseline row implements and tests the mechanism
+with the current development version. Those rows do not declare `1.0.0`.
+
+| Conventional Commit | Exact files | Required result |
+| --- | --- | --- |
+| `docs(release): define the first stable release authority` | `docs/decisions/0047-first-one-zero-release.md`; `docs/decisions/README.md` | Accept and index this release mechanism without accepting product completeness. |
+| `build(cargo): centralise artifact and client versions` | `Cargo.toml`; `crates/orna-artifact/Cargo.toml`; `crates/orna-client/Cargo.toml` | Add the current `0.1.0` workspace package version and make the first two crates inherit it. |
+| `build(cargo): centralise compiler core and postgres versions` | `crates/orna-compiler/Cargo.toml`; `crates/orna-core/Cargo.toml`; `crates/orna-postgres/Cargo.toml` | Replace the three local product-version literals with workspace inheritance. |
+| `build(cargo): centralise protocol server and standard versions` | `crates/orna-protocol/Cargo.toml`; `crates/orna-server/Cargo.toml`; `crates/orna-standard/Cargo.toml` | Replace the three local product-version literals with workspace inheritance. |
+| `build(cargo): centralise syntax and system-test versions` | `crates/orna-syntax/Cargo.toml`; `crates/orna-system-tests/Cargo.toml` | Remove the final local product-version literals and prove that every workspace package resolves to `0.1.0`. |
+| `feat(cli): report the canonical product version` | `crates/orna-server/src/main.rs`; `crates/orna-system-tests/tests/installed_product.rs` | Add exact `orna --version` output from `CARGO_PKG_VERSION` and prove the installed development package reports `0.1.0`. |
+| `build(debian): separate development and release modes` | `packaging/debian/changelog`; `packaging/debian/control`; `packaging/debian/rules` | Add the exact unreleased development entry, derive control and filenames from it, require an explicit build mode, and keep protected `1.0.0-1` closed. |
+| `build(debian): own dependency licence sources` | `LICENSE`; `packaging/debian/copyright`; `packaging/debian/dependency-licences.toml` | Add the Orna licence authority and exact Cargo.lock-keyed external dependency source, licence, holder, notice, and digest inventory. |
+| `build(debian): generate release evidence` | `packaging/debian/release-evidence.sh`; `packaging/debian/orna.install`; `packaging/debian/rules` | Validate the complete locked closure and install deterministic notices, SPDX 2.3 SBOM, changelog, copyright, and licence evidence bound by the manifest. |
+| `build(release): pin public signing policy` | `packaging/debian/release-policy.toml`; `packaging/debian/orna-archive-keyring.gpg`; `packaging/debian/publish-repository.sh` | Pin full public tag-signer and repository-key fingerprints, rotation and revocation state, keyring bytes, 14-day validity, and the immutable generation publisher interface without a secret or endpoint. |
+| `test(release): prove protected publication` | `.github/workflows/debian-package.yml`; `.github/workflows/debian-release.yml`; `crates/orna-system-tests/scenarios/debian-release.sh` | Keep development artifacts non-production and use only non-production test keys and a synthetic candidate to prove mode separation, trust policy, signing, expiry, monotonic immutable generations, replay rejection, atomic promotion, tamper closure, predecessor closure, and no runtime Ed25519 authority. Production `1.0.0-1` remains closed. |
+| `release(product): accept the 1.0 product baseline` | `docs/releases/1.0-product-acceptance.md` | After the complete product review, accept every supported claim, evidence mapping, and explicit deferral. This row is a mandatory gate, not an assumed result of the earlier rows. |
+| `release(debian): declare 1.0.0-1` | `Cargo.toml`; `Cargo.lock`; `packaging/debian/changelog` | Only after the accepted product baseline, set the workspace version to `1.0.0`, update the locked workspace package identities, and replace the development entry with the released Bookworm `1.0.0-1` entry. The protected authority can then sign `v1.0.0`, reproduce, approve, sign the repository, and publish. |
+
+The protected publication workflow and signing interface must remain outside
+an ordinary CI trigger and must not add a repository-held private key or a
+second package authority.
+
+## Deferred surface
+
+This decision does not accept or complete the Orna 1.0 product scope. It does
+not select the final public language subset, compatibility term, support
+period, service-level promise, backup policy, disaster recovery policy,
+release cadence, repository retention policy, or a later package upgrade edge.
+
+RPM packaging and repository publication are explicitly deferred. No `.rpm`,
+RPM spec, DNF repository, RPM signing key, RPM signature, conversion from the
+Debian package, or cross-format upgrade claim is part of the first release.
+A later accepted decision must define RPM version mapping, payload parity,
+maintainer scripts, signatures, repository metadata, clean-machine proof, and
+upgrade rules before RPM work starts.
+
+## Precedence
+
+This decision narrows the first production release mechanics under work ADR
+0019. It preserves ADR 0019's authenticated Debian package authority,
+one-executable product boundary, manifest integrity bindings, complete
+clean-machine gate, and empty first-release predecessor set.
+
+It supersedes work ADR 0017 only where that partly superseded decision could
+be read to require a detached Ed25519 signature, accepted-runtime record, or
+separate signed PostgreSQL runtime for production. It preserves all other
+accepted package transaction, lifecycle, failure, and data-transition rules
+that work ADR 0019 retains.
