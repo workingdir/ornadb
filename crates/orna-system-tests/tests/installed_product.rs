@@ -2707,3 +2707,382 @@ fn installed_distinct_eliminates_duplicate_stored_values_across_reapply_and_rest
         "read_distinct must stay FALSE and TRUE"
     );
 }
+
+/// Decode a stream of complete canonical ORV1 reference envelopes in order.
+///
+/// Returns `None` when any envelope is malformed or trailing bytes remain.
+fn decode_reference_envelopes(bytes: &[u8]) -> Option<Vec<OrvReference>> {
+    if !bytes.len().is_multiple_of(41) {
+        return None;
+    }
+    bytes
+        .chunks_exact(41)
+        .map(parse_reference_envelope)
+        .collect::<Result<Vec<_>, _>>()
+        .ok()
+}
+
+/// The sorted object identities of the given references.
+///
+/// Object identities are the unique public part of an ORV reference, so the
+/// sorted vector is an order-independent multiset.
+fn sorted_reference_objects(references: &[&OrvReference]) -> Vec<[u8; 16]> {
+    let mut objects = references
+        .iter()
+        .map(|reference| reference.object)
+        .collect::<Vec<_>>();
+    objects.sort_unstable();
+    objects
+}
+
+/// Require one granted raw reference reader to return exactly the given
+/// reference multiset.
+///
+/// The reader must exit 0 with empty standard error, its output must decode
+/// as complete ORV1 reference envelopes, the envelope count must equal the
+/// expected count, every envelope must use the same target type as the first
+/// expected reference, and the decoded object identities must equal the
+/// expected object identities as an unordered multiset.
+fn assert_reference_reader_returns(
+    machine: &InstalledMachine,
+    function: &str,
+    expected: &[&OrvReference],
+    label: &'static str,
+) -> Result<(), Error> {
+    let output = machine
+        .run_as_orna(&["raw-call", function])
+        .map_err(|error| Error::Spawn {
+            label: "spawn raw reference reader call",
+            io: match error {
+                Error::Spawn { io, .. } => io,
+                _ => unreachable!("run_as_orna only returns spawn errors"),
+            },
+        })?;
+    let output = require_success(label, output)?;
+    if !output.stderr.is_empty() {
+        return Err(Error::Unexpected {
+            message: format!(
+                "{label} must keep standard error empty, got {} bytes",
+                output.stderr.len()
+            ),
+        });
+    }
+    let decoded = decode_reference_envelopes(&output.stdout).ok_or_else(|| Error::Unexpected {
+        message: format!("{label} output must decode as complete reference envelopes"),
+    })?;
+    if decoded.len() != expected.len() {
+        return Err(Error::Unexpected {
+            message: format!(
+                "{label} must return exactly {} reference envelopes, got {}",
+                expected.len(),
+                decoded.len()
+            ),
+        });
+    }
+    let Some(first) = expected.first() else {
+        return Err(Error::Unexpected {
+            message: format!("{label} requires at least one expected reference"),
+        });
+    };
+    if decoded
+        .iter()
+        .any(|reference| reference.type_id != first.type_id)
+    {
+        return Err(Error::Unexpected {
+            message: format!("{label} must use one uniform target type"),
+        });
+    }
+    if sorted_reference_objects(&decoded.iter().collect::<Vec<_>>())
+        != sorted_reference_objects(expected)
+    {
+        return Err(Error::Unexpected {
+            message: format!("{label} must return exactly the expected references"),
+        });
+    }
+    Ok(())
+}
+
+/// Prove that `SELECT REF(entry)` returns the stored object references
+/// through the installed product's public raw-call path, without any row
+/// ordering assumption, and that the exact fixture reapplies cleanly.
+///
+/// The test installs the exact checked-in `product_test_references.orna`
+/// fixture, applies it, and requires exactly three sorted qualified-name
+/// mappings with pairwise distinct function identities. It then proves:
+///
+/// * the raw reader is denied before any grant;
+/// * after granting all three functions the reader succeeds empty;
+/// * `create_true` returns one reference A and the reader returns exactly A;
+/// * `create_false` returns a reference B with the same target type and a
+///   distinct nonzero object identity, and the reader returns the unordered
+///   multiset {A, B};
+/// * reapplying the exact same fixture keeps the complete function mapping,
+///   grants, and rows;
+/// * a restart keeps the unordered multiset {A, B};
+/// * after the restart both surviving grants stay usable without any re-grant:
+///   `create_true` returns a distinct reference C, then `create_false`
+///   returns a distinct reference D, and the reader returns the unordered
+///   multiset {A, B, C, D}.
+///
+/// All observations go through the packaged `/usr/bin/orna` public commands
+/// and raw-call ORV envelopes. The test makes no claim about physical
+/// storage, private rows, or row ordering.
+#[test]
+#[ignore = "requires Docker, ORNA_SYSTEM_TEST_DEBIAN_PACKAGE, and the installed orna executable"]
+fn installed_reference_reader_returns_stored_object_references_across_replay_and_restart() {
+    let package = std::env::var("ORNA_SYSTEM_TEST_DEBIAN_PACKAGE")
+        .expect("ORNA_SYSTEM_TEST_DEBIAN_PACKAGE must point at the reproduced .deb package");
+    let artifact = FrozenPackageArtifact::new(PackageFormat::Debian, &package)
+        .expect("freeze the reproduced Debian package");
+    let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures")
+        .join("product_test_references.orna");
+    let fixture = fs::read(&fixture_path).expect("read the checked-in references fixture");
+
+    let machine = InstalledMachine::start(&artifact, &fixture)
+        .expect("start the installed Debian test machine");
+
+    // Apply the exact fixture and require the three sorted mappings.
+    let apply = machine
+        .run_as_orna(&["source", "apply", FIXTURE_PATH])
+        .expect("run installed source apply");
+    let apply = require_success("orna source apply", apply).expect("source apply must succeed");
+    assert!(
+        apply.stderr.is_empty(),
+        "source apply must keep standard error empty"
+    );
+    let document = parse_apply_document(&apply.stdout).expect("source apply JSON must parse");
+    let expected_order = [
+        vec!["reference_test".to_string(), "create_false".to_string()],
+        vec!["reference_test".to_string(), "create_true".to_string()],
+        vec!["reference_test".to_string(), "read_entries".to_string()],
+    ];
+    let actual_order = document
+        .functions
+        .iter()
+        .map(|(names, _)| names.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual_order, expected_order,
+        "apply must report the three function entries sorted by qualified name"
+    );
+    let create_true = document
+        .function_id(&["reference_test", "create_true"])
+        .expect("apply must report create_true");
+    let create_false = document
+        .function_id(&["reference_test", "create_false"])
+        .expect("apply must report create_false");
+    let read_entries = document
+        .function_id(&["reference_test", "read_entries"])
+        .expect("apply must report read_entries");
+    let identities = [create_true, create_false, read_entries];
+    for (index, left) in identities.iter().enumerate() {
+        for right in &identities[index + 1..] {
+            assert_ne!(
+                left, right,
+                "the three function identities must be pairwise distinct"
+            );
+        }
+    }
+
+    // Source apply grants nothing: every raw call is denied before any grant.
+    for function in identities {
+        let denied = machine
+            .run_as_orna(&["raw-call", function])
+            .expect("run denied raw call");
+        assert_denied("raw call before grant", denied).expect("raw call must be denied");
+    }
+
+    // Grant all three functions through the fixed-service command.
+    for function in identities {
+        let granted = machine
+            .run_as_orna(&["security", "grant-execute", function])
+            .expect("run installed grant command");
+        require_silent_success("orna security grant-execute", granted)
+            .expect("grant must succeed silently");
+    }
+
+    // The reader initially succeeds with empty output.
+    let empty = machine
+        .run_as_orna(&["raw-call", read_entries])
+        .expect("run empty raw select");
+    require_silent_success("orna raw-call read_entries empty", empty)
+        .expect("empty read must exit 0 with empty streams");
+
+    // create_true returns one reference A and the reader returns exactly A.
+    let create_true_call = machine
+        .run_as_orna(&["raw-call", create_true])
+        .expect("run true raw insert");
+    let create_true_call = require_success("orna raw-call create_true", create_true_call)
+        .expect("true insert must succeed");
+    assert!(
+        create_true_call.stderr.is_empty(),
+        "true insert must keep standard error empty"
+    );
+    let a = parse_reference_envelope(&create_true_call.stdout)
+        .expect("true insert must return one ORV reference");
+    assert!(
+        a.type_id != [0; 16] && !a.object_is_zero(),
+        "the true insert must return a real object reference"
+    );
+    let read_a = machine
+        .run_as_orna(&["raw-call", read_entries])
+        .expect("run raw select for one reference");
+    let read_a = require_success("orna raw-call read_entries one reference", read_a)
+        .expect("read must succeed");
+    assert!(
+        read_a.stderr.is_empty(),
+        "read must keep standard error empty"
+    );
+    assert_eq!(
+        read_a.stdout.as_slice(),
+        create_true_call.stdout.as_slice(),
+        "read must return exactly the reference A envelope"
+    );
+
+    // create_false returns B with the same target type and a distinct object.
+    let create_false_call = machine
+        .run_as_orna(&["raw-call", create_false])
+        .expect("run false raw insert");
+    let create_false_call = require_success("orna raw-call create_false", create_false_call)
+        .expect("false insert must succeed");
+    assert!(
+        create_false_call.stderr.is_empty(),
+        "false insert must keep standard error empty"
+    );
+    let b = parse_reference_envelope(&create_false_call.stdout)
+        .expect("false insert must return one ORV reference");
+    assert!(
+        b.type_id != [0; 16] && !b.object_is_zero(),
+        "the false insert must return a real object reference"
+    );
+    assert_eq!(
+        b.type_id, a.type_id,
+        "both creates must reference the same target type"
+    );
+    assert_ne!(
+        b.object, a.object,
+        "the false insert must allocate a distinct object identity"
+    );
+
+    // The reader returns the unordered multiset {A, B}.
+    assert_reference_reader_returns(
+        &machine,
+        read_entries,
+        &[&a, &b],
+        "orna raw-call read_entries two references",
+    )
+    .expect("read must return exactly the references A and B");
+
+    // Exact source replay keeps the complete mapping, grants, and rows.
+    let replay = machine
+        .run_as_orna(&["source", "apply", FIXTURE_PATH])
+        .expect("run installed source apply on the same fixture");
+    let replay = require_success("orna source apply replay", replay)
+        .expect("references replay must succeed");
+    assert!(
+        replay.stderr.is_empty(),
+        "references replay must keep standard error empty"
+    );
+    let replay_document =
+        parse_apply_document(&replay.stdout).expect("references replay JSON must parse");
+    assert_eq!(
+        replay_document.functions, document.functions,
+        "the replay must keep the complete three-entry function vector"
+    );
+    assert_reference_reader_returns(
+        &machine,
+        read_entries,
+        &[&a, &b],
+        "orna raw-call read_entries after replay",
+    )
+    .expect("read after replay must return exactly the references A and B");
+
+    // Restart keeps the unordered multiset {A, B}.
+    machine
+        .restart_server()
+        .expect("installed server must restart cleanly");
+    assert_reference_reader_returns(
+        &machine,
+        read_entries,
+        &[&a, &b],
+        "orna raw-call read_entries after restart",
+    )
+    .expect("read after restart must return exactly the references A and B");
+
+    // A post-restart create_true returns distinct C; read returns {A, B, C}.
+    let create_true_after = machine
+        .run_as_orna(&["raw-call", create_true])
+        .expect("run true raw insert after restart");
+    let create_true_after =
+        require_success("orna raw-call create_true after restart", create_true_after)
+            .expect("true insert after restart must succeed");
+    assert!(
+        create_true_after.stderr.is_empty(),
+        "true insert after restart must keep standard error empty"
+    );
+    let c = parse_reference_envelope(&create_true_after.stdout)
+        .expect("true insert after restart must return one ORV reference");
+    assert!(
+        c.type_id != [0; 16] && !c.object_is_zero(),
+        "the post-restart true insert must return a real object reference"
+    );
+    assert_eq!(
+        c.type_id, a.type_id,
+        "the post-restart true insert must reference the same target type"
+    );
+    assert_ne!(
+        c.object, a.object,
+        "the post-restart true insert must allocate a distinct object identity"
+    );
+    assert_ne!(
+        c.object, b.object,
+        "the post-restart true insert must allocate a distinct object identity"
+    );
+
+    assert_reference_reader_returns(
+        &machine,
+        read_entries,
+        &[&a, &b, &c],
+        "orna raw-call read_entries three references",
+    )
+    .expect("read must return exactly the references A, B, and C");
+
+    // The post-restart create_false grant survived too: distinct D.
+    let create_false_after = machine
+        .run_as_orna(&["raw-call", create_false])
+        .expect("run false raw insert after restart");
+    let create_false_after = require_success(
+        "orna raw-call create_false after restart",
+        create_false_after,
+    )
+    .expect("false insert after restart must succeed");
+    assert!(
+        create_false_after.stderr.is_empty(),
+        "false insert after restart must keep standard error empty"
+    );
+    let d = parse_reference_envelope(&create_false_after.stdout)
+        .expect("false insert after restart must return one ORV reference");
+    assert!(
+        d.type_id != [0; 16] && !d.object_is_zero(),
+        "the post-restart false insert must return a real object reference"
+    );
+    assert_eq!(
+        d.type_id, a.type_id,
+        "the post-restart false insert must reference the same target type"
+    );
+    for reference in [&a, &b, &c] {
+        assert_ne!(
+            d.object, reference.object,
+            "the post-restart false insert must allocate a distinct object identity"
+        );
+    }
+
+    assert_reference_reader_returns(
+        &machine,
+        read_entries,
+        &[&a, &b, &c, &d],
+        "orna raw-call read_entries four references",
+    )
+    .expect("read must return exactly the references A, B, C, and D");
+}
