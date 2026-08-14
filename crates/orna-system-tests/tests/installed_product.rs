@@ -694,6 +694,20 @@ fn boolean_orv1_envelope(value: Option<bool>) -> Vec<u8> {
     }
 }
 
+/// The canonical `ORV1` envelope for one object reference.
+///
+/// The layout is `ORV1`, the REFERENCE tag, the 16-byte target type identity,
+/// the 4-byte big-endian payload length, and the 16-byte object identity.
+fn reference_orv1_envelope(target: [u8; 16], object: [u8; 16]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(41);
+    bytes.extend_from_slice(b"ORV1");
+    bytes.push(0x08);
+    bytes.extend_from_slice(&target);
+    bytes.extend_from_slice(&16_u32.to_be_bytes());
+    bytes.extend_from_slice(&object);
+    bytes
+}
+
 /// Two exact canonical Boolean TRUE envelopes, one per stored row.
 fn two_boolean_true_envelopes() -> Vec<u8> {
     let mut bytes = boolean_orv1_envelope(Some(true));
@@ -4320,4 +4334,408 @@ fn installed_parameterised_argument_insert_persists_across_replay_and_restart() 
         vec![false, false, true, true],
         "the reader must return exactly two FALSE and two TRUE values"
     );
+}
+
+/// Prove that the installed product's canonical raw reference mutations
+/// update and delete rows through the packaged `/usr/bin/orna` public
+/// commands, and that the exact fixture reapplies and restarts without
+/// changing identities, parameter bindings, grants, or the stored Boolean
+/// multiset.
+///
+/// The test installs the exact checked-in `product_test_reference_mutations.orna`
+/// fixture, applies it, and requires the four sorted qualified-name mappings
+/// with pairwise distinct function identities and exact selector parameter
+/// identities. It then proves:
+///
+/// * every create, read, update, and delete call is denied before any grant;
+/// * after granting the four functions, two distinct rows are created, and
+///   the parameterised constant-FALSE UPDATE of the first row returns a
+///   reference byte-identical to the supplied selector;
+/// * the reader returns exactly one FALSE and one TRUE value;
+/// * the UPDATE of the deleted reference succeeds with no value event and
+///   preserves the surviving row;
+/// * the DELETE of the first row returns the exact ORV1 TRUE envelope, a
+///   repeated DELETE completes empty, and the reader keeps only the second
+///   row;
+/// * an exact source replay keeps the complete function vector including
+///   parameters, and the grants and data survive;
+/// * a restart keeps the grants and rows, and the second row can still be
+///   updated and deleted with the reader ending empty.
+///
+/// All observations go through the packaged `/usr/bin/orna` public commands
+/// and raw-call ORV envelopes. The test makes no claim about physical storage
+/// or private rows.
+#[test]
+#[ignore = "requires Docker, ORNA_SYSTEM_TEST_DEBIAN_PACKAGE, and the installed orna executable"]
+fn installed_reference_mutations_update_delete_and_survive_replay_and_restart() {
+    let package = std::env::var("ORNA_SYSTEM_TEST_DEBIAN_PACKAGE")
+        .expect("ORNA_SYSTEM_TEST_DEBIAN_PACKAGE must point at the reproduced .deb package");
+    let artifact = FrozenPackageArtifact::new(PackageFormat::Debian, &package)
+        .expect("freeze the reproduced Debian package");
+    let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures")
+        .join("product_test_reference_mutations.orna");
+    let fixture = fs::read(&fixture_path).expect("read the checked-in reference mutations fixture");
+
+    let machine = InstalledMachine::start(&artifact, &fixture)
+        .expect("start the installed Debian test machine");
+
+    // Apply the exact fixture and require the four sorted mappings.
+    let apply = machine
+        .run_as_orna(&["source", "apply", FIXTURE_PATH])
+        .expect("run installed source apply");
+    let apply = require_success("orna source apply", apply).expect("source apply must succeed");
+    assert!(
+        apply.stderr.is_empty(),
+        "source apply must keep standard error empty"
+    );
+    let document = parse_apply_document(&apply.stdout).expect("source apply JSON must parse");
+    let expected_order = [
+        vec![
+            "reference_mutation_test".to_string(),
+            "create_true".to_string(),
+        ],
+        vec![
+            "reference_mutation_test".to_string(),
+            "delete_entry".to_string(),
+        ],
+        vec![
+            "reference_mutation_test".to_string(),
+            "read_entries".to_string(),
+        ],
+        vec![
+            "reference_mutation_test".to_string(),
+            "update_false".to_string(),
+        ],
+    ];
+    let actual_order = document
+        .functions
+        .iter()
+        .map(|function| function.names().to_vec())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual_order, expected_order,
+        "apply must report the four function entries sorted by qualified name"
+    );
+    let create_true = document
+        .function_id(&["reference_mutation_test", "create_true"])
+        .expect("apply must report create_true");
+    let update_false = document
+        .function_id(&["reference_mutation_test", "update_false"])
+        .expect("apply must report update_false");
+    let delete_entry = document
+        .function_id(&["reference_mutation_test", "delete_entry"])
+        .expect("apply must report delete_entry");
+    let read_entries = document
+        .function_id(&["reference_mutation_test", "read_entries"])
+        .expect("apply must report read_entries");
+    for (left, right) in [
+        (create_true, update_false),
+        (create_true, delete_entry),
+        (create_true, read_entries),
+        (update_false, delete_entry),
+        (update_false, read_entries),
+        (delete_entry, read_entries),
+    ] {
+        assert_ne!(
+            left, right,
+            "the four function identities must be pairwise distinct"
+        );
+    }
+    let update_parameter = document
+        .parameter_id(&["reference_mutation_test", "update_false"], "p_entry")
+        .expect("apply must report update_false.p_entry");
+    let delete_parameter = document
+        .parameter_id(&["reference_mutation_test", "delete_entry"], "p_entry")
+        .expect("apply must report delete_entry.p_entry");
+    assert_ne!(
+        update_parameter, delete_parameter,
+        "the two selector parameter identities must be pairwise distinct"
+    );
+    for name in ["create_true", "read_entries"] {
+        let entry = document
+            .functions
+            .iter()
+            .find(|entry| {
+                entry
+                    .names()
+                    .iter()
+                    .map(String::as_str)
+                    .eq(["reference_mutation_test", name].iter().copied())
+            })
+            .expect("apply must report the function entry");
+        assert!(
+            entry.parameters().is_empty(),
+            "{name} must declare no parameters"
+        );
+    }
+    for (name, parameter) in [
+        ("update_false", update_parameter),
+        ("delete_entry", delete_parameter),
+    ] {
+        let entry = document
+            .functions
+            .iter()
+            .find(|entry| {
+                entry
+                    .names()
+                    .iter()
+                    .map(String::as_str)
+                    .eq(["reference_mutation_test", name].iter().copied())
+            })
+            .expect("apply must report the function entry");
+        assert_eq!(
+            entry.parameters().len(),
+            1,
+            "{name} must declare exactly one parameter"
+        );
+        let declared = &entry.parameters()[0];
+        assert_eq!(
+            declared.name(),
+            "p_entry",
+            "{name} must declare exactly the p_entry parameter"
+        );
+        assert_eq!(
+            declared.parameter_id(),
+            parameter,
+            "the declared parameter must equal the discovered identity"
+        );
+    }
+
+    // Every create, read, update, and delete call is denied before any grant.
+    let denied_create = machine
+        .run_as_orna(&["raw-call", create_true])
+        .expect("run denied create call");
+    assert_denied("create before grant", denied_create).expect("create must be denied");
+    let denied_read = machine
+        .run_as_orna(&["raw-call", read_entries])
+        .expect("run denied read call");
+    assert_denied("read before grant", denied_read).expect("read must be denied");
+    let pre_grant_selector = reference_orv1_envelope([0x11; 16], [0x22; 16]);
+    let denied_update = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", update_false, update_parameter],
+            &pre_grant_selector,
+        )
+        .expect("run denied update call");
+    assert_denied("update before grant", denied_update).expect("update must be denied");
+    let denied_delete = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", delete_entry, delete_parameter],
+            &pre_grant_selector,
+        )
+        .expect("run denied delete call");
+    assert_denied("delete before grant", denied_delete).expect("delete must be denied");
+
+    // Grant the four exact functions.
+    for function in [create_true, update_false, delete_entry, read_entries] {
+        let granted = machine
+            .run_as_orna(&["security", "grant-execute", function])
+            .expect("run installed grant command");
+        require_silent_success("orna security grant-execute", granted)
+            .expect("grant must succeed silently");
+    }
+
+    // Create two distinct rows.
+    let first_created = machine
+        .run_as_orna(&["raw-call", create_true])
+        .expect("run first create call");
+    let first_created = require_value_success("orna raw-call create_true first", first_created)
+        .expect("first create must succeed");
+    let first = parse_reference_envelope(&first_created.stdout)
+        .expect("first create must return one ORV reference");
+    let second_created = machine
+        .run_as_orna(&["raw-call", create_true])
+        .expect("run second create call");
+    let second_created = require_value_success("orna raw-call create_true second", second_created)
+        .expect("second create must succeed");
+    let second = parse_reference_envelope(&second_created.stdout)
+        .expect("second create must return one ORV reference");
+    assert!(
+        !first.object_is_zero() && !second.object_is_zero(),
+        "both created references must name real rows"
+    );
+    assert_eq!(
+        first.type_id, second.type_id,
+        "both created references must target the same object type"
+    );
+    assert_ne!(
+        first.object, second.object,
+        "the two created references must be distinct"
+    );
+
+    // UPDATE the first row and require the returned reference to be
+    // byte-identical to the supplied selector.
+    let first_selector = reference_orv1_envelope(first.type_id, first.object);
+    let updated = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", update_false, update_parameter],
+            &first_selector,
+        )
+        .expect("run first UPDATE call");
+    let updated = require_value_success("orna raw-call update_false first", updated)
+        .expect("first UPDATE must succeed");
+    assert_eq!(
+        updated.stdout, first_selector,
+        "the UPDATE must return a reference byte-identical to the selector"
+    );
+
+    // The reader returns exactly one FALSE and one TRUE value.
+    let mut two_values = decode_reader_values(
+        &machine,
+        read_entries,
+        "orna raw-call read_entries two values",
+    )
+    .expect("two-value read must decode");
+    two_values.sort();
+    assert_eq!(
+        two_values,
+        vec![false, true],
+        "the UPDATE must move the first row to FALSE and keep the second TRUE"
+    );
+
+    // DELETE the first row returns the exact ORV1 TRUE envelope.
+    let deleted = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", delete_entry, delete_parameter],
+            &first_selector,
+        )
+        .expect("run first DELETE call");
+    let deleted = require_value_success("orna raw-call delete_entry first", deleted)
+        .expect("first DELETE must succeed");
+    assert_eq!(
+        deleted.stdout.as_slice(),
+        boolean_orv1_envelope(Some(true)).as_slice(),
+        "the DELETE must return the exact canonical Boolean TRUE envelope"
+    );
+
+    // A repeated DELETE completes empty.
+    let repeated = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", delete_entry, delete_parameter],
+            &first_selector,
+        )
+        .expect("run repeated DELETE call");
+    require_silent_success("orna raw-call delete_entry repeated", repeated)
+        .expect("repeated DELETE must complete empty");
+
+    // An UPDATE of the deleted reference completes empty and preserves the
+    // surviving row.
+    let deleted_update = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", update_false, update_parameter],
+            &first_selector,
+        )
+        .expect("run UPDATE of the deleted reference");
+    require_silent_success("orna raw-call update_false deleted", deleted_update)
+        .expect("UPDATE of the deleted reference must complete empty");
+
+    // The reader keeps only the second row.
+    let mut one_value = decode_reader_values(
+        &machine,
+        read_entries,
+        "orna raw-call read_entries one value",
+    )
+    .expect("one-value read must decode");
+    one_value.sort();
+    assert_eq!(
+        one_value,
+        vec![true],
+        "the UPDATE of the deleted reference must preserve the surviving TRUE row"
+    );
+
+    // Exact source replay keeps the complete function vector including
+    // parameters, and the grants and data survive without re-granting.
+    let replay = machine
+        .run_as_orna(&["source", "apply", FIXTURE_PATH])
+        .expect("run installed source apply on the same fixture");
+    let replay =
+        require_success("orna source apply replay", replay).expect("fixture replay must succeed");
+    assert!(
+        replay.stderr.is_empty(),
+        "fixture replay must keep standard error empty"
+    );
+    let replay_document =
+        parse_apply_document(&replay.stdout).expect("fixture replay JSON must parse");
+    assert_eq!(
+        replay_document.functions, document.functions,
+        "the replay must keep the complete function vector including parameters"
+    );
+    let replay_update_parameter = replay_document
+        .parameter_id(&["reference_mutation_test", "update_false"], "p_entry")
+        .expect("the replay must keep update_false.p_entry");
+    let replay_delete_parameter = replay_document
+        .parameter_id(&["reference_mutation_test", "delete_entry"], "p_entry")
+        .expect("the replay must keep delete_entry.p_entry");
+    assert_eq!(
+        replay_update_parameter, update_parameter,
+        "the replay must keep the exact update selector parameter identity"
+    );
+    assert_eq!(
+        replay_delete_parameter, delete_parameter,
+        "the replay must keep the exact delete selector parameter identity"
+    );
+    let surviving = decode_reader_values(
+        &machine,
+        read_entries,
+        "orna raw-call read_entries after replay",
+    )
+    .expect("post-replay read must decode");
+    assert_eq!(
+        surviving,
+        vec![true],
+        "the replay must preserve the surviving TRUE row"
+    );
+
+    // Restart keeps grants and rows; update then delete the second row using
+    // the surviving grants, and the final readers are empty.
+    machine
+        .restart_server()
+        .expect("installed server must restart cleanly");
+    let second_selector = reference_orv1_envelope(second.type_id, second.object);
+    let updated_second = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", update_false, update_parameter],
+            &second_selector,
+        )
+        .expect("run second UPDATE call after restart");
+    let updated_second = require_value_success("orna raw-call update_false second", updated_second)
+        .expect("second UPDATE must succeed after restart");
+    assert_eq!(
+        updated_second.stdout, second_selector,
+        "the second UPDATE must return a reference byte-identical to the selector"
+    );
+
+    // The reader causally proves the second row moved to FALSE before it is
+    // deleted.
+    let mut updated_second_values = decode_reader_values(
+        &machine,
+        read_entries,
+        "orna raw-call read_entries after second UPDATE",
+    )
+    .expect("post-update read must decode");
+    updated_second_values.sort();
+    assert_eq!(
+        updated_second_values,
+        vec![false],
+        "the second UPDATE must leave exactly one FALSE row"
+    );
+    let deleted_second = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", delete_entry, delete_parameter],
+            &second_selector,
+        )
+        .expect("run second DELETE call after restart");
+    let deleted_second = require_value_success("orna raw-call delete_entry second", deleted_second)
+        .expect("second DELETE must succeed after restart");
+    assert_eq!(
+        deleted_second.stdout.as_slice(),
+        boolean_orv1_envelope(Some(true)).as_slice(),
+        "the second DELETE must return the exact canonical Boolean TRUE envelope"
+    );
+    let final_read = machine
+        .run_as_orna(&["raw-call", read_entries])
+        .expect("run final empty raw select");
+    require_silent_success("orna raw-call read_entries final", final_read)
+        .expect("the final reader must be empty");
 }
