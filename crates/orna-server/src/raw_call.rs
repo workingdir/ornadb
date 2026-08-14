@@ -1,4 +1,4 @@
-//! Fixed local client for one parameter-free raw recovery call.
+//! Fixed local client for one zero-argument or one-argument raw recovery call.
 
 use std::{
     fmt, fs,
@@ -17,10 +17,10 @@ use std::{
 };
 
 use nix::sys::signal::{SaFlags, SigAction, SigHandler, SigSet, Signal, sigaction};
-use orna_core::FunctionId;
+use orna_core::{FunctionId, ParameterId, value::RuntimeValue};
 use orna_protocol::{
     CallFailure, ClientFrame, MAX_FRAME_PAYLOAD_LENGTH, RawCallClient, RawCallClientError,
-    RawCallClientResponse, encode_client_frame, encode_value,
+    RawCallClientResponse, decode_value, encode_client_frame, encode_value,
 };
 
 const RUNTIME_ROOT: &str = "/run/orna/default";
@@ -28,6 +28,8 @@ const SOCKET_PATH: &str = "/run/orna/default/orna.sock";
 const CLIENT_HELLO: [u8; 12] = *b"ORNA\x01\x00\x00\x01\x00\x00\x00\x00";
 const SERVER_ACK: [u8; 12] = *b"ORNA\x81\x00\x00\x01\x00\x00\x00\x00";
 const FRAME_HEADER_LENGTH: usize = 18;
+const VALUE_HEADER_LENGTH: usize = 25;
+const MAX_ARGUMENT_VALUE_LENGTH: usize = MAX_FRAME_PAYLOAD_LENGTH - 16;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const FRAME_TIMEOUT: Duration = Duration::from_secs(30);
 const IO_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -50,6 +52,8 @@ pub enum LocalRawCallOutcome {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum LocalRawCallError {
+    /// Standard input is not one complete bounded canonical ORV1 value.
+    Input,
     /// The fixed runtime directory or public socket is unavailable or invalid.
     Connection,
     /// Protocol negotiation did not return the exact version-1 acknowledgement.
@@ -68,6 +72,7 @@ pub enum LocalRawCallError {
 impl fmt::Display for LocalRawCallError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Input => formatter.write_str("orna: raw-call argument input is invalid"),
             Self::Connection => formatter.write_str("local raw-call connection failed"),
             Self::Negotiation => formatter.write_str("local raw-call negotiation failed"),
             Self::Protocol { .. } => formatter.write_str("local raw-call protocol failed"),
@@ -75,6 +80,63 @@ impl fmt::Display for LocalRawCallError {
             Self::Signal => formatter.write_str("local raw-call signal handling failed"),
         }
     }
+}
+
+fn read_raw_call_argument(input: &mut impl Read) -> Result<RuntimeValue, LocalRawCallError> {
+    let interrupts_seen = interruption_count();
+    let mut encoded = vec![0; VALUE_HEADER_LENGTH];
+    read_argument_input_exact(input, &mut encoded, interrupts_seen)?;
+
+    let payload_length = u32::from_be_bytes(
+        encoded[VALUE_HEADER_LENGTH - 4..VALUE_HEADER_LENGTH]
+            .try_into()
+            .expect("value header length is fixed"),
+    ) as usize;
+    let encoded_length = VALUE_HEADER_LENGTH
+        .checked_add(payload_length)
+        .filter(|length| *length <= MAX_ARGUMENT_VALUE_LENGTH)
+        .ok_or(LocalRawCallError::Input)?;
+    encoded.resize(encoded_length, 0);
+    read_argument_input_exact(input, &mut encoded[VALUE_HEADER_LENGTH..], interrupts_seen)?;
+
+    let mut trailing = [0];
+    loop {
+        if interruption_count() != interrupts_seen {
+            return Err(LocalRawCallError::Signal);
+        }
+        match input.read(&mut trailing) {
+            Ok(0) => break,
+            Ok(_) => return Err(LocalRawCallError::Input),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => return Err(LocalRawCallError::Input),
+        }
+    }
+
+    let value = decode_value(&encoded).map_err(|_| LocalRawCallError::Input)?;
+    if interruption_count() != interrupts_seen {
+        return Err(LocalRawCallError::Signal);
+    }
+    Ok(value)
+}
+
+fn read_argument_input_exact(
+    input: &mut impl Read,
+    bytes: &mut [u8],
+    interrupts_seen: u8,
+) -> Result<(), LocalRawCallError> {
+    let mut read = 0;
+    while read < bytes.len() {
+        if interruption_count() != interrupts_seen {
+            return Err(LocalRawCallError::Signal);
+        }
+        match input.read(&mut bytes[read..]) {
+            Ok(0) => return Err(LocalRawCallError::Input),
+            Ok(length) => read += length,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => return Err(LocalRawCallError::Input),
+        }
+    }
+    Ok(())
 }
 
 impl std::error::Error for LocalRawCallError {
@@ -102,6 +164,54 @@ pub fn run_local_raw_call(function: FunctionId) -> Result<LocalRawCallOutcome, L
         .try_lock()
         .map_err(|_| LocalRawCallError::Signal)?;
     let _interrupts = InterruptHandler::install()?;
+    run_local_raw_call_after_input(function, None)
+}
+
+/// Runs one protocol-1 call with one canonical standard-input argument.
+///
+/// The complete bounded `ORV1` argument is read and validated before the
+/// client checks or connects to the fixed local socket.
+///
+/// # Errors
+///
+/// Returns [`LocalRawCallError::Input`] when standard input is not exactly one
+/// canonical bounded `ORV1` value. It returns the other [`LocalRawCallError`]
+/// variants for fixed-socket, negotiation, protocol, output, or signal
+/// failures.
+pub fn run_local_raw_call_with_argument(
+    function: FunctionId,
+    parameter: ParameterId,
+) -> Result<LocalRawCallOutcome, LocalRawCallError> {
+    run_local_raw_call_with_argument_input(
+        function,
+        parameter,
+        &mut StandardInput {
+            descriptor: nix::libc::STDIN_FILENO,
+        },
+    )
+}
+
+fn run_local_raw_call_with_argument_input(
+    function: FunctionId,
+    parameter: ParameterId,
+    input: &mut impl Read,
+) -> Result<LocalRawCallOutcome, LocalRawCallError> {
+    let _owner = RAW_CALL_OWNER
+        .try_lock()
+        .map_err(|_| LocalRawCallError::Signal)?;
+    let _interrupts = InterruptHandler::install()?;
+    let value = read_raw_call_argument(input);
+    if interruption_count() > 0 {
+        return Ok(LocalRawCallOutcome::Cancelled);
+    }
+    let value = value?;
+    run_local_raw_call_after_input(function, Some((parameter, value)))
+}
+
+fn run_local_raw_call_after_input(
+    function: FunctionId,
+    argument: Option<(ParameterId, RuntimeValue)>,
+) -> Result<LocalRawCallOutcome, LocalRawCallError> {
     if let Err(error) = require_fixed_socket() {
         return if interruption_count() > 0 {
             Ok(LocalRawCallOutcome::Cancelled)
@@ -122,13 +232,20 @@ pub fn run_local_raw_call(function: FunctionId) -> Result<LocalRawCallOutcome, L
             Err(LocalRawCallError::Connection)
         };
     }
-    match run_connected_raw_call(
-        &mut stream,
-        function,
-        &mut StandardOutput {
-            descriptor: nix::libc::STDOUT_FILENO,
-        },
-    ) {
+    let mut output = StandardOutput {
+        descriptor: nix::libc::STDOUT_FILENO,
+    };
+    let result = match argument {
+        Some((parameter, value)) => run_connected_raw_call_with_argument(
+            &mut stream,
+            function,
+            parameter,
+            value,
+            &mut output,
+        ),
+        None => run_connected_raw_call(&mut stream, function, &mut output),
+    };
+    match result {
         Err(LocalRawCallError::Signal) if interruption_count() > 0 => {
             Ok(LocalRawCallOutcome::Cancelled)
         }
@@ -244,6 +361,53 @@ fn wait_for_connection(stream: &UnixStream, deadline: Instant) -> Result<(), Loc
     }
 }
 
+struct StandardInput {
+    descriptor: i32,
+}
+
+impl Read for StandardInput {
+    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        if bytes.is_empty() {
+            return Ok(0);
+        }
+        loop {
+            if interruption_count() > 0 {
+                return Err(io::Error::from(io::ErrorKind::Interrupted));
+            }
+            let mut descriptor = nix::libc::pollfd {
+                fd: self.descriptor,
+                events: nix::libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: descriptor points to one initialised pollfd for the call duration.
+            let result =
+                unsafe { nix::libc::poll(&mut descriptor, 1, IO_POLL_INTERVAL.as_millis() as i32) };
+            if result == 0 {
+                continue;
+            }
+            if result < 0 {
+                let error = io::Error::last_os_error();
+                if retryable(&error) {
+                    continue;
+                }
+                return Err(error);
+            }
+            // SAFETY: the destination is a live mutable byte slice and standard input
+            // remains process-owned for the complete call.
+            let result =
+                unsafe { nix::libc::read(self.descriptor, bytes.as_mut_ptr().cast(), bytes.len()) };
+            if result >= 0 {
+                return Ok(result as usize);
+            }
+            let error = io::Error::last_os_error();
+            if retryable(&error) {
+                continue;
+            }
+            return Err(error);
+        }
+    }
+}
+
 enum OutputWriteError {
     Interrupted,
     Failed,
@@ -336,6 +500,30 @@ fn run_connected_raw_call(
     function: FunctionId,
     output: &mut impl ValueOutput,
 ) -> Result<LocalRawCallOutcome, LocalRawCallError> {
+    run_connected_raw_call_with_optional_argument(stream, function, None, output)
+}
+
+fn run_connected_raw_call_with_argument(
+    stream: &mut UnixStream,
+    function: FunctionId,
+    parameter: ParameterId,
+    value: RuntimeValue,
+    output: &mut impl ValueOutput,
+) -> Result<LocalRawCallOutcome, LocalRawCallError> {
+    run_connected_raw_call_with_optional_argument(
+        stream,
+        function,
+        Some((parameter, value)),
+        output,
+    )
+}
+
+fn run_connected_raw_call_with_optional_argument(
+    stream: &mut UnixStream,
+    function: FunctionId,
+    argument: Option<(ParameterId, RuntimeValue)>,
+    output: &mut impl ValueOutput,
+) -> Result<LocalRawCallOutcome, LocalRawCallError> {
     let mut interrupts_seen = 0;
     write_interruptibly(
         stream,
@@ -359,10 +547,19 @@ fn run_connected_raw_call(
     if interruption_count() != interrupts_seen {
         return Ok(LocalRawCallOutcome::Cancelled);
     }
-    let (mut client, frames) = RawCallClient::start(function);
+    let (mut client, [start, window, complete]) = RawCallClient::start(function);
+    let argument = argument.map(|(parameter, value)| ClientFrame::CallArgument {
+        stream: 1,
+        parameter,
+        value,
+    });
     let mut stream_created = false;
     let mut cancellation_sent = false;
-    for frame in frames {
+    for frame in [start, window]
+        .into_iter()
+        .chain(argument)
+        .chain([complete])
+    {
         let creates_stream = matches!(frame, ClientFrame::CallRawStart { .. });
         let encoded = encode_client_frame(&frame).map_err(protocol_codec_failure)?;
         write_interruptibly(
@@ -682,9 +879,12 @@ fn protocol_value_failure(_: orna_protocol::ValueCodecError) -> LocalRawCallErro
 
 #[cfg(test)]
 mod tests {
-    use std::{fs::File, os::unix::net::UnixStream, path::Path, sync::Mutex, thread};
+    use std::{
+        error::Error as _, fs::File, io::Cursor, os::unix::net::UnixStream, path::Path,
+        sync::Mutex, thread,
+    };
 
-    use orna_core::value::RuntimeValue;
+    use orna_core::{ParameterId, value::RuntimeValue};
     use orna_protocol::{
         Event, EventRecord, ServerFrame, decode_client_frame, encode_server_frame,
     };
@@ -764,6 +964,391 @@ mod tests {
         expected.extend(encode_value(&RuntimeValue::Integer(7)).unwrap());
         assert_eq!(output, expected);
         server_task.join().unwrap();
+    }
+
+    #[test]
+    fn connected_client_writes_argument_frames_and_preserves_the_response() {
+        let _interrupt_guard = lock_interrupt_tests();
+        let function = FunctionId::from_bytes([0x11; 16]);
+        let parameter = ParameterId::from_bytes([0x33; 16]);
+        let (mut server, mut client_stream) = UnixStream::pair().unwrap();
+        for stream in [&server, &client_stream] {
+            stream.set_read_timeout(Some(IO_POLL_INTERVAL)).unwrap();
+            stream.set_write_timeout(Some(IO_POLL_INTERVAL)).unwrap();
+        }
+        INTERRUPTS.store(0, Ordering::SeqCst);
+        let server_task = thread::spawn(move || {
+            let mut hello = [0; CLIENT_HELLO.len()];
+            server.read_exact(&mut hello).unwrap();
+            assert_eq!(hello, CLIENT_HELLO);
+            server.write_all(&SERVER_ACK).unwrap();
+            for expected in 0..4 {
+                let encoded = read_test_frame(&mut server);
+                let frame = decode_client_frame(&encoded).unwrap();
+                match expected {
+                    0 => assert_eq!(
+                        frame,
+                        ClientFrame::CallRawStart {
+                            stream: 1,
+                            function,
+                        }
+                    ),
+                    1 => assert!(matches!(frame, ClientFrame::WindowUpdate { stream: 1, .. })),
+                    2 => assert_eq!(
+                        frame,
+                        ClientFrame::CallArgument {
+                            stream: 1,
+                            parameter,
+                            value: RuntimeValue::Boolean(true),
+                        }
+                    ),
+                    _ => assert_eq!(frame, ClientFrame::CallArgumentsComplete { stream: 1 }),
+                }
+            }
+            for frame in [
+                ServerFrame::CallAccepted {
+                    stream: 1,
+                    invocation: orna_core::InvocationId::from_bytes([0x22; 16]),
+                },
+                ServerFrame::EventBatch {
+                    stream: 1,
+                    channel: orna_protocol::Channel::ResultValues,
+                    events: vec![EventRecord {
+                        sequence: 1,
+                        event: Event::Value(RuntimeValue::Boolean(true)),
+                    }],
+                },
+                ServerFrame::CallCompleted { stream: 1 },
+            ] {
+                server
+                    .write_all(&encode_server_frame(&frame).unwrap())
+                    .unwrap();
+            }
+        });
+        let mut output = Vec::new();
+        assert_eq!(
+            run_connected_raw_call_with_argument(
+                &mut client_stream,
+                function,
+                parameter,
+                RuntimeValue::Boolean(true),
+                &mut output
+            )
+            .unwrap(),
+            LocalRawCallOutcome::Completed
+        );
+        let expected = encode_value(&RuntimeValue::Boolean(true)).unwrap();
+        assert_eq!(output, expected);
+        server_task.join().unwrap();
+    }
+
+    #[test]
+    fn raw_call_argument_input_requires_one_complete_orv1_envelope() {
+        let _interrupt_guard = lock_interrupt_tests();
+        INTERRUPTS.store(0, Ordering::SeqCst);
+        let exact = [
+            0x4f, 0x52, 0x56, 0x31, // ORV1 marker
+            0x02, // Boolean tag
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Boolean type identity
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, // Boolean type identity
+            0x00, 0x00, 0x00, 0x01, // payload length
+            0x01, // Boolean true payload
+        ];
+        assert_eq!(
+            read_raw_call_argument(&mut Cursor::new(exact)).unwrap(),
+            RuntimeValue::Boolean(true)
+        );
+        let mut trailing = exact.to_vec();
+        trailing.push(0xaa);
+        let error = read_raw_call_argument(&mut Cursor::new(trailing))
+            .expect_err("one trailing byte after a complete envelope must reject the input");
+        assert!(matches!(error, LocalRawCallError::Input));
+        assert_eq!(
+            error.to_string(),
+            "orna: raw-call argument input is invalid"
+        );
+        assert!(error.source().is_none());
+    }
+
+    #[test]
+    fn raw_call_argument_input_validation_precedes_the_fixed_socket() {
+        let _interrupt_guard = lock_interrupt_tests();
+        INTERRUPTS.store(0, Ordering::SeqCst);
+        // In an ordinary unit-test environment the fixed runtime socket is
+        // absent. If it is unexpectedly present, skip this environmental
+        // precedence tracer rather than connect to it.
+        if require_fixed_socket().is_ok() {
+            return;
+        }
+        assert!(
+            matches!(require_fixed_socket(), Err(LocalRawCallError::Connection)),
+            "the fixed socket boundary must be the connection failure in this environment"
+        );
+        let mut input = Cursor::new(vec![
+            0x4f, 0x52, 0x56, 0x31, // ORV1 marker
+            0x02, // Boolean tag
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Boolean type identity
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, // Boolean type identity
+            0x00, 0x00, 0x00, 0x01, // payload length
+            0x01, // Boolean true payload
+            0xaa, // trailing byte
+        ]);
+        let error = run_local_raw_call_with_argument_input(
+            FunctionId::from_bytes([0x11; 16]),
+            ParameterId::from_bytes([0x33; 16]),
+            &mut input,
+        )
+        .expect_err("a malformed ORV1 argument must fail before the fixed socket");
+        assert!(matches!(error, LocalRawCallError::Input));
+        assert_eq!(
+            error.to_string(),
+            "orna: raw-call argument input is invalid"
+        );
+        assert!(error.source().is_none());
+    }
+
+    struct OneByteReader<'a> {
+        bytes: &'a [u8],
+        position: usize,
+    }
+
+    impl<'a> OneByteReader<'a> {
+        fn new(bytes: &'a [u8]) -> Self {
+            Self { bytes, position: 0 }
+        }
+    }
+
+    impl Read for OneByteReader<'_> {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            if self.position >= self.bytes.len() {
+                return Ok(0);
+            }
+            buffer[0] = self.bytes[self.position];
+            self.position += 1;
+            Ok(1)
+        }
+    }
+
+    struct OversizedHeaderOnlyReader<'a> {
+        header: &'a [u8],
+        position: usize,
+        payload_requested: bool,
+    }
+
+    impl<'a> OversizedHeaderOnlyReader<'a> {
+        fn new(header: &'a [u8]) -> Self {
+            Self {
+                header,
+                position: 0,
+                payload_requested: false,
+            }
+        }
+    }
+
+    impl Read for OversizedHeaderOnlyReader<'_> {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            if self.position >= self.header.len() {
+                self.payload_requested = true;
+                return Ok(0);
+            }
+            let available = self.header.len() - self.position;
+            let length = available.min(buffer.len());
+            buffer[..length].copy_from_slice(&self.header[self.position..self.position + length]);
+            self.position += length;
+            Ok(length)
+        }
+    }
+
+    fn require_raw_call_argument_input(error: LocalRawCallError) {
+        assert!(matches!(error, LocalRawCallError::Input));
+        assert_eq!(
+            error.to_string(),
+            "orna: raw-call argument input is invalid"
+        );
+        assert!(error.source().is_none());
+    }
+
+    #[test]
+    fn raw_call_argument_input_rejects_every_invalid_boundary() {
+        let _interrupt_guard = lock_interrupt_tests();
+        INTERRUPTS.store(0, Ordering::SeqCst);
+        let exact = [
+            0x4f, 0x52, 0x56, 0x31, // ORV1 marker
+            0x02, // Boolean tag
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Boolean type identity
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, // Boolean type identity
+            0x00, 0x00, 0x00, 0x01, // payload length
+            0x01, // Boolean true payload
+        ];
+        let mut bad_marker = exact;
+        bad_marker[..4].copy_from_slice(b"ORV2");
+        let mut invalid_payload = exact;
+        invalid_payload[VALUE_HEADER_LENGTH] = 0x02;
+        for input in [
+            Vec::new(),
+            exact[..24].to_vec(),
+            bad_marker.to_vec(),
+            invalid_payload.to_vec(),
+        ] {
+            require_raw_call_argument_input(
+                read_raw_call_argument(&mut Cursor::new(input))
+                    .expect_err("invalid raw argument input must be rejected"),
+            );
+        }
+
+        // A reader that returns at most one byte per read still decodes the
+        // complete exact TRUE envelope through sequential partial reads.
+        let mut one_byte = OneByteReader::new(&exact);
+        assert_eq!(
+            read_raw_call_argument(&mut one_byte).unwrap(),
+            RuntimeValue::Boolean(true)
+        );
+        assert_eq!(one_byte.position, exact.len());
+
+        // An oversized declared payload is rejected from the header alone,
+        // before the production reader requests any payload byte.
+        let mut oversized_header = exact[..VALUE_HEADER_LENGTH].to_vec();
+        oversized_header[VALUE_HEADER_LENGTH - 4..]
+            .copy_from_slice(&(MAX_ARGUMENT_VALUE_LENGTH as u32).to_be_bytes());
+        let mut oversized = OversizedHeaderOnlyReader::new(&oversized_header);
+        require_raw_call_argument_input(
+            read_raw_call_argument(&mut oversized)
+                .expect_err("an oversized declared payload must be rejected"),
+        );
+        assert_eq!(oversized.position, VALUE_HEADER_LENGTH);
+        assert!(
+            !oversized.payload_requested,
+            "the bounded reader must reject the oversized envelope before payload bytes"
+        );
+    }
+
+    struct InterruptOnFirstRead {
+        reads: usize,
+    }
+
+    impl Read for InterruptOnFirstRead {
+        fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
+            self.reads += 1;
+            if self.reads > 1 {
+                panic!("the interrupted input reader must not be read twice");
+            }
+            record_interrupt(0);
+            Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "forced interrupt",
+            ))
+        }
+    }
+
+    #[test]
+    fn raw_call_argument_input_interrupt_cancels_before_any_socket() {
+        let _interrupt_guard = lock_interrupt_tests();
+        INTERRUPTS.store(0, Ordering::SeqCst);
+        // The ordinary unit-test environment has no fixed socket. If one is
+        // unexpectedly present, skip this environmental precedence tracer.
+        if require_fixed_socket().is_ok() {
+            return;
+        }
+        assert!(
+            matches!(require_fixed_socket(), Err(LocalRawCallError::Connection)),
+            "the fixed socket boundary must be the connection failure in this environment"
+        );
+        let mut input = InterruptOnFirstRead { reads: 0 };
+        let outcome = run_local_raw_call_with_argument_input(
+            FunctionId::from_bytes([0x11; 16]),
+            ParameterId::from_bytes([0x33; 16]),
+            &mut input,
+        )
+        .expect("an input interrupt must cancel the call cleanly");
+        assert_eq!(outcome, LocalRawCallOutcome::Cancelled);
+        assert_eq!(input.reads, 1);
+        assert_eq!(INTERRUPTS.load(Ordering::SeqCst), 1);
+    }
+
+    struct InterruptOnEofProbe<'a> {
+        bytes: &'a [u8],
+        position: usize,
+        probes: usize,
+    }
+
+    impl<'a> InterruptOnEofProbe<'a> {
+        fn new(bytes: &'a [u8]) -> Self {
+            Self {
+                bytes,
+                position: 0,
+                probes: 0,
+            }
+        }
+    }
+
+    impl Read for InterruptOnEofProbe<'_> {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            if self.position < self.bytes.len() {
+                let available = self.bytes.len() - self.position;
+                let length = available.min(buffer.len());
+                buffer[..length]
+                    .copy_from_slice(&self.bytes[self.position..self.position + length]);
+                self.position += length;
+                return Ok(length);
+            }
+            self.probes += 1;
+            if self.probes > 1 {
+                panic!("the EOF probe reader must not be read again");
+            }
+            record_interrupt(0);
+            Ok(0)
+        }
+    }
+
+    #[test]
+    fn raw_call_argument_input_must_not_miss_an_interrupt_on_the_eof_probe() {
+        let _interrupt_guard = lock_interrupt_tests();
+        INTERRUPTS.store(0, Ordering::SeqCst);
+        let exact = [
+            0x4f, 0x52, 0x56, 0x31, // ORV1 marker
+            0x02, // Boolean tag
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Boolean type identity
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, // Boolean type identity
+            0x00, 0x00, 0x00, 0x01, // payload length
+            0x01, // Boolean true payload
+        ];
+        let mut input = InterruptOnEofProbe::new(&exact);
+        let error = read_raw_call_argument(&mut input)
+            .expect_err("an interrupt recorded by the EOF probe must surface as Signal");
+        assert!(matches!(error, LocalRawCallError::Signal));
+        assert_eq!(input.probes, 1);
+        assert_eq!(INTERRUPTS.load(Ordering::SeqCst), 1);
+    }
+
+    struct InterruptAndTruncateOnFirstRead {
+        reads: usize,
+    }
+
+    impl Read for InterruptAndTruncateOnFirstRead {
+        fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
+            self.reads += 1;
+            if self.reads > 1 {
+                panic!("the truncated interrupt reader must not be read again");
+            }
+            record_interrupt(0);
+            Ok(0)
+        }
+    }
+
+    #[test]
+    fn raw_call_argument_input_gives_signal_precedence_over_truncated_eof() {
+        let _interrupt_guard = lock_interrupt_tests();
+        INTERRUPTS.store(0, Ordering::SeqCst);
+        let mut input = InterruptAndTruncateOnFirstRead { reads: 0 };
+        let outcome = run_local_raw_call_with_argument_input(
+            FunctionId::from_bytes([0x11; 16]),
+            ParameterId::from_bytes([0x33; 16]),
+            &mut input,
+        )
+        .expect("an interrupt with truncated EOF must cancel, not fail as input");
+        assert_eq!(outcome, LocalRawCallOutcome::Cancelled);
+        assert_eq!(input.reads, 1);
+        assert_eq!(INTERRUPTS.load(Ordering::SeqCst), 1);
     }
 
     fn read_test_frame(stream: &mut UnixStream) -> Vec<u8> {
