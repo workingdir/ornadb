@@ -79,3 +79,5 @@ source-of-truth or authority rules.
   [Installed Source Apply Activates One Complete File](0038-installed-source-apply.md)
 * **work ADR 0039:**
   [Canonical Collection Values Use ORV5 and ORF5](0039-canonical-collection-value-codec.md)
+* **work ADR 0040:**
+  [Canonical Raw Calls Bind One Boolean INSERT Argument](0040-canonical-raw-call-argument.md)
