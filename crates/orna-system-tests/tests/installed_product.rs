@@ -1336,3 +1336,373 @@ fn installed_source_apply_grants_raw_insert_and_persists_across_restart() {
         "restart must preserve the unordered four-value Boolean multiset"
     );
 }
+
+/// Prove that an ADR 0006 replay-safe field rename keeps the installed
+/// product's public data path observable through the original function
+/// identities, and that the rename requires its transition evidence.
+///
+/// The test installs the original `product_test.orna` fixture, applies it,
+/// grants both functions, inserts one TRUE row, and then:
+///
+/// * submits the renamed shape without `ALTER TYPE ... RENAME FIELD`
+///   evidence and requires the installed product to reject it with the exact
+///   apply-commit failure line, proving the shape change cannot commit;
+/// * proves the rejection changes nothing: the original create identity
+///   inserts a second distinct TRUE object of the same reference type, and
+///   the original read identity returns exactly two TRUE values;
+/// * applies the evidence-bearing renamed fixture: source and catalogue
+///   revisions advance while the complete two-entry function vector stays
+///   exactly equal to the original apply, and a replay of the same renamed
+///   source keeps that complete mapping exact;
+/// * without any re-grant, reads the two pre-rename TRUE rows, inserts one
+///   FALSE object through the original create identity, and decodes the
+///   unordered multiset [false, true, true];
+/// * restarts the installed server and reads the same unordered multiset,
+///   then proves the create grant also survived by inserting a second FALSE
+///   object and decoding the unordered multiset [false, false, true, true].
+///
+/// All observations go through the packaged `/usr/bin/orna` public commands
+/// and raw-call ORV envelopes. The test proves stored values and grants
+/// remain observable across the rename; it does not inspect physical table
+/// columns, storage, or field identities.
+#[test]
+#[ignore = "requires Docker, ORNA_SYSTEM_TEST_DEBIAN_PACKAGE, and the ADR 0006 rename support in the installed orna executable"]
+fn installed_field_rename_preserves_function_identities_and_values_across_restart() {
+    let package = std::env::var("ORNA_SYSTEM_TEST_DEBIAN_PACKAGE")
+        .expect("ORNA_SYSTEM_TEST_DEBIAN_PACKAGE must point at the reproduced .deb package");
+    let artifact = FrozenPackageArtifact::new(PackageFormat::Debian, &package)
+        .expect("freeze the reproduced Debian package");
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+    let original = fs::read(fixtures.join("product_test.orna")).expect("read the product fixture");
+    let renamed = fs::read(fixtures.join("product_test_renamed.orna"))
+        .expect("read the renamed product fixture");
+    let without_evidence = fs::read(fixtures.join("product_test_renamed_without_evidence.orna"))
+        .expect("read the no-evidence renamed product fixture");
+
+    let machine = InstalledMachine::start(&artifact, &original)
+        .expect("start the installed Debian test machine");
+
+    // Apply the original fixture and capture the complete function vector.
+    let apply = machine
+        .run_as_orna(&["source", "apply", FIXTURE_PATH])
+        .expect("run installed source apply");
+    let apply = require_success("orna source apply", apply).expect("source apply must succeed");
+    let document = parse_apply_document(&apply.stdout).expect("source apply JSON must parse");
+    assert_eq!(
+        document.functions.len(),
+        2,
+        "the original apply must report exactly two function entries"
+    );
+    let original_functions = document.functions.clone();
+    let create_probe = document
+        .function_id(&["product_test", "create_probe"])
+        .expect("apply must report create_probe");
+    let read_probes = document
+        .function_id(&["product_test", "read_probes"])
+        .expect("apply must report read_probes");
+
+    // Grant both functions through the fixed-service command.
+    for function in [create_probe, read_probes] {
+        let granted = machine
+            .run_as_orna(&["security", "grant-execute", function])
+            .expect("run installed grant command");
+        require_silent_success("orna security grant-execute", granted)
+            .expect("grant must succeed silently");
+    }
+
+    // One pre-rename row with the exact canonical Boolean TRUE value.
+    let inserted = machine
+        .run_as_orna(&["raw-call", create_probe])
+        .expect("run raw insert call");
+    let inserted =
+        require_success("orna raw-call create_probe", inserted).expect("raw insert must succeed");
+    let reference = parse_reference_envelope(&inserted.stdout)
+        .expect("raw insert must return one ORV reference");
+    assert!(
+        reference.type_id != [0; 16] && !reference.object_is_zero(),
+        "the inserted object reference must name a real row"
+    );
+    assert_exact_boolean_true(
+        "orna raw-call read_probes before rename",
+        machine
+            .run_as_orna(&["raw-call", read_probes])
+            .expect("run raw select call before rename"),
+    )
+    .expect("raw select must return the exact Boolean TRUE value");
+
+    // The no-evidence fixture keeps the renamed shape but omits the ALTER
+    // evidence. The installed product must reject it at the apply-commit
+    // boundary rather than silently changing the object field set.
+    machine
+        .write_fixture(&without_evidence)
+        .expect("replace the fixture with the no-evidence source");
+    let rejected = machine
+        .run_as_orna(&["source", "apply", FIXTURE_PATH])
+        .expect("run installed source apply on the no-evidence source");
+    assert!(
+        rejected.status.code() == Some(1),
+        "no-evidence apply must exit 1, got {}",
+        rejected.status
+    );
+    assert!(
+        rejected.stdout.is_empty(),
+        "no-evidence apply must emit no standard output"
+    );
+    assert_eq!(
+        rejected.stderr,
+        b"orna: source apply did not commit\n".as_slice(),
+        "no-evidence apply must fail with the exact apply-commit rejection line"
+    );
+
+    // The rejection changes nothing: the original create identity inserts a
+    // second distinct TRUE object of the same reference type.
+    let second = machine
+        .run_as_orna(&["raw-call", create_probe])
+        .expect("run raw insert call after the rejected apply");
+    let second = require_success(
+        "orna raw-call create_probe after the rejected apply",
+        second,
+    )
+    .expect("raw insert after the rejected apply must succeed");
+    let second_reference = parse_reference_envelope(&second.stdout)
+        .expect("raw insert after the rejected apply must return one ORV reference");
+    assert!(
+        second_reference.type_id != [0; 16] && !second_reference.object_is_zero(),
+        "the post-rejection object reference must name a real row"
+    );
+    assert_ne!(
+        second_reference.object, reference.object,
+        "the post-rejection raw INSERT must allocate a distinct object identity"
+    );
+    assert_eq!(
+        second_reference.type_id, reference.type_id,
+        "the post-rejection raw INSERT must reference the same stable object type"
+    );
+
+    // The original read identity still returns exactly two TRUE values.
+    let two_after_rejection = machine
+        .run_as_orna(&["raw-call", read_probes])
+        .expect("run raw select call after the rejected apply");
+    let two_after_rejection = require_success(
+        "orna raw-call read_probes after the rejected apply",
+        two_after_rejection,
+    )
+    .expect("raw select after the rejected apply must succeed");
+    assert!(
+        two_after_rejection.stderr.is_empty(),
+        "raw select after the rejected apply must keep standard error empty"
+    );
+    let mut two_values = decode_boolean_envelopes(&two_after_rejection.stdout)
+        .expect("post-rejection rows must decode as two Boolean envelopes");
+    assert_eq!(
+        two_values.len(),
+        2,
+        "post-rejection rows must emit exactly two Boolean envelopes"
+    );
+    two_values.sort_unstable();
+    assert_eq!(
+        two_values,
+        [true, true],
+        "the two pre-rename rows must both hold TRUE"
+    );
+
+    // The evidence-bearing renamed fixture applies: revisions advance and
+    // the complete two-entry function vector stays exactly the original.
+    machine
+        .write_fixture(&renamed)
+        .expect("replace the fixture with the renamed source");
+    let renamed_apply = machine
+        .run_as_orna(&["source", "apply", FIXTURE_PATH])
+        .expect("run installed source apply on the renamed source");
+    let renamed_apply = require_success("orna source apply renamed", renamed_apply)
+        .expect("renamed source apply must succeed");
+    let renamed_document =
+        parse_apply_document(&renamed_apply.stdout).expect("renamed source apply JSON must parse");
+    assert_ne!(
+        renamed_document.source_revision, document.source_revision,
+        "the rename must advance the source revision"
+    );
+    assert_ne!(
+        renamed_document.catalogue_revision, document.catalogue_revision,
+        "the rename must advance the catalogue revision"
+    );
+    assert_eq!(
+        renamed_document.functions, original_functions,
+        "the rename apply must report the complete original function vector"
+    );
+
+    // Replaying the exact same renamed source keeps the complete mapping
+    // exact. Revision advance on replay is not assumed.
+    machine
+        .write_fixture(&renamed)
+        .expect("replace the fixture with the same renamed source");
+    let replay = machine
+        .run_as_orna(&["source", "apply", FIXTURE_PATH])
+        .expect("run installed source apply on the replay source");
+    let replay =
+        require_success("orna source apply replay", replay).expect("renamed replay must succeed");
+    let replay_document =
+        parse_apply_document(&replay.stdout).expect("renamed replay JSON must parse");
+    assert_eq!(
+        replay_document.functions, original_functions,
+        "the renamed replay must keep the complete original function vector"
+    );
+
+    // Without any re-grant, the two pre-rename TRUE rows remain observable.
+    let two_before_false = machine
+        .run_as_orna(&["raw-call", read_probes])
+        .expect("run raw select call after the rename");
+    let two_before_false = require_success(
+        "orna raw-call read_probes after the rename",
+        two_before_false,
+    )
+    .expect("raw select after the rename must succeed");
+    assert!(
+        two_before_false.stderr.is_empty(),
+        "raw select after the rename must keep standard error empty"
+    );
+    let mut two_before_values = decode_boolean_envelopes(&two_before_false.stdout)
+        .expect("pre-rename rows must decode as two Boolean envelopes");
+    assert_eq!(
+        two_before_values.len(),
+        2,
+        "the two pre-rename rows must emit exactly two Boolean envelopes"
+    );
+    two_before_values.sort_unstable();
+    assert_eq!(
+        two_before_values,
+        [true, true],
+        "the two pre-rename rows must both hold TRUE"
+    );
+
+    // The original create identity now inserts one FALSE object with the
+    // same reference type and a distinct object identity.
+    let third = machine
+        .run_as_orna(&["raw-call", create_probe])
+        .expect("run raw insert call after the rename");
+    let third = require_success("orna raw-call create_probe after the rename", third)
+        .expect("raw insert after the rename must succeed");
+    let third_reference = parse_reference_envelope(&third.stdout)
+        .expect("raw insert after the rename must return one ORV reference");
+    assert!(
+        third_reference.type_id != [0; 16] && !third_reference.object_is_zero(),
+        "the post-rename object reference must name a real row"
+    );
+    assert_ne!(
+        third_reference.object, reference.object,
+        "the post-rename raw INSERT must allocate a distinct object identity"
+    );
+    assert_ne!(
+        third_reference.object, second_reference.object,
+        "the post-rename raw INSERT must allocate a distinct object identity"
+    );
+    assert_eq!(
+        third_reference.type_id, reference.type_id,
+        "the post-rename raw INSERT must reference the same stable object type"
+    );
+
+    // Three rows decode as the unordered multiset [false, true, true].
+    let three = machine
+        .run_as_orna(&["raw-call", read_probes])
+        .expect("run raw select call after the post-rename insert");
+    let three = require_success("orna raw-call read_probes three rows", three)
+        .expect("raw select must succeed after the post-rename insert");
+    assert!(
+        three.stderr.is_empty(),
+        "raw select must keep standard error empty"
+    );
+    let mut three_values = decode_boolean_envelopes(&three.stdout)
+        .expect("three rows must decode as three Boolean envelopes");
+    assert_eq!(
+        three_values.len(),
+        3,
+        "three rows must emit exactly three Boolean envelopes"
+    );
+    three_values.sort_unstable();
+    assert_eq!(
+        three_values,
+        [false, true, true],
+        "the three rows must hold one FALSE and two TRUE values"
+    );
+
+    // Restart preserves the same unordered multiset.
+    machine
+        .restart_server()
+        .expect("installed server must restart cleanly");
+    let three_after = machine
+        .run_as_orna(&["raw-call", read_probes])
+        .expect("run raw select call after restart");
+    let three_after = require_success("orna raw-call read_probes after restart", three_after)
+        .expect("raw select after restart must succeed");
+    assert!(
+        three_after.stderr.is_empty(),
+        "raw select after restart must keep standard error empty"
+    );
+    let mut three_after_values = decode_boolean_envelopes(&three_after.stdout)
+        .expect("restart rows must decode as three Boolean envelopes");
+    assert_eq!(
+        three_after_values.len(),
+        3,
+        "restart must emit exactly three Boolean envelopes"
+    );
+    three_after_values.sort_unstable();
+    assert_eq!(
+        three_after_values,
+        [false, true, true],
+        "restart must preserve the unordered three-value multiset"
+    );
+
+    // After restart the original create grant survived too: a second FALSE
+    // object with the same reference type and a distinct object identity.
+    let fourth = machine
+        .run_as_orna(&["raw-call", create_probe])
+        .expect("run raw insert call after restart");
+    let fourth = require_success("orna raw-call create_probe after restart", fourth)
+        .expect("raw insert after restart must succeed");
+    let fourth_reference = parse_reference_envelope(&fourth.stdout)
+        .expect("raw insert after restart must return one ORV reference");
+    assert!(
+        fourth_reference.type_id != [0; 16] && !fourth_reference.object_is_zero(),
+        "the post-restart object reference must name a real row"
+    );
+    assert_ne!(
+        fourth_reference.object, reference.object,
+        "the post-restart raw INSERT must allocate a distinct object identity"
+    );
+    assert_ne!(
+        fourth_reference.object, second_reference.object,
+        "the post-restart raw INSERT must allocate a distinct object identity"
+    );
+    assert_ne!(
+        fourth_reference.object, third_reference.object,
+        "the post-restart raw INSERT must allocate a distinct object identity"
+    );
+    assert_eq!(
+        fourth_reference.type_id, reference.type_id,
+        "the post-restart raw INSERT must reference the same stable object type"
+    );
+
+    // Four rows decode as the unordered multiset [false, false, true, true].
+    let four = machine
+        .run_as_orna(&["raw-call", read_probes])
+        .expect("run raw select call after the post-restart insert");
+    let four = require_success("orna raw-call read_probes four rows", four)
+        .expect("raw select must succeed after the post-restart insert");
+    assert!(
+        four.stderr.is_empty(),
+        "raw select must keep standard error empty"
+    );
+    let mut four_values = decode_boolean_envelopes(&four.stdout)
+        .expect("four rows must decode as four Boolean envelopes");
+    assert_eq!(
+        four_values.len(),
+        4,
+        "four rows must emit exactly four Boolean envelopes"
+    );
+    four_values.sort_unstable();
+    assert_eq!(
+        four_values,
+        [false, false, true, true],
+        "the four rows must hold two FALSE and two TRUE values"
+    );
+}
