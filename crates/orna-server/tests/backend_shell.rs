@@ -1,5 +1,7 @@
 #![cfg(unix)]
 
+mod support;
+
 use nix::pty::openpty;
 use std::{
     ffi::OsString,
@@ -13,7 +15,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-const USAGE: &[u8] = b"Usage:\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna security grant-execute <canonical-function-id>\n  orna raw-call <canonical-function-id>\n";
 const TERMINAL_REQUIRED: &[u8] = b"orna: backend-shell must be run in an interactive terminal\n";
 const SERVICE_ACCOUNT_REQUIRED: &[u8] =
     b"orna: backend-shell must run as the orna service account\n";
@@ -178,7 +179,7 @@ fn normalise_terminal_output(bytes: Vec<u8>) -> Vec<u8> {
 fn assert_usage(output: &Output) {
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
-    assert_eq!(output.stderr, USAGE);
+    assert_eq!(output.stderr, support::EXPECTED_USAGE);
 }
 
 #[test]
