@@ -4,7 +4,7 @@
 //! This module defines the initial runtime subset only. It does not define a
 //! canonical or wire encoding. A later protocol slice must define that format.
 
-use std::{error::Error, fmt};
+use std::{cmp::Ordering, error::Error, fmt};
 
 use crate::{
     FieldId, ObjectId, ParameterId, TypeId,
@@ -12,18 +12,22 @@ use crate::{
         CatalogueSnapshot, QualifiedSemanticName, ValueTypeKind, ValueTypeMutability,
         ValueTypePersistence,
     },
-    revision::{ActiveDatabaseRevision, VerifiedStandardLibrarySnapshot},
-    types::{ResolvedType, StandardScalar, TypeDescriptor},
+    revision::{
+        ActiveDatabaseRevision, RecordValueFieldDescriptorClass, VerifiedStandardLibrarySnapshot,
+        classify_record_value_field_descriptor,
+    },
+    types::{ResolvedType, StandardScalar, TypeDescriptor, TypeDescriptorKind},
 };
 
 const MAX_OPAQUE_CODEC_PAYLOAD_LENGTH: usize = 16 * 1024 * 1024;
+
+/// The largest accepted number of runtime-value nodes.
+pub const MAX_RUNTIME_VALUE_NODES: usize = 65_536;
 
 /// A borrowed exact type view of one runtime value.
 ///
 /// `Flat` preserves the existing compatibility `ResolvedType`. `Constructed`
 /// borrows the complete descriptor retained by a constructed runtime value.
-/// This bridge defines the constructed arm before any current `RuntimeValue`
-/// can return it.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RuntimeType<'a> {
@@ -33,7 +37,185 @@ pub enum RuntimeType<'a> {
     Constructed(&'a TypeDescriptor),
 }
 
-/// One typed runtime value accepted by the initial SERVER query result subset.
+/// One immutable checked constructed runtime value.
+#[derive(Clone, Debug)]
+pub struct ConstructedValue {
+    descriptor: TypeDescriptor,
+    kind: ConstructedValueData,
+    node_count: usize,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum ConstructedValueData {
+    Option(Option<Box<RuntimeValue>>),
+    List(Vec<RuntimeValue>),
+    Map(Vec<(RuntimeValue, RuntimeValue)>),
+}
+
+impl PartialEq for ConstructedValue {
+    fn eq(&self, other: &Self) -> bool {
+        self.descriptor == other.descriptor && self.kind == other.kind
+    }
+}
+
+impl ConstructedValue {
+    /// Returns the complete retained type descriptor.
+    pub const fn descriptor(&self) -> &TypeDescriptor {
+        &self.descriptor
+    }
+
+    /// Returns an immutable borrowed view of the constructed contents.
+    pub fn kind(&self) -> ConstructedValueKind<'_> {
+        match &self.kind {
+            ConstructedValueData::Option(value) => ConstructedValueKind::Option(value.as_deref()),
+            ConstructedValueData::List(values) => ConstructedValueKind::List(values),
+            ConstructedValueData::Map(entries) => ConstructedValueKind::Map(entries),
+        }
+    }
+}
+
+/// An immutable borrowed view of one constructed runtime value.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ConstructedValueKind<'a> {
+    /// One optional child value.
+    Option(Option<&'a RuntimeValue>),
+    /// Ordered child values.
+    List(&'a [RuntimeValue]),
+    /// Canonically ordered key/value entries.
+    Map(&'a [(RuntimeValue, RuntimeValue)]),
+}
+
+/// One immutable path through a collection descriptor or runtime value.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CollectionValuePath(Vec<CollectionValuePathSegment>);
+
+impl CollectionValuePath {
+    /// Returns the immutable ordered path segments.
+    pub fn segments(&self) -> &[CollectionValuePathSegment] {
+        &self.0
+    }
+}
+
+/// One location in a collection descriptor or runtime value.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CollectionValuePathSegment {
+    /// The child of an optional runtime value.
+    OptionChild,
+    /// One ordered list runtime value.
+    ListElement(usize),
+    /// One map runtime key.
+    MapKey(usize),
+    /// One map runtime value.
+    MapValue(usize),
+    /// One declared immutable record field.
+    RecordField(FieldId),
+    /// The child descriptor of a list descriptor.
+    ListChild,
+    /// The key descriptor of a map descriptor.
+    MapKeyChild,
+    /// The value descriptor of a map descriptor.
+    MapValueChild,
+}
+
+/// One supported constructed runtime-value outer kind.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CollectionKind {
+    /// An optional value.
+    Option,
+    /// An ordered collection value.
+    List,
+    /// A key/value collection value.
+    Map,
+}
+
+/// An error from checking one constructed runtime value.
+#[non_exhaustive]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CollectionValueError {
+    /// The supplied descriptor has a different outer constructor.
+    WrongConstructor {
+        /// The required outer constructor.
+        expected: CollectionKind,
+        /// The complete supplied descriptor.
+        descriptor: TypeDescriptor,
+    },
+    /// One complete descriptor is outside the admitted collection subset.
+    UnsupportedDescriptor {
+        /// The unsupported descriptor location.
+        path: CollectionValuePath,
+        /// The exact unsupported descriptor.
+        descriptor: TypeDescriptor,
+    },
+    /// One named descriptor identity is present in both catalogue snapshots.
+    AmbiguousNamedType {
+        /// The ambiguous descriptor location.
+        path: CollectionValuePath,
+        /// The ambiguous type identity.
+        type_id: TypeId,
+    },
+    /// A runtime value has more than the accepted number of nodes.
+    TooManyNodes {
+        /// The accepted maximum node count.
+        maximum: usize,
+    },
+    /// A legacy typed null occurred in a constructed value.
+    NullValueNotAccepted {
+        /// The null runtime-value location.
+        path: CollectionValuePath,
+    },
+    /// A runtime value does not have its exact declared type.
+    ValueTypeMismatch {
+        /// The mismatched runtime-value location.
+        path: CollectionValuePath,
+    },
+    /// A runtime value is not active in the supplied revision.
+    InactiveValue {
+        /// The inactive runtime-value location.
+        path: CollectionValuePath,
+    },
+    /// Two map keys compare equal after canonical ordering.
+    DuplicateMapKey {
+        /// The lower original input index of the selected equal pair.
+        first: usize,
+        /// The higher original input index of the selected equal pair.
+        duplicate: usize,
+    },
+}
+
+impl fmt::Display for CollectionValueError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::WrongConstructor { .. } => {
+                formatter.write_str("collection descriptor has the wrong outer constructor")
+            }
+            Self::UnsupportedDescriptor { .. } => {
+                formatter.write_str("collection descriptor is not supported")
+            }
+            Self::AmbiguousNamedType { .. } => formatter.write_str(
+                "collection descriptor type is present in both application and standard catalogues",
+            ),
+            Self::TooManyNodes { .. } => formatter.write_str("runtime value has too many nodes"),
+            Self::NullValueNotAccepted { .. } => {
+                formatter.write_str("collection values cannot contain legacy typed NULL")
+            }
+            Self::ValueTypeMismatch { .. } => {
+                formatter.write_str("collection value has a type mismatch")
+            }
+            Self::InactiveValue { .. } => formatter.write_str("collection value is not active"),
+            Self::DuplicateMapKey { .. } => formatter.write_str("map contains a duplicate key"),
+        }
+    }
+}
+
+impl Error for CollectionValueError {}
+
+/// One checked core runtime value.
+///
+/// Existing function and SERVER result positions accept only their closed flat
+/// runtime subsets.
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq)]
 pub enum RuntimeValue {
@@ -59,16 +241,34 @@ pub enum RuntimeValue {
     Record(RecordValue),
     /// A registered, catalogue-validated opaque value.
     Opaque(OpaqueValue),
+    /// A checked immutable constructed runtime value.
+    Constructed(ConstructedValue),
 }
 
 impl RuntimeValue {
     /// Returns the exact runtime type without erasing a constructed descriptor.
     ///
-    /// Every currently constructible runtime value returns
-    /// [`RuntimeType::Flat`]. A later step adds the first value that returns
-    /// [`RuntimeType::Constructed`].
+    /// Constructed values retain their complete descriptor. Flat values retain
+    /// their compatible resolved type.
     pub fn runtime_type(&self) -> RuntimeType<'_> {
-        RuntimeType::Flat(self.resolved_type())
+        match self {
+            Self::Null(value) => RuntimeType::Flat(value.resolved_type),
+            Self::Boolean(_) => RuntimeType::Flat(ResolvedType::scalar(StandardScalar::Boolean)),
+            Self::Integer(_) => RuntimeType::Flat(ResolvedType::scalar(StandardScalar::Integer)),
+            Self::BigInt(_) => RuntimeType::Flat(ResolvedType::scalar(StandardScalar::BigInt)),
+            Self::Float(_) => RuntimeType::Flat(ResolvedType::scalar(StandardScalar::Float)),
+            Self::Text(_) => {
+                RuntimeType::Flat(ResolvedType::scalar(StandardScalar::CharacterLargeObject))
+            }
+            Self::Bytes(_) => {
+                RuntimeType::Flat(ResolvedType::scalar(StandardScalar::BinaryLargeObject))
+            }
+            Self::Reference { target, .. } => RuntimeType::Flat(ResolvedType::reference(*target)),
+            Self::Enum(value) => RuntimeType::Flat(ResolvedType::named(value.enum_type)),
+            Self::Record(value) => RuntimeType::Flat(ResolvedType::named(value.record_type)),
+            Self::Opaque(value) => RuntimeType::Flat(ResolvedType::value(value.opaque_type)),
+            Self::Constructed(value) => RuntimeType::Constructed(value.descriptor()),
+        }
     }
 
     /// Creates a typed null in the initial supported runtime subset.
@@ -77,26 +277,570 @@ impl RuntimeValue {
         Ok(Self::Null(NullValue { resolved_type }))
     }
 
-    /// Returns the exact resolved type carried by this value.
-    pub const fn resolved_type(&self) -> ResolvedType {
-        match self {
-            Self::Null(value) => value.resolved_type,
-            Self::Boolean(_) => ResolvedType::scalar(StandardScalar::Boolean),
-            Self::Integer(_) => ResolvedType::scalar(StandardScalar::Integer),
-            Self::BigInt(_) => ResolvedType::scalar(StandardScalar::BigInt),
-            Self::Float(_) => ResolvedType::scalar(StandardScalar::Float),
-            Self::Text(_) => ResolvedType::scalar(StandardScalar::CharacterLargeObject),
-            Self::Bytes(_) => ResolvedType::scalar(StandardScalar::BinaryLargeObject),
-            Self::Reference { target, .. } => ResolvedType::reference(*target),
-            Self::Enum(value) => ResolvedType::named(value.enum_type),
-            Self::Record(value) => ResolvedType::named(value.record_type),
-            Self::Opaque(value) => ResolvedType::value(value.opaque_type),
+    /// Creates one checked immutable `OPTION` value.
+    pub fn option(
+        active: &ActiveDatabaseRevision,
+        descriptor: TypeDescriptor,
+        value: Option<RuntimeValue>,
+    ) -> Result<Self, CollectionValueError> {
+        if !matches!(descriptor.kind(), TypeDescriptorKind::Option(_)) {
+            return Err(CollectionValueError::WrongConstructor {
+                expected: CollectionKind::Option,
+                descriptor,
+            });
         }
+        let mut path = Vec::new();
+        preflight_collection_descriptor(active, &descriptor, &mut path)?;
+
+        let mut node_count = 1;
+        if let Some(value) = &value {
+            count_runtime_value_nodes(value, &mut node_count)?;
+        }
+
+        let TypeDescriptorKind::Option(child) = descriptor.kind() else {
+            unreachable!("checked option descriptor must retain its option child");
+        };
+        if let Some(value) = &value {
+            path.push(CollectionValuePathSegment::OptionChild);
+            validate_collection_runtime_value(active, child, value, &mut path)?;
+        }
+
+        Ok(Self::Constructed(ConstructedValue {
+            descriptor,
+            kind: ConstructedValueData::Option(value.map(Box::new)),
+            node_count,
+        }))
+    }
+
+    /// Creates one checked immutable `LIST` value.
+    pub fn list(
+        active: &ActiveDatabaseRevision,
+        descriptor: TypeDescriptor,
+        values: Vec<RuntimeValue>,
+    ) -> Result<Self, CollectionValueError> {
+        if !matches!(descriptor.kind(), TypeDescriptorKind::List(_)) {
+            return Err(CollectionValueError::WrongConstructor {
+                expected: CollectionKind::List,
+                descriptor,
+            });
+        }
+        let mut path = Vec::new();
+        preflight_collection_descriptor(active, &descriptor, &mut path)?;
+
+        let mut node_count = 1;
+        check_runtime_value_lower_bound(values.len().checked_add(1))?;
+        for value in &values {
+            count_runtime_value_nodes(value, &mut node_count)?;
+        }
+
+        let TypeDescriptorKind::List(child) = descriptor.kind() else {
+            unreachable!("checked list descriptor must retain its list child");
+        };
+        for (index, value) in values.iter().enumerate() {
+            path.push(CollectionValuePathSegment::ListElement(index));
+            validate_collection_runtime_value(active, child, value, &mut path)?;
+            path.pop();
+        }
+
+        Ok(Self::Constructed(ConstructedValue {
+            descriptor,
+            kind: ConstructedValueData::List(values),
+            node_count,
+        }))
+    }
+
+    /// Creates one checked immutable canonically ordered `MAP` value.
+    pub fn map(
+        active: &ActiveDatabaseRevision,
+        descriptor: TypeDescriptor,
+        entries: Vec<(RuntimeValue, RuntimeValue)>,
+    ) -> Result<Self, CollectionValueError> {
+        if !matches!(descriptor.kind(), TypeDescriptorKind::Map { .. }) {
+            return Err(CollectionValueError::WrongConstructor {
+                expected: CollectionKind::Map,
+                descriptor,
+            });
+        }
+        let mut path = Vec::new();
+        preflight_collection_descriptor(active, &descriptor, &mut path)?;
+
+        let mut node_count = 1;
+        check_runtime_value_lower_bound(
+            entries
+                .len()
+                .checked_mul(2)
+                .and_then(|count| count.checked_add(1)),
+        )?;
+        for (key, value) in &entries {
+            count_runtime_value_nodes(key, &mut node_count)?;
+            count_runtime_value_nodes(value, &mut node_count)?;
+        }
+
+        let TypeDescriptorKind::Map { key, value } = descriptor.kind() else {
+            unreachable!("checked map descriptor must retain its map children");
+        };
+        for (index, (entry_key, entry_value)) in entries.iter().enumerate() {
+            path.push(CollectionValuePathSegment::MapKey(index));
+            validate_collection_runtime_value(active, key, entry_key, &mut path)?;
+            path.pop();
+            path.push(CollectionValuePathSegment::MapValue(index));
+            validate_collection_runtime_value(active, value, entry_value, &mut path)?;
+            path.pop();
+        }
+
+        let mut indexed = entries.into_iter().enumerate().collect::<Vec<_>>();
+        indexed.sort_by(|(left_index, (left, _)), (right_index, (right, _))| {
+            compare_map_key(active, key, left, right).then(left_index.cmp(right_index))
+        });
+        for pair in indexed.windows(2) {
+            let (left_index, (left, _)) = &pair[0];
+            let (right_index, (right, _)) = &pair[1];
+            if compare_map_key(active, key, left, right) == Ordering::Equal {
+                return Err(CollectionValueError::DuplicateMapKey {
+                    first: *left_index,
+                    duplicate: *right_index,
+                });
+            }
+        }
+        let entries = indexed.into_iter().map(|(_, entry)| entry).collect();
+
+        Ok(Self::Constructed(ConstructedValue {
+            descriptor,
+            kind: ConstructedValueData::Map(entries),
+            node_count,
+        }))
     }
 
     /// Reports whether this value is null.
     pub const fn is_null(&self) -> bool {
         matches!(self, Self::Null(_))
+    }
+}
+
+fn collection_value_path(path: &[CollectionValuePathSegment]) -> CollectionValuePath {
+    CollectionValuePath(path.to_vec())
+}
+
+fn too_many_runtime_value_nodes() -> CollectionValueError {
+    CollectionValueError::TooManyNodes {
+        maximum: MAX_RUNTIME_VALUE_NODES,
+    }
+}
+
+fn add_runtime_value_nodes(
+    total: &mut usize,
+    additional: usize,
+) -> Result<(), CollectionValueError> {
+    let next = total
+        .checked_add(additional)
+        .ok_or_else(too_many_runtime_value_nodes)?;
+    if next > MAX_RUNTIME_VALUE_NODES {
+        return Err(too_many_runtime_value_nodes());
+    }
+    *total = next;
+    Ok(())
+}
+
+fn check_runtime_value_lower_bound(minimum: Option<usize>) -> Result<(), CollectionValueError> {
+    let minimum = minimum.ok_or_else(too_many_runtime_value_nodes)?;
+    if minimum > MAX_RUNTIME_VALUE_NODES {
+        return Err(too_many_runtime_value_nodes());
+    }
+    Ok(())
+}
+
+fn count_runtime_value_nodes(
+    value: &RuntimeValue,
+    total: &mut usize,
+) -> Result<(), CollectionValueError> {
+    match value {
+        RuntimeValue::Constructed(value) => add_runtime_value_nodes(total, value.node_count),
+        RuntimeValue::Record(value) => {
+            add_runtime_value_nodes(total, 1)?;
+            for field in value.fields() {
+                count_runtime_value_nodes(field, total)?;
+            }
+            Ok(())
+        }
+        RuntimeValue::Null(_)
+        | RuntimeValue::Boolean(_)
+        | RuntimeValue::Integer(_)
+        | RuntimeValue::BigInt(_)
+        | RuntimeValue::Float(_)
+        | RuntimeValue::Text(_)
+        | RuntimeValue::Bytes(_)
+        | RuntimeValue::Reference { .. }
+        | RuntimeValue::Enum(_)
+        | RuntimeValue::Opaque(_) => add_runtime_value_nodes(total, 1),
+    }
+}
+
+fn preflight_collection_descriptor(
+    active: &ActiveDatabaseRevision,
+    descriptor: &TypeDescriptor,
+    path: &mut Vec<CollectionValuePathSegment>,
+) -> Result<(), CollectionValueError> {
+    match descriptor.kind() {
+        TypeDescriptorKind::Named(_) => {
+            classify_collection_named_descriptor(active, descriptor, path).map(|_| ())
+        }
+        TypeDescriptorKind::Reference(target) => {
+            if active.catalogue().object_type_by_id(target).is_some() {
+                Ok(())
+            } else {
+                Err(CollectionValueError::UnsupportedDescriptor {
+                    path: collection_value_path(path),
+                    descriptor: descriptor.clone(),
+                })
+            }
+        }
+        TypeDescriptorKind::Option(child) => {
+            path.push(CollectionValuePathSegment::OptionChild);
+            let result = preflight_collection_descriptor(active, child, path);
+            if result.is_ok() {
+                path.pop();
+            }
+            result
+        }
+        TypeDescriptorKind::List(child) => {
+            path.push(CollectionValuePathSegment::ListChild);
+            let result = preflight_collection_descriptor(active, child, path);
+            if result.is_ok() {
+                path.pop();
+            }
+            result
+        }
+        TypeDescriptorKind::Map { key, value } => {
+            path.push(CollectionValuePathSegment::MapKeyChild);
+            if !matches!(
+                key.kind(),
+                TypeDescriptorKind::Named(_) | TypeDescriptorKind::Reference(_)
+            ) {
+                return Err(CollectionValueError::UnsupportedDescriptor {
+                    path: collection_value_path(path),
+                    descriptor: key.clone(),
+                });
+            }
+            preflight_collection_descriptor(active, key, path)?;
+            path.pop();
+            path.push(CollectionValuePathSegment::MapValueChild);
+            let result = preflight_collection_descriptor(active, value, path);
+            if result.is_ok() {
+                path.pop();
+            }
+            result
+        }
+        TypeDescriptorKind::Set(_) | TypeDescriptorKind::Stream(_) => {
+            Err(CollectionValueError::UnsupportedDescriptor {
+                path: collection_value_path(path),
+                descriptor: descriptor.clone(),
+            })
+        }
+    }
+}
+
+fn classify_collection_named_descriptor(
+    active: &ActiveDatabaseRevision,
+    descriptor: &TypeDescriptor,
+    path: &[CollectionValuePathSegment],
+) -> Result<RecordValueFieldDescriptorClass, CollectionValueError> {
+    let TypeDescriptorKind::Named(type_id) = descriptor.kind() else {
+        return Err(CollectionValueError::UnsupportedDescriptor {
+            path: collection_value_path(path),
+            descriptor: descriptor.clone(),
+        });
+    };
+    let catalogue = active.catalogue();
+    let Some(standard) = active.catalogue_hash_context().standard() else {
+        return Err(CollectionValueError::UnsupportedDescriptor {
+            path: collection_value_path(path),
+            descriptor: descriptor.clone(),
+        });
+    };
+    let standard = standard.catalogue();
+    if catalogue.type_definition_by_id(type_id).is_some()
+        && standard.type_definition_by_id(type_id).is_some()
+    {
+        return Err(CollectionValueError::AmbiguousNamedType {
+            path: collection_value_path(path),
+            type_id,
+        });
+    }
+    classify_record_value_field_descriptor(catalogue, standard, descriptor).map_err(|_| {
+        CollectionValueError::UnsupportedDescriptor {
+            path: collection_value_path(path),
+            descriptor: descriptor.clone(),
+        }
+    })
+}
+
+fn validate_collection_runtime_value(
+    active: &ActiveDatabaseRevision,
+    descriptor: &TypeDescriptor,
+    value: &RuntimeValue,
+    path: &mut Vec<CollectionValuePathSegment>,
+) -> Result<(), CollectionValueError> {
+    if value.is_null() {
+        return Err(CollectionValueError::NullValueNotAccepted {
+            path: collection_value_path(path),
+        });
+    }
+
+    match descriptor.kind() {
+        TypeDescriptorKind::Named(_) => {
+            let class =
+                classify_collection_named_descriptor(active, descriptor, path).map_err(|_| {
+                    CollectionValueError::InactiveValue {
+                        path: collection_value_path(path),
+                    }
+                })?;
+            let Some(expected) = active.record_value_field_descriptor_runtime_type(descriptor)
+            else {
+                return Err(CollectionValueError::InactiveValue {
+                    path: collection_value_path(path),
+                });
+            };
+            if value.runtime_type() != RuntimeType::Flat(expected) {
+                return Err(CollectionValueError::ValueTypeMismatch {
+                    path: collection_value_path(path),
+                });
+            }
+            match class {
+                RecordValueFieldDescriptorClass::ApplicationEnum(type_id) => {
+                    validate_collection_enum_label(active, type_id, value, path)
+                }
+                RecordValueFieldDescriptorClass::StandardEnum(type_id) => {
+                    validate_collection_enum_label(active, type_id, value, path)
+                }
+                RecordValueFieldDescriptorClass::ApplicationRecord(_) => {
+                    let RuntimeValue::Record(record) = value else {
+                        return Err(CollectionValueError::ValueTypeMismatch {
+                            path: collection_value_path(path),
+                        });
+                    };
+                    validate_record_value_semantics(active, record, path)
+                        .map_err(|failure| collection_error_from_record_failure(failure, path))
+                }
+                RecordValueFieldDescriptorClass::StandardPrimitive(_) => Ok(()),
+            }
+        }
+        TypeDescriptorKind::Reference(target) => {
+            if value.runtime_type() != RuntimeType::Flat(ResolvedType::reference(target)) {
+                return Err(CollectionValueError::ValueTypeMismatch {
+                    path: collection_value_path(path),
+                });
+            }
+            if active.catalogue().object_type_by_id(target).is_none() {
+                return Err(CollectionValueError::InactiveValue {
+                    path: collection_value_path(path),
+                });
+            }
+            Ok(())
+        }
+        TypeDescriptorKind::Option(child) => {
+            if value.runtime_type() != RuntimeType::Constructed(descriptor) {
+                return Err(CollectionValueError::ValueTypeMismatch {
+                    path: collection_value_path(path),
+                });
+            }
+            let RuntimeValue::Constructed(value) = value else {
+                return Err(CollectionValueError::ValueTypeMismatch {
+                    path: collection_value_path(path),
+                });
+            };
+            let ConstructedValueKind::Option(value) = value.kind() else {
+                return Err(CollectionValueError::ValueTypeMismatch {
+                    path: collection_value_path(path),
+                });
+            };
+            if let Some(value) = value {
+                path.push(CollectionValuePathSegment::OptionChild);
+                let result = validate_collection_runtime_value(active, child, value, path);
+                if result.is_ok() {
+                    path.pop();
+                }
+                result?;
+            }
+            Ok(())
+        }
+        TypeDescriptorKind::List(child) => {
+            if value.runtime_type() != RuntimeType::Constructed(descriptor) {
+                return Err(CollectionValueError::ValueTypeMismatch {
+                    path: collection_value_path(path),
+                });
+            }
+            let RuntimeValue::Constructed(value) = value else {
+                return Err(CollectionValueError::ValueTypeMismatch {
+                    path: collection_value_path(path),
+                });
+            };
+            let ConstructedValueKind::List(values) = value.kind() else {
+                return Err(CollectionValueError::ValueTypeMismatch {
+                    path: collection_value_path(path),
+                });
+            };
+            for (index, value) in values.iter().enumerate() {
+                path.push(CollectionValuePathSegment::ListElement(index));
+                validate_collection_runtime_value(active, child, value, path)?;
+                path.pop();
+            }
+            Ok(())
+        }
+        TypeDescriptorKind::Map {
+            key,
+            value: map_value,
+        } => {
+            if value.runtime_type() != RuntimeType::Constructed(descriptor) {
+                return Err(CollectionValueError::ValueTypeMismatch {
+                    path: collection_value_path(path),
+                });
+            }
+            let RuntimeValue::Constructed(value) = value else {
+                return Err(CollectionValueError::ValueTypeMismatch {
+                    path: collection_value_path(path),
+                });
+            };
+            let ConstructedValueKind::Map(entries) = value.kind() else {
+                return Err(CollectionValueError::ValueTypeMismatch {
+                    path: collection_value_path(path),
+                });
+            };
+            for (index, (entry_key, entry_value)) in entries.iter().enumerate() {
+                path.push(CollectionValuePathSegment::MapKey(index));
+                validate_collection_runtime_value(active, key, entry_key, path)?;
+                path.pop();
+                path.push(CollectionValuePathSegment::MapValue(index));
+                validate_collection_runtime_value(active, map_value, entry_value, path)?;
+                path.pop();
+            }
+            Ok(())
+        }
+        TypeDescriptorKind::Set(_) | TypeDescriptorKind::Stream(_) => {
+            Err(CollectionValueError::InactiveValue {
+                path: collection_value_path(path),
+            })
+        }
+    }
+}
+
+fn validate_collection_enum_label(
+    active: &ActiveDatabaseRevision,
+    type_id: TypeId,
+    value: &RuntimeValue,
+    path: &[CollectionValuePathSegment],
+) -> Result<(), CollectionValueError> {
+    let RuntimeValue::Enum(value) = value else {
+        return Err(CollectionValueError::ValueTypeMismatch {
+            path: collection_value_path(path),
+        });
+    };
+    let standard = active
+        .catalogue_hash_context()
+        .standard()
+        .map(VerifiedStandardLibrarySnapshot::catalogue);
+    let definition = active
+        .catalogue()
+        .enum_type_by_id(type_id)
+        .or_else(|| standard.and_then(|standard| standard.enum_type_by_id(type_id)));
+    if definition.is_some_and(|definition| {
+        definition
+            .labels()
+            .iter()
+            .any(|label| label == value.label())
+    }) {
+        Ok(())
+    } else {
+        Err(CollectionValueError::InactiveValue {
+            path: collection_value_path(path),
+        })
+    }
+}
+
+fn compare_map_key(
+    active: &ActiveDatabaseRevision,
+    descriptor: &TypeDescriptor,
+    left: &RuntimeValue,
+    right: &RuntimeValue,
+) -> Ordering {
+    match descriptor.kind() {
+        TypeDescriptorKind::Reference(_) => {
+            let (
+                RuntimeValue::Reference { object: left, .. },
+                RuntimeValue::Reference { object: right, .. },
+            ) = (left, right)
+            else {
+                return Ordering::Equal;
+            };
+            left.to_bytes().cmp(&right.to_bytes())
+        }
+        TypeDescriptorKind::Named(_) => {
+            let Some(standard) = active.catalogue_hash_context().standard() else {
+                return Ordering::Equal;
+            };
+            let Ok(class) = classify_record_value_field_descriptor(
+                active.catalogue(),
+                standard.catalogue(),
+                descriptor,
+            ) else {
+                return Ordering::Equal;
+            };
+            match class {
+                RecordValueFieldDescriptorClass::ApplicationEnum(_)
+                | RecordValueFieldDescriptorClass::StandardEnum(_) => {
+                    let (RuntimeValue::Enum(left), RuntimeValue::Enum(right)) = (left, right)
+                    else {
+                        return Ordering::Equal;
+                    };
+                    left.label().as_bytes().cmp(right.label().as_bytes())
+                }
+                RecordValueFieldDescriptorClass::ApplicationRecord(type_id) => {
+                    let (RuntimeValue::Record(left), RuntimeValue::Record(right)) = (left, right)
+                    else {
+                        return Ordering::Equal;
+                    };
+                    let Some(definition) = active.catalogue().record_value_type_by_id(type_id)
+                    else {
+                        return Ordering::Equal;
+                    };
+                    for (field, (left, right)) in definition
+                        .fields()
+                        .iter()
+                        .zip(left.fields().iter().zip(right.fields()))
+                    {
+                        let ordering = compare_map_key(active, field.descriptor(), left, right);
+                        if ordering != Ordering::Equal {
+                            return ordering;
+                        }
+                    }
+                    Ordering::Equal
+                }
+                RecordValueFieldDescriptorClass::StandardPrimitive(_) => {
+                    compare_standard_primitive_map_key(left, right)
+                }
+            }
+        }
+        TypeDescriptorKind::List(_)
+        | TypeDescriptorKind::Set(_)
+        | TypeDescriptorKind::Map { .. }
+        | TypeDescriptorKind::Option(_)
+        | TypeDescriptorKind::Stream(_) => Ordering::Equal,
+    }
+}
+
+fn compare_standard_primitive_map_key(left: &RuntimeValue, right: &RuntimeValue) -> Ordering {
+    match (left, right) {
+        (RuntimeValue::Boolean(left), RuntimeValue::Boolean(right)) => left.cmp(right),
+        (RuntimeValue::Integer(left), RuntimeValue::Integer(right)) => left.cmp(right),
+        (RuntimeValue::BigInt(left), RuntimeValue::BigInt(right)) => left.cmp(right),
+        (RuntimeValue::Float(left), RuntimeValue::Float(right)) => left
+            .value()
+            .partial_cmp(&right.value())
+            .unwrap_or(Ordering::Equal),
+        (RuntimeValue::Text(left), RuntimeValue::Text(right)) => {
+            left.as_bytes().cmp(right.as_bytes())
+        }
+        (RuntimeValue::Bytes(left), RuntimeValue::Bytes(right)) => left.cmp(right),
+        _ => Ordering::Equal,
     }
 }
 
@@ -481,11 +1225,6 @@ impl RecordValue {
         let definition = catalogue
             .record_value_type_by_id(record_type)
             .ok_or(RecordValueError::UnknownType { record_type })?;
-        let standard = active
-            .catalogue_hash_context()
-            .standard()
-            .expect("admitted record catalogue must have a verified standard context")
-            .catalogue();
         let mut ordered = vec![None; definition.fields().len()];
 
         for (name, value) in fields {
@@ -514,7 +1253,16 @@ impl RecordValue {
                     field: field.id(),
                     descriptor: descriptor.clone(),
                 })?;
-            let actual = value.resolved_type();
+            if let RuntimeValue::Constructed(value) = &value {
+                return Err(RecordValueError::ConstructedValueNotAccepted {
+                    record_type,
+                    field: field.id(),
+                    descriptor: value.descriptor().clone(),
+                });
+            }
+            let RuntimeType::Flat(actual) = value.runtime_type() else {
+                unreachable!("non-constructed runtime values have a flat runtime type");
+            };
             if actual != expected {
                 return Err(RecordValueError::FieldTypeMismatch {
                     record_type,
@@ -523,48 +1271,18 @@ impl RecordValue {
                     actual,
                 });
             }
-            if let Some(nested_record_type) = application_record_field_target(catalogue, descriptor)
+            let mut path = vec![CollectionValuePathSegment::RecordField(field.id())];
+            if let Err(failure) =
+                validate_record_field_semantics(active, descriptor, &value, &mut path)
             {
-                let RuntimeValue::Record(nested) = &value else {
-                    return Err(RecordValueError::FieldTypeMismatch {
-                        record_type,
-                        field: field.id(),
-                        expected,
-                        actual,
-                    });
-                };
-                if !record_value_is_active(active, nested) {
-                    return Err(RecordValueError::InactiveNestedRecord {
-                        record_type,
-                        field: field.id(),
-                        nested_record_type,
-                    });
-                }
-            } else if matches!(value, RuntimeValue::Record(_)) {
-                return Err(RecordValueError::FieldTypeMismatch {
+                return Err(record_value_error_from_field_semantic_failure(
+                    active,
                     record_type,
-                    field: field.id(),
-                    expected,
-                    actual,
-                });
-            }
-            if let RuntimeValue::Enum(enum_value) = &value {
-                let active_enum = catalogue
-                    .enum_type_by_id(enum_value.enum_type())
-                    .or_else(|| standard.enum_type_by_id(enum_value.enum_type()));
-                if !active_enum.is_some_and(|enum_type| {
-                    enum_type
-                        .labels()
-                        .iter()
-                        .any(|label| label == enum_value.label())
-                }) {
-                    return Err(RecordValueError::InactiveEnumLabel {
-                        record_type,
-                        field: field.id(),
-                        enum_type: enum_value.enum_type(),
-                        label: enum_value.label().to_owned(),
-                    });
-                }
+                    field.id(),
+                    descriptor,
+                    &value,
+                    failure,
+                ));
             }
             ordered[index] = Some(value);
         }
@@ -580,11 +1298,12 @@ impl RecordValue {
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(Self {
+        let value = Self {
             record_type,
             field_ids: definition.fields().iter().map(|field| field.id()).collect(),
             fields,
-        })
+        };
+        Ok(value)
     }
 
     /// Returns the stable identity of the nominal record type.
@@ -610,70 +1329,169 @@ fn application_record_field_target(
         .map(|definition| definition.id())
 }
 
-fn record_value_is_active(active: &ActiveDatabaseRevision, value: &RecordValue) -> bool {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RecordValueSemanticFailure {
+    Null,
+    TypeMismatch,
+    Inactive,
+}
+
+fn validate_record_value_semantics(
+    active: &ActiveDatabaseRevision,
+    value: &RecordValue,
+    path: &mut Vec<CollectionValuePathSegment>,
+) -> Result<(), RecordValueSemanticFailure> {
     let catalogue = active.catalogue();
     let Some(definition) = catalogue.record_value_type_by_id(value.record_type) else {
-        return false;
+        return Err(RecordValueSemanticFailure::Inactive);
     };
-    if definition.fields().len() != value.fields.len()
-        || !definition
-            .fields()
-            .iter()
-            .map(|field| field.id())
-            .eq(value.field_ids.iter().copied())
-    {
-        return false;
+    for (index, field) in definition.fields().iter().enumerate() {
+        if value.field_ids.get(index) != Some(&field.id()) || value.fields.get(index).is_none() {
+            path.push(CollectionValuePathSegment::RecordField(field.id()));
+            return Err(RecordValueSemanticFailure::Inactive);
+        }
     }
-    let Some(standard) = active.catalogue_hash_context().standard() else {
-        return false;
-    };
-    let standard = standard.catalogue();
+    let current_field_count = definition.fields().len();
+    if value.field_ids.len() > current_field_count || value.fields.len() > current_field_count {
+        let retained_field = value
+            .field_ids
+            .get(current_field_count)
+            .expect("record values retain one field identity for each retained field value");
+        path.push(CollectionValuePathSegment::RecordField(*retained_field));
+        return Err(RecordValueSemanticFailure::Inactive);
+    }
+    if value.field_ids.len() != current_field_count || value.fields.len() != current_field_count {
+        return Err(RecordValueSemanticFailure::Inactive);
+    }
 
-    definition
-        .fields()
-        .iter()
-        .zip(&value.fields)
-        .all(|(field, field_value)| {
-            if field_value.is_null() {
-                return false;
-            }
-            let Some(expected) =
-                active.record_value_field_descriptor_runtime_type(field.descriptor())
-            else {
-                return false;
-            };
-            if field_value.runtime_type() != RuntimeType::Flat(expected) {
-                return false;
-            }
-            if let Some(nested_record_type) =
-                application_record_field_target(catalogue, field.descriptor())
-            {
-                let RuntimeValue::Record(nested) = field_value else {
-                    return false;
-                };
-                if nested.record_type() != nested_record_type
-                    || !record_value_is_active(active, nested)
-                {
-                    return false;
+    for (field, field_value) in definition.fields().iter().zip(&value.fields) {
+        path.push(CollectionValuePathSegment::RecordField(field.id()));
+        let result = validate_record_field_semantics(active, field.descriptor(), field_value, path);
+        if result.is_ok() {
+            path.pop();
+        }
+        result?;
+    }
+    Ok(())
+}
+
+fn validate_record_field_semantics(
+    active: &ActiveDatabaseRevision,
+    descriptor: &TypeDescriptor,
+    value: &RuntimeValue,
+    path: &mut Vec<CollectionValuePathSegment>,
+) -> Result<(), RecordValueSemanticFailure> {
+    if value.is_null() {
+        return Err(RecordValueSemanticFailure::Null);
+    }
+    let Some(expected) = active.record_value_field_descriptor_runtime_type(descriptor) else {
+        return Err(RecordValueSemanticFailure::Inactive);
+    };
+    if value.runtime_type() != RuntimeType::Flat(expected) {
+        return Err(RecordValueSemanticFailure::TypeMismatch);
+    }
+
+    if let Some(nested_record_type) =
+        application_record_field_target(active.catalogue(), descriptor)
+    {
+        let RuntimeValue::Record(nested) = value else {
+            return Err(RecordValueSemanticFailure::TypeMismatch);
+        };
+        if nested.record_type() != nested_record_type {
+            return Err(RecordValueSemanticFailure::TypeMismatch);
+        }
+        return validate_record_value_semantics(active, nested, path);
+    }
+    if matches!(value, RuntimeValue::Record(_)) {
+        return Err(RecordValueSemanticFailure::TypeMismatch);
+    }
+    if let RuntimeValue::Enum(enum_value) = value {
+        let Some(standard) = active.catalogue_hash_context().standard() else {
+            return Err(RecordValueSemanticFailure::Inactive);
+        };
+        let active_enum = active
+            .catalogue()
+            .enum_type_by_id(enum_value.enum_type())
+            .or_else(|| standard.catalogue().enum_type_by_id(enum_value.enum_type()));
+        if !active_enum.is_some_and(|enum_type| {
+            enum_type
+                .labels()
+                .iter()
+                .any(|label| label == enum_value.label())
+        }) {
+            return Err(RecordValueSemanticFailure::Inactive);
+        }
+    }
+    Ok(())
+}
+
+fn collection_error_from_record_failure(
+    failure: RecordValueSemanticFailure,
+    path: &[CollectionValuePathSegment],
+) -> CollectionValueError {
+    match failure {
+        RecordValueSemanticFailure::Null => CollectionValueError::NullValueNotAccepted {
+            path: collection_value_path(path),
+        },
+        RecordValueSemanticFailure::TypeMismatch => CollectionValueError::ValueTypeMismatch {
+            path: collection_value_path(path),
+        },
+        RecordValueSemanticFailure::Inactive => CollectionValueError::InactiveValue {
+            path: collection_value_path(path),
+        },
+    }
+}
+
+fn record_value_error_from_field_semantic_failure(
+    active: &ActiveDatabaseRevision,
+    record_type: TypeId,
+    field: FieldId,
+    descriptor: &TypeDescriptor,
+    value: &RuntimeValue,
+    failure: RecordValueSemanticFailure,
+) -> RecordValueError {
+    if let RuntimeValue::Enum(enum_value) = value
+        && matches!(failure, RecordValueSemanticFailure::Inactive)
+    {
+        return RecordValueError::InactiveEnumLabel {
+            record_type,
+            field,
+            enum_type: enum_value.enum_type(),
+            label: enum_value.label().to_owned(),
+        };
+    }
+    if matches!(failure, RecordValueSemanticFailure::Inactive)
+        && let Some(nested_record_type) =
+            application_record_field_target(active.catalogue(), descriptor)
+    {
+        return RecordValueError::InactiveNestedRecord {
+            record_type,
+            field,
+            nested_record_type,
+        };
+    }
+
+    match failure {
+        RecordValueSemanticFailure::Null => RecordValueError::NullField { record_type, field },
+        RecordValueSemanticFailure::TypeMismatch => RecordValueError::FieldTypeMismatch {
+            record_type,
+            field,
+            expected: active
+                .record_value_field_descriptor_runtime_type(descriptor)
+                .expect("a newly constructed field descriptor must remain admitted"),
+            actual: match value.runtime_type() {
+                RuntimeType::Flat(actual) => actual,
+                RuntimeType::Constructed(_) => {
+                    unreachable!("constructed values are rejected before record semantic checks")
                 }
-            } else if matches!(field_value, RuntimeValue::Record(_)) {
-                return false;
-            }
-            if let RuntimeValue::Enum(enum_value) = field_value {
-                let active_enum = catalogue
-                    .enum_type_by_id(enum_value.enum_type())
-                    .or_else(|| standard.enum_type_by_id(enum_value.enum_type()));
-                if !active_enum.is_some_and(|enum_type| {
-                    enum_type
-                        .labels()
-                        .iter()
-                        .any(|label| label == enum_value.label())
-                }) {
-                    return false;
-                }
-            }
-            true
-        })
+            },
+        },
+        RecordValueSemanticFailure::Inactive => RecordValueError::UnsupportedFieldType {
+            record_type,
+            field,
+            descriptor: descriptor.clone(),
+        },
+    }
 }
 
 /// An error from validating a named immutable record value.
@@ -712,6 +1530,15 @@ pub enum RecordValueError {
         record_type: TypeId,
         /// The field that received NULL.
         field: FieldId,
+    },
+    /// A constructed value is outside the current record-field subset.
+    ConstructedValueNotAccepted {
+        /// The active record type identity.
+        record_type: TypeId,
+        /// The field that received the constructed value.
+        field: FieldId,
+        /// The rejected complete constructed descriptor.
+        descriptor: TypeDescriptor,
     },
     /// A declared field type is not available through the selected context.
     UnsupportedFieldType {
@@ -765,6 +1592,9 @@ impl fmt::Display for RecordValueError {
             Self::DuplicateField { .. } => formatter.write_str("record field is duplicated"),
             Self::MissingField { .. } => formatter.write_str("record field is missing"),
             Self::NullField { .. } => formatter.write_str("record field cannot be NULL"),
+            Self::ConstructedValueNotAccepted { .. } => {
+                formatter.write_str("constructed record field values are not accepted")
+            }
             Self::UnsupportedFieldType { .. } => {
                 formatter.write_str("record field type is not available in the active context")
             }
@@ -876,6 +1706,12 @@ impl FunctionArgument {
             | RuntimeValue::Bytes(_)
             | RuntimeValue::Reference { .. }
             | RuntimeValue::Enum(_) => Ok(Self { parameter, value }),
+            RuntimeValue::Constructed(value) => {
+                Err(FunctionArgumentError::ConstructedValueNotAccepted {
+                    parameter,
+                    descriptor: value.descriptor().clone(),
+                })
+            }
             RuntimeValue::Record(value) => Err(FunctionArgumentError::RecordValueNotAccepted {
                 parameter,
                 record_type: value.record_type(),
@@ -909,6 +1745,13 @@ pub enum FunctionArgumentError {
         /// The resolved type carried by the null value.
         resolved_type: ResolvedType,
     },
+    /// A constructed value is outside the current executable argument subset.
+    ConstructedValueNotAccepted {
+        /// The parameter identity supplied with the constructed value.
+        parameter: ParameterId,
+        /// The rejected complete constructed descriptor.
+        descriptor: TypeDescriptor,
+    },
     /// A record value is outside the current executable argument subset.
     RecordValueNotAccepted {
         /// The parameter identity supplied with the record value.
@@ -929,6 +1772,9 @@ impl fmt::Display for FunctionArgumentError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NullValue { .. } => formatter.write_str("function argument value cannot be NULL"),
+            Self::ConstructedValueNotAccepted { .. } => {
+                formatter.write_str("constructed function arguments are not accepted")
+            }
             Self::RecordValueNotAccepted { .. } => {
                 formatter.write_str("record function arguments are not accepted")
             }
@@ -1089,7 +1935,16 @@ impl ResultRows {
                         column: column_index,
                     });
                 }
-                let actual = value.resolved_type();
+                if let RuntimeValue::Constructed(value) = value {
+                    return Err(ResultRowsError::ConstructedValueNotAccepted {
+                        row: row_index,
+                        column: column_index,
+                        descriptor: value.descriptor().clone(),
+                    });
+                }
+                let RuntimeType::Flat(actual) = value.runtime_type() else {
+                    unreachable!("constructed values are rejected before result type validation");
+                };
                 if actual != column.resolved_type {
                     return Err(ResultRowsError::ValueTypeMismatch {
                         row: row_index,
@@ -1153,6 +2008,15 @@ pub enum ResultRowsError {
         expected: ResolvedType,
         actual: ResolvedType,
     },
+    /// A constructed value occurred in a SERVER result row.
+    ConstructedValueNotAccepted {
+        /// The zero-based result-row position.
+        row: usize,
+        /// The zero-based result-column position.
+        column: usize,
+        /// The rejected complete constructed descriptor.
+        descriptor: TypeDescriptor,
+    },
     /// An opaque value occurred in a SERVER result row.
     OpaqueValueNotAccepted {
         /// The zero-based result-row position.
@@ -1201,6 +2065,9 @@ impl fmt::Display for ResultRowsError {
                 formatter,
                 "result row {row} column {column} has a type mismatch"
             ),
+            Self::ConstructedValueNotAccepted { .. } => {
+                formatter.write_str("constructed SERVER result values are not accepted")
+            }
             Self::OpaqueValueNotAccepted { row, column, .. } => {
                 write!(
                     formatter,
@@ -1269,7 +2136,7 @@ mod tests {
             verify_standard_library_snapshot,
         },
         catalogue::{
-            CatalogueSnapshot, EnumTypeDefinition, QualifiedSemanticName,
+            CatalogueSnapshot, EnumTypeDefinition, ObjectTypeDefinition, QualifiedSemanticName,
             RecordValueFieldDefinition, RecordValueTypeDefinition, SchemaDefinition,
             ValueTypeDefinition, ValueTypeMutability, ValueTypePersistence,
         },
@@ -1320,7 +2187,20 @@ mod tests {
         catalogue_revision_byte: u8,
         source_revision_byte: u8,
     ) -> ActiveDatabaseRevision {
-        let standard = verified_standard_with_value_types(vec![standard_boolean_definition()]);
+        active_nested_record_revision_with_standard_and_seed(
+            child_fields,
+            verified_standard_with_value_types(vec![standard_boolean_definition()]),
+            catalogue_revision_byte,
+            source_revision_byte,
+        )
+    }
+
+    fn active_nested_record_revision_with_standard_and_seed(
+        child_fields: Vec<RecordValueFieldDefinition>,
+        standard: VerifiedStandardLibrarySnapshot,
+        catalogue_revision_byte: u8,
+        source_revision_byte: u8,
+    ) -> ActiveDatabaseRevision {
         let application_schema = SchemaId::from_bytes([0x57; 16]);
         let catalogue_revision = CatalogueRevisionId::from_bytes([catalogue_revision_byte; 16]);
         let inner_type = TypeId::from_bytes([0x31; 16]);
@@ -1553,8 +2433,8 @@ mod tests {
         assert_eq!(inner.record_type(), inner_type);
         assert_eq!(inner.fields(), &[RuntimeValue::Boolean(true)]);
         assert_eq!(
-            RuntimeValue::Record(inner.clone()).resolved_type(),
-            ResolvedType::named(inner_type)
+            RuntimeValue::Record(inner.clone()).runtime_type(),
+            RuntimeType::Flat(ResolvedType::named(inner_type))
         );
 
         let outer = RecordValue::new(
@@ -1572,13 +2452,13 @@ mod tests {
             "outer must store the equal inner record in declaration order"
         );
         assert_eq!(
-            RuntimeValue::Record(outer).resolved_type(),
-            ResolvedType::named(outer_type)
+            RuntimeValue::Record(outer).runtime_type(),
+            RuntimeType::Flat(ResolvedType::named(outer_type))
         );
     }
 
     #[test]
-    fn runtime_type_preserves_every_current_flat_runtime_variant() {
+    fn runtime_type_preserves_every_flat_runtime_variant() {
         let active = active_record_revision();
         let standard = active.catalogue_hash_context().standard().unwrap();
         let registry = OpaqueCodecRegistry::new(
@@ -1660,7 +2540,6 @@ mod tests {
 
         for (value, expected) in cases {
             assert_eq!(value.runtime_type(), RuntimeType::Flat(expected));
-            assert_eq!(value.resolved_type(), expected);
         }
 
         let query: for<'a> fn(&'a RuntimeValue) -> RuntimeType<'a> = RuntimeValue::runtime_type;
@@ -1668,6 +2547,2636 @@ mod tests {
             query(&RuntimeValue::Boolean(true)),
             RuntimeType::Flat(ResolvedType::scalar(StandardScalar::Boolean))
         );
+    }
+
+    #[test]
+    fn canonical_nested_list_and_option_values_expose_exact_public_views_and_stay_closed() {
+        let active = active_record_revision();
+        let option_descriptor =
+            TypeDescriptor::option(TypeDescriptor::named(STANDARD_BOOLEAN)).unwrap();
+        let list_descriptor = TypeDescriptor::list(option_descriptor.clone()).unwrap();
+
+        let some = RuntimeValue::option(
+            &active,
+            option_descriptor.clone(),
+            Some(RuntimeValue::Boolean(true)),
+        )
+        .unwrap();
+        let none = RuntimeValue::option(&active, option_descriptor.clone(), None).unwrap();
+        let list = RuntimeValue::list(
+            &active,
+            list_descriptor.clone(),
+            vec![some.clone(), none.clone()],
+        )
+        .unwrap();
+
+        assert_eq!(
+            list.runtime_type(),
+            RuntimeType::Constructed(&list_descriptor)
+        );
+
+        let RuntimeValue::Constructed(constructed) = &list else {
+            panic!("list value must be a constructed value");
+        };
+        assert_eq!(constructed.descriptor(), &list_descriptor);
+        let ConstructedValueKind::List(elements) = constructed.kind() else {
+            panic!("list kind view must expose the elements");
+        };
+        assert_eq!(elements.len(), 2);
+        assert_eq!(elements[0], some);
+        assert_eq!(elements[1], none);
+
+        let RuntimeValue::Constructed(some_value) = &elements[0] else {
+            panic!("first element must be constructed");
+        };
+        assert_eq!(some_value.descriptor(), &option_descriptor);
+        let ConstructedValueKind::Option(inner) = some_value.kind() else {
+            panic!("first element kind view must be an option");
+        };
+        assert_eq!(inner, Some(&RuntimeValue::Boolean(true)));
+
+        let RuntimeValue::Constructed(none_value) = &elements[1] else {
+            panic!("second element must be constructed");
+        };
+        assert_eq!(none_value.descriptor(), &option_descriptor);
+        let ConstructedValueKind::Option(inner) = none_value.kind() else {
+            panic!("second element kind view must be an option");
+        };
+        assert_eq!(inner, None);
+
+        let list_again = RuntimeValue::list(
+            &active,
+            list_descriptor.clone(),
+            vec![some.clone(), none.clone()],
+        )
+        .unwrap();
+        assert_eq!(list, list_again);
+
+        let parameter = ParameterId::from_bytes([0x4c; 16]);
+        let argument_error = FunctionArgument::new(parameter, list.clone()).unwrap_err();
+        assert_eq!(
+            argument_error,
+            FunctionArgumentError::ConstructedValueNotAccepted {
+                parameter,
+                descriptor: list_descriptor.clone(),
+            }
+        );
+        assert_eq!(
+            argument_error.to_string(),
+            "constructed function arguments are not accepted"
+        );
+        assert!(std::error::Error::source(&argument_error).is_none());
+
+        let column = ResultColumn::new(
+            "value",
+            ResolvedType::scalar(StandardScalar::Boolean),
+            false,
+        )
+        .unwrap();
+        let rows_error =
+            ResultRows::new(vec![column], vec![ResultRow::new(vec![list.clone()])]).unwrap_err();
+        assert_eq!(
+            rows_error,
+            ResultRowsError::ConstructedValueNotAccepted {
+                row: 0,
+                column: 0,
+                descriptor: list_descriptor.clone(),
+            }
+        );
+        assert_eq!(
+            rows_error.to_string(),
+            "constructed SERVER result values are not accepted"
+        );
+        assert!(std::error::Error::source(&rows_error).is_none());
+
+        let record_error = RecordValue::new(
+            &active,
+            RECORD_TYPE,
+            [(String::from("enabled"), list.clone())],
+        )
+        .unwrap_err();
+        assert_eq!(
+            record_error,
+            RecordValueError::ConstructedValueNotAccepted {
+                record_type: RECORD_TYPE,
+                field: ENABLED_FIELD,
+                descriptor: list_descriptor.clone(),
+            }
+        );
+        assert_eq!(
+            record_error.to_string(),
+            "constructed record field values are not accepted"
+        );
+        assert!(std::error::Error::source(&record_error).is_none());
+    }
+
+    #[test]
+    fn stale_record_with_removed_trailing_field_reports_that_field_path() {
+        const INNER_TYPE: TypeId = TypeId::from_bytes([0x31; 16]);
+        const A_FIELD: FieldId = FieldId::from_bytes([0x6a; 16]);
+        const B_FIELD: FieldId = FieldId::from_bytes([0x6b; 16]);
+
+        let field_a = RecordValueFieldDefinition::try_new_descriptor(
+            A_FIELD,
+            "a",
+            0,
+            TypeDescriptor::named(STANDARD_BOOLEAN),
+        )
+        .unwrap();
+        let field_b = RecordValueFieldDefinition::try_new_descriptor(
+            B_FIELD,
+            "b",
+            1,
+            TypeDescriptor::named(STANDARD_BOOLEAN),
+        )
+        .unwrap();
+        let old_active =
+            active_nested_record_revision_with_child_fields(vec![field_a.clone(), field_b]);
+        let old_record = RecordValue::new(
+            &old_active,
+            INNER_TYPE,
+            [
+                (String::from("a"), RuntimeValue::Boolean(true)),
+                (String::from("b"), RuntimeValue::Boolean(true)),
+            ],
+        )
+        .expect("the old two-field inner record must construct");
+
+        let current = active_nested_record_revision_with_child_fields(vec![field_a]);
+        let list_descriptor = TypeDescriptor::list(TypeDescriptor::named(INNER_TYPE)).unwrap();
+        let error = RuntimeValue::list(
+            &current,
+            list_descriptor,
+            vec![RuntimeValue::Record(old_record)],
+        )
+        .unwrap_err();
+
+        let CollectionValueError::InactiveValue { path } = &error else {
+            panic!("stale record list must fail as an inactive value: {error}");
+        };
+        assert_eq!(
+            path.segments(),
+            &[
+                CollectionValuePathSegment::ListElement(0),
+                CollectionValuePathSegment::RecordField(B_FIELD),
+            ]
+        );
+        assert_eq!(error.to_string(), "collection value is not active");
+        assert!(std::error::Error::source(&error).is_none());
+    }
+
+    #[test]
+    fn stale_enum_label_precedes_a_later_unknown_field() {
+        let active = active_record_revision();
+        let stale_catalogue = enum_catalogue(&["retired"]);
+        let stale =
+            RuntimeValue::Enum(EnumValue::new(&stale_catalogue, ENUM_TYPE, "retired").unwrap());
+        let error = RecordValue::new(
+            &active,
+            RECORD_TYPE,
+            [
+                (String::from("stage"), stale),
+                (String::from("missing"), RuntimeValue::Boolean(true)),
+            ],
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            RecordValueError::InactiveEnumLabel {
+                record_type: RECORD_TYPE,
+                field: STAGE_FIELD,
+                enum_type: ENUM_TYPE,
+                label: String::from("retired"),
+            }
+        );
+        assert_eq!(error.to_string(), "record enum field label is not active");
+        assert!(std::error::Error::source(&error).is_none());
+    }
+
+    #[test]
+    fn stale_enum_label_precedes_a_missing_required_field() {
+        let active = active_record_revision();
+        let stale_catalogue = enum_catalogue(&["retired"]);
+        let stale =
+            RuntimeValue::Enum(EnumValue::new(&stale_catalogue, ENUM_TYPE, "retired").unwrap());
+        let error =
+            RecordValue::new(&active, RECORD_TYPE, [(String::from("stage"), stale)]).unwrap_err();
+        assert_eq!(
+            error,
+            RecordValueError::InactiveEnumLabel {
+                record_type: RECORD_TYPE,
+                field: STAGE_FIELD,
+                enum_type: ENUM_TYPE,
+                label: String::from("retired"),
+            }
+        );
+        assert_eq!(error.to_string(), "record enum field label is not active");
+        assert!(std::error::Error::source(&error).is_none());
+    }
+
+    #[test]
+    fn stale_nested_record_precedes_a_later_unknown_field() {
+        const INNER_TYPE: TypeId = TypeId::from_bytes([0x31; 16]);
+        const OUTER_TYPE: TypeId = TypeId::from_bytes([0x30; 16]);
+        const OUTER_FIELD: FieldId = FieldId::from_bytes([0x3b; 16]);
+        const A_FIELD: FieldId = FieldId::from_bytes([0x6a; 16]);
+        const B_FIELD: FieldId = FieldId::from_bytes([0x6b; 16]);
+        let field_a = RecordValueFieldDefinition::try_new_descriptor(
+            A_FIELD,
+            "a",
+            0,
+            TypeDescriptor::named(STANDARD_BOOLEAN),
+        )
+        .unwrap();
+        let field_b = RecordValueFieldDefinition::try_new_descriptor(
+            B_FIELD,
+            "b",
+            1,
+            TypeDescriptor::named(STANDARD_BOOLEAN),
+        )
+        .unwrap();
+        let old = active_nested_record_revision_with_child_fields(vec![field_a.clone(), field_b]);
+        let old_child = RecordValue::new(
+            &old,
+            INNER_TYPE,
+            [
+                (String::from("a"), RuntimeValue::Boolean(true)),
+                (String::from("b"), RuntimeValue::Boolean(true)),
+            ],
+        )
+        .expect("the old two-field child must construct");
+        let current = active_nested_record_revision_with_child_fields(vec![field_a]);
+        let error = RecordValue::new(
+            &current,
+            OUTER_TYPE,
+            [
+                (String::from("payload"), RuntimeValue::Record(old_child)),
+                (String::from("missing"), RuntimeValue::Boolean(true)),
+            ],
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            RecordValueError::InactiveNestedRecord {
+                record_type: OUTER_TYPE,
+                field: OUTER_FIELD,
+                nested_record_type: INNER_TYPE,
+            }
+        );
+        assert_eq!(error.to_string(), "nested record field value is not active");
+        assert!(std::error::Error::source(&error).is_none());
+    }
+
+    #[test]
+    fn empty_option_list_and_map_retain_exact_constructed_views_and_equal_contents() {
+        let active = active_record_revision();
+        let boolean = TypeDescriptor::named(STANDARD_BOOLEAN);
+        let option_desc = TypeDescriptor::option(boolean.clone()).unwrap();
+        let list_desc = TypeDescriptor::list(boolean.clone()).unwrap();
+        let map_desc = TypeDescriptor::map(boolean.clone(), boolean.clone()).unwrap();
+
+        let option = RuntimeValue::option(&active, option_desc.clone(), None).unwrap();
+        assert_eq!(
+            option.runtime_type(),
+            RuntimeType::Constructed(&option_desc)
+        );
+        let RuntimeValue::Constructed(option_value) = &option else {
+            panic!("empty option must be a constructed value");
+        };
+        assert_eq!(option_value.descriptor(), &option_desc);
+        let ConstructedValueKind::Option(inner) = option_value.kind() else {
+            panic!("empty option must expose the option kind");
+        };
+        assert_eq!(inner, None);
+
+        let list = RuntimeValue::list(&active, list_desc.clone(), vec![]).unwrap();
+        assert_eq!(list.runtime_type(), RuntimeType::Constructed(&list_desc));
+        let RuntimeValue::Constructed(list_value) = &list else {
+            panic!("empty list must be a constructed value");
+        };
+        assert_eq!(list_value.descriptor(), &list_desc);
+        let ConstructedValueKind::List(elements) = list_value.kind() else {
+            panic!("empty list must expose the list kind");
+        };
+        assert_eq!(elements, &[]);
+
+        let map = RuntimeValue::map(&active, map_desc.clone(), vec![]).unwrap();
+        assert_eq!(map.runtime_type(), RuntimeType::Constructed(&map_desc));
+        let RuntimeValue::Constructed(map_value) = &map else {
+            panic!("empty map must be a constructed value");
+        };
+        assert_eq!(map_value.descriptor(), &map_desc);
+        let ConstructedValueKind::Map(entries) = map_value.kind() else {
+            panic!("empty map must expose the map kind");
+        };
+        assert_eq!(entries, &[]);
+
+        let inner_list = RuntimeValue::list(
+            &active,
+            list_desc.clone(),
+            vec![RuntimeValue::Boolean(true), RuntimeValue::Boolean(false)],
+        )
+        .unwrap();
+        let nested_option = TypeDescriptor::option(list_desc.clone()).unwrap();
+        let nested =
+            RuntimeValue::option(&active, nested_option.clone(), Some(inner_list.clone())).unwrap();
+        let RuntimeValue::Constructed(nested_value) = &nested else {
+            panic!("nested option must be a constructed value");
+        };
+        let ConstructedValueKind::Option(Some(child)) = nested_value.kind() else {
+            panic!("nested option must expose its some child");
+        };
+        assert_eq!(child, &inner_list);
+        assert_eq!(
+            nested,
+            RuntimeValue::option(&active, nested_option, Some(inner_list.clone())).unwrap()
+        );
+
+        let map_entry = RuntimeValue::map(
+            &active,
+            map_desc.clone(),
+            vec![(RuntimeValue::Boolean(true), RuntimeValue::Boolean(false))],
+        )
+        .unwrap();
+        let RuntimeValue::Constructed(map_entry_value) = &map_entry else {
+            panic!("map entry must be a constructed value");
+        };
+        let ConstructedValueKind::Map(entries) = map_entry_value.kind() else {
+            panic!("map entry must expose the map kind");
+        };
+        assert_eq!(
+            entries,
+            &[(RuntimeValue::Boolean(true), RuntimeValue::Boolean(false))]
+        );
+        assert_eq!(
+            map_entry,
+            RuntimeValue::map(
+                &active,
+                map_desc,
+                vec![(RuntimeValue::Boolean(true), RuntimeValue::Boolean(false),)],
+            )
+            .unwrap()
+        );
+
+        let ordered = RuntimeValue::list(
+            &active,
+            list_desc.clone(),
+            vec![
+                RuntimeValue::Boolean(true),
+                RuntimeValue::Boolean(false),
+                RuntimeValue::Boolean(true),
+            ],
+        )
+        .unwrap();
+        let RuntimeValue::Constructed(ordered_value) = &ordered else {
+            panic!("ordered list must be a constructed value");
+        };
+        let ConstructedValueKind::List(elements) = ordered_value.kind() else {
+            panic!("ordered list must expose the list kind");
+        };
+        assert_eq!(
+            elements,
+            &[
+                RuntimeValue::Boolean(true),
+                RuntimeValue::Boolean(false),
+                RuntimeValue::Boolean(true),
+            ]
+        );
+        assert_eq!(
+            ordered,
+            RuntimeValue::list(
+                &active,
+                list_desc,
+                vec![
+                    RuntimeValue::Boolean(true),
+                    RuntimeValue::Boolean(false),
+                    RuntimeValue::Boolean(true),
+                ],
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn constructed_constructors_reject_wrong_outer_descriptors_exactly() {
+        let active = active_record_revision();
+        let boolean = TypeDescriptor::named(STANDARD_BOOLEAN);
+        let option_desc = TypeDescriptor::option(boolean.clone()).unwrap();
+        let list_desc = TypeDescriptor::list(boolean.clone()).unwrap();
+        let map_desc = TypeDescriptor::map(boolean.clone(), boolean.clone()).unwrap();
+
+        let wrong_option = RuntimeValue::option(&active, list_desc.clone(), None).unwrap_err();
+        assert_eq!(
+            wrong_option,
+            CollectionValueError::WrongConstructor {
+                expected: CollectionKind::Option,
+                descriptor: list_desc.clone(),
+            }
+        );
+        assert_eq!(
+            wrong_option.to_string(),
+            "collection descriptor has the wrong outer constructor"
+        );
+        assert!(std::error::Error::source(&wrong_option).is_none());
+
+        let wrong_list = RuntimeValue::list(&active, option_desc.clone(), vec![]).unwrap_err();
+        assert_eq!(
+            wrong_list,
+            CollectionValueError::WrongConstructor {
+                expected: CollectionKind::List,
+                descriptor: option_desc.clone(),
+            }
+        );
+        assert_eq!(
+            wrong_list.to_string(),
+            "collection descriptor has the wrong outer constructor"
+        );
+        assert!(std::error::Error::source(&wrong_list).is_none());
+
+        let wrong_map = RuntimeValue::map(&active, option_desc.clone(), vec![]).unwrap_err();
+        assert_eq!(
+            wrong_map,
+            CollectionValueError::WrongConstructor {
+                expected: CollectionKind::Map,
+                descriptor: option_desc.clone(),
+            }
+        );
+        assert_eq!(
+            wrong_map.to_string(),
+            "collection descriptor has the wrong outer constructor"
+        );
+        assert!(std::error::Error::source(&wrong_map).is_none());
+
+        let set_desc = TypeDescriptor::set(boolean.clone()).unwrap();
+        let list_of_set = TypeDescriptor::list(set_desc).unwrap();
+        let wrong_before_unsupported =
+            RuntimeValue::option(&active, list_of_set.clone(), None).unwrap_err();
+        assert_eq!(
+            wrong_before_unsupported,
+            CollectionValueError::WrongConstructor {
+                expected: CollectionKind::Option,
+                descriptor: list_of_set.clone(),
+            }
+        );
+        assert_eq!(
+            wrong_before_unsupported.to_string(),
+            "collection descriptor has the wrong outer constructor"
+        );
+        assert!(std::error::Error::source(&wrong_before_unsupported).is_none());
+
+        let _ = map_desc;
+    }
+
+    #[test]
+    fn collection_descriptor_preorder_reports_exact_paths_for_unsupported_children() {
+        let active = active_record_revision();
+        let boolean = TypeDescriptor::named(STANDARD_BOOLEAN);
+        let set_desc = TypeDescriptor::set(boolean.clone()).unwrap();
+        let stream_desc = TypeDescriptor::stream(boolean.clone()).unwrap();
+
+        let option_of_set = TypeDescriptor::option(set_desc.clone()).unwrap();
+        let error = RuntimeValue::option(&active, option_of_set.clone(), None).unwrap_err();
+        let CollectionValueError::UnsupportedDescriptor { path, descriptor } = &error else {
+            panic!("option child must fail as an unsupported descriptor: {error}");
+        };
+        assert_eq!(path.segments(), &[CollectionValuePathSegment::OptionChild]);
+        assert_eq!(descriptor, &set_desc);
+
+        let list_of_set = TypeDescriptor::list(set_desc.clone()).unwrap();
+        let error = RuntimeValue::list(&active, list_of_set.clone(), vec![]).unwrap_err();
+        let CollectionValueError::UnsupportedDescriptor { path, descriptor } = &error else {
+            panic!("list child must fail as an unsupported descriptor: {error}");
+        };
+        assert_eq!(path.segments(), &[CollectionValuePathSegment::ListChild]);
+        assert_eq!(descriptor, &set_desc);
+
+        let nested_list =
+            TypeDescriptor::list(TypeDescriptor::list(stream_desc.clone()).unwrap()).unwrap();
+        let error = RuntimeValue::list(&active, nested_list.clone(), vec![]).unwrap_err();
+        let CollectionValueError::UnsupportedDescriptor { path, descriptor } = &error else {
+            panic!("nested list child must fail at the deepest path: {error}");
+        };
+        assert_eq!(
+            path.segments(),
+            &[
+                CollectionValuePathSegment::ListChild,
+                CollectionValuePathSegment::ListChild,
+            ]
+        );
+        assert_eq!(descriptor, &stream_desc);
+
+        let map_stream_key = TypeDescriptor::map(stream_desc.clone(), boolean.clone()).unwrap();
+        let error = RuntimeValue::map(&active, map_stream_key.clone(), vec![]).unwrap_err();
+        let CollectionValueError::UnsupportedDescriptor { path, descriptor } = &error else {
+            panic!("map stream key must fail before the value: {error}");
+        };
+        assert_eq!(path.segments(), &[CollectionValuePathSegment::MapKeyChild]);
+        assert_eq!(descriptor, &stream_desc);
+
+        let map_set_value = TypeDescriptor::map(boolean.clone(), set_desc.clone()).unwrap();
+        let error = RuntimeValue::map(&active, map_set_value.clone(), vec![]).unwrap_err();
+        let CollectionValueError::UnsupportedDescriptor { path, descriptor } = &error else {
+            panic!("map set value must fail at the value child: {error}");
+        };
+        assert_eq!(
+            path.segments(),
+            &[CollectionValuePathSegment::MapValueChild]
+        );
+        assert_eq!(descriptor, &set_desc);
+
+        let map_list_key = TypeDescriptor::map(
+            TypeDescriptor::list(boolean.clone()).unwrap(),
+            boolean.clone(),
+        )
+        .unwrap();
+        let error = RuntimeValue::map(&active, map_list_key.clone(), vec![]).unwrap_err();
+        let CollectionValueError::UnsupportedDescriptor { path, descriptor } = &error else {
+            panic!("constructed map key must fail at the key child without a deeper path: {error}");
+        };
+        assert_eq!(path.segments(), &[CollectionValuePathSegment::MapKeyChild]);
+        assert_eq!(descriptor, &TypeDescriptor::list(boolean.clone()).unwrap());
+
+        let option_of_stream = TypeDescriptor::option(stream_desc.clone()).unwrap();
+        let error = RuntimeValue::option(&active, option_of_stream.clone(), None).unwrap_err();
+        let CollectionValueError::UnsupportedDescriptor { path, descriptor } = &error else {
+            panic!("option stream child must fail at the option child path: {error}");
+        };
+        assert_eq!(path.segments(), &[CollectionValuePathSegment::OptionChild]);
+        assert_eq!(descriptor, &stream_desc);
+    }
+
+    #[test]
+    fn collection_descriptor_rejects_missing_and_inactive_leaf_categories_exactly() {
+        let active = active_record_revision();
+        let missing = TypeDescriptor::named(TypeId::from_bytes([0x6c; 16]));
+
+        let list_of_missing = TypeDescriptor::list(missing.clone()).unwrap();
+        let error = RuntimeValue::list(&active, list_of_missing.clone(), vec![]).unwrap_err();
+        let CollectionValueError::UnsupportedDescriptor { path, descriptor } = &error else {
+            panic!("missing named leaf must be unsupported: {error}");
+        };
+        assert_eq!(path.segments(), &[CollectionValuePathSegment::ListChild]);
+        assert_eq!(descriptor, &missing);
+
+        let opaque = TypeDescriptor::named(OPAQUE_TYPE);
+        let list_of_opaque = TypeDescriptor::list(opaque.clone()).unwrap();
+        let error = RuntimeValue::list(&active, list_of_opaque.clone(), vec![]).unwrap_err();
+        let CollectionValueError::UnsupportedDescriptor { path, descriptor } = &error else {
+            panic!("pinned opaque leaf must be unsupported: {error}");
+        };
+        assert_eq!(path.segments(), &[CollectionValuePathSegment::ListChild]);
+        assert_eq!(descriptor, &opaque);
+
+        let reference = TypeDescriptor::reference(TARGET);
+        let list_of_reference = TypeDescriptor::list(reference.clone()).unwrap();
+        let error = RuntimeValue::list(&active, list_of_reference.clone(), vec![]).unwrap_err();
+        let CollectionValueError::UnsupportedDescriptor { path, descriptor } = &error else {
+            panic!("inactive reference leaf must be unsupported: {error}");
+        };
+        assert_eq!(path.segments(), &[CollectionValuePathSegment::ListChild]);
+        assert_eq!(descriptor, &reference);
+    }
+
+    #[test]
+    fn ambiguous_application_standard_named_collision_precedes_category_rejection() {
+        let active = active_record_revision_with_opaque_contract(
+            TypeId::from_bytes([0x49; 16]),
+            OPAQUE_CONTRACT,
+        );
+        let collision = TypeDescriptor::named(TypeId::from_bytes([0x49; 16]));
+        let list_of_collision = TypeDescriptor::list(collision.clone()).unwrap();
+        let error = RuntimeValue::list(&active, list_of_collision.clone(), vec![]).unwrap_err();
+        let CollectionValueError::AmbiguousNamedType { path, type_id } = &error else {
+            panic!("application-standard collision must be ambiguous: {error}");
+        };
+        assert_eq!(path.segments(), &[CollectionValuePathSegment::ListChild]);
+        assert_eq!(*type_id, TypeId::from_bytes([0x49; 16]));
+        assert_eq!(
+            error.to_string(),
+            "collection descriptor type is present in both application and standard catalogues"
+        );
+        assert!(std::error::Error::source(&error).is_none());
+    }
+
+    #[test]
+    fn constructed_constructor_precedence_is_exact() {
+        let active = active_record_revision();
+        let boolean = TypeDescriptor::named(STANDARD_BOOLEAN);
+        let set_desc = TypeDescriptor::set(boolean.clone()).unwrap();
+        let list_of_set = TypeDescriptor::list(set_desc.clone()).unwrap();
+        let list_boolean = TypeDescriptor::list(boolean.clone()).unwrap();
+        let map_boolean = TypeDescriptor::map(boolean.clone(), boolean.clone()).unwrap();
+
+        let error = RuntimeValue::list(
+            &active,
+            list_of_set.clone(),
+            vec![RuntimeValue::Boolean(true); MAX_RUNTIME_VALUE_NODES],
+        )
+        .unwrap_err();
+        let CollectionValueError::UnsupportedDescriptor { path, .. } = &error else {
+            panic!("descriptor failure must precede node counting: {error}");
+        };
+        assert_eq!(path.segments(), &[CollectionValuePathSegment::ListChild]);
+
+        let mut overflow = vec![RuntimeValue::Boolean(true); MAX_RUNTIME_VALUE_NODES];
+        overflow.push(RuntimeValue::Text("x".into()));
+        let error = RuntimeValue::list(&active, list_boolean.clone(), overflow).unwrap_err();
+        assert_eq!(
+            error,
+            CollectionValueError::TooManyNodes {
+                maximum: MAX_RUNTIME_VALUE_NODES,
+            }
+        );
+
+        let error = RuntimeValue::list(
+            &active,
+            list_boolean.clone(),
+            vec![
+                RuntimeValue::null(ResolvedType::scalar(StandardScalar::Boolean)).unwrap(),
+                RuntimeValue::Text("x".into()),
+            ],
+        )
+        .unwrap_err();
+        let CollectionValueError::NullValueNotAccepted { path } = &error else {
+            panic!("null element must precede a later type mismatch: {error}");
+        };
+        assert_eq!(
+            path.segments(),
+            &[CollectionValuePathSegment::ListElement(0)]
+        );
+
+        const INNER_TYPE: TypeId = TypeId::from_bytes([0x31; 16]);
+        const A_FIELD: FieldId = FieldId::from_bytes([0x6a; 16]);
+        const B_FIELD: FieldId = FieldId::from_bytes([0x6b; 16]);
+        let field_a = RecordValueFieldDefinition::try_new_descriptor(
+            A_FIELD,
+            "a",
+            0,
+            TypeDescriptor::named(STANDARD_BOOLEAN),
+        )
+        .unwrap();
+        let field_b = RecordValueFieldDefinition::try_new_descriptor(
+            B_FIELD,
+            "b",
+            1,
+            TypeDescriptor::named(STANDARD_BOOLEAN),
+        )
+        .unwrap();
+        let old = active_nested_record_revision_with_child_fields(vec![field_a.clone(), field_b]);
+        let stale_child = RecordValue::new(
+            &old,
+            INNER_TYPE,
+            [
+                (String::from("a"), RuntimeValue::Boolean(true)),
+                (String::from("b"), RuntimeValue::Boolean(true)),
+            ],
+        )
+        .expect("the old two-field child must construct");
+        let current = active_nested_record_revision_with_child_fields(vec![field_a]);
+        let list_inner = TypeDescriptor::list(TypeDescriptor::named(INNER_TYPE)).unwrap();
+        let error = RuntimeValue::list(
+            &current,
+            list_inner,
+            vec![RuntimeValue::Integer(1), RuntimeValue::Record(stale_child)],
+        )
+        .unwrap_err();
+        let CollectionValueError::ValueTypeMismatch { path } = &error else {
+            panic!("type mismatch must precede an inactive element: {error}");
+        };
+        assert_eq!(
+            path.segments(),
+            &[CollectionValuePathSegment::ListElement(0)]
+        );
+
+        let error = RuntimeValue::map(
+            &active,
+            map_boolean.clone(),
+            vec![(
+                RuntimeValue::Text("k".into()),
+                RuntimeValue::null(ResolvedType::scalar(StandardScalar::Boolean)).unwrap(),
+            )],
+        )
+        .unwrap_err();
+        let CollectionValueError::ValueTypeMismatch { path } = &error else {
+            panic!("map key mismatch must precede the value failure: {error}");
+        };
+        assert_eq!(path.segments(), &[CollectionValuePathSegment::MapKey(0)]);
+
+        let error = RuntimeValue::map(
+            &active,
+            map_boolean.clone(),
+            vec![
+                (RuntimeValue::Boolean(true), RuntimeValue::Text("x".into())),
+                (RuntimeValue::Boolean(true), RuntimeValue::Boolean(false)),
+            ],
+        )
+        .unwrap_err();
+        let CollectionValueError::ValueTypeMismatch { path } = &error else {
+            panic!("value semantic failure must precede duplicate detection: {error}");
+        };
+        assert_eq!(path.segments(), &[CollectionValuePathSegment::MapValue(0)]);
+    }
+
+    const MAP_BOOLEAN: TypeId = TypeId::from_bytes([0x81; 16]);
+    const MAP_INTEGER: TypeId = TypeId::from_bytes([0x82; 16]);
+    const MAP_BIGINT: TypeId = TypeId::from_bytes([0x83; 16]);
+    const MAP_FLOAT: TypeId = TypeId::from_bytes([0x84; 16]);
+    const MAP_TEXT: TypeId = TypeId::from_bytes([0x85; 16]);
+    const MAP_BYTES: TypeId = TypeId::from_bytes([0x86; 16]);
+    const MAP_STD_ENUM: TypeId = TypeId::from_bytes([0x87; 16]);
+    const MAP_APP_ENUM: TypeId = TypeId::from_bytes([0x88; 16]);
+    const MAP_OBJECT: TypeId = TypeId::from_bytes([0x89; 16]);
+    const MAP_FLAT: TypeId = TypeId::from_bytes([0x8a; 16]);
+    const MAP_INNER: TypeId = TypeId::from_bytes([0x8b; 16]);
+    const MAP_OUTER: TypeId = TypeId::from_bytes([0x8c; 16]);
+    const MAP_A_FIELD: FieldId = FieldId::from_bytes([0xa1; 16]);
+    const MAP_B_FIELD: FieldId = FieldId::from_bytes([0xa2; 16]);
+    const MAP_LEAF_FIELD: FieldId = FieldId::from_bytes([0xa3; 16]);
+    const MAP_FIRST_FIELD: FieldId = FieldId::from_bytes([0xa4; 16]);
+    const MAP_TAIL_FIELD: FieldId = FieldId::from_bytes([0xa5; 16]);
+
+    fn map_standard_primitive(type_id: TypeId, name: &str, contract: &str) -> ValueTypeDefinition {
+        ValueTypeDefinition::primitive(
+            type_id,
+            QualifiedSemanticName::new(["std", name]).unwrap(),
+            ValueTypeMutability::Immutable,
+            ValueTypePersistence::Persistable,
+            contract,
+        )
+    }
+
+    fn verified_map_standard() -> VerifiedStandardLibrarySnapshot {
+        let value_types = vec![
+            map_standard_primitive(MAP_BOOLEAN, "boolean", "orna.kernel.value.boolean@1"),
+            map_standard_primitive(MAP_INTEGER, "integer", "orna.kernel.value.integer@1"),
+            map_standard_primitive(MAP_BIGINT, "bigint", "orna.kernel.value.bigint@1"),
+            map_standard_primitive(MAP_FLOAT, "float", "orna.kernel.value.float@1"),
+            map_standard_primitive(
+                MAP_TEXT,
+                "character_large_object",
+                "orna.kernel.value.character-large-object@1",
+            ),
+            map_standard_primitive(
+                MAP_BYTES,
+                "binary_large_object",
+                "orna.kernel.value.binary-large-object@1",
+            ),
+        ];
+        let enum_types = vec![EnumTypeDefinition::new(
+            MAP_STD_ENUM,
+            QualifiedSemanticName::new(["std", "mode"]).unwrap(),
+            ["alpha", "beta"],
+        )];
+        let standard_unit_content = "x".repeat(value_types.len() + enum_types.len() + 2);
+        let standard_unit = StoredSourceUnit::new(
+            SourceUnitId::from_bytes([0x50; 16]),
+            0,
+            "std/types.orna",
+            &standard_unit_content,
+            source_unit_content_digest(&standard_unit_content).unwrap(),
+        )
+        .unwrap();
+        let standard_bundle_hash =
+            source_bundle_digest(std::slice::from_ref(&standard_unit)).unwrap();
+        let standard_source = StoredSourceRevision::new(
+            SourceBundleId::from_bytes([0x51; 16]),
+            SourceRevisionId::from_bytes([0x52; 16]),
+            None,
+            vec![standard_unit],
+            standard_bundle_hash,
+            source_revision_record_digest(
+                SourceBundleId::from_bytes([0x51; 16]),
+                None,
+                standard_bundle_hash,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let standard_schema = SchemaId::from_bytes([0x53; 16]);
+        let standard_types_schema = SchemaId::from_bytes([0x54; 16]);
+        let standard_catalogue = CatalogueSnapshot::new_with_record_value_types(
+            CatalogueRevisionId::from_bytes([0x5b; 16]),
+            vec![
+                SchemaDefinition::new(
+                    standard_schema,
+                    QualifiedSemanticName::new(["std"]).unwrap(),
+                ),
+                SchemaDefinition::new(
+                    standard_types_schema,
+                    QualifiedSemanticName::new(["std", "types"]).unwrap(),
+                ),
+            ],
+            vec![],
+            value_types.clone(),
+            enum_types.clone(),
+            vec![],
+            vec![],
+        )
+        .unwrap();
+        let mut standard_origins = vec![
+            DefinitionOrigin::new(
+                DefinitionIdentity::Schema(standard_schema),
+                SourceOrigin::new(SourceUnitId::from_bytes([0x50; 16]), 0, 1).unwrap(),
+            ),
+            DefinitionOrigin::new(
+                DefinitionIdentity::Schema(standard_types_schema),
+                SourceOrigin::new(SourceUnitId::from_bytes([0x50; 16]), 1, 2).unwrap(),
+            ),
+        ];
+        for (index, value_type) in standard_catalogue.value_types().iter().enumerate() {
+            let start = u32::try_from(index + 2).unwrap();
+            standard_origins.push(DefinitionOrigin::new(
+                DefinitionIdentity::ValueType(value_type.id()),
+                SourceOrigin::new(SourceUnitId::from_bytes([0x50; 16]), start, start + 1).unwrap(),
+            ));
+        }
+        for (index, enum_type) in standard_catalogue.enum_types().iter().enumerate() {
+            let start = u32::try_from(value_types.len() + index + 2).unwrap();
+            standard_origins.push(DefinitionOrigin::new(
+                DefinitionIdentity::ValueType(enum_type.id()),
+                SourceOrigin::new(SourceUnitId::from_bytes([0x50; 16]), start, start + 1).unwrap(),
+            ));
+        }
+        let provisional_standard = StandardLibrarySnapshot::new(
+            StandardLibraryRevisionId::from_bytes([0x55; 16]),
+            StandardLibraryDigestVersion::Version1,
+            standard_source.clone(),
+            "orna.language/1",
+            standard_catalogue.clone(),
+            standard_origins.clone(),
+            Sha256Digest::from_bytes([0x56; 32]),
+        )
+        .unwrap();
+        let standard_digest =
+            calculate_standard_library_digest_for_test(&provisional_standard).unwrap();
+        verify_standard_library_snapshot(
+            StandardLibrarySnapshot::new(
+                provisional_standard.revision(),
+                provisional_standard.digest_version(),
+                standard_source,
+                provisional_standard.language_version(),
+                standard_catalogue,
+                standard_origins,
+                standard_digest,
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn active_map_revision() -> ActiveDatabaseRevision {
+        let standard = verified_map_standard();
+        let application_schema = SchemaId::from_bytes([0x91; 16]);
+        let catalogue_revision = CatalogueRevisionId::from_bytes([0x92; 16]);
+        let catalogue = CatalogueSnapshot::new_with_record_value_types(
+            catalogue_revision,
+            vec![SchemaDefinition::new(
+                application_schema,
+                QualifiedSemanticName::new(["app"]).unwrap(),
+            )],
+            vec![ObjectTypeDefinition::new(
+                MAP_OBJECT,
+                QualifiedSemanticName::new(["app", "item"]).unwrap(),
+                vec![],
+            )],
+            vec![],
+            vec![EnumTypeDefinition::new(
+                MAP_APP_ENUM,
+                QualifiedSemanticName::new(["app", "stage"]).unwrap(),
+                ["low", "high"],
+            )],
+            vec![
+                RecordValueTypeDefinition::new(
+                    MAP_FLAT,
+                    QualifiedSemanticName::new(["app", "flat"]).unwrap(),
+                    vec![
+                        RecordValueFieldDefinition::try_new_descriptor(
+                            MAP_A_FIELD,
+                            "a",
+                            0,
+                            TypeDescriptor::named(MAP_BOOLEAN),
+                        )
+                        .unwrap(),
+                        RecordValueFieldDefinition::try_new_descriptor(
+                            MAP_B_FIELD,
+                            "b",
+                            1,
+                            TypeDescriptor::named(MAP_INTEGER),
+                        )
+                        .unwrap(),
+                    ],
+                ),
+                RecordValueTypeDefinition::new(
+                    MAP_INNER,
+                    QualifiedSemanticName::new(["app", "inner"]).unwrap(),
+                    vec![
+                        RecordValueFieldDefinition::try_new_descriptor(
+                            MAP_LEAF_FIELD,
+                            "leaf",
+                            0,
+                            TypeDescriptor::named(MAP_BOOLEAN),
+                        )
+                        .unwrap(),
+                    ],
+                ),
+                RecordValueTypeDefinition::new(
+                    MAP_OUTER,
+                    QualifiedSemanticName::new(["app", "outer"]).unwrap(),
+                    vec![
+                        RecordValueFieldDefinition::try_new_descriptor(
+                            MAP_FIRST_FIELD,
+                            "first",
+                            0,
+                            TypeDescriptor::named(MAP_INNER),
+                        )
+                        .unwrap(),
+                        RecordValueFieldDefinition::try_new_descriptor(
+                            MAP_TAIL_FIELD,
+                            "tail",
+                            1,
+                            TypeDescriptor::named(MAP_INTEGER),
+                        )
+                        .unwrap(),
+                    ],
+                ),
+            ],
+            vec![],
+        )
+        .unwrap();
+        let context = CatalogueHashContext::version_two(standard);
+        let application_content = "x".repeat(12);
+        let application_content_digest = source_unit_content_digest(&application_content).unwrap();
+        let application_unit = StoredSourceUnit::new(
+            SourceUnitId::from_bytes([0x93; 16]),
+            0,
+            "app/types.orna",
+            application_content,
+            application_content_digest,
+        )
+        .unwrap();
+        let application_bundle_hash =
+            source_bundle_digest(std::slice::from_ref(&application_unit)).unwrap();
+        let application_source_revision = SourceRevisionId::from_bytes([0x95; 16]);
+        let application_source = StoredSourceRevision::new(
+            SourceBundleId::from_bytes([0x94; 16]),
+            application_source_revision,
+            None,
+            vec![application_unit],
+            application_bundle_hash,
+            source_revision_record_digest(
+                SourceBundleId::from_bytes([0x94; 16]),
+                None,
+                application_bundle_hash,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let source_unit = SourceUnitId::from_bytes([0x93; 16]);
+        let mut origins = vec![
+            DefinitionOrigin::new(
+                DefinitionIdentity::Schema(application_schema),
+                SourceOrigin::new(source_unit, 0, 1).unwrap(),
+            ),
+            DefinitionOrigin::new(
+                DefinitionIdentity::ValueType(MAP_APP_ENUM),
+                SourceOrigin::new(source_unit, 1, 2).unwrap(),
+            ),
+            DefinitionOrigin::new(
+                DefinitionIdentity::ObjectType(MAP_OBJECT),
+                SourceOrigin::new(source_unit, 2, 3).unwrap(),
+            ),
+        ];
+        for (index, record) in catalogue.record_value_types().iter().enumerate() {
+            let record_start = u32::try_from(3 + index * 3).unwrap();
+            origins.push(DefinitionOrigin::new(
+                DefinitionIdentity::ValueType(record.id()),
+                SourceOrigin::new(source_unit, record_start, record_start + 1).unwrap(),
+            ));
+            for (field_index, field) in record.fields().iter().enumerate() {
+                let field_start = record_start + 1 + u32::try_from(field_index).unwrap();
+                origins.push(DefinitionOrigin::new(
+                    DefinitionIdentity::Field {
+                        owner: record.id(),
+                        field: field.id(),
+                    },
+                    SourceOrigin::new(source_unit, field_start, field_start + 1).unwrap(),
+                ));
+            }
+        }
+        let catalogue_hash =
+            catalogue_digest_with_context(&context, &catalogue, &[], &[], &origins, &[]).unwrap();
+        ActiveDatabaseRevision::new_with_catalogue_hash_context(
+            ActiveDatabaseRevisionInput::new(
+                RevisionPair::new(application_source_revision, catalogue_revision),
+                application_source,
+                catalogue,
+                catalogue_hash,
+                ActiveRevisionContent::new(vec![], vec![], origins, vec![]),
+            ),
+            context,
+        )
+        .unwrap()
+    }
+
+    fn canonical_map_entries(
+        active: &ActiveDatabaseRevision,
+        key_descriptor: TypeDescriptor,
+        entries: Vec<(RuntimeValue, RuntimeValue)>,
+    ) -> Vec<(RuntimeValue, RuntimeValue)> {
+        let map_descriptor =
+            TypeDescriptor::map(key_descriptor, TypeDescriptor::named(MAP_BOOLEAN)).unwrap();
+        let map = RuntimeValue::map(active, map_descriptor, entries).unwrap();
+        let RuntimeValue::Constructed(value) = &map else {
+            panic!("map value must be constructed");
+        };
+        let ConstructedValueKind::Map(entries) = value.kind() else {
+            panic!("map value must expose the map kind");
+        };
+        entries.to_vec()
+    }
+
+    fn map_flat_record(active: &ActiveDatabaseRevision, a: bool, b: i32) -> RuntimeValue {
+        RuntimeValue::Record(
+            RecordValue::new(
+                active,
+                MAP_FLAT,
+                [
+                    (String::from("a"), RuntimeValue::Boolean(a)),
+                    (String::from("b"), RuntimeValue::Integer(b)),
+                ],
+            )
+            .unwrap(),
+        )
+    }
+
+    fn map_outer_record(active: &ActiveDatabaseRevision, leaf: bool, tail: i32) -> RuntimeValue {
+        let inner = RecordValue::new(
+            active,
+            MAP_INNER,
+            [(String::from("leaf"), RuntimeValue::Boolean(leaf))],
+        )
+        .unwrap();
+        RuntimeValue::Record(
+            RecordValue::new(
+                active,
+                MAP_OUTER,
+                [
+                    (String::from("first"), RuntimeValue::Record(inner)),
+                    (String::from("tail"), RuntimeValue::Integer(tail)),
+                ],
+            )
+            .unwrap(),
+        )
+    }
+
+    fn map_keys(keys: Vec<RuntimeValue>) -> Vec<(RuntimeValue, RuntimeValue)> {
+        keys.into_iter()
+            .map(|key| (key, RuntimeValue::Boolean(true)))
+            .collect()
+    }
+
+    #[test]
+    fn map_canonical_order_holds_for_every_admitted_flat_key_family() {
+        let active = active_map_revision();
+        let standard = active.catalogue_hash_context().standard().unwrap();
+
+        let boolean_keys = canonical_map_entries(
+            &active,
+            TypeDescriptor::named(MAP_BOOLEAN),
+            map_keys(vec![
+                RuntimeValue::Boolean(true),
+                RuntimeValue::Boolean(false),
+            ]),
+        )
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect::<Vec<_>>();
+        assert_eq!(
+            boolean_keys,
+            vec![RuntimeValue::Boolean(false), RuntimeValue::Boolean(true)]
+        );
+
+        let integer_keys = canonical_map_entries(
+            &active,
+            TypeDescriptor::named(MAP_INTEGER),
+            map_keys(vec![
+                RuntimeValue::Integer(2),
+                RuntimeValue::Integer(0),
+                RuntimeValue::Integer(-1),
+            ]),
+        )
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect::<Vec<_>>();
+        assert_eq!(
+            integer_keys,
+            vec![
+                RuntimeValue::Integer(-1),
+                RuntimeValue::Integer(0),
+                RuntimeValue::Integer(2),
+            ]
+        );
+
+        let bigint_keys = canonical_map_entries(
+            &active,
+            TypeDescriptor::named(MAP_BIGINT),
+            map_keys(vec![
+                RuntimeValue::BigInt(0),
+                RuntimeValue::BigInt(-5),
+                RuntimeValue::BigInt(9),
+            ]),
+        )
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect::<Vec<_>>();
+        assert_eq!(
+            bigint_keys,
+            vec![
+                RuntimeValue::BigInt(-5),
+                RuntimeValue::BigInt(0),
+                RuntimeValue::BigInt(9),
+            ]
+        );
+
+        let float_keys = canonical_map_entries(
+            &active,
+            TypeDescriptor::named(MAP_FLOAT),
+            map_keys(vec![
+                RuntimeValue::Float(RuntimeFloat::new(1.5).unwrap()),
+                RuntimeValue::Float(RuntimeFloat::new(-2.5).unwrap()),
+                RuntimeValue::Float(RuntimeFloat::new(0.0).unwrap()),
+            ]),
+        )
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect::<Vec<_>>();
+        assert_eq!(
+            float_keys,
+            vec![
+                RuntimeValue::Float(RuntimeFloat::new(-2.5).unwrap()),
+                RuntimeValue::Float(RuntimeFloat::new(0.0).unwrap()),
+                RuntimeValue::Float(RuntimeFloat::new(1.5).unwrap()),
+            ]
+        );
+
+        let text_keys = canonical_map_entries(
+            &active,
+            TypeDescriptor::named(MAP_TEXT),
+            map_keys(vec![
+                RuntimeValue::Text("cherry".into()),
+                RuntimeValue::Text("apple".into()),
+                RuntimeValue::Text("banana".into()),
+            ]),
+        )
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect::<Vec<_>>();
+        assert_eq!(
+            text_keys,
+            vec![
+                RuntimeValue::Text("apple".into()),
+                RuntimeValue::Text("banana".into()),
+                RuntimeValue::Text("cherry".into()),
+            ]
+        );
+
+        let bytes_keys = canonical_map_entries(
+            &active,
+            TypeDescriptor::named(MAP_BYTES),
+            map_keys(vec![
+                RuntimeValue::Bytes(vec![2]),
+                RuntimeValue::Bytes(vec![1, 0]),
+                RuntimeValue::Bytes(vec![1]),
+            ]),
+        )
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect::<Vec<_>>();
+        assert_eq!(
+            bytes_keys,
+            vec![
+                RuntimeValue::Bytes(vec![1]),
+                RuntimeValue::Bytes(vec![1, 0]),
+                RuntimeValue::Bytes(vec![2]),
+            ]
+        );
+
+        let reference_keys = canonical_map_entries(
+            &active,
+            TypeDescriptor::reference(MAP_OBJECT),
+            map_keys(vec![
+                RuntimeValue::Reference {
+                    target: MAP_OBJECT,
+                    object: ObjectId::from_bytes([0x02; 16]),
+                },
+                RuntimeValue::Reference {
+                    target: MAP_OBJECT,
+                    object: ObjectId::from_bytes([0x01; 16]),
+                },
+                RuntimeValue::Reference {
+                    target: MAP_OBJECT,
+                    object: ObjectId::from_bytes([0x03; 16]),
+                },
+            ]),
+        )
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect::<Vec<_>>();
+        assert_eq!(
+            reference_keys,
+            vec![
+                RuntimeValue::Reference {
+                    target: MAP_OBJECT,
+                    object: ObjectId::from_bytes([0x01; 16]),
+                },
+                RuntimeValue::Reference {
+                    target: MAP_OBJECT,
+                    object: ObjectId::from_bytes([0x02; 16]),
+                },
+                RuntimeValue::Reference {
+                    target: MAP_OBJECT,
+                    object: ObjectId::from_bytes([0x03; 16]),
+                },
+            ]
+        );
+
+        let app_enum_keys = canonical_map_entries(
+            &active,
+            TypeDescriptor::named(MAP_APP_ENUM),
+            map_keys(vec![
+                RuntimeValue::Enum(
+                    EnumValue::new(active.catalogue(), MAP_APP_ENUM, "low").unwrap(),
+                ),
+                RuntimeValue::Enum(
+                    EnumValue::new(active.catalogue(), MAP_APP_ENUM, "high").unwrap(),
+                ),
+            ]),
+        )
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect::<Vec<_>>();
+        assert_eq!(
+            app_enum_keys,
+            vec![
+                RuntimeValue::Enum(
+                    EnumValue::new(active.catalogue(), MAP_APP_ENUM, "high").unwrap(),
+                ),
+                RuntimeValue::Enum(
+                    EnumValue::new(active.catalogue(), MAP_APP_ENUM, "low").unwrap(),
+                ),
+            ]
+        );
+
+        let std_enum_keys = canonical_map_entries(
+            &active,
+            TypeDescriptor::named(MAP_STD_ENUM),
+            map_keys(vec![
+                RuntimeValue::Enum(
+                    EnumValue::new(standard.catalogue(), MAP_STD_ENUM, "beta").unwrap(),
+                ),
+                RuntimeValue::Enum(
+                    EnumValue::new(standard.catalogue(), MAP_STD_ENUM, "alpha").unwrap(),
+                ),
+            ]),
+        )
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect::<Vec<_>>();
+        assert_eq!(
+            std_enum_keys,
+            vec![
+                RuntimeValue::Enum(
+                    EnumValue::new(standard.catalogue(), MAP_STD_ENUM, "alpha").unwrap(),
+                ),
+                RuntimeValue::Enum(
+                    EnumValue::new(standard.catalogue(), MAP_STD_ENUM, "beta").unwrap(),
+                ),
+            ]
+        );
+
+        let flat_keys = canonical_map_entries(
+            &active,
+            TypeDescriptor::named(MAP_FLAT),
+            map_keys(vec![
+                map_flat_record(&active, true, 2),
+                map_flat_record(&active, false, 1),
+                map_flat_record(&active, true, 1),
+            ]),
+        )
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect::<Vec<_>>();
+        assert_eq!(
+            flat_keys,
+            vec![
+                map_flat_record(&active, false, 1),
+                map_flat_record(&active, true, 1),
+                map_flat_record(&active, true, 2),
+            ]
+        );
+
+        let outer_keys = canonical_map_entries(
+            &active,
+            TypeDescriptor::named(MAP_OUTER),
+            map_keys(vec![
+                map_outer_record(&active, true, 1),
+                map_outer_record(&active, false, 9),
+                map_outer_record(&active, true, 0),
+            ]),
+        )
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect::<Vec<_>>();
+        assert_eq!(
+            outer_keys,
+            vec![
+                map_outer_record(&active, false, 9),
+                map_outer_record(&active, true, 0),
+                map_outer_record(&active, true, 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn map_input_permutations_produce_equal_canonical_maps() {
+        let active = active_map_revision();
+        let integer_descriptor = TypeDescriptor::named(MAP_INTEGER);
+        let text_descriptor = TypeDescriptor::named(MAP_TEXT);
+        let flat_descriptor = TypeDescriptor::named(MAP_FLAT);
+
+        let forward = RuntimeValue::map(
+            &active,
+            TypeDescriptor::map(
+                integer_descriptor.clone(),
+                TypeDescriptor::named(MAP_BOOLEAN),
+            )
+            .unwrap(),
+            map_keys(vec![
+                RuntimeValue::Integer(1),
+                RuntimeValue::Integer(0),
+                RuntimeValue::Integer(2),
+            ]),
+        )
+        .unwrap();
+        let reversed = RuntimeValue::map(
+            &active,
+            TypeDescriptor::map(integer_descriptor, TypeDescriptor::named(MAP_BOOLEAN)).unwrap(),
+            map_keys(vec![
+                RuntimeValue::Integer(2),
+                RuntimeValue::Integer(1),
+                RuntimeValue::Integer(0),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(forward, reversed);
+        let RuntimeValue::Constructed(forward_value) = &forward else {
+            panic!("forward map must be constructed");
+        };
+        let RuntimeValue::Constructed(reversed_value) = &reversed else {
+            panic!("reversed map must be constructed");
+        };
+        let ConstructedValueKind::Map(forward_entries) = forward_value.kind() else {
+            panic!("forward map must expose the map kind");
+        };
+        let ConstructedValueKind::Map(reversed_entries) = reversed_value.kind() else {
+            panic!("reversed map must expose the map kind");
+        };
+        assert_eq!(forward_entries, reversed_entries);
+
+        let text_forward = RuntimeValue::map(
+            &active,
+            TypeDescriptor::map(text_descriptor.clone(), TypeDescriptor::named(MAP_BOOLEAN))
+                .unwrap(),
+            map_keys(vec![
+                RuntimeValue::Text("b".into()),
+                RuntimeValue::Text("a".into()),
+                RuntimeValue::Text("c".into()),
+            ]),
+        )
+        .unwrap();
+        let text_scrambled = RuntimeValue::map(
+            &active,
+            TypeDescriptor::map(text_descriptor, TypeDescriptor::named(MAP_BOOLEAN)).unwrap(),
+            map_keys(vec![
+                RuntimeValue::Text("c".into()),
+                RuntimeValue::Text("b".into()),
+                RuntimeValue::Text("a".into()),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(text_forward, text_scrambled);
+
+        let flat_forward = RuntimeValue::map(
+            &active,
+            TypeDescriptor::map(flat_descriptor.clone(), TypeDescriptor::named(MAP_BOOLEAN))
+                .unwrap(),
+            map_keys(vec![
+                map_flat_record(&active, false, 1),
+                map_flat_record(&active, true, 2),
+            ]),
+        )
+        .unwrap();
+        let flat_reversed = RuntimeValue::map(
+            &active,
+            TypeDescriptor::map(flat_descriptor, TypeDescriptor::named(MAP_BOOLEAN)).unwrap(),
+            map_keys(vec![
+                map_flat_record(&active, true, 2),
+                map_flat_record(&active, false, 1),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(flat_forward, flat_reversed);
+    }
+
+    #[test]
+    fn map_duplicate_keys_report_exact_original_indices() {
+        let active = active_map_revision();
+        let integer_descriptor = TypeDescriptor::named(MAP_INTEGER);
+        let float_descriptor = TypeDescriptor::named(MAP_FLOAT);
+
+        let error = RuntimeValue::map(
+            &active,
+            TypeDescriptor::map(
+                integer_descriptor.clone(),
+                TypeDescriptor::named(MAP_BOOLEAN),
+            )
+            .unwrap(),
+            map_keys(vec![RuntimeValue::Integer(5), RuntimeValue::Integer(5)]),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            CollectionValueError::DuplicateMapKey {
+                first: 0,
+                duplicate: 1,
+            }
+        );
+
+        let three_error = RuntimeValue::map(
+            &active,
+            TypeDescriptor::map(
+                integer_descriptor.clone(),
+                TypeDescriptor::named(MAP_BOOLEAN),
+            )
+            .unwrap(),
+            map_keys(vec![
+                RuntimeValue::Integer(5),
+                RuntimeValue::Integer(5),
+                RuntimeValue::Integer(5),
+            ]),
+        )
+        .unwrap_err();
+        assert_eq!(
+            three_error,
+            CollectionValueError::DuplicateMapKey {
+                first: 0,
+                duplicate: 1,
+            }
+        );
+
+        let canonical_first_error = RuntimeValue::map(
+            &active,
+            TypeDescriptor::map(
+                integer_descriptor.clone(),
+                TypeDescriptor::named(MAP_BOOLEAN),
+            )
+            .unwrap(),
+            vec![
+                (RuntimeValue::Integer(5), RuntimeValue::Boolean(true)),
+                (RuntimeValue::Integer(1), RuntimeValue::Boolean(true)),
+                (RuntimeValue::Integer(5), RuntimeValue::Boolean(true)),
+                (RuntimeValue::Integer(1), RuntimeValue::Boolean(true)),
+            ],
+        )
+        .unwrap_err();
+        assert_eq!(
+            canonical_first_error,
+            CollectionValueError::DuplicateMapKey {
+                first: 1,
+                duplicate: 3,
+            }
+        );
+
+        let negative_zero_error = RuntimeValue::map(
+            &active,
+            TypeDescriptor::map(float_descriptor, TypeDescriptor::named(MAP_BOOLEAN)).unwrap(),
+            map_keys(vec![
+                RuntimeValue::Float(RuntimeFloat::new(-0.0).unwrap()),
+                RuntimeValue::Float(RuntimeFloat::new(0.0).unwrap()),
+            ]),
+        )
+        .unwrap_err();
+        assert_eq!(
+            negative_zero_error,
+            CollectionValueError::DuplicateMapKey {
+                first: 0,
+                duplicate: 1,
+            }
+        );
+        assert_eq!(
+            negative_zero_error.to_string(),
+            "map contains a duplicate key"
+        );
+        assert!(std::error::Error::source(&negative_zero_error).is_none());
+    }
+
+    #[test]
+    fn record_map_keys_order_lexicographically_in_declaration_order() {
+        let active = active_map_revision();
+
+        let flat_keys = canonical_map_entries(
+            &active,
+            TypeDescriptor::named(MAP_FLAT),
+            map_keys(vec![
+                map_flat_record(&active, true, 2),
+                map_flat_record(&active, true, 1),
+                map_flat_record(&active, false, 9),
+            ]),
+        )
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect::<Vec<_>>();
+        assert_eq!(
+            flat_keys,
+            vec![
+                map_flat_record(&active, false, 9),
+                map_flat_record(&active, true, 1),
+                map_flat_record(&active, true, 2),
+            ]
+        );
+
+        let outer_keys = canonical_map_entries(
+            &active,
+            TypeDescriptor::named(MAP_OUTER),
+            map_keys(vec![
+                map_outer_record(&active, true, 1),
+                map_outer_record(&active, false, 9),
+                map_outer_record(&active, true, 0),
+            ]),
+        )
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect::<Vec<_>>();
+        assert_eq!(
+            outer_keys,
+            vec![
+                map_outer_record(&active, false, 9),
+                map_outer_record(&active, true, 0),
+                map_outer_record(&active, true, 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn map_and_list_equality_distinguish_descriptors_values_and_order() {
+        let active = active_map_revision();
+        let boolean_descriptor = TypeDescriptor::named(MAP_BOOLEAN);
+        let integer_descriptor = TypeDescriptor::named(MAP_INTEGER);
+        let map_descriptor = TypeDescriptor::map(
+            boolean_descriptor.clone(),
+            TypeDescriptor::named(MAP_BOOLEAN),
+        )
+        .unwrap();
+
+        let value_map = RuntimeValue::map(
+            &active,
+            map_descriptor.clone(),
+            vec![(RuntimeValue::Boolean(true), RuntimeValue::Boolean(false))],
+        )
+        .unwrap();
+        let different_value = RuntimeValue::map(
+            &active,
+            map_descriptor.clone(),
+            vec![(RuntimeValue::Boolean(true), RuntimeValue::Boolean(true))],
+        )
+        .unwrap();
+        assert_ne!(value_map, different_value);
+
+        let different_descriptor = RuntimeValue::map(
+            &active,
+            TypeDescriptor::map(integer_descriptor, TypeDescriptor::named(MAP_BOOLEAN)).unwrap(),
+            vec![(RuntimeValue::Integer(1), RuntimeValue::Boolean(false))],
+        )
+        .unwrap();
+        assert_ne!(value_map, different_descriptor);
+
+        let list_descriptor = TypeDescriptor::list(boolean_descriptor).unwrap();
+        let forward_list = RuntimeValue::list(
+            &active,
+            list_descriptor.clone(),
+            vec![RuntimeValue::Boolean(true), RuntimeValue::Boolean(false)],
+        )
+        .unwrap();
+        let reversed_list = RuntimeValue::list(
+            &active,
+            list_descriptor.clone(),
+            vec![RuntimeValue::Boolean(false), RuntimeValue::Boolean(true)],
+        )
+        .unwrap();
+        assert_ne!(forward_list, reversed_list);
+
+        let duplicate_list = RuntimeValue::list(
+            &active,
+            list_descriptor.clone(),
+            vec![RuntimeValue::Boolean(true), RuntimeValue::Boolean(true)],
+        )
+        .unwrap();
+        assert_ne!(
+            forward_list,
+            RuntimeValue::list(&active, list_descriptor, vec![RuntimeValue::Boolean(true)],)
+                .unwrap()
+        );
+        assert_ne!(forward_list, duplicate_list);
+    }
+    fn active_object_opaque_collision_revision() -> ActiveDatabaseRevision {
+        let standard = verified_standard_with_value_types(vec![
+            standard_boolean_definition(),
+            opaque_definition(OPAQUE_TYPE, OPAQUE_NAME, OPAQUE_CONTRACT),
+        ]);
+        let application_schema = SchemaId::from_bytes([0x57; 16]);
+        let catalogue_revision = CatalogueRevisionId::from_bytes([0x58; 16]);
+        let catalogue = CatalogueSnapshot::new_with_record_value_types(
+            catalogue_revision,
+            vec![SchemaDefinition::new(
+                application_schema,
+                QualifiedSemanticName::new(["crm"]).unwrap(),
+            )],
+            vec![ObjectTypeDefinition::new(
+                OPAQUE_TYPE,
+                QualifiedSemanticName::new(["crm", "item"]).unwrap(),
+                vec![],
+            )],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        )
+        .unwrap();
+        let context = CatalogueHashContext::version_two(standard);
+        let application_content = "ab";
+        let application_unit = StoredSourceUnit::new(
+            SourceUnitId::from_bytes([0x63; 16]),
+            0,
+            "app/types.orna",
+            application_content,
+            source_unit_content_digest(application_content).unwrap(),
+        )
+        .unwrap();
+        let application_bundle_hash =
+            source_bundle_digest(std::slice::from_ref(&application_unit)).unwrap();
+        let application_source_revision = SourceRevisionId::from_bytes([0x64; 16]);
+        let application_source = StoredSourceRevision::new(
+            SourceBundleId::from_bytes([0x65; 16]),
+            application_source_revision,
+            None,
+            vec![application_unit],
+            application_bundle_hash,
+            source_revision_record_digest(
+                SourceBundleId::from_bytes([0x65; 16]),
+                None,
+                application_bundle_hash,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let source_unit = SourceUnitId::from_bytes([0x63; 16]);
+        let origins = vec![
+            DefinitionOrigin::new(
+                DefinitionIdentity::Schema(application_schema),
+                SourceOrigin::new(source_unit, 0, 1).unwrap(),
+            ),
+            DefinitionOrigin::new(
+                DefinitionIdentity::ObjectType(OPAQUE_TYPE),
+                SourceOrigin::new(source_unit, 1, 2).unwrap(),
+            ),
+        ];
+        let catalogue_hash =
+            catalogue_digest_with_context(&context, &catalogue, &[], &[], &origins, &[]).unwrap();
+        ActiveDatabaseRevision::new_with_catalogue_hash_context(
+            ActiveDatabaseRevisionInput::new(
+                RevisionPair::new(application_source_revision, catalogue_revision),
+                application_source,
+                catalogue,
+                catalogue_hash,
+                ActiveRevisionContent::new(vec![], vec![], origins, vec![]),
+            ),
+            context,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn enum_with_record_identity_is_rejected_as_a_field_type_mismatch() {
+        const INNER_TYPE: TypeId = TypeId::from_bytes([0x31; 16]);
+        const OUTER_TYPE: TypeId = TypeId::from_bytes([0x30; 16]);
+        const OUTER_FIELD: FieldId = FieldId::from_bytes([0x3b; 16]);
+        let current = active_nested_record_revision_with_child_fields(vec![
+            RecordValueFieldDefinition::try_new_descriptor(
+                FieldId::from_bytes([0x3a; 16]),
+                "value",
+                0,
+                TypeDescriptor::named(STANDARD_BOOLEAN),
+            )
+            .unwrap(),
+        ]);
+        let identity_catalogue = CatalogueSnapshot::new_with_enum_types(
+            CatalogueRevisionId::from_bytes([0x44; 16]),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes([0x45; 16]),
+                QualifiedSemanticName::new(["crm"]).unwrap(),
+            )],
+            vec![],
+            vec![],
+            vec![EnumTypeDefinition::new(
+                INNER_TYPE,
+                QualifiedSemanticName::new(["crm", "inner"]).unwrap(),
+                ["lead"],
+            )],
+            vec![],
+        )
+        .unwrap();
+        let identity_enum =
+            RuntimeValue::Enum(EnumValue::new(&identity_catalogue, INNER_TYPE, "lead").unwrap());
+        let error = RecordValue::new(
+            &current,
+            OUTER_TYPE,
+            [(String::from("payload"), identity_enum)],
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            RecordValueError::FieldTypeMismatch {
+                record_type: OUTER_TYPE,
+                field: OUTER_FIELD,
+                expected: ResolvedType::named(INNER_TYPE),
+                actual: ResolvedType::named(INNER_TYPE),
+            }
+        );
+        assert_eq!(error.to_string(), "record field value has a type mismatch");
+        assert!(std::error::Error::source(&error).is_none());
+    }
+
+    #[test]
+    fn legacy_typed_null_precedes_type_mismatch_at_the_same_list_element() {
+        let active = active_record_revision();
+        let list_boolean = TypeDescriptor::list(TypeDescriptor::named(STANDARD_BOOLEAN)).unwrap();
+        let error = RuntimeValue::list(
+            &active,
+            list_boolean,
+            vec![
+                RuntimeValue::null(ResolvedType::scalar(StandardScalar::CharacterLargeObject))
+                    .unwrap(),
+                RuntimeValue::Boolean(false),
+            ],
+        )
+        .unwrap_err();
+        let CollectionValueError::NullValueNotAccepted { path } = &error else {
+            panic!("typed null must precede the type mismatch: {error}");
+        };
+        assert_eq!(
+            path.segments(),
+            &[CollectionValuePathSegment::ListElement(0)]
+        );
+    }
+
+    #[test]
+    fn enum_nominal_mismatch_precedes_label_inactivity_at_the_same_element() {
+        let active = active_record_revision();
+        let wrong_id_catalogue = CatalogueSnapshot::new_with_enum_types(
+            CatalogueRevisionId::from_bytes([0x44; 16]),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes([0x45; 16]),
+                QualifiedSemanticName::new(["crm"]).unwrap(),
+            )],
+            vec![],
+            vec![],
+            vec![EnumTypeDefinition::new(
+                TypeId::from_bytes([0x6d; 16]),
+                QualifiedSemanticName::new(["crm", "other"]).unwrap(),
+                ["retired"],
+            )],
+            vec![],
+        )
+        .unwrap();
+        let wrong_enum = RuntimeValue::Enum(
+            EnumValue::new(
+                &wrong_id_catalogue,
+                TypeId::from_bytes([0x6d; 16]),
+                "retired",
+            )
+            .unwrap(),
+        );
+        let list_enum = TypeDescriptor::list(TypeDescriptor::named(ENUM_TYPE)).unwrap();
+        let error = RuntimeValue::list(&active, list_enum, vec![wrong_enum]).unwrap_err();
+        let CollectionValueError::ValueTypeMismatch { path } = &error else {
+            panic!("nominal mismatch must precede label inactivity: {error}");
+        };
+        assert_eq!(
+            path.segments(),
+            &[CollectionValuePathSegment::ListElement(0)]
+        );
+    }
+
+    #[test]
+    fn map_descriptor_reports_the_key_child_before_an_unsupported_value() {
+        let active = active_record_revision();
+        let boolean = TypeDescriptor::named(STANDARD_BOOLEAN);
+        let set_key = TypeDescriptor::set(boolean.clone()).unwrap();
+        let stream_value = TypeDescriptor::stream(boolean).unwrap();
+        let map_descriptor = TypeDescriptor::map(set_key.clone(), stream_value).unwrap();
+        let error = RuntimeValue::map(&active, map_descriptor, vec![]).unwrap_err();
+        let CollectionValueError::UnsupportedDescriptor { path, descriptor } = &error else {
+            panic!("unsupported map key must precede the unsupported value: {error}");
+        };
+        assert_eq!(path.segments(), &[CollectionValuePathSegment::MapKeyChild]);
+        assert_eq!(descriptor, &set_key);
+    }
+
+    #[test]
+    fn object_opaque_shared_identity_is_ambiguous_before_unsupported() {
+        let active = active_object_opaque_collision_revision();
+        let collision = TypeDescriptor::named(OPAQUE_TYPE);
+        let list = TypeDescriptor::list(collision.clone()).unwrap();
+        let error = RuntimeValue::list(&active, list, vec![]).unwrap_err();
+        let CollectionValueError::AmbiguousNamedType { path, type_id } = &error else {
+            panic!("object/opaque identity collision must be ambiguous: {error}");
+        };
+        assert_eq!(path.segments(), &[CollectionValuePathSegment::ListChild]);
+        assert_eq!(*type_id, OPAQUE_TYPE);
+        assert_eq!(
+            error.to_string(),
+            "collection descriptor type is present in both application and standard catalogues"
+        );
+        assert!(std::error::Error::source(&error).is_none());
+    }
+
+    #[test]
+    fn record_caller_input_order_reports_the_first_supplied_stale_enum_error() {
+        let active = active_record_revision();
+        let stale_catalogue = enum_catalogue(&["retired"]);
+        let stale =
+            RuntimeValue::Enum(EnumValue::new(&stale_catalogue, ENUM_TYPE, "retired").unwrap());
+        let error = RecordValue::new(
+            &active,
+            RECORD_TYPE,
+            [
+                (String::from("stage"), stale),
+                (String::from("enabled"), RuntimeValue::Integer(1)),
+            ],
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            RecordValueError::InactiveEnumLabel {
+                record_type: RECORD_TYPE,
+                field: STAGE_FIELD,
+                enum_type: ENUM_TYPE,
+                label: String::from("retired"),
+            }
+        );
+        assert_eq!(error.to_string(), "record enum field label is not active");
+        assert!(std::error::Error::source(&error).is_none());
+    }
+
+    #[test]
+    fn runtime_value_node_boundary_is_exact() {
+        let active = active_record_revision();
+        let boolean = TypeDescriptor::named(STANDARD_BOOLEAN);
+        let option_boolean = TypeDescriptor::option(boolean.clone()).unwrap();
+        let list_of_option = TypeDescriptor::list(option_boolean.clone()).unwrap();
+        let list_boolean = TypeDescriptor::list(boolean.clone()).unwrap();
+        let map_boolean = TypeDescriptor::map(boolean.clone(), boolean.clone()).unwrap();
+
+        let subtree = RuntimeValue::option(
+            &active,
+            option_boolean.clone(),
+            Some(RuntimeValue::Boolean(true)),
+        )
+        .unwrap();
+        let empty_subtree = RuntimeValue::option(&active, option_boolean.clone(), None).unwrap();
+        let mut boundary_elements = vec![subtree.clone(); 32_767];
+        boundary_elements.push(empty_subtree.clone());
+        let at_boundary =
+            RuntimeValue::list(&active, list_of_option.clone(), boundary_elements).unwrap();
+        let RuntimeValue::Constructed(at_boundary_value) = &at_boundary else {
+            panic!("boundary list must be constructed");
+        };
+        let ConstructedValueKind::List(elements) = at_boundary_value.kind() else {
+            panic!("boundary list must expose the list kind");
+        };
+        assert_eq!(elements.len(), 32_768);
+        let RuntimeValue::Constructed(last) = &elements[32_767] else {
+            panic!("the final boundary element must be constructed");
+        };
+        let ConstructedValueKind::Option(None) = last.kind() else {
+            panic!("the final boundary element must be the empty option");
+        };
+
+        let overflow =
+            RuntimeValue::list(&active, list_of_option, vec![subtree; 32_768]).unwrap_err();
+        assert_eq!(
+            overflow,
+            CollectionValueError::TooManyNodes {
+                maximum: MAX_RUNTIME_VALUE_NODES,
+            }
+        );
+        assert_eq!(overflow.to_string(), "runtime value has too many nodes");
+        assert!(std::error::Error::source(&overflow).is_none());
+
+        let list_lower_bound = RuntimeValue::list(&active, list_boolean.clone(), {
+            let mut entries = vec![RuntimeValue::Boolean(true); MAX_RUNTIME_VALUE_NODES];
+            entries.push(RuntimeValue::Text("x".into()));
+            entries
+        })
+        .unwrap_err();
+        assert_eq!(
+            list_lower_bound,
+            CollectionValueError::TooManyNodes {
+                maximum: MAX_RUNTIME_VALUE_NODES,
+            }
+        );
+
+        let map_lower_bound = RuntimeValue::map(&active, map_boolean, {
+            let mut entries = vec![
+                (RuntimeValue::Boolean(true), RuntimeValue::Boolean(true));
+                MAX_RUNTIME_VALUE_NODES / 2
+            ];
+            entries.push((RuntimeValue::Text("x".into()), RuntimeValue::Boolean(true)));
+            entries
+        })
+        .unwrap_err();
+        assert_eq!(
+            map_lower_bound,
+            CollectionValueError::TooManyNodes {
+                maximum: MAX_RUNTIME_VALUE_NODES,
+            }
+        );
+    }
+
+    #[test]
+    fn constructed_equality_ignores_the_construction_route() {
+        let active = active_map_revision();
+        let boolean = TypeDescriptor::named(MAP_BOOLEAN);
+        let option_boolean = TypeDescriptor::option(boolean.clone()).unwrap();
+
+        let first = RuntimeValue::option(
+            &active,
+            option_boolean.clone(),
+            Some(RuntimeValue::Boolean(true)),
+        )
+        .unwrap();
+        let second = RuntimeValue::option(
+            &active,
+            option_boolean.clone(),
+            Some(RuntimeValue::Boolean(true)),
+        )
+        .unwrap();
+        assert_eq!(first, second);
+
+        let map_descriptor = TypeDescriptor::map(boolean.clone(), boolean).unwrap();
+        let map_first = RuntimeValue::map(
+            &active,
+            map_descriptor.clone(),
+            vec![
+                (RuntimeValue::Boolean(true), RuntimeValue::Boolean(false)),
+                (RuntimeValue::Boolean(false), RuntimeValue::Boolean(true)),
+            ],
+        )
+        .unwrap();
+        let map_second = RuntimeValue::map(
+            &active,
+            map_descriptor,
+            vec![
+                (RuntimeValue::Boolean(false), RuntimeValue::Boolean(true)),
+                (RuntimeValue::Boolean(true), RuntimeValue::Boolean(false)),
+            ],
+        )
+        .unwrap();
+        assert_eq!(map_first, map_second);
+    }
+
+    #[test]
+    fn stale_and_identical_revision_semantics_are_exact() {
+        const INNER_TYPE: TypeId = TypeId::from_bytes([0x31; 16]);
+        const A_FIELD: FieldId = FieldId::from_bytes([0x6a; 16]);
+        const B_FIELD: FieldId = FieldId::from_bytes([0x6b; 16]);
+        let field_a = RecordValueFieldDefinition::try_new_descriptor(
+            A_FIELD,
+            "a",
+            0,
+            TypeDescriptor::named(STANDARD_BOOLEAN),
+        )
+        .unwrap();
+        let field_b = RecordValueFieldDefinition::try_new_descriptor(
+            B_FIELD,
+            "b",
+            1,
+            TypeDescriptor::named(STANDARD_BOOLEAN),
+        )
+        .unwrap();
+
+        let old = active_nested_record_revision_with_seed(vec![field_a.clone()], 0x58, 0x64);
+        let current = active_nested_record_revision_with_seed(vec![field_a.clone()], 0x59, 0x65);
+        let identical = RecordValue::new(
+            &old,
+            INNER_TYPE,
+            [(String::from("a"), RuntimeValue::Boolean(true))],
+        )
+        .unwrap();
+
+        let list_descriptor = TypeDescriptor::list(TypeDescriptor::named(INNER_TYPE)).unwrap();
+        assert!(
+            RuntimeValue::list(
+                &current,
+                list_descriptor.clone(),
+                vec![RuntimeValue::Record(identical.clone())],
+            )
+            .is_ok()
+        );
+        let option_descriptor = TypeDescriptor::option(TypeDescriptor::named(INNER_TYPE)).unwrap();
+        assert!(
+            RuntimeValue::option(
+                &current,
+                option_descriptor.clone(),
+                Some(RuntimeValue::Record(identical.clone())),
+            )
+            .is_ok()
+        );
+        let map_descriptor = TypeDescriptor::map(
+            TypeDescriptor::named(INNER_TYPE),
+            TypeDescriptor::named(STANDARD_BOOLEAN),
+        )
+        .unwrap();
+        assert!(
+            RuntimeValue::map(
+                &current,
+                map_descriptor.clone(),
+                vec![(
+                    RuntimeValue::Record(identical.clone()),
+                    RuntimeValue::Boolean(true)
+                )],
+            )
+            .is_ok()
+        );
+
+        let retired_active = active_record_revision();
+        let retired_enum = RuntimeValue::Enum(
+            EnumValue::new(&enum_catalogue(&["retired"]), ENUM_TYPE, "retired").unwrap(),
+        );
+        let enum_list = TypeDescriptor::list(TypeDescriptor::named(ENUM_TYPE)).unwrap();
+        let error = RuntimeValue::list(&retired_active, enum_list, vec![retired_enum]).unwrap_err();
+        let CollectionValueError::InactiveValue { path } = &error else {
+            panic!("retired enum label must be inactive: {error}");
+        };
+        assert_eq!(
+            path.segments(),
+            &[CollectionValuePathSegment::ListElement(0)]
+        );
+
+        let old_two =
+            active_nested_record_revision_with_child_fields(vec![field_a.clone(), field_b.clone()]);
+        let removed = active_nested_record_revision_with_child_fields(vec![field_a.clone()]);
+        let old_record = RecordValue::new(
+            &old_two,
+            INNER_TYPE,
+            [
+                (String::from("a"), RuntimeValue::Boolean(true)),
+                (String::from("b"), RuntimeValue::Boolean(true)),
+            ],
+        )
+        .unwrap();
+        let option_error = RuntimeValue::option(
+            &removed,
+            option_descriptor,
+            Some(RuntimeValue::Record(old_record.clone())),
+        )
+        .unwrap_err();
+        let CollectionValueError::InactiveValue { path } = &option_error else {
+            panic!("removed trailing field must be inactive in an option: {option_error}");
+        };
+        assert_eq!(
+            path.segments(),
+            &[
+                CollectionValuePathSegment::OptionChild,
+                CollectionValuePathSegment::RecordField(B_FIELD),
+            ]
+        );
+        let map_error = RuntimeValue::map(
+            &removed,
+            map_descriptor,
+            vec![(
+                RuntimeValue::Record(old_record.clone()),
+                RuntimeValue::Boolean(true),
+            )],
+        )
+        .unwrap_err();
+        let CollectionValueError::InactiveValue { path } = &map_error else {
+            panic!("removed trailing field must be inactive as a map key: {map_error}");
+        };
+        assert_eq!(
+            path.segments(),
+            &[
+                CollectionValuePathSegment::MapKey(0),
+                CollectionValuePathSegment::RecordField(B_FIELD),
+            ]
+        );
+        let map_value_error = RuntimeValue::map(
+            &removed,
+            TypeDescriptor::map(
+                TypeDescriptor::named(STANDARD_BOOLEAN),
+                TypeDescriptor::named(INNER_TYPE),
+            )
+            .unwrap(),
+            vec![(
+                RuntimeValue::Boolean(true),
+                RuntimeValue::Record(old_record.clone()),
+            )],
+        )
+        .unwrap_err();
+        let CollectionValueError::InactiveValue { path } = &map_value_error else {
+            panic!("removed trailing field must be inactive as a map value: {map_value_error}");
+        };
+        assert_eq!(
+            path.segments(),
+            &[
+                CollectionValuePathSegment::MapValue(0),
+                CollectionValuePathSegment::RecordField(B_FIELD),
+            ]
+        );
+
+        let swapped_id_a = RecordValueFieldDefinition::try_new_descriptor(
+            B_FIELD,
+            "a",
+            0,
+            TypeDescriptor::named(STANDARD_BOOLEAN),
+        )
+        .unwrap();
+        let swapped_id_b = RecordValueFieldDefinition::try_new_descriptor(
+            A_FIELD,
+            "b",
+            1,
+            TypeDescriptor::named(STANDARD_BOOLEAN),
+        )
+        .unwrap();
+        let reordered_current =
+            active_nested_record_revision_with_child_fields(vec![swapped_id_a, swapped_id_b]);
+        let reordered_error = RuntimeValue::list(
+            &reordered_current,
+            list_descriptor,
+            vec![RuntimeValue::Record(old_record)],
+        )
+        .unwrap_err();
+        let CollectionValueError::InactiveValue { path } = &reordered_error else {
+            panic!("reordered field identities must be inactive: {reordered_error}");
+        };
+        assert_eq!(
+            path.segments(),
+            &[
+                CollectionValuePathSegment::ListElement(0),
+                CollectionValuePathSegment::RecordField(B_FIELD),
+            ]
+        );
+
+        let integer_standard = verified_standard_with_value_types(vec![
+            standard_boolean_definition(),
+            map_standard_primitive(MAP_INTEGER, "integer", "orna.kernel.value.integer@1"),
+        ]);
+        let boolean_field = RecordValueFieldDefinition::try_new_descriptor(
+            A_FIELD,
+            "a",
+            0,
+            TypeDescriptor::named(STANDARD_BOOLEAN),
+        )
+        .unwrap();
+        let integer_field = RecordValueFieldDefinition::try_new_descriptor(
+            A_FIELD,
+            "a",
+            0,
+            TypeDescriptor::named(MAP_INTEGER),
+        )
+        .unwrap();
+        let boolean_active = active_nested_record_revision_with_standard_and_seed(
+            vec![boolean_field],
+            integer_standard.clone(),
+            0x5a,
+            0x66,
+        );
+        let integer_active = active_nested_record_revision_with_standard_and_seed(
+            vec![integer_field],
+            integer_standard,
+            0x5b,
+            0x67,
+        );
+        let boolean_record = RecordValue::new(
+            &boolean_active,
+            INNER_TYPE,
+            [(String::from("a"), RuntimeValue::Boolean(true))],
+        )
+        .unwrap();
+        let changed_error = RuntimeValue::list(
+            &integer_active,
+            TypeDescriptor::list(TypeDescriptor::named(INNER_TYPE)).unwrap(),
+            vec![RuntimeValue::Record(boolean_record)],
+        )
+        .unwrap_err();
+        let CollectionValueError::ValueTypeMismatch { path } = &changed_error else {
+            panic!("changed record field type must be a type mismatch: {changed_error}");
+        };
+        assert_eq!(
+            path.segments(),
+            &[
+                CollectionValuePathSegment::ListElement(0),
+                CollectionValuePathSegment::RecordField(A_FIELD),
+            ]
+        );
+        assert_eq!(
+            changed_error.to_string(),
+            "collection value has a type mismatch"
+        );
+        assert!(std::error::Error::source(&changed_error).is_none());
+    }
+
+    fn deep_record_chain_revision_error() -> crate::canonical_hash::CanonicalHashError {
+        let standard = verified_standard_with_value_types(vec![standard_boolean_definition()]);
+        let application_schema = SchemaId::from_bytes([0x57; 16]);
+        let catalogue_revision = CatalogueRevisionId::from_bytes([0x58; 16]);
+        let mut records = Vec::new();
+        for index in 0..34_u8 {
+            let record_type = TypeId::from_bytes([0x20 + index; 16]);
+            let field_id = FieldId::from_bytes([0x80 + index; 16]);
+            let target = if index == 33 {
+                STANDARD_BOOLEAN
+            } else {
+                TypeId::from_bytes([0x20 + index + 1; 16])
+            };
+            records.push(RecordValueTypeDefinition::new(
+                record_type,
+                QualifiedSemanticName::new(["crm", &format!("chain_{index}")]).unwrap(),
+                vec![
+                    RecordValueFieldDefinition::try_new_descriptor(
+                        field_id,
+                        if index == 33 { "value" } else { "next" },
+                        0,
+                        TypeDescriptor::named(target),
+                    )
+                    .unwrap(),
+                ],
+            ));
+        }
+        let catalogue = CatalogueSnapshot::new_with_record_value_types(
+            catalogue_revision,
+            vec![SchemaDefinition::new(
+                application_schema,
+                QualifiedSemanticName::new(["crm"]).unwrap(),
+            )],
+            vec![],
+            vec![],
+            vec![],
+            records,
+            vec![],
+        )
+        .unwrap();
+        let context = CatalogueHashContext::version_two(standard);
+        let source_unit = SourceUnitId::from_bytes([0x63; 16]);
+        let mut identities = vec![DefinitionIdentity::Schema(application_schema)];
+        for index in 0..34_u8 {
+            let record_type = TypeId::from_bytes([0x20 + index; 16]);
+            let field_id = FieldId::from_bytes([0x80 + index; 16]);
+            identities.push(DefinitionIdentity::ValueType(record_type));
+            identities.push(DefinitionIdentity::Field {
+                owner: record_type,
+                field: field_id,
+            });
+        }
+        let origins = identities
+            .into_iter()
+            .enumerate()
+            .map(|(index, identity)| {
+                DefinitionOrigin::new(
+                    identity,
+                    SourceOrigin::new(source_unit, index as u32, index as u32 + 1).unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        catalogue_digest_with_context(&context, &catalogue, &[], &[], &origins, &[]).unwrap_err()
+    }
+
+    #[test]
+    fn descriptor_and_record_nesting_depth_boundaries_are_exact() {
+        let active = active_record_revision();
+        let mut descriptor = TypeDescriptor::named(STANDARD_BOOLEAN);
+        let mut value = RuntimeValue::Boolean(true);
+        for _ in 0..32 {
+            descriptor = TypeDescriptor::option(descriptor).unwrap();
+            value = RuntimeValue::option(&active, descriptor.clone(), Some(value)).unwrap();
+        }
+        assert_eq!(value.runtime_type(), RuntimeType::Constructed(&descriptor));
+        let too_deep = TypeDescriptor::option(descriptor).unwrap_err();
+        assert_eq!(
+            too_deep,
+            crate::types::TypeDescriptorError::TooDeep {
+                maximum: 32,
+                actual: 33,
+            }
+        );
+        assert_eq!(too_deep.to_string(), "type descriptor is too deep");
+        assert!(std::error::Error::source(&too_deep).is_none());
+
+        let error = deep_record_chain_revision_error();
+        match error {
+            crate::canonical_hash::CanonicalHashError::RecordValueNestingTooDeep {
+                record_value_type,
+                field,
+                nested_record_value_type,
+                maximum,
+                actual,
+            } => {
+                assert_eq!(record_value_type, TypeId::from_bytes([0x20 + 32; 16]));
+                assert_eq!(field, FieldId::from_bytes([0x80 + 32; 16]));
+                assert_eq!(
+                    nested_record_value_type,
+                    TypeId::from_bytes([0x20 + 33; 16])
+                );
+                assert_eq!(maximum, 32);
+                assert_eq!(actual, 33);
+            }
+            other => panic!("deep record chain must fail as nesting too deep: {other:?}"),
+        }
+        assert_eq!(
+            error.to_string(),
+            "record value nesting exceeds the maximum depth"
+        );
+        assert!(std::error::Error::source(&error).is_none());
+    }
+
+    #[test]
+    fn collection_error_variants_preserve_exact_display_and_source() {
+        let active = active_record_revision();
+        let boolean = TypeDescriptor::named(STANDARD_BOOLEAN);
+        let option_desc = TypeDescriptor::option(boolean.clone()).unwrap();
+        let list_boolean = TypeDescriptor::list(boolean.clone()).unwrap();
+        let list_enum = TypeDescriptor::list(TypeDescriptor::named(ENUM_TYPE)).unwrap();
+        let map_boolean = TypeDescriptor::map(boolean.clone(), boolean.clone()).unwrap();
+
+        let cases = [
+            (
+                RuntimeValue::list(&active, option_desc, vec![]).unwrap_err(),
+                "collection descriptor has the wrong outer constructor",
+            ),
+            (
+                RuntimeValue::list(
+                    &active,
+                    TypeDescriptor::list(TypeDescriptor::named(TypeId::from_bytes([0x6c; 16])))
+                        .unwrap(),
+                    vec![],
+                )
+                .unwrap_err(),
+                "collection descriptor is not supported",
+            ),
+            (
+                RuntimeValue::list(
+                    &active,
+                    list_boolean.clone(),
+                    vec![RuntimeValue::Boolean(true); MAX_RUNTIME_VALUE_NODES],
+                )
+                .unwrap_err(),
+                "runtime value has too many nodes",
+            ),
+            (
+                RuntimeValue::list(
+                    &active,
+                    list_boolean.clone(),
+                    vec![
+                        RuntimeValue::null(ResolvedType::scalar(StandardScalar::Boolean)).unwrap(),
+                    ],
+                )
+                .unwrap_err(),
+                "collection values cannot contain legacy typed NULL",
+            ),
+            (
+                RuntimeValue::list(&active, list_boolean, vec![RuntimeValue::Text("x".into())])
+                    .unwrap_err(),
+                "collection value has a type mismatch",
+            ),
+            (
+                RuntimeValue::list(
+                    &active,
+                    list_enum,
+                    vec![RuntimeValue::Enum(
+                        EnumValue::new(&enum_catalogue(&["retired"]), ENUM_TYPE, "retired")
+                            .unwrap(),
+                    )],
+                )
+                .unwrap_err(),
+                "collection value is not active",
+            ),
+            (
+                RuntimeValue::map(
+                    &active,
+                    map_boolean,
+                    vec![
+                        (RuntimeValue::Boolean(true), RuntimeValue::Boolean(true)),
+                        (RuntimeValue::Boolean(true), RuntimeValue::Boolean(false)),
+                    ],
+                )
+                .unwrap_err(),
+                "map contains a duplicate key",
+            ),
+        ];
+        for (error, expected_display) in cases {
+            assert_eq!(error.to_string(), expected_display);
+            assert!(std::error::Error::source(&error).is_none());
+        }
+
+        let ambiguous = RuntimeValue::list(
+            &active_record_revision_with_opaque_contract(
+                TypeId::from_bytes([0x49; 16]),
+                OPAQUE_CONTRACT,
+            ),
+            TypeDescriptor::list(TypeDescriptor::named(TypeId::from_bytes([0x49; 16]))).unwrap(),
+            vec![],
+        )
+        .unwrap_err();
+        assert_eq!(
+            ambiguous.to_string(),
+            "collection descriptor type is present in both application and standard catalogues"
+        );
+        assert!(std::error::Error::source(&ambiguous).is_none());
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn constructed_constructors_never_panic_on_bounded_public_input(
+            descriptor_choice in 0usize..10,
+            value_choice in 0usize..8,
+            count in 0usize..6,
+        ) {
+            let active = active_record_revision();
+            let boolean = TypeDescriptor::named(STANDARD_BOOLEAN);
+            let descriptors = vec![
+                TypeDescriptor::option(boolean.clone()).unwrap(),
+                TypeDescriptor::list(boolean.clone()).unwrap(),
+                TypeDescriptor::map(boolean.clone(), boolean.clone()).unwrap(),
+                TypeDescriptor::option(TypeDescriptor::named(TypeId::from_bytes([0x6c; 16])))
+                    .unwrap(),
+                TypeDescriptor::list(TypeDescriptor::named(ENUM_TYPE)).unwrap(),
+                TypeDescriptor::set(boolean.clone()).unwrap(),
+                TypeDescriptor::stream(boolean.clone()).unwrap(),
+                TypeDescriptor::option(TypeDescriptor::list(boolean.clone()).unwrap()).unwrap(),
+                TypeDescriptor::map(
+                    TypeDescriptor::named(ENUM_TYPE),
+                    TypeDescriptor::named(TypeId::from_bytes([0x6c; 16])),
+                )
+                .unwrap(),
+                TypeDescriptor::list(
+                    TypeDescriptor::option(TypeDescriptor::named(ENUM_TYPE)).unwrap(),
+                )
+                .unwrap(),
+            ];
+            let values = [
+                RuntimeValue::Boolean(true),
+                RuntimeValue::Integer(1),
+                RuntimeValue::Text("x".into()),
+                RuntimeValue::Bytes(vec![1]),
+                RuntimeValue::Enum(
+                    EnumValue::new(&enum_catalogue(&["lead"]), ENUM_TYPE, "lead").unwrap(),
+                ),
+                RuntimeValue::null(ResolvedType::scalar(StandardScalar::Boolean)).unwrap(),
+                RuntimeValue::Reference {
+                    target: TypeId::from_bytes([0x41; 16]),
+                    object: ObjectId::from_bytes([0x42; 16]),
+                },
+                RuntimeValue::option(
+                    &active,
+                    TypeDescriptor::option(boolean).unwrap(),
+                    Some(RuntimeValue::Boolean(false)),
+                )
+                .unwrap(),
+            ];
+            let descriptor = descriptors[descriptor_choice].clone();
+            let value = values[value_choice].clone();
+            let _ = RuntimeValue::option(&active, descriptor.clone(), Some(value.clone()));
+            let _ = RuntimeValue::list(
+                &active,
+                descriptor.clone(),
+                vec![value.clone(); count],
+            );
+            let _ = RuntimeValue::map(
+                &active,
+                descriptor.clone(),
+                (0..count)
+                    .map(|index| {
+                        (
+                            values[(value_choice + index) % values.len()].clone(),
+                            value.clone(),
+                        )
+                    })
+                    .collect(),
+            );
+        }
+    }
+
+    #[test]
+    fn admitted_leaf_values_construct_in_option_list_and_map() {
+        let active = active_map_revision();
+        let standard = active.catalogue_hash_context().standard().unwrap();
+        let record = RecordValue::new(
+            &active,
+            MAP_FLAT,
+            [
+                (String::from("a"), RuntimeValue::Boolean(true)),
+                (String::from("b"), RuntimeValue::Integer(1)),
+            ],
+        )
+        .unwrap();
+        let leaf_cases = [
+            (
+                TypeDescriptor::named(MAP_BOOLEAN),
+                RuntimeValue::Boolean(true),
+            ),
+            (TypeDescriptor::named(MAP_INTEGER), RuntimeValue::Integer(1)),
+            (TypeDescriptor::named(MAP_BIGINT), RuntimeValue::BigInt(2)),
+            (
+                TypeDescriptor::named(MAP_FLOAT),
+                RuntimeValue::Float(RuntimeFloat::new(3.5).unwrap()),
+            ),
+            (
+                TypeDescriptor::named(MAP_TEXT),
+                RuntimeValue::Text("t".into()),
+            ),
+            (
+                TypeDescriptor::named(MAP_BYTES),
+                RuntimeValue::Bytes(vec![1, 2]),
+            ),
+            (
+                TypeDescriptor::named(MAP_APP_ENUM),
+                RuntimeValue::Enum(
+                    EnumValue::new(active.catalogue(), MAP_APP_ENUM, "low").unwrap(),
+                ),
+            ),
+            (
+                TypeDescriptor::named(MAP_STD_ENUM),
+                RuntimeValue::Enum(
+                    EnumValue::new(standard.catalogue(), MAP_STD_ENUM, "alpha").unwrap(),
+                ),
+            ),
+            (
+                TypeDescriptor::named(MAP_FLAT),
+                RuntimeValue::Record(record),
+            ),
+            (
+                TypeDescriptor::reference(MAP_OBJECT),
+                RuntimeValue::Reference {
+                    target: MAP_OBJECT,
+                    object: ObjectId::from_bytes([0x01; 16]),
+                },
+            ),
+        ];
+        for (descriptor, value) in leaf_cases {
+            let option = RuntimeValue::option(
+                &active,
+                TypeDescriptor::option(descriptor.clone()).unwrap(),
+                Some(value.clone()),
+            )
+            .expect("admitted leaf must construct an option");
+            let RuntimeValue::Constructed(option_value) = &option else {
+                panic!("admitted leaf option must be constructed");
+            };
+            let ConstructedValueKind::Option(Some(child)) = option_value.kind() else {
+                panic!("admitted leaf option must expose its child");
+            };
+            assert_eq!(child, &value);
+
+            let list = RuntimeValue::list(
+                &active,
+                TypeDescriptor::list(descriptor.clone()).unwrap(),
+                vec![value.clone()],
+            )
+            .expect("admitted leaf must construct a list");
+            let RuntimeValue::Constructed(list_value) = &list else {
+                panic!("admitted leaf list must be constructed");
+            };
+            let ConstructedValueKind::List(elements) = list_value.kind() else {
+                panic!("admitted leaf list must expose elements");
+            };
+            assert_eq!(elements, std::slice::from_ref(&value));
+
+            let map = RuntimeValue::map(
+                &active,
+                TypeDescriptor::map(descriptor.clone(), TypeDescriptor::named(MAP_BOOLEAN))
+                    .unwrap(),
+                vec![(value.clone(), RuntimeValue::Boolean(true))],
+            )
+            .expect("admitted leaf must construct a map key");
+            let RuntimeValue::Constructed(map_value) = &map else {
+                panic!("admitted leaf map must be constructed");
+            };
+            let ConstructedValueKind::Map(entries) = map_value.kind() else {
+                panic!("admitted leaf map must expose entries");
+            };
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].0, value);
+        }
     }
 
     #[test]
@@ -1790,8 +5299,8 @@ mod tests {
         };
         assert_eq!(inner_value, &old_child);
         assert_eq!(
-            RuntimeValue::Record(outer).resolved_type(),
-            ResolvedType::named(outer_type)
+            RuntimeValue::Record(outer).runtime_type(),
+            RuntimeType::Flat(ResolvedType::named(outer_type))
         );
     }
 
@@ -2318,8 +5827,8 @@ mod tests {
                 assert_eq!(value.opaque_type(), OPAQUE_TYPE);
                 assert_eq!(value.canonical_payload(), payload);
                 assert_eq!(
-                    RuntimeValue::Opaque(value.clone()).resolved_type(),
-                    ResolvedType::value(OPAQUE_TYPE)
+                    RuntimeValue::Opaque(value.clone()).runtime_type(),
+                    RuntimeType::Flat(ResolvedType::value(OPAQUE_TYPE))
                 );
                 assert_eq!(value, value.clone());
             }
@@ -2403,8 +5912,8 @@ mod tests {
             &[RuntimeValue::Boolean(true), stage.clone()]
         );
         assert_eq!(
-            RuntimeValue::Record(record).resolved_type(),
-            ResolvedType::named(RECORD_TYPE)
+            RuntimeValue::Record(record).runtime_type(),
+            RuntimeType::Flat(ResolvedType::named(RECORD_TYPE))
         );
     }
 
@@ -2752,8 +6261,8 @@ mod tests {
         assert_eq!(value.enum_type(), ENUM_TYPE);
         assert_eq!(value.label(), "owner's");
         assert_eq!(
-            RuntimeValue::Enum(value.clone()).resolved_type(),
-            ResolvedType::named(ENUM_TYPE)
+            RuntimeValue::Enum(value.clone()).runtime_type(),
+            RuntimeType::Flat(ResolvedType::named(ENUM_TYPE))
         );
         assert_eq!(value, value.clone());
 
