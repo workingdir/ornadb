@@ -87,3 +87,5 @@ source-of-truth or authority rules.
   [Mandatory System Functions Have One Sealed Registry](0042-mandatory-system-function-registry.md)
 * **work ADR 0043:**
   [Canonical Raw Calls Bind One Reference INSERT Argument](0043-canonical-raw-reference-insert.md)
+* **work ADR 0044:**
+  [Existing Objects Admit One Appended Nullable Boolean Field](0044-appended-nullable-boolean-fields.md)
