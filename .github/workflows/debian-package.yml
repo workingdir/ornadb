@@ -38,7 +38,7 @@ jobs:
       - name: Provision the offline Rust dependency cache
         run: cargo fetch --locked
       - name: Reproduce the package twice
-        run: make --file packaging/debian/rules package
+        run: make --file packaging/debian/rules development-package
       - name: Prove package transaction exclusion
         run: >-
           crates/orna-system-tests/scenarios/debian-package.sh
