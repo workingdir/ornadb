@@ -1392,8 +1392,8 @@ pub(crate) async fn execute_authorised_raw_server_insert(
         .await
 }
 
-/// Executes one pinned raw SERVER `INSERT` with zero arguments or one Boolean
-/// or Reference argument.
+/// Executes one pinned raw SERVER `INSERT` with zero arguments or one accepted
+/// scalar or Reference argument.
 ///
 /// The caller owns recovery, authorisation, audit, savepoint, and commit. This
 /// entry validates the raw argument shape, then delegates stable identity and
@@ -1456,18 +1456,24 @@ fn validate_raw_server_insert_argument_shape(
         [argument]
             if matches!(
                 argument.value(),
-                RuntimeValue::Boolean(_) | RuntimeValue::Reference { .. }
+                RuntimeValue::Boolean(_)
+                    | RuntimeValue::Integer(_)
+                    | RuntimeValue::BigInt(_)
+                    | RuntimeValue::Float(_)
+                    | RuntimeValue::Text(_)
+                    | RuntimeValue::Bytes(_)
+                    | RuntimeValue::Reference { .. }
             ) =>
         {
             Ok(())
         }
         [argument] => Err(argument_error(
             Some(argument.parameter()),
-            "raw SERVER INSERT calls accept only one Boolean or Reference argument",
+            "raw SERVER INSERT calls accept only one supported scalar or Reference argument",
         )),
         _ => Err(argument_error(
             None,
-            "raw SERVER INSERT calls accept only one Boolean or Reference argument",
+            "raw SERVER INSERT calls accept only one supported scalar or Reference argument",
         )),
     }
 }
@@ -1505,6 +1511,67 @@ fn validate_raw_reference_insert_parameter_use(
     Ok(())
 }
 
+fn validate_raw_scalar_insert_parameter_use(
+    active: &ActiveDatabaseRevision,
+    function: &FunctionDefinition,
+    plan: &ServerMutationPlan,
+    arguments: &[FunctionArgument],
+) -> Result<(), PostgresKernelError> {
+    let [argument] = arguments else {
+        return Ok(());
+    };
+    if !matches!(
+        argument.value(),
+        RuntimeValue::Integer(_)
+            | RuntimeValue::BigInt(_)
+            | RuntimeValue::Float(_)
+            | RuntimeValue::Text(_)
+            | RuntimeValue::Bytes(_)
+    ) {
+        return Ok(());
+    }
+    let [parameter] = function.parameters() else {
+        return Err(function_signature_error(
+            function.id(),
+            "raw scalar INSERT calls must declare exactly one parameter",
+        ));
+    };
+    let reads_parameter = plan.assignments().iter().any(|assignment| {
+        let expression = assignment.expression();
+        matches!(
+            expression.kind(),
+            MutationExpressionKind::Parameter { owner, parameter: read }
+                if *owner == function.id() && *read == parameter.id()
+        ) && runtime_types_match(
+            active.catalogue_hash_context(),
+            expression.resolved_type(),
+            parameter.resolved_type(),
+        )
+    });
+    if argument.parameter() != parameter.id() || !reads_parameter {
+        return Err(argument_error(
+            Some(argument.parameter()),
+            "raw SERVER INSERT calls must directly read the sole scalar parameter",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_raw_text_insert_argument(
+    arguments: &[FunctionArgument],
+) -> Result<(), PostgresKernelError> {
+    let [argument] = arguments else {
+        return Ok(());
+    };
+    if matches!(argument.value(), RuntimeValue::Text(value) if value.contains('\0')) {
+        return Err(argument_error(
+            Some(argument.parameter()),
+            "raw Text INSERT arguments cannot contain U+0000",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_active_raw_server_insert<'a>(
     active: &'a ActiveDatabaseRevision,
     function: &FunctionDefinition,
@@ -1513,6 +1580,8 @@ fn validate_active_raw_server_insert<'a>(
     let validated =
         validate_active_mutation(active, function, arguments, MutationExecutionKind::Insert)?;
     validate_raw_reference_insert_parameter_use(function, &validated.plan, arguments)?;
+    validate_raw_scalar_insert_parameter_use(active, function, &validated.plan, arguments)?;
+    validate_raw_text_insert_argument(arguments)?;
     Ok(validated)
 }
 
