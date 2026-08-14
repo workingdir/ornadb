@@ -77,3 +77,5 @@ source-of-truth or authority rules.
   [PostgreSQL Uses One Private Rust Crate](0037-single-private-postgresql-crate.md)
 * **work ADR 0038:**
   [Installed Source Apply Activates One Complete File](0038-installed-source-apply.md)
+* **work ADR 0039:**
+  [Canonical Collection Values Use ORV5 and ORF5](0039-canonical-collection-value-codec.md)
