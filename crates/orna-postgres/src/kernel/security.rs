@@ -28,7 +28,8 @@ use crate::{
         raw_server_target_is_unavailable, validate_raw_server_select_target,
     },
     server_mutation_execution::{
-        execute_authorised_raw_server_insert, raw_server_insert_target_is_selected,
+        ServerInsertError, execute_authorised_raw_server_insert,
+        execute_authorised_raw_server_insert_with_arguments, raw_server_insert_target_is_selected,
         raw_server_insert_target_is_unavailable,
     },
     server_runtime::configure_and_recover,
@@ -66,8 +67,29 @@ impl PostgresKernel {
         authenticated_session: &AuthenticatedSession,
         function: FunctionId,
     ) -> Result<AuthenticatedRawCallResult, PostgresKernelError> {
-        self.dispatch_authenticated_raw_call_with_options(authenticated_session, function, None)
+        self.dispatch_authenticated_raw_call_with_arguments(authenticated_session, function, &[])
             .await
+    }
+
+    /// Dispatches one authenticated raw call with zero or one Boolean argument.
+    ///
+    /// Other argument shapes fail before PostgreSQL is opened. An admitted
+    /// shape is authorised and audited before the active target or parameter
+    /// declaration is inspected.
+    pub async fn dispatch_authenticated_raw_call_with_arguments(
+        &self,
+        authenticated_session: &AuthenticatedSession,
+        function: FunctionId,
+        arguments: &[FunctionArgument],
+    ) -> Result<AuthenticatedRawCallResult, PostgresKernelError> {
+        validate_raw_call_argument_shape(function, arguments)?;
+        self.dispatch_authenticated_raw_call_with_options(
+            authenticated_session,
+            function,
+            arguments,
+            None,
+        )
+        .await
     }
 
     /// Pauses raw dispatch after one active and security snapshot is recovered.
@@ -83,9 +105,36 @@ impl PostgresKernel {
         reached: std::sync::Arc<tokio::sync::Barrier>,
         resume: std::sync::Arc<tokio::sync::Barrier>,
     ) -> Result<AuthenticatedRawCallResult, PostgresKernelError> {
+        self.dispatch_authenticated_raw_call_with_arguments_and_test_barrier(
+            authenticated_session,
+            function,
+            &[],
+            reached,
+            resume,
+        )
+        .await
+    }
+
+    /// Pauses raw dispatch with arguments after active recovery.
+    ///
+    /// The hook lets the integration harness alter only its disposable test
+    /// database after recovery has verified the durable catalogue. It is absent
+    /// from production builds and does not alter transaction state.
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub async fn dispatch_authenticated_raw_call_with_arguments_and_test_barrier(
+        &self,
+        authenticated_session: &AuthenticatedSession,
+        function: FunctionId,
+        arguments: &[FunctionArgument],
+        reached: std::sync::Arc<tokio::sync::Barrier>,
+        resume: std::sync::Arc<tokio::sync::Barrier>,
+    ) -> Result<AuthenticatedRawCallResult, PostgresKernelError> {
+        validate_raw_call_argument_shape(function, arguments)?;
         self.dispatch_authenticated_raw_call_with_options(
             authenticated_session,
             function,
+            arguments,
             Some(RawDispatchTestBarrier { reached, resume }),
         )
         .await
@@ -95,6 +144,7 @@ impl PostgresKernel {
         &self,
         authenticated_session: &AuthenticatedSession,
         function: FunctionId,
+        arguments: &[FunctionArgument],
         test_barrier: Option<RawDispatchTestBarrier>,
     ) -> Result<AuthenticatedRawCallResult, PostgresKernelError> {
         let mut database_session = self.open().await?;
@@ -148,6 +198,11 @@ impl PostgresKernel {
                                     record: active.pair().catalogue().canonical(),
                                     rule: "catalogue health requires the accepted standard context",
                                 })
+                            } else if !arguments.is_empty() {
+                                Err(raw_call_target_unavailable(
+                                    function,
+                                    "raw call arguments require an active SERVER INSERT target",
+                                ))
                             } else {
                                 Ok(AuthenticatedRawCallResult::Client(RuntimeValue::Boolean(
                                     true,
@@ -155,11 +210,18 @@ impl PostgresKernel {
                             }
                         }
                         Some(definition) if definition.domain() == FunctionDomain::Client => {
-                            evaluate_authorised_client_function(&active, &authorisation)
-                                .map(|result| {
-                                    AuthenticatedRawCallResult::Client(result.into_value())
-                                })
-                                .map_err(PostgresKernelError::ClientExecution)
+                            if arguments.is_empty() {
+                                evaluate_authorised_client_function(&active, &authorisation)
+                                    .map(|result| {
+                                        AuthenticatedRawCallResult::Client(result.into_value())
+                                    })
+                                    .map_err(PostgresKernelError::ClientExecution)
+                            } else {
+                                Err(raw_call_target_unavailable(
+                                    function,
+                                    "raw call arguments require an active SERVER INSERT target",
+                                ))
+                            }
                         }
                         Some(definition) if definition.domain() == FunctionDomain::Server => {
                             if raw_server_insert_target_is_selected(&active, function) {
@@ -167,12 +229,22 @@ impl PostgresKernel {
                                     .savepoint("raw_server_insert_execution")
                                     .await
                                     .map_err(PostgresKernelError::Database)?;
-                                let insert = execute_authorised_raw_server_insert(
-                                    &savepoint,
-                                    &active,
-                                    &authorisation,
-                                )
-                                .await;
+                                let insert = if arguments.is_empty() {
+                                    execute_authorised_raw_server_insert(
+                                        &savepoint,
+                                        &active,
+                                        &authorisation,
+                                    )
+                                    .await
+                                } else {
+                                    execute_authorised_raw_server_insert_with_arguments(
+                                        &savepoint,
+                                        &active,
+                                        &authorisation,
+                                        arguments,
+                                    )
+                                    .await
+                                };
                                 match insert {
                                     Ok(value) => {
                                         savepoint
@@ -186,9 +258,18 @@ impl PostgresKernel {
                                             .rollback()
                                             .await
                                             .map_err(PostgresKernelError::Database)?;
-                                        Err(classify_raw_server_insert_error(error))
+                                        Err(classify_raw_server_insert_error(
+                                            error,
+                                            !arguments.is_empty(),
+                                            function,
+                                        ))
                                     }
                                 }
+                            } else if !arguments.is_empty() {
+                                Err(raw_call_target_unavailable(
+                                    function,
+                                    "raw call arguments require an active SERVER INSERT target",
+                                ))
                             } else {
                                 let savepoint = transaction
                                     .savepoint("raw_server_select_execution")
@@ -225,6 +306,10 @@ impl PostgresKernel {
                                 }
                             }
                         }
+                        Some(_) if !arguments.is_empty() => Err(raw_call_target_unavailable(
+                            function,
+                            "raw call arguments require an active SERVER INSERT target",
+                        )),
                         Some(_) => Err(PostgresKernelError::DurableInvariant {
                             relation: "active catalogue",
                             record: function.canonical(),
@@ -1036,8 +1121,41 @@ fn classify_raw_server_error(error: PostgresKernelError) -> PostgresKernelError 
     }
 }
 
-fn classify_raw_server_insert_error(error: PostgresKernelError) -> PostgresKernelError {
+fn validate_raw_call_argument_shape(
+    function: FunctionId,
+    arguments: &[FunctionArgument],
+) -> Result<(), PostgresKernelError> {
+    match arguments {
+        [] => Ok(()),
+        [argument] if matches!(argument.value(), RuntimeValue::Boolean(_)) => Ok(()),
+        _ => Err(raw_call_target_unavailable(
+            function,
+            "raw calls accept zero arguments or one Boolean argument",
+        )),
+    }
+}
+
+fn raw_call_target_unavailable(function: FunctionId, rule: &'static str) -> PostgresKernelError {
+    PostgresKernelError::RawCallTargetUnavailable { function, rule }
+}
+
+fn classify_raw_server_insert_error(
+    error: PostgresKernelError,
+    arguments_present: bool,
+    function: FunctionId,
+) -> PostgresKernelError {
     match error {
+        PostgresKernelError::ServerInsert(source)
+            if raw_server_insert_argument_target_is_unavailable(&source, arguments_present) =>
+        {
+            raw_call_target_unavailable(
+                function,
+                "raw SERVER INSERT argument target is unavailable",
+            )
+        }
+        PostgresKernelError::ServerInsert(source) if arguments_present => {
+            PostgresKernelError::ServerInsert(source)
+        }
         PostgresKernelError::ServerInsert(source)
             if raw_server_insert_target_is_unavailable(&source) =>
         {
@@ -1046,6 +1164,26 @@ fn classify_raw_server_insert_error(error: PostgresKernelError) -> PostgresKerne
             }
         }
         error => error,
+    }
+}
+
+fn raw_server_insert_argument_target_is_unavailable(
+    error: &ServerInsertError,
+    arguments_present: bool,
+) -> bool {
+    match error {
+        ServerInsertError::NotCommitted { source, .. } => {
+            raw_server_insert_argument_target_is_unavailable(source, arguments_present)
+        }
+        ServerInsertError::Argument { .. } => true,
+        ServerInsertError::FunctionNotActive { .. }
+        | ServerInsertError::FunctionSignature { .. }
+        | ServerInsertError::Artifact { .. }
+        | ServerInsertError::PlanDecode(_)
+        | ServerInsertError::PlanInvariant { .. }
+        | ServerInsertError::ReferenceEvidence { .. }
+        | ServerInsertError::ComplexityLimit { .. } => arguments_present,
+        _ => false,
     }
 }
 
@@ -1805,6 +1943,171 @@ fn decode_principal_status(value: String) -> Result<PrincipalStatus, PostgresKer
 #[cfg(test)]
 mod tests {
     use super::*;
+    use orna_core::{FieldId, ParameterId, TypeId};
+
+    const RAW_CALL_FUNCTION: FunctionId = FunctionId::from_bytes([0x61; 16]);
+    const RAW_CALL_PARAMETER: ParameterId = ParameterId::from_bytes([0x62; 16]);
+
+    #[test]
+    fn raw_call_argument_shape_accepts_zero_or_one_boolean() {
+        validate_raw_call_argument_shape(RAW_CALL_FUNCTION, &[])
+            .expect("zero arguments must be accepted");
+        for value in [true, false] {
+            let argument = FunctionArgument::new(RAW_CALL_PARAMETER, RuntimeValue::Boolean(value))
+                .expect("Boolean argument is valid");
+            validate_raw_call_argument_shape(RAW_CALL_FUNCTION, std::slice::from_ref(&argument))
+                .expect("one Boolean argument must be accepted");
+        }
+    }
+
+    #[test]
+    fn raw_call_argument_shape_rejects_other_argument_sets() {
+        let integer = FunctionArgument::new(RAW_CALL_PARAMETER, RuntimeValue::Integer(1))
+            .expect("Integer argument is valid");
+        assert!(matches!(
+            validate_raw_call_argument_shape(RAW_CALL_FUNCTION, std::slice::from_ref(&integer))
+                .expect_err("one Integer argument must be rejected"),
+            PostgresKernelError::RawCallTargetUnavailable {
+                function: RAW_CALL_FUNCTION,
+                rule: "raw calls accept zero arguments or one Boolean argument",
+            }
+        ));
+
+        let two = [
+            FunctionArgument::new(RAW_CALL_PARAMETER, RuntimeValue::Boolean(true))
+                .expect("Boolean argument is valid"),
+            FunctionArgument::new(
+                ParameterId::from_bytes([0x64; 16]),
+                RuntimeValue::Boolean(false),
+            )
+            .expect("Boolean argument is valid"),
+        ];
+        assert!(matches!(
+            validate_raw_call_argument_shape(RAW_CALL_FUNCTION, &two)
+                .expect_err("two Boolean arguments must be rejected"),
+            PostgresKernelError::RawCallTargetUnavailable {
+                function: RAW_CALL_FUNCTION,
+                rule: "raw calls accept zero arguments or one Boolean argument",
+            }
+        ));
+    }
+
+    #[test]
+    fn raw_insert_argument_errors_classify_to_generic_unavailable() {
+        let argument_error = PostgresKernelError::ServerInsert(
+            crate::ServerInsertError::Argument {
+                parameter: Some(RAW_CALL_PARAMETER),
+                rule: "an argument was supplied for a parameter that this function does not declare",
+            },
+        );
+        assert!(matches!(
+            classify_raw_server_insert_error(argument_error, true, RAW_CALL_FUNCTION),
+            PostgresKernelError::RawCallTargetUnavailable {
+                function: RAW_CALL_FUNCTION,
+                rule: "raw SERVER INSERT argument target is unavailable",
+            }
+        ));
+
+        let missing_required =
+            PostgresKernelError::ServerInsert(crate::ServerInsertError::Argument {
+                parameter: Some(RAW_CALL_PARAMETER),
+                rule: "a required argument is missing",
+            });
+        assert!(matches!(
+            classify_raw_server_insert_error(missing_required, false, RAW_CALL_FUNCTION),
+            PostgresKernelError::RawCallTargetUnavailable {
+                function: RAW_CALL_FUNCTION,
+                rule: "raw SERVER INSERT argument target is unavailable",
+            }
+        ));
+    }
+
+    #[test]
+    fn raw_insert_parameter_free_target_failure_stays_typed() {
+        let pair = RevisionPair::new(
+            SourceRevisionId::from_bytes([0x71; 16]),
+            CatalogueRevisionId::from_bytes([0x72; 16]),
+        );
+        let target_error =
+            PostgresKernelError::ServerInsert(crate::ServerInsertError::FunctionNotActive {
+                pair,
+                function: RAW_CALL_FUNCTION,
+            });
+        assert!(matches!(
+            classify_raw_server_insert_error(target_error, false, RAW_CALL_FUNCTION),
+            PostgresKernelError::RawServerTargetUnavailable {
+                source: RawServerTargetError::Insert(
+                    crate::ServerInsertError::FunctionNotActive {
+                        pair: actual_pair,
+                        function: RAW_CALL_FUNCTION,
+                    },
+                ),
+            } if actual_pair == pair
+        ));
+    }
+
+    #[test]
+    fn raw_insert_operational_error_stays_unchanged() {
+        let operational = PostgresKernelError::ServerInsert(crate::ServerInsertError::Kernel {
+            source: Box::new(PostgresKernelError::DurableInvariant {
+                relation: "test relation",
+                record: "test record".to_owned(),
+                rule: "test rule",
+            }),
+        });
+        assert!(matches!(
+            classify_raw_server_insert_error(operational, true, RAW_CALL_FUNCTION),
+            PostgresKernelError::ServerInsert(crate::ServerInsertError::Kernel {
+                source,
+            }) if matches!(
+                *source,
+                PostgresKernelError::DurableInvariant {
+                    relation: "test relation",
+                    ref record,
+                    rule: "test rule",
+                } if record == "test record"
+            )
+        ));
+    }
+
+    #[test]
+    fn raw_insert_value_codec_error_stays_unchanged_with_arguments_present() {
+        let unsupported = PostgresKernelError::ServerInsert(crate::ServerInsertError::ValueCodec(
+            orna_protocol::ValueCodecError::UnsupportedValue,
+        ));
+        assert!(matches!(
+            classify_raw_server_insert_error(unsupported, true, RAW_CALL_FUNCTION),
+            PostgresKernelError::ServerInsert(crate::ServerInsertError::ValueCodec(
+                orna_protocol::ValueCodecError::UnsupportedValue,
+            ))
+        ));
+    }
+
+    #[test]
+    fn raw_insert_unique_reference_conflict_stays_typed_with_arguments_present() {
+        const CONFLICT_OWNER: TypeId = TypeId::from_bytes([0x41; 16]);
+        const CONFLICT_FIELD: FieldId = FieldId::from_bytes([0x42; 16]);
+        const CONFLICT_REFERENCED: TypeId = TypeId::from_bytes([0x43; 16]);
+        let config_error = "port=invalid"
+            .parse::<tokio_postgres::Config>()
+            .expect_err("invalid port must fail to parse");
+        let conflict =
+            PostgresKernelError::ServerInsert(crate::ServerInsertError::UniqueReferenceConflict {
+                owner: CONFLICT_OWNER,
+                field: CONFLICT_FIELD,
+                referenced_type: CONFLICT_REFERENCED,
+                source: config_error,
+            });
+        assert!(matches!(
+            classify_raw_server_insert_error(conflict, true, RAW_CALL_FUNCTION),
+            PostgresKernelError::ServerInsert(crate::ServerInsertError::UniqueReferenceConflict {
+                owner: CONFLICT_OWNER,
+                field: CONFLICT_FIELD,
+                referenced_type: CONFLICT_REFERENCED,
+                source,
+            }) if source.as_db_error().is_none()
+        ));
+    }
 
     #[test]
     fn raw_call_results_transfer_owned_values_in_execution_order() {
