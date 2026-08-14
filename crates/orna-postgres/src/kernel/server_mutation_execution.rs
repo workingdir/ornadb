@@ -1392,7 +1392,8 @@ pub(crate) async fn execute_authorised_raw_server_insert(
         .await
 }
 
-/// Executes one pinned raw SERVER `INSERT` with zero or one Boolean argument.
+/// Executes one pinned raw SERVER `INSERT` with zero arguments or one Boolean
+/// or Reference argument.
 ///
 /// The caller owns recovery, authorisation, audit, savepoint, and commit. This
 /// entry validates the raw argument shape, then delegates stable identity and
@@ -1426,7 +1427,9 @@ pub(crate) async fn execute_authorised_raw_server_insert_with_arguments(
         target.function(),
         function.current_revision(),
     );
-    let (result, _) = execute_active_insert(transaction, active, function, context, arguments)
+    let validated = validate_active_raw_server_insert(active, function, arguments)
+        .map_err(|error| not_committed(context, error))?;
+    let (result, _) = execute_validated_active_insert(transaction, active, context, validated)
         .await
         .map_err(|error| not_committed(context, error))?;
     Ok(RuntimeValue::Reference {
@@ -1450,16 +1453,67 @@ fn validate_raw_server_insert_argument_shape(
     }
 
     match arguments {
-        [argument] if matches!(argument.value(), RuntimeValue::Boolean(_)) => Ok(()),
+        [argument]
+            if matches!(
+                argument.value(),
+                RuntimeValue::Boolean(_) | RuntimeValue::Reference { .. }
+            ) =>
+        {
+            Ok(())
+        }
         [argument] => Err(argument_error(
             Some(argument.parameter()),
-            "raw SERVER INSERT calls accept only one Boolean argument",
+            "raw SERVER INSERT calls accept only one Boolean or Reference argument",
         )),
         _ => Err(argument_error(
             None,
-            "raw SERVER INSERT calls accept only one Boolean argument",
+            "raw SERVER INSERT calls accept only one Boolean or Reference argument",
         )),
     }
+}
+
+fn validate_raw_reference_insert_parameter_use(
+    function: &FunctionDefinition,
+    plan: &ServerMutationPlan,
+    arguments: &[FunctionArgument],
+) -> Result<(), PostgresKernelError> {
+    let [argument] = arguments else {
+        return Ok(());
+    };
+    if !matches!(argument.value(), RuntimeValue::Reference { .. }) {
+        return Ok(());
+    }
+    let [parameter] = function.parameters() else {
+        return Err(function_signature_error(
+            function.id(),
+            "raw Reference INSERT calls must declare exactly one parameter",
+        ));
+    };
+    let reads_parameter = plan.assignments().iter().any(|assignment| {
+        matches!(
+            assignment.expression().kind(),
+            MutationExpressionKind::Parameter { owner, parameter: read }
+                if *owner == function.id() && *read == parameter.id()
+        )
+    });
+    if !reads_parameter {
+        return Err(argument_error(
+            Some(argument.parameter()),
+            "raw SERVER INSERT calls must read the sole Reference parameter",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_active_raw_server_insert<'a>(
+    active: &'a ActiveDatabaseRevision,
+    function: &FunctionDefinition,
+    arguments: &[FunctionArgument],
+) -> Result<ValidatedActiveMutation<'a>, PostgresKernelError> {
+    let validated =
+        validate_active_mutation(active, function, arguments, MutationExecutionKind::Insert)?;
+    validate_raw_reference_insert_parameter_use(function, &validated.plan, arguments)?;
+    Ok(validated)
 }
 
 /// Reports whether an INSERT failure is a closed raw target rejection.
@@ -1872,6 +1926,15 @@ async fn execute_active_insert(
 ) -> Result<(ServerInsertResult, UniqueReferenceConstraints), PostgresKernelError> {
     let validated =
         validate_active_mutation(active, function, arguments, MutationExecutionKind::Insert)?;
+    execute_validated_active_insert(transaction, active, context, validated).await
+}
+
+async fn execute_validated_active_insert(
+    transaction: &Transaction<'_>,
+    active: &ActiveDatabaseRevision,
+    context: ServerInsertContext,
+    validated: ValidatedActiveMutation<'_>,
+) -> Result<(ServerInsertResult, UniqueReferenceConstraints), PostgresKernelError> {
     let lowered = lower_insert_with_active(active, &validated.plan, &validated.arguments)?;
     let statement = transaction
         .prepare_typed(&lowered.sql, &lowered.bind_types)
@@ -4485,6 +4548,23 @@ mod tests {
         )
     }
 
+    fn raw_reference_function() -> FunctionDefinition {
+        function(
+            FunctionDomain::Server,
+            vec![ParameterDefinition::new(
+                PARAMETER_OWNER,
+                "raw_owner",
+                0,
+                ResolvedType::reference(OTHER),
+                None,
+            )],
+            rows_reference(TARGET),
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::Atomic),
+            FunctionVolatility::Volatile,
+        )
+    }
+
     #[test]
     fn raw_insert_argument_shape_accepts_zero_parameters_and_rejects_extra_arguments() {
         let zero = raw_zero_parameter_function();
@@ -4518,7 +4598,7 @@ mod tests {
                 assert_eq!(parameter, None);
                 assert_eq!(
                     rule,
-                    "raw SERVER INSERT calls accept only one Boolean argument"
+                    "raw SERVER INSERT calls accept only one Boolean or Reference argument"
                 );
             }
             other => panic!("unexpected mutation error: {other:?}"),
@@ -4596,7 +4676,87 @@ mod tests {
                 assert_eq!(parameter, Some(PARAMETER_TITLE));
                 assert_eq!(
                     rule,
-                    "raw SERVER INSERT calls accept only one Boolean argument"
+                    "raw SERVER INSERT calls accept only one Boolean or Reference argument"
+                );
+            }
+            other => panic!("unexpected mutation error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn raw_insert_reference_argument_is_accepted_at_the_shape_boundary_and_binds_object_bytes() {
+        let catalogue = catalogue(target_fields(OTHER), true, Vec::new());
+        let function = raw_reference_function();
+        let argument = FunctionArgument::new(
+            PARAMETER_OWNER,
+            RuntimeValue::Reference {
+                target: OTHER,
+                object: OBJECT,
+            },
+        )
+        .unwrap();
+        validate_raw_server_insert_argument_shape(&function, std::slice::from_ref(&argument))
+            .unwrap();
+        let validated = validate_arguments(&catalogue, &function, &[argument]).unwrap();
+        assert_eq!(
+            validated[&PARAMETER_OWNER],
+            BindValue::Bytes(OBJECT.to_bytes().to_vec())
+        );
+    }
+
+    #[test]
+    fn raw_reference_insert_parameter_use_requires_the_sole_reference_parameter_to_be_read() {
+        let function = raw_reference_function();
+        let argument = FunctionArgument::new(
+            PARAMETER_OWNER,
+            RuntimeValue::Reference {
+                target: OTHER,
+                object: OBJECT,
+            },
+        )
+        .unwrap();
+        let reads_reference = ServerMutationPlan::new_insert(
+            TARGET,
+            [FieldAssignment::new(
+                TARGET,
+                FIELD_OWNER,
+                MutationExpression::parameter(
+                    FUNCTION,
+                    PARAMETER_OWNER,
+                    ResolvedType::reference(OTHER),
+                )
+                .unwrap(),
+            )],
+            TARGET,
+        )
+        .unwrap();
+        validate_raw_reference_insert_parameter_use(
+            &function,
+            &reads_reference,
+            std::slice::from_ref(&argument),
+        )
+        .expect("a plan that reads the sole Reference parameter must pass");
+
+        let ignores_reference = ServerMutationPlan::new_insert(
+            TARGET,
+            [FieldAssignment::new(
+                TARGET,
+                FIELD_ENABLED,
+                MutationExpression::boolean_literal(true),
+            )],
+            TARGET,
+        )
+        .unwrap();
+        let error = expect_insert_error(
+            validate_raw_reference_insert_parameter_use(&function, &ignores_reference, &[argument])
+                .unwrap_err(),
+        );
+        match error {
+            ServerInsertError::Argument { parameter, rule } => {
+                assert_eq!(parameter, Some(PARAMETER_OWNER));
+                assert_eq!(
+                    rule,
+                    "raw SERVER INSERT calls must read the sole Reference parameter"
                 );
             }
             other => panic!("unexpected mutation error: {other:?}"),
