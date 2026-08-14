@@ -1,0 +1,39 @@
+CREATE SCHEMA predicate_test;
+
+CREATE TYPE predicate_test.entry AS OBJECT (
+    marker BOOLEAN NOT NULL,
+    visible BOOLEAN
+);
+
+CREATE SERVER FUNCTION predicate_test.create_true()
+RETURNS ROWS (created REF predicate_test.entry)
+SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE
+AS INSERT INTO predicate_test.entry AS made (marker, visible)
+VALUES (FALSE, TRUE) RETURNING REF(made);
+
+CREATE SERVER FUNCTION predicate_test.create_false()
+RETURNS ROWS (created REF predicate_test.entry)
+SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE
+AS INSERT INTO predicate_test.entry AS made (marker, visible)
+VALUES (TRUE, FALSE) RETURNING REF(made);
+
+CREATE SERVER FUNCTION predicate_test.create_null()
+RETURNS ROWS (created REF predicate_test.entry)
+SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE
+AS INSERT INTO predicate_test.entry AS made (marker)
+VALUES (TRUE) RETURNING REF(made);
+
+CREATE SERVER FUNCTION predicate_test.read_all()
+RETURNS ROWS (visible BOOLEAN)
+SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE
+AS SELECT entry.visible FROM predicate_test.entry entry;
+
+CREATE SERVER FUNCTION predicate_test.read_matching()
+RETURNS ROWS (marker BOOLEAN)
+SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE
+AS SELECT entry.marker FROM predicate_test.entry entry WHERE entry.visible;
+
+CREATE SERVER FUNCTION predicate_test.read_matching_distinct()
+RETURNS ROWS (marker BOOLEAN)
+SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE
+AS SELECT DISTINCT entry.marker FROM predicate_test.entry entry WHERE entry.visible;

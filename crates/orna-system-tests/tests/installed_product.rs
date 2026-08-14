@@ -2325,11 +2325,32 @@ fn decode_reader_values(
     function: &str,
     label: &'static str,
 ) -> Result<Vec<bool>, Error> {
+    run_reader_and_decode(
+        machine,
+        function,
+        label,
+        decode_boolean_envelopes,
+        "complete Boolean envelopes",
+    )
+}
+
+/// Run one granted raw reader and decode its complete envelope stream.
+///
+/// The reader must exit 0 with empty standard error. The decoder receives the
+/// exact standard-output bytes and must return `Some` only for one complete
+/// valid stream.
+fn run_reader_and_decode<T>(
+    machine: &InstalledMachine,
+    function: &str,
+    label: &'static str,
+    decode: impl FnOnce(&[u8]) -> Option<T>,
+    description: &'static str,
+) -> Result<T, Error> {
     let output = machine
         .run_as_orna(&["raw-call", function])
-        .map_err(|io| Error::Spawn {
+        .map_err(|error| Error::Spawn {
             label: "spawn raw reader call",
-            io: match io {
+            io: match error {
                 Error::Spawn { io, .. } => io,
                 _ => unreachable!("run_as_orna only returns spawn errors"),
             },
@@ -2343,8 +2364,8 @@ fn decode_reader_values(
             ),
         });
     }
-    decode_boolean_envelopes(&output.stdout).ok_or_else(|| Error::Unexpected {
-        message: format!("{label} output must decode as complete Boolean envelopes"),
+    decode(&output.stdout).ok_or_else(|| Error::Unexpected {
+        message: format!("{label} output must decode as {description}"),
     })
 }
 
@@ -3085,4 +3106,375 @@ fn installed_reference_reader_returns_stored_object_references_across_replay_and
         "orna raw-call read_entries four references",
     )
     .expect("read must return exactly the references A, B, C, and D");
+}
+
+/// Decode a stream of complete canonical ORV1 Boolean or Boolean-NULL
+/// envelopes in order.
+///
+/// Each envelope must start with the ORV1 marker, carry the BOOLEAN type
+/// identity, and be either the NULL-SCALAR tag with a zero payload length or
+/// the BOOLEAN tag with payload length 1 and a payload byte of exactly 0 or
+/// 1. Returns `None` when any envelope is malformed or trailing bytes remain.
+fn decode_boolean_or_null_envelopes(bytes: &[u8]) -> Option<Vec<Option<bool>>> {
+    let mut values = Vec::new();
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let remaining = &bytes[offset..];
+        if remaining.len() < 25 || &remaining[0..4] != b"ORV1" {
+            return None;
+        }
+        if remaining[5..20] != [0; 15] || remaining[20] != 0x01 {
+            return None;
+        }
+        match remaining[4] {
+            0x00 => {
+                if remaining[21..25] != 0_u32.to_be_bytes() {
+                    return None;
+                }
+                values.push(None);
+                offset += 25;
+            }
+            0x02 => {
+                if remaining.len() < 26 || remaining[21..25] != 1_u32.to_be_bytes() {
+                    return None;
+                }
+                match remaining[25] {
+                    0x00 => values.push(Some(false)),
+                    0x01 => values.push(Some(true)),
+                    _ => return None,
+                }
+                offset += 26;
+            }
+            _ => return None,
+        }
+    }
+    Some(values)
+}
+
+/// Run one granted raw reader and decode its complete mixed Boolean stream.
+///
+/// The reader must exit 0 with empty standard error. The decoded values are
+/// returned in wire order; callers sort before comparing multisets.
+fn decode_mixed_reader_values(
+    machine: &InstalledMachine,
+    function: &str,
+    label: &'static str,
+) -> Result<Vec<Option<bool>>, Error> {
+    run_reader_and_decode(
+        machine,
+        function,
+        label,
+        decode_boolean_or_null_envelopes,
+        "complete mixed Boolean envelopes",
+    )
+}
+
+/// Prove that a nullable Boolean field reads back as a typed NULL envelope,
+/// that a bare Boolean predicate filters rows and SELECT DISTINCT deduplicates
+/// through the installed product's public raw-call path, and that the exact
+/// fixture reapplies and restarts without changing the observable rows.
+///
+/// The test installs the exact checked-in `product_test_predicates.orna`
+/// fixture, applies it, and requires exactly six sorted qualified-name
+/// mappings with pairwise distinct function identities. It then proves:
+///
+/// * all six raw calls are denied before any grant;
+/// * after granting all six functions the three readers succeed empty;
+/// * rows where marker and visible carry opposite truth (TRUE rows have
+///   marker FALSE and visible TRUE, the FALSE row has marker TRUE and
+///   visible FALSE, and the omitted-nullable row has marker TRUE) decode
+///   through `read_all` as the sorted multiset
+///   [None, Some(false), Some(true), Some(true)], while the bare-predicate
+///   readers project marker and return [false, false] and [false], causally
+///   separating the visible predicate from the marker projection;
+/// * reapplying the exact same fixture keeps the complete six-entry function
+///   vector, grants, and rows;
+/// * a restart keeps every reader result;
+/// * post-restart creates through the surviving grants add one TRUE, one
+///   FALSE, and one omitted-nullable row, and the final sorted multisets are
+///   [None, None, false, false, true, true, true], [false, false, false],
+///   and [false].
+///
+/// All observations go through the packaged `/usr/bin/orna` public commands
+/// and raw-call ORV envelopes. The test makes no claim about physical
+/// storage, private rows, or row ordering.
+#[test]
+#[ignore = "requires Docker, ORNA_SYSTEM_TEST_DEBIAN_PACKAGE, and the installed orna executable"]
+fn installed_nullable_boolean_predicates_filter_and_distinct_across_replay_and_restart() {
+    let package = std::env::var("ORNA_SYSTEM_TEST_DEBIAN_PACKAGE")
+        .expect("ORNA_SYSTEM_TEST_DEBIAN_PACKAGE must point at the reproduced .deb package");
+    let artifact = FrozenPackageArtifact::new(PackageFormat::Debian, &package)
+        .expect("freeze the reproduced Debian package");
+    let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures")
+        .join("product_test_predicates.orna");
+    let fixture = fs::read(&fixture_path).expect("read the checked-in predicates fixture");
+
+    let machine = InstalledMachine::start(&artifact, &fixture)
+        .expect("start the installed Debian test machine");
+
+    // Apply the exact fixture and require the six sorted mappings.
+    let apply = machine
+        .run_as_orna(&["source", "apply", FIXTURE_PATH])
+        .expect("run installed source apply");
+    let apply = require_success("orna source apply", apply).expect("source apply must succeed");
+    assert!(
+        apply.stderr.is_empty(),
+        "source apply must keep standard error empty"
+    );
+    let document = parse_apply_document(&apply.stdout).expect("source apply JSON must parse");
+    let expected_order = [
+        vec!["predicate_test".to_string(), "create_false".to_string()],
+        vec!["predicate_test".to_string(), "create_null".to_string()],
+        vec!["predicate_test".to_string(), "create_true".to_string()],
+        vec!["predicate_test".to_string(), "read_all".to_string()],
+        vec!["predicate_test".to_string(), "read_matching".to_string()],
+        vec![
+            "predicate_test".to_string(),
+            "read_matching_distinct".to_string(),
+        ],
+    ];
+    let actual_order = document
+        .functions
+        .iter()
+        .map(|(names, _)| names.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual_order, expected_order,
+        "apply must report the six function entries sorted by qualified name"
+    );
+    let create_true = document
+        .function_id(&["predicate_test", "create_true"])
+        .expect("apply must report create_true");
+    let create_false = document
+        .function_id(&["predicate_test", "create_false"])
+        .expect("apply must report create_false");
+    let create_null = document
+        .function_id(&["predicate_test", "create_null"])
+        .expect("apply must report create_null");
+    let read_all = document
+        .function_id(&["predicate_test", "read_all"])
+        .expect("apply must report read_all");
+    let read_matching = document
+        .function_id(&["predicate_test", "read_matching"])
+        .expect("apply must report read_matching");
+    let read_matching_distinct = document
+        .function_id(&["predicate_test", "read_matching_distinct"])
+        .expect("apply must report read_matching_distinct");
+    let identities = [
+        create_true,
+        create_false,
+        create_null,
+        read_all,
+        read_matching,
+        read_matching_distinct,
+    ];
+    for (index, left) in identities.iter().enumerate() {
+        for right in &identities[index + 1..] {
+            assert_ne!(
+                left, right,
+                "the six function identities must be pairwise distinct"
+            );
+        }
+    }
+
+    // Source apply grants nothing: every raw call is denied before any grant.
+    for function in identities {
+        let denied = machine
+            .run_as_orna(&["raw-call", function])
+            .expect("run denied raw call");
+        assert_denied("raw call before grant", denied).expect("raw call must be denied");
+    }
+
+    // Grant all six functions through the fixed-service command.
+    for function in identities {
+        let granted = machine
+            .run_as_orna(&["security", "grant-execute", function])
+            .expect("run installed grant command");
+        require_silent_success("orna security grant-execute", granted)
+            .expect("grant must succeed silently");
+    }
+
+    // All three readers initially succeed with empty streams.
+    for function in [read_all, read_matching, read_matching_distinct] {
+        let empty = machine
+            .run_as_orna(&["raw-call", function])
+            .expect("run empty raw select");
+        require_silent_success("orna raw-call empty select", empty)
+            .expect("empty select must exit 0 with empty streams");
+    }
+
+    // Two TRUE rows, one FALSE row, and one omitted-nullable row.
+    let mut references: Vec<&OrvReference> = Vec::new();
+    let insert_and_check = |machine: &InstalledMachine, function: &str| {
+        let inserted = machine
+            .run_as_orna(&["raw-call", function])
+            .expect("run raw insert");
+        let inserted =
+            require_success("orna raw-call insert", inserted).expect("insert must succeed");
+        assert!(
+            inserted.stderr.is_empty(),
+            "insert must keep standard error empty"
+        );
+        let reference = parse_reference_envelope(&inserted.stdout)
+            .expect("insert must return one ORV reference");
+        assert!(
+            reference.type_id != [0; 16] && !reference.object_is_zero(),
+            "the insert must return a real object reference"
+        );
+        reference
+    };
+    let a = insert_and_check(&machine, create_true);
+    let b = insert_and_check(&machine, create_true);
+    let c = insert_and_check(&machine, create_false);
+    let d = insert_and_check(&machine, create_null);
+    references.extend([&a, &b, &c, &d]);
+    for (index, left) in references.iter().enumerate() {
+        assert_eq!(
+            left.type_id, a.type_id,
+            "every insert must reference the same target type"
+        );
+        for right in &references[index + 1..] {
+            assert_ne!(
+                left.object, right.object,
+                "every insert must allocate a distinct object identity"
+            );
+        }
+    }
+
+    // read_all decodes the mixed multiset; the predicate readers filter.
+    let mut all_values = decode_mixed_reader_values(&machine, read_all, "orna raw-call read_all")
+        .expect("read_all must decode");
+    all_values.sort_unstable();
+    assert_eq!(
+        all_values,
+        [None, Some(false), Some(true), Some(true)],
+        "read_all must decode as one NULL, one FALSE, and two TRUE values"
+    );
+    let mut matching = decode_reader_values(&machine, read_matching, "orna raw-call read_matching")
+        .expect("read_matching must decode");
+    matching.sort_unstable();
+    assert_eq!(
+        matching,
+        [false, false],
+        "read_matching must decode as exactly two FALSE values"
+    );
+    let matching_distinct = decode_reader_values(
+        &machine,
+        read_matching_distinct,
+        "orna raw-call read_matching_distinct",
+    )
+    .expect("read_matching_distinct must decode");
+    assert_eq!(
+        matching_distinct,
+        [false],
+        "read_matching_distinct must decode as exactly one FALSE value"
+    );
+
+    // Exact source replay keeps the complete mapping, grants, and rows.
+    let replay = machine
+        .run_as_orna(&["source", "apply", FIXTURE_PATH])
+        .expect("run installed source apply on the same fixture");
+    let replay = require_success("orna source apply replay", replay)
+        .expect("predicates replay must succeed");
+    assert!(
+        replay.stderr.is_empty(),
+        "predicates replay must keep standard error empty"
+    );
+    let replay_document =
+        parse_apply_document(&replay.stdout).expect("predicates replay JSON must parse");
+    assert_eq!(
+        replay_document.functions, document.functions,
+        "the replay must keep the complete six-entry function vector"
+    );
+
+    // Restart preserves every reader result.
+    machine
+        .restart_server()
+        .expect("installed server must restart cleanly");
+    let mut all_after_restart =
+        decode_mixed_reader_values(&machine, read_all, "orna raw-call read_all after restart")
+            .expect("read_all must decode after restart");
+    all_after_restart.sort_unstable();
+    assert_eq!(
+        all_after_restart, all_values,
+        "read_all must stay unchanged after restart"
+    );
+    let mut matching_after_restart = decode_reader_values(
+        &machine,
+        read_matching,
+        "orna raw-call read_matching after restart",
+    )
+    .expect("read_matching must decode after restart");
+    matching_after_restart.sort_unstable();
+    assert_eq!(
+        matching_after_restart, matching,
+        "read_matching must stay unchanged after restart"
+    );
+    let distinct_after_restart = decode_reader_values(
+        &machine,
+        read_matching_distinct,
+        "orna raw-call read_matching_distinct after restart",
+    )
+    .expect("read_matching_distinct must decode after restart");
+    assert_eq!(
+        distinct_after_restart, matching_distinct,
+        "read_matching_distinct must stay unchanged after restart"
+    );
+
+    // Post-restart creates through the surviving grants add three objects.
+    let e = insert_and_check(&machine, create_true);
+    let f = insert_and_check(&machine, create_false);
+    let g = insert_and_check(&machine, create_null);
+    references.extend([&e, &f, &g]);
+    for (index, left) in references.iter().enumerate() {
+        assert_eq!(
+            left.type_id, a.type_id,
+            "every insert must reference the same target type"
+        );
+        for right in &references[index + 1..] {
+            assert_ne!(
+                left.object, right.object,
+                "every insert must allocate a distinct object identity"
+            );
+        }
+    }
+
+    // Final multisets after the three post-restart inserts.
+    let mut all_final = decode_mixed_reader_values(&machine, read_all, "orna raw-call read_all")
+        .expect("read_all must decode");
+    all_final.sort_unstable();
+    assert_eq!(
+        all_final,
+        [
+            None,
+            None,
+            Some(false),
+            Some(false),
+            Some(true),
+            Some(true),
+            Some(true)
+        ],
+        "read_all must decode as two NULL, two FALSE, and three TRUE values"
+    );
+    let mut matching_final =
+        decode_reader_values(&machine, read_matching, "orna raw-call read_matching")
+            .expect("read_matching must decode");
+    matching_final.sort_unstable();
+    assert_eq!(
+        matching_final,
+        [false, false, false],
+        "read_matching must decode as exactly three FALSE values"
+    );
+    let distinct_final = decode_reader_values(
+        &machine,
+        read_matching_distinct,
+        "orna raw-call read_matching_distinct",
+    )
+    .expect("read_matching_distinct must decode");
+    assert_eq!(
+        distinct_final,
+        [false],
+        "read_matching_distinct must decode as exactly one FALSE value"
+    );
 }
