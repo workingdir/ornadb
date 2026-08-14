@@ -27,7 +27,7 @@ use crate::{
         FunctionVolatility, TypeDefinition, ValueTypeDefinition, ValueTypeKind,
         ValueTypeMutability, ValueTypePersistence,
     },
-    security::CATALOGUE_HEALTH_FUNCTION_ID,
+    system::SYSTEM_FUNCTIONS,
     types::{ResolvedType, StandardScalar, TypeDescriptor, TypeDescriptorKind},
 };
 
@@ -2244,13 +2244,23 @@ fn validate_catalogue_hash_context_coherence(
 fn reject_reserved_system_function_identity(
     catalogue: &CatalogueSnapshot,
 ) -> Result<(), RevisionInvariantError> {
-    if catalogue
-        .function_by_id(CATALOGUE_HEALTH_FUNCTION_ID)
-        .is_some()
-    {
-        return Err(RevisionInvariantError::ReservedSystemFunctionIdentity {
-            function: CATALOGUE_HEALTH_FUNCTION_ID,
-        });
+    for system_function in SYSTEM_FUNCTIONS {
+        if catalogue.function_by_id(system_function.id()).is_some() {
+            return Err(RevisionInvariantError::ReservedSystemFunctionIdentity {
+                function: system_function.id(),
+            });
+        }
+    }
+    for system_function in SYSTEM_FUNCTIONS {
+        if let Some(function) = catalogue
+            .functions()
+            .iter()
+            .find(|function| system_function.has_name(function.name()))
+        {
+            return Err(RevisionInvariantError::ReservedSystemFunctionName {
+                function: function.id(),
+            });
+        }
     }
     Ok(())
 }
@@ -3263,6 +3273,11 @@ pub enum RevisionInvariantError {
         /// The rejected reserved system function identity.
         function: FunctionId,
     },
+    /// An application catalogue uses a function name reserved for the kernel.
+    ReservedSystemFunctionName {
+        /// The application function carrying the reserved name.
+        function: FunctionId,
+    },
     /// A deployable source parent differs from its expected base source.
     DeployableSourceParentMismatch {
         expected: SourceRevisionId,
@@ -3482,6 +3497,9 @@ impl fmt::Display for RevisionInvariantError {
                 .write_str("the reserved offline-check catalogue identity cannot be used in a durable revision"),
             ReservedSystemFunctionIdentity { .. } => formatter.write_str(
                 "the reserved system function identity cannot enter an application catalogue",
+            ),
+            ReservedSystemFunctionName { .. } => formatter.write_str(
+                "the reserved system function name cannot enter an application catalogue",
             ),
             DeployableSourceParentMismatch { .. } => {
                 formatter.write_str("deployable source parent does not match expected base")
@@ -4117,6 +4135,58 @@ mod tests {
             vec![schema],
             object_types,
             vec![function],
+        )
+        .unwrap()
+    }
+
+    fn function_definition_named(
+        name: &[&str],
+        function_id: FunctionId,
+        function_revision: FunctionRevisionId,
+        resolved_type: ResolvedType,
+    ) -> FunctionDefinition {
+        FunctionDefinition::new(
+            function_id,
+            QualifiedSemanticName::new(name.iter().copied()).unwrap(),
+            FunctionDomain::Server,
+            vec![],
+            FunctionReturn::Rows(vec![FunctionReturnColumnDefinition::new(
+                "found",
+                0,
+                resolved_type,
+            )]),
+            function_revision,
+            FunctionSecurity::Invoker,
+            None,
+            FunctionVolatility::Stable,
+        )
+    }
+
+    fn function_catalogue_with_functions(functions: Vec<FunctionDefinition>) -> CatalogueSnapshot {
+        assert!(
+            !functions.is_empty(),
+            "the catalogue requires at least one function"
+        );
+        let namespace = {
+            let parts = functions[0].name().parts();
+            &parts[..parts.len() - 1]
+        };
+        assert!(
+            functions.iter().all(|function| {
+                let parts = function.name().parts();
+                parts.len() == namespace.len() + 1 && &parts[..namespace.len()] == namespace
+            }),
+            "all supplied functions must share the same namespace"
+        );
+        let schema = SchemaDefinition::new(
+            SchemaId::from_bytes(id::<8>()),
+            QualifiedSemanticName::new(namespace.iter().cloned()).unwrap(),
+        );
+        CatalogueSnapshot::new_with_functions(
+            CatalogueRevisionId::from_bytes(id::<7>()),
+            vec![schema],
+            vec![],
+            functions,
         )
         .unwrap()
     }
@@ -6335,6 +6405,449 @@ mod tests {
             deployable_error.to_string(),
             "the reserved system function identity cannot enter an application catalogue"
         );
+    }
+
+    #[test]
+    fn active_and_deployable_revisions_reject_the_invoke_system_identity() {
+        let function = crate::system::SYS_INVOKE_FUNCTION_ID;
+        let revision = function_revision_fixture(
+            function,
+            FunctionRevisionId::from_bytes(id::<92>()),
+            digest::<92>(),
+            digest::<93>(),
+        );
+        let catalogue = function_catalogue_with_identity(
+            function,
+            revision.id(),
+            vec![],
+            ResolvedType::scalar(StandardScalar::Boolean),
+        );
+        let origins = function_origins(&revision);
+        let expected = RevisionInvariantError::ReservedSystemFunctionIdentity { function };
+        let active_source = source(None);
+
+        let active_error = ActiveDatabaseRevision::new(
+            RevisionPair::new(active_source.id(), catalogue.revision()),
+            active_source,
+            catalogue.clone(),
+            digest::<7>(),
+            vec![],
+            vec![revision.clone()],
+            origins.clone(),
+            vec![],
+        )
+        .unwrap_err();
+        assert_eq!(active_error, expected);
+
+        let expected_base = RevisionPair::new(
+            SourceRevisionId::from_bytes(id::<20>()),
+            CatalogueRevisionId::from_bytes(id::<21>()),
+        );
+        let deployable_error = DeployableRevision::new(
+            expected_base,
+            source(Some(expected_base.source())),
+            expected_base.catalogue(),
+            catalogue,
+            digest::<7>(),
+            origins,
+            vec![],
+            vec![revision],
+            vec![],
+        )
+        .unwrap_err();
+        assert_eq!(deployable_error, expected);
+        assert_eq!(
+            deployable_error.to_string(),
+            "the reserved system function identity cannot enter an application catalogue"
+        );
+    }
+
+    #[test]
+    fn active_and_deployable_revisions_reject_the_health_system_name() {
+        let function = FunctionId::from_bytes([0x5a; 16]);
+        let revision = function_revision_fixture(
+            function,
+            FunctionRevisionId::from_bytes(id::<94>()),
+            digest::<94>(),
+            digest::<95>(),
+        );
+        let catalogue = function_catalogue_with_functions(vec![function_definition_named(
+            &["sys", "catalog", "health"],
+            function,
+            revision.id(),
+            ResolvedType::scalar(StandardScalar::Boolean),
+        )]);
+        let origins = function_origins(&revision);
+        let expected = RevisionInvariantError::ReservedSystemFunctionName { function };
+        let active_source = source(None);
+
+        let active_error = ActiveDatabaseRevision::new(
+            RevisionPair::new(active_source.id(), catalogue.revision()),
+            active_source,
+            catalogue.clone(),
+            digest::<7>(),
+            vec![],
+            vec![revision.clone()],
+            origins.clone(),
+            vec![],
+        )
+        .unwrap_err();
+        assert_eq!(active_error, expected);
+
+        let expected_base = RevisionPair::new(
+            SourceRevisionId::from_bytes(id::<20>()),
+            CatalogueRevisionId::from_bytes(id::<21>()),
+        );
+        let deployable_error = DeployableRevision::new(
+            expected_base,
+            source(Some(expected_base.source())),
+            expected_base.catalogue(),
+            catalogue,
+            digest::<7>(),
+            origins,
+            vec![],
+            vec![revision],
+            vec![],
+        )
+        .unwrap_err();
+        assert_eq!(deployable_error, expected);
+        assert_eq!(
+            deployable_error.to_string(),
+            "the reserved system function name cannot enter an application catalogue"
+        );
+    }
+
+    #[test]
+    fn active_and_deployable_revisions_reject_the_invoke_system_name() {
+        let function = FunctionId::from_bytes([0x5b; 16]);
+        let revision = function_revision_fixture(
+            function,
+            FunctionRevisionId::from_bytes(id::<96>()),
+            digest::<96>(),
+            digest::<97>(),
+        );
+        let catalogue = function_catalogue_with_functions(vec![function_definition_named(
+            &["sys", "invoke"],
+            function,
+            revision.id(),
+            ResolvedType::scalar(StandardScalar::Boolean),
+        )]);
+        let origins = function_origins(&revision);
+        let expected = RevisionInvariantError::ReservedSystemFunctionName { function };
+        let active_source = source(None);
+
+        let active_error = ActiveDatabaseRevision::new(
+            RevisionPair::new(active_source.id(), catalogue.revision()),
+            active_source,
+            catalogue.clone(),
+            digest::<7>(),
+            vec![],
+            vec![revision.clone()],
+            origins.clone(),
+            vec![],
+        )
+        .unwrap_err();
+        assert_eq!(active_error, expected);
+
+        let expected_base = RevisionPair::new(
+            SourceRevisionId::from_bytes(id::<20>()),
+            CatalogueRevisionId::from_bytes(id::<21>()),
+        );
+        let deployable_error = DeployableRevision::new(
+            expected_base,
+            source(Some(expected_base.source())),
+            expected_base.catalogue(),
+            catalogue,
+            digest::<7>(),
+            origins,
+            vec![],
+            vec![revision],
+            vec![],
+        )
+        .unwrap_err();
+        assert_eq!(deployable_error, expected);
+        assert_eq!(
+            deployable_error.to_string(),
+            "the reserved system function name cannot enter an application catalogue"
+        );
+    }
+
+    #[test]
+    fn identity_collisions_precede_name_collisions_in_registry_order() {
+        let name_collision = FunctionId::from_bytes([0x5c; 16]);
+        let invoke_identity = crate::system::SYS_INVOKE_FUNCTION_ID;
+        let health_identity = crate::security::CATALOGUE_HEALTH_FUNCTION_ID;
+        let name_revision = function_revision_fixture(
+            name_collision,
+            FunctionRevisionId::from_bytes(id::<98>()),
+            digest::<98>(),
+            digest::<99>(),
+        );
+        let invoke_revision = function_revision_fixture(
+            invoke_identity,
+            FunctionRevisionId::from_bytes(id::<100>()),
+            digest::<100>(),
+            digest::<101>(),
+        );
+        let health_revision = function_revision_fixture(
+            health_identity,
+            FunctionRevisionId::from_bytes(id::<102>()),
+            digest::<102>(),
+            digest::<103>(),
+        );
+        // Reversed application definition input: the reserved name and the
+        // invocation identity appear before the health identity. Admission
+        // must still select the health identity collision because every
+        // identity collision precedes every name collision and the registry
+        // order is health then invocation.
+        let catalogue = function_catalogue_with_functions(vec![
+            function_definition_named(
+                &["sys", "invoke"],
+                name_collision,
+                name_revision.id(),
+                ResolvedType::scalar(StandardScalar::Boolean),
+            ),
+            function_definition_named(
+                &["sys", "lookup"],
+                invoke_identity,
+                invoke_revision.id(),
+                ResolvedType::scalar(StandardScalar::Boolean),
+            ),
+            function_definition_named(
+                &["sys", "probe"],
+                health_identity,
+                health_revision.id(),
+                ResolvedType::scalar(StandardScalar::Boolean),
+            ),
+        ]);
+        let mut origins = function_origins(&name_revision);
+        origins.extend(function_origins(&invoke_revision));
+        origins.extend(function_origins(&health_revision));
+        let expected = RevisionInvariantError::ReservedSystemFunctionIdentity {
+            function: health_identity,
+        };
+        let active_source = source(None);
+
+        let active_error = ActiveDatabaseRevision::new(
+            RevisionPair::new(active_source.id(), catalogue.revision()),
+            active_source,
+            catalogue.clone(),
+            digest::<7>(),
+            vec![],
+            vec![
+                name_revision.clone(),
+                invoke_revision.clone(),
+                health_revision.clone(),
+            ],
+            origins.clone(),
+            vec![],
+        )
+        .unwrap_err();
+        assert_eq!(active_error, expected);
+
+        let expected_base = RevisionPair::new(
+            SourceRevisionId::from_bytes(id::<20>()),
+            CatalogueRevisionId::from_bytes(id::<21>()),
+        );
+        let deployable_error = DeployableRevision::new(
+            expected_base,
+            source(Some(expected_base.source())),
+            expected_base.catalogue(),
+            catalogue,
+            digest::<7>(),
+            origins,
+            vec![],
+            vec![name_revision, invoke_revision, health_revision],
+            vec![],
+        )
+        .unwrap_err();
+        assert_eq!(deployable_error, expected);
+    }
+
+    #[test]
+    fn reserved_invoke_identity_beats_a_health_name_collision_in_one_definition() {
+        let function_id = crate::system::SYS_INVOKE_FUNCTION_ID;
+        let revision = function_revision_fixture(
+            function_id,
+            FunctionRevisionId::from_bytes(id::<106>()),
+            digest::<106>(),
+            digest::<107>(),
+        );
+        // One application definition carries the invocation identity and the
+        // health function's exact name. The identity phase is global and runs
+        // before the name phase, so admission must report the invocation
+        // identity collision even though the same definition also collides
+        // with the health name.
+        let catalogue = function_catalogue_with_functions(vec![function_definition_named(
+            &["sys", "catalog", "health"],
+            function_id,
+            revision.id(),
+            ResolvedType::scalar(StandardScalar::Boolean),
+        )]);
+        let origins = function_origins(&revision);
+        let expected = RevisionInvariantError::ReservedSystemFunctionIdentity {
+            function: function_id,
+        };
+        let active_source = source(None);
+
+        let active_error = ActiveDatabaseRevision::new(
+            RevisionPair::new(active_source.id(), catalogue.revision()),
+            active_source,
+            catalogue.clone(),
+            digest::<7>(),
+            vec![],
+            vec![revision.clone()],
+            origins.clone(),
+            vec![],
+        )
+        .unwrap_err();
+        assert_eq!(active_error, expected);
+
+        let expected_base = RevisionPair::new(
+            SourceRevisionId::from_bytes(id::<20>()),
+            CatalogueRevisionId::from_bytes(id::<21>()),
+        );
+        let deployable_error = DeployableRevision::new(
+            expected_base,
+            source(Some(expected_base.source())),
+            expected_base.catalogue(),
+            catalogue,
+            digest::<7>(),
+            origins,
+            vec![],
+            vec![revision],
+            vec![],
+        )
+        .unwrap_err();
+        assert_eq!(deployable_error, expected);
+        assert_eq!(
+            deployable_error.to_string(),
+            "the reserved system function identity cannot enter an application catalogue"
+        );
+    }
+
+    #[test]
+    fn name_collisions_use_registry_order_independent_of_application_vector_order() {
+        let invoke_name_id = FunctionId::from_bytes([0x5e; 16]);
+        let health_name_id = FunctionId::from_bytes([0x5f; 16]);
+        let invoke_name_revision = function_revision_fixture(
+            invoke_name_id,
+            FunctionRevisionId::from_bytes(id::<108>()),
+            digest::<108>(),
+            digest::<109>(),
+        );
+        let health_name_revision = function_revision_fixture(
+            health_name_id,
+            FunctionRevisionId::from_bytes(id::<110>()),
+            digest::<110>(),
+            digest::<111>(),
+        );
+        // Reversed application definition input: sys.invoke appears before
+        // sys.catalog.health. Name collisions must follow registry order, so
+        // admission reports the health-name collision from registry position
+        // zero even though the invoke-name definition comes first in the
+        // application vector. Both schemas are declared exactly because each
+        // function must resolve against its own parent namespace.
+        let schema_sys = SchemaDefinition::new(
+            SchemaId::from_bytes(id::<8>()),
+            QualifiedSemanticName::new(["sys"]).unwrap(),
+        );
+        let schema_sys_catalog = SchemaDefinition::new(
+            SchemaId::from_bytes(id::<9>()),
+            QualifiedSemanticName::new(["sys", "catalog"]).unwrap(),
+        );
+        let catalogue = CatalogueSnapshot::new_with_functions(
+            CatalogueRevisionId::from_bytes(id::<7>()),
+            vec![schema_sys, schema_sys_catalog],
+            vec![],
+            vec![
+                function_definition_named(
+                    &["sys", "invoke"],
+                    invoke_name_id,
+                    invoke_name_revision.id(),
+                    ResolvedType::scalar(StandardScalar::Boolean),
+                ),
+                function_definition_named(
+                    &["sys", "catalog", "health"],
+                    health_name_id,
+                    health_name_revision.id(),
+                    ResolvedType::scalar(StandardScalar::Boolean),
+                ),
+            ],
+        )
+        .unwrap();
+        // Reserved-name validation is authoritative before origin
+        // completeness, so the failing revision's origin fixture suffices.
+        let origins = function_origins(&health_name_revision);
+        let expected = RevisionInvariantError::ReservedSystemFunctionName {
+            function: health_name_id,
+        };
+        let active_source = source(None);
+
+        let active_error = ActiveDatabaseRevision::new(
+            RevisionPair::new(active_source.id(), catalogue.revision()),
+            active_source,
+            catalogue.clone(),
+            digest::<7>(),
+            vec![],
+            vec![invoke_name_revision.clone(), health_name_revision.clone()],
+            origins.clone(),
+            vec![],
+        )
+        .unwrap_err();
+        assert_eq!(active_error, expected);
+
+        let expected_base = RevisionPair::new(
+            SourceRevisionId::from_bytes(id::<20>()),
+            CatalogueRevisionId::from_bytes(id::<21>()),
+        );
+        let deployable_error = DeployableRevision::new(
+            expected_base,
+            source(Some(expected_base.source())),
+            expected_base.catalogue(),
+            catalogue,
+            digest::<7>(),
+            origins,
+            vec![],
+            vec![invoke_name_revision, health_name_revision],
+            vec![],
+        )
+        .unwrap_err();
+        assert_eq!(deployable_error, expected);
+        assert_eq!(
+            deployable_error.to_string(),
+            "the reserved system function name cannot enter an application catalogue"
+        );
+    }
+
+    #[test]
+    fn neighbouring_sys_names_remain_admissible() {
+        let function = FunctionId::from_bytes([0x5d; 16]);
+        let revision = function_revision_fixture(
+            function,
+            FunctionRevisionId::from_bytes(id::<104>()),
+            digest::<104>(),
+            digest::<105>(),
+        );
+        let catalogue = function_catalogue_with_functions(vec![function_definition_named(
+            &["sys", "probe"],
+            function,
+            revision.id(),
+            ResolvedType::scalar(StandardScalar::Boolean),
+        )]);
+        let origins = function_origins(&revision);
+        let active_source = source(None);
+        ActiveDatabaseRevision::new(
+            RevisionPair::new(active_source.id(), catalogue.revision()),
+            active_source,
+            catalogue,
+            digest::<7>(),
+            vec![],
+            vec![revision],
+            origins,
+            vec![],
+        )
+        .expect("a neighbouring sys.probe name must remain admissible");
     }
 
     #[test]
