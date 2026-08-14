@@ -366,6 +366,42 @@ impl InstalledMachine {
         self.exec_args(&args)
     }
 
+    /// Run one installed `orna` raw-call command with the exact argument
+    /// bytes streamed through `docker exec --interactive`.
+    ///
+    /// The command runs as the real service account with the same poisoned
+    /// libpq environment as [`Self::run_as_orna`]. The supplied bytes arrive
+    /// on the child's standard input and EOF closes the pipe after the write.
+    /// The exit status is not checked here.
+    fn run_as_orna_with_stdin(&self, command: &[&str], input: &[u8]) -> Result<Output, Error> {
+        let mut args = vec!["--interactive".to_string()];
+        args.extend(self.setpriv_args(command));
+        let mut child = Command::new("docker")
+            .arg("exec")
+            .args(&args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|io| Error::Spawn {
+                label: "spawn argument raw-call exec",
+                io,
+            })?;
+        child
+            .stdin
+            .take()
+            .expect("piped stdin must be present")
+            .write_all(input)
+            .map_err(|io| Error::Spawn {
+                label: "stream the raw-call argument",
+                io,
+            })?;
+        child.wait_with_output().map_err(|io| Error::Spawn {
+            label: "wait for argument raw-call exec",
+            io,
+        })
+    }
+
     /// The `docker exec` argument vector for one post-install service/data
     /// path `orna` command as the real service account.
     ///
@@ -503,6 +539,21 @@ fn require_silent_success(label: &'static str, output: Output) -> Result<Output,
             message: format!(
                 "{label} must write nothing, got {} stdout bytes and {} stderr bytes",
                 output.stdout.len(),
+                output.stderr.len()
+            ),
+        });
+    }
+    Ok(output)
+}
+
+/// Require one successful raw-call that produced a value payload and no
+/// standard error, returning the output for exact envelope validation.
+fn require_value_success(label: &'static str, output: Output) -> Result<Output, Error> {
+    let output = require_success(label, output)?;
+    if !output.stderr.is_empty() {
+        return Err(Error::Unexpected {
+            message: format!(
+                "{label} must keep standard error empty, got {} bytes",
                 output.stderr.len()
             ),
         });
@@ -3936,30 +3987,40 @@ fn installed_nullable_boolean_predicates_filter_and_distinct_across_replay_and_r
     );
 }
 
-/// Prove that an unavailable parameterised mutation stays closed and empty
-/// through the installed product's public raw-call path, and that the exact
-/// fixture reapplies and restarts without changing the observable state.
+/// Prove that the installed product's parameterised raw-call argument path
+/// inserts persisted rows through the packaged `/usr/bin/orna` public
+/// commands, and that the exact fixture reapplies and restarts without
+/// changing identities, grants, or the stored Boolean multiset.
 ///
 /// The test installs the exact checked-in `product_test_unavailable_insert.orna`
 /// fixture, applies it, and requires exactly two sorted qualified-name
 /// mappings with pairwise distinct function identities. It then proves:
 ///
-/// * both raw calls are denied before any grant;
-/// * after granting both functions the reader succeeds empty;
-/// * invoking the parameterised create with only its function identity and
-///   no arguments exits 1 with empty standard output and the exact
-///   `raw call failed: TARGET_UNAVAILABLE` line, and no row appears;
+/// * `create_entry` reports the canonical `p_stored` parameter identity while
+///   `read_entries` has no parameters;
+/// * an argument-bearing create call with the exact ORV1 TRUE argument on
+///   standard input is denied before create's own explicit grant; after
+///   granting the reader alone, the reader stays empty, which proves the
+///   denied writer created no row;
+/// * a zero-argument create call is TARGET_UNAVAILABLE and adds no row;
+/// * an argument-bearing TRUE create returns a canonical nonzero reference,
+///   and a second FALSE create returns the same target type with a distinct
+///   nonzero object identity;
+/// * the reader returns exactly one TRUE and one FALSE value;
 /// * reapplying the exact same fixture keeps the complete two-entry function
-///   vector, grants, and rows, and the unavailable mutation stays closed;
-/// * a restart keeps both grants and the empty state, and the unavailable
-///   mutation stays closed again.
+///   vector including ordered parameters, without re-granting, and a third
+///   TRUE create adds a third distinct object;
+/// * a restart keeps grants and rows, and a fourth FALSE create adds a
+///   fourth distinct object;
+/// * the reader then returns exactly two TRUE and two FALSE values.
 ///
 /// All observations go through the packaged `/usr/bin/orna` public commands
-/// and raw-call ORV envelopes. The test makes no claim about physical
+/// and raw-call ORV envelopes, with the argument streamed through
+/// `docker exec --interactive`. The test makes no claim about physical
 /// storage, private rows, or row ordering.
 #[test]
 #[ignore = "requires Docker, ORNA_SYSTEM_TEST_DEBIAN_PACKAGE, and the installed orna executable"]
-fn installed_parameterised_mutation_stays_unavailable_and_empty_across_replay_and_restart() {
+fn installed_parameterised_argument_insert_persists_across_replay_and_restart() {
     let package = std::env::var("ORNA_SYSTEM_TEST_DEBIAN_PACKAGE")
         .expect("ORNA_SYSTEM_TEST_DEBIAN_PACKAGE must point at the reproduced .deb package");
     let artifact = FrozenPackageArtifact::new(PackageFormat::Debian, &package)
@@ -4011,94 +4072,252 @@ fn installed_parameterised_mutation_stays_unavailable_and_empty_across_replay_an
         create_entry, read_entries,
         "the two function identities must be pairwise distinct"
     );
+    let p_stored = document
+        .parameter_id(&["unavailable_insert_test", "create_entry"], "p_stored")
+        .expect("apply must report the canonical create_entry.p_stored identity");
+    let create_entry_entry = document
+        .functions
+        .iter()
+        .find(|function| {
+            function.names().iter().map(String::as_str).eq([
+                "unavailable_insert_test",
+                "create_entry",
+            ]
+            .iter()
+            .copied())
+        })
+        .expect("apply must report the create_entry entry");
+    assert_eq!(
+        create_entry_entry.parameters().len(),
+        1,
+        "create_entry must declare exactly one parameter"
+    );
+    let stored_parameter = &create_entry_entry.parameters()[0];
+    assert_eq!(
+        stored_parameter.name(),
+        "p_stored",
+        "create_entry must declare exactly the p_stored parameter"
+    );
+    assert_eq!(
+        stored_parameter.parameter_id(),
+        p_stored,
+        "the declared parameter identity must equal the discovered p_stored identity"
+    );
+    let read_entry = document
+        .functions
+        .iter()
+        .find(|function| {
+            function.names().iter().map(String::as_str).eq([
+                "unavailable_insert_test",
+                "read_entries",
+            ]
+            .iter()
+            .copied())
+        })
+        .expect("apply must report the read_entries entry");
+    assert!(
+        read_entry.parameters().is_empty(),
+        "read_entries must have no parameters"
+    );
 
-    // Both raw calls are denied before any grant.
-    for function in [create_entry, read_entries] {
-        let denied = machine
-            .run_as_orna(&["raw-call", function])
-            .expect("run denied raw call");
-        assert_denied("raw call before grant", denied).expect("raw call must be denied");
-    }
+    // Before create's explicit grant, the argument-bearing create is denied
+    // and nothing is stored.
+    let denied = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", create_entry, p_stored],
+            &boolean_orv1_envelope(Some(true)),
+        )
+        .expect("run denied argument raw call");
+    assert_denied("argument raw call before grant", denied)
+        .expect("argument raw call must be denied before grant");
 
-    // Grant both functions through the fixed-service command.
-    for function in [create_entry, read_entries] {
-        let granted = machine
-            .run_as_orna(&["security", "grant-execute", function])
-            .expect("run installed grant command");
-        require_silent_success("orna security grant-execute", granted)
-            .expect("grant must succeed silently");
-    }
-
-    // The reader initially succeeds with empty output.
-    let empty = machine
+    // Grant the reader only, then prove the denied writer created no row.
+    let granted_reader = machine
+        .run_as_orna(&["security", "grant-execute", read_entries])
+        .expect("run installed reader grant command");
+    require_silent_success("orna security grant-execute read_entries", granted_reader)
+        .expect("reader grant must succeed silently");
+    let empty_before = machine
         .run_as_orna(&["raw-call", read_entries])
-        .expect("run empty raw select");
-    require_silent_success("orna raw-call read_entries empty", empty)
-        .expect("empty read must exit 0 with empty streams");
+        .expect("run empty raw select after reader grant");
+    require_silent_success(
+        "orna raw-call read_entries after reader grant",
+        empty_before,
+    )
+    .expect("the denied writer must leave the reader empty");
 
-    // The parameterised create with no arguments is unavailable and inserts
-    // nothing.
+    // Grant the create only, then prove the zero-argument create is
+    // unavailable and adds no row.
+    let granted_create = machine
+        .run_as_orna(&["security", "grant-execute", create_entry])
+        .expect("run installed create grant command");
+    require_silent_success("orna security grant-execute create_entry", granted_create)
+        .expect("create grant must succeed silently");
     let unavailable = machine
         .run_as_orna(&["raw-call", create_entry])
-        .expect("run unavailable raw call");
-    assert_target_unavailable("raw call with no arguments", unavailable)
-        .expect("raw call must be target unavailable");
-    let after_unavailable = machine
+        .expect("run unavailable zero-argument raw call");
+    assert_target_unavailable("zero-argument raw call", unavailable)
+        .expect("zero-argument create must be target unavailable");
+    let empty_after_unavailable = machine
         .run_as_orna(&["raw-call", read_entries])
         .expect("run empty raw select after unavailable call");
     require_silent_success(
         "orna raw-call read_entries after unavailable call",
-        after_unavailable,
+        empty_after_unavailable,
     )
     .expect("the reader must stay successful and empty");
 
-    // Exact source replay keeps the complete mapping, grants, and rows.
+    // A TRUE argument create returns a canonical nonzero reference.
+    let inserted_true = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", create_entry, p_stored],
+            &boolean_orv1_envelope(Some(true)),
+        )
+        .expect("run TRUE argument raw call");
+    let inserted_true = require_value_success("orna raw-call create_entry TRUE", inserted_true)
+        .expect("TRUE argument create must succeed");
+    let true_reference = parse_reference_envelope(&inserted_true.stdout)
+        .expect("TRUE argument create must return one ORV reference");
+    assert!(
+        true_reference.type_id != [0; 16] && !true_reference.object_is_zero(),
+        "the TRUE create reference must name a real target type and row"
+    );
+
+    // A FALSE argument create returns the same target type with a distinct
+    // nonzero object identity.
+    let inserted_false = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", create_entry, p_stored],
+            &boolean_orv1_envelope(Some(false)),
+        )
+        .expect("run FALSE argument raw call");
+    let inserted_false = require_value_success("orna raw-call create_entry FALSE", inserted_false)
+        .expect("FALSE argument create must succeed");
+    let false_reference = parse_reference_envelope(&inserted_false.stdout)
+        .expect("FALSE argument create must return one ORV reference");
+    assert!(
+        !false_reference.object_is_zero(),
+        "the FALSE create reference must name a real row"
+    );
+    assert_eq!(
+        false_reference.type_id, true_reference.type_id,
+        "both argument creates must target the same object type"
+    );
+    assert_ne!(
+        false_reference.object, true_reference.object,
+        "each argument create must allocate a distinct object identity"
+    );
+
+    // The reader returns exactly one TRUE and one FALSE value.
+    let mut two_values = decode_reader_values(
+        &machine,
+        read_entries,
+        "orna raw-call read_entries two values",
+    )
+    .expect("two-value read must decode");
+    two_values.sort();
+    assert_eq!(
+        two_values,
+        vec![false, true],
+        "the reader must return exactly one TRUE and one FALSE value"
+    );
+
+    // Exact source replay keeps the complete mapping including ordered
+    // parameters, and no re-grant is needed.
     let replay = machine
         .run_as_orna(&["source", "apply", FIXTURE_PATH])
         .expect("run installed source apply on the same fixture");
-    let replay = require_success("orna source apply replay", replay)
-        .expect("unavailable replay must succeed");
+    let replay =
+        require_success("orna source apply replay", replay).expect("fixture replay must succeed");
     assert!(
         replay.stderr.is_empty(),
-        "unavailable replay must keep standard error empty"
+        "fixture replay must keep standard error empty"
     );
     let replay_document =
-        parse_apply_document(&replay.stdout).expect("unavailable replay JSON must parse");
+        parse_apply_document(&replay.stdout).expect("fixture replay JSON must parse");
     assert_eq!(
         replay_document.functions, document.functions,
-        "the replay must keep the complete two-entry function vector"
+        "the replay must keep the complete two-entry function vector including parameters"
+    );
+    let replay_p_stored = replay_document
+        .parameter_id(&["unavailable_insert_test", "create_entry"], "p_stored")
+        .expect("the replay must keep create_entry.p_stored");
+    assert_eq!(
+        replay_p_stored, p_stored,
+        "the replay must keep the exact canonical parameter identity"
     );
 
-    // No re-grant: the unavailable mutation stays closed and empty.
-    let unavailable_after_replay = machine
-        .run_as_orna(&["raw-call", create_entry])
-        .expect("run unavailable raw call after replay");
-    assert_target_unavailable("raw call after replay", unavailable_after_replay)
-        .expect("raw call must stay target unavailable");
-    let empty_after_replay = machine
-        .run_as_orna(&["raw-call", read_entries])
-        .expect("run empty raw select after replay");
-    require_silent_success(
-        "orna raw-call read_entries after replay",
-        empty_after_replay,
-    )
-    .expect("the reader must stay successful and empty after replay");
+    // A third TRUE create with the original identities adds a third object.
+    let third = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", create_entry, p_stored],
+            &boolean_orv1_envelope(Some(true)),
+        )
+        .expect("run third TRUE argument raw call");
+    let third = require_value_success("orna raw-call create_entry third", third)
+        .expect("third TRUE argument create must succeed");
+    let third_reference = parse_reference_envelope(&third.stdout)
+        .expect("third create must return one ORV reference");
+    assert!(
+        third_reference.type_id == true_reference.type_id && !third_reference.object_is_zero(),
+        "the third create must target the same real object type"
+    );
+    assert!(
+        third_reference.object != true_reference.object
+            && third_reference.object != false_reference.object,
+        "each argument create must allocate a distinct object identity"
+    );
 
-    // Restart keeps both grants and the empty state.
+    // The reader returns exactly one FALSE and two TRUE values.
+    let mut three_values = decode_reader_values(
+        &machine,
+        read_entries,
+        "orna raw-call read_entries three values",
+    )
+    .expect("three-value read must decode");
+    three_values.sort();
+    assert_eq!(
+        three_values,
+        vec![false, true, true],
+        "the reader must return exactly one FALSE and two TRUE values"
+    );
+
+    // Restart keeps grants and rows; a fourth FALSE create adds an object.
     machine
         .restart_server()
         .expect("installed server must restart cleanly");
-    let unavailable_after_restart = machine
-        .run_as_orna(&["raw-call", create_entry])
-        .expect("run unavailable raw call after restart");
-    assert_target_unavailable("raw call after restart", unavailable_after_restart)
-        .expect("raw call must stay target unavailable after restart");
-    let empty_after_restart = machine
-        .run_as_orna(&["raw-call", read_entries])
-        .expect("run empty raw select after restart");
-    require_silent_success(
-        "orna raw-call read_entries after restart",
-        empty_after_restart,
+    let fourth = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", create_entry, p_stored],
+            &boolean_orv1_envelope(Some(false)),
+        )
+        .expect("run fourth FALSE argument raw call");
+    let fourth = require_value_success("orna raw-call create_entry fourth", fourth)
+        .expect("fourth FALSE argument create must succeed");
+    let fourth_reference = parse_reference_envelope(&fourth.stdout)
+        .expect("fourth create must return one ORV reference");
+    assert!(
+        fourth_reference.type_id == true_reference.type_id && !fourth_reference.object_is_zero(),
+        "the fourth create must target the same real object type"
+    );
+    assert!(
+        fourth_reference.object != true_reference.object
+            && fourth_reference.object != false_reference.object
+            && fourth_reference.object != third_reference.object,
+        "each argument create must allocate a distinct object identity"
+    );
+
+    // The reader returns exactly two FALSE and two TRUE values.
+    let mut four_values = decode_reader_values(
+        &machine,
+        read_entries,
+        "orna raw-call read_entries four values",
     )
-    .expect("the reader must stay successful and empty after restart");
+    .expect("four-value read must decode");
+    four_values.sort();
+    assert_eq!(
+        four_values,
+        vec![false, false, true, true],
+        "the reader must return exactly two FALSE and two TRUE values"
+    );
 }
