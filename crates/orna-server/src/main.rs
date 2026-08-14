@@ -5,8 +5,8 @@ use std::{
 };
 
 use orna_core::{
-    security::{CATALOGUE_HEALTH_FUNCTION_ID, CATALOGUE_HEALTH_FUNCTION_NAME},
     FunctionId, ParameterId as RawCallParameterId,
+    security::{CATALOGUE_HEALTH_FUNCTION_ID, CATALOGUE_HEALTH_FUNCTION_NAME},
 };
 use orna_protocol::CallFailure;
 
