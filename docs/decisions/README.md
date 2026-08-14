@@ -93,3 +93,5 @@ source-of-truth or authority rules.
   [Canonical Raw Calls Bind Remaining ORV1 Scalar INSERT Arguments](0045-canonical-raw-scalar-insert.md)
 * **work ADR 0046:**
   [Existing Objects Admit One Appended Nullable Executable Scalar Field](0046-appended-nullable-scalar-fields.md)
+* **work ADR 0047:**
+  [The First 1.0 Release Uses One Authenticated Debian Authority](0047-first-one-zero-release.md)
