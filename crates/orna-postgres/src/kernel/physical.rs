@@ -377,6 +377,18 @@ mod tests {
         let added_field = FieldId::from_bytes([0x21; 16]);
         let new_object = TypeId::from_bytes([0x22; 16]);
         let reference_field = FieldId::from_bytes([0x23; 16]);
+        let standard = orna_standard::verify_standard_library_snapshot(
+            orna_standard::retained_standard_library_snapshot()
+                .expect("retained standard-library snapshot"),
+        )
+        .expect("verified standard-library snapshot");
+        let boolean = standard
+            .catalogue()
+            .value_types()
+            .iter()
+            .find(|value| value.representation_contract() == "orna.kernel.value.boolean@1")
+            .expect("verified Boolean value type")
+            .id();
         let schema = SchemaDefinition::new(SchemaId::new(), semantic_name(&["private_words"]));
         let active_catalogue = CatalogueSnapshot::new(
             CatalogueRevisionId::new(),
@@ -388,7 +400,7 @@ mod tests {
                     first_field,
                     "semantic_stored",
                     0,
-                    ResolvedType::scalar(StandardScalar::Boolean),
+                    ResolvedType::value(boolean),
                     false,
                     false,
                     None,
@@ -429,7 +441,7 @@ mod tests {
                 source_origin,
             ),
         ];
-        let context = CatalogueHashContext::version_one();
+        let context = CatalogueHashContext::version_two(standard);
         let catalogue_hash =
             catalogue_digest_with_context(&context, &active_catalogue, &[], &[], &origins, &[])
                 .unwrap();
@@ -456,7 +468,7 @@ mod tests {
                             first_field,
                             "semantic_stored",
                             0,
-                            ResolvedType::scalar(StandardScalar::Boolean),
+                            ResolvedType::value(boolean),
                             false,
                             false,
                             None,
@@ -466,7 +478,7 @@ mod tests {
                             added_field,
                             "semantic_added",
                             1,
-                            ResolvedType::scalar(StandardScalar::Boolean),
+                            ResolvedType::value(boolean),
                             true,
                             false,
                             None,

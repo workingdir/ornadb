@@ -2026,20 +2026,33 @@ fn decode_principal_status(value: String) -> Result<PrincipalStatus, PostgresKer
 #[cfg(test)]
 mod tests {
     use super::*;
-    use orna_core::{FieldId, ObjectId, ParameterId, TypeId};
+    use orna_core::{
+        CatalogueRevisionId, FieldId, ObjectId, ParameterId, TypeId,
+        catalogue::{
+            CatalogueSnapshot, EnumTypeDefinition, QualifiedSemanticName, SchemaDefinition,
+        },
+        value::{EnumValue, RuntimeFloat},
+    };
 
     const RAW_CALL_FUNCTION: FunctionId = FunctionId::from_bytes([0x61; 16]);
     const RAW_CALL_PARAMETER: ParameterId = ParameterId::from_bytes([0x62; 16]);
 
     #[test]
-    fn raw_call_argument_shape_accepts_zero_one_boolean_or_one_reference() {
+    fn raw_call_argument_shape_accepts_zero_one_supported_scalar_or_one_reference() {
         validate_raw_call_argument_shape(RAW_CALL_FUNCTION, &[])
             .expect("zero arguments must be accepted");
-        for value in [true, false] {
-            let argument = FunctionArgument::new(RAW_CALL_PARAMETER, RuntimeValue::Boolean(value))
-                .expect("Boolean argument is valid");
+        for value in [
+            RuntimeValue::Boolean(true),
+            RuntimeValue::Integer(1),
+            RuntimeValue::BigInt(2),
+            RuntimeValue::Float(RuntimeFloat::new(3.5).expect("finite Float argument")),
+            RuntimeValue::Text("text".to_string()),
+            RuntimeValue::Bytes(vec![0x00, 0xff]),
+        ] {
+            let argument = FunctionArgument::new(RAW_CALL_PARAMETER, value)
+                .expect("supported scalar argument is valid");
             validate_raw_call_argument_shape(RAW_CALL_FUNCTION, std::slice::from_ref(&argument))
-                .expect("one Boolean argument must be accepted");
+                .expect("one supported scalar argument must be accepted");
         }
         let reference = FunctionArgument::new(
             RAW_CALL_PARAMETER,
@@ -2063,14 +2076,39 @@ mod tests {
 
     #[test]
     fn raw_call_argument_shape_rejects_other_argument_sets() {
-        let integer = FunctionArgument::new(RAW_CALL_PARAMETER, RuntimeValue::Integer(1))
-            .expect("Integer argument is valid");
+        let enum_type = TypeId::from_bytes([0x67; 16]);
+        let catalogue = CatalogueSnapshot::new_with_enum_types(
+            CatalogueRevisionId::new(),
+            vec![SchemaDefinition::new(
+                orna_core::SchemaId::new(),
+                QualifiedSemanticName::new(["app"]).expect("schema name"),
+            )],
+            Vec::new(),
+            Vec::new(),
+            vec![EnumTypeDefinition::new(
+                enum_type,
+                QualifiedSemanticName::new(["app", "stage"]).expect("qualified enum name"),
+                ["lead"],
+            )],
+            Vec::new(),
+        )
+        .expect("enum catalogue");
+        let enum_argument = FunctionArgument::new(
+            RAW_CALL_PARAMETER,
+            RuntimeValue::Enum(
+                EnumValue::new(&catalogue, enum_type, "lead").expect("declared enum label"),
+            ),
+        )
+        .expect("Enum argument is valid");
         assert!(matches!(
-            validate_raw_call_argument_shape(RAW_CALL_FUNCTION, std::slice::from_ref(&integer))
-                .expect_err("one Integer argument must be rejected"),
+            validate_raw_call_argument_shape(
+                RAW_CALL_FUNCTION,
+                std::slice::from_ref(&enum_argument),
+            )
+            .expect_err("one Enum argument must be rejected"),
             PostgresKernelError::RawCallTargetUnavailable {
                 function: RAW_CALL_FUNCTION,
-                rule: "raw calls accept zero arguments or one Boolean or Reference argument",
+                rule: "raw calls accept zero arguments or one supported scalar or Reference argument",
             }
         ));
 
@@ -2088,7 +2126,7 @@ mod tests {
                 .expect_err("two Boolean arguments must be rejected"),
             PostgresKernelError::RawCallTargetUnavailable {
                 function: RAW_CALL_FUNCTION,
-                rule: "raw calls accept zero arguments or one Boolean or Reference argument",
+                rule: "raw calls accept zero arguments or one supported scalar or Reference argument",
             }
         ));
     }
