@@ -29,8 +29,10 @@ use crate::{
     },
     server_mutation_execution::{
         ServerInsertError, execute_authorised_raw_server_insert,
-        execute_authorised_raw_server_insert_with_arguments, raw_server_insert_target_is_selected,
-        raw_server_insert_target_is_unavailable,
+        execute_authorised_raw_server_insert_with_arguments,
+        execute_authorised_raw_server_reference_mutation, raw_server_delete_target_is_unavailable,
+        raw_server_insert_target_is_selected, raw_server_insert_target_is_unavailable,
+        raw_server_reference_mutation_target, raw_server_update_target_is_unavailable,
     },
     server_runtime::configure_and_recover,
 };
@@ -40,7 +42,7 @@ use crate::{
 pub enum AuthenticatedRawCallResult {
     /// One value evaluated by the CLIENT runtime.
     Client(RuntimeValue),
-    /// Zero or more values returned in SERVER query row order.
+    /// Zero or more values returned in SERVER execution result order.
     Server(Vec<RuntimeValue>),
 }
 
@@ -71,7 +73,8 @@ impl PostgresKernel {
             .await
     }
 
-    /// Dispatches one authenticated raw call with zero or one Boolean argument.
+    /// Dispatches one authenticated raw call with zero arguments or one Boolean
+    /// or Reference argument.
     ///
     /// Other argument shapes fail before PostgreSQL is opened. An admitted
     /// shape is authorised and audited before the active target or parameter
@@ -201,7 +204,7 @@ impl PostgresKernel {
                             } else if !arguments.is_empty() {
                                 Err(raw_call_target_unavailable(
                                     function,
-                                    "raw call arguments require an active SERVER INSERT target",
+                                    "raw call arguments require a supported active SERVER mutation target",
                                 ))
                             } else {
                                 Ok(AuthenticatedRawCallResult::Client(RuntimeValue::Boolean(
@@ -219,12 +222,25 @@ impl PostgresKernel {
                             } else {
                                 Err(raw_call_target_unavailable(
                                     function,
-                                    "raw call arguments require an active SERVER INSERT target",
+                                    "raw call arguments require a supported active SERVER mutation target",
                                 ))
                             }
                         }
                         Some(definition) if definition.domain() == FunctionDomain::Server => {
-                            if raw_server_insert_target_is_selected(&active, function) {
+                            let reference_argument = matches!(
+                                arguments,
+                                [argument]
+                                    if matches!(
+                                        argument.value(),
+                                        RuntimeValue::Reference { .. }
+                                    )
+                            );
+                            let reference_mutation = reference_argument
+                                .then(|| raw_server_reference_mutation_target(&active, function))
+                                .flatten();
+                            if raw_server_insert_target_is_selected(&active, function)
+                                && !reference_argument
+                            {
                                 let savepoint = transaction
                                     .savepoint("raw_server_insert_execution")
                                     .await
@@ -265,10 +281,41 @@ impl PostgresKernel {
                                         ))
                                     }
                                 }
+                            } else if let Some(operation) = reference_mutation {
+                                let savepoint = transaction
+                                    .savepoint("raw_server_reference_mutation_execution")
+                                    .await
+                                    .map_err(PostgresKernelError::Database)?;
+                                let mutation = execute_authorised_raw_server_reference_mutation(
+                                    &savepoint,
+                                    &active,
+                                    &authorisation,
+                                    operation,
+                                    arguments,
+                                )
+                                .await;
+                                match mutation {
+                                    Ok(values) => {
+                                        savepoint
+                                            .commit()
+                                            .await
+                                            .map_err(PostgresKernelError::Database)?;
+                                        Ok(AuthenticatedRawCallResult::Server(values))
+                                    }
+                                    Err(error) => {
+                                        savepoint
+                                            .rollback()
+                                            .await
+                                            .map_err(PostgresKernelError::Database)?;
+                                        Err(classify_raw_server_reference_mutation_error(
+                                            error, function,
+                                        ))
+                                    }
+                                }
                             } else if !arguments.is_empty() {
                                 Err(raw_call_target_unavailable(
                                     function,
-                                    "raw call arguments require an active SERVER INSERT target",
+                                    "raw call arguments require a supported active SERVER mutation target",
                                 ))
                             } else {
                                 let savepoint = transaction
@@ -308,7 +355,7 @@ impl PostgresKernel {
                         }
                         Some(_) if !arguments.is_empty() => Err(raw_call_target_unavailable(
                             function,
-                            "raw call arguments require an active SERVER INSERT target",
+                            "raw call arguments require a supported active SERVER mutation target",
                         )),
                         Some(_) => Err(PostgresKernelError::DurableInvariant {
                             relation: "active catalogue",
@@ -1127,10 +1174,17 @@ fn validate_raw_call_argument_shape(
 ) -> Result<(), PostgresKernelError> {
     match arguments {
         [] => Ok(()),
-        [argument] if matches!(argument.value(), RuntimeValue::Boolean(_)) => Ok(()),
+        [argument]
+            if matches!(
+                argument.value(),
+                RuntimeValue::Boolean(_) | RuntimeValue::Reference { .. }
+            ) =>
+        {
+            Ok(())
+        }
         _ => Err(raw_call_target_unavailable(
             function,
-            "raw calls accept zero arguments or one Boolean argument",
+            "raw calls accept zero arguments or one Boolean or Reference argument",
         )),
     }
 }
@@ -1162,6 +1216,31 @@ fn classify_raw_server_insert_error(
             PostgresKernelError::RawServerTargetUnavailable {
                 source: RawServerTargetError::Insert(source),
             }
+        }
+        error => error,
+    }
+}
+
+fn classify_raw_server_reference_mutation_error(
+    error: PostgresKernelError,
+    function: FunctionId,
+) -> PostgresKernelError {
+    match error {
+        PostgresKernelError::ServerUpdate(source)
+            if raw_server_update_target_is_unavailable(&source) =>
+        {
+            raw_call_target_unavailable(
+                function,
+                "raw SERVER UPDATE reference target is unavailable",
+            )
+        }
+        PostgresKernelError::ServerDelete(source)
+            if raw_server_delete_target_is_unavailable(&source) =>
+        {
+            raw_call_target_unavailable(
+                function,
+                "raw SERVER DELETE reference target is unavailable",
+            )
         }
         error => error,
     }
@@ -1943,13 +2022,13 @@ fn decode_principal_status(value: String) -> Result<PrincipalStatus, PostgresKer
 #[cfg(test)]
 mod tests {
     use super::*;
-    use orna_core::{FieldId, ParameterId, TypeId};
+    use orna_core::{FieldId, ObjectId, ParameterId, TypeId};
 
     const RAW_CALL_FUNCTION: FunctionId = FunctionId::from_bytes([0x61; 16]);
     const RAW_CALL_PARAMETER: ParameterId = ParameterId::from_bytes([0x62; 16]);
 
     #[test]
-    fn raw_call_argument_shape_accepts_zero_or_one_boolean() {
+    fn raw_call_argument_shape_accepts_zero_one_boolean_or_one_reference() {
         validate_raw_call_argument_shape(RAW_CALL_FUNCTION, &[])
             .expect("zero arguments must be accepted");
         for value in [true, false] {
@@ -1958,6 +2037,24 @@ mod tests {
             validate_raw_call_argument_shape(RAW_CALL_FUNCTION, std::slice::from_ref(&argument))
                 .expect("one Boolean argument must be accepted");
         }
+        let reference = FunctionArgument::new(
+            RAW_CALL_PARAMETER,
+            RuntimeValue::Reference {
+                target: TypeId::from_bytes([0x65; 16]),
+                object: ObjectId::from_bytes([0x66; 16]),
+            },
+        )
+        .expect("Reference argument is valid");
+        assert_eq!(reference.parameter(), RAW_CALL_PARAMETER);
+        assert_eq!(
+            reference.value(),
+            &RuntimeValue::Reference {
+                target: TypeId::from_bytes([0x65; 16]),
+                object: ObjectId::from_bytes([0x66; 16]),
+            }
+        );
+        validate_raw_call_argument_shape(RAW_CALL_FUNCTION, std::slice::from_ref(&reference))
+            .expect("one Reference argument must be accepted");
     }
 
     #[test]
@@ -1969,7 +2066,7 @@ mod tests {
                 .expect_err("one Integer argument must be rejected"),
             PostgresKernelError::RawCallTargetUnavailable {
                 function: RAW_CALL_FUNCTION,
-                rule: "raw calls accept zero arguments or one Boolean argument",
+                rule: "raw calls accept zero arguments or one Boolean or Reference argument",
             }
         ));
 
@@ -1987,7 +2084,7 @@ mod tests {
                 .expect_err("two Boolean arguments must be rejected"),
             PostgresKernelError::RawCallTargetUnavailable {
                 function: RAW_CALL_FUNCTION,
-                rule: "raw calls accept zero arguments or one Boolean argument",
+                rule: "raw calls accept zero arguments or one Boolean or Reference argument",
             }
         ));
     }
