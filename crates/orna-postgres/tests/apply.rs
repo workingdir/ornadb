@@ -4092,3 +4092,474 @@ fn require(condition: bool, message: &'static str) -> TestResult<()> {
         Err(failure(message))
     }
 }
+
+#[cfg(feature = "test-hooks")]
+const NULLABLE_ADDITION_INITIAL_SOURCE: &str = "CREATE SCHEMA nullable_addition;\n\
+    CREATE TYPE nullable_addition.entry AS OBJECT (stored BOOL NOT NULL);\n";
+
+#[cfg(feature = "test-hooks")]
+const NULLABLE_ADDITION_FINAL_SOURCE: &str = "CREATE SCHEMA nullable_addition;\n\
+    CREATE TYPE nullable_addition.entry AS OBJECT (\n\
+        stored BOOL NOT NULL,\n\
+        added BOOL\n\
+    );\n";
+
+/// One live journey for appending one nullable Boolean field to an existing
+/// object that already has live rows.
+///
+/// The test applies the initial `nullable_addition` source, captures the
+/// stable object and stored field identities, seeds one row through a direct
+/// test SQL session, compiles the final source, proves through the public
+/// candidate catalogue that the object and stored identities are retained and
+/// one new nullable Boolean `added` field exists with a distinct FieldId,
+/// then applies the final candidate and requires the recovered snapshot.
+/// After the transition two more rows are seeded: one that omits the new
+/// column and one that writes it explicitly. The three-row state is queried
+/// by exact ObjectId: the seeded row keeps stored true with a NULL added
+/// column, the omitted row keeps stored false with NULL added, and the
+/// explicit row stores true and false. A fresh kernel recovers the same
+/// stable identities. Replaying the exact final source against the recovered
+/// revision plans no duplicate column and reapplies cleanly, and a second
+/// fresh kernel recovers the replayed snapshot with the same three rows.
+#[cfg(feature = "test-hooks")]
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn applies_one_appended_nullable_boolean_field_to_live_rows() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel: PostgresKernel = database.connection_string().parse()?;
+        kernel.bootstrap().await?;
+        let empty = kernel.recover().await?;
+        let initial = candidate(NULLABLE_ADDITION_INITIAL_SOURCE, &empty)?;
+        let applied_initial = kernel.apply(&initial).await?;
+        require_recovered_snapshot(&initial, &applied_initial)?;
+
+        let object_type = applied_initial
+            .catalogue()
+            .object_types()
+            .iter()
+            .find(|object| object.name().parts() == ["nullable_addition", "entry"])
+            .ok_or_else(|| {
+                failure("nullable_addition.entry is absent from the applied initial catalogue")
+            })?
+            .id();
+        let stored_field = applied_initial
+            .catalogue()
+            .object_type_by_id(object_type)
+            .ok_or_else(|| {
+                failure("nullable_addition.entry is absent from the applied initial catalogue")
+            })?
+            .field_by_name("stored")
+            .ok_or_else(|| failure("nullable_addition.entry.stored is absent"))?
+            .id();
+        let seeded_object = ObjectId::from_bytes([0xab; 16]);
+
+        // Seed one row through a direct test SQL session. This is test
+        // substrate only: the private physical relation and identity-derived
+        // column names are the documented lower-level PostgreSQL seam.
+        let session = database.open().await?;
+        let seeded = async {
+            session
+                .client()
+                .execute(
+                    &format!(
+                        "INSERT INTO {} (_orna_object_id, {}) VALUES ($1, $2)",
+                        relation(object_type),
+                        field(stored_field)
+                    ),
+                    &[&seeded_object.to_bytes().to_vec(), &true],
+                )
+                .await?;
+            Ok(())
+        }
+        .await;
+        finish_test_session(seeded, session.shutdown().await, "seed the private row")?;
+
+        // Compile the final source and prove through the public candidate
+        // catalogue that the object and stored identities are retained and
+        // one new nullable Boolean field named added exists with a distinct
+        // FieldId.
+        let final_candidate = candidate(NULLABLE_ADDITION_FINAL_SOURCE, &applied_initial)?;
+        let final_object = final_candidate
+            .candidate()
+            .object_type_by_id(object_type)
+            .ok_or_else(|| failure("the final candidate lost the object TypeId"))?;
+        let retained_stored = final_object
+            .field_by_id(stored_field)
+            .ok_or_else(|| failure("the final candidate lost the stored FieldId"))?;
+        require(
+            retained_stored.name() == "stored"
+                && retained_stored.ordinal() == 0
+                && retained_stored.resolved_type()
+                    == ResolvedType::scalar(orna_core::types::StandardScalar::Boolean)
+                && !retained_stored.nullable(),
+            "the final candidate must retain the exact stored field identity",
+        )?;
+        let added_field = final_object
+            .field_by_name("added")
+            .ok_or_else(|| failure("the final candidate is missing the added field"))?;
+        require(
+            added_field.id() != stored_field
+                && added_field.ordinal() == 1
+                && added_field.resolved_type()
+                    == ResolvedType::scalar(orna_core::types::StandardScalar::Boolean)
+                && added_field.nullable(),
+            "the final candidate must append one nullable Boolean added field",
+        )?;
+
+        // Apply the final candidate and require the recovered snapshot.
+        let applied_final = kernel.apply(&final_candidate).await?;
+        require_recovered_snapshot(&final_candidate, &applied_final)?;
+
+        // A fresh session queries the seeded row by ObjectId and reads both
+        // private identity-derived field columns: stored stays true and the
+        // appended column is SQL NULL.
+        let session = database.open().await?;
+        let queried = async {
+            let row = session
+                .client()
+                .query_one(
+                    &format!(
+                        "SELECT {}, {} FROM {} WHERE _orna_object_id = $1",
+                        field(stored_field),
+                        field(added_field.id()),
+                        relation(object_type)
+                    ),
+                    &[&seeded_object.to_bytes().to_vec()],
+                )
+                .await?;
+            let stored: bool = row.try_get(0)?;
+            let added: Option<bool> = row.try_get(1)?;
+            require(
+                stored && added.is_none(),
+                "the seeded row must keep stored true and the appended column NULL",
+            )
+        }
+        .await;
+        finish_test_session(
+            queried,
+            session.shutdown().await,
+            "query the appended column",
+        )?;
+
+        // Two more fixed nonzero rows through bounded direct test SQL: one
+        // that omits the appended column and one that writes it explicitly.
+        let omitted_object = ObjectId::from_bytes([0xac; 16]);
+        let explicit_object = ObjectId::from_bytes([0xad; 16]);
+        seed_nullable_addition_row(
+            &database,
+            object_type,
+            stored_field,
+            None,
+            omitted_object,
+            false,
+            None,
+        )
+        .await?;
+        seed_nullable_addition_row(
+            &database,
+            object_type,
+            stored_field,
+            Some(added_field.id()),
+            explicit_object,
+            true,
+            Some(false),
+        )
+        .await?;
+        require_nullable_addition_rows(
+            &database,
+            object_type,
+            stored_field,
+            added_field.id(),
+            &[
+                (seeded_object, true, None),
+                (omitted_object, false, None),
+                (explicit_object, true, Some(false)),
+            ],
+        )
+        .await?;
+
+        // A fresh kernel recovers the same stable object, stored, and added
+        // identities.
+        let restarted: PostgresKernel = database.connection_string().parse()?;
+        let restarted = restarted.recover().await?;
+        require_recovered_snapshot(&final_candidate, &restarted)?;
+        let recovered_object = restarted
+            .catalogue()
+            .object_type_by_id(object_type)
+            .ok_or_else(|| failure("the recovered catalogue lost the object TypeId"))?;
+        let recovered_stored = recovered_object
+            .field_by_id(stored_field)
+            .ok_or_else(|| failure("the recovered catalogue lost the stored FieldId"))?;
+        let recovered_added = recovered_object
+            .field_by_id(added_field.id())
+            .ok_or_else(|| failure("the recovered catalogue lost the added FieldId"))?;
+        require(
+            recovered_stored.name() == "stored" && recovered_added.name() == "added",
+            "the recovered catalogue must retain the stable stored and added identities",
+        )?;
+
+        // Replay the exact final source against the recovered revision. Exact
+        // replay may advance the immutable revision pair; the applied and
+        // recovered snapshot must equal the replay candidate instead. The
+        // replay candidate must retain the same object, stored, and added
+        // identities so applying it plans no duplicate column, which the
+        // successful apply and the unchanged row checks prove.
+        let replay_candidate = candidate(NULLABLE_ADDITION_FINAL_SOURCE, &restarted)?;
+        let replay_object = replay_candidate
+            .candidate()
+            .object_type_by_id(object_type)
+            .ok_or_else(|| failure("the replay candidate lost the object TypeId"))?;
+        let replay_stored = replay_object
+            .field_by_id(stored_field)
+            .ok_or_else(|| failure("the replay candidate lost the stored FieldId"))?;
+        let replay_added = replay_object
+            .field_by_id(added_field.id())
+            .ok_or_else(|| failure("the replay candidate lost the added FieldId"))?;
+        require(
+            replay_stored.name() == "stored"
+                && replay_added.name() == "added"
+                && replay_added.id() == added_field.id(),
+            "the replay candidate must retain the exact stored and added identities",
+        )?;
+        let replayed = kernel.apply(&replay_candidate).await?;
+        require_recovered_snapshot(&replay_candidate, &replayed)?;
+        require_nullable_addition_rows(
+            &database,
+            object_type,
+            stored_field,
+            added_field.id(),
+            &[
+                (seeded_object, true, None),
+                (omitted_object, false, None),
+                (explicit_object, true, Some(false)),
+            ],
+        )
+        .await?;
+
+        // One more fresh kernel recovers the exact replayed snapshot and the
+        // same three private rows.
+        let replayed_recovery: PostgresKernel = database.connection_string().parse()?;
+        let replayed_recovery = replayed_recovery.recover().await?;
+        require_recovered_snapshot(&replay_candidate, &replayed_recovery)?;
+        let replayed_recovered_object = replayed_recovery
+            .catalogue()
+            .object_type_by_id(object_type)
+            .ok_or_else(|| failure("the replayed recovery lost the object TypeId"))?;
+        let replayed_recovered_added = replayed_recovered_object
+            .field_by_id(added_field.id())
+            .ok_or_else(|| failure("the replayed recovery lost the added FieldId"))?;
+        require(
+            replayed_recovered_added.name() == "added",
+            "the replayed recovery must retain the added identity",
+        )?;
+        require_nullable_addition_rows(
+            &database,
+            object_type,
+            stored_field,
+            added_field.id(),
+            &[
+                (seeded_object, true, None),
+                (omitted_object, false, None),
+                (explicit_object, true, Some(false)),
+            ],
+        )
+        .await
+    })
+    .await
+}
+
+/// Seeds one private nullable-addition row through a bounded direct test SQL
+/// session. The appended column is written only when both the added field and
+/// a value are supplied; otherwise the row omits it and stays NULL.
+#[cfg(feature = "test-hooks")]
+async fn seed_nullable_addition_row(
+    database: &TestDatabase,
+    object_type: TypeId,
+    stored_field: FieldId,
+    added_field: Option<FieldId>,
+    object: ObjectId,
+    stored: bool,
+    added: Option<bool>,
+) -> TestResult<()> {
+    let session = database.open().await?;
+    let operation = async {
+        let sql = if let Some(added_field) = added_field {
+            format!(
+                "INSERT INTO {} (_orna_object_id, {}, {}) VALUES ($1, $2, $3)",
+                relation(object_type),
+                field(stored_field),
+                field(added_field)
+            )
+        } else {
+            format!(
+                "INSERT INTO {} (_orna_object_id, {}) VALUES ($1, $2)",
+                relation(object_type),
+                field(stored_field)
+            )
+        };
+        let result = if let Some(added) = added {
+            session
+                .client()
+                .execute(&sql, &[&object.to_bytes().to_vec(), &stored, &added])
+                .await
+        } else {
+            session
+                .client()
+                .execute(&sql, &[&object.to_bytes().to_vec(), &stored])
+                .await
+        };
+        result?;
+        Ok(())
+    }
+    .await;
+    finish_test_session(
+        operation,
+        session.shutdown().await,
+        "seed a nullable-addition row",
+    )
+}
+
+/// Requires the exact ordered private row state of the nullable-addition
+/// relation, deterministically ordered by object identity.
+#[cfg(feature = "test-hooks")]
+async fn require_nullable_addition_rows(
+    database: &TestDatabase,
+    object_type: TypeId,
+    stored_field: FieldId,
+    added_field: FieldId,
+    expected: &[(ObjectId, bool, Option<bool>)],
+) -> TestResult<()> {
+    let session = database.open().await?;
+    let operation = async {
+        let rows = session
+            .client()
+            .query(
+                &format!(
+                    "SELECT _orna_object_id, {}, {} FROM {} ORDER BY _orna_object_id",
+                    field(stored_field),
+                    field(added_field),
+                    relation(object_type)
+                ),
+                &[],
+            )
+            .await?;
+        if rows.len() != expected.len() {
+            return Err(failure(format!(
+                "expected exactly {} private rows, got {}",
+                expected.len(),
+                rows.len()
+            )));
+        }
+        for (row, expected) in rows.iter().zip(expected) {
+            let object: Vec<u8> = row.try_get(0)?;
+            let stored: bool = row.try_get(1)?;
+            let added: Option<bool> = row.try_get(2)?;
+            require(
+                object == expected.0.to_bytes().to_vec()
+                    && stored == expected.1
+                    && added == expected.2,
+                "private row identity or values differ from the expected state",
+            )?;
+        }
+        Ok(())
+    }
+    .await;
+    finish_test_session(
+        operation,
+        session.shutdown().await,
+        "require nullable-addition rows",
+    )
+}
+
+/// One live rollback tracer for a failed appended-field apply.
+///
+/// The test applies the initial `nullable_addition` source, seeds one fixed
+/// row through a direct test SQL session, captures the durable baseline,
+/// compiles the final source, and installs the existing
+/// `FailurePoint::CatalogueSchema` trigger, which fires after physical
+/// installation and before semantic persistence. The triggered apply must
+/// fail with the exact failure shape, and baseline recovery must causally
+/// catch any leaked extra physical column. The original row is then queried
+/// through only the pre-transition stored column and must still be true.
+#[cfg(feature = "test-hooks")]
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn failed_appended_nullable_boolean_apply_rolls_back_column_and_live_row() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = kernel(&database)?;
+        kernel.bootstrap().await?;
+        let empty = kernel.recover().await?;
+        let initial = candidate(NULLABLE_ADDITION_INITIAL_SOURCE, &empty)?;
+        let applied_initial = kernel.apply(&initial).await?;
+        require_recovered_snapshot(&initial, &applied_initial)?;
+
+        let object_type = applied_initial
+            .catalogue()
+            .object_types()
+            .iter()
+            .find(|object| object.name().parts() == ["nullable_addition", "entry"])
+            .ok_or_else(|| {
+                failure("nullable_addition.entry is absent from the applied initial catalogue")
+            })?
+            .id();
+        let stored_field = applied_initial
+            .catalogue()
+            .object_type_by_id(object_type)
+            .ok_or_else(|| {
+                failure("nullable_addition.entry is absent from the applied initial catalogue")
+            })?
+            .field_by_name("stored")
+            .ok_or_else(|| failure("nullable_addition.entry.stored is absent"))?
+            .id();
+        let seeded_object = ObjectId::from_bytes([0xac; 16]);
+        seed_nullable_addition_row(
+            &database,
+            object_type,
+            stored_field,
+            None,
+            seeded_object,
+            true,
+            None,
+        )
+        .await?;
+
+        let final_candidate = candidate(NULLABLE_ADDITION_FINAL_SOURCE, &applied_initial)?;
+        let baseline = baseline(&database, &applied_initial).await?;
+        install_failure_point(&database, FailurePoint::CatalogueSchema, &final_candidate).await?;
+
+        let error = kernel
+            .apply(&final_candidate)
+            .await
+            .expect_err("the triggered final apply must fail");
+        assert_failure_shape(FailurePoint::CatalogueSchema, &error)?;
+        require_baseline(&database, &baseline, &kernel).await?;
+
+        // The original row survives through only the pre-transition column.
+        let session = database.open().await?;
+        let operation = async {
+            let row = session
+                .client()
+                .query_one(
+                    &format!(
+                        "SELECT {} FROM {} WHERE _orna_object_id = $1",
+                        field(stored_field),
+                        relation(object_type)
+                    ),
+                    &[&seeded_object.to_bytes().to_vec()],
+                )
+                .await?;
+            let stored: bool = row.try_get(0)?;
+            require(
+                stored,
+                "the pre-transition stored value must survive the failed apply",
+            )
+        }
+        .await;
+        finish_test_session(
+            operation,
+            session.shutdown().await,
+            "query the pre-transition row",
+        )
+    })
+    .await
+}

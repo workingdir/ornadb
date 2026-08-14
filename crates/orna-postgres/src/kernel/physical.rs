@@ -6,7 +6,7 @@ mod verify;
 use orna_core::{
     TypeId,
     catalogue::OnDeleteAction,
-    physical::{CreateField, CreateObject, PhysicalFieldType, PhysicalPlan},
+    physical::{AddField, CreateField, CreateObject, PhysicalFieldType, PhysicalPlan},
     types::StandardScalar,
 };
 use tokio_postgres::Transaction;
@@ -57,13 +57,21 @@ struct PhysicalStatements {
 }
 
 fn lower_physical_plan(plan: &PhysicalPlan) -> Result<PhysicalStatements, PostgresKernelError> {
-    let mut creates = Vec::with_capacity(plan.create_objects().len().saturating_mul(2));
+    let mut creates = Vec::with_capacity(
+        plan.create_objects()
+            .len()
+            .saturating_mul(2)
+            .saturating_add(usize::from(plan.add_field().is_some())),
+    );
     let mut references = Vec::new();
 
     for object in plan.create_objects() {
         creates.push(create_table_statement(object)?);
         creates.push(revoke_table_statement(object.type_id()));
         references.extend(reference_statements(object));
+    }
+    if let Some(add_field) = plan.add_field() {
+        creates.push(add_field_statement(add_field)?);
     }
 
     Ok(PhysicalStatements {
@@ -102,6 +110,14 @@ fn create_table_statement(object: &CreateObject) -> Result<String, PostgresKerne
     Ok(format!(
         "CREATE TABLE {DATA_SCHEMA}.{table} (\n    {}\n);",
         definitions.join(",\n    ")
+    ))
+}
+
+fn add_field_statement(add_field: &AddField) -> Result<String, PostgresKernelError> {
+    Ok(format!(
+        "ALTER TABLE {DATA_SCHEMA}.{}\n    ADD COLUMN {};",
+        relation_name(add_field.object_type()),
+        field_definition(add_field.field())?,
     ))
 }
 
@@ -352,6 +368,179 @@ mod tests {
         assert!(!sql.contains("semantic_scalar"));
         assert!(!sql.contains("semantic_reference"));
         assert!(!sql.contains("semantic_unique_reference"));
+    }
+
+    #[test]
+    fn mixed_plan_orders_new_tables_before_the_existing_object_column() {
+        let existing = TypeId::from_bytes([0x11; 16]);
+        let first_field = FieldId::from_bytes([0x20; 16]);
+        let added_field = FieldId::from_bytes([0x21; 16]);
+        let new_object = TypeId::from_bytes([0x22; 16]);
+        let reference_field = FieldId::from_bytes([0x23; 16]);
+        let schema = SchemaDefinition::new(SchemaId::new(), semantic_name(&["private_words"]));
+        let active_catalogue = CatalogueSnapshot::new(
+            CatalogueRevisionId::new(),
+            vec![schema.clone()],
+            vec![ObjectTypeDefinition::new(
+                existing,
+                semantic_name(&["private_words", "existing"]),
+                vec![FieldDefinition::new(
+                    first_field,
+                    "semantic_stored",
+                    0,
+                    ResolvedType::scalar(StandardScalar::Boolean),
+                    false,
+                    false,
+                    None,
+                    None,
+                )],
+            )],
+        )
+        .unwrap();
+        let source_unit = SourceUnitId::new();
+        let unit = StoredSourceUnit::new(
+            source_unit,
+            0,
+            "physical.orna",
+            "",
+            source_unit_content_digest("").unwrap(),
+        )
+        .unwrap();
+        let bundle = SourceBundleId::new();
+        let bundle_hash = source_bundle_digest(std::slice::from_ref(&unit)).unwrap();
+        let source = StoredSourceRevision::new(
+            bundle,
+            SourceRevisionId::new(),
+            None,
+            vec![unit],
+            bundle_hash,
+            source_revision_record_digest(bundle, None, bundle_hash).unwrap(),
+        )
+        .unwrap();
+        let source_origin = SourceOrigin::new(source_unit, 0, 0).unwrap();
+        let origins = vec![
+            DefinitionOrigin::new(DefinitionIdentity::Schema(schema.id()), source_origin),
+            DefinitionOrigin::new(DefinitionIdentity::ObjectType(existing), source_origin),
+            DefinitionOrigin::new(
+                DefinitionIdentity::Field {
+                    owner: existing,
+                    field: first_field,
+                },
+                source_origin,
+            ),
+        ];
+        let context = CatalogueHashContext::version_one();
+        let catalogue_hash =
+            catalogue_digest_with_context(&context, &active_catalogue, &[], &[], &origins, &[])
+                .unwrap();
+        let active = ActiveDatabaseRevision::new_with_catalogue_hash_context(
+            ActiveDatabaseRevisionInput::new(
+                RevisionPair::new(source.id(), active_catalogue.revision()),
+                source,
+                active_catalogue,
+                catalogue_hash,
+                ActiveRevisionContent::new(Vec::new(), Vec::new(), origins, Vec::new()),
+            ),
+            context,
+        )
+        .unwrap();
+
+        let candidate = candidate_with_objects(
+            &active,
+            vec![
+                ObjectTypeDefinition::new(
+                    existing,
+                    semantic_name(&["private_words", "existing"]),
+                    vec![
+                        FieldDefinition::new(
+                            first_field,
+                            "semantic_stored",
+                            0,
+                            ResolvedType::scalar(StandardScalar::Boolean),
+                            false,
+                            false,
+                            None,
+                            None,
+                        ),
+                        FieldDefinition::new(
+                            added_field,
+                            "semantic_added",
+                            1,
+                            ResolvedType::scalar(StandardScalar::Boolean),
+                            true,
+                            false,
+                            None,
+                            None,
+                        ),
+                    ],
+                ),
+                ObjectTypeDefinition::new(
+                    new_object,
+                    semantic_name(&["private_words", "new"]),
+                    vec![FieldDefinition::new(
+                        reference_field,
+                        "semantic_owner",
+                        0,
+                        ResolvedType::reference(existing),
+                        true,
+                        false,
+                        None,
+                        None,
+                    )],
+                ),
+            ],
+        );
+        let plan = plan_physical_changes(&active, &candidate).unwrap();
+        let statements = lower_physical_plan(&plan).unwrap();
+
+        // The new object's CREATE TABLE and REVOKE precede the existing
+        // object's ALTER TABLE ADD COLUMN.
+        assert_eq!(statements.creates.len(), 3);
+        assert_eq!(statements.references.len(), 1);
+        assert_eq!(
+            statements.creates[0],
+            concat!(
+                "CREATE TABLE _orna_data.t_22222222222222222222222222222222 (\n",
+                "    _orna_object_id bytea NOT NULL,\n",
+                "    CONSTRAINT pk_22222222222222222222222222222222 PRIMARY KEY (_orna_object_id),\n",
+                "    CONSTRAINT ck_22222222222222222222222222222222_object_id CHECK (octet_length(_orna_object_id) = 16),\n",
+                "    f_23232323232323232323232323232323 bytea,\n",
+                "    CONSTRAINT ck_23232323232323232323232323232323_object_id CHECK (octet_length(f_23232323232323232323232323232323) = 16)\n",
+                ");"
+            )
+        );
+        assert_eq!(
+            statements.creates[1],
+            "REVOKE ALL ON TABLE _orna_data.t_22222222222222222222222222222222 FROM PUBLIC;"
+        );
+        assert_eq!(
+            statements.creates[2],
+            "ALTER TABLE _orna_data.t_11111111111111111111111111111111\n    ADD COLUMN f_21212121212121212121212121212121 boolean;"
+        );
+        assert_eq!(
+            statements.references[0],
+            concat!(
+                "ALTER TABLE _orna_data.t_22222222222222222222222222222222\n",
+                "    ADD CONSTRAINT fk_23232323232323232323232323232323\n",
+                "    FOREIGN KEY (f_23232323232323232323232323232323)\n",
+                "    REFERENCES _orna_data.t_11111111111111111111111111111111 (_orna_object_id)\n",
+                "    ON DELETE NO ACTION;"
+            )
+        );
+
+        // install_physical_plan chains every create before every reference,
+        // so the new-object foreign key follows the three create statements.
+        let chained = statements
+            .creates
+            .iter()
+            .chain(&statements.references)
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(chained.len(), 4);
+        assert_eq!(
+            chained[3], statements.references[0],
+            "install_physical_plan must chain the new-object FK after the three create statements"
+        );
     }
 
     #[test]
