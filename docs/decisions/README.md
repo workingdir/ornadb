@@ -91,3 +91,5 @@ source-of-truth or authority rules.
   [Existing Objects Admit One Appended Nullable Boolean Field](0044-appended-nullable-boolean-fields.md)
 * **work ADR 0045:**
   [Canonical Raw Calls Bind Remaining ORV1 Scalar INSERT Arguments](0045-canonical-raw-scalar-insert.md)
+* **work ADR 0046:**
+  [Existing Objects Admit One Appended Nullable Executable Scalar Field](0046-appended-nullable-scalar-fields.md)
