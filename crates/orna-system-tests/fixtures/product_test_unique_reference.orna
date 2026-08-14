@@ -1,0 +1,26 @@
+CREATE SCHEMA unique_reference_test;
+
+CREATE TYPE unique_reference_test.owner AS OBJECT (
+    stored BOOLEAN NOT NULL
+);
+
+CREATE TYPE unique_reference_test.assignment AS OBJECT (
+    owner REF unique_reference_test.owner NOT NULL UNIQUE
+);
+
+CREATE SERVER FUNCTION unique_reference_test.create_owner()
+RETURNS ROWS (created REF unique_reference_test.owner)
+SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE
+AS INSERT INTO unique_reference_test.owner AS made (stored)
+VALUES (TRUE) RETURNING REF(made);
+
+CREATE SERVER FUNCTION unique_reference_test.create_assignment(p_owner REF unique_reference_test.owner)
+RETURNS ROWS (created REF unique_reference_test.assignment)
+SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE
+AS INSERT INTO unique_reference_test.assignment AS made (owner)
+VALUES (p_owner) RETURNING REF(made);
+
+CREATE SERVER FUNCTION unique_reference_test.read_assignment_owners()
+RETURNS ROWS (owner REF unique_reference_test.owner)
+SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE
+AS SELECT assignment.owner FROM unique_reference_test.assignment assignment;
