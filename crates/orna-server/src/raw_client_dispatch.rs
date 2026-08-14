@@ -55,17 +55,18 @@ impl RawClientDispatch {
     ///
     /// CLIENT success returns one typed value action followed by completion.
     /// SERVER success returns one value action per row followed by completion.
-    /// Exactly one Boolean or Reference argument enters the protected kernel
-    /// path. Other argument shapes return `TARGET_UNAVAILABLE`. Calls containing
-    /// a record first complete the closed transactional record preflight; other
-    /// closed argument shapes do not open PostgreSQL. Raw execute denial returns
+    /// Exactly one Boolean, Integer, BigInt, Float, Text, Bytes, or Reference
+    /// argument enters the protected kernel path. Other argument shapes return
+    /// `TARGET_UNAVAILABLE`. Calls containing a record first complete the closed
+    /// transactional record preflight; other closed argument shapes do not open
+    /// PostgreSQL. Raw execute denial returns
     /// `EXECUTE_DENIED`, an unavailable raw target returns
     /// `TARGET_UNAVAILABLE`, a CLIENT evaluator error returns
     /// `CLIENT_EVALUATION_FAILED`, and every other kernel error returns
     /// `INTERNAL_FAILURE`. The result retains the private typed kernel source
     /// for trusted diagnostics only.
     pub async fn finish(self) -> RawClientDispatchResult {
-        if let Some(argument) = one_boolean_or_reference_argument(&self.call) {
+        if let Some(argument) = one_admitted_argument(&self.call) {
             return match self
                 .kernel
                 .dispatch_authenticated_raw_call_with_arguments(
@@ -114,19 +115,21 @@ impl RawClientDispatch {
     }
 }
 
-fn one_boolean_or_reference_argument(call: &RawCall) -> Option<FunctionArgument> {
+fn one_admitted_argument(call: &RawCall) -> Option<FunctionArgument> {
     let [argument] = call.arguments.as_slice() else {
         return None;
     };
-    let value = match &argument.value {
-        RuntimeValue::Boolean(value) => RuntimeValue::Boolean(*value),
-        RuntimeValue::Reference { target, object } => RuntimeValue::Reference {
-            target: *target,
-            object: *object,
-        },
+    match &argument.value {
+        RuntimeValue::Boolean(_)
+        | RuntimeValue::Integer(_)
+        | RuntimeValue::BigInt(_)
+        | RuntimeValue::Float(_)
+        | RuntimeValue::Text(_)
+        | RuntimeValue::Bytes(_)
+        | RuntimeValue::Reference { .. } => {}
         _ => return None,
-    };
-    FunctionArgument::new(argument.parameter, value).ok()
+    }
+    FunctionArgument::new(argument.parameter, argument.value.clone()).ok()
 }
 
 /// The closed public actions and private diagnostic source for one dispatch.
@@ -234,7 +237,8 @@ mod tests {
             AuthenticatedSession, ExecuteDenial, Principal, PrincipalKind, PrincipalStatus,
             SecuritySnapshot,
         },
-        value::RuntimeValue,
+        types::{ResolvedType, StandardScalar},
+        value::{RuntimeFloat, RuntimeValue},
     };
     use orna_postgres::{PostgresKernel, RawServerTargetError, ServerSelectError};
     use orna_protocol::{
@@ -274,12 +278,18 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_argument_shapes_never_open_postgres_and_close_redacted() {
+        // A single typed NULL and a two-argument call are both closed at the
+        // adapter. Catalogue-bound closed shapes such as enum, record, opaque,
+        // and constructed values cannot be built without an active revision and
+        // are proven through the public adapter in the live
+        // `standard_database.rs` scalar dispatch proof.
         for (stream, arguments) in [
             (
                 7,
                 vec![CallArgument {
                     parameter: ParameterId::from_bytes([5; 16]),
-                    value: RuntimeValue::Integer(1),
+                    value: RuntimeValue::null(ResolvedType::scalar(StandardScalar::Boolean))
+                        .expect("a typed test null is valid"),
                 }],
             ),
             (
@@ -409,59 +419,133 @@ mod tests {
         );
     }
 
-    #[test]
-    fn one_boolean_or_reference_argument_preserves_parameter_identity_and_value() {
-        let converted = one_boolean_or_reference_argument(&RawCall {
-            function: FUNCTION,
-            arguments: vec![CallArgument {
-                parameter: ParameterId::from_bytes([5; 16]),
-                value: RuntimeValue::Boolean(true),
-            }],
-        })
-        .expect("one Boolean argument must convert");
-        assert_eq!(converted.parameter(), ParameterId::from_bytes([5; 16]));
-        assert_eq!(converted.value(), &RuntimeValue::Boolean(true));
-
-        let converted = one_boolean_or_reference_argument(&RawCall {
-            function: FUNCTION,
-            arguments: vec![CallArgument {
-                parameter: ParameterId::from_bytes([6; 16]),
-                value: RuntimeValue::Boolean(false),
-            }],
-        })
-        .expect("one Boolean argument must convert");
-        assert_eq!(converted.parameter(), ParameterId::from_bytes([6; 16]));
-        assert_eq!(converted.value(), &RuntimeValue::Boolean(false));
-
+    #[tokio::test]
+    async fn every_admitted_scalar_crosses_to_the_kernel_path_without_conversion() {
+        // Every admitted scalar shape reaches the authenticated kernel path
+        // with its checked value intact. An unreachable kernel must produce an
+        // operational internal failure that retains its private typed source; a
+        // local redacted closure could never produce that outcome. The public
+        // action carries no value, so a cross-boundary conversion could never
+        // be observed through the closed failure surface.
         let reference = RuntimeValue::Reference {
             target: TypeId::from_bytes([0x71; 16]),
             object: ObjectId::from_bytes([0x72; 16]),
         };
-        let converted = one_boolean_or_reference_argument(&RawCall {
-            function: FUNCTION,
-            arguments: vec![CallArgument {
-                parameter: ParameterId::from_bytes([7; 16]),
-                value: reference.clone(),
-            }],
-        })
-        .expect("one Reference argument must convert");
-        assert_eq!(converted.parameter(), ParameterId::from_bytes([7; 16]));
-        assert_eq!(converted.value(), &reference);
-
-        // The conversion boundary rejects every other shape before dispatch:
-        // one Integer and two Booleans both close at the helper itself.
-        assert!(
-            one_boolean_or_reference_argument(&RawCall {
+        for (stream, value) in [
+            (12, RuntimeValue::Boolean(true)),
+            (13, RuntimeValue::Integer(i32::MAX)),
+            (14, RuntimeValue::BigInt(i64::MIN)),
+            (
+                15,
+                RuntimeValue::Float(RuntimeFloat::new(0.1).expect("0.1 is finite")),
+            ),
+            (
+                16,
+                RuntimeValue::Text(String::from("exact \u{65e5}\u{672c}")),
+            ),
+            (17, RuntimeValue::Bytes(vec![0x00, 0xff, 0x01])),
+            (18, reference),
+        ] {
+            let call = RawCall {
                 function: FUNCTION,
                 arguments: vec![CallArgument {
                     parameter: ParameterId::from_bytes([5; 16]),
-                    value: RuntimeValue::Integer(1),
+                    value,
+                }],
+            };
+            let dispatch =
+                RawClientDispatch::new(unavailable_kernel(), test_session(), stream, call);
+            let result = dispatch.finish().await;
+            assert!(
+                result.source().is_some(),
+                "an admitted scalar must retain the private kernel source"
+            );
+            assert_eq!(
+                result.actions(),
+                &[ServerAction::Failed {
+                    stream,
+                    failure: CallFailure::InternalFailure,
+                }]
+            );
+            assert_eq!(
+                result.action_after_cancellation(),
+                ServerAction::Failed {
+                    stream,
+                    failure: CallFailure::InternalFailure,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn one_admitted_argument_preserves_parameter_identity_and_value() {
+        let reference = RuntimeValue::Reference {
+            target: TypeId::from_bytes([0x71; 16]),
+            object: ObjectId::from_bytes([0x72; 16]),
+        };
+        let text = RuntimeValue::Text(String::from("caf\u{e9} e\u{301}\n\t\u{65e5}\u{672c}"));
+        let bytes = RuntimeValue::Bytes(vec![0x00, 0xff, 0x7f, 0x00, 0x01]);
+        for (index, value) in [
+            RuntimeValue::Boolean(true),
+            RuntimeValue::Boolean(false),
+            RuntimeValue::Integer(i32::MIN),
+            RuntimeValue::BigInt(i64::MAX),
+            RuntimeValue::Float(RuntimeFloat::new(0.5).expect("0.5 is finite")),
+            text.clone(),
+            bytes.clone(),
+            reference.clone(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let parameter = ParameterId::from_bytes([5 + index as u8; 16]);
+            let converted = one_admitted_argument(&RawCall {
+                function: FUNCTION,
+                arguments: vec![CallArgument {
+                    parameter,
+                    value: value.clone(),
+                }],
+            })
+            .expect("one admitted argument must cross the adapter boundary");
+            assert_eq!(converted.parameter(), parameter);
+            assert_eq!(converted.value(), &value);
+        }
+
+        // The exact float bit pattern crosses unchanged: the adapter retains
+        // the checked RuntimeFloat clone instead of re-rendering a literal.
+        let float = RuntimeValue::Float(RuntimeFloat::new(-0.25).expect("-0.25 is finite"));
+        let converted = one_admitted_argument(&RawCall {
+            function: FUNCTION,
+            arguments: vec![CallArgument {
+                parameter: ParameterId::from_bytes([0x60; 16]),
+                value: float.clone(),
+            }],
+        })
+        .expect("one Float argument must cross the adapter boundary");
+        let RuntimeValue::Float(stored) = converted.value() else {
+            panic!("the converted Float argument lost its runtime shape");
+        };
+        assert_eq!(stored.value().to_bits(), (-0.25_f64).to_bits());
+
+        // The conversion boundary rejects every closed shape before dispatch:
+        // one typed NULL, two Booleans, and an empty argument set all close at
+        // the helper itself. Catalogue-bound closed shapes such as enum,
+        // record, opaque, and constructed values cannot be built without an
+        // active revision and are proven through the public adapter in the live
+        // `standard_database.rs` scalar dispatch proof.
+        assert!(
+            one_admitted_argument(&RawCall {
+                function: FUNCTION,
+                arguments: vec![CallArgument {
+                    parameter: ParameterId::from_bytes([5; 16]),
+                    value: RuntimeValue::null(ResolvedType::scalar(StandardScalar::Boolean))
+                        .expect("a typed test null is valid"),
                 }],
             })
             .is_none()
         );
         assert!(
-            one_boolean_or_reference_argument(&RawCall {
+            one_admitted_argument(&RawCall {
                 function: FUNCTION,
                 arguments: vec![
                     CallArgument {
@@ -473,6 +557,13 @@ mod tests {
                         value: RuntimeValue::Boolean(false),
                     },
                 ],
+            })
+            .is_none()
+        );
+        assert!(
+            one_admitted_argument(&RawCall {
+                function: FUNCTION,
+                arguments: vec![],
             })
             .is_none()
         );
@@ -637,6 +728,15 @@ mod tests {
             call_unavailable.action_after_cancellation(),
             ServerAction::Cancelled { stream: 13 }
         );
+        // The public TARGET_UNAVAILABLE frame is the closed redacted form: it
+        // carries no argument value, while the private typed source remains
+        // available for trusted diagnostics only.
+        let encoded = encode_server_frame(&ServerFrame::CallFailed {
+            stream: 13,
+            failure: CallFailure::TargetUnavailable,
+        })
+        .expect("redacted target-unavailable failure encodes");
+        assert_eq!(&encoded[18..], &[0x02, 0x00, 0x01, 0x00]);
 
         let operational = RawClientDispatchResult::from_kernel_error(
             12,
