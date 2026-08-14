@@ -211,6 +211,13 @@ pub enum PostgresKernelError {
         /// The fail-closed reason for denying execution.
         reason: ExecuteDenial,
     },
+    /// An authorised function is unavailable at the generic raw-call boundary.
+    RawCallTargetUnavailable {
+        /// The requested function identity.
+        function: FunctionId,
+        /// The closed raw-call rule that rejected the target.
+        rule: &'static str,
+    },
     /// An allowed SERVER function is unavailable at the closed raw-call boundary.
     RawServerTargetUnavailable {
         /// The exact typed SERVER target validation failure.
@@ -337,6 +344,13 @@ impl fmt::Display for PostgresKernelError {
             Self::RawExecuteDenied { .. } => {
                 formatter.write_str("raw function execution was denied")
             }
+            Self::RawCallTargetUnavailable { function, rule } => {
+                write!(
+                    formatter,
+                    "raw call target {} is unavailable: {rule}",
+                    function.canonical()
+                )
+            }
             Self::RawServerTargetUnavailable { source } => {
                 write!(formatter, "raw SERVER target is unavailable: {source}")
             }
@@ -419,6 +433,7 @@ impl Error for PostgresKernelError {
             | Self::ClientExecuteDenied { .. }
             | Self::ServerExecuteDenied { .. }
             | Self::RawExecuteDenied { .. }
+            | Self::RawCallTargetUnavailable { .. }
             | Self::DurableInvariant { .. } => None,
         }
     }
@@ -582,6 +597,31 @@ mod tests {
                 function: actual_function,
                 reason: ExecuteDenial::UnknownFunction,
             } if actual_pair == pair && actual_function == function
+        ));
+    }
+
+    #[test]
+    fn raw_call_target_unavailable_reports_the_exact_function_and_rule() {
+        let function = FunctionId::from_bytes([0x25; 16]);
+        let error = PostgresKernelError::RawCallTargetUnavailable {
+            function,
+            rule: "test boundary",
+        };
+
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "raw call target {} is unavailable: test boundary",
+                function.canonical()
+            )
+        );
+        assert!(error.source().is_none());
+        assert!(matches!(
+            error,
+            PostgresKernelError::RawCallTargetUnavailable {
+                function: actual_function,
+                rule: "test boundary",
+            } if actual_function == function
         ));
     }
 
