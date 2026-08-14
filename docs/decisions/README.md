@@ -85,3 +85,5 @@ source-of-truth or authority rules.
   [Canonical Raw Calls Select UPDATE and DELETE by Reference](0041-canonical-raw-reference-mutations.md)
 * **work ADR 0042:**
   [Mandatory System Functions Have One Sealed Registry](0042-mandatory-system-function-registry.md)
+* **work ADR 0043:**
+  [Canonical Raw Calls Bind One Reference INSERT Argument](0043-canonical-raw-reference-insert.md)
