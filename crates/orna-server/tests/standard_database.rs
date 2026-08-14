@@ -104,6 +104,20 @@ const RAW_CLIENT_FUNCTION_SOURCE: &str = "CREATE SCHEMA app;\n\
     SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n\
     AS SELECT assignment.marker FROM app.assignment assignment;\n\
     CREATE CLIENT FUNCTION app.enabled() RETURNS BOOLEAN RETURN TRUE;\n";
+/// One Integer single-parameter INSERT and one public Integer reader.
+const RAW_CLIENT_INT_INSERT_SOURCE: &str = "CREATE SCHEMA raw_int_insert;\n\
+    CREATE TYPE raw_int_insert.int_probe AS OBJECT (\n\
+      stored INT NOT NULL\n\
+    );\n\
+    CREATE SERVER FUNCTION raw_int_insert.create_int(p_value INT)\n\
+    RETURNS ROWS (created REF raw_int_insert.int_probe)\n\
+    SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE\n\
+    AS INSERT INTO raw_int_insert.int_probe AS made (stored)\n\
+    VALUES (p_value) RETURNING REF(made);\n\
+    CREATE SERVER FUNCTION raw_int_insert.read_ints()\n\
+    RETURNS ROWS (stored INT)\n\
+    SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n\
+    AS SELECT int_probe.stored FROM raw_int_insert.int_probe int_probe;\n";
 const RAW_CLIENT_USER: PrincipalId = PrincipalId::from_bytes([0x71; 16]);
 const RAW_CLIENT_UNGRANTED_USER: PrincipalId = PrincipalId::from_bytes([0x72; 16]);
 const RAW_CLIENT_STALE_USER: PrincipalId = PrincipalId::from_bytes([0x73; 16]);
@@ -1700,6 +1714,163 @@ async fn server_raw_reference_insert_authority() -> TestResult<()> {
 
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
+async fn server_raw_integer_dispatch_denies_then_grants_and_audits_exact_values() -> TestResult<()>
+{
+    // One Integer tracer through the public adapter. The PostgreSQL scalar
+    // matrix already proves the kernel bind and value contract.
+    with_test_database(|database| async move {
+        let kernel = kernel(&database)?;
+        let (active, standard_upgrade, _client_function, _server_function) =
+            install_raw_client_fixture(&kernel).await?;
+        let (active, int_probe, create_int, create_int_parameter, read_ints) =
+            install_raw_int_insert_fixture(&kernel, &active, &standard_upgrade).await?;
+        let mut wrong_parameter_bytes = create_int_parameter.to_bytes();
+        wrong_parameter_bytes[0] ^= 0x01;
+        let wrong_parameter = ParameterId::from_bytes(wrong_parameter_bytes);
+        let principal = Principal::new(
+            RAW_CLIENT_USER,
+            PrincipalKind::User,
+            PrincipalStatus::Active,
+        );
+        let snapshot = |grants: Vec<ExecuteGrant>| {
+            SecuritySnapshot::new(
+                active.pair(),
+                active
+                    .catalogue()
+                    .functions()
+                    .iter()
+                    .map(|function| function.id())
+                    .collect::<Vec<_>>(),
+                vec![principal],
+                vec![],
+                grants,
+            )
+            .expect("the raw Integer test security snapshot is valid")
+        };
+        let dispatch = |session: &AuthenticatedSession,
+                        stream: u64,
+                        parameter: ParameterId,
+                        value: RuntimeValue| {
+            RawClientDispatch::new(
+                kernel.clone(),
+                session.clone(),
+                stream,
+                RawCall {
+                    function: create_int,
+                    arguments: vec![orna_protocol::CallArgument { parameter, value }],
+                },
+            )
+        };
+
+        // The wrong-parameter call is denied before its grant, proving
+        // authorisation precedes argument validation.
+        let read_only = kernel
+            .replace_security_snapshot(&snapshot(vec![ExecuteGrant::new(
+                RAW_CLIENT_USER,
+                read_ints,
+            )]))
+            .await?;
+        let session = read_only.bind_authenticated_session(RAW_CLIENT_USER, vec![])?;
+        let denied = dispatch(&session, 1, wrong_parameter, RuntimeValue::Integer(7))
+            .finish()
+            .await;
+        require_dispatch_failure(
+            &denied,
+            1,
+            CallFailure::ExecuteDenied,
+            matches!(
+                denied.source(),
+                Some(PostgresKernelError::RawExecuteDenied {
+                    reason: ExecuteDenial::MissingExecuteGrant,
+                    ..
+                })
+            ),
+            "an ungranted raw Integer INSERT was not denied before argument binding",
+        )?;
+
+        // Grant the INSERT, store one exact value, and read it back.
+        let granted = kernel
+            .replace_security_snapshot(&snapshot(vec![
+                ExecuteGrant::new(RAW_CLIENT_USER, create_int),
+                ExecuteGrant::new(RAW_CLIENT_USER, read_ints),
+            ]))
+            .await?;
+        let session = granted.bind_authenticated_session(RAW_CLIENT_USER, vec![])?;
+        let inserted = dispatch(&session, 3, create_int_parameter, RuntimeValue::Integer(-7))
+            .finish()
+            .await;
+        let events = match inserted.actions() {
+            [
+                ServerAction::Events { events, .. },
+                ServerAction::Completed { .. },
+            ] => events,
+            _ => {
+                return Err(failure(
+                    "the raw Integer INSERT must return one event batch and completion",
+                ));
+            }
+        };
+        let [Event::Value(RuntimeValue::Reference { target, object })] = events.as_slice() else {
+            return Err(failure(
+                "the raw Integer INSERT did not return one reference",
+            ));
+        };
+        require(
+            *target == int_probe && *object != ObjectId::from_bytes([0; 16]),
+            "the raw Integer INSERT returned the wrong reference",
+        )?;
+
+        // The wrong parameter closes redacted as an unavailable target. The
+        // final read proves the exact stored value and that neither the
+        // denied nor the wrong call added a row.
+        let wrong = dispatch(&session, 5, wrong_parameter, RuntimeValue::Integer(9))
+            .finish()
+            .await;
+        require_dispatch_failure(
+            &wrong,
+            5,
+            CallFailure::TargetUnavailable,
+            matches!(
+                wrong.source(),
+                Some(PostgresKernelError::RawCallTargetUnavailable { function, .. })
+                    if *function == create_int
+            ),
+            "a wrong raw Integer ParameterId did not close as an unavailable target",
+        )?;
+        require(
+            read_flag_values(&kernel, &session, read_ints, 6).await? == [RuntimeValue::Integer(-7)],
+            "the final read must show exactly the stored value and no extra row",
+        )?;
+
+        // Authentication is session binding here, so every audit is Execute
+        // with the exact outcome, target, and principal in dispatch order.
+        let audits = kernel.recover_security_audit_events().await?;
+        require(
+            audits.len() == 4
+                && audits.iter().enumerate().all(|(index, event)| {
+                    let decision = event.decision();
+                    decision.kind() == SecurityAuditKind::Execute
+                        && decision.session_principal() == Some(RAW_CLIENT_USER)
+                        && decision.outcome()
+                            == [
+                                SecurityAuditOutcome::Denied,
+                                SecurityAuditOutcome::Allowed,
+                                SecurityAuditOutcome::Allowed,
+                                SecurityAuditOutcome::Allowed,
+                            ][index]
+                        && decision.target().map(InvocationTarget::function)
+                            == Some([create_int, create_int, create_int, read_ints][index])
+                }),
+            "raw Integer dispatch changed the exact durable audit sequence",
+        )?;
+
+        require_no_database_sessions(&database).await
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
 async fn serves_the_actual_local_peer_through_the_raw_socket_protocol() -> TestResult<()> {
     with_test_database(|database| async move {
         let kernel = kernel(&database)?;
@@ -2503,6 +2674,90 @@ async fn read_flag_values(
         "the raw read must terminate with exactly one completion",
     )?;
     Ok(values)
+}
+
+/// Installs the Integer tracer on top of the active revision.
+///
+/// The preparation candidate must retain every active catalogue definition, so
+/// the source is rebuilt from all retained units and the Integer trio is
+/// appended to the last unit.
+async fn install_raw_int_insert_fixture(
+    kernel: &PostgresKernel,
+    active: &orna_core::revision::ActiveDatabaseRevision,
+    standard_upgrade: &orna_standard::StandardUpgrade,
+) -> TestResult<(
+    orna_core::revision::ActiveDatabaseRevision,
+    TypeId,
+    FunctionId,
+    ParameterId,
+    FunctionId,
+)> {
+    let last_ordinal = active
+        .source()
+        .units()
+        .len()
+        .checked_sub(1)
+        .ok_or_else(|| failure("raw Integer tracer has no retained source unit"))?;
+    let source = SourceBundle::new(active.source().units().iter().enumerate().map(
+        |(ordinal, unit)| {
+            let content = if ordinal == last_ordinal {
+                format!("{}\n{}", unit.content(), RAW_CLIENT_INT_INSERT_SOURCE)
+            } else {
+                unit.content().to_owned()
+            };
+            SourceUnit::new(unit.logical_path(), content)
+        },
+    ))?;
+    let report = check_standard_application(
+        &source,
+        &StandardApplicationCheckContext::try_new(
+            active.catalogue(),
+            standard_upgrade.checked_standard_library(),
+        )?,
+    );
+    require(
+        report.diagnostics().is_empty(),
+        "raw Integer INSERT fixture did not compile",
+    )?;
+    let applied = kernel
+        .apply(&prepare_standard_application(
+            &report,
+            active.pair(),
+            active,
+        )?)
+        .await?;
+    let catalogue = applied.catalogue();
+    let int_probe = catalogue
+        .object_types()
+        .iter()
+        .find(|object| object.name().parts() == ["raw_int_insert", "int_probe"])
+        .expect("raw_int_insert.int_probe type is absent")
+        .id();
+    let create_int = catalogue
+        .functions()
+        .iter()
+        .find(|function| function.name().parts() == ["raw_int_insert", "create_int"])
+        .expect("raw_int_insert.create_int function is absent")
+        .id();
+    let create_int_parameter = catalogue
+        .function_by_id(create_int)
+        .expect("create_int is absent from the active catalogue")
+        .parameter_by_name("p_value")
+        .expect("create_int.p_value is absent")
+        .id();
+    let read_ints = catalogue
+        .functions()
+        .iter()
+        .find(|function| function.name().parts() == ["raw_int_insert", "read_ints"])
+        .expect("raw_int_insert.read_ints function is absent")
+        .id();
+    Ok((
+        applied,
+        int_probe,
+        create_int,
+        create_int_parameter,
+        read_ints,
+    ))
 }
 
 async fn send_active_protocol_frame(
