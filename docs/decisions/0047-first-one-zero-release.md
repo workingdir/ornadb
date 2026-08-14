@@ -31,6 +31,11 @@ The Debian build has two explicit modes and no implicit mode:
   `orna (1.0.0-1) bookworm; urgency=medium` entry and exact signed `v1.0.0`
   tag. It requires every product and release gate in this decision.
 
+A dry-run mode may validate an accepted mode and report the derived identity.
+It must not write a package, a repository generation, a signature, a manifest,
+or another persistent release artefact. A dry run cannot replace a build,
+reproduction, signing, approval, or publication gate.
+
 The generic `package` target must not select between these modes. A caller
 must name one mode. Neither an environment variable nor a command-line
 version override can change the accepted version or release state.
@@ -427,7 +432,8 @@ with the current development version. Those rows do not declare `1.0.0`.
 | `build(cargo): centralise protocol server and standard versions` | `crates/orna-protocol/Cargo.toml`; `crates/orna-server/Cargo.toml`; `crates/orna-standard/Cargo.toml` | Replace the three local product-version literals with workspace inheritance. |
 | `build(cargo): centralise syntax and system-test versions` | `crates/orna-syntax/Cargo.toml`; `crates/orna-system-tests/Cargo.toml` | Remove the final local product-version literals and prove that every workspace package resolves to `0.1.0`. |
 | `feat(cli): report the canonical product version` | `crates/orna-server/src/main.rs`; `crates/orna-system-tests/tests/installed_product.rs` | Add exact `orna --version` output from `CARGO_PKG_VERSION` and prove the installed development package reports `0.1.0`. |
-| `build(debian): separate development and release modes` | `packaging/debian/changelog`; `packaging/debian/control`; `packaging/debian/rules` | Add the exact unreleased development entry, derive control and filenames from it, require an explicit build mode, and keep protected `1.0.0-1` closed. |
+| `build(debian): separate development and release modes` | `packaging/debian/changelog`; `packaging/debian/rules`; `.github/workflows/debian-package.yml` | Add the exact unreleased development entry and require an explicit build mode. Change ordinary CI to call only `development-package`. Keep the current literal control and CI package identity for this row, but validate it against the changelog before build or test. Keep protected `1.0.0-1` closed. A dry-run, when added, validates only and does not change persistent state. |
+| `build(debian): derive development package identity` | `packaging/debian/control`; `packaging/debian/rules` | Derive the Debian control version, source and binary package identity, and package filename from `dpkg-parsechangelog`. Remove the temporary literal identity checks only after the derived identity has replaced them. Keep the exact `0.1.0-1` development contract and the closed protected mode. |
 | `build(debian): own dependency licence sources` | `LICENSE`; `packaging/debian/copyright`; `packaging/debian/dependency-licences.toml` | Add the Orna licence authority and exact Cargo.lock-keyed external dependency source, licence, holder, notice, and digest inventory. |
 | `build(debian): generate release evidence` | `packaging/debian/release-evidence.sh`; `packaging/debian/orna.install`; `packaging/debian/rules` | Validate the complete locked closure and install deterministic notices, SPDX 2.3 SBOM, changelog, copyright, and licence evidence bound by the manifest. |
 | `build(release): pin public signing policy` | `packaging/debian/release-policy.toml`; `packaging/debian/orna-archive-keyring.gpg`; `packaging/debian/publish-repository.sh` | Pin full public tag-signer and repository-key fingerprints, rotation and revocation state, keyring bytes, 14-day validity, and the immutable generation publisher interface without a secret or endpoint. |
