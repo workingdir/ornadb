@@ -3932,8 +3932,8 @@ mod tests {
     use orna_core::{
         CatalogueRevisionId, ExpressionId, FieldId, SchemaId, SourceRevisionId,
         catalogue::{
-            FieldDefinition, FunctionReturnColumnDefinition, ParameterDefinition,
-            QualifiedSemanticName, SchemaDefinition,
+            EnumTypeDefinition, FieldDefinition, FunctionReturnColumnDefinition,
+            ParameterDefinition, QualifiedSemanticName, SchemaDefinition,
         },
         types::StandardScalar,
         value::{RuntimeFloat, RuntimeValue},
@@ -4667,7 +4667,7 @@ mod tests {
                 assert_eq!(parameter, None);
                 assert_eq!(
                     rule,
-                    "raw SERVER INSERT calls accept only one Boolean or Reference argument"
+                    "raw SERVER INSERT calls accept only one supported scalar or Reference argument"
                 );
             }
             other => panic!("unexpected mutation error: {other:?}"),
@@ -4734,9 +4734,27 @@ mod tests {
     }
 
     #[test]
-    fn raw_insert_rejects_a_non_boolean_single_argument_at_the_shape_boundary() {
+    fn raw_insert_rejects_an_enum_single_argument_at_the_shape_boundary() {
         let function = raw_boolean_function();
-        let argument = FunctionArgument::new(PARAMETER_TITLE, RuntimeValue::Integer(1)).unwrap();
+        let enum_type = TypeId::from_bytes([0x73; 16]);
+        let catalogue = CatalogueSnapshot::new_with_enum_types(
+            CatalogueRevisionId::new(),
+            vec![SchemaDefinition::new(SchemaId::new(), name(&["app"]))],
+            Vec::new(),
+            Vec::new(),
+            vec![EnumTypeDefinition::new(
+                enum_type,
+                name(&["app", "stage"]),
+                ["lead"],
+            )],
+            Vec::new(),
+        )
+        .unwrap();
+        let argument = FunctionArgument::new(
+            PARAMETER_TITLE,
+            RuntimeValue::Enum(EnumValue::new(&catalogue, enum_type, "lead").unwrap()),
+        )
+        .unwrap();
         let error = expect_insert_error(
             validate_raw_server_insert_argument_shape(&function, &[argument]).unwrap_err(),
         );
@@ -4745,7 +4763,7 @@ mod tests {
                 assert_eq!(parameter, Some(PARAMETER_TITLE));
                 assert_eq!(
                     rule,
-                    "raw SERVER INSERT calls accept only one Boolean or Reference argument"
+                    "raw SERVER INSERT calls accept only one supported scalar or Reference argument"
                 );
             }
             other => panic!("unexpected mutation error: {other:?}"),
