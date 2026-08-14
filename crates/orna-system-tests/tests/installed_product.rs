@@ -5929,3 +5929,760 @@ fn installed_unique_reference_insert_rolls_back_and_persists_across_replay_and_r
     )
     .expect("the final reader must still return exactly the unordered owner multiset A and B");
 }
+
+/// One decoded ORV1 reference envelope, or one typed NULL whose nominal type
+/// is a reference to the given object type.
+struct OrvReferenceOrNull {
+    reference: Option<OrvReference>,
+    nominal_type_id: [u8; 16],
+}
+
+/// Decode one complete stream of ORV1 Reference or typed-NULL envelopes.
+///
+/// A reference envelope is the canonical 41-byte `ORV1` REFERENCE shape. A
+/// typed NULL of a reference nominal type is the canonical 25-byte `ORV1`
+/// NULL-REFERENCE shape with the referenced object type identity and an empty
+/// payload. Any other tag, shape, or trailing byte is rejected.
+fn decode_reference_or_null_envelopes(bytes: &[u8]) -> Option<Vec<OrvReferenceOrNull>> {
+    let mut values = Vec::new();
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let remaining = &bytes[offset..];
+        if remaining.len() < 25 || &remaining[0..4] != b"ORV1" {
+            return None;
+        }
+        match remaining[4] {
+            0x01 => {
+                if remaining[21..25] != 0_u32.to_be_bytes() {
+                    return None;
+                }
+                let mut nominal_type_id = [0; 16];
+                nominal_type_id.copy_from_slice(&remaining[5..21]);
+                values.push(OrvReferenceOrNull {
+                    reference: None,
+                    nominal_type_id,
+                });
+                offset += 25;
+            }
+            0x08 => {
+                if remaining.len() < 41 {
+                    return None;
+                }
+                let parsed = parse_reference_envelope(&remaining[..41]).ok()?;
+                let nominal_type_id = parsed.type_id;
+                values.push(OrvReferenceOrNull {
+                    reference: Some(parsed),
+                    nominal_type_id,
+                });
+                offset += 41;
+            }
+            _ => return None,
+        }
+    }
+    Some(values)
+}
+
+/// Run one granted raw reader and decode its complete Reference-or-typed-NULL
+/// stream in wire order.
+fn read_reference_or_null_values(
+    machine: &InstalledMachine,
+    function: &str,
+    label: &'static str,
+) -> Result<Vec<OrvReferenceOrNull>, Error> {
+    run_reader_and_decode(
+        machine,
+        function,
+        label,
+        decode_reference_or_null_envelopes,
+        "complete Reference or typed-NULL envelopes",
+    )
+}
+
+/// Installed public-boundary journey for the four public DELETE policies.
+///
+/// The test installs the exact checked-in `product_test_delete_policies.orna`
+/// fixture and applies it. It requires the complete thirteen-entry sorted
+/// function vector with pairwise distinct identities and proves every exact
+/// sole parameter declaration, then proves every raw command is denied before
+/// any grant using a syntactically valid synthetic reference input for the
+/// parameterised commands.
+///
+/// Four distinct roots drive one policy each without masking: a NO ACTION
+/// child blocks root deletion with the exact public `INTERNAL_FAILURE` line
+/// until the child is deleted publicly; a RESTRICT child does the same; a SET
+/// NULL child lets the root delete succeed while the child survives as one
+/// typed NULL whose nominal type is the root type; a CASCADE child disappears
+/// with its root. Exact source replay without any repeated grant keeps the
+/// complete function and parameter discovery vector and the surviving rows. A
+/// restart preserves the SET NULL survivor as typed NULL and every other
+/// relation empty. After restart, one new root plus a RESTRICT child fails
+/// deletion and preserves both, the blocker is removed publicly, a CASCADE
+/// child on the same root is added, the root delete then succeeds, and the
+/// cascade child disappears while the original SET NULL survivor stays typed
+/// NULL throughout.
+///
+/// The test claims only public NO ACTION, RESTRICT, SET NULL, CASCADE,
+/// rollback, replay, restart, identity and grant retention, and persistence
+/// through the packaged `/usr/bin/orna` commands and raw-call ORV envelopes.
+/// It makes no claim about private SQLSTATEs, constraint names, audit
+/// records, physical storage, the exact internal error type, or row order.
+#[test]
+#[ignore = "requires Docker, ORNA_SYSTEM_TEST_DEBIAN_PACKAGE, and the installed orna executable"]
+fn installed_delete_policies_enforce_no_action_restrict_set_null_and_cascade() {
+    let package = std::env::var("ORNA_SYSTEM_TEST_DEBIAN_PACKAGE")
+        .expect("ORNA_SYSTEM_TEST_DEBIAN_PACKAGE must point at the reproduced .deb package");
+    let artifact = FrozenPackageArtifact::new(PackageFormat::Debian, &package)
+        .expect("freeze the reproduced Debian package");
+    let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures")
+        .join("product_test_delete_policies.orna");
+    let fixture = fs::read(&fixture_path).expect("read the checked-in delete policies fixture");
+
+    let machine = InstalledMachine::start(&artifact, &fixture)
+        .expect("start the installed Debian test machine");
+
+    // Apply the exact fixture and require the thirteen sorted mappings.
+    let apply = machine
+        .run_as_orna(&["source", "apply", FIXTURE_PATH])
+        .expect("run installed source apply");
+    let apply = require_success("orna source apply", apply).expect("source apply must succeed");
+    assert!(
+        apply.stderr.is_empty(),
+        "source apply must keep standard error empty"
+    );
+    let document = parse_apply_document(&apply.stdout).expect("source apply JSON must parse");
+    let expected_order = [
+        ["delete_policy_test", "create_cascade"],
+        ["delete_policy_test", "create_no_action"],
+        ["delete_policy_test", "create_restrict"],
+        ["delete_policy_test", "create_root"],
+        ["delete_policy_test", "create_set_null"],
+        ["delete_policy_test", "delete_no_action_child"],
+        ["delete_policy_test", "delete_restrict_child"],
+        ["delete_policy_test", "delete_root"],
+        ["delete_policy_test", "read_cascade_children"],
+        ["delete_policy_test", "read_no_action_children"],
+        ["delete_policy_test", "read_restrict_children"],
+        ["delete_policy_test", "read_roots"],
+        ["delete_policy_test", "read_set_null_children"],
+    ];
+    let actual_order = document
+        .functions
+        .iter()
+        .map(|function| function.names().to_vec())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual_order, expected_order,
+        "apply must report the thirteen function entries sorted by qualified name"
+    );
+    let function_id = |name: &str| {
+        document
+            .function_id(&["delete_policy_test", name])
+            .unwrap_or_else(|_| panic!("apply must report {name}"))
+    };
+    let create_cascade = function_id("create_cascade");
+    let create_no_action = function_id("create_no_action");
+    let create_restrict = function_id("create_restrict");
+    let create_root = function_id("create_root");
+    let create_set_null = function_id("create_set_null");
+    let delete_no_action_child = function_id("delete_no_action_child");
+    let delete_restrict_child = function_id("delete_restrict_child");
+    let delete_root = function_id("delete_root");
+    let read_cascade_children = function_id("read_cascade_children");
+    let read_no_action_children = function_id("read_no_action_children");
+    let read_restrict_children = function_id("read_restrict_children");
+    let read_roots = function_id("read_roots");
+    let read_set_null_children = function_id("read_set_null_children");
+    let identities = [
+        create_cascade,
+        create_no_action,
+        create_restrict,
+        create_root,
+        create_set_null,
+        delete_no_action_child,
+        delete_restrict_child,
+        delete_root,
+        read_cascade_children,
+        read_no_action_children,
+        read_restrict_children,
+        read_roots,
+        read_set_null_children,
+    ];
+    for (index, left) in identities.iter().enumerate() {
+        for right in &identities[index + 1..] {
+            assert_ne!(
+                left, right,
+                "the thirteen function identities must be pairwise distinct"
+            );
+        }
+    }
+    let parameter_id = |name: &str, parameter: &str| {
+        document
+            .parameter_id(&["delete_policy_test", name], parameter)
+            .unwrap_or_else(|_| panic!("apply must report {name}.{parameter}"))
+    };
+    let create_root_parameter = parameter_id("create_cascade", "p_root");
+    let create_restrict_parameter = parameter_id("create_restrict", "p_root");
+    let create_set_null_parameter = parameter_id("create_set_null", "p_root");
+    let delete_root_parameter = parameter_id("delete_root", "p_root");
+    let delete_no_action_parameter = parameter_id("delete_no_action_child", "p_child");
+    let delete_restrict_parameter = parameter_id("delete_restrict_child", "p_child");
+    let create_no_action_parameter = parameter_id("create_no_action", "p_root");
+    let parameterised = [
+        (create_no_action, create_no_action_parameter),
+        (create_restrict, create_restrict_parameter),
+        (create_set_null, create_set_null_parameter),
+        (create_cascade, create_root_parameter),
+        (delete_root, delete_root_parameter),
+        (delete_no_action_child, delete_no_action_parameter),
+        (delete_restrict_child, delete_restrict_parameter),
+    ];
+    for (function, parameter) in parameterised {
+        let entry = document
+            .functions
+            .iter()
+            .find(|entry| entry.function_id() == function)
+            .expect("apply must report the parameterised function entry");
+        assert_eq!(
+            entry.parameters().len(),
+            1,
+            "the parameterised function must declare exactly one parameter"
+        );
+        let declared = &entry.parameters()[0];
+        assert_eq!(
+            declared.parameter_id(),
+            parameter,
+            "the declared parameter must equal the discovered identity"
+        );
+    }
+    for name in [
+        "create_root",
+        "read_cascade_children",
+        "read_no_action_children",
+        "read_restrict_children",
+        "read_roots",
+        "read_set_null_children",
+    ] {
+        let entry = document
+            .functions
+            .iter()
+            .find(|entry| {
+                entry
+                    .names()
+                    .iter()
+                    .map(String::as_str)
+                    .eq(["delete_policy_test", name].iter().copied())
+            })
+            .expect("apply must report the parameter-free function entry");
+        assert!(
+            entry.parameters().is_empty(),
+            "{name} must declare no parameters"
+        );
+    }
+
+    // Source apply grants nothing: every raw command is denied before any
+    // grant. The parameterised commands carry a syntactically valid synthetic
+    // reference, proving authorisation precedes argument validation.
+    let synthetic = reference_orv1_envelope([0x11; 16], [0x22; 16]);
+    for (function, parameter) in parameterised {
+        let denied = machine
+            .run_as_orna_with_stdin(&["raw-call", function, parameter], &synthetic)
+            .expect("run denied parameterised raw call");
+        assert_denied("parameterised call before grant", denied)
+            .expect("parameterised call must be denied before its grant");
+    }
+    for function in [
+        create_root,
+        read_cascade_children,
+        read_no_action_children,
+        read_restrict_children,
+        read_roots,
+        read_set_null_children,
+    ] {
+        let denied = machine
+            .run_as_orna(&["raw-call", function])
+            .expect("run denied parameter-free raw call");
+        assert_denied("parameter-free call before grant", denied)
+            .expect("parameter-free call must be denied before its grant");
+    }
+
+    // Grant every exact function explicitly.
+    for function in identities {
+        let granted = machine
+            .run_as_orna(&["security", "grant-execute", function])
+            .expect("run installed grant command");
+        require_silent_success("orna security grant-execute", granted)
+            .expect("grant must succeed silently");
+    }
+
+    // Journey 1: root A plus one NO ACTION child blocks root deletion until
+    // the blocker is removed publicly.
+    let root_a_call = machine
+        .run_as_orna(&["raw-call", create_root])
+        .expect("run root A create call");
+    let root_a_call = require_value_success("orna raw-call create_root A", root_a_call)
+        .expect("root A create must succeed");
+    let root_a = parse_reference_envelope(&root_a_call.stdout)
+        .expect("root A create must return one ORV reference");
+    let child_na_call = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", create_no_action, create_no_action_parameter],
+            &reference_orv1_envelope(root_a.type_id, root_a.object),
+        )
+        .expect("run NO ACTION child create for root A");
+    let child_na_call = require_value_success("orna raw-call create_no_action A", child_na_call)
+        .expect("NO ACTION child create must succeed");
+    let child_na = parse_reference_envelope(&child_na_call.stdout)
+        .expect("NO ACTION child create must return one ORV reference");
+    let blocked_a = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", delete_root, delete_root_parameter],
+            &reference_orv1_envelope(root_a.type_id, root_a.object),
+        )
+        .expect("run blocked root A delete");
+    assert_exact_raw_call_failure(
+        "orna raw-call delete_root A blocked",
+        blocked_a,
+        "raw call failed: INTERNAL_FAILURE\n",
+    )
+    .expect("the NO ACTION blocker must close as a public INTERNAL_FAILURE");
+    assert_reference_reader_returns(
+        &machine,
+        read_roots,
+        &[&root_a],
+        "orna raw-call read_roots after blocked delete A",
+    )
+    .expect("the blocked delete must preserve root A");
+    assert_reference_reader_returns(
+        &machine,
+        read_no_action_children,
+        &[&root_a],
+        "orna raw-call read_no_action_children after blocked delete A",
+    )
+    .expect("the blocked delete must preserve the NO ACTION child");
+    let removed_na = machine
+        .run_as_orna_with_stdin(
+            &[
+                "raw-call",
+                delete_no_action_child,
+                delete_no_action_parameter,
+            ],
+            &reference_orv1_envelope(child_na.type_id, child_na.object),
+        )
+        .expect("run NO ACTION child delete");
+    let removed_na = require_value_success("orna raw-call delete_no_action_child", removed_na)
+        .expect("NO ACTION child delete must succeed");
+    assert_eq!(
+        removed_na.stdout.as_slice(),
+        boolean_orv1_envelope(Some(true)).as_slice(),
+        "the NO ACTION child delete must return the exact Boolean TRUE envelope"
+    );
+    let deleted_a = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", delete_root, delete_root_parameter],
+            &reference_orv1_envelope(root_a.type_id, root_a.object),
+        )
+        .expect("run root A delete after blocker removal");
+    let deleted_a = require_value_success("orna raw-call delete_root A", deleted_a)
+        .expect("root A delete must succeed after blocker removal");
+    assert_eq!(
+        deleted_a.stdout.as_slice(),
+        boolean_orv1_envelope(Some(true)).as_slice(),
+        "the root A delete must return the exact Boolean TRUE envelope"
+    );
+    let roots_after_a = machine
+        .run_as_orna(&["raw-call", read_roots])
+        .expect("run root reader after journey A");
+    require_silent_success("orna raw-call read_roots after journey A", roots_after_a)
+        .expect("root A must disappear after its delete");
+    let no_action_after_a = machine
+        .run_as_orna(&["raw-call", read_no_action_children])
+        .expect("run NO ACTION reader after journey A");
+    require_silent_success(
+        "orna raw-call read_no_action_children after journey A",
+        no_action_after_a,
+    )
+    .expect("the NO ACTION child must disappear with its blocker removal");
+
+    // Journey 2: root B plus one RESTRICT child blocks root deletion until
+    // the blocker is removed publicly.
+    let root_b_call = machine
+        .run_as_orna(&["raw-call", create_root])
+        .expect("run root B create call");
+    let root_b_call = require_value_success("orna raw-call create_root B", root_b_call)
+        .expect("root B create must succeed");
+    let root_b = parse_reference_envelope(&root_b_call.stdout)
+        .expect("root B create must return one ORV reference");
+    let child_rc_call = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", create_restrict, create_restrict_parameter],
+            &reference_orv1_envelope(root_b.type_id, root_b.object),
+        )
+        .expect("run RESTRICT child create for root B");
+    let child_rc_call = require_value_success("orna raw-call create_restrict B", child_rc_call)
+        .expect("RESTRICT child create must succeed");
+    let child_rc = parse_reference_envelope(&child_rc_call.stdout)
+        .expect("RESTRICT child create must return one ORV reference");
+    let blocked_b = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", delete_root, delete_root_parameter],
+            &reference_orv1_envelope(root_b.type_id, root_b.object),
+        )
+        .expect("run blocked root B delete");
+    assert_exact_raw_call_failure(
+        "orna raw-call delete_root B blocked",
+        blocked_b,
+        "raw call failed: INTERNAL_FAILURE\n",
+    )
+    .expect("the RESTRICT blocker must close as a public INTERNAL_FAILURE");
+    assert_reference_reader_returns(
+        &machine,
+        read_roots,
+        &[&root_b],
+        "orna raw-call read_roots after blocked delete B",
+    )
+    .expect("the blocked delete must preserve root B");
+    assert_reference_reader_returns(
+        &machine,
+        read_restrict_children,
+        &[&root_b],
+        "orna raw-call read_restrict_children after blocked delete B",
+    )
+    .expect("the blocked delete must preserve the RESTRICT child");
+    let removed_rc = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", delete_restrict_child, delete_restrict_parameter],
+            &reference_orv1_envelope(child_rc.type_id, child_rc.object),
+        )
+        .expect("run RESTRICT child delete");
+    let removed_rc = require_value_success("orna raw-call delete_restrict_child", removed_rc)
+        .expect("RESTRICT child delete must succeed");
+    assert_eq!(
+        removed_rc.stdout.as_slice(),
+        boolean_orv1_envelope(Some(true)).as_slice(),
+        "the RESTRICT child delete must return the exact Boolean TRUE envelope"
+    );
+    let deleted_b = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", delete_root, delete_root_parameter],
+            &reference_orv1_envelope(root_b.type_id, root_b.object),
+        )
+        .expect("run root B delete after blocker removal");
+    let deleted_b = require_value_success("orna raw-call delete_root B", deleted_b)
+        .expect("root B delete must succeed after blocker removal");
+    assert_eq!(
+        deleted_b.stdout.as_slice(),
+        boolean_orv1_envelope(Some(true)).as_slice(),
+        "the root B delete must return the exact Boolean TRUE envelope"
+    );
+    let roots_after_b = machine
+        .run_as_orna(&["raw-call", read_roots])
+        .expect("run root reader after journey B");
+    require_silent_success("orna raw-call read_roots after journey B", roots_after_b)
+        .expect("root B must disappear after its delete");
+    let restrict_after_b = machine
+        .run_as_orna(&["raw-call", read_restrict_children])
+        .expect("run RESTRICT reader after journey B");
+    require_silent_success(
+        "orna raw-call read_restrict_children after journey B",
+        restrict_after_b,
+    )
+    .expect("the RESTRICT child must disappear with its blocker removal");
+
+    // Journey 3: root C plus one SET NULL child lets the root delete succeed
+    // while the child survives as one typed NULL of the root nominal type.
+    let root_c_call = machine
+        .run_as_orna(&["raw-call", create_root])
+        .expect("run root C create call");
+    let root_c_call = require_value_success("orna raw-call create_root C", root_c_call)
+        .expect("root C create must succeed");
+    let root_c = parse_reference_envelope(&root_c_call.stdout)
+        .expect("root C create must return one ORV reference");
+    let child_sn_call = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", create_set_null, create_set_null_parameter],
+            &reference_orv1_envelope(root_c.type_id, root_c.object),
+        )
+        .expect("run SET NULL child create for root C");
+    let child_sn_call = require_value_success("orna raw-call create_set_null C", child_sn_call)
+        .expect("SET NULL child create must succeed");
+    let child_sn = parse_reference_envelope(&child_sn_call.stdout)
+        .expect("SET NULL child create must return one ORV reference");
+    assert!(
+        child_sn.type_id != [0; 16] && !child_sn.object_is_zero(),
+        "the SET NULL child must name a real nonzero row"
+    );
+    assert_ne!(
+        child_sn.type_id, root_c.type_id,
+        "the SET NULL child must use a different target type from the root"
+    );
+    let deleted_c = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", delete_root, delete_root_parameter],
+            &reference_orv1_envelope(root_c.type_id, root_c.object),
+        )
+        .expect("run root C delete");
+    let deleted_c = require_value_success("orna raw-call delete_root C", deleted_c)
+        .expect("root C delete must succeed with a SET NULL child");
+    assert_eq!(
+        deleted_c.stdout.as_slice(),
+        boolean_orv1_envelope(Some(true)).as_slice(),
+        "the root C delete must return the exact Boolean TRUE envelope"
+    );
+    let roots_after_c = machine
+        .run_as_orna(&["raw-call", read_roots])
+        .expect("run root reader after journey C");
+    require_silent_success("orna raw-call read_roots after journey C", roots_after_c)
+        .expect("root C must disappear after its delete");
+    let set_null_after_c = read_reference_or_null_values(
+        &machine,
+        read_set_null_children,
+        "orna raw-call read_set_null_children after journey C",
+    )
+    .expect("SET NULL reader must decode after journey C");
+    assert_eq!(
+        set_null_after_c.len(),
+        1,
+        "the SET NULL child must survive root C deletion"
+    );
+    assert!(
+        set_null_after_c[0].reference.is_none()
+            && set_null_after_c[0].nominal_type_id == root_c.type_id,
+        "the surviving SET NULL child must be a typed NULL of the root type"
+    );
+
+    // Journey 4: root D plus one CASCADE child disappears with its root.
+    let root_d_call = machine
+        .run_as_orna(&["raw-call", create_root])
+        .expect("run root D create call");
+    let root_d_call = require_value_success("orna raw-call create_root D", root_d_call)
+        .expect("root D create must succeed");
+    let root_d = parse_reference_envelope(&root_d_call.stdout)
+        .expect("root D create must return one ORV reference");
+    let child_ca_call = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", create_cascade, create_root_parameter],
+            &reference_orv1_envelope(root_d.type_id, root_d.object),
+        )
+        .expect("run CASCADE child create for root D");
+    let child_ca_call = require_value_success("orna raw-call create_cascade D", child_ca_call)
+        .expect("CASCADE child create must succeed");
+    let child_ca = parse_reference_envelope(&child_ca_call.stdout)
+        .expect("CASCADE child create must return one ORV reference");
+    assert_ne!(
+        child_ca.type_id, root_d.type_id,
+        "the cascade child must use a different target type from the root"
+    );
+    let deleted_d = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", delete_root, delete_root_parameter],
+            &reference_orv1_envelope(root_d.type_id, root_d.object),
+        )
+        .expect("run root D delete");
+    let deleted_d = require_value_success("orna raw-call delete_root D", deleted_d)
+        .expect("root D delete must succeed with a CASCADE child");
+    assert_eq!(
+        deleted_d.stdout.as_slice(),
+        boolean_orv1_envelope(Some(true)).as_slice(),
+        "the root D delete must return the exact Boolean TRUE envelope"
+    );
+    let roots_after_d = machine
+        .run_as_orna(&["raw-call", read_roots])
+        .expect("run root reader after journey D");
+    require_silent_success("orna raw-call read_roots after journey D", roots_after_d)
+        .expect("root D must disappear after its delete");
+    let cascade_after_d = machine
+        .run_as_orna(&["raw-call", read_cascade_children])
+        .expect("run CASCADE reader after journey D");
+    require_silent_success(
+        "orna raw-call read_cascade_children after journey D",
+        cascade_after_d,
+    )
+    .expect("the CASCADE child must disappear with its root");
+
+    // Exact source replay keeps the complete discovery vector and the SET
+    // NULL survivor without any repeated grant.
+    let replay = machine
+        .run_as_orna(&["source", "apply", FIXTURE_PATH])
+        .expect("run installed source apply on the same fixture");
+    let replay = require_success("orna source apply replay", replay)
+        .expect("delete policies replay must succeed");
+    assert!(
+        replay.stderr.is_empty(),
+        "delete policies replay must keep standard error empty"
+    );
+    let replay_document =
+        parse_apply_document(&replay.stdout).expect("delete policies replay JSON must parse");
+    assert_eq!(
+        replay_document.functions, document.functions,
+        "the replay must keep the complete function and parameter discovery vector"
+    );
+    let set_null_after_replay = read_reference_or_null_values(
+        &machine,
+        read_set_null_children,
+        "orna raw-call read_set_null_children after replay",
+    )
+    .expect("SET NULL reader must decode after replay");
+    assert_eq!(
+        set_null_after_replay.len(),
+        1,
+        "the replay must preserve the SET NULL survivor"
+    );
+    assert!(
+        set_null_after_replay[0].reference.is_none()
+            && set_null_after_replay[0].nominal_type_id == root_c.type_id,
+        "the replayed SET NULL survivor must stay a typed NULL of the root type"
+    );
+
+    // A restart preserves the SET NULL survivor and every empty relation.
+    machine
+        .restart_server()
+        .expect("installed server must restart cleanly");
+    let set_null_after_restart = read_reference_or_null_values(
+        &machine,
+        read_set_null_children,
+        "orna raw-call read_set_null_children after restart",
+    )
+    .expect("SET NULL reader must decode after restart");
+    assert_eq!(
+        set_null_after_restart.len(),
+        1,
+        "the restart must preserve the SET NULL survivor"
+    );
+    assert!(
+        set_null_after_restart[0].reference.is_none()
+            && set_null_after_restart[0].nominal_type_id == root_c.type_id,
+        "the restarted SET NULL survivor must stay a typed NULL of the root type"
+    );
+    for (function, label) in [
+        (read_roots, "orna raw-call read_roots after restart"),
+        (
+            read_no_action_children,
+            "orna raw-call read_no_action_children after restart",
+        ),
+        (
+            read_restrict_children,
+            "orna raw-call read_restrict_children after restart",
+        ),
+        (
+            read_cascade_children,
+            "orna raw-call read_cascade_children after restart",
+        ),
+    ] {
+        let empty = machine
+            .run_as_orna(&["raw-call", function])
+            .expect("run empty relation reader after restart");
+        require_silent_success(label, empty).expect("the relation must stay empty after restart");
+    }
+
+    // Post-restart: one new root plus a RESTRICT child blocks deletion and
+    // preserves both; removing the blocker and adding a CASCADE child on the
+    // same root lets the root delete succeed while the cascade child
+    // disappears, and the original SET NULL survivor stays typed NULL.
+    let root_e_call = machine
+        .run_as_orna(&["raw-call", create_root])
+        .expect("run root E create call");
+    let root_e_call = require_value_success("orna raw-call create_root E", root_e_call)
+        .expect("root E create must succeed");
+    let root_e = parse_reference_envelope(&root_e_call.stdout)
+        .expect("root E create must return one ORV reference");
+    let child_er_call = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", create_restrict, create_restrict_parameter],
+            &reference_orv1_envelope(root_e.type_id, root_e.object),
+        )
+        .expect("run RESTRICT child create for root E");
+    let child_er_call = require_value_success("orna raw-call create_restrict E", child_er_call)
+        .expect("RESTRICT child create must succeed");
+    let child_er = parse_reference_envelope(&child_er_call.stdout)
+        .expect("RESTRICT child create must return one ORV reference");
+    let blocked_e = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", delete_root, delete_root_parameter],
+            &reference_orv1_envelope(root_e.type_id, root_e.object),
+        )
+        .expect("run blocked root E delete");
+    assert_exact_raw_call_failure(
+        "orna raw-call delete_root E blocked",
+        blocked_e,
+        "raw call failed: INTERNAL_FAILURE\n",
+    )
+    .expect("the post-restart RESTRICT blocker must close as a public INTERNAL_FAILURE");
+    assert_reference_reader_returns(
+        &machine,
+        read_roots,
+        &[&root_e],
+        "orna raw-call read_roots after blocked delete E",
+    )
+    .expect("the blocked delete must preserve root E");
+    assert_reference_reader_returns(
+        &machine,
+        read_restrict_children,
+        &[&root_e],
+        "orna raw-call read_restrict_children after blocked delete E",
+    )
+    .expect("the blocked delete must preserve the RESTRICT child");
+    let removed_er = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", delete_restrict_child, delete_restrict_parameter],
+            &reference_orv1_envelope(child_er.type_id, child_er.object),
+        )
+        .expect("run post-restart RESTRICT child delete");
+    let removed_er = require_value_success("orna raw-call delete_restrict_child E", removed_er)
+        .expect("RESTRICT child delete must succeed after restart");
+    assert_eq!(
+        removed_er.stdout.as_slice(),
+        boolean_orv1_envelope(Some(true)).as_slice(),
+        "the post-restart RESTRICT child delete must return the exact Boolean TRUE envelope"
+    );
+    let child_ec_call = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", create_cascade, create_root_parameter],
+            &reference_orv1_envelope(root_e.type_id, root_e.object),
+        )
+        .expect("run CASCADE child create for root E");
+    require_value_success("orna raw-call create_cascade E", child_ec_call)
+        .expect("CASCADE child create must succeed after restart");
+    let deleted_e = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", delete_root, delete_root_parameter],
+            &reference_orv1_envelope(root_e.type_id, root_e.object),
+        )
+        .expect("run root E delete");
+    let deleted_e = require_value_success("orna raw-call delete_root E", deleted_e)
+        .expect("root E delete must succeed after blocker removal");
+    assert_eq!(
+        deleted_e.stdout.as_slice(),
+        boolean_orv1_envelope(Some(true)).as_slice(),
+        "the root E delete must return the exact Boolean TRUE envelope"
+    );
+    let roots_after_e = machine
+        .run_as_orna(&["raw-call", read_roots])
+        .expect("run root reader after journey E");
+    require_silent_success("orna raw-call read_roots after journey E", roots_after_e)
+        .expect("root E must disappear after its delete");
+    let cascade_after_e = machine
+        .run_as_orna(&["raw-call", read_cascade_children])
+        .expect("run CASCADE reader after journey E");
+    require_silent_success(
+        "orna raw-call read_cascade_children after journey E",
+        cascade_after_e,
+    )
+    .expect("the CASCADE child must disappear with root E");
+    let set_null_final = read_reference_or_null_values(
+        &machine,
+        read_set_null_children,
+        "orna raw-call read_set_null_children final",
+    )
+    .expect("SET NULL reader must decode finally");
+    assert_eq!(
+        set_null_final.len(),
+        1,
+        "the original SET NULL survivor must persist throughout"
+    );
+    assert!(
+        set_null_final[0].reference.is_none()
+            && set_null_final[0].nominal_type_id == root_c.type_id,
+        "the original SET NULL survivor must stay a typed NULL of the root type"
+    );
+}
