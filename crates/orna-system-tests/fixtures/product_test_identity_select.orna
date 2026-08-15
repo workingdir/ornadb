@@ -1,0 +1,22 @@
+CREATE SCHEMA identity_select_test;
+
+CREATE TYPE identity_select_test.person AS OBJECT (
+    name TEXT NOT NULL,
+    active BOOLEAN NOT NULL
+);
+
+CREATE SERVER FUNCTION identity_select_test.create_person(p_name TEXT)
+RETURNS ROWS (created REF identity_select_test.person)
+SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE
+AS INSERT INTO identity_select_test.person AS made (name, active)
+VALUES (p_name, TRUE) RETURNING REF(made);
+
+CREATE SERVER FUNCTION identity_select_test.read_person(p_person REF identity_select_test.person)
+RETURNS ROWS (
+    person REF identity_select_test.person,
+    name TEXT,
+    active BOOLEAN
+)
+SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE
+AS SELECT REF(person), person.name, person.active
+FROM identity_select_test.person person WHERE REF(person) = p_person;

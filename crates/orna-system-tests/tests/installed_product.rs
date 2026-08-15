@@ -708,6 +708,21 @@ fn reference_orv1_envelope(target: [u8; 16], object: [u8; 16]) -> Vec<u8> {
     bytes
 }
 
+/// The exact projected raw result for one identity-selected person read.
+///
+/// The result contains the stored Reference, Text, and Boolean cells in the
+/// declared projection order. It has no row wrapper or column metadata.
+fn identity_selected_person_envelopes(
+    reference: &OrvReference,
+    name: &str,
+    active: bool,
+) -> Vec<u8> {
+    let mut bytes = reference_orv1_envelope(reference.type_id, reference.object);
+    bytes.extend(text_orv1_envelope(name));
+    bytes.extend(boolean_orv1_envelope(Some(active)));
+    bytes
+}
+
 /// Two exact canonical Boolean TRUE envelopes, one per stored row.
 fn two_boolean_true_envelopes() -> Vec<u8> {
     let mut bytes = boolean_orv1_envelope(Some(true));
@@ -3278,6 +3293,247 @@ fn assert_reference_reader_returns(
         });
     }
     Ok(())
+}
+
+/// Prove the public raw Reference journey for work ADR 0048.
+///
+/// The installed product applies one object with Text and Boolean fields, a
+/// scalar-argument creator, and one identity-selected reader. It proves that
+/// the reader is denied before its grant, selects only its supplied Reference,
+/// accepts a same-type absent Reference as an empty result, and preserves the
+/// discovered identities, grants, References, and rows across replay and
+/// restart.
+#[test]
+#[ignore = "requires Docker, ORNA_SYSTEM_TEST_DEBIAN_PACKAGE, and the installed orna executable"]
+fn installed_identity_selected_read_binds_reference_and_survives_replay_and_restart() {
+    let package = std::env::var("ORNA_SYSTEM_TEST_DEBIAN_PACKAGE")
+        .expect("ORNA_SYSTEM_TEST_DEBIAN_PACKAGE must point at the reproduced .deb package");
+    let artifact = FrozenPackageArtifact::new(PackageFormat::Debian, &package)
+        .expect("freeze the reproduced Debian package");
+    let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures")
+        .join("product_test_identity_select.orna");
+    let fixture = fs::read(&fixture_path).expect("read the checked-in identity select fixture");
+
+    let machine = InstalledMachine::start(&artifact, &fixture)
+        .expect("start the installed Debian test machine");
+
+    // Apply the exact fixture and discover the stable function and parameter
+    // identities used by the public raw-call command.
+    let apply = machine
+        .run_as_orna(&["source", "apply", FIXTURE_PATH])
+        .expect("run installed source apply");
+    let apply = require_success("orna source apply", apply).expect("source apply must succeed");
+    assert!(
+        apply.stderr.is_empty(),
+        "source apply must keep standard error empty"
+    );
+    let document = parse_apply_document(&apply.stdout).expect("source apply JSON must parse");
+    let expected_order = [
+        vec![
+            "identity_select_test".to_string(),
+            "create_person".to_string(),
+        ],
+        vec![
+            "identity_select_test".to_string(),
+            "read_person".to_string(),
+        ],
+    ];
+    let actual_order = document
+        .functions
+        .iter()
+        .map(|function| function.names().to_vec())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual_order, expected_order,
+        "apply must report the two function entries sorted by qualified name"
+    );
+    let create_person = document
+        .function_id(&["identity_select_test", "create_person"])
+        .expect("apply must report create_person");
+    let read_person = document
+        .function_id(&["identity_select_test", "read_person"])
+        .expect("apply must report read_person");
+    assert_ne!(
+        create_person, read_person,
+        "the two function identities must be distinct"
+    );
+    let p_name = document
+        .parameter_id(&["identity_select_test", "create_person"], "p_name")
+        .expect("apply must report create_person.p_name");
+    let p_person = document
+        .parameter_id(&["identity_select_test", "read_person"], "p_person")
+        .expect("apply must report read_person.p_person");
+    assert_ne!(
+        p_name, p_person,
+        "the two parameter identities must be distinct"
+    );
+
+    // Both public calls deny before any explicit grant. The reader receives a
+    // well-formed same-type-looking Reference only after the creator returns
+    // one, so the reader denial below is proved with the created reference.
+    let denied_create = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", create_person, p_name],
+            &text_orv1_envelope("Ada"),
+        )
+        .expect("run denied creator raw call");
+    assert_denied("creator raw call before grant", denied_create)
+        .expect("creator raw call must be denied before grant");
+
+    let granted_creator = machine
+        .run_as_orna(&["security", "grant-execute", create_person])
+        .expect("run installed creator grant command");
+    require_silent_success("orna security grant-execute create_person", granted_creator)
+        .expect("creator grant must succeed silently");
+    let ada_call = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", create_person, p_name],
+            &text_orv1_envelope("Ada"),
+        )
+        .expect("run Ada creator raw call");
+    let ada_call = require_value_success("orna raw-call create_person Ada", ada_call)
+        .expect("Ada creator must succeed");
+    let ada = parse_reference_envelope(&ada_call.stdout)
+        .expect("Ada creator must return one ORV reference");
+    assert!(
+        ada.type_id != [0; 16] && !ada.object_is_zero(),
+        "Ada creator must return a real object reference"
+    );
+
+    let denied_reader = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", read_person, p_person],
+            &reference_orv1_envelope(ada.type_id, ada.object),
+        )
+        .expect("run denied reader raw call");
+    assert_denied("identity reader raw call before grant", denied_reader)
+        .expect("identity reader raw call must be denied before grant");
+
+    let granted_reader = machine
+        .run_as_orna(&["security", "grant-execute", read_person])
+        .expect("run installed reader grant command");
+    require_silent_success("orna security grant-execute read_person", granted_reader)
+        .expect("reader grant must succeed silently");
+
+    // The Reference binds only Ada and flattens the one returned row in its
+    // declared Reference, Text, Boolean projection order.
+    let read_ada = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", read_person, p_person],
+            &reference_orv1_envelope(ada.type_id, ada.object),
+        )
+        .expect("run Ada identity reader");
+    let read_ada = require_value_success("orna raw-call read_person Ada", read_ada)
+        .expect("Ada identity reader must succeed");
+    assert_eq!(
+        read_ada.stdout,
+        identity_selected_person_envelopes(&ada, "Ada", true),
+        "Ada identity reader must return its exact ordered projected cells"
+    );
+
+    // An absent object of the same type is a successful empty selected read.
+    // Choose one fixed identity that cannot equal Ada's generated identity.
+    let absent_object = if ada.object == [0xa5; 16] {
+        [0x5a; 16]
+    } else {
+        [0xa5; 16]
+    };
+    let absent = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", read_person, p_person],
+            &reference_orv1_envelope(ada.type_id, absent_object),
+        )
+        .expect("run absent identity reader");
+    require_silent_success("orna raw-call read_person absent", absent)
+        .expect("an absent same-type Reference must select no values");
+
+    // A second object proves the selector does not expose another object's
+    // projected cells.
+    let grace_call = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", create_person, p_name],
+            &text_orv1_envelope("Grace"),
+        )
+        .expect("run Grace creator raw call");
+    let grace_call = require_value_success("orna raw-call create_person Grace", grace_call)
+        .expect("Grace creator must succeed");
+    let grace = parse_reference_envelope(&grace_call.stdout)
+        .expect("Grace creator must return one ORV reference");
+    assert_eq!(
+        grace.type_id, ada.type_id,
+        "both creators must return the same object type"
+    );
+    assert_ne!(
+        grace.object, ada.object,
+        "each creator call must return a distinct object identity"
+    );
+    let read_grace = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", read_person, p_person],
+            &reference_orv1_envelope(grace.type_id, grace.object),
+        )
+        .expect("run Grace identity reader");
+    let read_grace = require_value_success("orna raw-call read_person Grace", read_grace)
+        .expect("Grace identity reader must succeed");
+    assert_eq!(
+        read_grace.stdout,
+        identity_selected_person_envelopes(&grace, "Grace", true),
+        "Grace identity reader must return only Grace's exact ordered projected cells"
+    );
+
+    // Exact replay preserves the discovery identities, explicit grants, and
+    // already-created References without a regrant.
+    let replay = machine
+        .run_as_orna(&["source", "apply", FIXTURE_PATH])
+        .expect("run installed source apply replay");
+    let replay = require_success("orna source apply replay", replay)
+        .expect("identity select fixture replay must succeed");
+    assert!(
+        replay.stderr.is_empty(),
+        "identity select fixture replay must keep standard error empty"
+    );
+    let replay_document =
+        parse_apply_document(&replay.stdout).expect("identity select replay JSON must parse");
+    assert_eq!(
+        replay_document.functions, document.functions,
+        "replay must retain both function and selector identities"
+    );
+    for (reference, name) in [(&ada, "Ada"), (&grace, "Grace")] {
+        let read = machine
+            .run_as_orna_with_stdin(
+                &["raw-call", read_person, p_person],
+                &reference_orv1_envelope(reference.type_id, reference.object),
+            )
+            .expect("run identity reader after replay");
+        let read = require_value_success("orna raw-call read_person after replay", read)
+            .expect("identity reader grant must survive replay");
+        assert_eq!(
+            read.stdout,
+            identity_selected_person_envelopes(reference, name, true),
+            "identity reader must retain the exact selected cells after replay"
+        );
+    }
+
+    // Restart retains the original identities, grants, References, and rows.
+    machine
+        .restart_server()
+        .expect("installed server must restart cleanly");
+    for (reference, name) in [(&ada, "Ada"), (&grace, "Grace")] {
+        let read = machine
+            .run_as_orna_with_stdin(
+                &["raw-call", read_person, p_person],
+                &reference_orv1_envelope(reference.type_id, reference.object),
+            )
+            .expect("run identity reader after restart");
+        let read = require_value_success("orna raw-call read_person after restart", read)
+            .expect("identity reader grant must survive restart");
+        assert_eq!(
+            read.stdout,
+            identity_selected_person_envelopes(reference, name, true),
+            "identity reader must retain the exact selected cells after restart"
+        );
+    }
 }
 
 /// Prove that `SELECT REF(entry)` returns the stored object references
