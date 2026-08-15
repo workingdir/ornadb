@@ -105,3 +105,5 @@ source-of-truth or authority rules.
   [Text Fields Have Byte-Exact Uniqueness](0051-unique-text-fields.md)
 * **work ADR 0052:**
   [Raw Calls Select One Object by Unique Text](0052-raw-unique-text-server-select.md)
+* **work ADR 0053:**
+  [Sealed `sys.invoke` Carriers Use Three ORV5 Codecs](0053-sealed-sys-invoke-carriers.md)
