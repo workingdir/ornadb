@@ -180,6 +180,7 @@ define_id!(FunctionRevisionId, "function-revision");
 define_id!(StateSlotId, "state-slot");
 define_id!(CallSiteId, "call-site");
 define_id!(InvocationId, "invocation");
+define_id!(InvocationAuditEventId, "invocation-audit-event");
 define_id!(PrincipalId, "principal");
 define_id!(SecurityAuditEventId, "security-audit-event");
 
@@ -272,6 +273,25 @@ mod tests {
         accepts_type_id(TypeId::new());
         let field_id = FieldId::new();
         assert!(field_id.canonical().starts_with("field:"));
+    }
+
+    #[test]
+    fn invocation_audit_event_identifiers_are_typed_and_canonical() {
+        let bytes = [0x42; 16];
+        let event = InvocationAuditEventId::from_bytes(bytes);
+
+        assert_eq!(
+            event.canonical(),
+            "invocation-audit-event:89144gj289144gj289144gj288"
+        );
+        assert_eq!(
+            InvocationAuditEventId::from_canonical(&event.canonical()),
+            Ok(event)
+        );
+        assert_eq!(
+            SecurityAuditEventId::from_canonical(&event.canonical()),
+            Err(InvalidCanonicalId)
+        );
     }
 
     #[test]
