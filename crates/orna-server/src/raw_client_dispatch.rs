@@ -6,7 +6,7 @@ use orna_core::{
     value::{FunctionArgument, RuntimeValue},
 };
 use orna_postgres::{AuthenticatedRawCallResult, PostgresKernel, PostgresKernelError};
-use orna_protocol::{CallFailure, Event, RawCall, ServerAction};
+use orna_protocol::{CallArgument, CallFailure, Event, RawCall, ServerAction};
 
 /// One accepted raw CLIENT call bound to trusted session state.
 pub struct RawClientDispatch {
@@ -55,8 +55,9 @@ impl RawClientDispatch {
     ///
     /// CLIENT success returns one typed value action followed by completion.
     /// SERVER success returns one value action per row followed by completion.
-    /// Exactly one Boolean, Integer, BigInt, Float, Text, Bytes, or Reference
-    /// argument enters the protected kernel path. Other argument shapes return
+    /// Exactly one or two Boolean, Integer, BigInt, Float, Text, Bytes, or
+    /// Reference arguments enter the protected kernel path. A pair must use two
+    /// distinct parameter identities. Other argument shapes return
     /// `TARGET_UNAVAILABLE`. Calls containing a record first complete the closed
     /// transactional record preflight; other closed argument shapes do not open
     /// PostgreSQL. Raw execute denial returns
@@ -66,13 +67,16 @@ impl RawClientDispatch {
     /// `INTERNAL_FAILURE`. The result retains the private typed kernel source
     /// for trusted diagnostics only.
     pub async fn finish(self) -> RawClientDispatchResult {
-        if let Some(argument) = one_admitted_argument(&self.call) {
+        let arguments = one_admitted_argument(&self.call)
+            .map(|argument| vec![argument])
+            .or_else(|| two_admitted_arguments(&self.call).map(Vec::from));
+        if let Some(arguments) = arguments {
             return match self
                 .kernel
                 .dispatch_authenticated_raw_call_with_arguments(
                     &self.session,
                     self.call.function,
-                    &[argument],
+                    &arguments,
                 )
                 .await
             {
@@ -119,17 +123,37 @@ fn one_admitted_argument(call: &RawCall) -> Option<FunctionArgument> {
     let [argument] = call.arguments.as_slice() else {
         return None;
     };
-    match &argument.value {
-        RuntimeValue::Boolean(_)
-        | RuntimeValue::Integer(_)
-        | RuntimeValue::BigInt(_)
-        | RuntimeValue::Float(_)
-        | RuntimeValue::Text(_)
-        | RuntimeValue::Bytes(_)
-        | RuntimeValue::Reference { .. } => {}
-        _ => return None,
+    admitted_argument(argument)
+}
+
+fn two_admitted_arguments(call: &RawCall) -> Option<[FunctionArgument; 2]> {
+    let [first, second] = call.arguments.as_slice() else {
+        return None;
+    };
+    if first.parameter == second.parameter {
+        return None;
+    }
+    Some([admitted_argument(first)?, admitted_argument(second)?])
+}
+
+fn admitted_argument(argument: &CallArgument) -> Option<FunctionArgument> {
+    if !raw_argument_value_is_admitted(&argument.value) {
+        return None;
     }
     FunctionArgument::new(argument.parameter, argument.value.clone()).ok()
+}
+
+fn raw_argument_value_is_admitted(value: &RuntimeValue) -> bool {
+    matches!(
+        value,
+        RuntimeValue::Boolean(_)
+            | RuntimeValue::Integer(_)
+            | RuntimeValue::BigInt(_)
+            | RuntimeValue::Float(_)
+            | RuntimeValue::Text(_)
+            | RuntimeValue::Bytes(_)
+            | RuntimeValue::Reference { .. }
+    )
 }
 
 /// The closed public actions and private diagnostic source for one dispatch.
@@ -232,13 +256,16 @@ mod tests {
     use orna_core::{
         CatalogueRevisionId, FunctionId, ObjectId, ParameterId, PrincipalId, SourceRevisionId,
         TypeId,
+        catalogue::{
+            CatalogueSnapshot, EnumTypeDefinition, QualifiedSemanticName, SchemaDefinition,
+        },
         revision::RevisionPair,
         security::{
             AuthenticatedSession, ExecuteDenial, Principal, PrincipalKind, PrincipalStatus,
             SecuritySnapshot,
         },
         types::{ResolvedType, StandardScalar},
-        value::{RuntimeFloat, RuntimeValue},
+        value::{EnumValue, RuntimeFloat, RuntimeValue},
     };
     use orna_postgres::{PostgresKernel, RawServerTargetError, ServerSelectError};
     use orna_protocol::{
@@ -252,6 +279,29 @@ mod tests {
         SourceRevisionId::from_bytes([2; 16]),
         CatalogueRevisionId::from_bytes([3; 16]),
     );
+    const ENUM_TYPE: TypeId = TypeId::from_bytes([0x31; 16]);
+
+    fn enum_value() -> RuntimeValue {
+        let catalogue = CatalogueSnapshot::new_with_enum_types(
+            CatalogueRevisionId::from_bytes([0x32; 16]),
+            vec![SchemaDefinition::new(
+                orna_core::SchemaId::from_bytes([0x33; 16]),
+                QualifiedSemanticName::new(["test"]).expect("test schema name is valid"),
+            )],
+            vec![],
+            vec![],
+            vec![EnumTypeDefinition::new(
+                ENUM_TYPE,
+                QualifiedSemanticName::new(["test", "state"]).expect("test enum name is valid"),
+                ["member"],
+            )],
+            vec![],
+        )
+        .expect("test enum catalogue is valid");
+        RuntimeValue::Enum(
+            EnumValue::new(&catalogue, ENUM_TYPE, "member").expect("test enum member is active"),
+        )
+    }
 
     fn test_session() -> AuthenticatedSession {
         let principal = PrincipalId::from_bytes([4; 16]);
@@ -278,11 +328,9 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_argument_shapes_never_open_postgres_and_close_redacted() {
-        // A single typed NULL and a two-argument call are both closed at the
-        // adapter. Catalogue-bound closed shapes such as enum, record, opaque,
-        // and constructed values cannot be built without an active revision and
-        // are proven through the public adapter in the live
-        // `standard_database.rs` scalar dispatch proof.
+        // Closed pairs do not convert or open PostgreSQL. Record arguments
+        // retain their separate transactional preflight, which the live
+        // `standard_database.rs` proof covers.
         for (stream, arguments) in [
             (
                 7,
@@ -293,15 +341,45 @@ mod tests {
                 }],
             ),
             (
-                8,
+                10,
                 vec![
                     CallArgument {
-                        parameter: ParameterId::from_bytes([5; 16]),
+                        parameter: ParameterId::from_bytes([0x61; 16]),
                         value: RuntimeValue::Boolean(true),
                     },
                     CallArgument {
-                        parameter: ParameterId::from_bytes([6; 16]),
+                        parameter: ParameterId::from_bytes([0x61; 16]),
                         value: RuntimeValue::Boolean(false),
+                    },
+                ],
+            ),
+            (
+                11,
+                vec![
+                    CallArgument {
+                        parameter: ParameterId::from_bytes([0x62; 16]),
+                        value: RuntimeValue::Boolean(true),
+                    },
+                    CallArgument {
+                        parameter: ParameterId::from_bytes([0x63; 16]),
+                        value: enum_value(),
+                    },
+                ],
+            ),
+            (
+                12,
+                vec![
+                    CallArgument {
+                        parameter: ParameterId::from_bytes([0x64; 16]),
+                        value: RuntimeValue::Boolean(true),
+                    },
+                    CallArgument {
+                        parameter: ParameterId::from_bytes([0x65; 16]),
+                        value: RuntimeValue::Boolean(false),
+                    },
+                    CallArgument {
+                        parameter: ParameterId::from_bytes([0x66; 16]),
+                        value: RuntimeValue::Boolean(true),
                     },
                 ],
             ),
@@ -336,6 +414,177 @@ mod tests {
             assert_eq!(
                 result.action_after_cancellation(),
                 ServerAction::Cancelled { stream }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn zero_argument_path_remains_a_kernel_dispatch() {
+        let result = RawClientDispatch::new(
+            unavailable_kernel(),
+            test_session(),
+            8,
+            RawCall {
+                function: FUNCTION,
+                arguments: vec![],
+            },
+        )
+        .finish()
+        .await;
+        assert!(
+            result.source().is_some(),
+            "zero arguments still reach the kernel"
+        );
+        assert_eq!(
+            result.actions(),
+            &[ServerAction::Failed {
+                stream: 8,
+                failure: CallFailure::InternalFailure,
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn two_distinct_admitted_arguments_reach_the_protected_kernel_path() {
+        let reference = RuntimeValue::Reference {
+            target: TypeId::from_bytes([0x71; 16]),
+            object: ObjectId::from_bytes([0x72; 16]),
+        };
+        for (stream, arguments) in [
+            (
+                8,
+                vec![
+                    CallArgument {
+                        parameter: ParameterId::from_bytes([0x41; 16]),
+                        value: RuntimeValue::Text(String::from("first exact value")),
+                    },
+                    CallArgument {
+                        parameter: ParameterId::from_bytes([0x42; 16]),
+                        value: RuntimeValue::Bytes(vec![0x00, 0xff, 0x01]),
+                    },
+                ],
+            ),
+            (
+                9,
+                vec![
+                    CallArgument {
+                        parameter: ParameterId::from_bytes([0x43; 16]),
+                        value: RuntimeValue::Integer(i32::MIN),
+                    },
+                    CallArgument {
+                        parameter: ParameterId::from_bytes([0x44; 16]),
+                        value: reference,
+                    },
+                ],
+            ),
+        ] {
+            let result = RawClientDispatch::new(
+                unavailable_kernel(),
+                test_session(),
+                stream,
+                RawCall {
+                    function: FUNCTION,
+                    arguments,
+                },
+            )
+            .finish()
+            .await;
+            assert!(
+                result.source().is_some(),
+                "the admitted pair reaches the kernel"
+            );
+            assert_eq!(
+                result.actions(),
+                &[ServerAction::Failed {
+                    stream,
+                    failure: CallFailure::InternalFailure,
+                }]
+            );
+        }
+    }
+
+    #[test]
+    fn two_admitted_arguments_retain_distinct_identities_and_exact_values() {
+        let first = ParameterId::from_bytes([0x51; 16]);
+        let second = ParameterId::from_bytes([0x52; 16]);
+        let first_value = RuntimeValue::Text(String::from("cafe\u{301} \u{65e5}\u{672c}\0"));
+        let second_value = RuntimeValue::Reference {
+            target: TypeId::from_bytes([0x71; 16]),
+            object: ObjectId::from_bytes([0x72; 16]),
+        };
+        let admitted = two_admitted_arguments(&RawCall {
+            function: FUNCTION,
+            arguments: vec![
+                CallArgument {
+                    parameter: first,
+                    value: first_value.clone(),
+                },
+                CallArgument {
+                    parameter: second,
+                    value: second_value.clone(),
+                },
+            ],
+        })
+        .expect("a supported scalar and Reference pair is admitted");
+        assert_eq!(admitted[0].parameter(), first);
+        assert_eq!(admitted[0].value(), &first_value);
+        assert_eq!(admitted[1].parameter(), second);
+        assert_eq!(admitted[1].value(), &second_value);
+
+        for arguments in [
+            vec![
+                CallArgument {
+                    parameter: first,
+                    value: RuntimeValue::Boolean(true),
+                },
+                CallArgument {
+                    parameter: first,
+                    value: RuntimeValue::Boolean(false),
+                },
+            ],
+            vec![
+                CallArgument {
+                    parameter: first,
+                    value: enum_value(),
+                },
+                CallArgument {
+                    parameter: second,
+                    value: RuntimeValue::Boolean(true),
+                },
+            ],
+            vec![
+                CallArgument {
+                    parameter: first,
+                    value: RuntimeValue::null(ResolvedType::scalar(StandardScalar::Boolean))
+                        .expect("a typed test null is valid"),
+                },
+                CallArgument {
+                    parameter: second,
+                    value: RuntimeValue::Boolean(true),
+                },
+            ],
+            vec![
+                CallArgument {
+                    parameter: first,
+                    value: RuntimeValue::Boolean(true),
+                },
+                CallArgument {
+                    parameter: second,
+                    value: RuntimeValue::Boolean(false),
+                },
+                CallArgument {
+                    parameter: ParameterId::from_bytes([0x53; 16]),
+                    value: RuntimeValue::Boolean(true),
+                },
+            ],
+        ] {
+            assert!(
+                two_admitted_arguments(&RawCall {
+                    function: FUNCTION,
+                    arguments,
+                })
+                .is_none(),
+                "closed pair shapes do not cross the adapter boundary"
             );
         }
     }
