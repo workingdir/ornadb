@@ -5,6 +5,7 @@
 
 pub mod canonical_hash;
 pub mod catalogue;
+pub mod invocation;
 pub mod physical;
 pub mod revision;
 pub mod security;
