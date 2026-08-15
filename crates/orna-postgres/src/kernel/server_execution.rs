@@ -8,13 +8,15 @@ use std::{collections::BTreeMap, error::Error, fmt};
 use futures_util::TryStreamExt;
 use orna_artifact::server_plan::{
     self, DistinctServerPlan, Expression, ExpressionKind, FieldStep, IdentitySelectedServerPlan,
-    Ordering, ServerPlan, SortDirection,
+    Ordering, SelectBindValue as UniqueTextSelectBindValue, ServerPlan, SortDirection,
+    UniqueTextSelectedServerPlan,
 };
 use orna_core::{
     FieldId, FunctionId, FunctionRevisionId, ObjectId, ParameterId, TypeId,
     catalogue::{
         CatalogueSnapshot, FunctionDefinition, FunctionDomain, FunctionReturn, FunctionSecurity,
-        FunctionTransaction, FunctionVolatility,
+        FunctionTransaction, FunctionVolatility, ValueTypeKind, ValueTypeMutability,
+        ValueTypePersistence,
     },
     revision::{
         ActiveDatabaseRevision, CatalogueHashContext, DefinitionReferenceKind,
@@ -47,6 +49,8 @@ const SERVER_PLAN_FORMAT: &str = server_plan::FORMAT_IDENTITY;
 const SERVER_PLAN_VERSION: u32 = server_plan::FORMAT_VERSION;
 const IDENTITY_SELECTED_SERVER_PLAN_VERSION: u32 = server_plan::IDENTITY_SELECTED_FORMAT_VERSION;
 const DISTINCT_SERVER_PLAN_VERSION: u32 = server_plan::DISTINCT_FORMAT_VERSION;
+const UNIQUE_TEXT_SELECTED_SERVER_PLAN_VERSION: u32 =
+    server_plan::UNIQUE_TEXT_SELECTED_FORMAT_VERSION;
 const ROW_LIMIT: usize = 10_000;
 const CELL_LIMIT: usize = 1_000_000;
 const PAYLOAD_LIMIT: usize = 16 * 1024 * 1024;
@@ -694,8 +698,9 @@ pub(crate) async fn execute_authorised_server_select(
 /// Executes one raw-compatible SERVER SELECT through its existing authorised entry.
 ///
 /// Parameter-free calls retain the one-column, many-row boundary. A call with
-/// one Reference uses the version-2 identity-selected boundary and may flatten
-/// only its zero-or-one result row. The caller owns the savepoint and outer
+/// one Reference uses the version-2 identity-selected boundary and one Text
+/// value uses the version-4 unique-Text-selected boundary. Both flatten only
+/// their zero-or-one result row. The caller owns the savepoint and outer
 /// transaction.
 pub(crate) async fn execute_authorised_raw_server_select(
     transaction: &Transaction<'_>,
@@ -704,7 +709,9 @@ pub(crate) async fn execute_authorised_raw_server_select(
     arguments: &[FunctionArgument],
 ) -> Result<Vec<RuntimeValue>, PostgresKernelError> {
     let function = authorisation.target().function();
-    if arguments.is_empty() {
+    if raw_unique_text_selected_server_select_target_is_selected(active, function) {
+        validate_raw_unique_text_selected_server_select_target(active, function)?;
+    } else if arguments.is_empty() {
         validate_raw_server_select_target(active, function)?;
     } else {
         validate_raw_identity_selected_server_select_target(active, function)?;
@@ -714,8 +721,32 @@ pub(crate) async fn execute_authorised_raw_server_select(
     if arguments.is_empty() {
         into_raw_server_values(active, function, result)
     } else {
-        into_raw_identity_selected_server_values(active, function, result)
+        into_raw_selected_server_values(active, function, result)
     }
+}
+
+/// Reports whether an active artifact is a superficial version-4 raw SELECT candidate.
+///
+/// The check deliberately stops before decoding or validating the target. An
+/// authorised caller uses it only to select the existing SELECT savepoint;
+/// complete validation remains in [`execute_authorised_raw_server_select`].
+pub(crate) fn raw_unique_text_selected_server_select_target_is_selected(
+    active: &ActiveDatabaseRevision,
+    function_id: FunctionId,
+) -> bool {
+    let Some(function) = active.catalogue().function_by_id(function_id) else {
+        return false;
+    };
+    let Some(revision) = active.function_revisions().iter().find(|revision| {
+        revision.function() == function_id && revision.id() == function.current_revision()
+    }) else {
+        return false;
+    };
+    let artifact = revision.artifact();
+    function.domain() == FunctionDomain::Server
+        && artifact.kind() == ExecutableArtifactKind::Server
+        && artifact.format() == SERVER_PLAN_FORMAT
+        && artifact.version() == UNIQUE_TEXT_SELECTED_SERVER_PLAN_VERSION
 }
 
 /// Reports whether an active artifact is a superficial version-2 raw SELECT candidate.
@@ -788,6 +819,57 @@ fn validate_raw_identity_selected_server_select_target(
         return Err(raw_target_error(
             function_id,
             "raw identity-selected SERVER results support only protocol-1 scalar and reference values",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_raw_unique_text_selected_server_select_target(
+    active: &ActiveDatabaseRevision,
+    function_id: FunctionId,
+) -> Result<(), PostgresKernelError> {
+    let function = active
+        .catalogue()
+        .function_by_id(function_id)
+        .ok_or_else(|| {
+            server_error(ServerSelectError::FunctionNotActive {
+                pair: active.pair(),
+                function: function_id,
+            })
+        })?;
+    if function.domain() != FunctionDomain::Server {
+        return Err(server_error(ServerSelectError::FunctionDomain {
+            function: function_id,
+        }));
+    }
+    if function.parameters().len() != 1 {
+        return Err(raw_target_error(
+            function_id,
+            "raw unique-Text-selected SERVER calls must declare exactly one parameter",
+        ));
+    }
+    let FunctionReturn::Rows(columns) = function.return_type() else {
+        return Err(raw_target_error(
+            function_id,
+            "raw unique-Text-selected SERVER calls must return nonempty ROWS",
+        ));
+    };
+    if columns.is_empty() {
+        return Err(raw_target_error(
+            function_id,
+            "raw unique-Text-selected SERVER calls must return nonempty ROWS",
+        ));
+    }
+    if columns.iter().any(|column| {
+        !raw_result_type_is_supported(
+            active.catalogue(),
+            active.catalogue_hash_context(),
+            column.resolved_type(),
+        )
+    }) {
+        return Err(raw_target_error(
+            function_id,
+            "raw unique-Text-selected SERVER results support only protocol-1 scalar and reference values",
         ));
     }
     Ok(())
@@ -882,7 +964,7 @@ fn into_raw_server_values_for_context(
 }
 
 /// Transfers one zero-or-one-row raw identity result in projection order.
-fn into_raw_identity_selected_server_values(
+fn into_raw_selected_server_values(
     active: &ActiveDatabaseRevision,
     function: FunctionId,
     result: ServerSelectResult,
@@ -894,7 +976,7 @@ fn into_raw_identity_selected_server_values(
     if rows.next().is_some() {
         return Err(raw_target_error(
             function,
-            "raw identity-selected SERVER execution must produce at most one row",
+            "raw selected SERVER execution must produce at most one row",
         ));
     }
     row.into_values()
@@ -1092,6 +1174,39 @@ async fn execute_active_transaction(
             )?;
             (columns, lowered, ResultCardinality::BoundedMany)
         }
+        DecodedServerPlan::V4(plan) => {
+            validate_unique_text_selected_function_signature(function)?;
+            validate_unique_text_selected_plan(
+                active.catalogue(),
+                active.catalogue_hash_context(),
+                function,
+                plan,
+            )?;
+            validate_unique_text_selected_reference_evidence(active, function, plan)?;
+            let selector = validate_unique_text_selected_arguments(
+                active.catalogue(),
+                active.catalogue_hash_context(),
+                function,
+                plan,
+                arguments,
+            )?;
+            let columns = result_columns_for_projections(function, plan.projections())?;
+            validate_target_entries(
+                active.catalogue(),
+                active.catalogue_hash_context(),
+                plan.projections().len(),
+                &columns,
+                0,
+            )?;
+            let lowered = lower_unique_text_selected_plan(
+                active.catalogue(),
+                active.catalogue_hash_context(),
+                plan,
+                &columns,
+                selector,
+            )?;
+            (columns, lowered, ResultCardinality::AtMostOne)
+        }
     };
     let statement = transaction
         .prepare_typed(&lowered.sql, &lowered.bind_types)
@@ -1129,6 +1244,7 @@ enum DecodedServerPlan {
     V1(ServerPlan),
     V2(IdentitySelectedServerPlan),
     V3(DistinctServerPlan),
+    V4(UniqueTextSelectedServerPlan),
 }
 
 fn decode_plan(
@@ -1155,9 +1271,13 @@ fn decode_plan(
         DISTINCT_SERVER_PLAN_VERSION => DistinctServerPlan::decode(payload)
             .map(DecodedServerPlan::V3)
             .map_err(map_distinct_plan_decode_error),
+        UNIQUE_TEXT_SELECTED_SERVER_PLAN_VERSION => UniqueTextSelectedServerPlan::decode(payload)
+            .map(DecodedServerPlan::V4)
+            .map_err(ServerSelectError::PlanDecode)
+            .map_err(server_error),
         _ => Err(artifact_error(
             function,
-            "current SERVER artifact must use supported orna.server-plan version 1, version 2, or version 3",
+            "current SERVER artifact must use supported orna.server-plan version 1, version 2, version 3, or version 4",
         )),
     }
 }
@@ -1270,6 +1390,53 @@ fn validate_identity_selected_function_signature(
     Ok(())
 }
 
+fn validate_unique_text_selected_function_signature(
+    function: &FunctionDefinition,
+) -> Result<(), PostgresKernelError> {
+    if function.domain() != FunctionDomain::Server {
+        return Err(server_error(ServerSelectError::FunctionDomain {
+            function: function.id(),
+        }));
+    }
+    if !matches!(function.return_type(), FunctionReturn::Rows(columns) if !columns.is_empty()) {
+        return Err(function_signature_error(
+            function.id(),
+            "unique-Text-selected SERVER functions must return nonempty ROWS",
+        ));
+    }
+    if function.security() != FunctionSecurity::Invoker {
+        return Err(function_signature_error(
+            function.id(),
+            "unique-Text-selected SERVER functions must use INVOKER security",
+        ));
+    }
+    if function.transaction() != Some(FunctionTransaction::ReadOnly) {
+        return Err(function_signature_error(
+            function.id(),
+            "unique-Text-selected SERVER functions must use READ ONLY transactions",
+        ));
+    }
+    if function.volatility() != FunctionVolatility::Stable {
+        return Err(function_signature_error(
+            function.id(),
+            "unique-Text-selected SERVER functions must use STABLE volatility",
+        ));
+    }
+    let [parameter] = function.parameters() else {
+        return Err(function_signature_error(
+            function.id(),
+            "unique-Text-selected SERVER functions must declare exactly one parameter",
+        ));
+    };
+    if parameter.default_expression().is_some() {
+        return Err(function_signature_error(
+            function.id(),
+            "the unique-Text selector parameter cannot have a default expression",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_distinct_function_signature(
     function: &FunctionDefinition,
 ) -> Result<(), PostgresKernelError> {
@@ -1372,6 +1539,104 @@ fn validate_identity_selected_plan(
     if parameter.resolved_type() != ResolvedType::reference(scan.object_type) {
         return Err(plan_invariant(
             "the selector parameter must use REF to the object type selected in FROM",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_unique_text_selected_plan(
+    catalogue: &CatalogueSnapshot,
+    context: &CatalogueHashContext,
+    function: &FunctionDefinition,
+    plan: &UniqueTextSelectedServerPlan,
+) -> Result<(), PostgresKernelError> {
+    validate_execution_complexity_for_projections(plan.projections())?;
+    let scan = plan.scan();
+    let Some(object_type) = catalogue.object_type_by_id(scan.object_type) else {
+        return Err(plan_invariant(
+            "unique-Text selector scan must use active input zero and an active object type",
+        ));
+    };
+    if scan.input != 0 {
+        return Err(plan_invariant(
+            "unique-Text selector scan must use active input zero and an active object type",
+        ));
+    }
+    let FunctionReturn::Rows(return_columns) = function.return_type() else {
+        return Err(plan_invariant("function return shape must be ROWS"));
+    };
+    if plan.projections().len() != return_columns.len() {
+        return Err(plan_invariant(
+            "projection count must equal ROWS column count",
+        ));
+    }
+    for (projection, column) in plan.projections().iter().zip(return_columns) {
+        validate_expression_with_equality_rule(
+            catalogue,
+            context,
+            scan.object_type,
+            projection,
+            PARAMETERISED_EQUALITY_RULE,
+        )?;
+        if !runtime_types_match(
+            context,
+            projection.value_type.resolved_type,
+            column.resolved_type(),
+        ) {
+            return Err(plan_invariant("projection type must equal its ROWS column"));
+        }
+        if !supports_result_type(
+            catalogue,
+            context,
+            projection.value_type.resolved_type,
+            projection.value_type.nullable,
+        ) {
+            return Err(plan_invariant(
+                "projection type is outside the initial runtime result subset",
+            ));
+        }
+    }
+    let UniqueTextSelectBindValue::Text {
+        scan_object_type,
+        field_owner,
+        field,
+        parameter_owner,
+        parameter,
+        resolved_type,
+        field_nullable,
+        parameter_required_non_null,
+    } = plan.selector();
+    if *scan_object_type != scan.object_type || *field_owner != scan.object_type {
+        return Err(plan_invariant(
+            "unique-Text selector scan and direct field owner must match the active scan",
+        ));
+    }
+    let field = object_type.field_by_id(*field).ok_or_else(|| {
+        plan_invariant("unique-Text selector field must exist on the active scanned object type")
+    })?;
+    if !field.unique()
+        || field.nullable() != *field_nullable
+        || field.resolved_type() != *resolved_type
+        || !supports_unique_text(context, field.resolved_type())
+    {
+        return Err(plan_invariant(
+            "unique-Text selector field must be an exact active nullable or required unique Text field",
+        ));
+    }
+    let [declared_parameter] = function.parameters() else {
+        return Err(plan_invariant(
+            "unique-Text-selected SERVER function must have one declared selector parameter",
+        ));
+    };
+    if *parameter_owner != function.id()
+        || *parameter != declared_parameter.id()
+        || !*parameter_required_non_null
+        || declared_parameter.default_expression().is_some()
+        || declared_parameter.resolved_type() != *resolved_type
+        || !supports_unique_text(context, declared_parameter.resolved_type())
+    {
+        return Err(plan_invariant(
+            "unique-Text selector owner, parameter, required fact, and exact Text authority must match the active function signature",
         ));
     }
     Ok(())
@@ -1538,6 +1803,75 @@ fn validate_identity_selected_arguments(
             "the selector argument must refer to the object type selected by this function",
         )),
     }
+}
+
+fn validate_unique_text_selected_arguments(
+    catalogue: &CatalogueSnapshot,
+    context: &CatalogueHashContext,
+    function: &FunctionDefinition,
+    plan: &UniqueTextSelectedServerPlan,
+    arguments: &[FunctionArgument],
+) -> Result<String, PostgresKernelError> {
+    let [argument] = arguments else {
+        return Err(argument_error(
+            None,
+            "unique-Text-selected SERVER calls require exactly one Text argument",
+        ));
+    };
+    let UniqueTextSelectBindValue::Text {
+        parameter,
+        resolved_type,
+        ..
+    } = plan.selector();
+    if argument.parameter() != *parameter {
+        return Err(argument_error(
+            Some(argument.parameter()),
+            "the supplied argument must name the unique-Text selector parameter",
+        ));
+    }
+    let parameter = function
+        .parameter_by_id(argument.parameter())
+        .ok_or_else(|| {
+            argument_error(
+                Some(argument.parameter()),
+                "an argument was supplied for a parameter that this function does not declare",
+            )
+        })?;
+    if parameter.resolved_type() != *resolved_type
+        || !supports_unique_text(context, parameter.resolved_type())
+    {
+        return Err(argument_error(
+            Some(argument.parameter()),
+            "the unique-Text selector parameter must retain exact active Text authority",
+        ));
+    }
+    let RuntimeType::Flat(value_type) = argument.value().runtime_type() else {
+        return Err(argument_error(
+            Some(argument.parameter()),
+            "the unique-Text selector argument must be one non-null Text value",
+        ));
+    };
+    if !runtime_type_is_active(catalogue, context, value_type)
+        || !runtime_types_match(context, value_type, parameter.resolved_type())
+    {
+        return Err(argument_error(
+            Some(argument.parameter()),
+            "the unique-Text selector argument type does not match the declared parameter type",
+        ));
+    }
+    let RuntimeValue::Text(value) = argument.value() else {
+        return Err(argument_error(
+            Some(argument.parameter()),
+            "the unique-Text selector argument must be one non-null Text value",
+        ));
+    };
+    if value.contains('\0') {
+        return Err(argument_error(
+            Some(argument.parameter()),
+            "unique-Text selector arguments cannot contain U+0000",
+        ));
+    }
+    Ok(value.clone())
 }
 
 fn validate_no_arguments(arguments: &[FunctionArgument]) -> Result<(), PostgresKernelError> {
@@ -1745,6 +2079,23 @@ fn supports_equality_type(context: &CatalogueHashContext, resolved_type: Resolve
         resolve_runtime_type(context, resolved_type),
         ResolvedRuntimeType::Reference(_)
     )
+}
+
+fn supports_unique_text(context: &CatalogueHashContext, resolved_type: ResolvedType) -> bool {
+    match (context.standard(), resolved_type) {
+        (None, ResolvedType::Scalar(StandardScalar::CharacterLargeObject)) => true,
+        (Some(standard), ResolvedType::Value(type_id)) => standard
+            .catalogue()
+            .value_type_by_id(type_id)
+            .is_some_and(|value_type| {
+                value_type.kind() == ValueTypeKind::Primitive
+                    && value_type.mutability() == ValueTypeMutability::Immutable
+                    && value_type.persistence() == ValueTypePersistence::Persistable
+                    && value_type.representation_contract()
+                        == "orna.kernel.value.character-large-object@1"
+            }),
+        _ => false,
+    }
 }
 
 fn supports_distinct_projection_type(
@@ -2012,6 +2363,20 @@ fn validate_identity_selected_reference_evidence(
     )
 }
 
+fn validate_unique_text_selected_reference_evidence(
+    active: &ActiveDatabaseRevision,
+    function: &FunctionDefinition,
+    plan: &UniqueTextSelectedServerPlan,
+) -> Result<(), PostgresKernelError> {
+    validate_body_reference_evidence(
+        active,
+        function,
+        &expected_unique_text_selected_body_references(plan),
+        "recorded dependencies must match the unique-Text-selected function signature and query",
+        "recorded dependencies must appear in the same order as the unique-Text-selected function signature and query",
+    )
+}
+
 fn validate_distinct_reference_evidence(
     active: &ActiveDatabaseRevision,
     function: &FunctionDefinition,
@@ -2069,6 +2434,40 @@ fn expected_identity_selected_body_references(
         DefinitionReferenceTarget::Parameter {
             owner: selector.owner(),
             parameter: selector.parameter(),
+        },
+    ));
+    expected
+}
+
+fn expected_unique_text_selected_body_references(
+    plan: &UniqueTextSelectedServerPlan,
+) -> Vec<ExpectedDefinitionReference> {
+    let mut expected = vec![ExpectedDefinitionReference::new(
+        DefinitionReferenceKind::QueryObject,
+        DefinitionReferenceTarget::ObjectType(plan.scan().object_type),
+    )];
+    for projection in plan.projections() {
+        add_expression_references(&mut expected, plan.scan().object_type, projection);
+    }
+    let UniqueTextSelectBindValue::Text {
+        field_owner,
+        field,
+        parameter_owner,
+        parameter,
+        ..
+    } = plan.selector();
+    expected.push(ExpectedDefinitionReference::new(
+        DefinitionReferenceKind::QueryField,
+        DefinitionReferenceTarget::Field {
+            owner: *field_owner,
+            field: *field,
+        },
+    ));
+    expected.push(ExpectedDefinitionReference::new(
+        DefinitionReferenceKind::ParameterRead,
+        DefinitionReferenceTarget::Parameter {
+            owner: *parameter_owner,
+            parameter: *parameter,
         },
     ));
     expected
@@ -2169,6 +2568,7 @@ struct LoweredPlan {
 enum SelectBindValue {
     Boolean(bool),
     Bytes(Vec<u8>),
+    Text(String),
 }
 
 impl SelectBindValue {
@@ -2176,6 +2576,7 @@ impl SelectBindValue {
         match self {
             Self::Boolean(_) => Type::BOOL,
             Self::Bytes(_) => Type::BYTEA,
+            Self::Text(_) => Type::TEXT,
         }
     }
 
@@ -2183,6 +2584,7 @@ impl SelectBindValue {
         match self {
             Self::Boolean(value) => value,
             Self::Bytes(value) => value,
+            Self::Text(value) => value,
         }
     }
 }
@@ -2312,6 +2714,31 @@ fn lower_identity_selected_plan(
         .push(SelectBindValue::Bytes(selector.to_bytes().to_vec()));
     let selector_placeholder = lowered.lowerer.binds.len();
     let suffix = format!("\nWHERE i0.{OBJECT_ID_COLUMN} = ${selector_placeholder}\nLIMIT 2");
+    finish_lowered_select(lowered, DuplicatePolicy::Preserve, &suffix)
+}
+
+fn lower_unique_text_selected_plan(
+    catalogue: &CatalogueSnapshot,
+    context: &CatalogueHashContext,
+    plan: &UniqueTextSelectedServerPlan,
+    columns: &[ResultColumn],
+    selector: String,
+) -> Result<LoweredPlan, PostgresKernelError> {
+    let scan = plan.scan();
+    let result_columns = RuntimeResultColumns { context, columns };
+    let mut lowered = lower_select_projections(
+        catalogue,
+        result_columns,
+        scan.object_type,
+        plan.projections(),
+    )?;
+    let UniqueTextSelectBindValue::Text { field, .. } = plan.selector();
+    lowered.lowerer.binds.push(SelectBindValue::Text(selector));
+    let selector_placeholder = lowered.lowerer.binds.len();
+    let suffix = format!(
+        "\nWHERE i0.{} = ${selector_placeholder}\nLIMIT 2",
+        field_name(*field),
+    );
     finish_lowered_select(lowered, DuplicatePolicy::Preserve, &suffix)
 }
 
@@ -3510,8 +3937,28 @@ mod tests {
                 input: 0,
                 object_type: source,
             },
-            [projection],
+            [projection.clone()],
             None,
+        )
+        .unwrap()
+        .encode()
+        .unwrap();
+        let v4 = UniqueTextSelectedServerPlan::new(
+            Scan {
+                input: 0,
+                object_type: source,
+            },
+            [projection],
+            UniqueTextSelectBindValue::Text {
+                scan_object_type: source,
+                field_owner: source,
+                field: FieldId::from_bytes([0x34; 16]),
+                parameter_owner: FunctionId::from_bytes([0x31; 16]),
+                parameter: ParameterId::from_bytes([0x33; 16]),
+                resolved_type: ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+                field_nullable: true,
+                parameter_required_non_null: true,
+            },
         )
         .unwrap()
         .encode()
@@ -3539,6 +3986,15 @@ mod tests {
                 &v3,
             ),
             Ok(DecodedServerPlan::V3(_))
+        ));
+        assert!(matches!(
+            decode_plan(
+                function,
+                SERVER_PLAN_FORMAT,
+                UNIQUE_TEXT_SELECTED_SERVER_PLAN_VERSION,
+                &v4,
+            ),
+            Ok(DecodedServerPlan::V4(_))
         ));
         assert!(matches!(
             decode_plan(
@@ -3619,7 +4075,7 @@ mod tests {
             decode_plan(function, SERVER_PLAN_FORMAT, 99, &v1),
             Err(PostgresKernelError::ServerSelect(ServerSelectError::Artifact {
                 function: actual,
-                rule: "current SERVER artifact must use supported orna.server-plan version 1, version 2, or version 3",
+                rule: "current SERVER artifact must use supported orna.server-plan version 1, version 2, version 3, or version 4",
             })) if actual == function
         ));
     }
@@ -4912,12 +5368,13 @@ mod tests {
         assert_eq!(
             [
                 SelectBindValue::Boolean(true),
-                SelectBindValue::Boolean(false)
+                SelectBindValue::Bytes(vec![0]),
+                SelectBindValue::Text(String::from("selector")),
             ]
             .iter()
             .map(SelectBindValue::bind_type)
             .collect::<Vec<_>>(),
-            vec![Type::BOOL, Type::BOOL]
+            vec![Type::BOOL, Type::BYTEA, Type::TEXT]
         );
     }
 
