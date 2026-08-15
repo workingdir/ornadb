@@ -174,6 +174,27 @@ const RAW_REFERENCE_VALUE_UPDATE_SOCKET_SOURCE: &str = "CREATE SCHEMA raw_refere
     RETURNS ROWS (linked REF raw_reference_value_socket.probe)\n\
     SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n\
     AS SELECT probe.linked FROM raw_reference_value_socket.probe probe;\n";
+/// ADR 0052 exposes one version-4 unique Text selector and retains a creator
+/// so the local socket can create the exact byte-distinct test rows itself.
+const RAW_UNIQUE_TEXT_SELECT_SOCKET_SOURCE: &str = "CREATE SCHEMA raw_unique_text_select_socket;\n\
+    CREATE TYPE raw_unique_text_select_socket.person AS OBJECT (\n\
+      email TEXT UNIQUE, name TEXT NOT NULL, note TEXT\n\
+    );\n\
+    CREATE SERVER FUNCTION raw_unique_text_select_socket.create_person(\n\
+      p_email TEXT, p_name TEXT\n\
+    ) RETURNS ROWS (created REF raw_unique_text_select_socket.person)\n\
+    SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE\n\
+    AS INSERT INTO raw_unique_text_select_socket.person AS made (email, name)\n\
+    VALUES (p_email, p_name) RETURNING REF(made);\n\
+    CREATE SERVER FUNCTION raw_unique_text_select_socket.by_email(p_email TEXT)\n\
+    RETURNS ROWS (person REF raw_unique_text_select_socket.person, name TEXT, note TEXT)\n\
+    SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n\
+    AS SELECT REF(selected), selected.name, selected.note\n\
+    FROM raw_unique_text_select_socket.person selected WHERE selected.email = p_email;\n\
+    CREATE SERVER FUNCTION raw_unique_text_select_socket.all_people()\n\
+    RETURNS ROWS (person REF raw_unique_text_select_socket.person)\n\
+    SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n\
+    AS SELECT REF(person) FROM raw_unique_text_select_socket.person person;\n";
 const RAW_CLIENT_USER: PrincipalId = PrincipalId::from_bytes([0x71; 16]);
 const RAW_CLIENT_UNGRANTED_USER: PrincipalId = PrincipalId::from_bytes([0x72; 16]);
 const RAW_CLIENT_STALE_USER: PrincipalId = PrincipalId::from_bytes([0x73; 16]);
@@ -3755,6 +3776,612 @@ async fn raw_reference_value_update_socket_retains_pair_authority() -> TestResul
     .await
 }
 
+/// Proves the ADR 0052 version-4 unique Text read through the authenticated
+/// public raw socket. The direct dispatcher retains the private duplicate
+/// conflict source. The socket must expose only its public failure frame.
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service and ADR 0052 dispatch"]
+async fn raw_unique_text_select_socket_authorises_binds_and_redacts() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = kernel(&database)?;
+        let (active, standard_upgrade, _client, _server) =
+            install_raw_client_fixture(&kernel).await?;
+        let (active, person, create, create_email, create_name, by_email, email, all_people) =
+            install_raw_unique_text_select_socket_fixture(&kernel, &active, &standard_upgrade)
+                .await?;
+        let functions = active
+            .catalogue()
+            .functions()
+            .iter()
+            .map(|function| function.id())
+            .collect::<Vec<_>>();
+        let uid = nix::unistd::getuid().as_raw();
+        let principal = Principal::new(
+            RAW_CLIENT_USER,
+            PrincipalKind::User,
+            PrincipalStatus::Active,
+        );
+        let denied = SecuritySnapshot::new_with_local_peer_credentials(
+            active.pair(),
+            functions.clone(),
+            vec![principal],
+            vec![],
+            vec![],
+            vec![LocalPeerCredential::new(uid, RAW_CLIENT_USER)],
+        )?;
+        kernel.replace_security_snapshot(&denied).await?;
+        let mut wrong_email_bytes = email.to_bytes();
+        wrong_email_bytes[0] ^= 1;
+        let wrong_email = ParameterId::from_bytes(wrong_email_bytes);
+
+        // A denied malformed call must not disclose the parameter or value
+        // error that would otherwise make its target unavailable.
+        let (server, client) = StandardUnixStream::pair()?;
+        client.set_nonblocking(true)?;
+        let mut client = UnixStream::from_std(client)?;
+        let connection = tokio::spawn(serve_local_raw_stream(
+            kernel.clone(),
+            server,
+            LocalRawSocketResources::new(),
+        ));
+        let denied_operation = async {
+            client.write_all(b"ORNA\x01\x00\x00\x03\x00\x00\x00\x00").await?;
+            let mut acknowledgement = [0_u8; 12];
+            client.read_exact(&mut acknowledgement).await?;
+            require(
+                acknowledgement == *b"ORNA\x81\x00\x00\x03\x00\x00\x00\x00",
+                "unique Text denied socket returned the wrong acknowledgement",
+            )?;
+            for frame in [
+                ClientFrame::CallRawStart { stream: 1, function: by_email },
+                ClientFrame::CallArgument {
+                    stream: 1,
+                    parameter: wrong_email,
+                    value: RuntimeValue::Integer(42),
+                },
+                ClientFrame::CallArgumentsComplete { stream: 1 },
+            ] {
+                send_active_protocol_frame(&mut client, &active, &frame).await?;
+            }
+            require(
+                matches!(read_active_protocol_frame(&mut client, &active).await?, ServerFrame::CallAccepted { stream: 1, .. })
+                    && read_active_protocol_frame(&mut client, &active).await?
+                        == ServerFrame::CallFailed { stream: 1, failure: CallFailure::ExecuteDenied },
+                "unique Text denied socket disclosed a target or value fact",
+            )?;
+            require(
+                timeout(
+                    Duration::from_millis(50),
+                    read_active_protocol_frame(&mut client, &active),
+                )
+                .await
+                .is_err(),
+                "unique Text denied socket emitted a value after ExecuteDenied",
+            )
+        }
+        .await;
+        let shutdown = client.shutdown().await.map_err(Into::into);
+        let connection = connection.await.map_err(Into::into).and_then(|result| {
+            result.map_err(|error| -> Box<dyn Error + Send + Sync> { Box::new(error) })
+        });
+        finish_session(
+            denied_operation,
+            finish_session(shutdown, connection, "unique Text denied socket cleanup"),
+            "unique Text denied socket operation",
+        )?;
+
+        let granted = SecuritySnapshot::new_with_local_peer_credentials(
+            active.pair(),
+            functions,
+            vec![principal],
+            vec![],
+            vec![
+                ExecuteGrant::new(RAW_CLIENT_USER, create),
+                ExecuteGrant::new(RAW_CLIENT_USER, by_email),
+                ExecuteGrant::new(RAW_CLIENT_USER, all_people),
+            ],
+            vec![LocalPeerCredential::new(uid, RAW_CLIENT_USER)],
+        )?;
+        kernel.replace_security_snapshot(&granted).await?;
+        let direct = granted.bind_authenticated_session(RAW_CLIENT_USER, vec![])?;
+        let reference_credit = u64::try_from(
+            encode_active_server_frame(
+                &active,
+                &ServerFrame::EventBatch {
+                    stream: 4,
+                    channel: Channel::ResultValues,
+                    events: vec![orna_protocol::EventRecord {
+                        sequence: 1,
+                        event: Event::Value(RuntimeValue::Reference {
+                            target: person,
+                            object: ObjectId::from_bytes([0x41; 16]),
+                        }),
+                    }],
+                },
+            )?
+            .len()
+                - 18,
+        )?;
+        let (server, client) = StandardUnixStream::pair()?;
+        client.set_nonblocking(true)?;
+        let mut client = UnixStream::from_std(client)?;
+        let connection = tokio::spawn(serve_local_raw_stream(
+            kernel.clone(),
+            server,
+            LocalRawSocketResources::new(),
+        ));
+        let granted_operation = async {
+            client.write_all(b"ORNA\x01\x00\x00\x03\x00\x00\x00\x00").await?;
+            let mut acknowledgement = [0_u8; 12];
+            client.read_exact(&mut acknowledgement).await?;
+            require(
+                acknowledgement == *b"ORNA\x81\x00\x00\x03\x00\x00\x00\x00",
+                "unique Text granted socket returned the wrong acknowledgement",
+            )?;
+
+            let mut created = Vec::new();
+            for (stream, value, name) in [
+                (1, "caf\u{e9}", "exact bytes"),
+                (2, "cafe\u{301}", "byte-distinct decomposed"),
+            ] {
+                for frame in [
+                    ClientFrame::CallRawStart { stream, function: create },
+                    ClientFrame::CallArgument {
+                        stream,
+                        parameter: create_email,
+                        value: RuntimeValue::Text(value.into()),
+                    },
+                    ClientFrame::CallArgument {
+                        stream,
+                        parameter: create_name,
+                        value: RuntimeValue::Text(name.into()),
+                    },
+                    ClientFrame::WindowUpdate {
+                        stream,
+                        channel: Channel::ResultValues,
+                        credit: 1024,
+                    },
+                    ClientFrame::CallArgumentsComplete { stream },
+                ] {
+                    send_active_protocol_frame(&mut client, &active, &frame).await?;
+                }
+                require(
+                    matches!(read_active_protocol_frame(&mut client, &active).await?, ServerFrame::CallAccepted { stream: actual, .. } if actual == stream),
+                    "unique Text socket did not accept row creation",
+                )?;
+                let ServerFrame::EventBatch { events, .. } =
+                    read_active_protocol_frame(&mut client, &active).await?
+                else {
+                    return Err(failure("unique Text socket creator did not return an event batch"));
+                };
+                let [orna_protocol::EventRecord {
+                    event: Event::Value(RuntimeValue::Reference { target, object }), ..
+                }] = events.as_slice() else {
+                    return Err(failure("unique Text socket creator did not return one Reference"));
+                };
+                require(
+                    *target == person && *object != ObjectId::from_bytes([0; 16]),
+                    "unique Text socket creator returned the wrong Reference",
+                )?;
+                created.push(RuntimeValue::Reference { target: *target, object: *object });
+                require(
+                    read_active_protocol_frame(&mut client, &active).await?
+                        == ServerFrame::CallCompleted { stream },
+                    "unique Text socket creator did not complete",
+                )?;
+            }
+            let [exact_reference, decomposed_reference] = created.as_slice() else {
+                return Err(failure("unique Text socket did not create both byte-distinct rows"));
+            };
+
+            // The private cause remains available to the direct dispatcher.
+            // The same duplicate through the socket may expose only ORF1
+            // `InternalFailure`, with no following value frame.
+            let duplicate = RawClientDispatch::new(
+                kernel.clone(),
+                direct,
+                30,
+                RawCall {
+                    function: create,
+                    arguments: vec![
+                        orna_protocol::CallArgument {
+                            parameter: create_email,
+                            value: RuntimeValue::Text("caf\u{e9}".into()),
+                        },
+                        orna_protocol::CallArgument {
+                            parameter: create_name,
+                            value: RuntimeValue::Text("duplicate private source".into()),
+                        },
+                    ],
+                },
+            )
+            .finish()
+            .await;
+            require_dispatch_failure(
+                &duplicate,
+                30,
+                CallFailure::InternalFailure,
+                matches!(
+                    duplicate.source(),
+                    Some(PostgresKernelError::ServerInsert(
+                        ServerInsertError::NotCommitted { source, .. }
+                    )) if matches!(source.as_ref(), ServerMutationError::UniqueTextConflict { .. })
+                ),
+                "unique Text duplicate did not retain its private typed conflict",
+            )?;
+            for frame in [
+                ClientFrame::CallRawStart { stream: 3, function: create },
+                ClientFrame::CallArgument {
+                    stream: 3,
+                    parameter: create_email,
+                    value: RuntimeValue::Text("caf\u{e9}".into()),
+                },
+                ClientFrame::CallArgument {
+                    stream: 3,
+                    parameter: create_name,
+                    value: RuntimeValue::Text("duplicate socket source".into()),
+                },
+                ClientFrame::CallArgumentsComplete { stream: 3 },
+            ] {
+                send_active_protocol_frame(&mut client, &active, &frame).await?;
+            }
+            require(
+                matches!(read_active_protocol_frame(&mut client, &active).await?, ServerFrame::CallAccepted { stream: 3, .. })
+                    && read_active_protocol_frame(&mut client, &active).await?
+                        == ServerFrame::CallFailed { stream: 3, failure: CallFailure::InternalFailure },
+                "unique Text socket disclosed its private duplicate conflict",
+            )?;
+            require(
+                timeout(Duration::from_millis(50), read_active_protocol_frame(&mut client, &active))
+                    .await
+                    .is_err(),
+                "unique Text socket emitted a value after InternalFailure",
+            )?;
+
+            // Give exact reference-frame credit. The version-4 selector must
+            // stop at the next projection until more credit is supplied.
+            for frame in [
+                ClientFrame::CallRawStart { stream: 4, function: by_email },
+                ClientFrame::CallArgument {
+                    stream: 4,
+                    parameter: email,
+                    value: RuntimeValue::Text("caf\u{e9}".into()),
+                },
+                ClientFrame::WindowUpdate {
+                    stream: 4,
+                    channel: Channel::ResultValues,
+                    credit: reference_credit,
+                },
+                ClientFrame::CallArgumentsComplete { stream: 4 },
+            ] {
+                send_active_protocol_frame(&mut client, &active, &frame).await?;
+            }
+            require(
+                matches!(read_active_protocol_frame(&mut client, &active).await?, ServerFrame::CallAccepted { stream: 4, .. })
+                    && matches!(
+                        read_active_protocol_frame(&mut client, &active).await?,
+                        ServerFrame::EventBatch { stream: 4, events, .. }
+                            if events.len() == 1 && events[0].sequence == 1
+                                && events[0].event == Event::Value(exact_reference.clone())
+                    ),
+                "unique Text socket did not return its first exact ORF1 value",
+            )?;
+            sleep(Duration::from_millis(50)).await;
+            let mut unexpected = [0_u8; 1];
+            require(
+                matches!(client.try_read(&mut unexpected), Err(error) if error.kind() == ErrorKind::WouldBlock),
+                "unique Text socket emitted a projection before its credit boundary",
+            )?;
+            send_active_protocol_frame(
+                &mut client,
+                &active,
+                &ClientFrame::WindowUpdate {
+                    stream: 4,
+                    channel: Channel::ResultValues,
+                    credit: 1024,
+                },
+            )
+            .await?;
+            let expected_null = Event::Value(RuntimeValue::null(ResolvedType::scalar(
+                orna_core::types::StandardScalar::CharacterLargeObject,
+            ))?);
+            for (sequence, expected) in [
+                (2, Event::Value(RuntimeValue::Text("exact bytes".into()))),
+                (3, expected_null),
+            ] {
+                let actual = read_active_protocol_frame(&mut client, &active).await?;
+                if !matches!(
+                    actual,
+                    ServerFrame::EventBatch { stream: 4, ref events, .. }
+                        if events.len() == 1 && events[0].sequence == sequence
+                            && events[0].event == expected
+                ) {
+                    return Err(failure(format!(
+                        "unique Text socket did not preserve exact ordered ORF1 values: {actual:?}"
+                    )));
+                }
+            }
+            require(
+                read_active_protocol_frame(&mut client, &active).await?
+                    == ServerFrame::CallCompleted { stream: 4 },
+                "unique Text socket did not complete its exact row",
+            )?;
+
+            for frame in [
+                ClientFrame::CallRawStart { stream: 5, function: by_email },
+                ClientFrame::CallArgument {
+                    stream: 5,
+                    parameter: email,
+                    value: RuntimeValue::Text("cafe\u{301}".into()),
+                },
+                ClientFrame::WindowUpdate {
+                    stream: 5,
+                    channel: Channel::ResultValues,
+                    credit: 2048,
+                },
+                ClientFrame::CallArgumentsComplete { stream: 5 },
+            ] {
+                send_active_protocol_frame(&mut client, &active, &frame).await?;
+            }
+            let expected_decomposed_null = Event::Value(RuntimeValue::null(ResolvedType::scalar(
+                orna_core::types::StandardScalar::CharacterLargeObject,
+            ))?);
+            require(
+                matches!(read_active_protocol_frame(&mut client, &active).await?, ServerFrame::CallAccepted { stream: 5, .. })
+                    && matches!(
+                        read_active_protocol_frame(&mut client, &active).await?,
+                        ServerFrame::EventBatch { stream: 5, events, .. }
+                            if events.len() == 1 && events[0].sequence == 1
+                                && events[0].event == Event::Value(decomposed_reference.clone())
+                    )
+                    && matches!(
+                        read_active_protocol_frame(&mut client, &active).await?,
+                        ServerFrame::EventBatch { stream: 5, events, .. }
+                            if events.len() == 1 && events[0].sequence == 2
+                                && events[0].event == Event::Value(RuntimeValue::Text("byte-distinct decomposed".into()))
+                    )
+                    && matches!(
+                        read_active_protocol_frame(&mut client, &active).await?,
+                        ServerFrame::EventBatch { stream: 5, events, .. }
+                            if events.len() == 1 && events[0].sequence == 3
+                                && events[0].event == expected_decomposed_null
+                    )
+                    && read_active_protocol_frame(&mut client, &active).await?
+                        == ServerFrame::CallCompleted { stream: 5 },
+                "unique Text socket did not select the C-byte-distinct row",
+            )?;
+
+            for frame in [
+                ClientFrame::CallRawStart { stream: 6, function: by_email },
+                ClientFrame::CallArgument {
+                    stream: 6,
+                    parameter: email,
+                    value: RuntimeValue::Text("absent@example.test".into()),
+                },
+                ClientFrame::CallArgumentsComplete { stream: 6 },
+            ] {
+                send_active_protocol_frame(&mut client, &active, &frame).await?;
+            }
+            require(
+                matches!(read_active_protocol_frame(&mut client, &active).await?, ServerFrame::CallAccepted { stream: 6, .. })
+                    && read_active_protocol_frame(&mut client, &active).await?
+                        == ServerFrame::CallCompleted { stream: 6 },
+                "unique Text socket did not complete an absent value without output",
+            )?;
+
+            for (stream, function, parameter, value) in [
+                (7, by_email, wrong_email, RuntimeValue::Text("caf\u{e9}".into())),
+                (8, by_email, email, RuntimeValue::Integer(42)),
+                (9, all_people, email, RuntimeValue::Text("caf\u{e9}".into())),
+            ] {
+                for frame in [
+                    ClientFrame::CallRawStart { stream, function },
+                    ClientFrame::CallArgument { stream, parameter, value },
+                    ClientFrame::CallArgumentsComplete { stream },
+                ] {
+                    send_active_protocol_frame(&mut client, &active, &frame).await?;
+                }
+                require(
+                    matches!(read_active_protocol_frame(&mut client, &active).await?, ServerFrame::CallAccepted { stream: actual, .. } if actual == stream)
+                        && read_active_protocol_frame(&mut client, &active).await?
+                            == ServerFrame::CallFailed { stream, failure: CallFailure::TargetUnavailable },
+                    "unique Text socket disclosed a closed target fact",
+                )?;
+                require(
+                    timeout(
+                        Duration::from_millis(50),
+                        read_active_protocol_frame(&mut client, &active),
+                    )
+                    .await
+                    .is_err(),
+                    "unique Text socket emitted a value after TargetUnavailable",
+                )?;
+            }
+
+            let typed_null = RuntimeValue::null(ResolvedType::scalar(
+                orna_core::types::StandardScalar::CharacterLargeObject,
+            ))?;
+            for frame in [
+                ClientFrame::CallRawStart { stream: 10, function: by_email },
+                ClientFrame::CallArgument {
+                    stream: 10,
+                    parameter: email,
+                    value: typed_null,
+                },
+                ClientFrame::CallArgumentsComplete { stream: 10 },
+            ] {
+                send_active_protocol_frame(&mut client, &active, &frame).await?;
+            }
+            require(
+                matches!(read_active_protocol_frame(&mut client, &active).await?, ServerFrame::CallAccepted { stream: 10, .. })
+                    && read_active_protocol_frame(&mut client, &active).await?
+                        == ServerFrame::CallFailed { stream: 10, failure: CallFailure::TargetUnavailable },
+                "unique Text socket did not reject a typed NULL selector",
+            )?;
+            require(
+                timeout(
+                    Duration::from_millis(50),
+                    read_active_protocol_frame(&mut client, &active),
+                )
+                .await
+                .is_err(),
+                "unique Text socket emitted a value after its NULL closure",
+            )?;
+
+            // PostgreSQL C equality must not fold case, trim whitespace, or
+            // change line endings. None of these byte-distinct values exists.
+            for (stream, value) in [
+                (11, "CAF\u{c9}"),
+                (12, "caf\u{e9} "),
+                (13, "caf\u{e9}\n"),
+                (14, "caf\u{e9}\r\n"),
+            ] {
+                for frame in [
+                    ClientFrame::CallRawStart {
+                        stream,
+                        function: by_email,
+                    },
+                    ClientFrame::CallArgument {
+                        stream,
+                        parameter: email,
+                        value: RuntimeValue::Text(value.into()),
+                    },
+                    ClientFrame::CallArgumentsComplete { stream },
+                ] {
+                    send_active_protocol_frame(&mut client, &active, &frame).await?;
+                }
+                require(
+                    matches!(read_active_protocol_frame(&mut client, &active).await?, ServerFrame::CallAccepted { stream: actual, .. } if actual == stream)
+                        && read_active_protocol_frame(&mut client, &active).await?
+                            == ServerFrame::CallCompleted { stream },
+                    "unique Text socket folded a byte-distinct selector",
+                )?;
+            }
+
+            // The call must remain cancellable after its first selected value
+            // has crossed the public socket. Withheld credit keeps it open.
+            for frame in [
+                ClientFrame::CallRawStart {
+                    stream: 15,
+                    function: by_email,
+                },
+                ClientFrame::CallArgument {
+                    stream: 15,
+                    parameter: email,
+                    value: RuntimeValue::Text("caf\u{e9}".into()),
+                },
+                ClientFrame::WindowUpdate {
+                    stream: 15,
+                    channel: Channel::ResultValues,
+                    credit: reference_credit,
+                },
+                ClientFrame::CallArgumentsComplete { stream: 15 },
+            ] {
+                send_active_protocol_frame(&mut client, &active, &frame).await?;
+            }
+            require(
+                matches!(read_active_protocol_frame(&mut client, &active).await?, ServerFrame::CallAccepted { stream: 15, .. })
+                    && matches!(
+                        read_active_protocol_frame(&mut client, &active).await?,
+                        ServerFrame::EventBatch { stream: 15, events, .. }
+                            if events.len() == 1 && events[0].sequence == 1
+                                && events[0].event == Event::Value(exact_reference.clone())
+                    ),
+                "unique Text socket did not begin the cancellable version-4 result",
+            )?;
+            send_active_protocol_frame(
+                &mut client,
+                &active,
+                &ClientFrame::CallCancel { stream: 15 },
+            )
+            .await?;
+            require(
+                read_active_protocol_frame(&mut client, &active).await?
+                    == ServerFrame::CallCancelled { stream: 15 },
+                "unique Text socket did not cancel after its first result value",
+            )?;
+            require(
+                timeout(
+                    Duration::from_millis(50),
+                    read_active_protocol_frame(&mut client, &active),
+                )
+                .await
+                .is_err(),
+                "unique Text socket emitted a frame after cancellation",
+            )
+        }
+        .await;
+        let shutdown = client.shutdown().await.map_err(Into::into);
+        let connection = connection.await.map_err(Into::into).and_then(|result| {
+            result.map_err(|error| -> Box<dyn Error + Send + Sync> { Box::new(error) })
+        });
+        finish_session(
+            granted_operation,
+            finish_session(shutdown, connection, "unique Text granted socket cleanup"),
+            "unique Text granted socket operation",
+        )?;
+
+        let audits = kernel.recover_security_audit_events().await?;
+        let expected = [
+            (SecurityAuditKind::Authentication, SecurityAuditOutcome::Allowed, None, None),
+            (
+                SecurityAuditKind::Execute,
+                SecurityAuditOutcome::Denied,
+                Some(by_email),
+                Some(SecurityAuditDenial::Execute(ExecuteDenial::MissingExecuteGrant)),
+            ),
+            (SecurityAuditKind::Authentication, SecurityAuditOutcome::Allowed, None, None),
+            (SecurityAuditKind::Execute, SecurityAuditOutcome::Allowed, Some(create), None),
+            (SecurityAuditKind::Execute, SecurityAuditOutcome::Allowed, Some(create), None),
+            (SecurityAuditKind::Execute, SecurityAuditOutcome::Allowed, Some(create), None),
+            (SecurityAuditKind::Execute, SecurityAuditOutcome::Allowed, Some(create), None),
+            (SecurityAuditKind::Execute, SecurityAuditOutcome::Allowed, Some(by_email), None),
+            (SecurityAuditKind::Execute, SecurityAuditOutcome::Allowed, Some(by_email), None),
+            (SecurityAuditKind::Execute, SecurityAuditOutcome::Allowed, Some(by_email), None),
+            (SecurityAuditKind::Execute, SecurityAuditOutcome::Allowed, Some(by_email), None),
+            (SecurityAuditKind::Execute, SecurityAuditOutcome::Allowed, Some(by_email), None),
+            (SecurityAuditKind::Execute, SecurityAuditOutcome::Allowed, Some(all_people), None),
+            (SecurityAuditKind::Execute, SecurityAuditOutcome::Allowed, Some(by_email), None),
+            (SecurityAuditKind::Execute, SecurityAuditOutcome::Allowed, Some(by_email), None),
+            (SecurityAuditKind::Execute, SecurityAuditOutcome::Allowed, Some(by_email), None),
+            (SecurityAuditKind::Execute, SecurityAuditOutcome::Allowed, Some(by_email), None),
+            (SecurityAuditKind::Execute, SecurityAuditOutcome::Allowed, Some(by_email), None),
+        ];
+        let audit_matches = audits.len() == expected.len()
+            && audits.iter().zip(expected).all(|(event, (kind, outcome, function, denial))| {
+                let decision = event.decision();
+                decision.kind() == kind
+                    && decision.outcome() == outcome
+                    && decision.session_principal() == Some(RAW_CLIENT_USER)
+                    && decision.target()
+                        == function.map(|function| InvocationTarget::new(function, active.pair()))
+                    && decision.denial() == denial
+            });
+        if !audit_matches {
+            return Err(failure(format!(
+                "unique Text socket changed its ordered durable audit decisions: {audits:?}"
+            )));
+        }
+        let audit_debug = format!("{audits:?}");
+        require(
+            !audit_debug.contains("caf\u{e9}")
+                && !audit_debug.contains("cafe\u{301}")
+                && !audit_debug.contains("exact bytes")
+                && !audit_debug.contains("byte-distinct decomposed")
+                && !audit_debug.contains("duplicate private source")
+                && !audit_debug.contains("duplicate socket source")
+                && !audit_debug.contains("absent@example.test")
+                && !audit_debug.contains("CAF\u{c9}")
+                && !audit_debug.contains("caf\u{e9} ")
+                && !audit_debug.contains("caf\u{e9}\n")
+                && !audit_debug.contains("caf\u{e9}\r\n"),
+            "unique Text selector values leaked into the durable security audit",
+        )?;
+        require_no_database_sessions(&database).await
+    })
+    .await
+}
+
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
 async fn serves_the_actual_local_peer_through_the_raw_socket_protocol() -> TestResult<()> {
@@ -4738,6 +5365,119 @@ async fn install_raw_argument_pair_socket_fixture(
         second,
         read_first,
         read_second,
+    ))
+}
+
+async fn install_raw_unique_text_select_socket_fixture(
+    kernel: &PostgresKernel,
+    active: &orna_core::revision::ActiveDatabaseRevision,
+    standard_upgrade: &orna_standard::StandardUpgrade,
+) -> TestResult<(
+    orna_core::revision::ActiveDatabaseRevision,
+    TypeId,
+    FunctionId,
+    ParameterId,
+    ParameterId,
+    FunctionId,
+    ParameterId,
+    FunctionId,
+)> {
+    let last_ordinal = active
+        .source()
+        .units()
+        .len()
+        .checked_sub(1)
+        .ok_or_else(|| failure("raw unique Text selector fixture has no retained source unit"))?;
+    let source = SourceBundle::new(active.source().units().iter().enumerate().map(
+        |(ordinal, unit)| {
+            let content = if ordinal == last_ordinal {
+                format!(
+                    "{}\n{}",
+                    unit.content(),
+                    RAW_UNIQUE_TEXT_SELECT_SOCKET_SOURCE
+                )
+            } else {
+                unit.content().to_owned()
+            };
+            SourceUnit::new(unit.logical_path(), content)
+        },
+    ))?;
+    let report = check_standard_application(
+        &source,
+        &StandardApplicationCheckContext::try_new(
+            active.catalogue(),
+            standard_upgrade.checked_standard_library(),
+        )?,
+    );
+    require(
+        report.diagnostics().is_empty(),
+        "raw unique Text selector fixture did not compile",
+    )?;
+    let applied = kernel
+        .apply(&prepare_standard_application(
+            &report,
+            active.pair(),
+            active,
+        )?)
+        .await?;
+    let catalogue = applied.catalogue();
+    let person = catalogue
+        .object_types()
+        .iter()
+        .find(|object| object.name().parts() == ["raw_unique_text_select_socket", "person"])
+        .ok_or_else(|| failure("raw unique Text selector person type is absent"))?
+        .id();
+    let function = |name: &str| {
+        catalogue
+            .functions()
+            .iter()
+            .find(|function| function.name().parts() == ["raw_unique_text_select_socket", name])
+            .map(|function| function.id())
+            .ok_or_else(|| {
+                failure(format!(
+                    "raw unique Text selector function is absent: {name}"
+                ))
+            })
+    };
+    let parameter = |function: FunctionId, name: &str| {
+        catalogue
+            .function_by_id(function)
+            .and_then(|definition| definition.parameter_by_name(name))
+            .map(|parameter| parameter.id())
+            .ok_or_else(|| {
+                failure(format!(
+                    "raw unique Text selector parameter is absent: {name}"
+                ))
+            })
+    };
+    let create = function("create_person")?;
+    let by_email = function("by_email")?;
+    let all_people = function("all_people")?;
+    let create_email = parameter(create, "p_email")?;
+    let create_name = parameter(create, "p_name")?;
+    let email = parameter(by_email, "p_email")?;
+    require(
+        active
+            .function_revisions()
+            .iter()
+            .find(|revision| revision.function() == by_email)
+            .is_none()
+            && applied
+                .function_revisions()
+                .iter()
+                .find(|revision| revision.function() == by_email)
+                .is_some_and(|revision| revision.artifact().version() == 4),
+        "raw unique Text selector did not retain its sealed version-4 plan",
+    )?;
+    Ok((
+        applied,
+        person,
+        create,
+        create_email,
+        create_name,
+        by_email,
+        email,
+        all_people,
     ))
 }
 
