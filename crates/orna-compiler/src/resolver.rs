@@ -74,8 +74,9 @@ use crate::mutation::{
 use crate::relational::{
     ExpressionIr, ExpressionKind, IdentitySelectedQueryReference, IntrinsicBooleanType, OrderingIr,
     QueryParameter, QueryReference, QueryReferenceKind, QueryReferenceTarget,
-    check_distinct_query_with_intrinsic_boolean_in,
+    UniqueTextSelectedQueryReference, check_distinct_query_with_intrinsic_boolean_in,
     check_identity_selected_query_with_intrinsic_boolean_in, check_query_with_intrinsic_boolean_in,
+    check_unique_text_selected_query_with_intrinsic_boolean_in,
 };
 use crate::{
     CompilerDiagnostic, DiagnosticCode, ParseReport, ParsedSourceUnit, SourceLocation,
@@ -2579,6 +2580,14 @@ fn check_server_functions(
                         Some(orna_syntax::QueryExpression::Equality { right, .. })
                             if matches!(right.as_ref(), orna_syntax::QueryExpression::ParameterRead { .. })
                     );
+                    let has_unique_text_selector_shape = matches!(
+                        &query_body.query.predicate,
+                        Some(orna_syntax::QueryExpression::Equality { left, right, .. })
+                            if matches!(
+                                left.as_ref(),
+                                orna_syntax::QueryExpression::FieldPath { members, .. } if members.len() == 1
+                            ) && matches!(right.as_ref(), orna_syntax::QueryExpression::ParameterRead { .. })
+                    );
                     if input.parameters.is_empty() && !has_selector {
                         let query_check = match check_query_with_intrinsic_boolean_in(
                             &query_body.query,
@@ -2619,6 +2628,67 @@ fn check_server_functions(
                                 .references()
                                 .iter()
                                 .map(query_reference)
+                                .collect::<Vec<_>>(),
+                        )
+                    } else if has_unique_text_selector_shape {
+                        if !identity_selected_query_execution_mode_is_valid(input, diagnostics) {
+                            continue;
+                        }
+                        let parameters = unique_text_selected_query_parameters(input);
+                        let query_check =
+                            match check_unique_text_selected_query_with_intrinsic_boolean_in(
+                                &query_body.query,
+                                catalogue,
+                                input.id,
+                                &parameters,
+                                input.location.logical_path(),
+                                intrinsic_boolean,
+                            ) {
+                                Ok(query_check) => query_check,
+                                Err(query_diagnostics) => {
+                                    diagnostics.extend(query_diagnostics);
+                                    continue;
+                                }
+                            };
+                        if !query_return_matches(
+                            query_check.plan().projections(),
+                            columns,
+                            return_location,
+                            diagnostics,
+                        ) {
+                            continue;
+                        }
+                        let mut recorder = StandardTypeUseRecorder {
+                            uses,
+                            standard,
+                            owner: input.id,
+                            logical_path: input.location.logical_path(),
+                        };
+                        let expression_ordinal = recorder.record_query_body(
+                            &query_body.query,
+                            query_check.plan().projections(),
+                            None,
+                            &[],
+                            &[],
+                        );
+                        recorder.record_unique_text_selector(
+                            &query_body.query,
+                            intrinsic_boolean_id(intrinsic_boolean),
+                            query_check
+                                .plan()
+                                .selector()
+                                .text_type()
+                                .standard_value_type(),
+                            expression_ordinal,
+                        );
+                        (
+                            CheckedServerFunctionBody::UniqueTextSelectedQuery(
+                                query_check.plan().clone(),
+                            ),
+                            query_check
+                                .references()
+                                .iter()
+                                .map(unique_text_selected_query_reference)
                                 .collect::<Vec<_>>(),
                         )
                     } else {
@@ -3070,6 +3140,28 @@ fn identity_selected_query_parameters(
         .collect()
 }
 
+fn unique_text_selected_query_parameters(
+    input: &ResolvedServerFunctionInput<'_>,
+) -> Vec<QueryParameter<CheckedTypeId, CheckedParameterId>> {
+    input
+        .parameters
+        .iter()
+        .map(|parameter| {
+            let query_parameter = QueryParameter::new(
+                parameter.name.clone(),
+                parameter.id,
+                parameter.semantic_type,
+            )
+            .with_required_non_null();
+            if let Some(type_id) = parameter.standard_value_type {
+                query_parameter.with_standard_value_type(type_id)
+            } else {
+                query_parameter
+            }
+        })
+        .collect()
+}
+
 fn query_return_matches(
     projections: &[ExpressionIr<CheckedTypeId, CheckedFieldId>],
     columns: &[ResolvedServerFunctionReturnColumn],
@@ -3290,6 +3382,11 @@ fn checked_query_catalogue(
                         .map(|field| {
                             let query_field =
                                 QueryField::new(field.id, field.semantic_type, field.nullable);
+                            let query_field = if field.unique {
+                                query_field.with_unique()
+                            } else {
+                                query_field
+                            };
                             let query_field = standard_field_types
                                 .get(&(object_type.id, field.id))
                                 .copied()
@@ -3401,6 +3498,63 @@ fn identity_selected_query_reference(
             location,
         ),
         IdentitySelectedQueryReference::ParameterRead {
+            owner,
+            parameter,
+            location,
+        } => (
+            CheckedDefinitionReferenceTarget::Parameter {
+                owner: *owner,
+                parameter: *parameter,
+            },
+            DefinitionReferenceKind::ParameterRead,
+            location,
+        ),
+    };
+    CheckedDefinitionReference {
+        target,
+        kind,
+        location: location.clone(),
+    }
+}
+
+fn unique_text_selected_query_reference(
+    reference: &UniqueTextSelectedQueryReference<
+        CheckedTypeId,
+        CheckedFieldId,
+        CheckedFunctionId,
+        CheckedParameterId,
+    >,
+) -> CheckedDefinitionReference {
+    let (target, kind, location) = match reference {
+        UniqueTextSelectedQueryReference::QueryObject {
+            object_type,
+            location,
+        } => (
+            CheckedDefinitionReferenceTarget::ObjectType(*object_type),
+            DefinitionReferenceKind::QueryObject,
+            location,
+        ),
+        UniqueTextSelectedQueryReference::ObjectReference {
+            object_type,
+            location,
+        } => (
+            CheckedDefinitionReferenceTarget::ObjectType(*object_type),
+            DefinitionReferenceKind::ObjectReference,
+            location,
+        ),
+        UniqueTextSelectedQueryReference::QueryField {
+            owner,
+            field,
+            location,
+        } => (
+            CheckedDefinitionReferenceTarget::Field {
+                owner: *owner,
+                field: *field,
+            },
+            DefinitionReferenceKind::QueryField,
+            location,
+        ),
+        UniqueTextSelectedQueryReference::ParameterRead {
             owner,
             parameter,
             location,
@@ -4393,6 +4547,56 @@ impl StandardTypeUseRecorder<'_, '_> {
                 ordinal: expression_ordinal + 2,
             },
             target,
+            location(self.logical_path, right.span()),
+        );
+    }
+
+    fn record_unique_text_selector(
+        &mut self,
+        query: &orna_syntax::SelectQuery,
+        boolean_type: Option<orna_core::TypeId>,
+        text_type: Option<orna_core::TypeId>,
+        expression_ordinal: u32,
+    ) {
+        let Some(orna_syntax::QueryExpression::Equality { left, right, .. }) =
+            query.predicate.as_ref()
+        else {
+            return;
+        };
+        record_standard_value_type_use(
+            self.uses,
+            self.standard,
+            CheckedTypeUseKind::Expression {
+                owner: self.owner,
+                ordinal: expression_ordinal,
+            },
+            boolean_type,
+            location(
+                self.logical_path,
+                query
+                    .predicate
+                    .as_ref()
+                    .map_or(&query.span, |predicate| predicate.span()),
+            ),
+        );
+        record_standard_value_type_use(
+            self.uses,
+            self.standard,
+            CheckedTypeUseKind::Expression {
+                owner: self.owner,
+                ordinal: expression_ordinal + 1,
+            },
+            text_type,
+            location(self.logical_path, left.span()),
+        );
+        record_standard_value_type_use(
+            self.uses,
+            self.standard,
+            CheckedTypeUseKind::Expression {
+                owner: self.owner,
+                ordinal: expression_ordinal + 2,
+            },
+            text_type,
             location(self.logical_path, right.span()),
         );
     }
@@ -10005,6 +10209,64 @@ mod tests {
             plan.projections()[0].value_type().semantic_type(),
             title.semantic_type()
         );
+    }
+
+    #[test]
+    fn resolves_unique_text_selected_query_with_separate_plan_and_evidence() {
+        let source = "CREATE SCHEMA people; \
+            CREATE TYPE people.person AS OBJECT (email TEXT UNIQUE, name TEXT); \
+            CREATE SERVER FUNCTION people.by_email(p_email TEXT) \
+            RETURNS ROWS (name TEXT) \
+            SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE \
+            AS SELECT p.name FROM people.person p WHERE p.email = p_email;";
+        let report = check(&bundle([("unique_text.orna", source)]), &empty_catalogue());
+
+        assert!(report.diagnostics().is_empty());
+        let checked = report.checked_bundle().unwrap();
+        let person = &checked.object_types()[0];
+        let email = &person.fields()[0];
+        let function = &checked.server_functions()[0];
+        let plan = function
+            .unique_text_selected_query_plan()
+            .expect("fixture has a unique-Text-selected SELECT body");
+        assert!(function.query_plan().is_none());
+        assert!(function.distinct_query_plan().is_none());
+        assert!(function.identity_selected_query_plan().is_none());
+        assert!(function.mutation_plan().is_none());
+        assert!(function.delete_plan().is_none());
+        assert_eq!(plan.scan().object_type(), person.id());
+        assert_eq!(plan.selector().scan_object_type(), person.id());
+        assert_eq!(plan.selector().field_owner(), person.id());
+        assert_eq!(plan.selector().field(), email.id());
+        assert_eq!(plan.selector().parameter_owner(), function.id());
+        assert_eq!(plan.selector().parameter(), function.parameters()[0].id());
+        assert_eq!(
+            plan.selector().text_type().semantic_type(),
+            SemanticType::scalar(StandardScalar::CharacterLargeObject)
+        );
+        assert!(plan.selector().field_nullable());
+        assert!(plan.selector().parameter_required_non_null());
+
+        let selector_field_start = source.rfind("p.email").unwrap() + 2;
+        let parameter_start = source.rfind("p_email").unwrap();
+        assert!(function.references().iter().any(|reference| {
+            reference.kind() == DefinitionReferenceKind::QueryField
+                && reference.target()
+                    == CheckedDefinitionReferenceTarget::Field {
+                        owner: person.id(),
+                        field: email.id(),
+                    }
+                && reference.location().span().start() == selector_field_start
+        }));
+        assert!(function.references().iter().any(|reference| {
+            reference.kind() == DefinitionReferenceKind::ParameterRead
+                && reference.target()
+                    == CheckedDefinitionReferenceTarget::Parameter {
+                        owner: function.id(),
+                        parameter: function.parameters()[0].id(),
+                    }
+                && reference.location().span().start() == parameter_start
+        }));
     }
 
     #[test]
