@@ -190,6 +190,26 @@ fn socket_descriptors(pid: i32) -> io::Result<Vec<String>> {
     Ok(sockets)
 }
 
+fn pair_command(function: &FunctionId, first: &ParameterId, second: &ParameterId) -> Vec<OsString> {
+    let function = function.canonical();
+    let first = first.canonical();
+    let second = second.canonical();
+    arguments(&[
+        "raw-call",
+        function.as_str(),
+        first.as_str(),
+        second.as_str(),
+    ])
+}
+
+fn distinct_pair_ids() -> (FunctionId, ParameterId, ParameterId) {
+    (
+        FunctionId::from_bytes([0x11; 16]),
+        ParameterId::from_bytes([0x22; 16]),
+        ParameterId::from_bytes([0x33; 16]),
+    )
+}
+
 #[test]
 fn invalid_stdin_boundaries_exit_seven_with_exact_stderr() {
     require_fixed_socket_absent();
@@ -262,6 +282,205 @@ fn exact_orv1_true_passes_validation_then_reaches_the_absent_socket() {
     assert_eq!(output.status.code(), Some(3));
     assert!(output.stdout.is_empty());
     assert_eq!(output.stderr, CONNECTION_FAILED);
+}
+
+#[test]
+fn exact_orv1_pair_passes_validation_then_reaches_the_absent_socket() {
+    require_fixed_socket_absent();
+    let directory = TestDirectory::new("pair-input").expect("test directory");
+    let (function, first, second) = distinct_pair_ids();
+    let mut input = ORV1_TRUE.to_vec();
+    input.extend_from_slice(&ORV1_TRUE);
+    let output = run_with_stdin(
+        &directory.0,
+        &pair_command(&function, &first, &second),
+        &input,
+    )
+    .expect("exact pair input");
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    assert_eq!(output.stderr, CONNECTION_FAILED);
+}
+
+#[test]
+fn pair_malformed_boundaries_and_missing_second_value_exit_seven() {
+    require_fixed_socket_absent();
+    let directory = TestDirectory::new("pair-invalid-input").expect("test directory");
+    let (function, first, second) = distinct_pair_ids();
+    let command = pair_command(&function, &first, &second);
+    let mut malformed = ORV1_TRUE.to_vec();
+    malformed[..4].copy_from_slice(b"ORV2");
+    let mut malformed_first = malformed.clone();
+    malformed_first.extend_from_slice(&ORV1_TRUE);
+    let mut malformed_second = ORV1_TRUE.to_vec();
+    malformed_second.extend_from_slice(&malformed);
+    for (label, input) in [
+        ("empty", Vec::new()),
+        ("malformed first", malformed_first),
+        ("missing second", ORV1_TRUE.to_vec()),
+        ("malformed second", malformed_second),
+    ] {
+        let output = run_with_stdin(&directory.0, &command, &input)
+            .unwrap_or_else(|error| panic!("{label} failed: {error}"));
+        assert_input_invalid(&output);
+    }
+}
+
+#[test]
+fn pair_third_input_byte_exits_seven_before_the_socket() {
+    require_fixed_socket_absent();
+    let directory = TestDirectory::new("pair-trailing").expect("test directory");
+    let (function, first, second) = distinct_pair_ids();
+    let mut input = ORV1_TRUE.to_vec();
+    input.extend_from_slice(&ORV1_TRUE);
+    input.push(0xaa);
+    let output = run_with_stdin(
+        &directory.0,
+        &pair_command(&function, &first, &second),
+        &input,
+    )
+    .expect("third input byte rejection");
+    assert_input_invalid(&output);
+}
+
+#[test]
+fn pair_individual_and_aggregate_oversize_exit_seven_before_the_socket() {
+    require_fixed_socket_absent();
+    let directory = TestDirectory::new("pair-oversize").expect("test directory");
+    let (function, first, second) = distinct_pair_ids();
+    let command = pair_command(&function, &first, &second);
+    let declared = u32::try_from(orna_protocol::MAX_FRAME_PAYLOAD_LENGTH - 16 - 25 + 1)
+        .expect("bounded length");
+    let mut oversized_header = ORV1_TRUE[..25].to_vec();
+    oversized_header[21..25].copy_from_slice(&declared.to_be_bytes());
+
+    for (label, input) in [
+        ("oversized first", oversized_header.clone()),
+        ("oversized second", {
+            let mut input = ORV1_TRUE.to_vec();
+            input.extend_from_slice(&oversized_header);
+            input
+        }),
+    ] {
+        let mut child = spawn_orna(&directory.0, &command, Stdio::piped())
+            .unwrap_or_else(|error| panic!("{label} process: {error}"));
+        let mut stdin = child.stdin.take().expect("captured stdin");
+        stdin
+            .write_all(&input)
+            .unwrap_or_else(|error| panic!("{label} header: {error}"));
+        // Keep the input pipe open. The declared payload must be rejected
+        // before a reader can wait for it or allocate it.
+        let _held_stdin = stdin;
+        let output = wait_bounded(child)
+            .unwrap_or_else(|error| panic!("{label} bounded rejection: {error}"));
+        assert_input_invalid(&output);
+    }
+
+    // The first complete envelope is valid. The second header is also within
+    // the individual limit, but its declared value makes the two retained
+    // ParameterIds and envelopes exceed the shared frame budget. The held
+    // pipe proves that aggregate validation runs before the second payload.
+    let aggregate_declared = u32::try_from(orna_protocol::MAX_FRAME_PAYLOAD_LENGTH - 82)
+        .expect("bounded aggregate length");
+    let mut aggregate_header = ORV1_TRUE[..25].to_vec();
+    aggregate_header[21..25].copy_from_slice(&aggregate_declared.to_be_bytes());
+    let mut aggregate = ORV1_TRUE.to_vec();
+    aggregate.extend_from_slice(&aggregate_header);
+    let mut child =
+        spawn_orna(&directory.0, &command, Stdio::piped()).expect("aggregate oversize process");
+    let mut stdin = child.stdin.take().expect("captured stdin");
+    stdin
+        .write_all(&aggregate)
+        .expect("aggregate oversize header");
+    let _held_stdin = stdin;
+    let output = wait_bounded(child).expect("aggregate bounded rejection");
+    assert_input_invalid(&output);
+}
+
+#[test]
+fn pair_blocks_after_each_envelope_without_opening_a_socket() {
+    require_fixed_socket_absent();
+    let directory = TestDirectory::new("pair-boundaries").expect("test directory");
+    let (function, first, second) = distinct_pair_ids();
+    let command = pair_command(&function, &first, &second);
+
+    for (label, input) in [
+        ("second envelope", ORV1_TRUE.to_vec()),
+        (
+            "final eof",
+            [ORV1_TRUE.as_slice(), ORV1_TRUE.as_slice()].concat(),
+        ),
+    ] {
+        let mut child = spawn_orna(&directory.0, &command, Stdio::piped())
+            .unwrap_or_else(|error| panic!("{label} process: {error}"));
+        let mut stdin = child.stdin.take().expect("captured stdin");
+        stdin
+            .write_all(&input)
+            .unwrap_or_else(|error| panic!("{label} input: {error}"));
+        let pid = child.id() as i32;
+        wait_for_sigint_handler(pid).unwrap_or_else(|error| panic!("{label} handler: {error}"));
+        assert!(
+            child.try_wait().expect("running check").is_none(),
+            "the child must block while waiting for {label}"
+        );
+        assert!(
+            socket_descriptors(pid)
+                .expect("descriptor inspection")
+                .is_empty(),
+            "the child must not open a socket while waiting for {label}"
+        );
+        drop(stdin);
+        let output = wait_bounded(child).unwrap_or_else(|error| panic!("{label} exit: {error}"));
+        if label == "second envelope" {
+            assert_input_invalid(&output);
+        } else {
+            assert_eq!(output.status.code(), Some(3), "{label}");
+            assert!(output.stdout.is_empty());
+            assert_eq!(output.stderr, CONNECTION_FAILED, "{label}");
+        }
+    }
+}
+
+#[test]
+fn pair_sigint_while_waiting_for_second_or_eof_exits_six() {
+    require_fixed_socket_absent();
+    let directory = TestDirectory::new("pair-interrupt").expect("test directory");
+    let (function, first, second) = distinct_pair_ids();
+    let command = pair_command(&function, &first, &second);
+
+    for (label, input) in [
+        ("first envelope", Vec::new()),
+        ("second envelope", ORV1_TRUE.to_vec()),
+        (
+            "final eof",
+            [ORV1_TRUE.as_slice(), ORV1_TRUE.as_slice()].concat(),
+        ),
+    ] {
+        let mut child = spawn_orna(&directory.0, &command, Stdio::piped())
+            .unwrap_or_else(|error| panic!("{label} process: {error}"));
+        let mut stdin = child.stdin.take().expect("captured stdin");
+        stdin
+            .write_all(&input)
+            .unwrap_or_else(|error| panic!("{label} input: {error}"));
+        let pid = child.id() as i32;
+        wait_for_sigint_handler(pid).unwrap_or_else(|error| panic!("{label} handler: {error}"));
+        assert!(
+            child.try_wait().expect("running check").is_none(),
+            "the child must block while waiting for {label}"
+        );
+        assert!(
+            socket_descriptors(pid)
+                .expect("descriptor inspection")
+                .is_empty(),
+            "the child must not open a socket while waiting for {label}"
+        );
+        kill(Pid::from_raw(pid), Signal::SIGINT).expect("SIGINT delivery");
+        drop(stdin);
+        let output = wait_bounded(child).unwrap_or_else(|error| panic!("{label} exit: {error}"));
+        assert_eq!(output.status.code(), Some(6), "{label}");
+        assert!(output.stdout.is_empty());
+        assert!(output.stderr.is_empty());
+    }
 }
 
 #[test]
@@ -380,4 +599,49 @@ fn malformed_parameters_and_extra_tokens_print_the_usage() {
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
     assert_eq!(output.stderr, support::EXPECTED_USAGE);
+}
+
+#[test]
+fn pair_command_shape_errors_do_not_read_held_open_stdin() {
+    let directory = TestDirectory::new("pair-usage").expect("test directory");
+    let (function, first, second) = distinct_pair_ids();
+    let third = ParameterId::from_bytes([0x44; 16]);
+    let function = function.canonical();
+    let first = first.canonical();
+    let second = second.canonical();
+    let third = third.canonical();
+    let cases = [
+        vec![
+            "raw-call",
+            function.as_str(),
+            first.as_str(),
+            first.as_str(),
+        ],
+        vec!["raw-call", function.as_str(), "parameter:not-an-id"],
+        vec![
+            "raw-call",
+            function.as_str(),
+            first.as_str(),
+            "parameter:not-an-id",
+        ],
+        vec![
+            "raw-call",
+            function.as_str(),
+            first.as_str(),
+            second.as_str(),
+            third.as_str(),
+        ],
+    ];
+    for values in cases {
+        let mut child = spawn_orna(&directory.0, &arguments(&values), Stdio::piped())
+            .unwrap_or_else(|error| panic!("{values:?} process: {error}"));
+        // Keep the write end open. Any command-shape path that reads stdin
+        // blocks here and violates the CLI authority boundary.
+        let _held_stdin = child.stdin.take();
+        let output =
+            wait_bounded(child).unwrap_or_else(|error| panic!("{values:?} usage exit: {error}"));
+        assert_eq!(output.status.code(), Some(2), "{values:?}");
+        assert!(output.stdout.is_empty(), "{values:?}");
+        assert_eq!(output.stderr, support::EXPECTED_USAGE, "{values:?}");
+    }
 }
