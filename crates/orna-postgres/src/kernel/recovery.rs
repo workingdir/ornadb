@@ -189,6 +189,7 @@ async fn recover_client(
         .map_err(PostgresKernelError::Database)?;
 
     let active = recover_active_revision(&transaction).await?;
+    crate::security::recover_invocation_audit_events(&transaction, &active).await?;
 
     transaction
         .commit()
