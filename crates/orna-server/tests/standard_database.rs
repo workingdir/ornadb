@@ -11,8 +11,8 @@ use orna_compiler::{
     prepare_standard_application,
 };
 use orna_core::{
-    CatalogueRevisionId, FunctionId, FunctionRevisionId, ObjectId, ParameterId, PrincipalId,
-    SourceRevisionId, TypeId,
+    CatalogueRevisionId, FunctionId, FunctionRevisionId, InvocationId, ObjectId, ParameterId,
+    PrincipalId, SourceRevisionId, TypeId,
     canonical_hash::{
         artifact_payload_digest, catalogue_digest_with_context,
         function_semantic_digest_with_version,
@@ -35,7 +35,7 @@ use orna_core::{
     },
     source::{SourceBundle, SourceUnit},
     system::SYS_INVOKE_FUNCTION_ID,
-    types::ResolvedType,
+    types::{ResolvedType, TypeDescriptor},
     value::{EnumValue, OpaqueValue, RecordValue, RuntimeValue},
 };
 use orna_postgres::{
@@ -43,9 +43,10 @@ use orna_postgres::{
     ServerMutationError, ServerUpdateError,
 };
 use orna_protocol::{
-    CallFailure, Channel, ClientFrame, Event, RawCall, ServerAction, ServerFrame,
-    decode_active_server_frame, decode_registered_server_frame, decode_server_frame,
-    encode_active_client_frame, encode_active_server_frame, encode_client_frame,
+    CallFailure, Channel, ClientFrame, ConnectionError, Event, ProtocolConnection, RawCall,
+    ServerAction, ServerFrame, decode_active_server_frame, decode_constructed_server_frame,
+    decode_registered_server_frame, decode_server_frame, encode_active_client_frame,
+    encode_active_server_frame, encode_client_frame, encode_constructed_client_frame,
     encode_registered_client_frame,
 };
 use orna_server::{
@@ -5057,6 +5058,320 @@ async fn serves_the_actual_local_peer_through_the_raw_socket_protocol() -> TestR
     .await
 }
 
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn protocol_five_socket_retains_legacy_values_and_closes_constructed_arguments()
+-> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = kernel(&database)?;
+        let (active, _standard_upgrade, client_function, server_function) =
+            install_raw_client_fixture(&kernel).await?;
+        insert_raw_server_flag(&database, &active, 0x81, true).await?;
+        let functions = active
+            .catalogue()
+            .functions()
+            .iter()
+            .map(|function| function.id())
+            .collect::<Vec<_>>();
+        let uid = nix::unistd::getuid().as_raw();
+        let granted = SecuritySnapshot::new_with_local_peer_credentials(
+            active.pair(),
+            functions,
+            vec![Principal::new(
+                RAW_CLIENT_USER,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            vec![],
+            vec![
+                ExecuteGrant::new(RAW_CLIENT_USER, client_function),
+                ExecuteGrant::new(RAW_CLIENT_USER, server_function),
+            ],
+            vec![LocalPeerCredential::new(uid, RAW_CLIENT_USER)],
+        )?;
+        kernel.replace_security_snapshot(&granted).await?;
+        let registry = registered_opaque_codecs(
+            active
+                .catalogue_hash_context()
+                .standard()
+                .ok_or_else(|| failure("protocol-5 fixture has no selected standard context"))?,
+        )?;
+        let boolean_type = TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        let constructed_descriptor = TypeDescriptor::list(TypeDescriptor::named(boolean_type))
+            .expect("the fixed Boolean LIST descriptor is within the specified limits");
+        let constructed_value = RuntimeValue::list(
+            &active,
+            constructed_descriptor.clone(),
+            vec![RuntimeValue::Boolean(true)],
+        )?;
+        let constructed_rejection = orna_protocol::FrameCodecError::ConstructedValueNotAccepted {
+            descriptor: constructed_descriptor.clone(),
+        };
+        let mut protocol = ProtocolConnection::new();
+        protocol.receive_constructed(
+            &active,
+            &registry,
+            ClientFrame::CallRawStart {
+                stream: 9,
+                function: server_function,
+            },
+        )?;
+        protocol.receive_constructed(
+            &active,
+            &registry,
+            ClientFrame::WindowUpdate {
+                stream: 9,
+                channel: Channel::ResultValues,
+                credit: 1024,
+            },
+        )?;
+        let before_argument = protocol.clone();
+        require(
+            protocol.receive_constructed(
+                &active,
+                &registry,
+                ClientFrame::CallArgument {
+                    stream: 9,
+                    parameter: ParameterId::from_bytes([0x82; 16]),
+                    value: constructed_value.clone(),
+                },
+            ) == Err(ConnectionError::InvalidFrame {
+                source: constructed_rejection.clone(),
+            }) && protocol == before_argument,
+            "constructed protocol-5 argument changed state or result credit",
+        )?;
+        require(
+            matches!(
+                protocol.receive_constructed(
+                    &active,
+                    &registry,
+                    ClientFrame::CallArgumentsComplete { stream: 9 },
+                )?,
+                Some(orna_protocol::ClientAction::Dispatch { stream: 9, .. })
+            ),
+            "protocol-5 connection did not retain its callable state after constructed rejection",
+        )?;
+        protocol.apply_constructed(
+            &active,
+            &registry,
+            ServerAction::Accepted {
+                stream: 9,
+                invocation: InvocationId::from_bytes([0x83; 16]),
+            },
+        )?;
+        let before_result = protocol.clone();
+        require(
+            protocol.apply_constructed(
+                &active,
+                &registry,
+                ServerAction::Events {
+                    stream: 9,
+                    events: vec![Event::Value(constructed_value)],
+                },
+            ) == Err(ConnectionError::InvalidFrame {
+                source: constructed_rejection,
+            }) && protocol == before_result,
+            "constructed protocol-5 result changed state or result credit",
+        )?;
+        require(
+            matches!(
+                protocol.apply_constructed(
+                    &active,
+                    &registry,
+                    ServerAction::Events {
+                        stream: 9,
+                        events: vec![Event::Value(RuntimeValue::Boolean(true))],
+                    },
+                )?,
+                ServerFrame::EventBatch { stream: 9, .. }
+            ),
+            "protocol-5 result credit was not retained after constructed-result rejection",
+        )?;
+        for hello in [
+            *b"ORNA\x01\x00\x00\x05\x00\x01\x00\x00",
+            *b"ORNA\x01\x01\x00\x05\x00\x00\x00\x00",
+            *b"ORNA\x01\x00\x00\x05\x00\x00\x00\x01",
+            *b"ORNA\x01\x00\x00\x06\x00\x00\x00\x00",
+        ] {
+            require_invalid_local_raw_hello(&kernel, hello).await?;
+        }
+
+        let (server, client) = StandardUnixStream::pair()?;
+        client.set_nonblocking(true)?;
+        let mut client = UnixStream::from_std(client)?;
+        let connection = tokio::spawn(serve_local_raw_stream(
+            kernel.clone(),
+            server,
+            LocalRawSocketResources::new(),
+        ));
+        let legacy_operation = async {
+            client
+                .write_all(b"ORNA\x01\x00\x00\x05\x00\x00\x00\x00")
+                .await?;
+            let mut acknowledgement = [0_u8; 12];
+            client.read_exact(&mut acknowledgement).await?;
+            require(
+                acknowledgement == *b"ORNA\x81\x00\x00\x05\x00\x00\x00\x00",
+                "protocol-5 local raw socket returned the wrong acknowledgement",
+            )?;
+
+            for frame in [
+                ClientFrame::CallRawStart {
+                    stream: 1,
+                    function: server_function,
+                },
+                ClientFrame::WindowUpdate {
+                    stream: 1,
+                    channel: Channel::ResultValues,
+                    credit: 1024,
+                },
+                ClientFrame::CallArgumentsComplete { stream: 1 },
+            ] {
+                send_constructed_protocol_frame(&mut client, &active, &registry, &frame).await?;
+            }
+            require(
+                matches!(
+                    read_constructed_protocol_frame(&mut client, &active, &registry).await?,
+                    ServerFrame::CallAccepted { stream: 1, .. }
+                ),
+                "protocol-5 socket did not accept the legacy SERVER call",
+            )?;
+            require(
+                read_constructed_protocol_frame(&mut client, &active, &registry).await?
+                    == ServerFrame::EventBatch {
+                        stream: 1,
+                        channel: Channel::ResultValues,
+                        events: vec![orna_protocol::EventRecord {
+                            sequence: 1,
+                            event: Event::Value(RuntimeValue::Boolean(true)),
+                        }],
+                    },
+                "protocol-5 socket did not retain its legacy Boolean result",
+            )?;
+            require(
+                read_constructed_protocol_frame(&mut client, &active, &registry).await?
+                    == ServerFrame::CallCompleted { stream: 1 },
+                "protocol-5 socket did not complete its legacy SERVER call",
+            )?;
+
+            for frame in [
+                ClientFrame::CallRawStart {
+                    stream: 2,
+                    function: client_function,
+                },
+                ClientFrame::CallArgument {
+                    stream: 2,
+                    parameter: ParameterId::from_bytes([0x74; 16]),
+                    value: raw_client_record(&active)?,
+                },
+                ClientFrame::CallArgumentsComplete { stream: 2 },
+            ] {
+                send_constructed_protocol_frame(&mut client, &active, &registry, &frame).await?;
+            }
+            require(
+                matches!(
+                    read_constructed_protocol_frame(&mut client, &active, &registry).await?,
+                    ServerFrame::CallAccepted { stream: 2, .. }
+                ),
+                "protocol-5 socket did not accept the legacy application argument",
+            )?;
+            require(
+                read_constructed_protocol_frame(&mut client, &active, &registry).await?
+                    == ServerFrame::CallFailed {
+                        stream: 2,
+                        failure: CallFailure::TargetUnavailable,
+                    },
+                "protocol-5 socket did not retain the closed application target boundary",
+            )
+        }
+        .await;
+        let shutdown = client.shutdown().await.map_err(Into::into);
+        let connection = connection.await.map_err(Into::into).and_then(|result| {
+            result.map_err(|error| -> Box<dyn Error + Send + Sync> { Box::new(error) })
+        });
+        finish_session(
+            legacy_operation,
+            finish_session(shutdown, connection, "protocol-5 legacy socket cleanup"),
+            "protocol-5 legacy socket operation",
+        )?;
+
+        let (server, client) = StandardUnixStream::pair()?;
+        client.set_nonblocking(true)?;
+        let mut client = UnixStream::from_std(client)?;
+        let rejected = tokio::spawn(serve_local_raw_stream(
+            kernel.clone(),
+            server,
+            LocalRawSocketResources::new(),
+        ));
+        let constructed_operation = async {
+            client
+                .write_all(b"ORNA\x01\x00\x00\x05\x00\x00\x00\x00")
+                .await?;
+            let mut acknowledgement = [0_u8; 12];
+            client.read_exact(&mut acknowledgement).await?;
+            require(
+                acknowledgement == *b"ORNA\x81\x00\x00\x05\x00\x00\x00\x00",
+                "constructed-value socket returned the wrong protocol-5 acknowledgement",
+            )?;
+            send_constructed_protocol_frame(
+                &mut client,
+                &active,
+                &registry,
+                &ClientFrame::CallRawStart {
+                    stream: 3,
+                    function: server_function,
+                },
+            )
+            .await?;
+            send_constructed_protocol_frame(
+                &mut client,
+                &active,
+                &registry,
+                &ClientFrame::WindowUpdate {
+                    stream: 3,
+                    channel: Channel::ResultValues,
+                    credit: 1024,
+                },
+            )
+            .await?;
+            client
+                .write_all(&constructed_list_argument_frame(
+                    3,
+                    ParameterId::from_bytes([0x82; 16]),
+                    boolean_type,
+                ))
+                .await?;
+            let mut response = [0_u8; 1];
+            require(
+                timeout(Duration::from_secs(1), client.read(&mut response)).await?? == 0,
+                "constructed protocol-5 argument returned a partial server frame",
+            )
+        }
+        .await;
+        let shutdown = client.shutdown().await.map_err(Into::into);
+        let rejection = rejected.await?;
+        finish_session(
+            constructed_operation,
+            shutdown,
+            "constructed protocol-5 socket cleanup",
+        )?;
+        require(
+            matches!(
+                rejection,
+                Err(LocalRawSocketError::Frame {
+                    source: orna_protocol::FrameCodecError::ConstructedValueNotAccepted {
+                        descriptor,
+                    },
+                }) if descriptor == constructed_descriptor
+            ),
+            "constructed protocol-5 argument did not close at the public frame boundary",
+        )?;
+
+        require_no_database_sessions(&database).await
+    })
+    .await
+}
+
 fn raw_call(function: FunctionId) -> RawCall {
     RawCall {
         function,
@@ -5629,6 +5944,18 @@ async fn send_registered_protocol_frame(
     Ok(())
 }
 
+async fn send_constructed_protocol_frame(
+    stream: &mut UnixStream,
+    active: &orna_core::revision::ActiveDatabaseRevision,
+    registry: &orna_core::value::OpaqueCodecRegistry,
+    frame: &ClientFrame,
+) -> TestResult<()> {
+    stream
+        .write_all(&encode_constructed_client_frame(active, registry, frame)?)
+        .await?;
+    Ok(())
+}
+
 async fn read_active_protocol_frame(
     stream: &mut UnixStream,
     active: &orna_core::revision::ActiveDatabaseRevision,
@@ -5644,6 +5971,15 @@ async fn read_registered_protocol_frame(
 ) -> TestResult<ServerFrame> {
     let encoded = read_encoded_protocol_frame(stream).await?;
     Ok(decode_registered_server_frame(active, registry, &encoded)?)
+}
+
+async fn read_constructed_protocol_frame(
+    stream: &mut UnixStream,
+    active: &orna_core::revision::ActiveDatabaseRevision,
+    registry: &orna_core::value::OpaqueCodecRegistry,
+) -> TestResult<ServerFrame> {
+    let encoded = read_encoded_protocol_frame(stream).await?;
+    Ok(decode_constructed_server_frame(active, registry, &encoded)?)
 }
 
 async fn send_legacy_protocol_frame(
@@ -5685,6 +6021,69 @@ fn canonical_value_suffix(encoded: &[u8], marker: &[u8; 4]) -> TestResult<Vec<u8
         .position(|window| window == marker)
         .ok_or_else(|| failure("raw SERVER event is missing its selected value marker"))?;
     Ok(encoded[offset + marker.len()..].to_vec())
+}
+
+fn constructed_list_argument_frame(
+    stream: u64,
+    parameter: ParameterId,
+    boolean_type: TypeId,
+) -> Vec<u8> {
+    let mut child = b"ORV5".to_vec();
+    child.push(0x02);
+    child.extend_from_slice(&boolean_type.to_bytes());
+    child.extend_from_slice(&1_u32.to_be_bytes());
+    child.push(1);
+
+    let mut value_payload = 18_u16.to_be_bytes().to_vec();
+    value_payload.extend_from_slice(&[0x02, 0x00]);
+    value_payload.extend_from_slice(&boolean_type.to_bytes());
+    value_payload.extend_from_slice(&1_u32.to_be_bytes());
+    value_payload.extend_from_slice(&(child.len() as u32).to_be_bytes());
+    value_payload.extend_from_slice(&child);
+
+    let mut value = b"ORV5".to_vec();
+    value.push(0x0d);
+    value.extend_from_slice(&[0; 16]);
+    value.extend_from_slice(&(value_payload.len() as u32).to_be_bytes());
+    value.extend_from_slice(&value_payload);
+
+    let mut frame_payload = parameter.to_bytes().to_vec();
+    frame_payload.extend_from_slice(&value);
+    let mut frame = b"ORF5\x02\x00".to_vec();
+    frame.extend_from_slice(&stream.to_be_bytes());
+    frame.extend_from_slice(&(frame_payload.len() as u32).to_be_bytes());
+    frame.extend_from_slice(&frame_payload);
+    frame
+}
+
+async fn require_invalid_local_raw_hello(
+    kernel: &PostgresKernel,
+    hello: [u8; 12],
+) -> TestResult<()> {
+    let (server, client) = StandardUnixStream::pair()?;
+    client.set_nonblocking(true)?;
+    let mut client = UnixStream::from_std(client)?;
+    let rejected = tokio::spawn(serve_local_raw_stream(
+        kernel.clone(),
+        server,
+        LocalRawSocketResources::new(),
+    ));
+    let operation = async {
+        client.write_all(&hello).await?;
+        let mut response = [0_u8; 1];
+        require(
+            timeout(Duration::from_secs(1), client.read(&mut response)).await?? == 0,
+            "invalid protocol-5 hello returned an acknowledgement or partial frame",
+        )
+    }
+    .await;
+    let shutdown = client.shutdown().await.map_err(Into::into);
+    let rejection = rejected.await?;
+    finish_session(operation, shutdown, "invalid protocol-5 hello cleanup")?;
+    require(
+        matches!(rejection, Err(LocalRawSocketError::InvalidHello)),
+        "invalid protocol-5 hello did not close at the public handshake boundary",
+    )
 }
 
 fn require_dispatch_failure(
