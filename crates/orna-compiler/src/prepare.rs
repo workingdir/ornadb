@@ -2180,6 +2180,111 @@ fn identity_selected_query_plan(
         .map_err(PrepareError::from)
 }
 
+fn unique_text_selected_query_plan(
+    plan: &crate::relational::UniqueTextSelectedQueryIr<TypeId, FieldId, FunctionId, ParameterId>,
+    function: &FunctionDefinition,
+    object_types: &[ObjectTypeDefinition],
+    standard: Option<&CatalogueSnapshot>,
+    references: &[(DefinitionReferenceKind, DefinitionReferenceTarget)],
+) -> Result<crate::relational::EncodedServerPlan, PrepareError> {
+    let scan = object_types
+        .iter()
+        .find(|object_type| object_type.id() == plan.scan().object_type())
+        .ok_or(PrepareError::InvalidCheckedBundle {
+            reason: "unique-Text-selected query scan object is absent from the candidate catalogue",
+        })?;
+    if function.domain() != FunctionDomain::Server
+        || function.security() != FunctionSecurity::Invoker
+        || function.transaction() != Some(FunctionTransaction::ReadOnly)
+        || function.volatility() != FunctionVolatility::Stable
+    {
+        return Err(PrepareError::InvalidCheckedBundle {
+            reason: "unique-Text-selected query function has unsupported execution modes",
+        });
+    }
+    let FunctionReturn::Rows(columns) = function.return_type() else {
+        return Err(PrepareError::InvalidCheckedBundle {
+            reason: "unique-Text-selected query function does not return ROWS",
+        });
+    };
+    if columns.is_empty() {
+        return Err(PrepareError::InvalidCheckedBundle {
+            reason: "unique-Text-selected query function returns empty ROWS",
+        });
+    }
+    if function.parameters().len() != 1 {
+        return Err(PrepareError::InvalidCheckedBundle {
+            reason: "unique-Text-selected query function does not declare exactly one parameter",
+        });
+    }
+    let parameter = &function.parameters()[0];
+    let selector = plan.selector();
+    if parameter.default_expression().is_some()
+        || !selector.parameter_required_non_null()
+        || selector.parameter_owner() != function.id()
+        || selector.parameter() != parameter.id()
+    {
+        return Err(PrepareError::InvalidCheckedBundle {
+            reason: "unique-Text-selected query selector parameter differs from its enclosing function parameter",
+        });
+    }
+    if selector.scan_object_type() != scan.id() || selector.field_owner() != scan.id() {
+        return Err(PrepareError::InvalidCheckedBundle {
+            reason: "unique-Text-selected query selector object identities differ from its scan",
+        });
+    }
+    let field = scan
+        .field_by_id(selector.field())
+        .ok_or(PrepareError::InvalidCheckedBundle {
+            reason: "unique-Text-selected query selector field is absent from its scan object",
+        })?;
+    let selector_type = selector
+        .text_type()
+        .standard_value_type()
+        .map(ResolvedType::value)
+        .unwrap_or_else(|| resolved_type_from_semantic(selector.text_type().semantic_type()));
+    let compatibility_selector_type =
+        resolved_type_from_semantic(selector.text_type().semantic_type());
+    if !field.unique()
+        || field.resolved_type() != compatibility_selector_type
+        || field.nullable() != selector.field_nullable()
+        || parameter.resolved_type() != compatibility_selector_type
+        || !supports_durable_unique_field(selector_type, selector.field_nullable(), standard)
+    {
+        return Err(PrepareError::InvalidCheckedBundle {
+            reason: "unique-Text-selected query selector does not retain exact unique Text authority",
+        });
+    }
+    if columns.len() != plan.projections().len() {
+        return Err(PrepareError::InvalidCheckedBundle {
+            reason: "unique-Text-selected query projection count differs from its function return",
+        });
+    }
+    for (projection, column) in plan.projections().iter().zip(columns) {
+        validate_query_expression_facts(
+            projection,
+            scan,
+            plan.scan().input(),
+            object_types,
+            UNIQUE_TEXT_SELECTED_QUERY_FACTS,
+        )?;
+        if resolved_type_from_semantic(projection.value_type().semantic_type())
+            != column.resolved_type()
+        {
+            return Err(PrepareError::InvalidCheckedBundle {
+                reason: "unique-Text-selected query projection differs from its function return",
+            });
+        }
+    }
+    validate_reference_sequence(
+        &unique_text_selected_query_reference_sequence(plan, function),
+        references,
+        "unique-Text-selected SELECT definition references differ from the checked function body",
+    )?;
+    plan.encode_unique_text_selected_server_plan()
+        .map_err(PrepareError::from)
+}
+
 fn version_one_query_plan(
     plan: &crate::relational::RelationalQueryIr<TypeId, FieldId>,
     function: &FunctionDefinition,
@@ -2382,6 +2487,19 @@ const IDENTITY_SELECTED_QUERY_FACTS: QueryExpressionFactAdapter = QueryExpressio
     require_final_reference_target: false,
 };
 
+const UNIQUE_TEXT_SELECTED_QUERY_FACTS: QueryExpressionFactAdapter = QueryExpressionFactAdapter {
+    object_reference: "unique-Text-selected query object reference has inconsistent facts",
+    field_path_input: "unique-Text-selected query field path has an invalid input or is empty",
+    field_path_owner: "unique-Text-selected query field path owner differs from its source object",
+    field_path_field: "unique-Text-selected query field path field is absent from its source object",
+    field_path_type: "unique-Text-selected query field path type differs from its source field",
+    field_path_continuation: "unique-Text-selected query field path continues through a non-reference field",
+    field_path_target: "unique-Text-selected query field path target is absent from the candidate catalogue",
+    boolean: "unique-Text-selected query BOOLEAN expression has inconsistent type facts",
+    equality: "unique-Text-selected query equality expression has inconsistent type facts",
+    require_final_reference_target: true,
+};
+
 const DISTINCT_QUERY_FACTS: QueryExpressionFactAdapter = QueryExpressionFactAdapter {
     object_reference: "SELECT DISTINCT query object reference has inconsistent facts",
     field_path_input: "SELECT DISTINCT query field path has an invalid input or is empty",
@@ -2539,6 +2657,37 @@ fn identity_selected_query_reference_sequence(
             DefinitionReferenceKind::ParameterRead,
             DefinitionReferenceTarget::Parameter {
                 owner: plan.selector().owner(),
+                parameter: plan.selector().parameter(),
+            },
+        ),
+    ]);
+    references
+}
+
+fn unique_text_selected_query_reference_sequence(
+    plan: &crate::relational::UniqueTextSelectedQueryIr<TypeId, FieldId, FunctionId, ParameterId>,
+    function: &FunctionDefinition,
+) -> Vec<(DefinitionReferenceKind, DefinitionReferenceTarget)> {
+    let mut references = signature_reference_sequence(function);
+    references.push((
+        DefinitionReferenceKind::QueryObject,
+        DefinitionReferenceTarget::ObjectType(plan.scan().object_type()),
+    ));
+    for projection in plan.projections() {
+        query_expression_references(projection, plan.scan().object_type(), &mut references);
+    }
+    references.extend([
+        (
+            DefinitionReferenceKind::QueryField,
+            DefinitionReferenceTarget::Field {
+                owner: plan.selector().field_owner(),
+                field: plan.selector().field(),
+            },
+        ),
+        (
+            DefinitionReferenceKind::ParameterRead,
+            DefinitionReferenceTarget::Parameter {
+                owner: plan.selector().parameter_owner(),
                 parameter: plan.selector().parameter(),
             },
         ),
@@ -6168,6 +6317,39 @@ impl<'a> CandidateBuilder<'a> {
         enum_types: &[EnumTypeDefinition],
         record_value_types: &[RecordValueTypeDefinition],
     ) -> Result<PreparedFunctionArtifact, PrepareError> {
+        if let Some(checked_plan) = checked.unique_text_selected_query_plan() {
+            let plan = checked_plan.try_map_identities(
+                |id| self.identities.type_id(id),
+                |id| self.identities.field(id),
+                |id| self.identities.function(id),
+                |id| self.identities.parameter(id),
+            )?;
+            let references = self.mapped_references(checked)?;
+            let hash_context = self.mode.catalogue_hash_context();
+            let standard = hash_context
+                .standard()
+                .map(VerifiedStandardLibrarySnapshot::catalogue);
+            let encoded = unique_text_selected_query_plan(
+                &plan,
+                function,
+                object_types,
+                standard,
+                &references,
+            )?;
+            let payload = encoded.payload().to_vec();
+            let hash = artifact_payload_digest(&payload)?;
+            return Ok(PreparedFunctionArtifact {
+                artifact: ExecutableArtifact::new(
+                    ExecutableArtifactKind::Server,
+                    SERVER_PLAN_FORMAT,
+                    encoded.format_version(),
+                    payload,
+                    hash,
+                )?,
+                language_version: SERVER_PLAN_LANGUAGE_VERSION.to_owned(),
+            });
+        }
+
         if let Some(checked_plan) = checked.identity_selected_query_plan() {
             let plan = checked_plan.try_map_identities(
                 |id| self.identities.type_id(id),
@@ -6495,8 +6677,8 @@ mod tests {
             ServerMutationOperation, ServerMutationPlan,
         },
         server_plan::{
-            DistinctServerPlan, ExpressionKind, IdentitySelectedServerPlan, ServerPlan,
-            ServerPlanError,
+            DistinctServerPlan, ExpressionKind, IdentitySelectedServerPlan, SelectBindValue,
+            ServerPlan, ServerPlanError, UniqueTextSelectedServerPlan,
         },
     };
     use orna_core::{
@@ -7261,6 +7443,13 @@ mod tests {
         SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n\
         AS SELECT REF(t), t.title FROM tasks.task t WHERE REF(t) = p_task;\n";
 
+    const UNIQUE_TEXT_SELECTED_SOURCE: &str = "CREATE SCHEMA tasks;\n\
+        CREATE TYPE tasks.task AS OBJECT (email TEXT UNIQUE, title TEXT NOT NULL);\n\
+        CREATE SERVER FUNCTION tasks.by_email(p_email TEXT)\n\
+        RETURNS ROWS (task REF tasks.task, title TEXT)\n\
+        SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n\
+        AS SELECT REF(t), t.title FROM tasks.task t WHERE t.email = p_email;\n";
+
     const IDENTITY_SELECTED_RENAMED_SELECTOR_SOURCE: &str = "CREATE SCHEMA tasks;\n\
         CREATE TYPE tasks.task AS OBJECT (title TEXT NOT NULL);\n\
         CREATE SERVER FUNCTION tasks.find(selector REF tasks.task)\n\
@@ -7769,6 +7958,86 @@ mod tests {
                         owner: function.id(),
                         parameter: function.parameters()[0].id()
                     }
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn prepares_unique_text_selected_query_as_a_version_four_server_plan_with_exact_evidence() {
+        let active = empty_active();
+        let prepared = prepare(
+            &checked_report(UNIQUE_TEXT_SELECTED_SOURCE, active.catalogue()),
+            active.pair(),
+            &active,
+        )
+        .unwrap();
+        let catalogue = prepared.candidate();
+        let task = catalogue
+            .object_type_by_name(&semantic_name(&["tasks", "task"]))
+            .unwrap();
+        let function = &catalogue.functions()[0];
+        let revision = &prepared.new_function_revisions()[0];
+        let email = task.field_by_name("email").unwrap();
+        assert_eq!(revision.artifact().format(), SERVER_PLAN_FORMAT);
+        assert_eq!(revision.artifact().version(), 4);
+        let plan = UniqueTextSelectedServerPlan::decode(revision.artifact().payload()).unwrap();
+        assert_eq!(plan.scan().object_type, task.id());
+        assert_eq!(
+            plan.selector(),
+            &SelectBindValue::Text {
+                scan_object_type: task.id(),
+                field_owner: task.id(),
+                field: email.id(),
+                parameter_owner: function.id(),
+                parameter: function.parameters()[0].id(),
+                resolved_type: ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+                field_nullable: true,
+                parameter_required_non_null: true,
+            }
+        );
+        assert!(ServerPlan::decode(revision.artifact().payload()).is_err());
+        assert!(IdentitySelectedServerPlan::decode(revision.artifact().payload()).is_err());
+        assert!(DistinctServerPlan::decode(revision.artifact().payload()).is_err());
+        assert_eq!(
+            prepared
+                .references()
+                .iter()
+                .map(|reference| (reference.kind(), reference.target()))
+                .filter(|(kind, _)| {
+                    matches!(
+                        kind,
+                        DefinitionReferenceKind::QueryObject
+                            | DefinitionReferenceKind::QueryField
+                            | DefinitionReferenceKind::ParameterRead
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    DefinitionReferenceKind::QueryObject,
+                    DefinitionReferenceTarget::ObjectType(task.id()),
+                ),
+                (
+                    DefinitionReferenceKind::QueryField,
+                    DefinitionReferenceTarget::Field {
+                        owner: task.id(),
+                        field: task.field_by_name("title").unwrap().id(),
+                    },
+                ),
+                (
+                    DefinitionReferenceKind::QueryField,
+                    DefinitionReferenceTarget::Field {
+                        owner: task.id(),
+                        field: email.id(),
+                    },
+                ),
+                (
+                    DefinitionReferenceKind::ParameterRead,
+                    DefinitionReferenceTarget::Parameter {
+                        owner: function.id(),
+                        parameter: function.parameters()[0].id(),
+                    },
                 ),
             ]
         );

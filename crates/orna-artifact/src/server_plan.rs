@@ -44,6 +44,8 @@ pub const FORMAT_VERSION: u32 = 1;
 pub const IDENTITY_SELECTED_FORMAT_VERSION: u32 = 2;
 /// The version used by parameter-free `SELECT DISTINCT` SERVER query artifacts.
 pub const DISTINCT_FORMAT_VERSION: u32 = 3;
+/// The version used by unique-Text-selected SERVER query artifacts.
+pub const UNIQUE_TEXT_SELECTED_FORMAT_VERSION: u32 = 4;
 /// The exact first eight bytes of every server-plan artifact.
 pub const MAGIC: [u8; 8] = *b"ORNASP\0\0";
 
@@ -63,6 +65,7 @@ pub const MAX_ARTIFACT_BYTES: usize = 16 * 1024 * 1024;
 const PRIMARY_INPUT: u32 = 0;
 const EXACT_INPUT_COUNT: u32 = 1;
 const IDENTITY_SELECTION_EXPRESSION_NODES: u32 = 3;
+const UNIQUE_TEXT_SELECTION_EXPRESSION_NODES: u32 = 3;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LegacyResolvedType {
@@ -240,6 +243,117 @@ pub struct DistinctServerPlan {
     scan: Scan,
     projections: Vec<Expression>,
     selection: Option<Expression>,
+}
+
+/// A checked SERVER query plan selected by one direct unique Text field.
+///
+/// This sealed version-four model has one fixed `SelectBindValue::Text`
+/// selection and no ordering terms. It cannot represent a general parameter
+/// expression or another selector form.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UniqueTextSelectedServerPlan {
+    scan: Scan,
+    projections: Vec<Expression>,
+    selector: SelectBindValue,
+}
+
+impl UniqueTextSelectedServerPlan {
+    /// Creates a checked unique-Text-selected plan.
+    pub fn new(
+        scan: Scan,
+        projections: impl IntoIterator<Item = Expression>,
+        selector: SelectBindValue,
+    ) -> Result<Self, ServerPlanError> {
+        let plan = Self {
+            scan,
+            projections: collect_projections(projections)?,
+            selector,
+        };
+        validate_unique_text_selected_plan(&plan)?;
+        Ok(plan)
+    }
+
+    /// Returns the canonical version for unique-Text-selected artifacts.
+    pub const fn format_version(&self) -> u32 {
+        UNIQUE_TEXT_SELECTED_FORMAT_VERSION
+    }
+
+    /// Returns the single source object scan.
+    pub const fn scan(&self) -> Scan {
+        self.scan
+    }
+
+    /// Returns projection expressions in source order.
+    pub fn projections(&self) -> &[Expression] {
+        &self.projections
+    }
+
+    /// Returns the one fixed Text bind selector.
+    pub const fn selector(&self) -> &SelectBindValue {
+        &self.selector
+    }
+
+    /// Encodes this checked plan into canonical version-4 bytes.
+    pub fn encode(&self) -> Result<Vec<u8>, ServerPlanError> {
+        validate_unique_text_selected_plan(self)?;
+
+        let mut writer = encode_plan_prefix(
+            UNIQUE_TEXT_SELECTED_FORMAT_VERSION,
+            self.scan,
+            &self.projections,
+        )?;
+        writer.boolean("selection presence", true);
+        encode_unique_text_selection(&mut writer, self.selector)?;
+        writer.count("ordering", 0, MAX_ORDERING)?;
+        let bytes = writer.finish();
+        validate_artifact_size(bytes.len())?;
+        Ok(bytes)
+    }
+
+    /// Decodes exactly one canonical version-4 unique-Text-selected artifact.
+    pub fn decode(bytes: &[u8]) -> Result<Self, ServerPlanError> {
+        let (mut reader, scan, projections, mut remaining_expression_nodes) =
+            decode_plan_prefix(bytes, UNIQUE_TEXT_SELECTED_FORMAT_VERSION)?;
+        if !reader.boolean("selection presence")? {
+            return Err(ServerPlanError::InvalidModel(
+                "a unique-Text-selected server plan must contain its fixed selection",
+            ));
+        }
+        consume_unique_text_selection_nodes(&mut remaining_expression_nodes)?;
+        let selector = decode_unique_text_selection(&mut reader)?;
+        let ordering_count = reader.count("ordering", MAX_ORDERING)?;
+        if ordering_count != 0 {
+            return Err(ServerPlanError::InvalidModel(
+                "a unique-Text-selected server plan must not contain ordering terms",
+            ));
+        }
+        reader.require_finished()?;
+        Self::new(scan, projections, selector)
+    }
+}
+
+/// The only parameter bind accepted by a version-4 server plan.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SelectBindValue {
+    /// Binds one required non-null Text function parameter to one direct field.
+    Text {
+        /// The type scanned by the plan.
+        scan_object_type: TypeId,
+        /// The object type that owns the direct selected field.
+        field_owner: TypeId,
+        /// The direct selected field.
+        field: FieldId,
+        /// The function that owns the selector parameter.
+        parameter_owner: FunctionId,
+        /// The selector parameter.
+        parameter: ParameterId,
+        /// The exact resolved Text authority of the selected field and parameter.
+        resolved_type: ResolvedType,
+        /// Whether the selected unique Text field can contain null.
+        field_nullable: bool,
+        /// Whether the selector parameter is required and non-null.
+        parameter_required_non_null: bool,
+    },
 }
 
 impl DistinctServerPlan {
@@ -688,6 +802,19 @@ fn validate_distinct_plan(plan: &DistinctServerPlan) -> Result<(), ServerPlanErr
     Ok(())
 }
 
+fn validate_unique_text_selected_plan(
+    plan: &UniqueTextSelectedServerPlan,
+) -> Result<(), ServerPlanError> {
+    let mut remaining_expression_nodes = MAX_EXPRESSION_NODES;
+    validate_scan_and_projections(
+        plan.scan,
+        &plan.projections,
+        &mut remaining_expression_nodes,
+    )?;
+    consume_unique_text_selection_nodes(&mut remaining_expression_nodes)?;
+    validate_unique_text_selector(plan.scan, plan.selector)
+}
+
 fn validate_optional_selection(
     selection: Option<&Expression>,
     scan: Scan,
@@ -745,6 +872,51 @@ fn consume_identity_selection_nodes(remaining_nodes: &mut u32) -> Result<(), Ser
         return Err(ServerPlanError::ExpressionNodeLimitExceeded);
     }
     *remaining_nodes -= IDENTITY_SELECTION_EXPRESSION_NODES;
+    Ok(())
+}
+
+fn consume_unique_text_selection_nodes(remaining_nodes: &mut u32) -> Result<(), ServerPlanError> {
+    if *remaining_nodes < UNIQUE_TEXT_SELECTION_EXPRESSION_NODES {
+        return Err(ServerPlanError::ExpressionNodeLimitExceeded);
+    }
+    *remaining_nodes -= UNIQUE_TEXT_SELECTION_EXPRESSION_NODES;
+    Ok(())
+}
+
+fn validate_unique_text_selector(
+    scan: Scan,
+    selector: SelectBindValue,
+) -> Result<(), ServerPlanError> {
+    let SelectBindValue::Text {
+        scan_object_type,
+        field_owner,
+        resolved_type,
+        parameter_required_non_null,
+        ..
+    } = selector;
+    if scan_object_type != scan.object_type {
+        return Err(ServerPlanError::InvalidModel(
+            "a unique-Text selector scan object must match the plan scan",
+        ));
+    }
+    if field_owner != scan.object_type {
+        return Err(ServerPlanError::InvalidModel(
+            "a unique-Text selector field owner must match the plan scan",
+        ));
+    }
+    if !matches!(
+        resolved_type,
+        ResolvedType::Scalar(StandardScalar::CharacterLargeObject) | ResolvedType::Value(_)
+    ) {
+        return Err(ServerPlanError::InvalidModel(
+            "a unique-Text selector must use resolved TEXT type",
+        ));
+    }
+    if !parameter_required_non_null {
+        return Err(ServerPlanError::InvalidModel(
+            "a unique-Text selector parameter must be required and non-null",
+        ));
+    }
     Ok(())
 }
 
@@ -958,6 +1130,111 @@ fn decode_identity_selection(
         reader.function_id()?,
         reader.parameter_id()?,
     ))
+}
+
+fn encode_unique_text_selection(
+    writer: &mut Writer,
+    selector: SelectBindValue,
+) -> Result<(), ServerPlanError> {
+    validate_unique_text_selector(
+        Scan {
+            input: PRIMARY_INPUT,
+            object_type: match selector {
+                SelectBindValue::Text {
+                    scan_object_type, ..
+                } => scan_object_type,
+            },
+        },
+        selector,
+    )?;
+    let SelectBindValue::Text {
+        scan_object_type,
+        field_owner,
+        field,
+        parameter_owner,
+        parameter,
+        resolved_type,
+        field_nullable,
+        parameter_required_non_null,
+    } = selector;
+    writer.u8(1);
+    writer.type_id(scan_object_type);
+    writer.type_id(field_owner);
+    writer.field_id(field);
+    writer.function_id(parameter_owner);
+    writer.parameter_id(parameter);
+    encode_unique_text_resolved_type(writer, resolved_type)?;
+    writer.boolean("unique-Text selector field nullability", field_nullable);
+    writer.boolean(
+        "unique-Text selector parameter required non-null",
+        parameter_required_non_null,
+    );
+    Ok(())
+}
+
+fn decode_unique_text_selection(
+    reader: &mut Reader<'_>,
+) -> Result<SelectBindValue, ServerPlanError> {
+    let tag = reader.u8()?;
+    if tag != 1 {
+        return Err(ServerPlanError::InvalidEnumTag {
+            kind: "unique-Text selector",
+            tag,
+        });
+    }
+    Ok(SelectBindValue::Text {
+        scan_object_type: reader.type_id()?,
+        field_owner: reader.type_id()?,
+        field: reader.field_id()?,
+        parameter_owner: reader.function_id()?,
+        parameter: reader.parameter_id()?,
+        resolved_type: decode_unique_text_resolved_type(reader)?,
+        field_nullable: reader.boolean("unique-Text selector field nullability")?,
+        parameter_required_non_null: reader
+            .boolean("unique-Text selector parameter required non-null")?,
+    })
+}
+
+fn encode_unique_text_resolved_type(
+    writer: &mut Writer,
+    resolved_type: ResolvedType,
+) -> Result<(), ServerPlanError> {
+    match resolved_type {
+        ResolvedType::Scalar(StandardScalar::CharacterLargeObject) => {
+            writer.u8(1);
+            writer.u8(encode_standard_scalar(StandardScalar::CharacterLargeObject));
+            Ok(())
+        }
+        ResolvedType::Value(type_id) => {
+            writer.u8(4);
+            writer.type_id(type_id);
+            Ok(())
+        }
+        _ => Err(ServerPlanError::InvalidModel(
+            "a unique-Text selector must use resolved TEXT type",
+        )),
+    }
+}
+
+fn decode_unique_text_resolved_type(
+    reader: &mut Reader<'_>,
+) -> Result<ResolvedType, ServerPlanError> {
+    match reader.u8()? {
+        1 => {
+            let scalar = decode_standard_scalar(reader.u8()?)?;
+            if scalar != StandardScalar::CharacterLargeObject {
+                return Err(ServerPlanError::InvalidModel(
+                    "a unique-Text selector must use resolved TEXT type",
+                ));
+            }
+            Ok(ResolvedType::scalar(scalar))
+        }
+        4 => Ok(ResolvedType::Value(reader.type_id()?)),
+        tag => Err(ServerPlanError::InvalidEnumTag {
+            kind: "unique-Text selector resolved type",
+            tag,
+        }),
+    }
 }
 
 fn encode_expression(
@@ -1449,6 +1726,173 @@ mod tests {
         .unwrap()
     }
 
+    fn unique_text_selected_plan() -> UniqueTextSelectedServerPlan {
+        UniqueTextSelectedServerPlan::new(
+            Scan {
+                input: 0,
+                object_type: TASK,
+            },
+            [boolean(true)],
+            SelectBindValue::Text {
+                scan_object_type: TASK,
+                field_owner: TASK,
+                field: TITLE,
+                parameter_owner: FUNCTION,
+                parameter: PARAMETER,
+                resolved_type: ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+                field_nullable: true,
+                parameter_required_non_null: true,
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn unique_text_selected_plan_has_a_sealed_v4_wire_format() {
+        let plan = unique_text_selected_plan();
+        let encoded = plan.encode().unwrap();
+
+        assert_eq!(plan.format_version(), UNIQUE_TEXT_SELECTED_FORMAT_VERSION);
+        assert_eq!(
+            UniqueTextSelectedServerPlan::decode(&encoded),
+            Ok(plan.clone())
+        );
+        assert_eq!(
+            UniqueTextSelectedServerPlan::decode(&encoded)
+                .unwrap()
+                .encode(),
+            Ok(encoded)
+        );
+    }
+
+    #[test]
+    fn unique_text_selected_plan_rejects_hostile_selector_shapes() {
+        let plan = unique_text_selected_plan();
+        let encoded = plan.encode().unwrap();
+
+        let missing_selection = {
+            let mut bytes = encoded.clone();
+            bytes[45] = 0;
+            bytes
+        };
+        assert!(UniqueTextSelectedServerPlan::decode(&missing_selection).is_err());
+
+        let wrong_owner = {
+            let mut bytes = encoded.clone();
+            bytes[63] = 2;
+            bytes
+        };
+        assert!(UniqueTextSelectedServerPlan::decode(&wrong_owner).is_err());
+
+        let malformed_selector = {
+            let mut bytes = encoded.clone();
+            bytes[46] = 2;
+            bytes
+        };
+        assert!(UniqueTextSelectedServerPlan::decode(&malformed_selector).is_err());
+
+        let nullable_parameter = {
+            let mut bytes = encoded.clone();
+            bytes[130] = 0;
+            bytes
+        };
+        assert!(UniqueTextSelectedServerPlan::decode(&nullable_parameter).is_err());
+
+        let ordering = {
+            let mut bytes = encoded.clone();
+            bytes[134] = 1;
+            bytes
+        };
+        assert!(UniqueTextSelectedServerPlan::decode(&ordering).is_err());
+
+        let mut trailing = encoded;
+        trailing.push(0);
+        assert_eq!(
+            UniqueTextSelectedServerPlan::decode(&trailing),
+            Err(ServerPlanError::TrailingBytes)
+        );
+
+        assert!(matches!(
+            UniqueTextSelectedServerPlan::new(
+                Scan {
+                    input: 1,
+                    object_type: TASK,
+                },
+                [boolean(true)],
+                *plan.selector(),
+            ),
+            Err(ServerPlanError::InvalidInputSlot(1))
+        ));
+        assert!(matches!(
+            UniqueTextSelectedServerPlan::new(
+                plan.scan(),
+                plan.projections().iter().cloned(),
+                SelectBindValue::Text {
+                    scan_object_type: TypeId::from_bytes([0x95; 16]),
+                    field_owner: TASK,
+                    field: TITLE,
+                    parameter_owner: FUNCTION,
+                    parameter: PARAMETER,
+                    resolved_type: ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+                    field_nullable: true,
+                    parameter_required_non_null: true,
+                },
+            ),
+            Err(ServerPlanError::InvalidModel(
+                "a unique-Text selector scan object must match the plan scan"
+            ))
+        ));
+
+        assert!(matches!(
+            UniqueTextSelectedServerPlan::new(
+                plan.scan(),
+                plan.projections().iter().cloned(),
+                SelectBindValue::Text {
+                    scan_object_type: TASK,
+                    field_owner: TASK,
+                    field: TITLE,
+                    parameter_owner: FUNCTION,
+                    parameter: PARAMETER,
+                    resolved_type: ResolvedType::scalar(StandardScalar::Integer),
+                    field_nullable: true,
+                    parameter_required_non_null: true,
+                },
+            ),
+            Err(ServerPlanError::InvalidModel(
+                "a unique-Text selector must use resolved TEXT type"
+            ))
+        ));
+    }
+
+    #[test]
+    fn unique_text_selected_plan_preserves_standard_value_text_identity() {
+        let plan = UniqueTextSelectedServerPlan::new(
+            Scan {
+                input: 0,
+                object_type: TASK,
+            },
+            [boolean(true)],
+            SelectBindValue::Text {
+                scan_object_type: TASK,
+                field_owner: TASK,
+                field: TITLE,
+                parameter_owner: FUNCTION,
+                parameter: PARAMETER,
+                resolved_type: ResolvedType::value(TypeId::from_bytes([0x94; 16])),
+                field_nullable: false,
+                parameter_required_non_null: true,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            UniqueTextSelectedServerPlan::decode(&plan.encode().unwrap())
+                .unwrap()
+                .selector(),
+            plan.selector()
+        );
+    }
+
     fn typed_field_path(resolved_type: ResolvedType, nullable: bool) -> Expression {
         Expression {
             kind: ExpressionKind::FieldPath {
@@ -1865,6 +2309,7 @@ mod tests {
         .unwrap();
         let version_two = identity_selected_plan().encode().unwrap();
         let version_three = distinct_plan(None).encode().unwrap();
+        let version_four = unique_text_selected_plan().encode().unwrap();
 
         assert!(ServerPlan::decode(&version_one).is_ok());
         assert_eq!(
@@ -1877,6 +2322,12 @@ mod tests {
             ServerPlan::decode(&version_three),
             Err(ServerPlanError::UnsupportedVersion(DISTINCT_FORMAT_VERSION))
         );
+        assert_eq!(
+            ServerPlan::decode(&version_four),
+            Err(ServerPlanError::UnsupportedVersion(
+                UNIQUE_TEXT_SELECTED_FORMAT_VERSION
+            ))
+        );
 
         assert_eq!(
             IdentitySelectedServerPlan::decode(&version_one),
@@ -1886,6 +2337,12 @@ mod tests {
         assert_eq!(
             IdentitySelectedServerPlan::decode(&version_three),
             Err(ServerPlanError::UnsupportedVersion(DISTINCT_FORMAT_VERSION))
+        );
+        assert_eq!(
+            IdentitySelectedServerPlan::decode(&version_four),
+            Err(ServerPlanError::UnsupportedVersion(
+                UNIQUE_TEXT_SELECTED_FORMAT_VERSION
+            ))
         );
 
         assert_eq!(
@@ -1899,6 +2356,22 @@ mod tests {
             ))
         );
         assert!(DistinctServerPlan::decode(&version_three).is_ok());
+
+        assert_eq!(
+            UniqueTextSelectedServerPlan::decode(&version_one),
+            Err(ServerPlanError::UnsupportedVersion(FORMAT_VERSION))
+        );
+        assert_eq!(
+            UniqueTextSelectedServerPlan::decode(&version_two),
+            Err(ServerPlanError::UnsupportedVersion(
+                IDENTITY_SELECTED_FORMAT_VERSION
+            ))
+        );
+        assert_eq!(
+            UniqueTextSelectedServerPlan::decode(&version_three),
+            Err(ServerPlanError::UnsupportedVersion(DISTINCT_FORMAT_VERSION))
+        );
+        assert!(UniqueTextSelectedServerPlan::decode(&version_four).is_ok());
     }
 
     #[test]

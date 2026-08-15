@@ -7,8 +7,8 @@
 
 use orna_artifact::server_plan::{
     DistinctServerPlan, Expression, ExpressionKind, FieldStep, IdentitySelectedServerPlan,
-    IdentitySelector, NullOrder, Ordering, Scan, ServerPlan, ServerPlanError, SortDirection,
-    ValueType,
+    IdentitySelector, NullOrder, Ordering, Scan, SelectBindValue, ServerPlan, ServerPlanError,
+    SortDirection, UniqueTextSelectedServerPlan, ValueType,
 };
 use orna_core::{FieldId, FunctionId, ParameterId, TypeId};
 
@@ -16,7 +16,7 @@ use super::{
     DistinctQueryIr, EncodedServerPlan, ExpressionIr, ExpressionKind as CompilerExpressionKind,
     IdentitySelectedQueryIr, InputSlot, NullOrder as CompilerNullOrder, OrderingIr,
     RelationalQueryIr, ResolvedFieldStep, ScanIr, SortDirection as CompilerSortDirection,
-    ValueType as CompilerValueType,
+    UniqueTextSelectedQueryIr, ValueType as CompilerValueType,
 };
 /// Converts and encodes one checked relational query into canonical bytes.
 pub(super) fn encode(
@@ -52,6 +52,50 @@ fn adapt_identity_selected(
         adapt_scan(&query.scan),
         query.projections.iter().map(adapt_expression),
         IdentitySelector::new(query.selector.owner, query.selector.parameter),
+    )
+}
+
+/// Converts and encodes one checked unique-Text-selected query into version-4 bytes.
+pub(super) fn encode_unique_text_selected(
+    query: &UniqueTextSelectedQueryIr<TypeId, FieldId, FunctionId, ParameterId>,
+) -> Result<EncodedServerPlan, ServerPlanError> {
+    let plan = adapt_unique_text_selected(query)?;
+    Ok(EncodedServerPlan {
+        format_version: plan.format_version(),
+        payload: plan.encode()?,
+    })
+}
+
+impl UniqueTextSelectedQueryIr<TypeId, FieldId, FunctionId, ParameterId> {
+    /// Encodes this checked unique-Text-selected query as a version-4 server plan.
+    pub(crate) fn encode_unique_text_selected_server_plan(
+        &self,
+    ) -> Result<EncodedServerPlan, ServerPlanError> {
+        encode_unique_text_selected(self)
+    }
+}
+
+fn adapt_unique_text_selected(
+    query: &UniqueTextSelectedQueryIr<TypeId, FieldId, FunctionId, ParameterId>,
+) -> Result<UniqueTextSelectedServerPlan, ServerPlanError> {
+    let selector = query.selector();
+    UniqueTextSelectedServerPlan::new(
+        adapt_scan(query.scan()),
+        query.projections().iter().map(adapt_expression),
+        SelectBindValue::Text {
+            scan_object_type: selector.scan_object_type(),
+            field_owner: selector.field_owner(),
+            field: selector.field(),
+            parameter_owner: selector.parameter_owner(),
+            parameter: selector.parameter(),
+            resolved_type: selector
+                .text_type()
+                .standard_value_type()
+                .map(orna_core::types::ResolvedType::value)
+                .unwrap_or_else(|| selector.text_type().legacy_artifact_type()),
+            field_nullable: selector.field_nullable(),
+            parameter_required_non_null: selector.parameter_required_non_null(),
+        },
     )
 }
 
@@ -151,7 +195,7 @@ mod tests {
 
     use orna_artifact::server_plan::{
         DistinctServerPlan, Expression, ExpressionKind, IdentitySelectedServerPlan, NullOrder,
-        ServerPlan, SortDirection,
+        SelectBindValue, ServerPlan, SortDirection, UniqueTextSelectedServerPlan,
     };
     use orna_core::{
         CatalogueRevisionId, FieldId, FunctionId, ParameterId, SchemaId, TypeId,
@@ -168,8 +212,8 @@ mod tests {
 
     use super::super::{
         DistinctQueryIr, ExpressionIr, ExpressionKind as CompilerExpressionKind, InputSlot,
-        QueryParameter, RelationalQueryIr, ResolvedFieldStep, ScanIr, ValueType,
-        check_identity_selected_query_in,
+        QueryParameter, RelationalQueryIr, ResolvedFieldStep, ScanIr, UniqueTextQuerySelector,
+        UniqueTextSelectedQueryIr, ValueType, check_identity_selected_query_in,
     };
 
     const TASK_TYPE: TypeId = TypeId::from_bytes([1; 16]);
@@ -180,6 +224,7 @@ mod tests {
     const PERSON_NAME_FIELD: FieldId = FieldId::from_bytes([21; 16]);
     const ACTIVE_FIELD: FieldId = FieldId::from_bytes([22; 16]);
     const NON_GOLDEN_BOOLEAN_TYPE: TypeId = TypeId::from_bytes([0x71; 16]);
+    const STANDARD_TEXT_TYPE: TypeId = TypeId::from_bytes([0x72; 16]);
     const SELECTOR_OWNER: FunctionId = FunctionId::from_bytes([31; 16]);
     const SELECTOR_PARAMETER: ParameterId = ParameterId::from_bytes([32; 16]);
 
@@ -287,6 +332,46 @@ mod tests {
             decoded.projections[0].value_type.resolved_type,
             ResolvedType::scalar(StandardScalar::Boolean)
         );
+    }
+
+    #[test]
+    fn preserves_standard_text_identity_in_a_version_four_selector() {
+        let query = UniqueTextSelectedQueryIr {
+            scan: ScanIr {
+                input: InputSlot(0),
+                object_type: TASK_TYPE,
+            },
+            projections: vec![ExpressionIr {
+                kind: CompilerExpressionKind::ObjectReference {
+                    input: InputSlot(0),
+                },
+                value_type: ValueType::reference(TASK_TYPE, false),
+            }],
+            selector: UniqueTextQuerySelector {
+                scan_object_type: TASK_TYPE,
+                field_owner: TASK_TYPE,
+                field: TITLE_FIELD,
+                parameter_owner: SELECTOR_OWNER,
+                parameter: SELECTOR_PARAMETER,
+                text_type: ValueType::standard_value(
+                    STANDARD_TEXT_TYPE,
+                    StandardScalar::CharacterLargeObject,
+                    true,
+                ),
+                parameter_required_non_null: true,
+            },
+        };
+
+        let encoded = query.encode_unique_text_selected_server_plan().unwrap();
+        let decoded = UniqueTextSelectedServerPlan::decode(encoded.payload()).unwrap();
+        assert_eq!(encoded.format_version(), 4);
+        assert!(matches!(
+            decoded.selector(),
+            SelectBindValue::Text {
+                resolved_type: ResolvedType::Value(STANDARD_TEXT_TYPE),
+                ..
+            }
+        ));
     }
 
     #[test]
