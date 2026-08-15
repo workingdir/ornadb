@@ -95,3 +95,5 @@ source-of-truth or authority rules.
   [Existing Objects Admit One Appended Nullable Executable Scalar Field](0046-appended-nullable-scalar-fields.md)
 * **work ADR 0047:**
   [The First 1.0 Release Uses One Authenticated Debian Authority](0047-first-one-zero-release.md)
+* **work ADR 0048:**
+  [Raw Reference Calls Select One Projected Object Row](0048-raw-identity-selected-server-select.md)
