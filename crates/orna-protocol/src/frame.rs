@@ -5,6 +5,7 @@ use std::{collections::BTreeMap, error::Error, fmt};
 use orna_core::{
     FunctionId, InvocationId, ParameterId, TypeId,
     catalogue::CatalogueSnapshot,
+    invocation::invocation_carrier_type_id,
     revision::ActiveDatabaseRevision,
     types::TypeDescriptor,
     value::{OpaqueCodecRegistry, RuntimeValue},
@@ -494,14 +495,22 @@ impl FrameVersion<'_> {
                 opaque_type: value.opaque_type(),
             });
         }
-        self.require_constructed_value_closed(value)
+        self.require_ordinary_value_position_closed(value)
     }
 
     fn require_event_value(self, value: &RuntimeValue) -> Result<(), FrameCodecError> {
-        self.require_constructed_value_closed(value)
+        self.require_ordinary_value_position_closed(value)
     }
 
-    fn require_constructed_value_closed(self, value: &RuntimeValue) -> Result<(), FrameCodecError> {
+    fn require_ordinary_value_position_closed(
+        self,
+        value: &RuntimeValue,
+    ) -> Result<(), FrameCodecError> {
+        if matches!(self, Self::Constructed(_, _))
+            && let Some(carrier) = invocation_carrier_type_id(value)
+        {
+            return Err(FrameCodecError::InvocationCarrierNotAccepted { carrier });
+        }
         if matches!(self, Self::Constructed(_, _))
             && let RuntimeValue::Constructed(value) = value
         {
@@ -637,8 +646,9 @@ impl ProtocolConnection {
     ///
     /// Returns a [`ConnectionError`] when the frame violates a state transition,
     /// bounded connection limit, active-revision rule, opaque argument boundary,
-    /// or closed constructed application-value boundary. An error leaves all
-    /// prior state unchanged.
+    /// closed constructed application-value boundary, or sealed invocation
+    /// carrier in an ordinary argument position. An error leaves all prior state
+    /// unchanged.
     pub fn receive_constructed(
         &mut self,
         active: &ActiveDatabaseRevision,
@@ -736,8 +746,9 @@ impl ProtocolConnection {
     ///
     /// Returns a [`ConnectionError`] when the action violates the current call
     /// state, sequence, frame, flow-control, active-revision, opaque registry,
-    /// or closed constructed application-value contract. An error leaves all
-    /// prior state and window credit unchanged.
+    /// closed constructed application-value contract, or sealed invocation
+    /// carrier in an ordinary event position. An error leaves all prior state
+    /// and window credit unchanged.
     pub fn apply_constructed(
         &mut self,
         active: &ActiveDatabaseRevision,
@@ -1435,6 +1446,11 @@ pub enum FrameCodecError {
         /// The rejected constructed value descriptor.
         descriptor: TypeDescriptor,
     },
+    /// Protocol 5 does not admit a sealed invocation carrier in an ordinary frame position.
+    InvocationCarrierNotAccepted {
+        /// The rejected sealed carrier identity.
+        carrier: TypeId,
+    },
     /// A failure payload is not one of the four closed values.
     InvalidFailure {
         /// The invalid four-byte failure value.
@@ -1513,6 +1529,9 @@ impl fmt::Display for FrameCodecError {
             }
             Self::ConstructedValueNotAccepted { .. } => formatter
                 .write_str("constructed runtime values are not accepted by protocol 5 frames"),
+            Self::InvocationCarrierNotAccepted { .. } => formatter.write_str(
+                "sealed invocation carriers are not accepted by ordinary protocol 5 frames",
+            ),
             Self::InvalidFailure { .. } => formatter.write_str("raw-call failure value is invalid"),
             Self::EmptyEventBatch => formatter.write_str("raw-call event batch is empty"),
             Self::TooManyEvents { .. } => {
@@ -1598,7 +1617,8 @@ pub fn encode_registered_client_frame(
 /// # Errors
 ///
 /// Returns a [`FrameCodecError`] when the frame cannot satisfy the version-5
-/// envelope, active-revision, registry, or closed application-value contract.
+/// envelope, active-revision, registry, closed application-value contract, or
+/// sealed invocation-carrier closure.
 pub fn encode_constructed_client_frame(
     active: &ActiveDatabaseRevision,
     registry: &OpaqueCodecRegistry,
@@ -1714,7 +1734,8 @@ pub fn decode_registered_client_frame(
 /// # Errors
 ///
 /// Returns a [`FrameCodecError`] for an invalid version-5 envelope, payload,
-/// active value, opaque call argument, or constructed application value.
+/// active value, opaque call argument, constructed application value, or
+/// sealed invocation carrier in the ordinary argument position.
 pub fn decode_constructed_client_frame(
     active: &ActiveDatabaseRevision,
     registry: &OpaqueCodecRegistry,
@@ -1849,7 +1870,8 @@ pub fn encode_registered_server_frame(
 /// # Errors
 ///
 /// Returns a [`FrameCodecError`] when the frame cannot satisfy the version-5
-/// envelope, active-revision, registry, or closed application-value contract.
+/// envelope, active-revision, registry, closed application-value contract, or
+/// sealed invocation-carrier closure.
 pub fn encode_constructed_server_frame(
     active: &ActiveDatabaseRevision,
     registry: &OpaqueCodecRegistry,
@@ -1949,7 +1971,8 @@ pub fn decode_registered_server_frame(
 /// # Errors
 ///
 /// Returns a [`FrameCodecError`] for an invalid version-5 envelope, payload,
-/// active value, registry-bound opaque value, or constructed application value.
+/// active value, registry-bound opaque value, constructed application value,
+/// or sealed invocation carrier in the ordinary result position.
 pub fn decode_constructed_server_frame(
     active: &ActiveDatabaseRevision,
     registry: &OpaqueCodecRegistry,
