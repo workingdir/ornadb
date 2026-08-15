@@ -6256,6 +6256,571 @@ fn installed_unique_reference_insert_rolls_back_and_persists_across_replay_and_r
     .expect("the post-restart missing-owner call must preserve exactly the owners A and B");
 }
 
+/// Prove ADR 0051 through only the installed product's public command path.
+///
+/// The journey creates nullable and required unique Text values, verifies that
+/// byte-distinct values remain separate, and requires duplicate writes to
+/// close as the existing public `INTERNAL_FAILURE`. It then proves replay,
+/// semantic rename, and restart retain the public function and parameter
+/// identities, grants, and rows without inspecting private database state.
+#[test]
+#[ignore = "requires Docker, ORNA_SYSTEM_TEST_DEBIAN_PACKAGE, and unique Text fields in the installed orna executable"]
+fn installed_unique_text_fields_reject_duplicates_and_persist_across_replay_rename_and_restart() {
+    let package = std::env::var("ORNA_SYSTEM_TEST_DEBIAN_PACKAGE")
+        .expect("ORNA_SYSTEM_TEST_DEBIAN_PACKAGE must point at the reproduced .deb package");
+    let artifact = FrozenPackageArtifact::new(PackageFormat::Debian, &package)
+        .expect("freeze the reproduced Debian package");
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+    let original = fs::read(fixtures.join("product_test_unique_text.orna"))
+        .expect("read the checked-in unique Text fixture");
+    let renamed = fs::read(fixtures.join("product_test_unique_text_renamed.orna"))
+        .expect("read the checked-in renamed unique Text fixture");
+    let machine = InstalledMachine::start(&artifact, &original)
+        .expect("start the installed unique Text test machine");
+
+    let apply = machine
+        .run_as_orna(&["source", "apply", FIXTURE_PATH])
+        .expect("apply the installed unique Text fixture");
+    let apply = require_success("orna source apply", apply).expect("source apply must succeed");
+    assert!(
+        apply.stderr.is_empty(),
+        "source apply must keep standard error empty"
+    );
+    let document = parse_apply_document(&apply.stdout).expect("source apply JSON must parse");
+    let expected_names = [
+        vec!["unique_text_test".to_string(), "create_account".to_string()],
+        vec!["unique_text_test".to_string(), "read_accounts".to_string()],
+        vec![
+            "unique_text_test".to_string(),
+            "update_account_email".to_string(),
+        ],
+        vec![
+            "unique_text_test".to_string(),
+            "update_account_username".to_string(),
+        ],
+    ];
+    assert_eq!(
+        document
+            .functions
+            .iter()
+            .map(|entry| entry.names().to_vec())
+            .collect::<Vec<_>>(),
+        expected_names,
+        "apply must report the four unique Text functions in canonical name order"
+    );
+    let create = document
+        .function_id(&["unique_text_test", "create_account"])
+        .expect("apply must report create_account");
+    let read = document
+        .function_id(&["unique_text_test", "read_accounts"])
+        .expect("apply must report read_accounts");
+    let update_email = document
+        .function_id(&["unique_text_test", "update_account_email"])
+        .expect("apply must report update_account_email");
+    let update_username = document
+        .function_id(&["unique_text_test", "update_account_username"])
+        .expect("apply must report update_account_username");
+    let p_create_email = document
+        .parameter_id(&["unique_text_test", "create_account"], "p_email")
+        .expect("apply must report create_account.p_email");
+    let p_create_username = document
+        .parameter_id(&["unique_text_test", "create_account"], "p_username")
+        .expect("apply must report create_account.p_username");
+    let p_update_email = document
+        .parameter_id(&["unique_text_test", "update_account_email"], "p_email")
+        .expect("apply must report update_account_email.p_email");
+    let p_update_email_account = document
+        .parameter_id(&["unique_text_test", "update_account_email"], "p_account")
+        .expect("apply must report update_account_email.p_account");
+    let p_update_username = document
+        .parameter_id(
+            &["unique_text_test", "update_account_username"],
+            "p_username",
+        )
+        .expect("apply must report update_account_username.p_username");
+    let p_update_username_account = document
+        .parameter_id(
+            &["unique_text_test", "update_account_username"],
+            "p_account",
+        )
+        .expect("apply must report update_account_username.p_account");
+    for (function, expected) in [
+        (create, ["p_email", "p_username"].as_slice()),
+        (read, [].as_slice()),
+        (update_email, ["p_email", "p_account"].as_slice()),
+        (update_username, ["p_username", "p_account"].as_slice()),
+    ] {
+        let entry = document
+            .functions
+            .iter()
+            .find(|entry| entry.function_id() == function)
+            .expect("apply must retain discovered function entry");
+        assert_eq!(
+            entry
+                .parameters()
+                .iter()
+                .map(ParameterEntry::name)
+                .collect::<Vec<_>>(),
+            expected,
+            "function must retain its exact ordered parameter declaration"
+        );
+    }
+    let parameter_ids = [
+        p_create_email,
+        p_create_username,
+        p_update_email,
+        p_update_email_account,
+        p_update_username,
+        p_update_username_account,
+    ];
+    for (index, left) in parameter_ids.iter().enumerate() {
+        for right in &parameter_ids[index + 1..] {
+            assert_ne!(left, right, "every discovered ParameterId must be distinct");
+        }
+    }
+
+    let synthetic_account = reference_orv1_envelope([0x41; 16], [0x42; 16]);
+    for (command, input) in [
+        (
+            vec!["raw-call", create, p_create_email, p_create_username],
+            [
+                nullable_text_orv1_envelope(None),
+                text_orv1_envelope("denied"),
+            ]
+            .concat(),
+        ),
+        (vec!["raw-call", read], Vec::new()),
+        (
+            vec![
+                "raw-call",
+                update_email,
+                p_update_email,
+                p_update_email_account,
+            ],
+            [text_orv1_envelope("denied"), synthetic_account.clone()].concat(),
+        ),
+        (
+            vec![
+                "raw-call",
+                update_username,
+                p_update_username,
+                p_update_username_account,
+            ],
+            [text_orv1_envelope("denied"), synthetic_account.clone()].concat(),
+        ),
+    ] {
+        let denied = if input.is_empty() {
+            machine.run_as_orna(&command)
+        } else {
+            machine.run_as_orna_with_stdin(&command, &input)
+        }
+        .expect("run denied unique Text raw call");
+        assert_denied("unique Text raw call before grant", denied)
+            .expect("authorisation must precede target and value inspection");
+    }
+    for function in [create, read, update_email, update_username] {
+        require_silent_success(
+            "orna security grant-execute",
+            machine
+                .run_as_orna(&["security", "grant-execute", function])
+                .expect("grant unique Text function"),
+        )
+        .expect("grant must succeed silently");
+    }
+
+    let create_account = |email: Option<&str>, username: &str, label: &'static str| {
+        let input = [
+            nullable_text_orv1_envelope(email),
+            text_orv1_envelope(username),
+        ]
+        .concat();
+        let output = machine
+            .run_as_orna_with_stdin(
+                &["raw-call", create, p_create_email, p_create_username],
+                &input,
+            )
+            .expect("create unique Text account");
+        parse_reference_envelope(
+            &require_value_success(label, output)
+                .expect("unique Text account creation must succeed")
+                .stdout,
+        )
+        .expect("account creation must return one canonical Reference")
+    };
+    let update = |function: &str,
+                  value_parameter: &str,
+                  account_parameter: &str,
+                  value: Option<&str>,
+                  account: &OrvReference,
+                  label: &'static str| {
+        let input = [
+            nullable_text_orv1_envelope(value),
+            reference_orv1_envelope(account.type_id, account.object),
+        ]
+        .concat();
+        let output = machine
+            .run_as_orna_with_stdin(
+                &["raw-call", function, value_parameter, account_parameter],
+                &input,
+            )
+            .expect("update selected unique Text account");
+        let output = require_value_success(label, output).expect("selected update must succeed");
+        assert_eq!(
+            output.stdout,
+            reference_orv1_envelope(account.type_id, account.object),
+            "successful selected update must return its exact account reference"
+        );
+    };
+    let read_accounts = |label: &'static str| {
+        let output = machine
+            .run_as_orna(&["raw-call", read])
+            .expect("read unique Text accounts");
+        let output = require_value_success(label, output).expect("account reader must succeed");
+        decode_unique_text_accounts(&output.stdout).expect(
+            "account reader must emit complete canonical Reference, nullable Text, and Text rows",
+        )
+    };
+
+    let nullable_a = create_account(None, "nullable-a", "create nullable account A");
+    let nullable_b = create_account(None, "nullable-b", "create nullable account B");
+    let baseline = create_account(
+        Some("exact@example.test"),
+        "baseline",
+        "create exact baseline account",
+    );
+    let variants = [
+        ("EXACT@example.test", "case"),
+        (" exact@example.test ", "whitespace"),
+        ("line\nending@example.test", "line-feed"),
+        ("line\r\nending@example.test", "carriage-return-line-feed"),
+        ("caf\u{e9}@example.test", "nfc"),
+        ("cafe\u{301}@example.test", "nfd"),
+        ("", "empty"),
+    ];
+    let variant_accounts = variants
+        .iter()
+        .map(|(email, username)| {
+            create_account(Some(email), username, "create byte-distinct account")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        read_accounts("read initial unique Text accounts").len(),
+        10,
+        "two nullable NULLs and every byte-distinct value must store independently"
+    );
+
+    let duplicate_insert = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", create, p_create_email, p_create_username],
+            &[
+                text_orv1_envelope("new@example.test"),
+                text_orv1_envelope("baseline"),
+            ]
+            .concat(),
+        )
+        .expect("attempt duplicate required Text insert");
+    assert_exact_raw_call_failure(
+        "orna raw-call create_account duplicate required Text",
+        duplicate_insert,
+        "raw call failed: INTERNAL_FAILURE\n",
+    )
+    .expect("duplicate required Text insert must remain publicly redacted");
+    assert_eq!(
+        read_accounts("read after duplicate required insert").len(),
+        10,
+        "failed insert must roll back"
+    );
+
+    update(
+        update_email,
+        p_update_email,
+        p_update_email_account,
+        Some("updated@example.test"),
+        &nullable_a,
+        "update selected nullable account",
+    );
+    let duplicate_email_update = machine
+        .run_as_orna_with_stdin(
+            &[
+                "raw-call",
+                update_email,
+                p_update_email,
+                p_update_email_account,
+            ],
+            &[
+                text_orv1_envelope("exact@example.test"),
+                reference_orv1_envelope(nullable_b.type_id, nullable_b.object),
+            ]
+            .concat(),
+        )
+        .expect("attempt duplicate nullable Text update");
+    assert_exact_raw_call_failure(
+        "orna raw-call update_account_email duplicate nullable Text",
+        duplicate_email_update,
+        "raw call failed: INTERNAL_FAILURE\n",
+    )
+    .expect("duplicate nullable Text update must remain publicly redacted");
+    let duplicate_username_update = machine
+        .run_as_orna_with_stdin(
+            &[
+                "raw-call",
+                update_username,
+                p_update_username,
+                p_update_username_account,
+            ],
+            &[
+                text_orv1_envelope("baseline"),
+                reference_orv1_envelope(variant_accounts[0].type_id, variant_accounts[0].object),
+            ]
+            .concat(),
+        )
+        .expect("attempt duplicate required Text update");
+    assert_exact_raw_call_failure(
+        "orna raw-call update_account_username duplicate required Text",
+        duplicate_username_update,
+        "raw call failed: INTERNAL_FAILURE\n",
+    )
+    .expect("duplicate required Text update must remain publicly redacted");
+    update(
+        update_email,
+        p_update_email,
+        p_update_email_account,
+        Some("exact@example.test"),
+        &baseline,
+        "self-update exact unique Text",
+    );
+    assert_unique_text_public_rows(
+        &read_accounts("read after unique Text failures"),
+        &nullable_a,
+        &nullable_b,
+        &baseline,
+        &variant_accounts,
+        "case",
+    );
+
+    let replay = require_success(
+        "orna source apply exact unique Text replay",
+        machine
+            .run_as_orna(&["source", "apply", FIXTURE_PATH])
+            .expect("replay unique Text source"),
+    )
+    .expect("exact unique Text replay must succeed");
+    assert!(
+        replay.stderr.is_empty(),
+        "replay must keep standard error empty"
+    );
+    assert_eq!(
+        parse_apply_document(&replay.stdout)
+            .expect("replay JSON must parse")
+            .functions,
+        document.functions,
+        "exact replay must retain every function and ParameterId without regrant"
+    );
+
+    machine
+        .write_fixture(&renamed)
+        .expect("replace with renamed unique Text fixture");
+    let renamed_apply = require_success(
+        "orna source apply renamed unique Text",
+        machine
+            .run_as_orna(&["source", "apply", FIXTURE_PATH])
+            .expect("apply renamed unique Text source"),
+    )
+    .expect("semantic unique Text rename must succeed");
+    let renamed_document =
+        parse_apply_document(&renamed_apply.stdout).expect("renamed JSON must parse");
+    assert_ne!(
+        renamed_document.source_revision, document.source_revision,
+        "rename must change source revision"
+    );
+    assert_ne!(
+        renamed_document.catalogue_revision, document.catalogue_revision,
+        "rename must change catalogue revision"
+    );
+    assert_eq!(
+        renamed_document.functions, document.functions,
+        "rename must retain all public function and ParameterId identities"
+    );
+    assert_unique_text_public_rows(
+        &read_accounts("read rows after semantic rename"),
+        &nullable_a,
+        &nullable_b,
+        &baseline,
+        &variant_accounts,
+        "case",
+    );
+    let duplicate_after_rename = machine
+        .run_as_orna_with_stdin(
+            &[
+                "raw-call",
+                update_email,
+                p_update_email,
+                p_update_email_account,
+            ],
+            &[
+                text_orv1_envelope("exact@example.test"),
+                reference_orv1_envelope(nullable_b.type_id, nullable_b.object),
+            ]
+            .concat(),
+        )
+        .expect("attempt duplicate nullable Text update after rename");
+    assert_exact_raw_call_failure(
+        "orna raw-call update_account_email duplicate after semantic rename",
+        duplicate_after_rename,
+        "raw call failed: INTERNAL_FAILURE\n",
+    )
+    .expect("renamed unique Text field must retain public duplicate redaction");
+    assert_unique_text_public_rows(
+        &read_accounts("read rows after renamed duplicate"),
+        &nullable_a,
+        &nullable_b,
+        &baseline,
+        &variant_accounts,
+        "case",
+    );
+
+    machine
+        .restart_server()
+        .expect("restart installed unique Text server");
+    update(
+        update_username,
+        p_update_username,
+        p_update_username_account,
+        Some("case-after-restart"),
+        &variant_accounts[0],
+        "update required Text after restart",
+    );
+    assert_unique_text_public_rows(
+        &read_accounts("read rows after restart"),
+        &nullable_a,
+        &nullable_b,
+        &baseline,
+        &variant_accounts,
+        "case-after-restart",
+    );
+    let after_restart = create_account(
+        Some("after-restart@example.test"),
+        "after-restart",
+        "create account through original identity after restart",
+    );
+    let final_rows = read_accounts("read original creator row after restart");
+    assert_eq!(
+        final_rows.len(),
+        11,
+        "the retained original create grant must add one account after restart"
+    );
+    let created = final_rows
+        .iter()
+        .find(|row| {
+            row.account.type_id == after_restart.type_id
+                && row.account.object == after_restart.object
+        })
+        .expect("public reader must return the account created after restart");
+    assert_eq!(
+        created.email.as_deref(),
+        Some("after-restart@example.test"),
+        "the original creator must retain its exact nullable Text binding"
+    );
+    assert_eq!(
+        created.username, "after-restart",
+        "the original creator must retain its exact required Text binding"
+    );
+}
+
+/// One public account row from the unique Text installed journey.
+struct UniqueTextAccountRow {
+    account: OrvReference,
+    email: Option<String>,
+    username: String,
+}
+
+/// Decode rows returned by `unique_text_test.read_accounts`.
+fn decode_unique_text_accounts(bytes: &[u8]) -> Option<Vec<UniqueTextAccountRow>> {
+    let mut rows = Vec::new();
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let account = parse_reference_envelope(bytes.get(offset..offset + 41)?).ok()?;
+        offset += 41;
+        let email_header = bytes.get(offset..offset + 25)?;
+        if &email_header[..4] != b"ORV1"
+            || email_header[5..20] != [0; 15]
+            || email_header[20] != 0x06
+        {
+            return None;
+        }
+        let email_length = u32::from_be_bytes(email_header[21..25].try_into().ok()?) as usize;
+        let email_end = offset.checked_add(25 + email_length)?;
+        let email = match email_header[4] {
+            0x00 if email_length == 0 => None,
+            0x06 => Some(String::from_utf8(bytes.get(offset + 25..email_end)?.to_vec()).ok()?),
+            _ => return None,
+        };
+        offset = email_end;
+        let username_header = bytes.get(offset..offset + 25)?;
+        if &username_header[..4] != b"ORV1"
+            || username_header[4] != 0x06
+            || username_header[5..20] != [0; 15]
+            || username_header[20] != 0x06
+        {
+            return None;
+        }
+        let username_length = u32::from_be_bytes(username_header[21..25].try_into().ok()?) as usize;
+        let username_end = offset.checked_add(25 + username_length)?;
+        let username = String::from_utf8(bytes.get(offset + 25..username_end)?.to_vec()).ok()?;
+        offset = username_end;
+        rows.push(UniqueTextAccountRow {
+            account,
+            email,
+            username,
+        });
+    }
+    Some(rows)
+}
+
+/// Require the observable account set after an allowed or rejected mutation.
+fn assert_unique_text_public_rows(
+    rows: &[UniqueTextAccountRow],
+    nullable_a: &OrvReference,
+    nullable_b: &OrvReference,
+    baseline: &OrvReference,
+    variants: &[OrvReference],
+    case_username: &str,
+) {
+    assert_eq!(
+        rows.len(),
+        10,
+        "the public reader must retain every stored account"
+    );
+    let row = |account: &OrvReference| {
+        rows.iter()
+            .find(|row| {
+                row.account.object == account.object && row.account.type_id == account.type_id
+            })
+            .expect("public reader must retain the selected account")
+    };
+    assert_eq!(
+        row(nullable_a).email.as_deref(),
+        Some("updated@example.test")
+    );
+    assert_eq!(row(nullable_a).username, "nullable-a");
+    assert_eq!(row(nullable_b).email, None);
+    assert_eq!(row(nullable_b).username, "nullable-b");
+    assert_eq!(row(baseline).email.as_deref(), Some("exact@example.test"));
+    assert_eq!(row(baseline).username, "baseline");
+    for (account, (email, username)) in variants.iter().zip([
+        ("EXACT@example.test", case_username),
+        (" exact@example.test ", "whitespace"),
+        ("line\nending@example.test", "line-feed"),
+        ("line\r\nending@example.test", "carriage-return-line-feed"),
+        ("caf\u{e9}@example.test", "nfc"),
+        ("cafe\u{301}@example.test", "nfd"),
+        ("", "empty"),
+    ]) {
+        assert_eq!(row(account).email.as_deref(), Some(email));
+        assert_eq!(row(account).username, username);
+    }
+}
+
 /// One decoded ORV1 reference envelope, or one typed NULL whose nominal type
 /// is a reference to the given object type.
 struct OrvReferenceOrNull {
@@ -7523,6 +8088,25 @@ fn text_orv1_envelope(text: &str) -> Vec<u8> {
     bytes.extend_from_slice(&(text.len() as u32).to_be_bytes());
     bytes.extend_from_slice(text.as_bytes());
     bytes
+}
+
+/// The canonical `ORV1` envelope for one nullable UTF-8 text value.
+///
+/// `None` is a typed NULL with the standard CHARACTER LARGE OBJECT identity.
+/// `Some` retains the exact canonical Text envelope.
+fn nullable_text_orv1_envelope(text: Option<&str>) -> Vec<u8> {
+    match text {
+        Some(text) => text_orv1_envelope(text),
+        None => {
+            let mut bytes = Vec::with_capacity(25);
+            bytes.extend_from_slice(b"ORV1");
+            bytes.push(0x00);
+            bytes.extend_from_slice(&[0; 15]);
+            bytes.push(0x06);
+            bytes.extend_from_slice(&0_u32.to_be_bytes());
+            bytes
+        }
+    }
 }
 
 /// The canonical `ORV1` envelope for one arbitrary byte value.
