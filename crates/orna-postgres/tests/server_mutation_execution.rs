@@ -236,6 +236,53 @@ const RAW_REFERENCE_UPDATE_SOURCE: &str = "CREATE SCHEMA raw_reference_test;\n\
     SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n\
     AS SELECT probe.linked FROM raw_reference_test.probe probe;\n";
 
+// ADR 0050 keeps this fixture separate from the ADR 0041 constant UPDATE
+// fixture. The scalar selector is declared after the value on purpose: calls
+// below supply it first and therefore prove binding by ParameterId.
+#[cfg(feature = "test-hooks")]
+const RAW_REFERENCE_VALUE_UPDATE_SOURCE: &str = "CREATE SCHEMA raw_reference_value_update;\n\
+    CREATE TYPE raw_reference_value_update.probe AS OBJECT (\n\
+      stored TEXT NOT NULL, marker BOOLEAN NOT NULL, linked REF raw_reference_value_update.probe\n\
+    );\n\
+    CREATE SERVER FUNCTION raw_reference_value_update.create_probe(p_stored TEXT)\n\
+    RETURNS ROWS (created REF raw_reference_value_update.probe)\n\
+    SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE\n\
+    AS INSERT INTO raw_reference_value_update.probe AS made (stored, marker)\n\
+    VALUES (p_stored, TRUE) RETURNING REF(made);\n\
+    CREATE SERVER FUNCTION raw_reference_value_update.update_text(\n\
+      p_value TEXT, p_probe REF raw_reference_value_update.probe\n\
+    ) RETURNS ROWS (updated REF raw_reference_value_update.probe)\n\
+    SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE\n\
+    AS UPDATE raw_reference_value_update.probe AS changed\n\
+    SET stored = p_value WHERE REF(changed) = p_probe RETURNING REF(changed);\n\
+    CREATE SERVER FUNCTION raw_reference_value_update.update_link(\n\
+      p_value REF raw_reference_value_update.probe,\n\
+      p_probe REF raw_reference_value_update.probe\n\
+    ) RETURNS ROWS (updated REF raw_reference_value_update.probe)\n\
+    SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE\n\
+    AS UPDATE raw_reference_value_update.probe AS changed\n\
+    SET linked = p_value WHERE REF(changed) = p_probe RETURNING REF(changed);\n\
+    CREATE SERVER FUNCTION raw_reference_value_update.update_unused(\n\
+      p_value TEXT, p_probe REF raw_reference_value_update.probe\n\
+    ) RETURNS ROWS (updated REF raw_reference_value_update.probe)\n\
+    SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE\n\
+    AS UPDATE raw_reference_value_update.probe AS changed\n\
+    SET marker = FALSE WHERE REF(changed) = p_probe RETURNING REF(changed);\n\
+    CREATE SERVER FUNCTION raw_reference_value_update.update_extra(\n\
+      p_value TEXT, p_probe REF raw_reference_value_update.probe, p_extra TEXT\n\
+    ) RETURNS ROWS (updated REF raw_reference_value_update.probe)\n\
+    SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE\n\
+    AS UPDATE raw_reference_value_update.probe AS changed\n\
+    SET stored = p_value WHERE REF(changed) = p_probe RETURNING REF(changed);\n\
+    CREATE SERVER FUNCTION raw_reference_value_update.read_stored()\n\
+    RETURNS ROWS (stored TEXT)\n\
+    SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n\
+    AS SELECT probe.stored FROM raw_reference_value_update.probe probe;\n\
+    CREATE SERVER FUNCTION raw_reference_value_update.read_links()\n\
+    RETURNS ROWS (linked REF raw_reference_value_update.probe)\n\
+    SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n\
+    AS SELECT probe.linked FROM raw_reference_value_update.probe probe;\n";
+
 #[cfg(feature = "test-hooks")]
 const SERVICE_UID: u32 = 61_018;
 
@@ -3136,6 +3183,212 @@ async fn authenticated_raw_argument_pair_binds_two_active_parameters_and_audits(
         Ok(())
     })
     .await
+}
+
+/// ADR 0050 RED tracer for a two-argument raw UPDATE. The compiler closes
+/// nullable and defaulted mutation parameters before this live boundary; this
+/// test covers every remaining public pair shape and the savepoint path.
+#[cfg(feature = "test-hooks")]
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service and ADR 0050 dispatch"]
+async fn authenticated_raw_reference_value_update_binds_by_parameter_id_and_audits()
+-> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel: PostgresKernel = database.connection_string().parse()?;
+        kernel.bootstrap().await?;
+        let empty = kernel.recover().await?;
+        let upgrade = orna_standard::prepare_standard_upgrade(&empty)?;
+        let standard = kernel.apply_standard_upgrade(&upgrade).await?;
+        let applied = kernel.apply(&standard_application_candidate(
+            RAW_REFERENCE_VALUE_UPDATE_SOURCE, &standard, &upgrade,
+        )?).await?;
+        let pair = applied.pair();
+        let object = applied.catalogue().object_types().iter().find(|object| {
+            name_is(object.name().parts(), &["raw_reference_value_update", "probe"])
+        }).ok_or_else(|| failure("raw reference value probe is absent"))?.id();
+        let function = |name| raw_function_id(&applied, &["raw_reference_value_update", name]);
+        let create = function("create_probe")?;
+        let update_text = function("update_text")?;
+        let update_link = function("update_link")?;
+        let update_unused = function("update_unused")?;
+        let update_extra = function("update_extra")?;
+        let read_stored = function("read_stored")?;
+        let read_links = function("read_links")?;
+        let parameter = |function, name| -> TestResult<ParameterId> {
+            applied.catalogue().function_by_id(function)
+                .and_then(|definition| definition.parameter_by_name(name))
+                .map(|parameter| parameter.id())
+                .ok_or_else(|| failure(format!("{name} parameter is absent")))
+        };
+        let text_value = parameter(update_text, "p_value")?;
+        let text_selector = parameter(update_text, "p_probe")?;
+        let link_value = parameter(update_link, "p_value")?;
+        let link_selector = parameter(update_link, "p_probe")?;
+        let unused_value = parameter(update_unused, "p_value")?;
+        let unused_selector = parameter(update_unused, "p_probe")?;
+        let extra_value = parameter(update_extra, "p_value")?;
+        let extra_selector = parameter(update_extra, "p_probe")?;
+        let revision = applied.catalogue().function_by_id(update_text)
+            .ok_or_else(|| failure("raw text UPDATE is absent"))?.current_revision();
+        let mut wrong_bytes = text_selector.to_bytes();
+        wrong_bytes[0] ^= 1;
+        let wrong = ParameterId::from_bytes(wrong_bytes);
+        kernel.install_catalogue_health_service(SERVICE_UID).await?;
+        let session = kernel.authenticate_local_peer(SERVICE_UID).await?;
+        for target in [create, read_stored, read_links] {
+            kernel.grant_catalogue_health_service_execute(pair, target).await?;
+        }
+        let first = create_raw_reference_value_update_probe(&kernel, &session, create, "seed").await?;
+        let second = create_raw_reference_value_update_probe(&kernel, &session, create, "seed").await?;
+        require(first != second, "the two raw value UPDATE rows must differ")?;
+
+        // Denial precedes selector and value inspection.
+        let denied = kernel.dispatch_authenticated_raw_call_with_arguments(&session, update_text,
+            &[FunctionArgument::new(wrong, first.clone())?, FunctionArgument::new(text_value, RuntimeValue::Text("denied".into()))?]
+        ).await.expect_err("ungranted pair UPDATE must deny before facts");
+        require(matches!(denied, PostgresKernelError::RawExecuteDenied { pair: actual, function, .. }
+            if actual == pair && function == update_text), "pair UPDATE denial differs")?;
+        require(read_probe_values(&kernel, &session, read_stored).await? == [RuntimeValue::Text("seed".into()), RuntimeValue::Text("seed".into())], "denied pair UPDATE changed a row")?;
+        for target in [update_text, update_link, update_unused, update_extra] {
+            kernel.grant_catalogue_health_service_execute(pair, target).await?;
+        }
+        let unavailable = |error: PostgresKernelError, target| require(matches!(error,
+            PostgresKernelError::RawCallTargetUnavailable { function, .. } if function == target),
+            "allowed invalid raw value UPDATE must be unavailable");
+        // Wrong, duplicate, missing, extra, mistyped, and unused public shapes
+        // close after the allowed audit. The compiler rejects nullable,
+        // defaulted, and indirect record-constructor UPDATE values before this
+        // fixture reaches PostgreSQL.
+        unavailable(kernel.dispatch_authenticated_raw_call_with_arguments(&session, update_text,
+            &[FunctionArgument::new(wrong, first.clone())?, FunctionArgument::new(text_value, RuntimeValue::Text("x".into()))?]).await.expect_err("wrong parameter must close"), update_text)?;
+        unavailable(kernel.dispatch_authenticated_raw_call_with_arguments(&session, update_text,
+            &[FunctionArgument::new(text_selector, first.clone())?, FunctionArgument::new(text_selector, second.clone())?]).await.expect_err("duplicate parameter must close"), update_text)?;
+        unavailable(kernel.dispatch_authenticated_raw_call_with_arguments(&session, update_text,
+            &[FunctionArgument::new(text_selector, first.clone())?]).await.expect_err("missing value must close"), update_text)?;
+        unavailable(kernel.dispatch_authenticated_raw_call_with_arguments(&session, update_extra,
+            &[FunctionArgument::new(extra_selector, first.clone())?, FunctionArgument::new(extra_value, RuntimeValue::Text("x".into()))?]).await.expect_err("extra declaration must close"), update_extra)?;
+        unavailable(kernel.dispatch_authenticated_raw_call_with_arguments(&session, update_text,
+            &[FunctionArgument::new(text_selector, RuntimeValue::Text("not-a-reference".into()))?, FunctionArgument::new(text_value, first.clone())?]).await.expect_err("mistyped pair must close"), update_text)?;
+        unavailable(kernel.dispatch_authenticated_raw_call_with_arguments(&session, update_unused,
+            &[FunctionArgument::new(unused_selector, first.clone())?, FunctionArgument::new(unused_value, RuntimeValue::Text("unused".into()))?]).await.expect_err("unused value must close"), update_unused)?;
+
+        // Supplied order is reverse declaration order. ParameterId selects the
+        // Reference and scalar slots, returns the exact selector, and updates
+        // only one row.
+        let updated = kernel.dispatch_authenticated_raw_call_with_arguments(&session, update_text,
+            &[FunctionArgument::new(text_selector, first.clone())?, FunctionArgument::new(text_value, RuntimeValue::Text("changed".into()))?]).await?;
+        require(matches!(updated, AuthenticatedRawCallResult::Server(values) if values == [first.clone()]), "scalar pair UPDATE result differs")?;
+        let stored = read_probe_values(&kernel, &session, read_stored).await?;
+        require(stored.len() == 2 && stored.iter().filter(|value| **value == RuntimeValue::Text("changed".into())).count() == 1 && stored.iter().filter(|value| **value == RuntimeValue::Text("seed".into())).count() == 1, "scalar pair UPDATE did not select one row")?;
+        let RuntimeValue::Reference { object: first_object, .. } = &first else { return Err(failure("first raw value row is not a reference")); };
+        let RuntimeValue::Reference { object: second_object, .. } = &second else { return Err(failure("second raw value row is not a reference")); };
+        let absent_object = [[7; 16], [8; 16], [9; 16]].into_iter().map(ObjectId::from_bytes)
+            .find(|candidate| candidate != first_object && candidate != second_object)
+            .ok_or_else(|| failure("no deterministic absent object identity remains"))?;
+        let absent = RuntimeValue::Reference { target: object, object: absent_object };
+        let empty = kernel.dispatch_authenticated_raw_call_with_arguments(&session, update_text,
+            &[FunctionArgument::new(text_value, RuntimeValue::Text("absent".into()))?, FunctionArgument::new(text_selector, absent)?]).await?;
+        require(matches!(empty, AuthenticatedRawCallResult::Server(values) if values.is_empty()), "absent selector must complete empty")?;
+        let linked = kernel.dispatch_authenticated_raw_call_with_arguments(&session, update_link,
+            &[FunctionArgument::new(link_selector, second.clone())?, FunctionArgument::new(link_value, first.clone())?]).await?;
+        require(matches!(linked, AuthenticatedRawCallResult::Server(values) if values == [second.clone()]), "Reference value pair UPDATE result differs")?;
+        require(read_probe_values(&kernel, &session, read_links).await?.iter().filter(|value| **value == first).count() == 1, "Reference value pair UPDATE did not select one row")?;
+        unavailable(kernel.dispatch_authenticated_raw_call_with_arguments(&session, update_text,
+            &[FunctionArgument::new(text_selector, first.clone())?, FunctionArgument::new(text_value, RuntimeValue::Text("nul\0text".into()))?]).await.expect_err("U+0000 must close"), update_text)?;
+        let after_nul = read_probe_values(&kernel, &session, read_stored).await?;
+        require(after_nul.iter().filter(|value| **value == RuntimeValue::Text("changed".into())).count() == 1, "U+0000 changed a row")?;
+
+        let reached = Arc::new(tokio::sync::Barrier::new(2));
+        let resume = Arc::new(tokio::sync::Barrier::new(2));
+        let executor = kernel.clone(); let execution_session = session.clone();
+        let arguments = vec![FunctionArgument::new(text_selector, first.clone())?, FunctionArgument::new(text_value, RuntimeValue::Text("rollback".into()))?];
+        let execution_reached = reached.clone();
+        let execution_resume = resume.clone();
+        let execution = tokio::spawn(async move { executor.dispatch_authenticated_raw_call_with_arguments_and_test_barrier(&execution_session, update_text, &arguments, execution_reached, execution_resume).await });
+        let triggered = finish_triggered_failure(&database, object, TriggerKind::AfterUpdate, execution,
+            reached, resume, "raw value UPDATE").await;
+        let triggered = triggered?;
+        let PostgresKernelError::ServerUpdate(ServerUpdateError::NotCommitted {
+            context,
+            source,
+        }) = triggered else {
+            return Err(failure("raw value UPDATE operational failure is not internal"));
+        };
+        require_context(context, pair, update_text, revision)?;
+        require(matches!(source.as_ref(), ServerMutationError::Database { source }
+            if source.as_db_error().is_some_and(|error| error.code() == &SqlState::RAISE_EXCEPTION)),
+            "raw value UPDATE operational failure lost SQLSTATE  P0001")?;
+        let after_failure = read_probe_values(&kernel, &session, read_stored).await?;
+        require(after_failure.iter().filter(|value| **value == RuntimeValue::Text("changed".into())).count() == 1,
+            "operational raw value UPDATE failure did not roll back")?;
+        let audits = kernel.recover_security_audit_events().await?;
+        let expected = [
+            (create, SecurityAuditOutcome::Allowed), (create, SecurityAuditOutcome::Allowed),
+            (update_text, SecurityAuditOutcome::Denied), (read_stored, SecurityAuditOutcome::Allowed),
+            (update_text, SecurityAuditOutcome::Allowed), (update_text, SecurityAuditOutcome::Allowed),
+            (update_text, SecurityAuditOutcome::Allowed), (update_extra, SecurityAuditOutcome::Allowed),
+            (update_text, SecurityAuditOutcome::Allowed), (update_unused, SecurityAuditOutcome::Allowed),
+            (update_text, SecurityAuditOutcome::Allowed), (read_stored, SecurityAuditOutcome::Allowed),
+            (update_text, SecurityAuditOutcome::Allowed), (update_link, SecurityAuditOutcome::Allowed),
+            (read_links, SecurityAuditOutcome::Allowed), (update_text, SecurityAuditOutcome::Allowed),
+            (read_stored, SecurityAuditOutcome::Allowed), (update_text, SecurityAuditOutcome::Allowed),
+            (read_stored, SecurityAuditOutcome::Allowed),
+        ];
+        require(audits.len() == expected.len() + 1
+            && audits[0].decision().kind() == SecurityAuditKind::Authentication
+            && audits[0].decision().outcome() == SecurityAuditOutcome::Allowed
+            && audits[1..].iter().zip(expected).all(|(event, (function, outcome))|
+                event.decision().kind() == SecurityAuditKind::Execute
+                    && event.decision().outcome() == outcome
+                    && event.decision().target() == Some(InvocationTarget::new(function, pair))),
+            "raw reference value UPDATE audit sequence differs")?;
+        Ok(())
+    }).await
+}
+
+#[cfg(feature = "test-hooks")]
+async fn create_raw_reference_value_update_probe(
+    kernel: &PostgresKernel,
+    session: &AuthenticatedSession,
+    create: FunctionId,
+    stored: &str,
+) -> TestResult<RuntimeValue> {
+    let parameter = kernel
+        .recover()
+        .await?
+        .catalogue()
+        .function_by_id(create)
+        .and_then(|definition| definition.parameter_by_name("p_stored"))
+        .map(|parameter| parameter.id())
+        .ok_or_else(|| failure("raw reference value create parameter is absent"))?;
+    let created = kernel
+        .dispatch_authenticated_raw_call_with_arguments(
+            session,
+            create,
+            &[FunctionArgument::new(
+                parameter,
+                RuntimeValue::Text(stored.into()),
+            )?],
+        )
+        .await?;
+    match created {
+        AuthenticatedRawCallResult::Server(values) if values.len() == 1 => match &values[0] {
+            RuntimeValue::Reference { target, object }
+                if *object != ObjectId::from_bytes([0; 16]) =>
+            {
+                Ok(RuntimeValue::Reference {
+                    target: *target,
+                    object: *object,
+                })
+            }
+            _ => Err(failure(
+                "raw reference value create did not return a real reference",
+            )),
+        },
+        other => Err(failure(format!(
+            "raw reference value create must return one Server value, got {other:?}"
+        ))),
+    }
 }
 
 #[cfg(feature = "test-hooks")]
