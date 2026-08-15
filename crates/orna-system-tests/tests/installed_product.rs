@@ -8986,6 +8986,34 @@ fn decode_text_reference_pair_envelopes(bytes: &[u8]) -> Option<Vec<(String, Orv
     Some(pairs)
 }
 
+/// Decode exactly one row from the ADR 0050 public probe reader.
+///
+/// The row is a Reference selector, one Text cell, and one nullable Reference
+/// cell. This rejects a wrong tag, nominal type, length, malformed UTF-8, or
+/// any trailing value.
+fn decode_reference_value_update_probe(
+    bytes: &[u8],
+) -> Option<(OrvReference, String, OrvReferenceOrNull)> {
+    let probe = parse_reference_envelope(bytes.get(..41)?).ok()?;
+    let text_header = bytes.get(41..66)?;
+    if &text_header[..4] != b"ORV1"
+        || text_header[4] != 0x06
+        || text_header[5..20] != [0; 15]
+        || text_header[20] != 0x06
+    {
+        return None;
+    }
+    let text_length = u32::from_be_bytes(text_header[21..25].try_into().ok()?) as usize;
+    let text_end = 66usize.checked_add(text_length)?;
+    let text = String::from_utf8(bytes.get(66..text_end)?.to_vec()).ok()?;
+    let mut linked_values = decode_reference_or_null_envelopes(bytes.get(text_end..)?)?.into_iter();
+    let linked = linked_values.next()?;
+    if linked_values.next().is_some() {
+        return None;
+    }
+    Some((probe, text, linked))
+}
+
 /// Prove ADR 0049 through the installed public raw-call product surface.
 ///
 /// The journey discovers exact function and ParameterId tokens from source
@@ -9503,5 +9531,571 @@ fn installed_argument_pairs_bind_by_identity_across_replay_and_restart() {
             "second anchor".to_string(),
         ],
         "Text message reader must return the exact unordered stored multiset"
+    );
+}
+
+/// Prove ADR 0050 through the installed public raw-call product surface.
+///
+/// The journey discovers both parameter identities of each value UPDATE,
+/// denies every call before a grant, then uses the original identities to
+/// update only selected rows. It uses reverse token and envelope order for a
+/// Text value and a Reference value. Exact source replay and restart retain
+/// the discovery, grants, references, and stored fields without a regrant.
+#[test]
+#[ignore = "requires Docker, ORNA_SYSTEM_TEST_DEBIAN_PACKAGE, and the ADR 0050 raw reference value update commands in the installed orna executable"]
+fn installed_raw_reference_value_update_binds_by_identity_across_replay_and_restart() {
+    let package = std::env::var("ORNA_SYSTEM_TEST_DEBIAN_PACKAGE")
+        .expect("ORNA_SYSTEM_TEST_DEBIAN_PACKAGE must point at the reproduced .deb package");
+    let artifact = FrozenPackageArtifact::new(PackageFormat::Debian, &package)
+        .expect("freeze the reproduced Debian package");
+    let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures")
+        .join("product_test_reference_value_update.orna");
+    let fixture = fs::read(&fixture_path).expect("read the checked-in value update fixture");
+    let machine = InstalledMachine::start(&artifact, &fixture)
+        .expect("start the installed Debian test machine");
+
+    let apply = machine
+        .run_as_orna(&["source", "apply", FIXTURE_PATH])
+        .expect("apply the installed value update fixture");
+    let apply = require_success("orna source apply", apply).expect("source apply must succeed");
+    assert!(
+        apply.stderr.is_empty(),
+        "source apply must keep standard error empty"
+    );
+    let document = parse_apply_document(&apply.stdout).expect("source apply JSON must parse");
+    let expected_order = [
+        vec![
+            "reference_value_update_test".to_string(),
+            "create_anchor".to_string(),
+        ],
+        vec![
+            "reference_value_update_test".to_string(),
+            "create_probe".to_string(),
+        ],
+        vec![
+            "reference_value_update_test".to_string(),
+            "read_anchor".to_string(),
+        ],
+        vec![
+            "reference_value_update_test".to_string(),
+            "read_probe".to_string(),
+        ],
+        vec![
+            "reference_value_update_test".to_string(),
+            "update_probe_link".to_string(),
+        ],
+        vec![
+            "reference_value_update_test".to_string(),
+            "update_probe_stored".to_string(),
+        ],
+    ];
+    assert_eq!(
+        document
+            .functions
+            .iter()
+            .map(|entry| entry.names().to_vec())
+            .collect::<Vec<_>>(),
+        expected_order,
+        "apply must report every value-update function in canonical name order"
+    );
+    let create_anchor = document
+        .function_id(&["reference_value_update_test", "create_anchor"])
+        .expect("apply must report create_anchor");
+    let create_probe = document
+        .function_id(&["reference_value_update_test", "create_probe"])
+        .expect("apply must report create_probe");
+    let read_anchor = document
+        .function_id(&["reference_value_update_test", "read_anchor"])
+        .expect("apply must report read_anchor");
+    let read_probe = document
+        .function_id(&["reference_value_update_test", "read_probe"])
+        .expect("apply must report read_probe");
+    let update_probe_link = document
+        .function_id(&["reference_value_update_test", "update_probe_link"])
+        .expect("apply must report update_probe_link");
+    let update_probe_stored = document
+        .function_id(&["reference_value_update_test", "update_probe_stored"])
+        .expect("apply must report update_probe_stored");
+    let assert_parameter_names = |function: &[&str], expected: &[&str]| {
+        let entry = document
+            .functions
+            .iter()
+            .find(|entry| {
+                entry
+                    .names()
+                    .iter()
+                    .map(String::as_str)
+                    .eq(function.iter().copied())
+            })
+            .expect("apply must report the function entry");
+        let actual = entry
+            .parameters()
+            .iter()
+            .map(|parameter| parameter.name())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual, expected,
+            "each function must report its complete ordered parameter declaration"
+        );
+    };
+    for (function, parameters) in [
+        (
+            &["reference_value_update_test", "create_anchor"][..],
+            &[][..],
+        ),
+        (
+            &["reference_value_update_test", "create_probe"][..],
+            &["p_stored"][..],
+        ),
+        (
+            &["reference_value_update_test", "read_anchor"][..],
+            &["p_anchor"][..],
+        ),
+        (
+            &["reference_value_update_test", "read_probe"][..],
+            &["p_probe"][..],
+        ),
+        (
+            &["reference_value_update_test", "update_probe_link"][..],
+            &["p_anchor", "p_probe"][..],
+        ),
+        (
+            &["reference_value_update_test", "update_probe_stored"][..],
+            &["p_stored", "p_probe"][..],
+        ),
+    ] {
+        assert_parameter_names(function, parameters);
+    }
+    let p_create_stored = document
+        .parameter_id(&["reference_value_update_test", "create_probe"], "p_stored")
+        .expect("apply must report create_probe.p_stored");
+    let p_read_anchor = document
+        .parameter_id(&["reference_value_update_test", "read_anchor"], "p_anchor")
+        .expect("apply must report read_anchor.p_anchor");
+    let p_read_probe = document
+        .parameter_id(&["reference_value_update_test", "read_probe"], "p_probe")
+        .expect("apply must report read_probe.p_probe");
+    let p_link_anchor = document
+        .parameter_id(
+            &["reference_value_update_test", "update_probe_link"],
+            "p_anchor",
+        )
+        .expect("apply must report update_probe_link.p_anchor");
+    let p_link_probe = document
+        .parameter_id(
+            &["reference_value_update_test", "update_probe_link"],
+            "p_probe",
+        )
+        .expect("apply must report update_probe_link.p_probe");
+    let p_stored_value = document
+        .parameter_id(
+            &["reference_value_update_test", "update_probe_stored"],
+            "p_stored",
+        )
+        .expect("apply must report update_probe_stored.p_stored");
+    let p_stored_probe = document
+        .parameter_id(
+            &["reference_value_update_test", "update_probe_stored"],
+            "p_probe",
+        )
+        .expect("apply must report update_probe_stored.p_probe");
+    let parameter_ids = [
+        p_create_stored,
+        p_read_anchor,
+        p_read_probe,
+        p_link_anchor,
+        p_link_probe,
+        p_stored_value,
+        p_stored_probe,
+    ];
+    for (index, left) in parameter_ids.iter().enumerate() {
+        for right in &parameter_ids[index + 1..] {
+            assert_ne!(left, right, "every discovered ParameterId must be distinct");
+        }
+    }
+
+    let denied_calls = [
+        (create_anchor, Vec::new()),
+        (create_probe, text_orv1_envelope("denied")),
+        (read_anchor, reference_orv1_envelope([0x10; 16], [0x11; 16])),
+        (read_probe, reference_orv1_envelope([0x12; 16], [0x13; 16])),
+        (
+            update_probe_link,
+            [
+                reference_orv1_envelope([0x14; 16], [0x15; 16]),
+                reference_orv1_envelope([0x16; 16], [0x17; 16]),
+            ]
+            .concat(),
+        ),
+        (
+            update_probe_stored,
+            [
+                text_orv1_envelope("denied"),
+                reference_orv1_envelope([0x18; 16], [0x19; 16]),
+            ]
+            .concat(),
+        ),
+    ];
+    for (function, input) in denied_calls {
+        let denied = if input.is_empty() {
+            machine.run_as_orna(&["raw-call", function])
+        } else if function == create_probe {
+            machine.run_as_orna_with_stdin(&["raw-call", function, p_create_stored], &input)
+        } else if function == read_anchor {
+            machine.run_as_orna_with_stdin(&["raw-call", function, p_read_anchor], &input)
+        } else if function == read_probe {
+            machine.run_as_orna_with_stdin(&["raw-call", function, p_read_probe], &input)
+        } else if function == update_probe_link {
+            machine.run_as_orna_with_stdin(
+                &["raw-call", function, p_link_anchor, p_link_probe],
+                &input,
+            )
+        } else {
+            machine.run_as_orna_with_stdin(
+                &["raw-call", function, p_stored_value, p_stored_probe],
+                &input,
+            )
+        }
+        .expect("run denied raw call");
+        assert_denied("raw call before grant", denied).expect("raw call must be denied");
+    }
+
+    for function in [create_anchor, create_probe, read_anchor, read_probe] {
+        let granted = machine
+            .run_as_orna(&["security", "grant-execute", function])
+            .expect("grant installed value-update function");
+        require_silent_success("orna security grant-execute", granted)
+            .expect("grant must succeed silently");
+    }
+
+    let create_probe_with_text = |text: &str, label: &'static str| {
+        let output = machine
+            .run_as_orna_with_stdin(
+                &["raw-call", create_probe, p_create_stored],
+                &text_orv1_envelope(text),
+            )
+            .expect("create probe with caller Text");
+        parse_reference_envelope(
+            &require_value_success(label, output)
+                .expect("probe creation must succeed")
+                .stdout,
+        )
+        .expect("probe creation must return one canonical Reference")
+    };
+    let first_probe = create_probe_with_text("first", "orna raw-call create_probe first");
+    let second_probe = create_probe_with_text("second", "orna raw-call create_probe second");
+    assert_eq!(
+        first_probe.type_id, second_probe.type_id,
+        "probes must have one target type"
+    );
+    assert_ne!(
+        first_probe.object, second_probe.object,
+        "probes must be distinct rows"
+    );
+    let create_anchor_reference = |label: &'static str| {
+        let output = machine
+            .run_as_orna(&["raw-call", create_anchor])
+            .expect("create anchor");
+        parse_reference_envelope(
+            &require_value_success(label, output)
+                .expect("anchor creation must succeed")
+                .stdout,
+        )
+        .expect("anchor creation must return one canonical Reference")
+    };
+    let first_anchor = create_anchor_reference("orna raw-call create_anchor first");
+    let second_anchor = create_anchor_reference("orna raw-call create_anchor second");
+    assert_eq!(
+        first_anchor.type_id, second_anchor.type_id,
+        "anchors must have one target type"
+    );
+    assert_ne!(
+        first_anchor.object, second_anchor.object,
+        "anchors must be distinct rows"
+    );
+
+    let denied_update = machine
+        .run_as_orna_with_stdin(
+            &[
+                "raw-call",
+                update_probe_stored,
+                p_stored_value,
+                p_stored_probe,
+            ],
+            &[
+                text_orv1_envelope("must not store"),
+                reference_orv1_envelope(first_probe.type_id, first_probe.object),
+            ]
+            .concat(),
+        )
+        .expect("run denied scalar update after creating probes");
+    assert_denied("scalar update before grant", denied_update)
+        .expect("ungranted scalar update must be denied");
+    for (probe, expected_stored) in [(&first_probe, "first"), (&second_probe, "second")] {
+        let output = machine
+            .run_as_orna_with_stdin(
+                &["raw-call", read_probe, p_read_probe],
+                &reference_orv1_envelope(probe.type_id, probe.object),
+            )
+            .expect("read probe after denied update");
+        let output = require_value_success("orna raw-call read_probe after denied update", output)
+            .expect("reader grant must remain usable");
+        let (selected, stored, linked) = decode_reference_value_update_probe(&output.stdout)
+            .expect("denied-update reader output must be one strict ORV1 row");
+        assert_eq!(
+            selected.object, probe.object,
+            "reader must retain the selected probe"
+        );
+        assert_eq!(
+            stored, expected_stored,
+            "denied update must leave the stored Text unchanged"
+        );
+        assert!(
+            linked.reference.is_none(),
+            "denied update must leave the nullable link unchanged"
+        );
+    }
+    for function in [update_probe_link, update_probe_stored] {
+        let granted = machine
+            .run_as_orna(&["security", "grant-execute", function])
+            .expect("grant installed value-update writer");
+        require_silent_success("orna security grant-execute writer", granted)
+            .expect("writer grant must succeed silently");
+    }
+
+    let updated_text = machine
+        .run_as_orna_with_stdin(
+            &[
+                "raw-call",
+                update_probe_stored,
+                p_stored_probe,
+                p_stored_value,
+            ],
+            &[
+                reference_orv1_envelope(first_probe.type_id, first_probe.object),
+                text_orv1_envelope("first updated"),
+            ]
+            .concat(),
+        )
+        .expect("update first probe with reverse Text parameter order");
+    let updated_text = require_value_success("orna raw-call update_probe_stored", updated_text)
+        .expect("Text update must succeed");
+    assert_eq!(
+        updated_text.stdout,
+        reference_orv1_envelope(first_probe.type_id, first_probe.object),
+        "Text update must return the exact selected probe Reference"
+    );
+    let updated_link = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", update_probe_link, p_link_probe, p_link_anchor],
+            &[
+                reference_orv1_envelope(second_probe.type_id, second_probe.object),
+                reference_orv1_envelope(first_anchor.type_id, first_anchor.object),
+            ]
+            .concat(),
+        )
+        .expect("update second probe with reverse Reference parameter order");
+    let updated_link = require_value_success("orna raw-call update_probe_link", updated_link)
+        .expect("Reference update must succeed");
+    assert_eq!(
+        updated_link.stdout,
+        reference_orv1_envelope(second_probe.type_id, second_probe.object),
+        "Reference update must return the exact selected probe Reference"
+    );
+
+    let assert_probe = |probe: &OrvReference,
+                        expected_stored: &str,
+                        expected_link: Option<&OrvReference>,
+                        label: &'static str| {
+        let output = machine
+            .run_as_orna_with_stdin(
+                &["raw-call", read_probe, p_read_probe],
+                &reference_orv1_envelope(probe.type_id, probe.object),
+            )
+            .expect("read selected probe");
+        let output = require_value_success(label, output).expect("probe reader must succeed");
+        let (reference, stored, linked) = decode_reference_value_update_probe(&output.stdout)
+            .expect("probe reader must emit one complete strict ORV1 row");
+        assert_eq!(
+            reference.type_id, probe.type_id,
+            "reader must return its selected probe type"
+        );
+        assert_eq!(
+            reference.object, probe.object,
+            "reader must return its selected probe identity"
+        );
+        assert_eq!(
+            stored, expected_stored,
+            "reader must return the exact stored Text"
+        );
+        match expected_link {
+            Some(expected) => {
+                let actual = linked
+                    .reference
+                    .expect("reader must return the assigned Reference");
+                assert_eq!(
+                    actual.type_id, expected.type_id,
+                    "reader must retain the assigned anchor type"
+                );
+                assert_eq!(
+                    actual.object, expected.object,
+                    "reader must retain the assigned anchor identity"
+                );
+            }
+            None => {
+                assert!(
+                    linked.reference.is_none(),
+                    "unassigned link must remain a typed NULL"
+                );
+                assert_eq!(
+                    linked.nominal_type_id, first_anchor.type_id,
+                    "typed NULL link must retain its anchor nominal type"
+                );
+            }
+        }
+    };
+    assert_probe(
+        &first_probe,
+        "first updated",
+        None,
+        "read first probe after Text update",
+    );
+    assert_probe(
+        &second_probe,
+        "second",
+        Some(&first_anchor),
+        "read second probe after Reference update",
+    );
+
+    let absent_object = [[0xa5; 16], [0x5a; 16], [0x3c; 16]]
+        .into_iter()
+        .find(|candidate| *candidate != first_probe.object && *candidate != second_probe.object)
+        .expect("one fixed absent selector candidate must differ from both observed probes");
+    let absent = machine
+        .run_as_orna_with_stdin(
+            &[
+                "raw-call",
+                update_probe_stored,
+                p_stored_value,
+                p_stored_probe,
+            ],
+            &[
+                text_orv1_envelope("absent must not create"),
+                reference_orv1_envelope(first_probe.type_id, absent_object),
+            ]
+            .concat(),
+        )
+        .expect("update an absent probe");
+    require_silent_success("orna raw-call update_probe_stored absent", absent)
+        .expect("an absent selector must complete with no value");
+    assert_probe(
+        &first_probe,
+        "first updated",
+        None,
+        "read first probe after absent update",
+    );
+    assert_probe(
+        &second_probe,
+        "second",
+        Some(&first_anchor),
+        "read second probe after absent update",
+    );
+
+    let replay = machine
+        .run_as_orna(&["source", "apply", FIXTURE_PATH])
+        .expect("replay installed value-update fixture");
+    let replay =
+        require_success("orna source apply replay", replay).expect("fixture replay must succeed");
+    assert!(
+        replay.stderr.is_empty(),
+        "fixture replay must keep standard error empty"
+    );
+    let replay_document = parse_apply_document(&replay.stdout).expect("replay JSON must parse");
+    assert_eq!(
+        replay_document.functions, document.functions,
+        "replay must preserve every function and ParameterId without regrant"
+    );
+    assert_probe(
+        &first_probe,
+        "first updated",
+        None,
+        "read first probe after replay",
+    );
+    assert_probe(
+        &second_probe,
+        "second",
+        Some(&first_anchor),
+        "read second probe after replay",
+    );
+
+    machine
+        .restart_server()
+        .expect("installed server must restart cleanly");
+    assert_probe(
+        &first_probe,
+        "first updated",
+        None,
+        "read first probe after restart",
+    );
+    assert_probe(
+        &second_probe,
+        "second",
+        Some(&first_anchor),
+        "read second probe after restart",
+    );
+    let after_restart = machine
+        .run_as_orna_with_stdin(
+            &[
+                "raw-call",
+                update_probe_stored,
+                p_stored_value,
+                p_stored_probe,
+            ],
+            &[
+                text_orv1_envelope("first after restart"),
+                reference_orv1_envelope(first_probe.type_id, first_probe.object),
+            ]
+            .concat(),
+        )
+        .expect("reuse original value-update identities after restart");
+    let after_restart = require_value_success(
+        "orna raw-call update_probe_stored after restart",
+        after_restart,
+    )
+    .expect("original value-update grant must survive restart");
+    assert_eq!(
+        after_restart.stdout,
+        reference_orv1_envelope(first_probe.type_id, first_probe.object),
+        "post-restart update must return the exact selector"
+    );
+    assert_probe(
+        &first_probe,
+        "first after restart",
+        None,
+        "read first probe after post-restart update",
+    );
+    assert_probe(
+        &second_probe,
+        "second",
+        Some(&first_anchor),
+        "read second probe after post-restart update",
+    );
+    let anchor = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", read_anchor, p_read_anchor],
+            &reference_orv1_envelope(second_anchor.type_id, second_anchor.object),
+        )
+        .expect("read unused anchor after restart");
+    let anchor = require_value_success("orna raw-call read_anchor", anchor)
+        .expect("original reader grant must survive restart");
+    assert_eq!(
+        anchor.stdout,
+        [
+            reference_orv1_envelope(second_anchor.type_id, second_anchor.object),
+            boolean_orv1_envelope(Some(true))
+        ]
+        .concat(),
+        "unselected anchor must remain readable with its exact stored value"
     );
 }
