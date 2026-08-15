@@ -113,7 +113,8 @@ impl ExpectedCatalogue {
 fn map_physical_projection_error(error: PhysicalPlanError) -> PostgresKernelError {
     match error {
         PhysicalPlanError::UnsupportedUniqueField { object_type, field } => {
-            field_record(object_type, field).invariant("only NOT NULL REF fields can be UNIQUE")
+            field_record(object_type, field)
+                .invariant("only TEXT fields or NOT NULL REF fields can be UNIQUE")
         }
         PhysicalPlanError::UnsupportedFieldDefault { object_type, field } => {
             field_record(object_type, field)
@@ -154,6 +155,7 @@ impl ExpectedTable {
             name: OBJECT_ID_COLUMN.to_owned(),
             type_name: "bytea",
             nullable: false,
+            collation: ExpectedCollation::TypeDefault,
             reference: None,
         }];
         let mut constraints = BTreeMap::new();
@@ -235,7 +237,14 @@ struct ExpectedColumn {
     name: String,
     type_name: &'static str,
     nullable: bool,
+    collation: ExpectedCollation,
     reference: Option<ExpectedReference>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExpectedCollation {
+    TypeDefault,
+    CanonicalText,
 }
 
 impl ExpectedColumn {
@@ -254,6 +263,15 @@ impl ExpectedColumn {
             name: field_name(field.field_id()),
             type_name,
             nullable: field.nullable(),
+            collation: if field.unique()
+                && matches!(
+                    field.field_type(),
+                    PhysicalFieldType::Scalar(StandardScalar::CharacterLargeObject)
+                ) {
+                ExpectedCollation::CanonicalText
+            } else {
+                ExpectedCollation::TypeDefault
+            },
             reference,
         })
     }
@@ -474,7 +492,15 @@ async fn verify_columns(
                 attribute.attnotnull AS not_null,
                 attribute.atttypmod AS type_modifier,
                 attribute.attndims AS dimensions,
-                COALESCE(attribute.attcollation = type.typcollation, false) AS matching_collation,
+                COALESCE(attribute.attcollation = type.typcollation, false) AS type_default_collation,
+                COALESCE(
+                    collation_namespace.nspname = 'pg_catalog'
+                    AND catalogue_collation.collname = 'C'
+                    AND catalogue_collation.collprovider::text = 'c'
+                    AND catalogue_collation.collisdeterministic
+                    AND catalogue_collation.collencoding = -1,
+                    false
+                ) AS canonical_text_collation,
                 attribute.atthasdef AS has_default,
                 attribute.attidentity::text AS identity,
                 attribute.attgenerated::text AS generated,
@@ -487,6 +513,10 @@ async fn verify_columns(
              JOIN pg_catalog.pg_attribute AS attribute ON attribute.attrelid = class.oid
              LEFT JOIN pg_catalog.pg_type AS type ON type.oid = attribute.atttypid
              LEFT JOIN pg_catalog.pg_namespace AS type_namespace ON type_namespace.oid = type.typnamespace
+             LEFT JOIN pg_catalog.pg_collation AS catalogue_collation
+               ON catalogue_collation.oid = attribute.attcollation
+             LEFT JOIN pg_catalog.pg_namespace AS collation_namespace
+               ON collation_namespace.oid = catalogue_collation.collnamespace
              WHERE namespace.nspname = '_orna_data'
                AND class.relname = $1
                AND attribute.attnum > 0
@@ -517,8 +547,20 @@ async fn verify_columns(
             observed_record.column(row, "type_modifier", "column type modifier must decode")?;
         let dimensions: i16 =
             observed_record.column(row, "dimensions", "column dimensions must decode")?;
-        let matching_collation: bool =
-            observed_record.column(row, "matching_collation", "column collation must decode")?;
+        let type_default_collation: bool = observed_record.column(
+            row,
+            "type_default_collation",
+            "column type-default collation must decode",
+        )?;
+        let canonical_text_collation: bool = observed_record.column(
+            row,
+            "canonical_text_collation",
+            "column canonical Text collation must decode",
+        )?;
+        let matching_collation = match expected.collation {
+            ExpectedCollation::TypeDefault => type_default_collation,
+            ExpectedCollation::CanonicalText => canonical_text_collation,
+        };
         let has_default: bool =
             observed_record.column(row, "has_default", "column default flag must decode")?;
         let identity: String =
@@ -865,6 +907,7 @@ struct ObservedIndex {
     key_attributes: i16,
     attributes: i16,
     key: Vec<i16>,
+    matching_column_collation: bool,
     no_predicate: bool,
     no_expression: bool,
 }
@@ -892,6 +935,11 @@ impl ObservedIndex {
             key_attributes: record.column(row, "key_attributes", "index key count must decode")?,
             attributes: record.column(row, "attributes", "index attribute count must decode")?,
             key: record.column(row, "indkey", "index key columns must decode")?,
+            matching_column_collation: record.column(
+                row,
+                "matching_column_collation",
+                "index collation must decode",
+            )?,
             no_predicate: record.column(row, "no_predicate", "index predicate flag must decode")?,
             no_expression: record.column(
                 row,
@@ -914,6 +962,7 @@ impl ObservedIndex {
             && self.key_attributes == 1
             && self.attributes == 1
             && self.key == expected.key
+            && self.matching_column_collation
             && self.no_predicate
             && self.no_expression
     }
@@ -960,12 +1009,19 @@ async fn verify_indexes(
                 index.indnkeyatts AS key_attributes,
                 index.indnatts AS attributes,
                 index.indkey,
+                COALESCE(
+                    index.indcollation[0] = attribute.attcollation,
+                    false
+                ) AS matching_column_collation,
                 index.indpred IS NULL AS no_predicate,
                 index.indexprs IS NULL AS no_expression
              FROM pg_catalog.pg_index AS index
              JOIN pg_catalog.pg_class AS class ON class.oid = index.indrelid
              JOIN pg_catalog.pg_class AS index_class ON index_class.oid = index.indexrelid
              JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = class.relnamespace
+             LEFT JOIN pg_catalog.pg_attribute AS attribute
+               ON attribute.attrelid = index.indrelid
+              AND attribute.attnum = index.indkey[0]
              WHERE namespace.nspname = '_orna_data'
                AND class.relname = $1
              ORDER BY index_class.relname",
@@ -1356,10 +1412,11 @@ mod tests {
     };
 
     use super::{
-        ExpectedCatalogue, ExpectedConstraint, ExpectedForeignKey, ExpectedIndex, ExpectedTable,
-        ObservedIndex, ReferenceTriggerLocation, classify_reference_trigger, expected_indexes,
-        field_name, has_non_foreign_constraint_shape, map_physical_projection_error, relation_name,
-        requires_no_inherit, unique_constraint_name, verify_named_constraint,
+        ExpectedCatalogue, ExpectedCollation, ExpectedConstraint, ExpectedForeignKey,
+        ExpectedIndex, ExpectedTable, ObservedIndex, ReferenceTriggerLocation,
+        classify_reference_trigger, expected_indexes, field_name, has_non_foreign_constraint_shape,
+        map_physical_projection_error, relation_name, requires_no_inherit, unique_constraint_name,
+        verify_named_constraint,
     };
     use crate::decode::DurableRecord;
 
@@ -1761,7 +1818,7 @@ mod tests {
     }
 
     #[test]
-    fn expected_builder_accepts_only_required_unique_references() {
+    fn expected_builder_accepts_only_unique_text_and_required_references() {
         let owner = TypeId::from_bytes([0x20; 16]);
         let target = TypeId::from_bytes([0x21; 16]);
         let required_reference = unique_object(
@@ -1830,20 +1887,70 @@ mod tests {
 
         for (index, scalar) in StandardScalar::ALL.into_iter().enumerate() {
             let field_byte = u8::try_from(index + 0x30).expect("closed scalar set fits byte");
-            let scalar = unique_object(
+            let object = unique_object(
                 owner,
                 ResolvedType::scalar(scalar),
                 false,
                 FieldId::from_bytes([field_byte; 16]),
             );
-            assert!(
-                ExpectedCatalogue::from_active(&active_revision_with_objects(
-                    CatalogueHashContext::version_one(),
-                    vec![scalar],
-                ))
-                .is_err()
+            let result = ExpectedCatalogue::from_active(&active_revision_with_objects(
+                CatalogueHashContext::version_one(),
+                vec![object],
+            ));
+            assert_eq!(
+                result.is_ok(),
+                scalar == StandardScalar::CharacterLargeObject,
+                "only Text can be unique among standard scalars"
             );
         }
+    }
+
+    #[test]
+    fn expected_builder_assigns_canonical_collation_only_to_unique_text() {
+        let owner = TypeId::from_bytes([0x26; 16]);
+        let unique_text = FieldId::from_bytes([0x27; 16]);
+        let plain_text = FieldId::from_bytes([0x28; 16]);
+        let object = ObjectTypeDefinition::new(
+            owner,
+            name(&["test", "text_collation"]),
+            vec![
+                FieldDefinition::new(
+                    unique_text,
+                    "unique_text",
+                    0,
+                    ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+                    true,
+                    true,
+                    None,
+                    None,
+                ),
+                FieldDefinition::new(
+                    plain_text,
+                    "plain_text",
+                    1,
+                    ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+                    false,
+                    false,
+                    None,
+                    None,
+                ),
+            ],
+        );
+        let active =
+            active_revision_with_objects(CatalogueHashContext::version_one(), vec![object]);
+        let expected =
+            ExpectedCatalogue::from_active(&active).expect("unique Text expected catalogue");
+        let table = expected
+            .tables
+            .get(&relation_name(owner))
+            .expect("unique Text table");
+
+        assert_eq!(table.columns[1].name, field_name(unique_text));
+        assert_eq!(table.columns[1].type_name, "text");
+        assert!(table.columns[1].nullable);
+        assert_eq!(table.columns[1].collation, ExpectedCollation::CanonicalText);
+        assert_eq!(table.columns[2].name, field_name(plain_text));
+        assert_eq!(table.columns[2].collation, ExpectedCollation::TypeDefault);
     }
 
     #[test]
@@ -1865,6 +1972,7 @@ mod tests {
             key_attributes: 1,
             attributes: 1,
             key: vec![2],
+            matching_column_collation: true,
             no_predicate: true,
             no_expression: true,
         };
@@ -1930,6 +2038,10 @@ mod tests {
                 ..exact.clone()
             },
             ObservedIndex {
+                matching_column_collation: false,
+                ..exact.clone()
+            },
+            ObservedIndex {
                 no_predicate: false,
                 ..exact.clone()
             },
@@ -1981,7 +2093,7 @@ mod tests {
         for (error, expected_rule) in [
             (
                 PhysicalPlanError::UnsupportedUniqueField { object_type, field },
-                "only NOT NULL REF fields can be UNIQUE",
+                "only TEXT fields or NOT NULL REF fields can be UNIQUE",
             ),
             (
                 PhysicalPlanError::UnsupportedFieldDefault { object_type, field },

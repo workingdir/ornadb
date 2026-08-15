@@ -14,14 +14,15 @@ use orna_core::{
     FieldId, FunctionId, FunctionRevisionId, ObjectId, ParameterId, TypeId,
     catalogue::{
         CatalogueSnapshot, FunctionDefinition, FunctionDomain, FunctionReturn, FunctionSecurity,
-        FunctionTransaction, FunctionVolatility, ObjectTypeDefinition,
+        FunctionTransaction, FunctionVolatility, ObjectTypeDefinition, ValueTypeKind,
+        ValueTypeMutability, ValueTypePersistence,
     },
     revision::{
-        ActiveDatabaseRevision, DefinitionReferenceKind, DefinitionReferenceTarget,
-        ExecutableArtifactKind, RevisionPair,
+        ActiveDatabaseRevision, CatalogueHashContext, DefinitionReferenceKind,
+        DefinitionReferenceTarget, ExecutableArtifactKind, RevisionPair,
     },
     security::AuthorisedInvocation,
-    types::ResolvedType,
+    types::{ResolvedType, StandardScalar},
     value::{
         EnumValue, FunctionArgument, RecordValue, RecordValueError, ResultColumn, ResultRow,
         ResultRows, ResultRowsError, RuntimeType, RuntimeValue,
@@ -322,11 +323,11 @@ impl ServerDeleteResult {
 enum ServerMutationResult {
     Insert {
         result: ServerInsertResult,
-        unique_references: UniqueReferenceConstraints,
+        unique_constraints: UniqueConstraints,
     },
     Update {
         result: ServerUpdateResult,
-        unique_references: UniqueReferenceConstraints,
+        unique_constraints: UniqueConstraints,
     },
     Delete(ServerDeleteResult),
 }
@@ -340,17 +341,14 @@ impl ServerMutationResult {
         }
     }
 
-    fn unique_reference_conflict(
-        &self,
-        source: &tokio_postgres::Error,
-    ) -> Option<UniqueReferenceConstraint> {
+    fn unique_conflict(&self, source: &tokio_postgres::Error) -> Option<UniqueConstraint> {
         match self {
             Self::Insert {
-                unique_references, ..
+                unique_constraints, ..
             }
             | Self::Update {
-                unique_references, ..
-            } => unique_references.conflict(source),
+                unique_constraints, ..
+            } => unique_constraints.conflict(source),
             Self::Delete(_) => None,
         }
     }
@@ -540,6 +538,15 @@ pub enum ServerMutationError {
         /// The PostgreSQL integrity rejection retained as internal context.
         source: tokio_postgres::Error,
     },
+    /// An exact Text value is already assigned to another object.
+    UniqueTextConflict {
+        /// The object type that owns the unique Text field.
+        owner: TypeId,
+        /// The exact unique Text field.
+        field: FieldId,
+        /// The PostgreSQL integrity rejection retained as internal context.
+        source: tokio_postgres::Error,
+    },
     /// PostgreSQL rejected COMMIT and confirmed that the transaction did not commit.
     CommitRejected {
         /// The immutable active execution context.
@@ -596,6 +603,7 @@ impl ServerMutationError {
             | Self::RecordValue(_)
             | Self::ValueCodec(_)
             | Self::UniqueReferenceConflict { .. }
+            | Self::UniqueTextConflict { .. }
             | Self::CommitRejected { .. } => ServerInsertCommitState::NotCommitted,
         }
     }
@@ -659,6 +667,9 @@ impl fmt::Display for ServerMutationError {
             Self::UniqueReferenceConflict { .. } => {
                 formatter.write_str("this reference is already used by another object")
             }
+            Self::UniqueTextConflict { .. } => {
+                formatter.write_str("this text value is already used by another object")
+            }
             Self::CommitRejected { candidate, .. } => write!(
                 formatter,
                 "the database rejected the final save for object {}; no row was added",
@@ -686,6 +697,7 @@ impl Error for ServerMutationError {
             Self::Database { source }
             | Self::RowDecode { source }
             | Self::UniqueReferenceConflict { source, .. }
+            | Self::UniqueTextConflict { source, .. }
             | Self::CommitRejected { source, .. }
             | Self::CommitOutcomeUnknown { source, .. } => Some(source),
             Self::PlanDecode(error) => Some(error),
@@ -1181,12 +1193,12 @@ async fn commit_mutation_candidate(
     match transaction.commit().await {
         Ok(()) => Ok(candidate),
         Err(source) => {
-            let unique_reference = candidate.unique_reference_conflict(&source);
+            let unique_conflict = candidate.unique_conflict(&source);
             Err(match candidate {
-                ServerMutationResult::Insert { .. } if let Some(reference) = unique_reference => {
+                ServerMutationResult::Insert { .. } if let Some(conflict) = unique_conflict => {
                     server_error(ServerMutationError::NotCommitted {
                         context,
-                        source: Box::new(reference.error(source)),
+                        source: Box::new(conflict.error(source)),
                     })
                 }
                 ServerMutationResult::Insert { result, .. } if source.as_db_error().is_some() => {
@@ -1205,10 +1217,10 @@ async fn commit_mutation_candidate(
                         source,
                     })
                 }
-                ServerMutationResult::Update { .. } if let Some(reference) = unique_reference => {
+                ServerMutationResult::Update { .. } if let Some(conflict) = unique_conflict => {
                     update_error(ServerUpdateError::NotCommitted {
                         context,
-                        source: Box::new(reference.error(source)),
+                        source: Box::new(conflict.error(source)),
                     })
                 }
                 ServerMutationResult::Update { result, .. } if source.as_db_error().is_some() => {
@@ -1327,19 +1339,23 @@ async fn execute_mutation_transaction(
         MutationExecutionKind::Insert => {
             execute_active_insert(transaction, &active, function, context, arguments)
                 .await
-                .map(|(result, unique_references)| ServerMutationResult::Insert {
-                    result,
-                    unique_references,
-                })
+                .map(
+                    |(result, unique_constraints)| ServerMutationResult::Insert {
+                        result,
+                        unique_constraints,
+                    },
+                )
                 .map_err(|error| not_committed(context, error))
         }
         MutationExecutionKind::Update => {
             execute_active_update(transaction, &active, function, context, arguments)
                 .await
-                .map(|(result, unique_references)| ServerMutationResult::Update {
-                    result,
-                    unique_references,
-                })
+                .map(
+                    |(result, unique_constraints)| ServerMutationResult::Update {
+                        result,
+                        unique_constraints,
+                    },
+                )
                 .map_err(|error| update_not_committed(context, error))
         }
         MutationExecutionKind::Delete => {
@@ -1701,6 +1717,7 @@ pub(crate) const fn raw_server_insert_target_is_unavailable(error: &ServerInsert
         | ServerInsertError::PreparedResult { .. }
         | ServerInsertError::RowDecode { .. }
         | ServerInsertError::ValueInvariant { .. }
+        | ServerInsertError::UniqueTextConflict { .. }
         | ServerInsertError::CommitRejected { .. }
         | ServerInsertError::CommitOutcomeUnknown { .. }
         | ServerInsertError::CommittedButShutdownFailed { .. } => false,
@@ -2161,6 +2178,7 @@ const fn raw_reference_mutation_failure_is_unavailable(error: &ServerMutationErr
         | ServerMutationError::RecordValue(_)
         | ServerMutationError::ValueCodec(_)
         | ServerMutationError::UniqueReferenceConflict { .. }
+        | ServerMutationError::UniqueTextConflict { .. }
         | ServerMutationError::CommitRejected { .. }
         | ServerMutationError::CommitOutcomeUnknown { .. }
         | ServerMutationError::CommittedButShutdownFailed { .. } => false,
@@ -2173,7 +2191,7 @@ async fn execute_active_update(
     function: &FunctionDefinition,
     context: ServerUpdateContext,
     arguments: &[FunctionArgument],
-) -> Result<(ServerUpdateResult, UniqueReferenceConstraints), PostgresKernelError> {
+) -> Result<(ServerUpdateResult, UniqueConstraints), PostgresKernelError> {
     let validated =
         validate_active_mutation(active, function, arguments, MutationExecutionKind::Update)?;
     execute_validated_active_update(transaction, active, context, validated, arguments).await
@@ -2185,7 +2203,7 @@ async fn execute_validated_active_update(
     context: ServerUpdateContext,
     validated: ValidatedActiveMutation<'_>,
     arguments: &[FunctionArgument],
-) -> Result<(ServerUpdateResult, UniqueReferenceConstraints), PostgresKernelError> {
+) -> Result<(ServerUpdateResult, UniqueConstraints), PostgresKernelError> {
     let selector = selector_object(&validated.plan, arguments)?;
     let lowered = lower_update_with_context(
         active.catalogue_hash_context(),
@@ -2202,7 +2220,7 @@ async fn execute_validated_active_update(
         &statement,
         lowered.binds,
         selector,
-        &validated.unique_references,
+        &validated.unique_constraints,
     )
     .await?;
     let result = ServerUpdateResult::new(
@@ -2214,7 +2232,7 @@ async fn execute_validated_active_update(
     )
     .map_err(ServerMutationError::ResultRows)
     .map_err(server_error)?;
-    Ok((result, validated.unique_references))
+    Ok((result, validated.unique_constraints))
 }
 
 async fn execute_active_delete(
@@ -2273,7 +2291,7 @@ async fn execute_active_insert(
     function: &FunctionDefinition,
     context: ServerInsertContext,
     arguments: &[FunctionArgument],
-) -> Result<(ServerInsertResult, UniqueReferenceConstraints), PostgresKernelError> {
+) -> Result<(ServerInsertResult, UniqueConstraints), PostgresKernelError> {
     let validated =
         validate_active_mutation(active, function, arguments, MutationExecutionKind::Insert)?;
     execute_validated_active_insert(transaction, active, context, validated).await
@@ -2284,7 +2302,7 @@ async fn execute_validated_active_insert(
     active: &ActiveDatabaseRevision,
     context: ServerInsertContext,
     validated: ValidatedActiveMutation<'_>,
-) -> Result<(ServerInsertResult, UniqueReferenceConstraints), PostgresKernelError> {
+) -> Result<(ServerInsertResult, UniqueConstraints), PostgresKernelError> {
     let lowered = lower_insert_with_active(active, &validated.plan, &validated.arguments)?;
     let statement = transaction
         .prepare_typed(&lowered.sql, &lowered.bind_types)
@@ -2308,10 +2326,10 @@ async fn execute_validated_active_insert(
         &statement,
         lowered.binds,
         object,
-        &validated.unique_references,
+        &validated.unique_constraints,
     )
     .await?;
-    Ok((result, validated.unique_references))
+    Ok((result, validated.unique_constraints))
 }
 
 #[derive(Debug)]
@@ -2322,14 +2340,14 @@ struct ValidatedReturn {
 
 struct ValidatedMutationTarget<'a> {
     target: &'a ObjectTypeDefinition,
-    unique_references: UniqueReferenceConstraints,
+    unique_constraints: UniqueConstraints,
 }
 
 struct ValidatedActiveMutation<'a> {
     returned: ValidatedReturn,
     plan: ServerMutationPlan,
     target: &'a ObjectTypeDefinition,
-    unique_references: UniqueReferenceConstraints,
+    unique_constraints: UniqueConstraints,
     arguments: BTreeMap<ParameterId, BindValue>,
 }
 
@@ -2341,65 +2359,115 @@ struct ValidatedActiveDelete<'a> {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct UniqueReferenceConstraint {
-    owner: TypeId,
-    field: FieldId,
-    referenced_type: TypeId,
+enum UniqueConstraint {
+    Reference {
+        owner: TypeId,
+        field: FieldId,
+        referenced_type: TypeId,
+    },
+    Text {
+        owner: TypeId,
+        field: FieldId,
+    },
 }
 
-impl UniqueReferenceConstraint {
+impl UniqueConstraint {
+    const fn field(self) -> FieldId {
+        match self {
+            Self::Reference { field, .. } | Self::Text { field, .. } => field,
+        }
+    }
+
     fn error(self, source: tokio_postgres::Error) -> ServerMutationError {
-        ServerMutationError::UniqueReferenceConflict {
-            owner: self.owner,
-            field: self.field,
-            referenced_type: self.referenced_type,
-            source,
+        match self {
+            Self::Reference {
+                owner,
+                field,
+                referenced_type,
+            } => ServerMutationError::UniqueReferenceConflict {
+                owner,
+                field,
+                referenced_type,
+                source,
+            },
+            Self::Text { owner, field } => ServerMutationError::UniqueTextConflict {
+                owner,
+                field,
+                source,
+            },
         }
     }
 }
 
 #[derive(Clone, Debug)]
-struct UniqueReferenceConstraints {
-    fields: Vec<UniqueReferenceConstraint>,
+struct UniqueConstraints {
+    fields: Vec<UniqueConstraint>,
 }
 
-impl UniqueReferenceConstraints {
-    fn from_target(target: &ObjectTypeDefinition) -> Result<Self, PostgresKernelError> {
+impl UniqueConstraints {
+    fn from_target(
+        context: &CatalogueHashContext,
+        target: &ObjectTypeDefinition,
+    ) -> Result<Self, PostgresKernelError> {
         let mut fields = Vec::new();
         for field in target.fields() {
             if !field.unique() {
                 continue;
             }
-            if !field.is_required_unique_reference() {
+            if field.is_required_unique_reference() {
+                let Some(referenced_type) = field.resolved_type().reference_target() else {
+                    return Err(plan_invariant(
+                        "UNIQUE target fields must be exact Text or required typed references",
+                    ));
+                };
+                fields.push(UniqueConstraint::Reference {
+                    owner: target.id(),
+                    field: field.id(),
+                    referenced_type,
+                });
+                continue;
+            }
+            if !supports_unique_text(context, field.resolved_type()) {
                 return Err(plan_invariant(
-                    "UNIQUE target fields must be required typed references",
+                    "UNIQUE target fields must be exact Text or required typed references",
                 ));
             }
-            let Some(referenced_type) = field.resolved_type().reference_target() else {
-                return Err(plan_invariant(
-                    "UNIQUE target fields must be required typed references",
-                ));
-            };
-            fields.push(UniqueReferenceConstraint {
+            fields.push(UniqueConstraint::Text {
                 owner: target.id(),
                 field: field.id(),
-                referenced_type,
             });
         }
         Ok(Self { fields })
     }
 
-    fn conflict(&self, source: &tokio_postgres::Error) -> Option<UniqueReferenceConstraint> {
+    fn conflict(&self, source: &tokio_postgres::Error) -> Option<UniqueConstraint> {
         let error = source.as_db_error()?;
-        unique_reference_constraint(self, Some(error.code()), error.constraint())
+        unique_constraint(self, Some(error.code()), error.constraint())
     }
 }
 
-fn unique_reference_constraint(
-    constraints: &UniqueReferenceConstraints,
+fn supports_unique_text(context: &CatalogueHashContext, resolved_type: ResolvedType) -> bool {
+    match (context.standard(), resolved_type) {
+        (None, ResolvedType::Scalar(StandardScalar::CharacterLargeObject)) => true,
+        (Some(standard), ResolvedType::Value(type_id)) => standard
+            .catalogue()
+            .value_type_by_id(type_id)
+            .is_some_and(|value_type| {
+                value_type.kind() == ValueTypeKind::Primitive
+                    && value_type.mutability() == ValueTypeMutability::Immutable
+                    && value_type.persistence() == ValueTypePersistence::Persistable
+                    && value_type.representation_contract()
+                        == "orna.kernel.value.character-large-object@1"
+            }),
+        _ => false,
+    }
+}
+
+fn unique_constraint(
+    constraints: &UniqueConstraints,
     code: Option<&SqlState>,
     constraint: Option<&str>,
-) -> Option<UniqueReferenceConstraint> {
+) -> Option<UniqueConstraint> {
     if code != Some(&SqlState::UNIQUE_VIOLATION) {
         return None;
     }
@@ -2408,15 +2476,15 @@ fn unique_reference_constraint(
         .fields
         .iter()
         .copied()
-        .find(|expected| unique_constraint_name(expected.field) == constraint)
+        .find(|expected| unique_constraint_name(expected.field()) == constraint)
 }
 
 fn mutation_database_error(
     source: tokio_postgres::Error,
-    constraints: &UniqueReferenceConstraints,
+    constraints: &UniqueConstraints,
 ) -> ServerMutationError {
-    if let Some(reference) = constraints.conflict(&source) {
-        reference.error(source)
+    if let Some(constraint) = constraints.conflict(&source) {
+        constraint.error(source)
     } else {
         ServerMutationError::Database { source }
     }
@@ -2485,7 +2553,7 @@ fn validate_active_mutation<'a>(
         returned,
         plan,
         target: target.target,
-        unique_references: target.unique_references,
+        unique_constraints: target.unique_constraints,
         arguments,
     })
 }
@@ -2962,7 +3030,7 @@ fn validate_plan_with_active<'a>(
     let target = catalogue
         .object_type_by_id(plan.target())
         .ok_or_else(|| plan_invariant("mutation target must be an active object type"))?;
-    let unique_references = UniqueReferenceConstraints::from_target(target)?;
+    let unique_constraints = UniqueConstraints::from_target(context, target)?;
     for field in target.fields() {
         if field.default_expression().is_some() {
             return Err(plan_invariant(
@@ -3084,7 +3152,7 @@ fn validate_plan_with_active<'a>(
     }
     Ok(ValidatedMutationTarget {
         target,
-        unique_references,
+        unique_constraints,
     })
 }
 
@@ -3963,7 +4031,7 @@ async fn execute_insert(
     statement: &Statement,
     binds: Vec<BindValue>,
     object: ObjectId,
-    unique_references: &UniqueReferenceConstraints,
+    unique_constraints: &UniqueConstraints,
 ) -> Result<(), PostgresKernelError> {
     let object_bytes = object.to_bytes().to_vec();
     let mut parameters = Vec::<&(dyn ToSql + Sync)>::with_capacity(binds.len() + 1);
@@ -3972,7 +4040,7 @@ async fn execute_insert(
     let rows = transaction
         .query(statement, &parameters)
         .await
-        .map_err(|source| server_error(mutation_database_error(source, unique_references)))?;
+        .map_err(|source| server_error(mutation_database_error(source, unique_constraints)))?;
     let [row] = rows.as_slice() else {
         return Err(server_error(ServerInsertError::ValueInvariant {
             rule: "INSERT must return exactly one row",
@@ -3999,13 +4067,13 @@ async fn execute_update(
     statement: &Statement,
     binds: Vec<BindValue>,
     selector: ObjectId,
-    unique_references: &UniqueReferenceConstraints,
+    unique_constraints: &UniqueConstraints,
 ) -> Result<bool, PostgresKernelError> {
     let parameters = binds.iter().map(BindValue::as_to_sql).collect::<Vec<_>>();
     let rows = transaction
         .query(statement, &parameters)
         .await
-        .map_err(|source| server_error(mutation_database_error(source, unique_references)))?;
+        .map_err(|source| server_error(mutation_database_error(source, unique_constraints)))?;
     decode_selected_result(&rows, selector, "UPDATE")
 }
 
@@ -6066,10 +6134,19 @@ mod tests {
     }
 
     #[test]
-    fn plan_accepts_only_required_unique_reference_target_fields() {
-        let function = valid_function();
-        let mut unique_fields = target_fields(OTHER);
-        unique_fields[3] = FieldDefinition::new(
+    fn unique_constraints_admit_exact_text_and_required_reference_target_fields() {
+        let mut version_one_fields = target_fields(OTHER);
+        version_one_fields[0] = FieldDefinition::new(
+            FIELD_TITLE,
+            "semantic_title",
+            0,
+            ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+            true,
+            true,
+            None,
+            None,
+        );
+        version_one_fields[3] = FieldDefinition::new(
             FIELD_OWNER,
             "semantic_owner",
             3,
@@ -6079,38 +6156,130 @@ mod tests {
             None,
             None,
         );
-        let unique_catalogue = catalogue(unique_fields, true, Vec::new());
-        let unique_target =
-            validate_plan(&unique_catalogue, &function, TARGET, &valid_plan()).unwrap();
-        assert_eq!(
-            UniqueReferenceConstraints::from_target(unique_target)
-                .unwrap()
-                .fields,
-            [UniqueReferenceConstraint {
-                owner: TARGET,
-                field: FIELD_OWNER,
-                referenced_type: OTHER,
-            }]
-        );
-
-        let mut invalid_unique_fields = target_fields(OTHER);
-        invalid_unique_fields[0] = FieldDefinition::new(
-            FIELD_TITLE,
-            "semantic_title",
-            0,
+        version_one_fields[4] = FieldDefinition::new(
+            FIELD_NOTE,
+            "semantic_note",
+            4,
             ResolvedType::scalar(StandardScalar::CharacterLargeObject),
             false,
             true,
             None,
             None,
         );
-        let invalid_unique_catalogue = catalogue(invalid_unique_fields, true, Vec::new());
-        assert!(
-            validate_plan(&invalid_unique_catalogue, &function, TARGET, &valid_plan()).is_err()
+        let version_one_catalogue = catalogue(version_one_fields, true, Vec::new());
+        let version_one_target = version_one_catalogue.object_type_by_id(TARGET).unwrap();
+        assert_eq!(
+            UniqueConstraints::from_target(
+                &CatalogueHashContext::version_one(),
+                version_one_target
+            )
+            .unwrap()
+            .fields,
+            vec![
+                UniqueConstraint::Text {
+                    owner: TARGET,
+                    field: FIELD_TITLE,
+                },
+                UniqueConstraint::Reference {
+                    owner: TARGET,
+                    field: FIELD_OWNER,
+                    referenced_type: OTHER,
+                },
+                UniqueConstraint::Text {
+                    owner: TARGET,
+                    field: FIELD_NOTE,
+                },
+            ]
         );
 
-        let mut nullable_unique_fields = target_fields(OTHER);
-        nullable_unique_fields[3] = FieldDefinition::new(
+        let mut version_two_fields = value_target_fields(OTHER);
+        version_two_fields[0] = FieldDefinition::new(
+            FIELD_TITLE,
+            "semantic_title",
+            0,
+            ResolvedType::value(orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID),
+            false,
+            true,
+            None,
+            None,
+        );
+        version_two_fields[3] = FieldDefinition::new(
+            FIELD_OWNER,
+            "semantic_owner",
+            3,
+            ResolvedType::reference(OTHER),
+            false,
+            true,
+            None,
+            None,
+        );
+        version_two_fields[4] = FieldDefinition::new(
+            FIELD_NOTE,
+            "semantic_note",
+            4,
+            ResolvedType::value(orna_standard::CHARACTER_LARGE_OBJECT_TYPE_ID),
+            true,
+            true,
+            None,
+            None,
+        );
+        let version_two_catalogue = catalogue(version_two_fields, true, Vec::new());
+        let version_two_target = version_two_catalogue.object_type_by_id(TARGET).unwrap();
+        assert_eq!(
+            UniqueConstraints::from_target(&retained_standard_context(), version_two_target)
+                .unwrap()
+                .fields,
+            vec![
+                UniqueConstraint::Text {
+                    owner: TARGET,
+                    field: FIELD_TITLE,
+                },
+                UniqueConstraint::Reference {
+                    owner: TARGET,
+                    field: FIELD_OWNER,
+                    referenced_type: OTHER,
+                },
+                UniqueConstraint::Text {
+                    owner: TARGET,
+                    field: FIELD_NOTE,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn unique_text_constraints_close_non_exact_version_two_and_nullable_reference_shapes() {
+        let version_two_context = retained_standard_context();
+        let cases = [
+            ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+            ResolvedType::value(orna_standard::BOOLEAN_TYPE_ID),
+            ResolvedType::value(TypeId::from_bytes([0x7b; 16])),
+            ResolvedType::value(orna_standard::OPAQUE_TOKEN_TYPE_ID),
+        ];
+        for resolved_type in cases {
+            let mut fields = value_target_fields(OTHER);
+            fields[0] = FieldDefinition::new(
+                FIELD_TITLE,
+                "semantic_title",
+                0,
+                resolved_type,
+                false,
+                true,
+                None,
+                None,
+            );
+            let catalogue = catalogue(fields, true, Vec::new());
+            assert!(
+                UniqueConstraints::from_target(
+                    &version_two_context,
+                    catalogue.object_type_by_id(TARGET).unwrap(),
+                )
+                .is_err()
+            );
+        }
+
+        let mut nullable_reference = target_fields(OTHER);
+        nullable_reference[3] = FieldDefinition::new(
             FIELD_OWNER,
             "semantic_owner",
             3,
@@ -6120,9 +6289,13 @@ mod tests {
             None,
             None,
         );
-        let nullable_unique_catalogue = catalogue(nullable_unique_fields, true, Vec::new());
+        let catalogue = catalogue(nullable_reference, true, Vec::new());
         assert!(
-            validate_plan(&nullable_unique_catalogue, &function, TARGET, &valid_plan()).is_err()
+            UniqueConstraints::from_target(
+                &CatalogueHashContext::version_one(),
+                catalogue.object_type_by_id(TARGET).unwrap(),
+            )
+            .is_err()
         );
     }
 
@@ -6789,39 +6962,99 @@ mod tests {
     }
 
     #[test]
-    fn unique_reference_classifier_requires_exact_active_constraint_evidence() {
-        let expected = UniqueReferenceConstraint {
+    fn unique_text_conflict_preserves_typed_context_and_remains_operational_for_raw_insert() {
+        let conflict = || ServerMutationError::UniqueTextConflict {
+            owner: TARGET,
+            field: FIELD_TITLE,
+            source: "port=invalid"
+                .parse::<tokio_postgres::Config>()
+                .unwrap_err(),
+        };
+        let error = conflict();
+        let ServerMutationError::UniqueTextConflict { owner, field, .. } = &error else {
+            unreachable!();
+        };
+        assert_eq!((*owner, *field), (TARGET, FIELD_TITLE));
+        assert_eq!(
+            error.to_string(),
+            "this text value is already used by another object"
+        );
+        assert_eq!(
+            error.commit_state(),
+            ServerMutationCommitState::NotCommitted
+        );
+        assert!(error.source().is_some());
+        assert!(!raw_server_insert_target_is_unavailable(&error));
+
+        let context = ServerInsertContext::new(
+            RevisionPair::new(
+                SourceRevisionId::from_bytes([0x76; 16]),
+                CatalogueRevisionId::from_bytes([0x77; 16]),
+            ),
+            FUNCTION,
+            REVISION,
+        );
+        let insert = expect_insert_error(not_committed(context, server_error(conflict())));
+        assert!(matches!(
+            insert,
+            ServerMutationError::NotCommitted {
+                source,
+                ..
+            } if matches!(source.as_ref(), ServerMutationError::UniqueTextConflict {
+                owner: TARGET,
+                field: FIELD_TITLE,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn unique_constraint_classifier_requires_exact_active_constraint_evidence() {
+        let expected_reference = UniqueConstraint::Reference {
             owner: TARGET,
             field: FIELD_OWNER,
             referenced_type: OTHER,
         };
-        let constraints = UniqueReferenceConstraints {
-            fields: vec![expected],
+        let expected_text = UniqueConstraint::Text {
+            owner: TARGET,
+            field: FIELD_TITLE,
         };
-        let expected_name = unique_constraint_name(FIELD_OWNER);
+        let constraints = UniqueConstraints {
+            fields: vec![expected_reference, expected_text],
+        };
+        let expected_reference_name = unique_constraint_name(FIELD_OWNER);
+        let expected_text_name = unique_constraint_name(FIELD_TITLE);
 
         assert_eq!(
-            unique_reference_constraint(
+            unique_constraint(
                 &constraints,
                 Some(&SqlState::UNIQUE_VIOLATION),
-                Some(&expected_name),
+                Some(&expected_reference_name),
             ),
-            Some(expected)
+            Some(expected_reference)
         );
         assert_eq!(
-            unique_reference_constraint(&constraints, Some(&SqlState::UNIQUE_VIOLATION), None),
+            unique_constraint(
+                &constraints,
+                Some(&SqlState::UNIQUE_VIOLATION),
+                Some(&expected_text_name),
+            ),
+            Some(expected_text)
+        );
+        assert_eq!(
+            unique_constraint(&constraints, Some(&SqlState::UNIQUE_VIOLATION), None),
             None
         );
         assert_eq!(
-            unique_reference_constraint(
+            unique_constraint(
                 &constraints,
                 Some(&SqlState::UNIQUE_VIOLATION),
                 Some(&unique_constraint_name(FIELD_TITLE)),
             ),
-            None
+            Some(expected_text)
         );
         assert_eq!(
-            unique_reference_constraint(
+            unique_constraint(
                 &constraints,
                 Some(&SqlState::UNIQUE_VIOLATION),
                 Some("unrelated_unique_constraint"),
@@ -6829,10 +7062,10 @@ mod tests {
             None
         );
         assert_eq!(
-            unique_reference_constraint(
+            unique_constraint(
                 &constraints,
                 Some(&SqlState::FOREIGN_KEY_VIOLATION),
-                Some(&expected_name),
+                Some(&expected_reference_name),
             ),
             None
         );
