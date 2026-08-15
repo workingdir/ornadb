@@ -124,6 +124,9 @@ fn add_field_statement(add_field: &AddField) -> Result<String, PostgresKernelErr
 fn field_definition(field: &CreateField) -> Result<String, PostgresKernelError> {
     let column = field_name(field.field_id());
     let storage_type = match field.field_type() {
+        PhysicalFieldType::Scalar(StandardScalar::CharacterLargeObject) if field.unique() => {
+            "text COLLATE pg_catalog.\"C\""
+        }
         PhysicalFieldType::Scalar(scalar) => scalar_storage_type(scalar)?,
         PhysicalFieldType::Enum(_) => "text",
         PhysicalFieldType::Record(_) => "bytea",
@@ -368,6 +371,79 @@ mod tests {
         assert!(!sql.contains("semantic_scalar"));
         assert!(!sql.contains("semantic_reference"));
         assert!(!sql.contains("semantic_unique_reference"));
+    }
+
+    #[test]
+    fn lowers_unique_text_with_c_collation_without_an_add_field_migration() {
+        let active = empty_active();
+        let object = TypeId::from_bytes([0x61; 16]);
+        let nullable_unique_text = FieldId::from_bytes([0x62; 16]);
+        let required_unique_text = FieldId::from_bytes([0x63; 16]);
+        let plain_text = FieldId::from_bytes([0x64; 16]);
+        let candidate = candidate_with_objects(
+            &active,
+            vec![ObjectTypeDefinition::new(
+                object,
+                semantic_name(&["private_words", "unique_text"]),
+                vec![
+                    FieldDefinition::new(
+                        nullable_unique_text,
+                        "semantic_nullable_unique_text",
+                        0,
+                        ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+                        true,
+                        true,
+                        None,
+                        None,
+                    ),
+                    FieldDefinition::new(
+                        required_unique_text,
+                        "semantic_required_unique_text",
+                        1,
+                        ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+                        false,
+                        true,
+                        None,
+                        None,
+                    ),
+                    FieldDefinition::new(
+                        plain_text,
+                        "semantic_plain_text",
+                        2,
+                        ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+                        false,
+                        false,
+                        None,
+                        None,
+                    ),
+                ],
+            )],
+        );
+        let plan = plan_physical_changes(&active, &candidate).expect("unique Text creation plan");
+        let statements = lower_physical_plan(&plan).expect("unique Text PostgreSQL statements");
+
+        assert!(plan.add_field().is_none());
+        assert_eq!(statements.references, Vec::<String>::new());
+        assert_eq!(
+            statements.creates,
+            vec![
+                concat!(
+                    "CREATE TABLE _orna_data.t_61616161616161616161616161616161 (\n",
+                    "    _orna_object_id bytea NOT NULL,\n",
+                    "    CONSTRAINT pk_61616161616161616161616161616161 PRIMARY KEY (_orna_object_id),\n",
+                    "    CONSTRAINT ck_61616161616161616161616161616161_object_id CHECK (octet_length(_orna_object_id) = 16),\n",
+                    "    f_62626262626262626262626262626262 text COLLATE pg_catalog.\"C\",\n",
+                    "    CONSTRAINT uq_62626262626262626262626262626262 UNIQUE (f_62626262626262626262626262626262),\n",
+                    "    f_63636363636363636363636363636363 text COLLATE pg_catalog.\"C\" NOT NULL,\n",
+                    "    CONSTRAINT uq_63636363636363636363636363636363 UNIQUE (f_63636363636363636363636363636363),\n",
+                    "    f_64646464646464646464646464646464 text NOT NULL\n",
+                    ");"
+                )
+                .to_owned(),
+                "REVOKE ALL ON TABLE _orna_data.t_61616161616161616161616161616161 FROM PUBLIC;"
+                    .to_owned(),
+            ]
+        );
     }
 
     #[test]
