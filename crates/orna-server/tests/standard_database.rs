@@ -45,7 +45,8 @@ use orna_postgres::{
 use orna_protocol::{
     CallFailure, Channel, ClientFrame, Event, RawCall, ServerAction, ServerFrame,
     decode_active_server_frame, decode_registered_server_frame, decode_server_frame,
-    encode_active_client_frame, encode_client_frame, encode_registered_client_frame,
+    encode_active_client_frame, encode_active_server_frame, encode_client_frame,
+    encode_registered_client_frame,
 };
 use orna_server::{
     LocalAuthenticationError, LocalRawSocketError, LocalRawSocketResources,
@@ -74,6 +75,11 @@ const RAW_CLIENT_FUNCTION_SOURCE: &str = "CREATE SCHEMA app;\n\
     CREATE TYPE app.flag AS OBJECT (value BOOLEAN NOT NULL);\n\
     CREATE SERVER FUNCTION app.read() RETURNS ROWS (value BOOLEAN)\n\
     TRANSACTION READ ONLY VOLATILITY STABLE AS SELECT f.value FROM app.flag f;\n\
+    CREATE SERVER FUNCTION app.select_flag(p_flag REF app.flag)\n\
+    RETURNS ROWS (selected REF app.flag, value BOOLEAN)\n\
+    SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n\
+    AS SELECT REF(selected), selected.value\n\
+    FROM app.flag selected WHERE REF(selected) = p_flag;\n\
     CREATE SERVER FUNCTION app.create_flagged(p_value BOOLEAN)\n\
     RETURNS ROWS (created REF app.flag)\n\
     SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE\n\
@@ -1064,6 +1070,603 @@ async fn raw_argument_authority_denies_then_grants_and_audits_each_dispatch() ->
                 && events[7].decision().target()
                     == Some(InvocationTarget::new(server_function, active.pair())),
             "raw argument authority changed the exact durable audit sequence",
+        )?;
+
+        require_no_database_sessions(&database).await
+    })
+    .await
+}
+
+/// Proves the raw socket-facing dispatch boundary exposes only the approved
+/// version-2 identity-selected SERVER SELECT form.
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn raw_identity_selected_server_read_authorises_binds_and_redacts() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = kernel(&database)?;
+        let (active, _standard_upgrade, _client_function, legacy_read) =
+            install_raw_client_fixture(&kernel).await?;
+        let flag_type = active
+            .catalogue()
+            .object_types()
+            .iter()
+            .find(|object| object.name().parts() == ["app", "flag"])
+            .ok_or_else(|| failure("the raw identity fixture is missing app.flag"))?
+            .id();
+        let create_flagged = active
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|function| function.name().parts() == ["app", "create_flagged"])
+            .ok_or_else(|| failure("the raw identity fixture is missing app.create_flagged"))?
+            .id();
+        let select_flag = active
+            .catalogue()
+            .functions()
+            .iter()
+            .find(|function| function.name().parts() == ["app", "select_flag"])
+            .ok_or_else(|| failure("the raw identity fixture is missing app.select_flag"))?
+            .id();
+        let create_parameter = active
+            .catalogue()
+            .function_by_id(create_flagged)
+            .ok_or_else(|| failure("create_flagged is absent from the active catalogue"))?
+            .parameter_by_name("p_value")
+            .ok_or_else(|| failure("create_flagged.p_value is absent from the active catalogue"))?
+            .id();
+        let select_parameter = active
+            .catalogue()
+            .function_by_id(select_flag)
+            .ok_or_else(|| failure("select_flag is absent from the active catalogue"))?
+            .parameter_by_name("p_flag")
+            .ok_or_else(|| failure("select_flag.p_flag is absent from the active catalogue"))?
+            .id();
+        let mut wrong_parameter_bytes = select_parameter.to_bytes();
+        wrong_parameter_bytes[0] ^= 0x01;
+        let wrong_parameter = ParameterId::from_bytes(wrong_parameter_bytes);
+        require(
+            wrong_parameter != select_parameter,
+            "the deliberately wrong identity-read parameter must differ from the declaration",
+        )?;
+        let functions = active
+            .catalogue()
+            .functions()
+            .iter()
+            .map(|function| function.id())
+            .collect::<Vec<_>>();
+
+        // Create one selected object before the selector grant exists.
+        let writer_only = SecuritySnapshot::new(
+            active.pair(),
+            functions.clone(),
+            vec![Principal::new(
+                RAW_CLIENT_USER,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            vec![],
+            vec![ExecuteGrant::new(RAW_CLIENT_USER, create_flagged)],
+        )?;
+        let security = kernel.replace_security_snapshot(&writer_only).await?;
+        let writer = security.bind_authenticated_session(RAW_CLIENT_USER, vec![])?;
+        let reference = create_flag_reference(
+            &kernel,
+            &writer,
+            create_flagged,
+            create_parameter,
+            flag_type,
+            1,
+        )
+        .await?;
+
+        // The protocol only exposes the public denial. The private cause
+        // proves authorisation occurred before reference binding.
+        let denied = RawClientDispatch::new(
+            kernel.clone(),
+            writer,
+            2,
+            RawCall {
+                function: select_flag,
+                arguments: vec![orna_protocol::CallArgument {
+                    parameter: select_parameter,
+                    value: reference.clone(),
+                }],
+            },
+        )
+        .finish()
+        .await;
+        require_dispatch_failure(
+            &denied,
+            2,
+            CallFailure::ExecuteDenied,
+            matches!(
+                denied.source(),
+                Some(PostgresKernelError::RawExecuteDenied {
+                    reason: ExecuteDenial::MissingExecuteGrant,
+                    ..
+                })
+            ),
+            "an ungranted identity-selected raw read was not redacted",
+        )?;
+
+        let granted = SecuritySnapshot::new(
+            active.pair(),
+            functions,
+            vec![Principal::new(
+                RAW_CLIENT_USER,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            vec![],
+            vec![
+                ExecuteGrant::new(RAW_CLIENT_USER, legacy_read),
+                ExecuteGrant::new(RAW_CLIENT_USER, select_flag),
+            ],
+        )?;
+        let security = kernel.replace_security_snapshot(&granted).await?;
+        let session = security.bind_authenticated_session(RAW_CLIENT_USER, vec![])?;
+
+        // The selected row flattens its two ORF1 values in declared column
+        // order, then emits the normal completion action.
+        let selected = RawClientDispatch::new(
+            kernel.clone(),
+            session.clone(),
+            3,
+            RawCall {
+                function: select_flag,
+                arguments: vec![orna_protocol::CallArgument {
+                    parameter: select_parameter,
+                    value: reference.clone(),
+                }],
+            },
+        )
+        .finish()
+        .await;
+        let expected_selected = [
+            ServerAction::Events {
+                stream: 3,
+                events: vec![Event::Value(reference.clone())],
+            },
+            ServerAction::Events {
+                stream: 3,
+                events: vec![Event::Value(RuntimeValue::Boolean(true))],
+            },
+            ServerAction::Completed { stream: 3 },
+        ];
+        require(
+            selected.source().is_none() && selected.actions() == expected_selected,
+            "the identity-selected raw read did not preserve projected ORF1 value order",
+        )?;
+
+        let absent = RuntimeValue::Reference {
+            target: flag_type,
+            object: ObjectId::from_bytes([0x6d; 16]),
+        };
+        let no_row = RawClientDispatch::new(
+            kernel.clone(),
+            session.clone(),
+            4,
+            RawCall {
+                function: select_flag,
+                arguments: vec![orna_protocol::CallArgument {
+                    parameter: select_parameter,
+                    value: absent.clone(),
+                }],
+            },
+        )
+        .finish()
+        .await;
+        require(
+            no_row.source().is_none()
+                && no_row.actions() == [ServerAction::Completed { stream: 4 }],
+            "an absent same-type reference must complete without raw values",
+        )?;
+
+        let wrong = RawClientDispatch::new(
+            kernel.clone(),
+            session.clone(),
+            5,
+            RawCall {
+                function: select_flag,
+                arguments: vec![orna_protocol::CallArgument {
+                    parameter: wrong_parameter,
+                    value: reference.clone(),
+                }],
+            },
+        )
+        .finish()
+        .await;
+        require_dispatch_failure(
+            &wrong,
+            5,
+            CallFailure::TargetUnavailable,
+            matches!(
+                wrong.source(),
+                Some(PostgresKernelError::RawCallTargetUnavailable { function, .. })
+                    if *function == select_flag
+            ),
+            "a wrong identity-selected ParameterId did not close as unavailable",
+        )?;
+
+        // The existing zero-argument read remains available, but a Reference
+        // cannot open its version-1 path.
+        let legacy =
+            RawClientDispatch::new(kernel.clone(), session.clone(), 6, raw_call(legacy_read))
+                .finish()
+                .await;
+        require(
+            legacy.source().is_none()
+                && legacy.actions()
+                    == [
+                        ServerAction::Events {
+                            stream: 6,
+                            events: vec![Event::Value(RuntimeValue::Boolean(true))],
+                        },
+                        ServerAction::Completed { stream: 6 },
+                    ],
+            "the legacy parameter-free raw read changed during identity selection",
+        )?;
+        let legacy_argument = RawClientDispatch::new(
+            kernel.clone(),
+            session,
+            7,
+            RawCall {
+                function: legacy_read,
+                arguments: vec![orna_protocol::CallArgument {
+                    parameter: select_parameter,
+                    value: absent.clone(),
+                }],
+            },
+        )
+        .finish()
+        .await;
+        require_dispatch_failure(
+            &legacy_argument,
+            7,
+            CallFailure::TargetUnavailable,
+            matches!(
+                legacy_argument.source(),
+                Some(PostgresKernelError::RawCallTargetUnavailable { function, .. })
+                    if *function == legacy_read
+            ),
+            "a Reference argument opened the legacy raw read path",
+        )?;
+
+        let audits = kernel.recover_security_audit_events().await?;
+        require(
+            audits.len() == 7
+                && audits[0].decision().outcome() == SecurityAuditOutcome::Allowed
+                && audits[0].decision().target()
+                    == Some(InvocationTarget::new(create_flagged, active.pair()))
+                && audits[1].decision().outcome() == SecurityAuditOutcome::Denied
+                && audits[1].decision().denial()
+                    == Some(SecurityAuditDenial::Execute(
+                        ExecuteDenial::MissingExecuteGrant,
+                    ))
+                && audits[1].decision().target()
+                    == Some(InvocationTarget::new(select_flag, active.pair()))
+                && audits[2].decision().outcome() == SecurityAuditOutcome::Allowed
+                && audits[2].decision().target()
+                    == Some(InvocationTarget::new(select_flag, active.pair()))
+                && audits[3].decision().outcome() == SecurityAuditOutcome::Allowed
+                && audits[3].decision().target()
+                    == Some(InvocationTarget::new(select_flag, active.pair()))
+                && audits[4].decision().outcome() == SecurityAuditOutcome::Allowed
+                && audits[4].decision().target()
+                    == Some(InvocationTarget::new(select_flag, active.pair()))
+                && audits[5].decision().outcome() == SecurityAuditOutcome::Allowed
+                && audits[5].decision().target()
+                    == Some(InvocationTarget::new(legacy_read, active.pair()))
+                && audits[6].decision().outcome() == SecurityAuditOutcome::Allowed
+                && audits[6].decision().target()
+                    == Some(InvocationTarget::new(legacy_read, active.pair())),
+            "identity-selected raw read changed its durable authorisation audit sequence",
+        )?;
+
+        // Exercise the same public closure through the local authenticated
+        // socket. The direct dispatcher calls above retain the private typed
+        // causes; these frames prove that the protocol does not disclose them.
+        let uid = nix::unistd::getuid().as_raw();
+        let socket_functions = active
+            .catalogue()
+            .functions()
+            .iter()
+            .map(|function| function.id())
+            .collect::<Vec<_>>();
+        let denied_socket_security = SecuritySnapshot::new_with_local_peer_credentials(
+            active.pair(),
+            socket_functions.clone(),
+            vec![Principal::new(
+                RAW_CLIENT_USER,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            vec![],
+            vec![],
+            vec![LocalPeerCredential::new(uid, RAW_CLIENT_USER)],
+        )?;
+        kernel
+            .replace_security_snapshot(&denied_socket_security)
+            .await?;
+        let (server, client) = StandardUnixStream::pair()?;
+        client.set_nonblocking(true)?;
+        let mut client = UnixStream::from_std(client)?;
+        let connection = tokio::spawn(serve_local_raw_stream(
+            kernel.clone(),
+            server,
+            LocalRawSocketResources::new(),
+        ));
+        let denied_socket_operation = async {
+            client
+                .write_all(b"ORNA\x01\x00\x00\x03\x00\x00\x00\x00")
+                .await?;
+            let mut acknowledgement = [0_u8; 12];
+            client.read_exact(&mut acknowledgement).await?;
+            require(
+                acknowledgement == *b"ORNA\x81\x00\x00\x03\x00\x00\x00\x00",
+                "identity-selected socket returned the wrong acknowledgement",
+            )?;
+            for frame in [
+                ClientFrame::CallRawStart {
+                    stream: 1,
+                    function: select_flag,
+                },
+                ClientFrame::CallArgument {
+                    stream: 1,
+                    parameter: select_parameter,
+                    value: reference.clone(),
+                },
+                ClientFrame::WindowUpdate {
+                    stream: 1,
+                    channel: Channel::ResultValues,
+                    credit: 1024,
+                },
+                ClientFrame::CallArgumentsComplete { stream: 1 },
+            ] {
+                send_active_protocol_frame(&mut client, &active, &frame).await?;
+            }
+            require(
+                matches!(
+                    read_active_protocol_frame(&mut client, &active).await?,
+                    ServerFrame::CallAccepted { stream: 1, .. }
+                ),
+                "identity-selected socket did not accept the denied call",
+            )?;
+            require(
+                read_active_protocol_frame(&mut client, &active).await?
+                    == ServerFrame::CallFailed {
+                        stream: 1,
+                        failure: CallFailure::ExecuteDenied,
+                    },
+                "identity-selected socket disclosed or changed ExecuteDenied",
+            )
+        }
+        .await;
+        let shutdown = client.shutdown().await.map_err(Into::into);
+        let connection = connection.await.map_err(Into::into).and_then(|result| {
+            result.map_err(|error| -> Box<dyn Error + Send + Sync> { Box::new(error) })
+        });
+        finish_session(
+            denied_socket_operation,
+            finish_session(
+                shutdown,
+                connection,
+                "identity-selected denied socket cleanup",
+            ),
+            "identity-selected denied socket operation",
+        )?;
+
+        let granted_socket_security = SecuritySnapshot::new_with_local_peer_credentials(
+            active.pair(),
+            socket_functions,
+            vec![Principal::new(
+                RAW_CLIENT_USER,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            vec![],
+            vec![ExecuteGrant::new(RAW_CLIENT_USER, select_flag)],
+            vec![LocalPeerCredential::new(uid, RAW_CLIENT_USER)],
+        )?;
+        kernel
+            .replace_security_snapshot(&granted_socket_security)
+            .await?;
+        let reference_event_credit = u64::try_from(
+            encode_active_server_frame(
+                &active,
+                &ServerFrame::EventBatch {
+                    stream: 2,
+                    channel: Channel::ResultValues,
+                    events: vec![orna_protocol::EventRecord {
+                        sequence: 1,
+                        event: Event::Value(reference.clone()),
+                    }],
+                },
+            )?
+            .len()
+                - 18,
+        )?;
+        let (server, client) = StandardUnixStream::pair()?;
+        client.set_nonblocking(true)?;
+        let mut client = UnixStream::from_std(client)?;
+        let connection = tokio::spawn(serve_local_raw_stream(
+            kernel.clone(),
+            server,
+            LocalRawSocketResources::new(),
+        ));
+        let granted_socket_operation = async {
+            client
+                .write_all(b"ORNA\x01\x00\x00\x03\x00\x00\x00\x00")
+                .await?;
+            let mut acknowledgement = [0_u8; 12];
+            client.read_exact(&mut acknowledgement).await?;
+            require(
+                acknowledgement == *b"ORNA\x81\x00\x00\x03\x00\x00\x00\x00",
+                "identity-selected granted socket returned the wrong acknowledgement",
+            )?;
+            for frame in [
+                ClientFrame::CallRawStart {
+                    stream: 2,
+                    function: select_flag,
+                },
+                ClientFrame::CallArgument {
+                    stream: 2,
+                    parameter: select_parameter,
+                    value: reference.clone(),
+                },
+                ClientFrame::WindowUpdate {
+                    stream: 2,
+                    channel: Channel::ResultValues,
+                    credit: reference_event_credit,
+                },
+                ClientFrame::CallArgumentsComplete { stream: 2 },
+            ] {
+                send_active_protocol_frame(&mut client, &active, &frame).await?;
+            }
+            require(
+                matches!(
+                    read_active_protocol_frame(&mut client, &active).await?,
+                    ServerFrame::CallAccepted { stream: 2, .. }
+                ),
+                "identity-selected socket did not accept the granted call",
+            )?;
+            require(
+                matches!(
+                    read_active_protocol_frame(&mut client, &active).await?,
+                    ServerFrame::EventBatch {
+                        stream: 2,
+                        channel: Channel::ResultValues,
+                        events,
+                    } if events.len() == 1
+                        && events[0].sequence == 1
+                        && events[0].event == Event::Value(reference.clone())
+                ),
+                "identity-selected socket did not emit the first projected Reference",
+            )?;
+            sleep(Duration::from_millis(50)).await;
+            let mut unexpected = [0_u8; 1];
+            require(
+                matches!(
+                    client.try_read(&mut unexpected),
+                    Err(error) if error.kind() == ErrorKind::WouldBlock
+                ),
+                "identity-selected socket emitted its second projection without byte credit",
+            )?;
+            send_active_protocol_frame(
+                &mut client,
+                &active,
+                &ClientFrame::WindowUpdate {
+                    stream: 2,
+                    channel: Channel::ResultValues,
+                    credit: BOOLEAN_EVENT_CREDIT,
+                },
+            )
+            .await?;
+            require(
+                matches!(
+                    read_active_protocol_frame(&mut client, &active).await?,
+                    ServerFrame::EventBatch {
+                        stream: 2,
+                        channel: Channel::ResultValues,
+                        events,
+                    } if events.len() == 1
+                        && events[0].sequence == 2
+                        && events[0].event == Event::Value(RuntimeValue::Boolean(true))
+                ),
+                "identity-selected socket did not resume with the Boolean projection",
+            )?;
+            require(
+                read_active_protocol_frame(&mut client, &active).await?
+                    == ServerFrame::CallCompleted { stream: 2 },
+                "identity-selected socket did not complete after both projected values",
+            )?;
+
+            for frame in [
+                ClientFrame::CallRawStart {
+                    stream: 3,
+                    function: select_flag,
+                },
+                ClientFrame::CallArgument {
+                    stream: 3,
+                    parameter: select_parameter,
+                    value: absent.clone(),
+                },
+                ClientFrame::CallArgumentsComplete { stream: 3 },
+            ] {
+                send_active_protocol_frame(&mut client, &active, &frame).await?;
+            }
+            require(
+                matches!(
+                    read_active_protocol_frame(&mut client, &active).await?,
+                    ServerFrame::CallAccepted { stream: 3, .. }
+                ) && read_active_protocol_frame(&mut client, &active).await?
+                    == ServerFrame::CallCompleted { stream: 3 },
+                "identity-selected socket did not close an absent reference without values",
+            )?;
+
+            for frame in [
+                ClientFrame::CallRawStart {
+                    stream: 4,
+                    function: select_flag,
+                },
+                ClientFrame::CallArgument {
+                    stream: 4,
+                    parameter: wrong_parameter,
+                    value: reference.clone(),
+                },
+                ClientFrame::CallArgumentsComplete { stream: 4 },
+            ] {
+                send_active_protocol_frame(&mut client, &active, &frame).await?;
+            }
+            require(
+                matches!(
+                    read_active_protocol_frame(&mut client, &active).await?,
+                    ServerFrame::CallAccepted { stream: 4, .. }
+                ) && read_active_protocol_frame(&mut client, &active).await?
+                    == ServerFrame::CallFailed {
+                        stream: 4,
+                        failure: CallFailure::TargetUnavailable,
+                    },
+                "identity-selected socket disclosed or changed TargetUnavailable",
+            )?;
+
+            for frame in [
+                ClientFrame::CallRawStart {
+                    stream: 5,
+                    function: select_flag,
+                },
+                ClientFrame::CallArgument {
+                    stream: 5,
+                    parameter: select_parameter,
+                    value: reference,
+                },
+                ClientFrame::CallArgumentsComplete { stream: 5 },
+                ClientFrame::CallCancel { stream: 5 },
+            ] {
+                send_active_protocol_frame(&mut client, &active, &frame).await?;
+            }
+            require(
+                matches!(
+                    read_active_protocol_frame(&mut client, &active).await?,
+                    ServerFrame::CallAccepted { stream: 5, .. }
+                ) && read_active_protocol_frame(&mut client, &active).await?
+                    == ServerFrame::CallCancelled { stream: 5 },
+                "identity-selected socket did not close the cancelled reference call",
+            )
+        }
+        .await;
+        let shutdown = client.shutdown().await.map_err(Into::into);
+        let connection = connection.await.map_err(Into::into).and_then(|result| {
+            result.map_err(|error| -> Box<dyn Error + Send + Sync> { Box::new(error) })
+        });
+        finish_session(
+            granted_socket_operation,
+            finish_session(
+                shutdown,
+                connection,
+                "identity-selected granted socket cleanup",
+            ),
+            "identity-selected granted socket operation",
         )?;
 
         require_no_database_sessions(&database).await
