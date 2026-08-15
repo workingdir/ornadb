@@ -2116,6 +2116,271 @@ async fn recovers_closed_security_audit_history_and_rejects_tamper() -> TestResu
 
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
+async fn recovery_rejects_tampered_protected_invocation_audit_evidence() -> TestResult<()> {
+    const SESSION: PrincipalId = PrincipalId::from_bytes([0x71; 16]);
+    const EFFECTIVE: PrincipalId = PrincipalId::from_bytes([0x72; 16]);
+    const AUTHORISING: PrincipalId = PrincipalId::from_bytes([0x73; 16]);
+
+    with_test_database(|database| async move {
+        let kernel = kernel(&database)?;
+        kernel.bootstrap().await?;
+        let fixture = install_function_revision(&database).await?;
+        let active = kernel.recover().await?;
+        let function_id = fixture.catalogue.functions()[0].id();
+        let database_session = database.open().await?;
+        let insertion = database_session
+            .client()
+            .batch_execute(&format!(
+                "INSERT INTO _orna_kernel.security_audit_events
+                     (event_id, event_kind, outcome, session_principal_id,
+                      effective_principal_id, authorising_principal_id, function_id,
+                      source_revision_id, catalogue_revision_id)
+                 VALUES (decode(repeat('a1', 16), 'hex'), 'execute', 'allowed',
+                         decode('{}', 'hex'), decode('{}', 'hex'), decode('{}', 'hex'),
+                         decode('{}', 'hex'), decode('{}', 'hex'), decode('{}', 'hex'));
+                 INSERT INTO _orna_kernel.invocation_audit_events
+                     (event_id, invocation_id, outcome, session_principal_id,
+                      effective_principal_id, authorising_principal_id, function_id,
+                      source_revision_id, catalogue_revision_id, security_audit_event_id)
+                 VALUES (decode(repeat('b1', 16), 'hex'), decode(repeat('c1', 16), 'hex'),
+                         'allowed', decode('{}', 'hex'), decode('{}', 'hex'), decode('{}', 'hex'),
+                         decode('{}', 'hex'), decode('{}', 'hex'), decode('{}', 'hex'),
+                         decode(repeat('a1', 16), 'hex'));",
+                raw_id_hex(SESSION.to_bytes()),
+                raw_id_hex(EFFECTIVE.to_bytes()),
+                raw_id_hex(AUTHORISING.to_bytes()),
+                raw_id_hex(function_id.to_bytes()),
+                raw_id_hex(active.pair().source().to_bytes()),
+                raw_id_hex(active.pair().catalogue().to_bytes()),
+                raw_id_hex(SESSION.to_bytes()),
+                raw_id_hex(EFFECTIVE.to_bytes()),
+                raw_id_hex(AUTHORISING.to_bytes()),
+                raw_id_hex(function_id.to_bytes()),
+                raw_id_hex(active.pair().source().to_bytes()),
+                raw_id_hex(active.pair().catalogue().to_bytes()),
+            ))
+            .await
+            .map_err(Into::into);
+        finish_session(
+            insertion,
+            database_session.shutdown().await,
+            "protected invocation audit fixture insertion",
+        )?;
+        kernel.recover().await?;
+
+        run_batch(
+            &database,
+            "ALTER TABLE _orna_kernel.invocation_audit_events
+                 DROP CONSTRAINT invocation_audit_events_identity_lengths,
+                 DROP CONSTRAINT invocation_audit_events_outcome_check,
+                 DROP CONSTRAINT invocation_audit_events_target_evidence_pair_check,
+                 DROP CONSTRAINT invocation_audit_events_target_fk,
+                 DROP CONSTRAINT invocation_audit_events_revision_pair_fk,
+                 DROP CONSTRAINT invocation_audit_events_security_evidence_fk;",
+        )
+        .await?;
+
+        run_single_row_statement(
+            &database,
+            "UPDATE _orna_kernel.invocation_audit_events
+             SET event_id = decode(repeat('b1', 15), 'hex')
+             WHERE invocation_id = decode(repeat('c1', 16), 'hex')",
+        )
+        .await?;
+        let malformed = recovery_error(&database).await?;
+        require(
+            matches!(
+                malformed,
+                PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.invocation_audit_events",
+                    rule: "invocation audit identity must be exactly sixteen bytes",
+                    ..
+                }
+            ),
+            "malformed invocation audit identity did not fail closed",
+        )?;
+        run_single_row_statement(
+            &database,
+            "UPDATE _orna_kernel.invocation_audit_events
+             SET event_id = decode(repeat('b1', 16), 'hex')
+             WHERE invocation_id = decode(repeat('c1', 16), 'hex')",
+        )
+        .await?;
+
+        run_single_row_statement(
+            &database,
+            "UPDATE _orna_kernel.invocation_audit_events
+             SET security_audit_event_id = decode(repeat('a2', 16), 'hex')
+             WHERE invocation_id = decode(repeat('c1', 16), 'hex')",
+        )
+        .await?;
+        let unlinked = recovery_error(&database).await?;
+        require(
+            matches!(
+                unlinked,
+                PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.invocation_audit_events",
+                    rule: "linked security audit evidence is missing",
+                    ..
+                }
+            ),
+            "unlinked invocation audit decision did not fail closed",
+        )?;
+        let database_session = database.open().await?;
+        let retained: bool = database_session
+            .client()
+            .query_one(
+                "SELECT security_audit_event_id = decode(repeat('a2', 16), 'hex')
+                 FROM _orna_kernel.invocation_audit_events
+                 WHERE invocation_id = decode(repeat('c1', 16), 'hex')",
+                &[],
+            )
+            .await?
+            .get(0);
+        finish_session(
+            require(
+                retained,
+                "rejected invocation audit link tamper was repaired",
+            ),
+            database_session.shutdown().await,
+            "invocation audit tamper retention check",
+        )?;
+        run_single_row_statement(
+            &database,
+            "UPDATE _orna_kernel.invocation_audit_events
+             SET security_audit_event_id = decode(repeat('a1', 16), 'hex')
+             WHERE invocation_id = decode(repeat('c1', 16), 'hex')",
+        )
+        .await?;
+
+        run_single_row_statement(
+            &database,
+            "UPDATE _orna_kernel.invocation_audit_events
+             SET outcome = 'denied'
+             WHERE invocation_id = decode(repeat('c1', 16), 'hex')",
+        )
+        .await?;
+        let wrong_outcome = recovery_error(&database).await?;
+        require(
+            matches!(
+                wrong_outcome,
+                PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.invocation_audit_events",
+                    rule: "linked security audit evidence does not match the invocation decision",
+                    ..
+                }
+            ),
+            "wrong invocation audit outcome did not fail closed",
+        )?;
+        run_single_row_statement(
+            &database,
+            "UPDATE _orna_kernel.invocation_audit_events
+             SET outcome = 'allowed'
+             WHERE invocation_id = decode(repeat('c1', 16), 'hex')",
+        )
+        .await?;
+
+        run_batch(
+            &database,
+            "UPDATE _orna_kernel.security_audit_events
+             SET source_revision_id = decode(repeat('f2', 16), 'hex')
+             WHERE event_id = decode(repeat('a1', 16), 'hex');
+             UPDATE _orna_kernel.invocation_audit_events
+             SET source_revision_id = decode(repeat('f2', 16), 'hex')
+             WHERE invocation_id = decode(repeat('c1', 16), 'hex');",
+        )
+        .await?;
+        let invalid_revision = recovery_error(&database).await?;
+        require(
+            matches!(
+                invalid_revision,
+                PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.invocation_audit_events",
+                    rule: "target function and pinned revision must exist together",
+                    ..
+                }
+            ),
+            "invalid invocation revision did not fail closed",
+        )?;
+        run_batch(
+            &database,
+            &format!(
+                "UPDATE _orna_kernel.security_audit_events
+                 SET source_revision_id = decode('{}', 'hex')
+                 WHERE event_id = decode(repeat('a1', 16), 'hex');
+                 UPDATE _orna_kernel.invocation_audit_events
+                 SET source_revision_id = decode('{}', 'hex')
+                 WHERE invocation_id = decode(repeat('c1', 16), 'hex');",
+                raw_id_hex(active.pair().source().to_bytes()),
+                raw_id_hex(active.pair().source().to_bytes()),
+            ),
+        )
+        .await?;
+
+        run_batch(
+            &database,
+            "ALTER TABLE _orna_kernel.security_audit_events
+                 DROP CONSTRAINT security_audit_events_invocation_evidence_key;
+             UPDATE _orna_kernel.security_audit_events
+             SET function_id = decode(repeat('f1', 16), 'hex')
+             WHERE event_id = decode(repeat('a1', 16), 'hex');
+             UPDATE _orna_kernel.invocation_audit_events
+             SET function_id = decode(repeat('f1', 16), 'hex')
+             WHERE invocation_id = decode(repeat('c1', 16), 'hex');",
+        )
+        .await?;
+        let invalid_target = recovery_error(&database).await?;
+        require(
+            matches!(
+                invalid_target,
+                PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.invocation_audit_events",
+                    rule: "target function and pinned revision must exist together",
+                    ..
+                }
+            ),
+            "invalid invocation target did not fail closed",
+        )?;
+        run_batch(
+            &database,
+            &format!(
+                "UPDATE _orna_kernel.security_audit_events
+                 SET function_id = decode('{}', 'hex')
+                 WHERE event_id = decode(repeat('a1', 16), 'hex');
+                 UPDATE _orna_kernel.invocation_audit_events
+                 SET function_id = decode('{}', 'hex')
+                 WHERE invocation_id = decode(repeat('c1', 16), 'hex');",
+                raw_id_hex(function_id.to_bytes()),
+                raw_id_hex(function_id.to_bytes()),
+            ),
+        )
+        .await?;
+
+        run_batch(
+            &database,
+            "ALTER TABLE _orna_kernel.invocation_audit_events
+                 ADD COLUMN request_payload bytea;",
+        )
+        .await?;
+        let disclosure = recovery_error(&database).await?;
+        require(
+            matches!(
+                disclosure,
+                PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.invocation_audit_events",
+                    rule: "invocation audit relation has unsupported disclosure-bearing columns",
+                    ..
+                }
+            ),
+            "disclosure-bearing invocation audit column did not fail closed",
+        )?;
+        require_no_session_leaks(&database).await
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
 async fn local_peer_authentication_appends_one_protected_decision() -> TestResult<()> {
     const USER_UID: u32 = 1_001;
     const DISABLED_UID: u32 = 1_002;
