@@ -178,6 +178,67 @@ The files have these owners:
   `generic_mit_no_holder = true`. The generic branch omits
   `copyright_holders`; an empty holder array, a false generic flag, and both
   branches together are invalid.
+* The release-evidence generator derives the Rust release closure from Cargo's
+  unit graph. It runs this exact command inside the accepted pinned Debian
+  builder, with the same release-build environment and flags as the final
+  `orna-server` build:
+
+  ```sh
+  RUSTC_BOOTSTRAP=1 cargo -Z unstable-options build --unit-graph --frozen --offline --release --manifest-path /workspace/Cargo.toml --package orna-server --bin orna > cargo-unit-graph.json
+  ```
+
+  The generator accepts only unit-graph schema version `1`, exactly one root
+  unit, and dependency indices that identify units in the graph. It traverses
+  only units reachable from that root. Each reached registry unit must map
+  uniquely to one Cargo.lock triple `(name, version, checksum)`. It rejects a
+  missing, ambiguous, changed, differently sourced, or checksum-mismatched
+  mapping. The reachable graph contains exactly 81 unique external registry
+  packages.
+
+  The runtime traversal starts at the same root. It does not traverse an edge
+  whose child unit has target kind `proc-macro` or `custom-build`, or mode
+  `run-custom-build`. Its unique external registry package set contains
+  exactly 73 packages. This is the final executable dependency closure.
+
+  The SPDX 2.3 relationship triples use the unit-graph edge direction. For a
+  runtime edge `U -> V`, the generator emits
+  `Package(U) DEPENDS_ON Package(V)`. For a proc-macro child edge `U -> V`, it
+  emits `Package(V) BUILD_TOOL_OF Package(U)`. For an ordinary child edge
+  `U -> V` where `U` has target kind `custom-build`, it emits
+  `Package(V) BUILD_DEPENDENCY_OF Package(U)`. An edge from a package unit to
+  its own `custom-build` or `run-custom-build` unit emits no package-level
+  triple. A dependency edge from a proc-macro package to its ordinary
+  dependency also emits `Package(U) DEPENDS_ON Package(V)`. The generator must
+  deduplicate identical triples and reject a projected self-triple, a
+  contradictory triple, an unsupported relationship, or a relationship that
+  does not correspond to one reached unit-graph edge.
+
+  `--unit-graph` is an unstable Cargo interface. The accepted builder must pin
+  the Cargo version. The generator must reject a different Cargo version, a
+  different unit-graph schema version, or an unrecognised graph field or
+  variant before it uses closure data.
+
+  `dependency-licences.toml` is a strict document container. It has exactly
+  `format = 1`, one `[closure]` table, and sorted `[[dependency]]` tables. The
+  `[closure]` table has exactly these required keys:
+
+  ```toml
+  format = 1
+
+  [closure]
+  cargo_version = "<accepted pinned Cargo version>"
+  unit_graph_schema_version = 1
+  root_package = "orna-server"
+  root_binary = "orna"
+  target = "x86_64-unknown-linux-gnu"
+  external_registry_package_count = 81
+  runtime_external_registry_package_count = 73
+  ```
+
+  `[[dependency]]` tables are sorted by the byte order of `name`, `version`,
+  then `checksum`. The generator must reject an unknown top-level key, closure
+  key, or dependency key; a missing container element; a different format; or
+  a count that does not equal the selected unit-graph closure.
 * The deterministic release-evidence generator owns
   `THIRD-PARTY-NOTICES`. It reads only the locked Rust closure, the pinned
   `dependency-licences.toml` records, the pinned PostgreSQL source and
@@ -185,10 +246,11 @@ The files have these owners:
   notice required by code or data present in the final package. An SBOM
   identifier is not a substitute for required notice text.
 * The same generator owns `sbom.spdx.json`. It emits deterministic SPDX 2.3
-  JSON for `/usr/bin/orna`, the statically linked Rust dependency closure, the
-  embedded PostgreSQL source and support assets, and the other package data
-  inputs. It records package versions, source revisions, checksums, declared
-  and concluded licences, and relationships. It does not hash the enclosing
+  JSON for `/usr/bin/orna`, the 73-package final executable Rust closure, the
+  build and proc-macro relationships defined above, the embedded PostgreSQL
+  source and support assets, and the other package data inputs. It records
+  package versions, source revisions, checksums, declared and concluded
+  licences, and relationships. It does not hash the enclosing
   `.deb`, itself, or the later distribution manifest. The distribution
   manifest and signed repository chain bind those final bytes without a
   circular checksum.
@@ -447,6 +509,12 @@ The release mechanism is implemented only when tests prove all of these facts:
 * every selected external Cargo.lock `(name, version, checksum)` has exactly
   one matching checked-in dependency licence and source record, and every
   extra, missing, changed, unsorted, or checksum-less external record fails;
+* the pinned Cargo unit graph has schema version `1`, one root, valid
+  dependency indices, and exactly 81 unique reachable external registry
+  packages; its runtime traversal has exactly 73 external registry packages;
+  every package maps uniquely to Cargo.lock; and the emitted SPDX 2.3
+  relationship triples have the required direction, type, deduplication, and
+  contradiction rejection;
 * every dependency-licences record has exactly the declared common and
   conditional TOML fields, applies slash licence normalisation to `OR`,
   selects one complete top-level SPDX `OR` branch without dropping `AND` or
