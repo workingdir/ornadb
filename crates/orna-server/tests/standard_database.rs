@@ -34,6 +34,7 @@ use orna_core::{
         SecuritySnapshot,
     },
     source::{SourceBundle, SourceUnit},
+    system::SYS_INVOKE_FUNCTION_ID,
     types::ResolvedType,
     value::{EnumValue, OpaqueValue, RecordValue, RuntimeValue},
 };
@@ -636,6 +637,93 @@ async fn dispatches_raw_client_calls_through_security_audit_and_evaluation() -> 
                             == Some(InvocationTarget::new(server_function, active.pair()))
                 }),
             "raw dispatch snapshot race did not bind its audit decision to the recovered revision",
+        )?;
+        require_no_database_sessions(&database).await
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn sealed_sys_invoke_entry_is_unavailable_after_system_authorisation() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = kernel(&database)?;
+        let (active, _standard_upgrade, _client_function, _server_function) =
+            install_raw_client_fixture(&kernel).await?;
+        let functions = active
+            .catalogue()
+            .functions()
+            .iter()
+            .map(|function| function.id())
+            .collect::<Vec<_>>();
+        let security = SecuritySnapshot::new(
+            active.pair(),
+            functions,
+            vec![Principal::new(
+                RAW_CLIENT_USER,
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            vec![],
+            vec![],
+        )?;
+        let security = kernel.replace_security_snapshot(&security).await?;
+        let session = security.bind_authenticated_session(RAW_CLIENT_USER, vec![])?;
+
+        let system_entry = RawClientDispatch::new(
+            kernel.clone(),
+            session.clone(),
+            1,
+            raw_call(SYS_INVOKE_FUNCTION_ID),
+        )
+        .finish()
+        .await;
+        require_dispatch_failure(
+            &system_entry,
+            1,
+            CallFailure::TargetUnavailable,
+            matches!(
+                system_entry.source(),
+                Some(PostgresKernelError::RawCallTargetUnavailable { function, rule })
+                    if *function == SYS_INVOKE_FUNCTION_ID
+                        && *rule == "sys.invoke requires its sealed request carrier"
+            ),
+            "the sealed sys.invoke entry did not close as an unavailable raw target",
+        )?;
+
+        let ordinary_unknown = FunctionId::from_bytes([0x74; 16]);
+        let unknown =
+            RawClientDispatch::new(kernel.clone(), session, 2, raw_call(ordinary_unknown))
+                .finish()
+                .await;
+        require_dispatch_failure(
+            &unknown,
+            2,
+            CallFailure::ExecuteDenied,
+            matches!(
+                unknown.source(),
+                Some(PostgresKernelError::RawExecuteDenied {
+                    reason: ExecuteDenial::UnknownFunction,
+                    ..
+                })
+            ),
+            "an unknown ordinary target did not retain its private execute denial",
+        )?;
+
+        let audits = kernel.recover_security_audit_events().await?;
+        require(
+            audits.len() == 2
+                && audits[0].decision().kind() == SecurityAuditKind::Execute
+                && audits[0].decision().outcome() == SecurityAuditOutcome::Allowed
+                && audits[0].decision().target()
+                    == Some(InvocationTarget::new(SYS_INVOKE_FUNCTION_ID, active.pair()))
+                && audits[1].decision().kind() == SecurityAuditKind::Execute
+                && audits[1].decision().outcome() == SecurityAuditOutcome::Denied
+                && audits[1].decision().target()
+                    == Some(InvocationTarget::new(ordinary_unknown, active.pair()))
+                && audits[1].decision().denial()
+                    == Some(SecurityAuditDenial::Execute(ExecuteDenial::UnknownFunction)),
+            "sealed system entry changed the exact durable audit sequence",
         )?;
         require_no_database_sessions(&database).await
     })
