@@ -237,7 +237,7 @@ pub enum QueryExpression {
         /// The exact source spelling of the literal.
         source: SourceSlice,
     },
-    /// A bare server function parameter read used as an identity selector.
+    /// A bare server function parameter read used as a supported selector.
     ParameterRead {
         /// The parameter name as written in the query.
         parameter: NamePart,
@@ -2456,6 +2456,115 @@ mod tests {
                 _ => panic!("query must contain the identity selector predicate"),
             }
         }
+    }
+
+    #[test]
+    fn retains_a_parameter_read_after_one_direct_field_path() {
+        let source = "CREATE SERVER FUNCTION people.by_email(p_email TEXT) RETURNS ROWS (person REF people.person, name TEXT) AS SELECT REF(selected), selected.name FROM people.person selected WHERE selected.email = p_email;";
+        let parsed = parse(source);
+
+        assert!(parsed.diagnostics().is_empty());
+        let body = parsed.server_functions()[0]
+            .body
+            .as_sql_query()
+            .expect("people.by_email must use a SELECT query");
+        let parameter_start = source.rfind("p_email").expect("parameter exists");
+        match &body.query.predicate {
+            Some(QueryExpression::Equality { left, right, span }) => {
+                assert!(matches!(
+                    left.as_ref(),
+                    QueryExpression::FieldPath { root, members, .. }
+                        if root.text == "selected" && members.len() == 1 && members[0].text == "email"
+                ));
+                match right.as_ref() {
+                    QueryExpression::ParameterRead { parameter } => {
+                        assert_eq!(parameter.text, "p_email");
+                        assert_eq!(parameter.span.start, parameter_start);
+                        assert_eq!(parameter.span.end, parameter_start + "p_email".len());
+                    }
+                    _ => panic!("direct field selector must retain a parameter read"),
+                }
+                assert_eq!(span.start, left.span().start);
+                assert_eq!(span.end, parameter_start + "p_email".len());
+            }
+            _ => panic!("query must contain a direct-field selector predicate"),
+        }
+    }
+
+    #[test]
+    fn rejects_a_bare_selector_name_after_a_nested_field_path() {
+        let source = "CREATE SERVER FUNCTION people.by_nested_email(p_email TEXT) RETURNS ROWS (person REF people.person) AS SELECT REF(selected) FROM people.person selected WHERE selected.owner.email = p_email;";
+        let parsed = parse(source);
+
+        assert!(parsed.server_functions().is_empty());
+        assert_eq!(parsed.diagnostics().len(), 1);
+        assert_eq!(parsed.diagnostics()[0].code, "ORNA0001");
+        assert_eq!(
+            parsed.diagnostics()[0].message,
+            "the current Orna SELECT parser does not yet implement bare alias expressions; expected a field path"
+        );
+    }
+
+    #[test]
+    fn retains_direct_field_selector_parser_closures() {
+        let reversed = "CREATE SERVER FUNCTION people.reversed(p_email TEXT) RETURNS ROWS (person REF people.person) AS SELECT REF(selected) FROM people.person selected WHERE p_email = selected.email;";
+        let parsed = parse(reversed);
+
+        assert!(parsed.server_functions().is_empty());
+        assert_eq!(parsed.diagnostics().len(), 1);
+        let diagnostic = &parsed.diagnostics()[0];
+        assert_eq!(diagnostic.code, "ORNA0001");
+        assert_eq!(
+            diagnostic.message,
+            "the current Orna SELECT parser does not yet implement bare alias expressions; expected a field path",
+            "{diagnostic:#?}"
+        );
+        let reversed_start = reversed.find(" = selected").expect("equality exists") + 1;
+        assert_eq!(
+            diagnostic.span,
+            SourceSpan {
+                start: reversed_start,
+                end: reversed_start + "=".len(),
+            }
+        );
+
+        let qualified = "CREATE SERVER FUNCTION people.qualified(p_email TEXT) RETURNS ROWS (person REF people.person) AS SELECT REF(selected) FROM people.person selected WHERE selected.email = owner.p_email;";
+        let parsed = parse(qualified);
+
+        assert!(parsed.diagnostics().is_empty());
+        let body = parsed.server_functions()[0]
+            .body
+            .as_sql_query()
+            .expect("people.qualified must use a SELECT query");
+        match &body.query.predicate {
+            Some(QueryExpression::Equality { right, .. }) => assert!(matches!(
+                right.as_ref(),
+                QueryExpression::FieldPath { root, members, .. }
+                    if root.text == "owner" && members.len() == 1 && members[0].text == "p_email"
+            )),
+            _ => panic!("query must retain its qualified right-hand path"),
+        }
+
+        let call = "CREATE SERVER FUNCTION people.call(p_email TEXT) RETURNS ROWS (person REF people.person) AS SELECT REF(selected) FROM people.person selected WHERE selected.email = find_email();";
+        let parsed = parse(call);
+
+        assert!(parsed.server_functions().is_empty());
+        assert_eq!(parsed.diagnostics().len(), 1);
+        let diagnostic = &parsed.diagnostics()[0];
+        assert_eq!(diagnostic.code, "ORNA0001");
+        assert_eq!(
+            diagnostic.message,
+            "the current Orna SELECT parser does not yet implement function calls as identity selector parameters; expected a selector parameter name by itself"
+        );
+        let call_start =
+            call.find("find_email()").expect("function call exists") + "find_email".len();
+        assert_eq!(
+            diagnostic.span,
+            SourceSpan {
+                start: call_start,
+                end: call_start + "(".len(),
+            }
+        );
     }
 
     #[test]
