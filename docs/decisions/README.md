@@ -99,3 +99,5 @@ source-of-truth or authority rules.
   [Raw Reference Calls Select One Projected Object Row](0048-raw-identity-selected-server-select.md)
 * **work ADR 0049:**
   [Canonical Raw Calls Bind One Bounded Argument Pair](0049-canonical-raw-argument-pairs.md)
+* **work ADR 0050:**
+  [Canonical Raw Calls Update One Selected Object with One Value](0050-canonical-raw-reference-value-update.md)
