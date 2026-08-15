@@ -2801,9 +2801,9 @@ impl<'tokens, 'source> SqlBodyParser<'tokens, 'source> {
         {
             self.index += 1;
             self.skip_trivia();
-            let right = if allow_selector_parameter
-                && matches!(&left, QueryExpression::ObjectReference { .. })
-            {
+            let is_selector_left = matches!(&left, QueryExpression::ObjectReference { .. })
+                || matches!(&left, QueryExpression::FieldPath { members, .. } if members.len() == 1);
+            let right = if allow_selector_parameter && is_selector_left {
                 self.parse_selector_parameter_or_primary_expression()?
             } else {
                 self.parse_primary_expression()?
