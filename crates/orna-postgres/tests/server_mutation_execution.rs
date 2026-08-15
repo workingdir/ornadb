@@ -132,6 +132,71 @@ const RAW_INSERT_SOURCE: &str = "CREATE SCHEMA raw_insert_test;\n\
     RETURNS BOOLEAN RETURN TRUE;\n";
 
 #[cfg(feature = "test-hooks")]
+const RAW_ARGUMENT_PAIR_SOURCE: &str = "CREATE SCHEMA raw_argument_pair_test;\n\
+    CREATE TYPE raw_argument_pair_test.pair_value AS VALUE (\n\
+      first TEXT, second TEXT\n\
+    ) IMMUTABLE PERSISTABLE;\n\
+    CREATE TYPE raw_argument_pair_test.probe AS OBJECT (\n\
+      first TEXT, second TEXT, marker BOOLEAN NOT NULL\n\
+    );\n\
+    CREATE TYPE raw_argument_pair_test.indirect_probe AS OBJECT (\n\
+      nested raw_argument_pair_test.pair_value NOT NULL\n\
+    );\n\
+    CREATE TYPE raw_argument_pair_test.owner AS OBJECT (name TEXT NOT NULL);\n\
+    CREATE TYPE raw_argument_pair_test.assignment AS OBJECT (\n\
+      label TEXT NOT NULL, owner REF raw_argument_pair_test.owner NOT NULL\n\
+    );\n\
+    CREATE SERVER FUNCTION raw_argument_pair_test.create_pair(p_first TEXT, p_second TEXT)\n\
+    RETURNS ROWS (created REF raw_argument_pair_test.probe)\n\
+    SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE\n\
+    AS INSERT INTO raw_argument_pair_test.probe AS made (first, second, marker)\n\
+    VALUES (p_first, p_second, TRUE) RETURNING REF(made);\n\
+    CREATE SERVER FUNCTION raw_argument_pair_test.create_unused(p_first TEXT, p_second TEXT)\n\
+    RETURNS ROWS (created REF raw_argument_pair_test.probe)\n\
+    SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE\n\
+    AS INSERT INTO raw_argument_pair_test.probe AS made (first, marker)\n\
+    VALUES (p_first, TRUE) RETURNING REF(made);\n\
+    CREATE SERVER FUNCTION raw_argument_pair_test.create_indirect(p_first TEXT, p_second TEXT)\n\
+    RETURNS ROWS (created REF raw_argument_pair_test.indirect_probe)\n\
+    SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE\n\
+    AS INSERT INTO raw_argument_pair_test.indirect_probe AS made (nested)\n\
+    VALUES (raw_argument_pair_test.pair_value{first: p_first, second: p_second})\n\
+    RETURNING REF(made);\n\
+    CREATE SERVER FUNCTION raw_argument_pair_test.create_extra(\n\
+      p_first TEXT, p_second TEXT, p_extra TEXT\n\
+    ) RETURNS ROWS (created REF raw_argument_pair_test.probe)\n\
+    SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE\n\
+    AS INSERT INTO raw_argument_pair_test.probe AS made (first, second, marker)\n\
+    VALUES (p_first, p_second, TRUE) RETURNING REF(made);\n\
+    CREATE SERVER FUNCTION raw_argument_pair_test.create_owner(p_name TEXT)\n\
+    RETURNS ROWS (created REF raw_argument_pair_test.owner)\n\
+    SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE\n\
+    AS INSERT INTO raw_argument_pair_test.owner AS made (name)\n\
+    VALUES (p_name) RETURNING REF(made);\n\
+    CREATE SERVER FUNCTION raw_argument_pair_test.create_assignment(\n\
+      p_label TEXT, p_owner REF raw_argument_pair_test.owner\n\
+    ) RETURNS ROWS (created REF raw_argument_pair_test.assignment)\n\
+    SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE\n\
+    AS INSERT INTO raw_argument_pair_test.assignment AS made (label, owner)\n\
+    VALUES (p_label, p_owner) RETURNING REF(made);\n\
+    CREATE SERVER FUNCTION raw_argument_pair_test.read_first()\n\
+    RETURNS ROWS (first TEXT)\n\
+    SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n\
+    AS SELECT probe.first FROM raw_argument_pair_test.probe probe;\n\
+    CREATE SERVER FUNCTION raw_argument_pair_test.read_second()\n\
+    RETURNS ROWS (second TEXT)\n\
+    SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n\
+    AS SELECT probe.second FROM raw_argument_pair_test.probe probe;\n\
+    CREATE SERVER FUNCTION raw_argument_pair_test.read_assignment_labels()\n\
+    RETURNS ROWS (label TEXT)\n\
+    SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n\
+    AS SELECT assignment.label FROM raw_argument_pair_test.assignment assignment;\n\
+    CREATE SERVER FUNCTION raw_argument_pair_test.read_assignment_owners()\n\
+    RETURNS ROWS (owner REF raw_argument_pair_test.owner)\n\
+    SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n\
+    AS SELECT assignment.owner FROM raw_argument_pair_test.assignment assignment;\n";
+
+#[cfg(feature = "test-hooks")]
 const RAW_REFERENCE_UPDATE_SOURCE: &str = "CREATE SCHEMA raw_reference_test;\n\
     CREATE TYPE raw_reference_test.probe AS OBJECT (\n\
       stored BOOLEAN NOT NULL,\n\
@@ -2598,6 +2663,474 @@ async fn authenticated_raw_insert_is_denied_then_granted_and_audited() -> TestRe
         require(
             grants == expected,
             "recovered grants must contain exactly the five fixed-service grants",
+        )?;
+
+        Ok(())
+    })
+    .await
+}
+
+/// Proves that one authenticated raw pair binds two same-typed parameters by
+/// their active identities, not by declaration or supplied argument order.
+///
+/// The existing singleton journeys retain their one-argument boundaries. A
+/// defaulted SERVER parameter cannot become an active target because the
+/// compiler rejects it before mutation preparation. This tracer owns the pair
+/// shapes that can reach PostgreSQL, authorisation order, U+0000 rollback,
+/// and the typed execution-failure path.
+#[cfg(feature = "test-hooks")]
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn authenticated_raw_argument_pair_binds_two_active_parameters_and_audits() -> TestResult<()>
+{
+    with_test_database(|database| async move {
+        let kernel: PostgresKernel = database.connection_string().parse()?;
+        kernel.bootstrap().await?;
+        let empty = kernel.recover().await?;
+        let upgrade = orna_standard::prepare_standard_upgrade(&empty)?;
+        let standard = kernel.apply_standard_upgrade(&upgrade).await?;
+        let applied = kernel
+            .apply(&standard_application_candidate(
+                RAW_ARGUMENT_PAIR_SOURCE,
+                &standard,
+                &upgrade,
+            )?)
+            .await?;
+        let pair = applied.pair();
+        let probe = applied
+            .catalogue()
+            .object_types()
+            .iter()
+            .find(|object| name_is(object.name().parts(), &["raw_argument_pair_test", "probe"]))
+            .ok_or_else(|| failure("raw argument-pair probe type is absent"))?
+            .id();
+        let create_pair = raw_function_id(&applied, &["raw_argument_pair_test", "create_pair"])?;
+        let create_unused = raw_function_id(&applied, &["raw_argument_pair_test", "create_unused"])?;
+        let create_indirect =
+            raw_function_id(&applied, &["raw_argument_pair_test", "create_indirect"])?;
+        let create_extra = raw_function_id(&applied, &["raw_argument_pair_test", "create_extra"])?;
+        let create_owner = raw_function_id(&applied, &["raw_argument_pair_test", "create_owner"])?;
+        let create_assignment =
+            raw_function_id(&applied, &["raw_argument_pair_test", "create_assignment"])?;
+        let read_first = raw_function_id(&applied, &["raw_argument_pair_test", "read_first"])?;
+        let read_second = raw_function_id(&applied, &["raw_argument_pair_test", "read_second"])?;
+        let read_assignment_labels = raw_function_id(
+            &applied,
+            &["raw_argument_pair_test", "read_assignment_labels"],
+        )?;
+        let read_assignment_owners = raw_function_id(
+            &applied,
+            &["raw_argument_pair_test", "read_assignment_owners"],
+        )?;
+        let create_definition = applied
+            .catalogue()
+            .function_by_id(create_pair)
+            .ok_or_else(|| failure("raw argument-pair creator is absent"))?;
+        let first_parameter = create_definition
+            .parameter_by_name("p_first")
+            .ok_or_else(|| failure("raw argument-pair p_first is absent"))?
+            .id();
+        let second_parameter = create_definition
+            .parameter_by_name("p_second")
+            .ok_or_else(|| failure("raw argument-pair p_second is absent"))?
+            .id();
+        require(
+            first_parameter != second_parameter,
+            "raw argument-pair parameters must have distinct identities",
+        )?;
+        let create_revision = create_definition.current_revision();
+        let parameter = |function: FunctionId, name: &str| {
+            applied
+                .catalogue()
+                .function_by_id(function)
+                .and_then(|definition| definition.parameter_by_name(name))
+                .map(|parameter| parameter.id())
+                .ok_or_else(|| {
+                    failure(format!(
+                        "raw argument-pair {name} parameter is absent from {function}"
+                    ))
+                })
+        };
+        let unused_first = parameter(create_unused, "p_first")?;
+        let unused_second = parameter(create_unused, "p_second")?;
+        let indirect_first = parameter(create_indirect, "p_first")?;
+        let indirect_second = parameter(create_indirect, "p_second")?;
+        let extra_first = parameter(create_extra, "p_first")?;
+        let extra_second = parameter(create_extra, "p_second")?;
+        let owner_parameter = parameter(create_owner, "p_name")?;
+        let assignment_label = parameter(create_assignment, "p_label")?;
+        let assignment_owner = parameter(create_assignment, "p_owner")?;
+        let owner = applied
+            .catalogue()
+            .object_types()
+            .iter()
+            .find(|object| name_is(object.name().parts(), &["raw_argument_pair_test", "owner"]))
+            .ok_or_else(|| failure("raw argument-pair owner type is absent"))?
+            .id();
+        let assignment = applied
+            .catalogue()
+            .object_types()
+            .iter()
+            .find(|object| {
+                name_is(
+                    object.name().parts(),
+                    &["raw_argument_pair_test", "assignment"],
+                )
+            })
+            .ok_or_else(|| failure("raw argument-pair assignment type is absent"))?
+            .id();
+        let exact_arguments = vec![
+            FunctionArgument::new(
+                second_parameter,
+                RuntimeValue::Text(String::from("second exact value")),
+            )?,
+            FunctionArgument::new(
+                first_parameter,
+                RuntimeValue::Text(String::from("first exact value")),
+            )?,
+        ];
+        kernel.install_catalogue_health_service(SERVICE_UID).await?;
+        let session = kernel.authenticate_local_peer(SERVICE_UID).await?;
+
+        // Denial precedes the two supplied parameter identities and values.
+        let denied = kernel
+            .dispatch_authenticated_raw_call_with_arguments(&session, create_pair, &exact_arguments)
+            .await
+            .expect_err("an ungranted raw argument pair must be denied");
+        require(
+            matches!(
+                denied,
+                PostgresKernelError::RawExecuteDenied {
+                    pair: denied_pair,
+                    function: denied_function,
+                    reason: ExecuteDenial::MissingExecuteGrant,
+                } if denied_pair == pair && denied_function == create_pair
+            ),
+            "raw argument-pair denial did not precede target inspection",
+        )?;
+
+        for function in [
+            create_pair,
+            create_unused,
+            create_indirect,
+            create_extra,
+            create_owner,
+            create_assignment,
+            read_first,
+            read_second,
+            read_assignment_labels,
+            read_assignment_owners,
+        ] {
+            kernel
+                .grant_catalogue_health_service_execute(pair, function)
+                .await?;
+        }
+
+        // All pair-specific target rejections that can reach the protected
+        // INSERT branch retain one allowed audit and create no probe row.
+        let mut wrong_parameter_bytes = first_parameter.to_bytes();
+        wrong_parameter_bytes[0] ^= 0x01;
+        let wrong_parameter = ParameterId::from_bytes(wrong_parameter_bytes);
+        let rejected_pairs = [
+            (
+                create_pair,
+                vec![
+                    FunctionArgument::new(wrong_parameter, RuntimeValue::Text(String::from("wrong")))?,
+                    FunctionArgument::new(second_parameter, RuntimeValue::Text(String::from("second")))?,
+                ],
+                "a wrong pair parameter",
+            ),
+            (
+                create_pair,
+                vec![
+                    FunctionArgument::new(first_parameter, RuntimeValue::Text(String::from("first")))?,
+                    FunctionArgument::new(first_parameter, RuntimeValue::Text(String::from("duplicate")))?,
+                ],
+                "a duplicate pair parameter",
+            ),
+            (
+                create_pair,
+                vec![FunctionArgument::new(
+                    first_parameter,
+                    RuntimeValue::Text(String::from("missing second")),
+                )?],
+                "a missing pair parameter",
+            ),
+            (
+                create_pair,
+                vec![
+                    FunctionArgument::new(first_parameter, RuntimeValue::Integer(7))?,
+                    FunctionArgument::new(second_parameter, RuntimeValue::Text(String::from("second")))?,
+                ],
+                "a mistyped pair parameter",
+            ),
+            (
+                create_unused,
+                vec![
+                    FunctionArgument::new(unused_first, RuntimeValue::Text(String::from("used")))?,
+                    FunctionArgument::new(unused_second, RuntimeValue::Text(String::from("unused")))?,
+                ],
+                "an unused pair parameter",
+            ),
+            (
+                create_indirect,
+                vec![
+                    FunctionArgument::new(indirect_first, RuntimeValue::Text(String::from("nested first")))?,
+                    FunctionArgument::new(indirect_second, RuntimeValue::Text(String::from("nested second")))?,
+                ],
+                "an indirectly used pair parameter",
+            ),
+            (
+                create_extra,
+                vec![
+                    FunctionArgument::new(extra_first, RuntimeValue::Text(String::from("first")))?,
+                    FunctionArgument::new(extra_second, RuntimeValue::Text(String::from("second")))?,
+                ],
+                "an extra declared pair parameter",
+            ),
+        ];
+        for (function, arguments, label) in rejected_pairs {
+            let unavailable = kernel
+                .dispatch_authenticated_raw_call_with_arguments(&session, function, &arguments)
+                .await
+                .expect_err(label);
+            require(
+                matches!(
+                    unavailable,
+                    PostgresKernelError::RawCallTargetUnavailable {
+                        function: actual,
+                        rule: "raw SERVER INSERT argument target is unavailable",
+                    } if actual == function
+                ),
+                format!("{label} returned {unavailable:?}"),
+            )?;
+        }
+        let outer_extra = vec![
+            FunctionArgument::new(first_parameter, RuntimeValue::Text(String::from("first")))?,
+            FunctionArgument::new(second_parameter, RuntimeValue::Text(String::from("second")))?,
+            FunctionArgument::new(first_parameter, RuntimeValue::Text(String::from("extra")))?,
+        ];
+        let extra = kernel
+            .dispatch_authenticated_raw_call_with_arguments(&session, create_pair, &outer_extra)
+            .await
+            .expect_err("a third raw argument must close before PostgreSQL");
+        require_raw_scalar_target_unavailable(
+            &extra,
+            create_pair,
+            "raw calls accept zero arguments, one supported value, or one supported argument pair",
+        )?;
+        let unsupported = kernel
+            .dispatch_authenticated_raw_call_with_arguments(&session, read_first, &exact_arguments)
+            .await
+            .expect_err("a pair must reject a non-INSERT raw target");
+        require_raw_scalar_target_unavailable(
+            &unsupported,
+            read_first,
+            "raw call arguments require a supported active SERVER mutation target",
+        )?;
+
+        // A scalar and Reference pair crosses the same protected path without
+        // source rendering or positional binding.
+        let owner_value = kernel
+            .dispatch_authenticated_raw_call_with_arguments(
+                &session,
+                create_owner,
+                &[FunctionArgument::new(
+                    owner_parameter,
+                    RuntimeValue::Text(String::from("pair owner")),
+                )?],
+            )
+            .await?;
+        let owner_object = raw_scalar_insert_reference(owner_value, owner)?;
+        let assignment_value = kernel
+            .dispatch_authenticated_raw_call_with_arguments(
+                &session,
+                create_assignment,
+                &[
+                    FunctionArgument::new(
+                        assignment_owner,
+                        RuntimeValue::Reference {
+                            target: owner,
+                            object: owner_object,
+                        },
+                    )?,
+                    FunctionArgument::new(
+                        assignment_label,
+                        RuntimeValue::Text(String::from("scalar-reference pair")),
+                    )?,
+                ],
+            )
+            .await?;
+        raw_scalar_insert_reference(assignment_value, assignment)?;
+        require_exact_scalar_read(
+            &read_raw_scalar_values(&kernel, &session, read_assignment_labels).await?,
+            &RuntimeValue::Text(String::from("scalar-reference pair")),
+            "raw scalar-Reference pair label",
+        )?;
+        require_exact_scalar_read(
+            &read_raw_scalar_values(&kernel, &session, read_assignment_owners).await?,
+            &RuntimeValue::Reference {
+                target: owner,
+                object: owner_object,
+            },
+            "raw scalar-Reference pair owner",
+        )?;
+
+        // Reverse supplied order while keeping the two values attached to
+        // their identities. Same-typed fields prove identity, not position,
+        // controls the stored row.
+        let inserted = kernel
+            .dispatch_authenticated_raw_call_with_arguments(&session, create_pair, &exact_arguments)
+            .await?;
+        let inserted = raw_scalar_insert_reference(inserted, probe)?;
+        require(
+            inserted != ObjectId::from_bytes([0; 16]),
+            "raw argument-pair INSERT must allocate a real object identity",
+        )?;
+        require_exact_scalar_read(
+            &read_raw_scalar_values(&kernel, &session, read_first).await?,
+            &RuntimeValue::Text(String::from("first exact value")),
+            "raw argument-pair first field",
+        )?;
+        require_exact_scalar_read(
+            &read_raw_scalar_values(&kernel, &session, read_second).await?,
+            &RuntimeValue::Text(String::from("second exact value")),
+            "raw argument-pair second field",
+        )?;
+
+        // A database failure after complete pair validation stays a typed
+        // SERVER INSERT failure and commits no partial pair row.
+        let reached = Arc::new(tokio::sync::Barrier::new(2));
+        let resume = Arc::new(tokio::sync::Barrier::new(2));
+        let executor = kernel.clone();
+        let execution_session = session.clone();
+        let execution_arguments = exact_arguments.clone();
+        let execution_reached = reached.clone();
+        let execution_resume = resume.clone();
+        let execution = tokio::spawn(async move {
+            executor
+                .dispatch_authenticated_raw_call_with_arguments_and_test_barrier(
+                    &execution_session,
+                    create_pair,
+                    &execution_arguments,
+                    execution_reached,
+                    execution_resume,
+                )
+                .await
+        });
+        let triggered = finish_triggered_failure(
+            &database,
+            probe,
+            TriggerKind::AfterRow,
+            execution,
+            reached,
+            resume,
+            "triggered raw argument-pair dispatch",
+        )
+        .await?;
+        let (context, source) = match triggered {
+            PostgresKernelError::ServerInsert(ServerInsertError::NotCommitted { context, source }) => {
+                (context, source)
+            }
+            other => return Err(failure(format!("triggered raw argument pair returned {other:?}"))),
+        };
+        require_context(context, pair, create_pair, create_revision)?;
+        let ServerInsertError::Database { source } = source.as_ref() else {
+            return Err(failure("triggered raw argument pair lost its database failure"));
+        };
+        require(
+            source.as_db_error().map(|error| error.code()) == Some(&SqlState::RAISE_EXCEPTION),
+            "triggered raw argument pair changed the PostgreSQL error code",
+        )?;
+
+        // Either Text position rejects U+0000 after authorisation, retains its
+        // allowed audit, and rolls back without adding a row. The last case
+        // supplies both invalid values in reverse stable-identity order, so
+        // the protected validator must canonicalise before its private check.
+        let (lower_parameter, higher_parameter) = if first_parameter.to_bytes() < second_parameter.to_bytes() {
+            (first_parameter, second_parameter)
+        } else {
+            (second_parameter, first_parameter)
+        };
+        for arguments in [
+            vec![
+                FunctionArgument::new(first_parameter, RuntimeValue::Text(String::from("a\u{0}b")))?,
+                FunctionArgument::new(second_parameter, RuntimeValue::Text(String::from("second")))?,
+            ],
+            vec![
+                FunctionArgument::new(first_parameter, RuntimeValue::Text(String::from("first")))?,
+                FunctionArgument::new(second_parameter, RuntimeValue::Text(String::from("a\u{0}b")))?,
+            ],
+            vec![
+                FunctionArgument::new(higher_parameter, RuntimeValue::Text(String::from("higher\u{0}")))?,
+                FunctionArgument::new(lower_parameter, RuntimeValue::Text(String::from("lower\u{0}")))?,
+            ],
+        ] {
+            let unavailable = kernel
+                .dispatch_authenticated_raw_call_with_arguments(&session, create_pair, &arguments)
+                .await
+                .expect_err("Text U+0000 must make a raw argument pair unavailable");
+            require(
+                matches!(
+                    unavailable,
+                    PostgresKernelError::RawCallTargetUnavailable { function, .. } if function == create_pair
+                ),
+                "Text U+0000 raw argument-pair rejection lost its target identity",
+            )?;
+        }
+        require_exact_scalar_read(
+            &read_raw_scalar_values(&kernel, &session, read_first).await?,
+            &RuntimeValue::Text(String::from("first exact value")),
+            "Text U+0000 raw argument-pair first field",
+        )?;
+        require_exact_scalar_read(
+            &read_raw_scalar_values(&kernel, &session, read_second).await?,
+            &RuntimeValue::Text(String::from("second exact value")),
+            "Text U+0000 raw argument-pair second field",
+        )?;
+
+        let audits = kernel.recover_security_audit_events().await?;
+        let actual: Vec<(SecurityAuditKind, SecurityAuditOutcome, Option<FunctionId>)> = audits
+            .iter()
+            .map(|event| {
+                let decision = event.decision();
+                (
+                    decision.kind(),
+                    decision.outcome(),
+                    decision.target().map(InvocationTarget::function),
+                )
+            })
+            .collect();
+        let allowed = SecurityAuditOutcome::Allowed;
+        let execute = SecurityAuditKind::Execute;
+        let expected = vec![
+            (SecurityAuditKind::Authentication, allowed, None),
+            (execute, SecurityAuditOutcome::Denied, Some(create_pair)),
+            (execute, allowed, Some(create_pair)),
+            (execute, allowed, Some(create_pair)),
+            (execute, allowed, Some(create_pair)),
+            (execute, allowed, Some(create_pair)),
+            (execute, allowed, Some(create_unused)),
+            (execute, allowed, Some(create_indirect)),
+            (execute, allowed, Some(create_extra)),
+            (execute, allowed, Some(read_first)),
+            (execute, allowed, Some(create_owner)),
+            (execute, allowed, Some(create_assignment)),
+            (execute, allowed, Some(read_assignment_labels)),
+            (execute, allowed, Some(read_assignment_owners)),
+            (execute, allowed, Some(create_pair)),
+            (execute, allowed, Some(read_first)),
+            (execute, allowed, Some(read_second)),
+            (execute, allowed, Some(create_pair)),
+            (execute, allowed, Some(create_pair)),
+            (execute, allowed, Some(create_pair)),
+            (execute, allowed, Some(create_pair)),
+            (execute, allowed, Some(read_first)),
+            (execute, allowed, Some(read_second)),
+        ];
+        require(
+            actual == expected,
+            "raw argument-pair audit sequence differs",
         )?;
 
         Ok(())
