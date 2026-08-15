@@ -66,6 +66,31 @@ const EXECUTION_SOURCE: &str = r"CREATE SCHEMA exec;
     AS SELECT n.active, n.value, n.amount, n.blob, n.child FROM exec.node n;
 ";
 
+#[cfg(feature = "test-hooks")]
+fn unique_text_select_source(schema: &str) -> String {
+    format!(
+        "CREATE SCHEMA {schema};\n\
+         CREATE TYPE {schema}.person AS OBJECT (\n\
+           email TEXT UNIQUE, required_email TEXT NOT NULL UNIQUE, name TEXT NOT NULL, note TEXT\n\
+         );\n\
+         CREATE SERVER FUNCTION {schema}.by_email(p_email TEXT)\n\
+         RETURNS ROWS (person REF {schema}.person, name TEXT, note TEXT)\n\
+         SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n\
+         AS SELECT REF(selected), selected.name, selected.note\n\
+         FROM {schema}.person selected WHERE selected.email = p_email;\n\
+         CREATE SERVER FUNCTION {schema}.by_required_email(p_email TEXT)\n\
+         RETURNS ROWS (person REF {schema}.person, name TEXT, note TEXT)\n\
+         SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n\
+         AS SELECT REF(selected), selected.name, selected.note\n\
+         FROM {schema}.person selected WHERE selected.required_email = p_email;\n\
+         CREATE SERVER FUNCTION {schema}.all_people()\n\
+         RETURNS ROWS (person REF {schema}.person, name TEXT, note TEXT)\n\
+         SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n\
+         AS SELECT REF(selected), selected.name, selected.note\n\
+         FROM {schema}.person selected;\n"
+    )
+}
+
 const ENUM_EXECUTION_SOURCE: &str = r"CREATE SCHEMA enum_exec;
     CREATE TYPE enum_exec.stage AS ENUM ('lead', 'qualified', 'customer');
     CREATE TYPE enum_exec.case AS OBJECT (stage enum_exec.stage NOT NULL);
@@ -159,6 +184,8 @@ const PAYLOAD_LIMIT: usize = 16 * 1024 * 1024;
 const VARIABLE_PAYLOAD_MAXIMUM: usize = 5_592_377;
 #[cfg(feature = "test-hooks")]
 const RAW_IDENTITY_SERVICE_UID: u32 = 61_019;
+#[cfg(feature = "test-hooks")]
+const RAW_UNIQUE_TEXT_SERVICE_UID: u32 = 61_020;
 
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
@@ -805,6 +832,259 @@ async fn authenticated_server_select_commits_allowed_and_denied_execute_decision
             "failed authenticated SERVER audit inserted a decision",
         )?;
         Ok(())
+    })
+    .await
+}
+
+#[cfg(feature = "test-hooks")]
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn authenticated_raw_unique_text_selected_select_requires_version_four_dispatch()
+-> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = hostile_kernel(&database)?;
+        kernel.bootstrap().await?;
+        let empty = kernel.recover().await?;
+        let scalar_source = unique_text_select_source("raw_unique_text_v1");
+        let version_one = kernel.apply(&candidate(&scalar_source, &empty)?).await?;
+        let scalar_fixture =
+            UniqueTextSelectFixture::from_active(&version_one, "raw_unique_text_v1")?;
+        require_unique_text_select_type_authority(
+            &version_one,
+            scalar_fixture,
+            ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+            "version-one scalar Text",
+        )?;
+        insert_unique_text_select_rows(&database, scalar_fixture).await?;
+        for (function, parameter, value, name) in [
+            (
+                scalar_fixture.by_email,
+                scalar_fixture.by_email_parameter,
+                "café",
+                "nullable unique scalar Text selector",
+            ),
+            (
+                scalar_fixture.by_required_email,
+                scalar_fixture.by_required_email_parameter,
+                "required@example.test",
+                "required unique scalar Text selector",
+            ),
+        ] {
+            let selected = kernel
+                .execute_server_select_with_arguments(
+                    function,
+                    &unique_text_select_argument(parameter, value)?,
+                )
+                .await?;
+            require_unique_text_select_result(&selected, scalar_fixture, name)?;
+        }
+        let upgrade = orna_standard::prepare_standard_upgrade(&version_one)
+            .map_err(|error| failure(format!("standard upgrade preparation failed: {error}")))?;
+        let version_two = kernel.apply_standard_upgrade(&upgrade).await?;
+        let value_source = unique_text_select_source("raw_unique_text");
+        let applied = kernel
+            .apply(&standard_execution_candidate(
+                &value_source,
+                &version_two,
+                &upgrade,
+            )?)
+            .await?;
+        let fixture = UniqueTextSelectFixture::from_active(&applied, "raw_unique_text")?;
+        require_unique_text_select_type_authority(
+            &applied,
+            fixture,
+            ResolvedType::Value(CHARACTER_LARGE_OBJECT_TYPE_ID),
+            "version-two standard Text value",
+        )?;
+        insert_unique_text_select_rows(&database, fixture).await?;
+        kernel
+            .install_catalogue_health_service(RAW_UNIQUE_TEXT_SERVICE_UID)
+            .await?;
+        let session = kernel
+            .authenticate_local_peer(RAW_UNIQUE_TEXT_SERVICE_UID)
+            .await?;
+
+        let denied = kernel
+            .dispatch_authenticated_raw_call_with_arguments(
+                &session,
+                fixture.by_email,
+                &[FunctionArgument::new(
+                    ParameterId::from_bytes([0xa1; 16]),
+                    RuntimeValue::Text("redacted@example.test".into()),
+                )?],
+            )
+            .await
+            .expect_err("raw unique Text SELECT must deny before target inspection");
+        require(
+            matches!(
+                denied,
+                PostgresKernelError::RawExecuteDenied {
+                    pair,
+                    function,
+                    reason: ExecuteDenial::MissingExecuteGrant,
+                } if pair == applied.pair() && function == fixture.by_email
+            ),
+            "raw unique Text SELECT did not deny before target inspection",
+        )?;
+
+        kernel
+            .grant_catalogue_health_service_execute(applied.pair(), fixture.by_email)
+            .await?;
+        kernel
+            .grant_catalogue_health_service_execute(applied.pair(), fixture.by_required_email)
+            .await?;
+        for (function, parameter, value, name) in [
+            (
+                fixture.by_email,
+                fixture.by_email_parameter,
+                "café",
+                "nullable unique Text selector",
+            ),
+            (
+                fixture.by_required_email,
+                fixture.by_required_email_parameter,
+                "required@example.test",
+                "required unique Text selector",
+            ),
+        ] {
+            let selected = kernel
+                .dispatch_authenticated_raw_call_with_arguments(
+                    &session,
+                    function,
+                    &unique_text_select_argument(parameter, value)?,
+                )
+                .await?;
+            require_raw_unique_text_select_result(selected, fixture, name)?;
+        }
+
+        for (value, name) in [
+            ("CAFÉ", "case-distinct Text"),
+            ("café ", "whitespace-distinct Text"),
+            ("line\r\nending@example.test", "CRLF-distinct Text"),
+            ("cafe\u{301}", "C-byte-distinct Text"),
+            ("absent@example.test", "absent Text"),
+            ("nullable@example.test", "nullable stored Text"),
+            ("", "empty Text"),
+        ] {
+            let result = kernel
+                .dispatch_authenticated_raw_call_with_arguments(
+                    &session,
+                    fixture.by_email,
+                    &unique_text_select_argument(fixture.by_email_parameter, value)?,
+                )
+                .await?;
+            require(
+                result == AuthenticatedRawCallResult::Server(vec![]),
+                format!("{name} did not complete without projected values"),
+            )?;
+        }
+        let required_absent = kernel
+            .dispatch_authenticated_raw_call_with_arguments(
+                &session,
+                fixture.by_required_email,
+                &unique_text_select_argument(
+                    fixture.by_required_email_parameter,
+                    "absent-required@example.test",
+                )?,
+            )
+            .await?;
+        require(
+            required_absent == AuthenticatedRawCallResult::Server(vec![]),
+            "absent required unique Text did not complete without projected values",
+        )?;
+
+        let wrong_parameter = kernel
+            .dispatch_authenticated_raw_call_with_arguments(
+                &session,
+                fixture.by_email,
+                &[FunctionArgument::new(
+                    ParameterId::from_bytes([0xa2; 16]),
+                    RuntimeValue::Text("café".into()),
+                )?],
+            )
+            .await
+            .expect_err("an allowed wrong ParameterId must be target-unavailable");
+        require_raw_target_unavailable(&wrong_parameter, fixture.by_email, "wrong ParameterId")?;
+
+        let mistyped = kernel
+            .dispatch_authenticated_raw_call_with_arguments(
+                &session,
+                fixture.by_email,
+                &[FunctionArgument::new(
+                    fixture.by_email_parameter,
+                    RuntimeValue::Integer(42),
+                )?],
+            )
+            .await
+            .expect_err("an allowed mistyped Text parameter must be target-unavailable");
+        require_raw_target_unavailable(&mistyped, fixture.by_email, "mistyped Text parameter")?;
+
+        kernel
+            .grant_catalogue_health_service_execute(applied.pair(), fixture.all_people)
+            .await?;
+        let non_version_four = kernel
+            .dispatch_authenticated_raw_call_with_arguments(
+                &session,
+                fixture.all_people,
+                &[FunctionArgument::new(
+                    ParameterId::from_bytes([0xa3; 16]),
+                    RuntimeValue::Text("not accepted by the v1 target".into()),
+                )?],
+            )
+            .await
+            .expect_err("an allowed one-argument non-version-4 target must be target-unavailable");
+        require_raw_target_unavailable(
+            &non_version_four,
+            fixture.all_people,
+            "non-version-4 target",
+        )?;
+
+        let execute = kernel
+            .recover_security_audit_events()
+            .await?
+            .into_iter()
+            .filter(|event| event.decision().kind() == SecurityAuditKind::Execute)
+            .collect::<Vec<_>>();
+        require(
+            execute.len() == 14,
+            "raw unique Text SELECT audit count differs",
+        )?;
+        require_server_execute_audit(
+            &execute[0],
+            SecurityAuditOutcome::Denied,
+            CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID,
+            None,
+            None,
+            InvocationTarget::new(fixture.by_email, applied.pair()),
+            Some(ExecuteDenial::MissingExecuteGrant),
+        )?;
+        let expected_allowed_targets = [
+            fixture.by_email,
+            fixture.by_required_email,
+            fixture.by_email,
+            fixture.by_email,
+            fixture.by_email,
+            fixture.by_email,
+            fixture.by_email,
+            fixture.by_email,
+            fixture.by_email,
+            fixture.by_required_email,
+            fixture.by_email,
+            fixture.by_email,
+            fixture.all_people,
+        ];
+        for (event, function) in execute[1..].iter().zip(expected_allowed_targets) {
+            require_server_execute_audit(
+                event,
+                SecurityAuditOutcome::Allowed,
+                CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID,
+                Some(CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID),
+                Some(CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID),
+                InvocationTarget::new(function, applied.pair()),
+                None,
+            )?;
+        }
+        require_no_session_leaks(&database).await
     })
     .await
 }
@@ -2065,6 +2345,92 @@ async fn rejects_tampered_artifacts_and_unknown_functions_before_target_executio
     .await
 }
 
+#[cfg(feature = "test-hooks")]
+#[derive(Clone, Copy)]
+struct UniqueTextSelectFixture {
+    person: TypeId,
+    email: FieldId,
+    required_email: FieldId,
+    name: FieldId,
+    note: FieldId,
+    email_type: ResolvedType,
+    required_email_type: ResolvedType,
+    by_email: FunctionId,
+    by_email_parameter: ParameterId,
+    by_email_parameter_type: ResolvedType,
+    by_required_email: FunctionId,
+    by_required_email_parameter: ParameterId,
+    by_required_email_parameter_type: ResolvedType,
+    all_people: FunctionId,
+    exact: ObjectId,
+    line_feed: ObjectId,
+    nullable_first: ObjectId,
+    nullable_second: ObjectId,
+}
+
+#[cfg(feature = "test-hooks")]
+impl UniqueTextSelectFixture {
+    fn from_active(active: &ActiveDatabaseRevision, schema: &str) -> TestResult<Self> {
+        let person = active
+            .catalogue()
+            .object_types()
+            .iter()
+            .find(|object| name_is(object.name().parts(), &[schema, "person"]))
+            .ok_or_else(|| failure("raw unique Text person type is absent"))?;
+        let function = |name| {
+            active
+                .catalogue()
+                .functions()
+                .iter()
+                .find(|function| name_is(function.name().parts(), &[schema, name]))
+                .ok_or_else(|| failure(format!("raw unique Text function {name} is absent")))
+        };
+        let by_email = function("by_email")?;
+        let by_required_email = function("by_required_email")?;
+        let all_people = function("all_people")?;
+        let [by_email_parameter] = by_email.parameters() else {
+            return Err(failure(
+                "raw unique Text selector function must have one parameter",
+            ));
+        };
+        let [by_required_email_parameter] = by_required_email.parameters() else {
+            return Err(failure(
+                "raw required unique Text selector function must have one parameter",
+            ));
+        };
+        let field = |name| {
+            person
+                .field_by_name(name)
+                .map(|field| (field.id(), field.resolved_type()))
+                .ok_or_else(|| failure(format!("raw unique Text field {name} is absent")))
+        };
+        let (email, email_type) = field("email")?;
+        let (required_email, required_email_type) = field("required_email")?;
+        let (name, _) = field("name")?;
+        let (note, _) = field("note")?;
+        Ok(Self {
+            person: person.id(),
+            email,
+            required_email,
+            name,
+            note,
+            email_type,
+            required_email_type,
+            by_email: by_email.id(),
+            by_email_parameter: by_email_parameter.id(),
+            by_email_parameter_type: by_email_parameter.resolved_type(),
+            by_required_email: by_required_email.id(),
+            by_required_email_parameter: by_required_email_parameter.id(),
+            by_required_email_parameter_type: by_required_email_parameter.resolved_type(),
+            all_people: all_people.id(),
+            exact: ObjectId::from_bytes([0xb1; 16]),
+            line_feed: ObjectId::from_bytes([0xb4; 16]),
+            nullable_first: ObjectId::from_bytes([0xb2; 16]),
+            nullable_second: ObjectId::from_bytes([0xb3; 16]),
+        })
+    }
+}
+
 #[derive(Clone, Copy)]
 struct Fixture {
     node: TypeId,
@@ -2317,6 +2683,71 @@ async fn execute_exact_fixture(
         "zero-match function returned a row",
     )?;
     require_no_session_leaks(database).await
+}
+
+#[cfg(feature = "test-hooks")]
+async fn insert_unique_text_select_rows(
+    database: &TestDatabase,
+    fixture: UniqueTextSelectFixture,
+) -> TestResult<()> {
+    let statement = format!(
+        "INSERT INTO {} (_orna_object_id, {}, {}, {}, {}) VALUES ($1, $2, $3, $4, $5)",
+        relation(fixture.person),
+        field(fixture.email),
+        field(fixture.required_email),
+        field(fixture.name),
+        field(fixture.note),
+    );
+    let session = database.open().await?;
+    let operation: TestResult<()> = async {
+        session
+            .client()
+            .execute(
+                &statement,
+                &[
+                    &fixture.exact.to_bytes().to_vec(),
+                    &Some("café"),
+                    &"required@example.test",
+                    &"exact byte match",
+                    &Option::<&str>::None,
+                ],
+            )
+            .await?;
+        session
+            .client()
+            .execute(
+                &statement,
+                &[
+                    &fixture.line_feed.to_bytes().to_vec(),
+                    &Some("line\nending@example.test"),
+                    &"line-feed@example.test",
+                    &"line feed email",
+                    &Some("stored LF email"),
+                ],
+            )
+            .await?;
+        for (object, name) in [
+            (fixture.nullable_first, "first null email"),
+            (fixture.nullable_second, "second null email"),
+        ] {
+            session
+                .client()
+                .execute(
+                    &statement,
+                    &[
+                        &object.to_bytes().to_vec(),
+                        &Option::<&str>::None,
+                        &format!("{name}@example.test"),
+                        &name,
+                        &Some("stored nullable email"),
+                    ],
+                )
+                .await?;
+        }
+        Ok(())
+    }
+    .await;
+    finish_session(session, operation, "unique Text select fixture insert").await
 }
 
 async fn insert_execution_rows(database: &TestDatabase, fixture: Fixture) -> TestResult<()> {
@@ -3328,6 +3759,110 @@ fn selector_argument(fixture: Fixture, object: ObjectId) -> TestResult<Vec<Funct
             object,
         },
     )?])
+}
+
+#[cfg(feature = "test-hooks")]
+fn unique_text_select_argument(
+    parameter: ParameterId,
+    value: &str,
+) -> TestResult<Vec<FunctionArgument>> {
+    Ok(vec![FunctionArgument::new(
+        parameter,
+        RuntimeValue::Text(value.into()),
+    )?])
+}
+
+#[cfg(feature = "test-hooks")]
+fn require_raw_target_unavailable(
+    error: &PostgresKernelError,
+    function: FunctionId,
+    name: &'static str,
+) -> TestResult<()> {
+    require(
+        matches!(
+            error,
+            PostgresKernelError::RawCallTargetUnavailable {
+                function: unavailable,
+                ..
+            } if *unavailable == function
+        ),
+        format!("{name} did not close as target-unavailable"),
+    )
+}
+
+#[cfg(feature = "test-hooks")]
+fn require_unique_text_select_type_authority(
+    active: &ActiveDatabaseRevision,
+    fixture: UniqueTextSelectFixture,
+    expected_type: ResolvedType,
+    name: &'static str,
+) -> TestResult<()> {
+    require(
+        fixture.email_type == expected_type
+            && fixture.required_email_type == expected_type
+            && fixture.by_email_parameter_type == expected_type
+            && fixture.by_required_email_parameter_type == expected_type,
+        format!("{name} did not retain one exact unique Text type authority"),
+    )?;
+    for function in [fixture.by_email, fixture.by_required_email] {
+        let revision = active
+            .function_revisions()
+            .iter()
+            .find(|revision| revision.function() == function)
+            .ok_or_else(|| failure(format!("{name} selector revision is absent")))?;
+        require(
+            revision.artifact().version() == 4,
+            format!("{name} selector did not retain a version-4 server plan"),
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "test-hooks")]
+fn require_unique_text_select_result(
+    result: &ServerSelectResult,
+    fixture: UniqueTextSelectFixture,
+    name: &'static str,
+) -> TestResult<()> {
+    let [row] = result.rows().rows() else {
+        return Err(failure(format!("{name} did not return exactly one row")));
+    };
+    require_unique_text_select_values(row.values(), fixture, name)
+}
+
+#[cfg(feature = "test-hooks")]
+fn require_raw_unique_text_select_result(
+    result: AuthenticatedRawCallResult,
+    fixture: UniqueTextSelectFixture,
+    name: &'static str,
+) -> TestResult<()> {
+    let AuthenticatedRawCallResult::Server(values) = result else {
+        return Err(failure(format!("{name} did not return SERVER values")));
+    };
+    require_unique_text_select_values(&values, fixture, name)
+}
+
+#[cfg(feature = "test-hooks")]
+fn require_unique_text_select_values(
+    values: &[RuntimeValue],
+    fixture: UniqueTextSelectFixture,
+    name: &'static str,
+) -> TestResult<()> {
+    require(
+        matches!(
+            values,
+            [
+                RuntimeValue::Reference { target, object },
+                RuntimeValue::Text(value),
+                RuntimeValue::Null(note),
+            ] if *target == fixture.person
+                && *object == fixture.exact
+                && value == "exact byte match"
+                && note.resolved_type()
+                    == ResolvedType::scalar(StandardScalar::CharacterLargeObject)
+        ),
+        format!("{name} did not return the exact ordered projected values"),
+    )
 }
 
 fn require_identity_selected_columns(
