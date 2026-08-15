@@ -101,3 +101,5 @@ source-of-truth or authority rules.
   [Canonical Raw Calls Bind One Bounded Argument Pair](0049-canonical-raw-argument-pairs.md)
 * **work ADR 0050:**
   [Canonical Raw Calls Update One Selected Object with One Value](0050-canonical-raw-reference-value-update.md)
+* **work ADR 0051:**
+  [Text Fields Have Byte-Exact Uniqueness](0051-unique-text-fields.md)
