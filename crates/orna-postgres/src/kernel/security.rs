@@ -29,11 +29,12 @@ use crate::{
         raw_identity_selected_server_select_target_is_selected, raw_server_target_is_unavailable,
     },
     server_mutation_execution::{
-        ServerInsertError, execute_authorised_raw_server_insert,
+        RawServerReferenceMutation, ServerInsertError, execute_authorised_raw_server_insert,
         execute_authorised_raw_server_insert_with_arguments,
         execute_authorised_raw_server_reference_mutation, raw_server_delete_target_is_unavailable,
         raw_server_insert_target_is_selected, raw_server_insert_target_is_unavailable,
-        raw_server_reference_mutation_target, raw_server_update_target_is_unavailable,
+        raw_server_reference_mutation_target, raw_server_reference_value_update_target_is_selected,
+        raw_server_update_target_is_unavailable,
     },
     server_runtime::configure_and_recover,
 };
@@ -246,6 +247,15 @@ impl PostgresKernel {
                             let reference_mutation = reference_argument
                                 .then(|| raw_server_reference_mutation_target(&active, function))
                                 .flatten();
+                            let reference_mutation = if matches!(arguments, [_, _])
+                                && raw_server_reference_value_update_target_is_selected(
+                                    &active, function,
+                                )
+                            {
+                                Some(RawServerReferenceMutation::Update)
+                            } else {
+                                reference_mutation
+                            };
                             let identity_selected_select = reference_argument
                                 && raw_identity_selected_server_select_target_is_selected(
                                     &active, function,
