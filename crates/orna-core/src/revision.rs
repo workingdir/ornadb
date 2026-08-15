@@ -24,10 +24,10 @@ use crate::{
     TypeBindingId, TypeId,
     catalogue::{
         CatalogueSnapshot, FunctionDefinition, FunctionDomain, FunctionReturn, FunctionSecurity,
-        FunctionVolatility, TypeDefinition, ValueTypeDefinition, ValueTypeKind,
-        ValueTypeMutability, ValueTypePersistence,
+        FunctionVolatility, QualifiedSemanticName, TypeDefinition, TypeLookupName,
+        ValueTypeDefinition, ValueTypeKind, ValueTypeMutability, ValueTypePersistence,
     },
-    system::SYSTEM_FUNCTIONS,
+    system::{INVOCATION_CARRIERS, SYSTEM_FUNCTIONS},
     types::{ResolvedType, StandardScalar, TypeDescriptor, TypeDescriptorKind},
 };
 
@@ -442,6 +442,7 @@ impl StandardLibrarySnapshot {
             catalogue.revision(),
             DurableCatalogueRevisionRole::ActiveOrRecoveredStandard,
         )?;
+        reject_reserved_invocation_carrier(&catalogue)?;
         if source.parent().is_some() {
             return Err(RevisionInvariantError::StandardLibrarySourceHasParent {
                 source: source.id(),
@@ -2225,6 +2226,7 @@ fn validate_catalogue_hash_context_coherence(
     origins: &[DefinitionOrigin],
     references: &[DefinitionReference],
 ) -> Result<(), RevisionInvariantError> {
+    reject_reserved_invocation_carrier(catalogue)?;
     reject_reserved_system_function_identity(catalogue)?;
     if matches!(context, CatalogueHashContext::Version1) {
         reject_version_one_value_definitions(catalogue)?;
@@ -2239,6 +2241,26 @@ fn validate_catalogue_hash_context_coherence(
             validate_catalogue_hash_context_version_two(revisions, references)
         }
     }
+}
+
+fn reject_reserved_invocation_carrier(
+    catalogue: &CatalogueSnapshot,
+) -> Result<(), RevisionInvariantError> {
+    for carrier in INVOCATION_CARRIERS {
+        if catalogue.type_definition_by_id(carrier.id()).is_some() {
+            return Err(RevisionInvariantError::ReservedInvocationCarrierIdentity {
+                carrier: carrier.id(),
+            });
+        }
+    }
+    for carrier in INVOCATION_CARRIERS {
+        let name = QualifiedSemanticName::new(carrier.name_parts().iter().copied())
+            .expect("the compiled invocation-carrier name must be valid");
+        if let Some(type_id) = catalogue.type_id_by_name(&TypeLookupName::qualified(name)) {
+            return Err(RevisionInvariantError::ReservedInvocationCarrierName { type_id });
+        }
+    }
+    Ok(())
 }
 
 fn reject_reserved_system_function_identity(
@@ -3278,6 +3300,16 @@ pub enum RevisionInvariantError {
         /// The application function carrying the reserved name.
         function: FunctionId,
     },
+    /// A catalogue uses a type identity reserved for a sealed invocation carrier.
+    ReservedInvocationCarrierIdentity {
+        /// The rejected reserved invocation-carrier identity.
+        carrier: TypeId,
+    },
+    /// A catalogue uses a type name reserved for a sealed invocation carrier.
+    ReservedInvocationCarrierName {
+        /// The catalogue type carrying the reserved invocation-carrier name.
+        type_id: TypeId,
+    },
     /// A deployable source parent differs from its expected base source.
     DeployableSourceParentMismatch {
         expected: SourceRevisionId,
@@ -3501,6 +3533,11 @@ impl fmt::Display for RevisionInvariantError {
             ReservedSystemFunctionName { .. } => formatter.write_str(
                 "the reserved system function name cannot enter an application catalogue",
             ),
+            ReservedInvocationCarrierIdentity { .. } => formatter.write_str(
+                "the reserved invocation carrier identity cannot enter a catalogue",
+            ),
+            ReservedInvocationCarrierName { .. } => formatter
+                .write_str("the reserved invocation carrier name cannot enter a catalogue"),
             DeployableSourceParentMismatch { .. } => {
                 formatter.write_str("deployable source parent does not match expected base")
             }
@@ -6405,6 +6442,249 @@ mod tests {
             deployable_error.to_string(),
             "the reserved system function identity cannot enter an application catalogue"
         );
+    }
+
+    fn invocation_carrier_value_type(id: TypeId, parts: &[&str]) -> ValueTypeDefinition {
+        ValueTypeDefinition::primitive(
+            id,
+            QualifiedSemanticName::new(parts.iter().copied()).unwrap(),
+            ValueTypeMutability::Immutable,
+            ValueTypePersistence::Persistable,
+            "orna.test.invocation-carrier@1",
+        )
+    }
+
+    fn invocation_carrier_catalogue(value_types: Vec<ValueTypeDefinition>) -> CatalogueSnapshot {
+        CatalogueSnapshot::new_with_types(
+            CatalogueRevisionId::from_bytes(id::<112>()),
+            vec![
+                SchemaDefinition::new(
+                    SchemaId::from_bytes(id::<113>()),
+                    QualifiedSemanticName::new(["sys"]).unwrap(),
+                ),
+                SchemaDefinition::new(
+                    SchemaId::from_bytes(id::<114>()),
+                    QualifiedSemanticName::new(["sys", "invoke"]).unwrap(),
+                ),
+            ],
+            vec![],
+            value_types,
+            vec![],
+        )
+        .unwrap()
+    }
+
+    fn invocation_carrier_origins(catalogue: &CatalogueSnapshot) -> Vec<DefinitionOrigin> {
+        let source_unit = SourceUnitId::from_bytes(id::<3>());
+        let mut origins = vec![
+            DefinitionOrigin::new(
+                DefinitionIdentity::Schema(SchemaId::from_bytes(id::<113>())),
+                SourceOrigin::new(source_unit, 0, 1).unwrap(),
+            ),
+            DefinitionOrigin::new(
+                DefinitionIdentity::Schema(SchemaId::from_bytes(id::<114>())),
+                SourceOrigin::new(source_unit, 1, 2).unwrap(),
+            ),
+        ];
+        origins.extend(
+            catalogue
+                .value_types()
+                .iter()
+                .enumerate()
+                .map(|(index, value_type)| {
+                    DefinitionOrigin::new(
+                        DefinitionIdentity::ValueType(value_type.id()),
+                        SourceOrigin::new(source_unit, index as u32 + 2, index as u32 + 3).unwrap(),
+                    )
+                }),
+        );
+        origins
+    }
+
+    fn active_invocation_carrier_admission(
+        catalogue: CatalogueSnapshot,
+        origins: Vec<DefinitionOrigin>,
+    ) -> Result<ActiveDatabaseRevision, RevisionInvariantError> {
+        let source = source(None);
+        ActiveDatabaseRevision::new_with_catalogue_hash_context(
+            ActiveDatabaseRevisionInput::new(
+                RevisionPair::new(source.id(), catalogue.revision()),
+                source,
+                catalogue,
+                digest::<115>(),
+                ActiveRevisionContent::new(vec![], vec![], origins, vec![]),
+            ),
+            standard_context(),
+        )
+    }
+
+    fn deployable_invocation_carrier_admission(
+        catalogue: CatalogueSnapshot,
+        origins: Vec<DefinitionOrigin>,
+    ) -> Result<DeployableRevision, RevisionInvariantError> {
+        let expected_base = RevisionPair::new(
+            SourceRevisionId::from_bytes(id::<117>()),
+            CatalogueRevisionId::from_bytes(id::<118>()),
+        );
+        DeployableRevision::new_with_catalogue_hash_context(
+            DeployableRevisionInput::new(
+                expected_base,
+                source(Some(expected_base.source())),
+                expected_base.catalogue(),
+                catalogue,
+                digest::<115>(),
+                DeployableRevisionContent::new(origins, vec![], vec![], vec![])
+                    .with_current_function_revisions(vec![]),
+            ),
+            standard_context(),
+        )
+    }
+
+    fn standard_invocation_carrier_admission(
+        catalogue: CatalogueSnapshot,
+        origins: Vec<DefinitionOrigin>,
+    ) -> Result<StandardLibrarySnapshot, RevisionInvariantError> {
+        StandardLibrarySnapshot::new(
+            StandardLibraryRevisionId::from_bytes(id::<115>()),
+            StandardLibraryDigestVersion::Version1,
+            source(None),
+            "orna.language/1",
+            catalogue,
+            origins,
+            digest::<115>(),
+        )
+    }
+
+    #[test]
+    fn public_application_and_standard_admission_reject_each_reserved_carrier_identity() {
+        for &carrier in crate::system::INVOCATION_CARRIERS {
+            let catalogue = invocation_carrier_catalogue(vec![invocation_carrier_value_type(
+                carrier.id(),
+                carrier.name_parts(),
+            )]);
+            let expected = RevisionInvariantError::ReservedInvocationCarrierIdentity {
+                carrier: carrier.id(),
+            };
+
+            assert_eq!(
+                active_invocation_carrier_admission(catalogue.clone(), vec![]).unwrap_err(),
+                expected
+            );
+            assert_eq!(
+                deployable_invocation_carrier_admission(catalogue.clone(), vec![]).unwrap_err(),
+                expected
+            );
+            assert_eq!(
+                standard_invocation_carrier_admission(catalogue, vec![]).unwrap_err(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn public_application_and_standard_admission_reject_each_reserved_carrier_name() {
+        for (index, &carrier) in crate::system::INVOCATION_CARRIERS.iter().enumerate() {
+            let type_id = TypeId::from_bytes([0x80 + index as u8; 16]);
+            let catalogue = invocation_carrier_catalogue(vec![invocation_carrier_value_type(
+                type_id,
+                carrier.name_parts(),
+            )]);
+            let expected = RevisionInvariantError::ReservedInvocationCarrierName { type_id };
+
+            assert_eq!(
+                active_invocation_carrier_admission(catalogue.clone(), vec![]).unwrap_err(),
+                expected
+            );
+            assert_eq!(
+                deployable_invocation_carrier_admission(catalogue.clone(), vec![]).unwrap_err(),
+                expected
+            );
+            assert_eq!(
+                standard_invocation_carrier_admission(catalogue, vec![]).unwrap_err(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn carrier_identities_globally_precede_carrier_names_at_public_application_admission() {
+        let value_name_only = TypeId::from_bytes([0xa0; 16]);
+        let catalogue = invocation_carrier_catalogue(vec![
+            invocation_carrier_value_type(value_name_only, &["sys", "invoke", "Value"]),
+            invocation_carrier_value_type(
+                crate::system::SYS_INVOKE_EVENT_TYPE_ID,
+                &["sys", "invoke", "Event2"],
+            ),
+            invocation_carrier_value_type(
+                crate::system::SYS_INVOKE_REQUEST_TYPE_ID,
+                &["sys", "invoke", "Request2"],
+            ),
+        ]);
+        let expected = RevisionInvariantError::ReservedInvocationCarrierIdentity {
+            carrier: crate::system::SYS_INVOKE_REQUEST_TYPE_ID,
+        };
+
+        assert_eq!(
+            active_invocation_carrier_admission(catalogue.clone(), vec![]).unwrap_err(),
+            expected
+        );
+        assert_eq!(
+            deployable_invocation_carrier_admission(catalogue.clone(), vec![]).unwrap_err(),
+            expected
+        );
+        assert_eq!(
+            standard_invocation_carrier_admission(catalogue, vec![]).unwrap_err(),
+            expected
+        );
+    }
+
+    #[test]
+    fn carrier_names_use_the_global_registry_order_at_public_application_admission() {
+        let catalogue = invocation_carrier_catalogue(vec![
+            invocation_carrier_value_type(
+                TypeId::from_bytes([0x90; 16]),
+                &["sys", "invoke", "Event"],
+            ),
+            invocation_carrier_value_type(
+                TypeId::from_bytes([0x91; 16]),
+                &["sys", "invoke", "Request"],
+            ),
+            invocation_carrier_value_type(
+                TypeId::from_bytes([0x92; 16]),
+                &["sys", "invoke", "Value"],
+            ),
+        ]);
+        let expected = RevisionInvariantError::ReservedInvocationCarrierName {
+            type_id: TypeId::from_bytes([0x92; 16]),
+        };
+
+        assert_eq!(
+            active_invocation_carrier_admission(catalogue.clone(), vec![]).unwrap_err(),
+            expected
+        );
+        assert_eq!(
+            deployable_invocation_carrier_admission(catalogue.clone(), vec![]).unwrap_err(),
+            expected
+        );
+        assert_eq!(
+            standard_invocation_carrier_admission(catalogue, vec![]).unwrap_err(),
+            expected
+        );
+    }
+
+    #[test]
+    fn neighbouring_invocation_carrier_names_remain_admissible_at_public_boundaries() {
+        let catalogue = invocation_carrier_catalogue(vec![invocation_carrier_value_type(
+            TypeId::from_bytes(id::<116>()),
+            &["sys", "invoke", "Value2"],
+        )]);
+        let origins = invocation_carrier_origins(&catalogue);
+
+        assert!(active_invocation_carrier_admission(catalogue.clone(), origins.clone()).is_ok());
+        assert!(
+            deployable_invocation_carrier_admission(catalogue.clone(), origins.clone()).is_ok()
+        );
+        assert!(standard_invocation_carrier_admission(catalogue, origins).is_ok());
     }
 
     #[test]
