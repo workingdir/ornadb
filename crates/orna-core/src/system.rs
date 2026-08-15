@@ -13,7 +13,7 @@
 //! Application catalogues remain separate from this registry. They cannot
 //! replace a sealed definition by reusing its identity or exact name.
 
-use crate::{FunctionId, TypeId, catalogue::QualifiedSemanticName};
+use crate::{FunctionId, ParameterId, TypeId, catalogue::QualifiedSemanticName};
 
 /// The stable identity of the sealed `sys.catalog.health` function.
 pub const CATALOGUE_HEALTH_FUNCTION_ID: FunctionId =
@@ -28,6 +28,13 @@ pub const SYS_INVOKE_FUNCTION_ID: FunctionId =
 
 /// The exact resolved name of the mandatory invocation gateway.
 pub const SYS_INVOKE_FUNCTION_NAME: &str = "sys.invoke";
+
+/// The stable identity of the sole sealed `sys.invoke` parameter.
+pub const SYS_INVOKE_PARAMETER_ID: ParameterId =
+    ParameterId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3]);
+
+/// The exact name of the sole sealed `sys.invoke` parameter.
+pub const SYS_INVOKE_PARAMETER_NAME: &str = "p_request";
 
 /// The stable identity of the sealed `sys.invoke.Value` carrier.
 pub const SYS_INVOKE_VALUE_TYPE_ID: TypeId =
@@ -193,12 +200,87 @@ pub fn invocation_carrier_by_name(
         .find(|definition| definition.has_name(name))
 }
 
+/// The immutable sealed signature of `sys.invoke`.
+///
+/// This is not an application function signature. It has exactly one required,
+/// non-null Request parameter and one stream item type for Event. A caller can
+/// obtain it only from the sealed system-function registry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SystemInvocationSignature {
+    request_parameter_id: ParameterId,
+    request_parameter_name: &'static str,
+    request_type: TypeId,
+    request_required: bool,
+    request_non_null: bool,
+    event_stream_item_type: TypeId,
+}
+
+impl SystemInvocationSignature {
+    const fn new(
+        request_parameter_id: ParameterId,
+        request_parameter_name: &'static str,
+        request_type: TypeId,
+        request_required: bool,
+        request_non_null: bool,
+        event_stream_item_type: TypeId,
+    ) -> Self {
+        Self {
+            request_parameter_id,
+            request_parameter_name,
+            request_type,
+            request_required,
+            request_non_null,
+            event_stream_item_type,
+        }
+    }
+
+    /// Returns the stable identity of the sole Request parameter.
+    pub const fn request_parameter_id(self) -> ParameterId {
+        self.request_parameter_id
+    }
+
+    /// Returns the exact name of the sole Request parameter.
+    pub const fn request_parameter_name(self) -> &'static str {
+        self.request_parameter_name
+    }
+
+    /// Returns the sealed type of the sole Request parameter.
+    pub const fn request_type(self) -> TypeId {
+        self.request_type
+    }
+
+    /// Returns whether the sole Request parameter is required.
+    pub const fn request_is_required(self) -> bool {
+        self.request_required
+    }
+
+    /// Returns whether the sole Request parameter rejects null.
+    pub const fn request_is_non_null(self) -> bool {
+        self.request_non_null
+    }
+
+    /// Returns the sealed Event type carried by the result stream.
+    pub const fn event_stream_item_type(self) -> TypeId {
+        self.event_stream_item_type
+    }
+}
+
+const SYS_INVOKE_SIGNATURE: SystemInvocationSignature = SystemInvocationSignature::new(
+    SYS_INVOKE_PARAMETER_ID,
+    SYS_INVOKE_PARAMETER_NAME,
+    SYS_INVOKE_REQUEST_TYPE_ID,
+    true,
+    true,
+    SYS_INVOKE_EVENT_TYPE_ID,
+);
+
 /// One immutable entry in the sealed system-function registry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SystemFunctionDefinition {
     kind: SystemFunctionKind,
     id: FunctionId,
     name_parts: &'static [&'static str],
+    invocation_signature: Option<SystemInvocationSignature>,
 }
 
 impl SystemFunctionDefinition {
@@ -206,11 +288,13 @@ impl SystemFunctionDefinition {
         kind: SystemFunctionKind,
         id: FunctionId,
         name_parts: &'static [&'static str],
+        invocation_signature: Option<SystemInvocationSignature>,
     ) -> Self {
         Self {
             kind,
             id,
             name_parts,
+            invocation_signature,
         }
     }
 
@@ -229,6 +313,13 @@ impl SystemFunctionDefinition {
         self.name_parts
     }
 
+    /// Returns the sealed invocation signature when this entry is `sys.invoke`.
+    ///
+    /// Other system functions do not have an invocation signature.
+    pub const fn invocation_signature(self) -> Option<SystemInvocationSignature> {
+        self.invocation_signature
+    }
+
     pub(crate) fn has_name(self, name: &QualifiedSemanticName) -> bool {
         name.parts()
             .iter()
@@ -243,11 +334,13 @@ pub const SYSTEM_FUNCTIONS: &[SystemFunctionDefinition] = &[
         SystemFunctionKind::Health,
         CATALOGUE_HEALTH_FUNCTION_ID,
         CATALOGUE_HEALTH_NAME_PARTS,
+        None,
     ),
     SystemFunctionDefinition::new(
         SystemFunctionKind::Invoke,
         SYS_INVOKE_FUNCTION_ID,
         SYS_INVOKE_NAME_PARTS,
+        Some(SYS_INVOKE_SIGNATURE),
     ),
 ];
 
@@ -269,9 +362,9 @@ pub fn system_function_by_name(name: &QualifiedSemanticName) -> Option<SystemFun
 
 #[cfg(test)]
 mod tests {
-    use crate::FunctionId;
     use crate::catalogue::QualifiedSemanticName;
     use crate::security::{CATALOGUE_HEALTH_FUNCTION_ID, CATALOGUE_HEALTH_FUNCTION_NAME};
+    use crate::{FunctionId, ParameterId};
 
     use super::*;
 
@@ -355,6 +448,43 @@ mod tests {
             FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2])
         );
         assert_eq!(SYS_INVOKE_FUNCTION_ID, SYSTEM_FUNCTIONS[1].id());
+    }
+
+    #[test]
+    fn invoke_entry_exposes_the_exact_sealed_request_to_event_stream_signature() {
+        let invoke = system_function_by_id(FunctionId::from_bytes([
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2,
+        ]))
+        .expect("the literal sys.invoke identity must resolve");
+        let signature = invoke
+            .invocation_signature()
+            .expect("sys.invoke must expose its sealed signature");
+
+        assert_eq!(
+            signature.request_parameter_id(),
+            ParameterId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3])
+        );
+        assert_eq!(signature.request_parameter_name(), "p_request");
+        assert_eq!(
+            signature.request_type(),
+            TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xf1])
+        );
+        assert!(signature.request_is_required());
+        assert!(signature.request_is_non_null());
+        assert_eq!(
+            signature.event_stream_item_type(),
+            TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xf2])
+        );
+    }
+
+    #[test]
+    fn health_entry_exposes_no_invocation_signature() {
+        let health = system_function_by_id(FunctionId::from_bytes([
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+        ]))
+        .expect("the literal health identity must resolve");
+
+        assert!(health.invocation_signature().is_none());
     }
 
     #[test]
