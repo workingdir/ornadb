@@ -2152,10 +2152,12 @@ mod tests {
         canonical_hash::{
             catalogue_digest_with_context, source_bundle_digest, source_revision_record_digest,
             source_unit_content_digest,
+            verify_standard_library_snapshot as verify_core_standard_library_snapshot,
         },
         catalogue::{
             CatalogueSnapshot, EnumTypeDefinition, QualifiedSemanticName,
             RecordValueFieldDefinition, RecordValueTypeDefinition, SchemaDefinition,
+            ValueTypeDefinition, ValueTypeMutability, ValueTypePersistence,
         },
         revision::{
             ActiveDatabaseRevision, ActiveDatabaseRevisionInput, ActiveRevisionContent,
@@ -2200,6 +2202,156 @@ mod tests {
         active_record_revision_with_second_type(TypeDescriptor::named(ENUM_TYPE))
     }
 
+    fn active_revision_without_standard() -> ActiveDatabaseRevision {
+        let schema = SchemaId::from_bytes([0x75; 16]);
+        let catalogue_revision = CatalogueRevisionId::from_bytes([0x76; 16]);
+        let catalogue = CatalogueSnapshot::new(
+            catalogue_revision,
+            vec![SchemaDefinition::new(
+                schema,
+                QualifiedSemanticName::new(["crm"]).unwrap(),
+            )],
+            Vec::new(),
+        )
+        .unwrap();
+        let source_unit_id = SourceUnitId::from_bytes([0x77; 16]);
+        let source_unit = StoredSourceUnit::new(
+            source_unit_id,
+            0,
+            "app/schema.orna",
+            "a",
+            source_unit_content_digest("a").unwrap(),
+        )
+        .unwrap();
+        let bundle_hash = source_bundle_digest(std::slice::from_ref(&source_unit)).unwrap();
+        let source_revision = SourceRevisionId::from_bytes([0x78; 16]);
+        let source = StoredSourceRevision::new(
+            SourceBundleId::from_bytes([0x79; 16]),
+            source_revision,
+            None,
+            vec![source_unit],
+            bundle_hash,
+            source_revision_record_digest(
+                SourceBundleId::from_bytes([0x79; 16]),
+                None,
+                bundle_hash,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let origins = vec![DefinitionOrigin::new(
+            DefinitionIdentity::Schema(schema),
+            SourceOrigin::new(source_unit_id, 0, 1).unwrap(),
+        )];
+        let context = CatalogueHashContext::version_one();
+        let catalogue_hash =
+            catalogue_digest_with_context(&context, &catalogue, &[], &[], &origins, &[]).unwrap();
+        ActiveDatabaseRevision::new_with_catalogue_hash_context(
+            ActiveDatabaseRevisionInput::new(
+                RevisionPair::new(source_revision, catalogue_revision),
+                source,
+                catalogue,
+                catalogue_hash,
+                ActiveRevisionContent::new(Vec::new(), Vec::new(), origins, Vec::new()),
+            ),
+            context,
+        )
+        .unwrap()
+    }
+
+    fn alternate_verified_standard() -> orna_core::revision::VerifiedStandardLibrarySnapshot {
+        let accepted = retained_standard_library_snapshot().unwrap();
+        let alternate = orna_core::revision::StandardLibrarySnapshot::new(
+            accepted.revision(),
+            accepted.digest_version(),
+            accepted.source().clone(),
+            "orna.language/2",
+            accepted.catalogue().clone(),
+            accepted.origins().to_vec(),
+            orna_core::revision::Sha256Digest::from_bytes([
+                0x19, 0x65, 0xe6, 0xcb, 0xeb, 0x68, 0x77, 0xa6, 0xab, 0xea, 0x13, 0x14, 0xe9, 0x12,
+                0xbe, 0xc5, 0xef, 0x12, 0xa9, 0x5b, 0xd3, 0x57, 0xdc, 0xee, 0xc9, 0xef, 0xb4, 0x54,
+                0xf8, 0x4a, 0x98, 0xb2,
+            ]),
+        )
+        .unwrap();
+        verify_core_standard_library_snapshot(alternate).unwrap()
+    }
+
+    fn active_revision_with_standard_named_collision() -> ActiveDatabaseRevision {
+        let standard =
+            verify_standard_library_snapshot(retained_standard_library_snapshot().unwrap())
+                .unwrap();
+        let schema = SchemaId::from_bytes([0x7a; 16]);
+        let catalogue_revision = CatalogueRevisionId::from_bytes([0x7b; 16]);
+        let catalogue = CatalogueSnapshot::new_with_types(
+            catalogue_revision,
+            vec![SchemaDefinition::new(
+                schema,
+                QualifiedSemanticName::new(["crm"]).unwrap(),
+            )],
+            Vec::new(),
+            vec![ValueTypeDefinition::primitive(
+                OPAQUE_TOKEN_TYPE_ID,
+                QualifiedSemanticName::new(["crm", "collision"]).unwrap(),
+                ValueTypeMutability::Immutable,
+                ValueTypePersistence::Persistable,
+                "orna.crm.value.collision@1",
+            )],
+            Vec::new(),
+        )
+        .unwrap();
+        let source_unit_id = SourceUnitId::from_bytes([0x7c; 16]);
+        let source_unit = StoredSourceUnit::new(
+            source_unit_id,
+            0,
+            "app/collision.orna",
+            "ab",
+            source_unit_content_digest("ab").unwrap(),
+        )
+        .unwrap();
+        let bundle_hash = source_bundle_digest(std::slice::from_ref(&source_unit)).unwrap();
+        let source_revision = SourceRevisionId::from_bytes([0x7d; 16]);
+        let source = StoredSourceRevision::new(
+            SourceBundleId::from_bytes([0x7e; 16]),
+            source_revision,
+            None,
+            vec![source_unit],
+            bundle_hash,
+            source_revision_record_digest(
+                SourceBundleId::from_bytes([0x7e; 16]),
+                None,
+                bundle_hash,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let origins = vec![
+            DefinitionOrigin::new(
+                DefinitionIdentity::Schema(schema),
+                SourceOrigin::new(source_unit_id, 0, 1).unwrap(),
+            ),
+            DefinitionOrigin::new(
+                DefinitionIdentity::ValueType(OPAQUE_TOKEN_TYPE_ID),
+                SourceOrigin::new(source_unit_id, 1, 2).unwrap(),
+            ),
+        ];
+        let context = CatalogueHashContext::version_two(standard);
+        let catalogue_hash =
+            catalogue_digest_with_context(&context, &catalogue, &[], &[], &origins, &[]).unwrap();
+        ActiveDatabaseRevision::new_with_catalogue_hash_context(
+            ActiveDatabaseRevisionInput::new(
+                RevisionPair::new(source_revision, catalogue_revision),
+                source,
+                catalogue,
+                catalogue_hash,
+                ActiveRevisionContent::new(Vec::new(), Vec::new(), origins, Vec::new()),
+            ),
+            context,
+        )
+        .unwrap()
+    }
+
     fn active_record_revision_with_second_type(
         second_field_type: TypeDescriptor,
     ) -> ActiveDatabaseRevision {
@@ -2209,6 +2361,21 @@ mod tests {
     fn active_record_revision_with_types(
         first_field_type: TypeDescriptor,
         second_field_type: TypeDescriptor,
+    ) -> ActiveDatabaseRevision {
+        let standard =
+            verify_standard_library_snapshot(retained_standard_library_snapshot().unwrap())
+                .unwrap();
+        active_record_revision_with_types_and_standard(
+            first_field_type,
+            second_field_type,
+            standard,
+        )
+    }
+
+    fn active_record_revision_with_types_and_standard(
+        first_field_type: TypeDescriptor,
+        second_field_type: TypeDescriptor,
+        standard: orna_core::revision::VerifiedStandardLibrarySnapshot,
     ) -> ActiveDatabaseRevision {
         let record_type = TypeId::from_bytes([0x47; 16]);
         let record_field = FieldId::from_bytes([0x48; 16]);
@@ -2304,9 +2471,6 @@ mod tests {
                 SourceOrigin::new(source_unit_id, 1, 2).unwrap(),
             ),
         ];
-        let standard =
-            verify_standard_library_snapshot(retained_standard_library_snapshot().unwrap())
-                .unwrap();
         let context = CatalogueHashContext::version_two(standard);
         let catalogue_hash =
             catalogue_digest_with_context(&context, &catalogue, &[], &[], &origins, &[]).unwrap();
@@ -4425,6 +4589,40 @@ mod tests {
         }
 
         #[test]
+        fn arbitrary_version_five_constructed_bytes_never_panic(
+            descriptor in prop::collection::vec(any::<u8>(), 0..=4_096),
+            body in prop::collection::vec(any::<u8>(), 0..=4_096),
+        ) {
+            let active = active_record_revision();
+            let registry = registered_opaque_codecs(
+                active.catalogue_hash_context().standard().unwrap(),
+            ).unwrap();
+            let mut payload = (descriptor.len() as u16).to_be_bytes().to_vec();
+            payload.extend_from_slice(&descriptor);
+            payload.extend_from_slice(&body);
+            let _ = decode_constructed_value(&active, &registry, &orv5_constructed(payload));
+        }
+
+        #[test]
+        fn arbitrary_version_five_untrusted_envelopes_never_panic(
+            tag in any::<u8>(),
+            type_bytes in any::<[u8; 16]>(),
+            declared in any::<u32>(),
+            payload in prop::collection::vec(any::<u8>(), 0..=4_096),
+        ) {
+            let active = active_record_revision();
+            let registry = registered_opaque_codecs(
+                active.catalogue_hash_context().standard().unwrap(),
+            ).unwrap();
+            let mut encoded = b"ORV5".to_vec();
+            encoded.push(tag);
+            encoded.extend_from_slice(&type_bytes);
+            encoded.extend_from_slice(&declared.to_be_bytes());
+            encoded.extend_from_slice(&payload);
+            let _ = decode_constructed_value(&active, &registry, &encoded);
+        }
+
+        #[test]
         fn arbitrary_version_four_frame_envelopes_never_panic(
             tag in any::<u8>(),
             flags in any::<u8>(),
@@ -4866,6 +5064,619 @@ mod tests {
     }
 
     #[test]
+    fn orv5_reports_each_constructed_structure_failure_exactly() {
+        let active = active_record_revision();
+        let registry =
+            registered_opaque_codecs(active.catalogue_hash_context().standard().unwrap()).unwrap();
+        assert_eq!(
+            decode_constructed_value(&active, &registry, &orv5_constructed(Vec::new())),
+            Err(ValueCodecError::TruncatedConstructedHeader { actual: 0 })
+        );
+        assert_eq!(
+            decode_constructed_value(&active, &registry, &orv5_constructed(vec![0])),
+            Err(ValueCodecError::TruncatedConstructedHeader { actual: 1 })
+        );
+        assert_eq!(
+            decode_constructed_value(&active, &registry, &orv5_constructed(vec![0, 0])),
+            Err(ValueCodecError::EmptyConstructedDescriptor)
+        );
+        assert_eq!(
+            decode_constructed_value(&active, &registry, &orv5_constructed(vec![0, 3, 0x04])),
+            Err(ValueCodecError::TruncatedConstructedDescriptor {
+                declared: 3,
+                available: 1,
+            })
+        );
+        assert_eq!(
+            decode_constructed_value(&active, &registry, &orv5_constructed(vec![0, 1, 0x00])),
+            Err(ValueCodecError::TruncatedConstructedDescriptorNode {
+                offset: 0,
+                required: 17,
+                available: 1,
+            })
+        );
+        assert_eq!(
+            decode_constructed_value(&active, &registry, &orv5_constructed(vec![0, 1, 0x04])),
+            Err(ValueCodecError::TruncatedConstructedDescriptorNode {
+                offset: 1,
+                required: 1,
+                available: 0,
+            })
+        );
+        let mut trailing_descriptor = orv5_named_descriptor(BOOLEAN_TYPE_ID);
+        trailing_descriptor.push(0xff);
+        assert_eq!(
+            decode_constructed_value(
+                &active,
+                &registry,
+                &orv5_constructed(orv5_descriptor_payload(&trailing_descriptor, &[])),
+            ),
+            Err(ValueCodecError::TrailingConstructedDescriptor { remaining: 1 })
+        );
+
+        let mut list_descriptor = vec![0x02];
+        list_descriptor.extend_from_slice(&orv5_named_descriptor(BOOLEAN_TYPE_ID));
+        let mut map_descriptor = vec![0x03];
+        map_descriptor.extend_from_slice(&orv5_named_descriptor(INTEGER_TYPE_ID));
+        map_descriptor.extend_from_slice(&orv5_named_descriptor(BOOLEAN_TYPE_ID));
+        for (descriptor, child_path) in [
+            (
+                list_descriptor.as_slice(),
+                vec![CollectionValuePathSegment::ListElement(0)],
+            ),
+            (
+                map_descriptor.as_slice(),
+                vec![CollectionValuePathSegment::MapKey(0)],
+            ),
+        ] {
+            assert_eq!(
+                decode_constructed_value(
+                    &active,
+                    &registry,
+                    &orv5_constructed(orv5_descriptor_payload(descriptor, &[])),
+                ),
+                Err(ValueCodecError::TruncatedCollectionEntry { path: Vec::new() })
+            );
+            let mut truncated_header = 1_u32.to_be_bytes().to_vec();
+            truncated_header.extend_from_slice(&[0; 3]);
+            assert_eq!(
+                decode_constructed_value(
+                    &active,
+                    &registry,
+                    &orv5_constructed(orv5_descriptor_payload(descriptor, &truncated_header)),
+                ),
+                Err(ValueCodecError::TruncatedCollectionEntry {
+                    path: child_path.clone(),
+                })
+            );
+            let mut truncated_region = 1_u32.to_be_bytes().to_vec();
+            truncated_region.extend_from_slice(&26_u32.to_be_bytes());
+            truncated_region.extend_from_slice(&[0; 25]);
+            assert_eq!(
+                decode_constructed_value(
+                    &active,
+                    &registry,
+                    &orv5_constructed(orv5_descriptor_payload(descriptor, &truncated_region)),
+                ),
+                Err(ValueCodecError::TruncatedCollectionEntry { path: child_path })
+            );
+        }
+
+        let mut map_value_header = 1_u32.to_be_bytes().to_vec();
+        map_value_header.extend_from_slice(&orv5_map_entry(orv5_integer(1), Vec::new()));
+        assert_eq!(
+            decode_constructed_value(
+                &active,
+                &registry,
+                &orv5_constructed(orv5_descriptor_payload(&map_descriptor, &map_value_header)),
+            ),
+            Err(ValueCodecError::TruncatedCollectionEntry {
+                path: vec![CollectionValuePathSegment::MapValue(0)],
+            })
+        );
+        let mut map_value_region = 1_u32.to_be_bytes().to_vec();
+        map_value_region.extend_from_slice(&(orv5_integer(1).len() as u32).to_be_bytes());
+        map_value_region.extend_from_slice(&orv5_integer(1));
+        map_value_region.extend_from_slice(&26_u32.to_be_bytes());
+        map_value_region.extend_from_slice(&[0; 25]);
+        assert_eq!(
+            decode_constructed_value(
+                &active,
+                &registry,
+                &orv5_constructed(orv5_descriptor_payload(&map_descriptor, &map_value_region)),
+            ),
+            Err(ValueCodecError::TruncatedCollectionEntry {
+                path: vec![CollectionValuePathSegment::MapValue(0)],
+            })
+        );
+
+        let mut short_child = 1_u32.to_be_bytes().to_vec();
+        short_child.extend_from_slice(&24_u32.to_be_bytes());
+        short_child.extend_from_slice(&[0; 24]);
+        assert_eq!(
+            decode_constructed_value(
+                &active,
+                &registry,
+                &orv5_constructed(orv5_descriptor_payload(&list_descriptor, &short_child)),
+            ),
+            Err(ValueCodecError::TruncatedCollectionEntry {
+                path: vec![CollectionValuePathSegment::ListElement(0)],
+            })
+        );
+        let mut maximum_child = 1_u32.to_be_bytes().to_vec();
+        maximum_child.extend_from_slice(&u32::MAX.to_be_bytes());
+        assert_eq!(
+            decode_constructed_value(
+                &active,
+                &registry,
+                &orv5_constructed(orv5_descriptor_payload(&list_descriptor, &maximum_child)),
+            ),
+            Err(ValueCodecError::TruncatedCollectionEntry {
+                path: vec![CollectionValuePathSegment::ListElement(0)],
+            })
+        );
+
+        let maximum_count = u32::MAX.to_be_bytes().to_vec();
+        assert_eq!(
+            decode_constructed_value(
+                &active,
+                &registry,
+                &orv5_constructed(orv5_descriptor_payload(&list_descriptor, &maximum_count)),
+            ),
+            Err(ValueCodecError::TruncatedCollectionEntry {
+                path: vec![CollectionValuePathSegment::ListElement(0)],
+            })
+        );
+        let mut oversized_header = b"ORV5".to_vec();
+        oversized_header.push(0x0d);
+        oversized_header.extend_from_slice(&[0; 16]);
+        oversized_header.extend_from_slice(&u32::MAX.to_be_bytes());
+        assert_eq!(
+            decode_constructed_value(&active, &registry, &oversized_header),
+            Err(ValueCodecError::PayloadTooLarge {
+                actual: u32::MAX as usize,
+                maximum: PAYLOAD_LIMIT,
+            })
+        );
+    }
+
+    #[test]
+    fn orv5_marker_substitution_covers_every_accepted_orv4_value_family() {
+        let active = active_record_revision();
+        let registry =
+            registered_opaque_codecs(active.catalogue_hash_context().standard().unwrap()).unwrap();
+        let reference_target = TypeId::from_bytes([0x41; 16]);
+        let values = vec![
+            RuntimeValue::null(ResolvedType::scalar(StandardScalar::Boolean)).unwrap(),
+            RuntimeValue::Boolean(true),
+            RuntimeValue::Integer(-7),
+            RuntimeValue::BigInt(-9),
+            RuntimeValue::Float(RuntimeFloat::new(1.5).unwrap()),
+            RuntimeValue::Text(String::from("literal ORV4 text payload")),
+            RuntimeValue::Bytes(b"literal ORV4 byte payload".to_vec()),
+            RuntimeValue::null(ResolvedType::reference(reference_target)).unwrap(),
+            RuntimeValue::Reference {
+                target: reference_target,
+                object: ObjectId::from_bytes([0x42; 16]),
+            },
+            RuntimeValue::null(ResolvedType::named(ENUM_TYPE)).unwrap(),
+            RuntimeValue::Enum(EnumValue::new(active.catalogue(), ENUM_TYPE, "lead").unwrap()),
+            RuntimeValue::Opaque(
+                OpaqueValue::new(&active, &registry, OPAQUE_TOKEN_TYPE_ID, [0x71; 16]).unwrap(),
+            ),
+        ];
+        for value in values {
+            assert_orv4_to_orv5_flat_marker_substitution(&active, &registry, value);
+        }
+
+        let nested_active = active_nested_record_revision();
+        let nested_registry =
+            registered_opaque_codecs(nested_active.catalogue_hash_context().standard().unwrap())
+                .unwrap();
+        let nested_value = nested_record_value(&nested_active);
+        let inner_type = TypeId::from_bytes([0x31; 16]);
+        let inner_field = FieldId::from_bytes([0x3a; 16]);
+        let version_four =
+            assemble_nested_envelope(b"ORV4", 0x0b, inner_type, inner_field, 1, 26, &[]);
+        let expected = assemble_nested_envelope(b"ORV5", 0x0b, inner_type, inner_field, 1, 26, &[]);
+        assert_eq!(
+            encode_registered_value(&nested_active, &nested_registry, &nested_value),
+            Ok(version_four)
+        );
+        assert_eq!(
+            encode_constructed_value(&nested_active, &nested_registry, &nested_value),
+            Ok(expected.clone())
+        );
+        assert_eq!(
+            decode_constructed_value(&nested_active, &nested_registry, &expected),
+            Ok(nested_value)
+        );
+    }
+
+    #[test]
+    fn orv5_rechecks_stale_enum_reference_standard_and_opaque_authorities() {
+        let active = active_record_revision();
+        let registry =
+            registered_opaque_codecs(active.catalogue_hash_context().standard().unwrap()).unwrap();
+
+        let enum_value =
+            RuntimeValue::Enum(EnumValue::new(active.catalogue(), ENUM_TYPE, "qualified").unwrap());
+        let mut stale_enum = encode_constructed_value(&active, &registry, &enum_value).unwrap();
+        stale_enum[25..34].copy_from_slice(b"obsolete!");
+        assert_eq!(
+            decode_constructed_value(&active, &registry, &stale_enum),
+            Err(ValueCodecError::UndeclaredEnumLabel {
+                enum_type: ENUM_TYPE,
+                label: String::from("obsolete!"),
+            })
+        );
+
+        let stale_reference_target = TypeId::from_bytes([0x74; 16]);
+        let mut reference_descriptor = vec![0x04, 0x01];
+        reference_descriptor.extend_from_slice(&stale_reference_target.to_bytes());
+        let reference_error = decode_constructed_value(
+            &active,
+            &registry,
+            &orv5_constructed(orv5_descriptor_payload(&reference_descriptor, &[0])),
+        )
+        .unwrap_err();
+        let ValueCodecError::CollectionValue {
+            source: CollectionValueError::UnsupportedDescriptor { path, descriptor },
+        } = reference_error
+        else {
+            panic!("a stale reference target must fail collection admission");
+        };
+        assert_eq!(path.segments(), &[CollectionValuePathSegment::OptionChild]);
+        assert_eq!(
+            descriptor,
+            TypeDescriptor::reference(stale_reference_target)
+        );
+
+        let opaque = RuntimeValue::Opaque(
+            OpaqueValue::new(&active, &registry, OPAQUE_TOKEN_TYPE_ID, [0x71; 16]).unwrap(),
+        );
+        let encoded_opaque = encode_constructed_value(&active, &registry, &opaque).unwrap();
+        assert_eq!(
+            decode_constructed_value(
+                &active_revision_without_standard(),
+                &registry,
+                &encoded_opaque
+            ),
+            Err(ValueCodecError::OpaqueValue {
+                source: OpaqueValueError::ActiveStandardRequired,
+            })
+        );
+        let alternate_active = active_record_revision_with_types_and_standard(
+            TypeDescriptor::named(BOOLEAN_TYPE_ID),
+            TypeDescriptor::named(ENUM_TYPE),
+            alternate_verified_standard(),
+        );
+        assert_eq!(
+            decode_constructed_value(&alternate_active, &registry, &encoded_opaque),
+            Err(ValueCodecError::OpaqueValue {
+                source: OpaqueValueError::ActiveStandardMismatch,
+            })
+        );
+        let invalid_registration =
+            orna_core::value::OpaqueCodecRegistration::fixed_length_identity(
+                OPAQUE_TOKEN_TYPE_ID,
+                QualifiedSemanticName::new(["std", "types", "opaque_token"]).unwrap(),
+                "orna.std.value.opaque-token@2",
+                16,
+            )
+            .unwrap();
+        assert!(matches!(
+            OpaqueCodecRegistry::new(
+                active.catalogue_hash_context().standard().unwrap(),
+                [invalid_registration],
+            ),
+            Err(
+                orna_core::value::OpaqueCodecRegistryError::ContractMismatch {
+                    opaque_type: OPAQUE_TOKEN_TYPE_ID,
+                }
+            )
+        ));
+        let mut wrong_contract = encoded_opaque;
+        wrong_contract[21..25].copy_from_slice(&15_u32.to_be_bytes());
+        wrong_contract.pop();
+        assert_eq!(
+            decode_constructed_value(&active, &registry, &wrong_contract),
+            Err(ValueCodecError::OpaqueValue {
+                source: OpaqueValueError::WrongPayloadLength {
+                    opaque_type: OPAQUE_TOKEN_TYPE_ID,
+                    expected: 16,
+                    actual: 15,
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn orv5_cross_catalogue_collision_precedes_opaque_category_rejection() {
+        let active = active_revision_with_standard_named_collision();
+        let registry =
+            registered_opaque_codecs(active.catalogue_hash_context().standard().unwrap()).unwrap();
+        let mut descriptor = vec![0x02];
+        descriptor.extend_from_slice(&orv5_named_descriptor(OPAQUE_TOKEN_TYPE_ID));
+        let error = decode_constructed_value(
+            &active,
+            &registry,
+            &orv5_constructed(orv5_descriptor_payload(&descriptor, &0_u32.to_be_bytes())),
+        )
+        .unwrap_err();
+        let ValueCodecError::CollectionValue {
+            source: CollectionValueError::AmbiguousNamedType { path, type_id },
+        } = error
+        else {
+            panic!("cross-catalogue identity collision must precede opaque rejection");
+        };
+        assert_eq!(path.segments(), &[CollectionValuePathSegment::ListChild]);
+        assert_eq!(type_id, OPAQUE_TOKEN_TYPE_ID);
+    }
+
+    #[test]
+    fn orv5_map_permutations_encode_to_the_same_canonical_bytes() {
+        let active = active_record_revision();
+        let registry =
+            registered_opaque_codecs(active.catalogue_hash_context().standard().unwrap()).unwrap();
+        let descriptor = TypeDescriptor::map(
+            TypeDescriptor::named(INTEGER_TYPE_ID),
+            TypeDescriptor::named(BOOLEAN_TYPE_ID),
+        )
+        .unwrap();
+        let canonical = RuntimeValue::map(
+            &active,
+            descriptor.clone(),
+            vec![
+                (RuntimeValue::Integer(1), RuntimeValue::Boolean(true)),
+                (RuntimeValue::Integer(2), RuntimeValue::Boolean(false)),
+            ],
+        )
+        .unwrap();
+        let permuted = RuntimeValue::map(
+            &active,
+            descriptor,
+            vec![
+                (RuntimeValue::Integer(2), RuntimeValue::Boolean(false)),
+                (RuntimeValue::Integer(1), RuntimeValue::Boolean(true)),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            encode_constructed_value(&active, &registry, &canonical),
+            encode_constructed_value(&active, &registry, &permuted)
+        );
+    }
+
+    #[test]
+    fn orv5_retains_legacy_bytes_and_keeps_markers_closed() {
+        let active = active_record_revision();
+        let standard = active.catalogue_hash_context().standard().unwrap();
+        let registry = registered_opaque_codecs(standard).unwrap();
+
+        let legacy = RuntimeValue::Boolean(true);
+        let version_four = encode_registered_value(&active, &registry, &legacy).unwrap();
+        let version_five = encode_constructed_value(&active, &registry, &legacy).unwrap();
+        assert_eq!(&version_four[..4], b"ORV4");
+        assert_eq!(&version_five[..4], b"ORV5");
+        assert_eq!(&version_five[4..], &version_four[4..]);
+        assert_eq!(
+            decode_constructed_value(&active, &registry, &version_five),
+            Ok(legacy)
+        );
+
+        assert_eq!(
+            decode_constructed_value(&active, &registry, &version_four),
+            Err(ValueCodecError::InvalidMarker)
+        );
+        assert_eq!(
+            decode_registered_value(&active, &registry, &version_five),
+            Err(ValueCodecError::InvalidMarker)
+        );
+        assert_eq!(
+            decode_value(&version_five),
+            Err(ValueCodecError::InvalidMarker)
+        );
+        assert_eq!(
+            decode_catalogue_value(active.catalogue(), &version_five),
+            Err(ValueCodecError::InvalidMarker)
+        );
+        assert_eq!(
+            decode_active_value(&active, &version_five),
+            Err(ValueCodecError::InvalidMarker)
+        );
+        for marker in [b"ORV1", b"ORV2", b"ORV3", b"ORV4"] {
+            let mut crossed = version_five.clone();
+            crossed[..4].copy_from_slice(marker);
+            assert_eq!(
+                decode_constructed_value(&active, &registry, &crossed),
+                Err(ValueCodecError::InvalidMarker)
+            );
+        }
+
+        let opaque = RuntimeValue::Opaque(
+            OpaqueValue::new(&active, &registry, OPAQUE_TOKEN_TYPE_ID, [0x71; 16]).unwrap(),
+        );
+        let opaque_version_four = encode_registered_value(&active, &registry, &opaque).unwrap();
+        let opaque_version_five = encode_constructed_value(&active, &registry, &opaque).unwrap();
+        assert_eq!(&opaque_version_five[4..], &opaque_version_four[4..]);
+        assert_eq!(
+            decode_constructed_value(&active, &registry, &opaque_version_five),
+            Ok(opaque)
+        );
+    }
+
+    #[test]
+    fn orv5_accepts_exact_depth_and_parses_the_256_node_descriptor_before_rejection() {
+        let active = active_record_revision();
+        let standard = active.catalogue_hash_context().standard().unwrap();
+        let registry = registered_opaque_codecs(standard).unwrap();
+
+        let mut depth_bytes = vec![0x04; MAX_TYPE_DESCRIPTOR_DEPTH];
+        let mut depth_descriptor = TypeDescriptor::named(BOOLEAN_TYPE_ID);
+        for _ in 0..MAX_TYPE_DESCRIPTOR_DEPTH {
+            depth_descriptor = TypeDescriptor::option(depth_descriptor).unwrap();
+        }
+        depth_bytes.push(0x00);
+        depth_bytes.extend_from_slice(&BOOLEAN_TYPE_ID.to_bytes());
+        assert_eq!(
+            decode_constructed_value(
+                &active,
+                &registry,
+                &orv5_constructed(orv5_descriptor_payload(&depth_bytes, &[0])),
+            ),
+            Ok(RuntimeValue::option(&active, depth_descriptor, None).unwrap())
+        );
+
+        let mut tree_bytes = orv5_named_descriptor(BOOLEAN_TYPE_ID);
+        let mut tree_descriptor = TypeDescriptor::named(BOOLEAN_TYPE_ID);
+        for _ in 0..7 {
+            let child_bytes = tree_bytes.clone();
+            tree_bytes = vec![0x03];
+            tree_bytes.extend_from_slice(&child_bytes);
+            tree_bytes.extend_from_slice(&child_bytes);
+            tree_descriptor =
+                TypeDescriptor::map(tree_descriptor.clone(), tree_descriptor).unwrap();
+        }
+        let mut maximum_bytes = vec![0x04];
+        maximum_bytes.extend_from_slice(&tree_bytes);
+        let _maximum_descriptor = TypeDescriptor::option(tree_descriptor).unwrap();
+        assert_eq!(maximum_bytes.len(), 2_304);
+        let maximum_error = decode_constructed_value(
+            &active,
+            &registry,
+            &orv5_constructed(orv5_descriptor_payload(&maximum_bytes, &[0])),
+        )
+        .unwrap_err();
+        let ValueCodecError::CollectionValue {
+            source: CollectionValueError::UnsupportedDescriptor { path, .. },
+        } = maximum_error
+        else {
+            panic!("the 256-node descriptor must parse before collection admission rejects it");
+        };
+        assert_eq!(
+            path.segments(),
+            &[
+                CollectionValuePathSegment::OptionChild,
+                CollectionValuePathSegment::MapKeyChild,
+            ]
+        );
+
+        let mut too_large_bytes = vec![0x04];
+        too_large_bytes.extend_from_slice(&maximum_bytes);
+        assert_eq!(
+            decode_constructed_value(
+                &active,
+                &registry,
+                &orv5_constructed(orv5_descriptor_payload(&too_large_bytes, &[0])),
+            ),
+            Err(ValueCodecError::InvalidConstructedDescriptor {
+                source: TypeDescriptorError::TooLarge {
+                    maximum: 256,
+                    actual: 257,
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn orv5_map_duplicate_keys_keep_original_wire_indexes() {
+        let active = active_record_revision();
+        let standard = active.catalogue_hash_context().standard().unwrap();
+        let registry = registered_opaque_codecs(standard).unwrap();
+        let mut descriptor = vec![0x03];
+        descriptor.extend_from_slice(&orv5_named_descriptor(INTEGER_TYPE_ID));
+        descriptor.extend_from_slice(&orv5_named_descriptor(BOOLEAN_TYPE_ID));
+        let mut body = 3_u32.to_be_bytes().to_vec();
+        body.extend_from_slice(&orv5_map_entry(orv5_integer(2), orv5_boolean(false)));
+        body.extend_from_slice(&orv5_map_entry(orv5_integer(1), orv5_boolean(true)));
+        body.extend_from_slice(&orv5_map_entry(orv5_integer(2), orv5_boolean(true)));
+
+        assert_eq!(
+            decode_constructed_value(
+                &active,
+                &registry,
+                &orv5_constructed(orv5_descriptor_payload(&descriptor, &body)),
+            ),
+            Err(ValueCodecError::CollectionValue {
+                source: CollectionValueError::DuplicateMapKey {
+                    first: 0,
+                    duplicate: 2,
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn orv5_revalidates_stale_records_and_rejects_unregistered_opaque_values() {
+        let original = active_record_revision();
+        let record = &original.catalogue().record_value_types()[0];
+        let stale = RuntimeValue::Record(
+            RecordValue::new(
+                &original,
+                record.id(),
+                [
+                    (String::from("enabled"), RuntimeValue::Boolean(true)),
+                    (
+                        String::from("verified"),
+                        RuntimeValue::Enum(
+                            EnumValue::new(original.catalogue(), ENUM_TYPE, "lead").unwrap(),
+                        ),
+                    ),
+                ],
+            )
+            .unwrap(),
+        );
+        let active = active_record_revision_with_second_type(TypeDescriptor::named(BIGINT_TYPE_ID));
+        let registry =
+            registered_opaque_codecs(active.catalogue_hash_context().standard().unwrap()).unwrap();
+        assert_eq!(
+            encode_constructed_value(&active, &registry, &stale),
+            Err(ValueCodecError::RecordValueNotActive {
+                record_type: record.id(),
+            })
+        );
+
+        let opaque = RuntimeValue::Opaque(
+            OpaqueValue::new(&active, &registry, OPAQUE_TOKEN_TYPE_ID, [0x71; 16]).unwrap(),
+        );
+        let mut encoded = encode_constructed_value(&active, &registry, &opaque).unwrap();
+        encoded[5..21].fill(0x72);
+        assert_eq!(
+            decode_constructed_value(&active, &registry, &encoded),
+            Err(ValueCodecError::OpaqueValue {
+                source: OpaqueValueError::UnregisteredType {
+                    opaque_type: TypeId::from_bytes([0x72; 16]),
+                },
+            })
+        );
+
+        let mut opaque_list_descriptor = vec![0x02];
+        opaque_list_descriptor.extend_from_slice(&orv5_named_descriptor(OPAQUE_TOKEN_TYPE_ID));
+        let opaque_child = encode_constructed_value(&active, &registry, &opaque).unwrap();
+        let mut opaque_list_body = 1_u32.to_be_bytes().to_vec();
+        opaque_list_body.extend_from_slice(&(opaque_child.len() as u32).to_be_bytes());
+        opaque_list_body.extend_from_slice(&opaque_child);
+        let error = decode_constructed_value(
+            &active,
+            &registry,
+            &orv5_constructed(orv5_descriptor_payload(
+                &opaque_list_descriptor,
+                &opaque_list_body,
+            )),
+        )
+        .unwrap_err();
+        let ValueCodecError::CollectionValue {
+            source: CollectionValueError::UnsupportedDescriptor { path, descriptor },
+        } = error
+        else {
+            panic!("opaque collection leaves must stay closed");
+        };
+        assert_eq!(path.segments(), &[CollectionValuePathSegment::ListChild]);
+        assert_eq!(descriptor, TypeDescriptor::named(OPAQUE_TOKEN_TYPE_ID));
+    }
+
+    #[test]
     fn constructed_collection_values_stay_closed_to_both_orf_value_paths() {
         let active = active_record_revision();
         let standard = active.catalogue_hash_context().standard().unwrap();
@@ -4974,6 +5785,47 @@ mod tests {
         encoded.extend_from_slice(&(payload.len() as u32).to_be_bytes());
         encoded.extend_from_slice(&payload);
         encoded
+    }
+
+    fn orv5_descriptor_payload(descriptor: &[u8], body: &[u8]) -> Vec<u8> {
+        let mut payload = (descriptor.len() as u16).to_be_bytes().to_vec();
+        payload.extend_from_slice(descriptor);
+        payload.extend_from_slice(body);
+        payload
+    }
+
+    fn orv5_named_descriptor(type_id: TypeId) -> Vec<u8> {
+        let mut descriptor = vec![0x00];
+        descriptor.extend_from_slice(&type_id.to_bytes());
+        descriptor
+    }
+
+    fn assert_orv4_to_orv5_flat_marker_substitution(
+        active: &ActiveDatabaseRevision,
+        registry: &OpaqueCodecRegistry,
+        value: RuntimeValue,
+    ) {
+        let version_four = encode_registered_value(active, registry, &value).unwrap();
+        let mut expected = version_four;
+        assert_eq!(&expected[..4], b"ORV4");
+        expected[..4].copy_from_slice(b"ORV5");
+        if matches!(
+            &value,
+            RuntimeValue::Text(text) if text.as_bytes().windows(4).any(|window| window == b"ORV4")
+        ) || matches!(
+            &value,
+            RuntimeValue::Bytes(bytes) if bytes.windows(4).any(|window| window == b"ORV4")
+        ) {
+            assert!(expected.windows(4).any(|window| window == b"ORV4"));
+        }
+        assert_eq!(
+            encode_constructed_value(active, registry, &value),
+            Ok(expected.clone())
+        );
+        assert_eq!(
+            decode_constructed_value(active, registry, &expected),
+            Ok(value)
+        );
     }
 
     fn orv5_integer(value: i32) -> Vec<u8> {
