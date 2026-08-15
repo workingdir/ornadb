@@ -42,7 +42,9 @@ AS SELECT REF(account), account.email
 FROM unique_text_select_test.account account
 WHERE account.username = p_username;
 
-CREATE SERVER FUNCTION unique_text_select_test.read_accounts()
+CREATE SERVER FUNCTION unique_text_select_test.read_accounts(
+    p_account REF unique_text_select_test.account
+)
 RETURNS ROWS (
     account REF unique_text_select_test.account,
     email TEXT,
@@ -50,4 +52,5 @@ RETURNS ROWS (
 )
 SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE
 AS SELECT REF(account), account.email, account.username
-FROM unique_text_select_test.account account;
+FROM unique_text_select_test.account account
+WHERE REF(account) = p_account;

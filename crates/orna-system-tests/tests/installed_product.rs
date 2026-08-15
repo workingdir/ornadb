@@ -6809,7 +6809,7 @@ fn installed_unique_text_select_binds_exact_text_and_survives_replay_rename_and_
         (create_without_email, ["p_username"].as_slice()),
         (find_by_email, ["p_email"].as_slice()),
         (find_by_username, ["p_username"].as_slice()),
-        (read_accounts, [].as_slice()),
+        (read_accounts, ["p_account"].as_slice()),
     ] {
         let entry = document
             .functions
@@ -6847,12 +6847,16 @@ fn installed_unique_text_select_binds_exact_text_and_survives_replay_rename_and_
             "p_username",
         )
         .expect("apply must report find_by_username.p_username");
+    let p_read_account = document
+        .parameter_id(&["unique_text_select_test", "read_accounts"], "p_account")
+        .expect("apply must report read_accounts.p_account");
     let parameter_ids = [
         p_create_email,
         p_create_username,
         p_create_without_email_username,
         p_find_email,
         p_find_username,
+        p_read_account,
     ];
     for (index, left) in parameter_ids.iter().enumerate() {
         for right in &parameter_ids[index + 1..] {
@@ -6888,7 +6892,10 @@ fn installed_unique_text_select_binds_exact_text_and_survives_replay_rename_and_
             vec!["raw-call", find_by_username, p_find_username],
             text_orv1_envelope("denied"),
         ),
-        (vec!["raw-call", read_accounts], Vec::new()),
+        (
+            vec!["raw-call", read_accounts, p_read_account],
+            reference_orv1_envelope([0xa5; 16], [0x5a; 16]),
+        ),
     ] {
         let denied = if input.is_empty() {
             machine.run_as_orna(&command)
@@ -6981,6 +6988,25 @@ fn installed_unique_text_select_binds_exact_text_and_survives_replay_rename_and_
                 ),
             )
         }
+    };
+    let read_account = |account: &OrvReference, label: &'static str| {
+        let output = machine
+            .run_as_orna_with_stdin(
+                &["raw-call", read_accounts, p_read_account],
+                &reference_orv1_envelope(account.type_id, account.object),
+            )
+            .expect("run unique Text identity reader");
+        let output = require_value_success(label, output).expect("identity reader must succeed");
+        let rows = decode_unique_text_accounts(&output.stdout)
+            .expect("identity reader must emit one complete strict account row");
+        assert_eq!(
+            rows.len(),
+            1,
+            "identity reader must return exactly the supplied account row"
+        );
+        rows.into_iter()
+            .next()
+            .expect("one identity-selected account row must exist")
     };
 
     let nullable_a = create_without_email_account("nullable-a", "create nullable account A");
@@ -7087,18 +7113,6 @@ fn installed_unique_text_select_binds_exact_text_and_survives_replay_rename_and_
     assert_target_unavailable("unique Text selector without parameter", unavailable)
         .expect("the malformed allowed target must close as TARGET_UNAVAILABLE");
 
-    let rows = machine
-        .run_as_orna(&["raw-call", read_accounts])
-        .expect("read public unique Text select accounts");
-    let rows = require_value_success("orna raw-call read_accounts", rows)
-        .expect("public account reader must succeed");
-    let rows = decode_unique_text_accounts(&rows.stdout)
-        .expect("public account reader must emit complete strict account rows");
-    assert_eq!(
-        rows.len(),
-        10,
-        "the public reader must retain two NULL rows and eight non-null unique Text rows"
-    );
     for expected in [
         &nullable_a,
         &nullable_b,
@@ -7111,13 +7125,30 @@ fn installed_unique_text_select_binds_exact_text_and_survives_replay_rename_and_
         &variant_accounts[5],
         &variant_accounts[6],
     ] {
-        assert!(
-            rows.iter().any(|row| {
-                row.account.type_id == expected.type_id && row.account.object == expected.object
-            }),
-            "the public reader must retain every created account identity"
+        let row = read_account(expected, "orna raw-call read_accounts by identity");
+        assert_eq!(
+            row.account.type_id, expected.type_id,
+            "identity reader must retain the supplied account type identity"
+        );
+        assert_eq!(
+            row.account.object, expected.object,
+            "identity reader must retain the supplied account object identity"
         );
     }
+
+    let absent_object = if baseline.object == [0xa5; 16] {
+        [0x5a; 16]
+    } else {
+        [0xa5; 16]
+    };
+    let absent = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", read_accounts, p_read_account],
+            &reference_orv1_envelope(baseline.type_id, absent_object),
+        )
+        .expect("run absent unique Text identity reader");
+    require_silent_success("orna raw-call read_accounts absent", absent)
+        .expect("an absent same-type Reference must select no values");
 
     // Exact replay keeps all callable identities and grants. Reuse the
     // original selector identities without regranting.
@@ -7145,6 +7176,12 @@ fn installed_unique_text_select_binds_exact_text_and_survives_replay_rename_and_
     )
     .expect("the original finder grant must survive exact replay");
     assert_unique_text_email_selection(&replayed, &baseline, "baseline");
+    let replayed_account =
+        read_account(&baseline, "orna raw-call read_accounts after exact replay");
+    assert_eq!(
+        replayed_account.username, "baseline",
+        "the original reader identity and grant must survive exact replay"
+    );
 
     // The field rename changes source and catalogue revisions, but leaves the
     // discovered function and parameter identities, grants, and row identity
@@ -7189,6 +7226,15 @@ fn installed_unique_text_select_binds_exact_text_and_survives_replay_rename_and_
     )
     .expect("the renamed selector must retain the nullable row identity");
     assert_unique_text_username_selection(&renamed_nullable, &nullable_b, None);
+    let renamed_account = read_account(
+        &nullable_a,
+        "orna raw-call read_accounts after semantic rename",
+    );
+    assert_eq!(
+        renamed_account.email.as_deref(),
+        None,
+        "the renamed identity reader must retain nullable account values"
+    );
 
     machine
         .restart_server()
@@ -7206,6 +7252,14 @@ fn installed_unique_text_select_binds_exact_text_and_survives_replay_rename_and_
         &restarted_baseline,
         &baseline,
         Some("exact@example.test"),
+    );
+    let restarted_account = read_account(
+        &variant_accounts[5],
+        "orna raw-call read_accounts after restart",
+    );
+    assert_eq!(
+        restarted_account.username, "nfd",
+        "the original reader identity and grant must survive restart"
     );
 }
 
