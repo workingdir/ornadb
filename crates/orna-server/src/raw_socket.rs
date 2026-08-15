@@ -29,9 +29,9 @@ use orna_postgres::{PostgresKernel, PostgresKernelError};
 use orna_protocol::{
     ClientAction, ClientFrame, ConnectionError, FrameCodecError, MAX_FRAME_PAYLOAD_LENGTH,
     ProtocolConnection, RawCall, ServerAction, ServerFrame, decode_active_client_frame,
-    decode_catalogue_client_frame, decode_client_frame, decode_registered_client_frame,
-    encode_active_server_frame, encode_catalogue_server_frame, encode_registered_server_frame,
-    encode_server_frame,
+    decode_catalogue_client_frame, decode_client_frame, decode_constructed_client_frame,
+    decode_registered_client_frame, encode_active_server_frame, encode_catalogue_server_frame,
+    encode_constructed_server_frame, encode_registered_server_frame, encode_server_frame,
 };
 use orna_standard::{RegisteredOpaqueCodecsError, registered_opaque_codecs};
 use tokio::{
@@ -51,10 +51,12 @@ const CLIENT_HELLO: [u8; 12] = *b"ORNA\x01\x00\x00\x01\x00\x00\x00\x00";
 const CLIENT_CATALOGUE_HELLO: [u8; 12] = *b"ORNA\x01\x00\x00\x02\x00\x00\x00\x00";
 const CLIENT_ACTIVE_HELLO: [u8; 12] = *b"ORNA\x01\x00\x00\x03\x00\x00\x00\x00";
 const CLIENT_REGISTERED_HELLO: [u8; 12] = *b"ORNA\x01\x00\x00\x04\x00\x00\x00\x00";
+const CLIENT_CONSTRUCTED_HELLO: [u8; 12] = *b"ORNA\x01\x00\x00\x05\x00\x00\x00\x00";
 const SERVER_ACK: [u8; 12] = *b"ORNA\x81\x00\x00\x01\x00\x00\x00\x00";
 const SERVER_CATALOGUE_ACK: [u8; 12] = *b"ORNA\x81\x00\x00\x02\x00\x00\x00\x00";
 const SERVER_ACTIVE_ACK: [u8; 12] = *b"ORNA\x81\x00\x00\x03\x00\x00\x00\x00";
 const SERVER_REGISTERED_ACK: [u8; 12] = *b"ORNA\x81\x00\x00\x04\x00\x00\x00\x00";
+const SERVER_CONSTRUCTED_ACK: [u8; 12] = *b"ORNA\x81\x00\x00\x05\x00\x00\x00\x00";
 const FRAME_HEADER_LENGTH: usize = 18;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const FRAME_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -69,6 +71,7 @@ enum RawProtocolVersion {
     Catalogue(Arc<CatalogueSnapshot>),
     Active(Arc<ActiveDatabaseRevision>),
     Registered(Arc<ActiveDatabaseRevision>, Arc<OpaqueCodecRegistry>),
+    Constructed(Arc<ActiveDatabaseRevision>, Arc<OpaqueCodecRegistry>),
 }
 
 impl RawProtocolVersion {
@@ -80,6 +83,9 @@ impl RawProtocolVersion {
             Self::Registered(active, registry) => {
                 decode_registered_client_frame(active, registry, encoded)
             }
+            Self::Constructed(active, registry) => {
+                decode_constructed_client_frame(active, registry, encoded)
+            }
         }
     }
 
@@ -90,6 +96,9 @@ impl RawProtocolVersion {
             Self::Active(active) => encode_active_server_frame(active, frame),
             Self::Registered(active, registry) => {
                 encode_registered_server_frame(active, registry, frame)
+            }
+            Self::Constructed(active, registry) => {
+                encode_constructed_server_frame(active, registry, frame)
             }
         }
     }
@@ -106,6 +115,9 @@ impl RawProtocolVersion {
             Self::Registered(active, registry) => {
                 connection.receive_registered(active, registry, frame)
             }
+            Self::Constructed(active, registry) => {
+                connection.receive_constructed(active, registry, frame)
+            }
         }
     }
 
@@ -121,6 +133,9 @@ impl RawProtocolVersion {
             Self::Registered(active, registry) => {
                 connection.apply_registered(active, registry, action)
             }
+            Self::Constructed(active, registry) => {
+                connection.apply_constructed(active, registry, action)
+            }
         }
     }
 }
@@ -131,6 +146,7 @@ enum RequestedProtocol {
     Catalogue,
     Active,
     Registered,
+    Constructed,
 }
 
 impl RequestedProtocol {
@@ -140,6 +156,7 @@ impl RequestedProtocol {
             Self::Catalogue => &SERVER_CATALOGUE_ACK,
             Self::Active => &SERVER_ACTIVE_ACK,
             Self::Registered => &SERVER_REGISTERED_ACK,
+            Self::Constructed => &SERVER_CONSTRUCTED_ACK,
         }
     }
 }
@@ -150,6 +167,7 @@ fn requested_protocol(hello: &[u8; 12]) -> Option<RequestedProtocol> {
         CLIENT_CATALOGUE_HELLO => Some(RequestedProtocol::Catalogue),
         CLIENT_ACTIVE_HELLO => Some(RequestedProtocol::Active),
         CLIENT_REGISTERED_HELLO => Some(RequestedProtocol::Registered),
+        CLIENT_CONSTRUCTED_HELLO => Some(RequestedProtocol::Constructed),
         _ => None,
     }
 }
@@ -778,19 +796,12 @@ async fn negotiate_and_drive(
                 RawProtocolVersion::Active(Arc::new(active))
             }
             RequestedProtocol::Registered => {
-                let active = Arc::new(kernel.recover().await.map_err(|source| {
-                    LocalRawSocketError::ActiveRevision {
-                        source: Box::new(source),
-                    }
-                })?);
-                let standard = active.catalogue_hash_context().standard().ok_or(
-                    LocalRawSocketError::OpaqueRegistry {
-                        source: RegisteredOpaqueCodecsError::UnacceptedStandardSnapshot,
-                    },
-                )?;
-                let registry = registered_opaque_codecs(standard)
-                    .map_err(|source| LocalRawSocketError::OpaqueRegistry { source })?;
-                RawProtocolVersion::Registered(active, Arc::new(registry))
+                let (active, registry) = recover_active_and_registry(&kernel).await?;
+                RawProtocolVersion::Registered(active, registry)
+            }
+            RequestedProtocol::Constructed => {
+                let (active, registry) = recover_active_and_registry(&kernel).await?;
+                RawProtocolVersion::Constructed(active, registry)
             }
         };
     drop(authentication_permit);
@@ -811,6 +822,30 @@ async fn negotiate_and_drive(
         shutdown,
     )
     .await
+}
+
+async fn recover_active_and_registry(
+    kernel: &PostgresKernel,
+) -> Result<(Arc<ActiveDatabaseRevision>, Arc<OpaqueCodecRegistry>), LocalRawSocketError> {
+    let active =
+        Arc::new(
+            kernel
+                .recover()
+                .await
+                .map_err(|source| LocalRawSocketError::ActiveRevision {
+                    source: Box::new(source),
+                })?,
+        );
+    let standard =
+        active
+            .catalogue_hash_context()
+            .standard()
+            .ok_or(LocalRawSocketError::OpaqueRegistry {
+                source: RegisteredOpaqueCodecsError::UnacceptedStandardSnapshot,
+            })?;
+    let registry = registered_opaque_codecs(standard)
+        .map_err(|source| LocalRawSocketError::OpaqueRegistry { source })?;
+    Ok((active, Arc::new(registry)))
 }
 
 struct PayloadReservation {
@@ -1521,11 +1556,6 @@ mod tests {
             requested_protocol(&CLIENT_REGISTERED_HELLO),
             Some(RequestedProtocol::Registered)
         );
-        assert_eq!(
-            requested_protocol(b"ORNA\x01\x00\x00\x05\x00\x00\x00\x00"),
-            None
-        );
-
         let resources = LocalRawSocketResources::new();
         let payload = resources
             .reserve_payload(SHARED_PAYLOAD_BYTES)
