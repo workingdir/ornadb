@@ -173,19 +173,31 @@ The files have these owners:
   generator must first verify the Cargo.lock checksum against the exact
   registry crate archive, then parse that checksum-bound archive's
   `.cargo_vcs_info.json`. It must require `git.sha1` to be exactly 40
-  lowercase hexadecimal characters and must use the exact `path_in_vcs`
-  string in that file. It must reject a missing, malformed, ambiguous, or
-  checksum-mismatched archive or VCS file. It must read the `repository`
-  value from that same archive's Cargo manifest and use those exact bytes as
-  `canonical_source_url`, without normalisation. It must reject a missing,
-  malformed, or mismatched manifest repository value. The SBOM must record
-  the parsed VCS revision and `path_in_vcs` for every registry package. For
-  each registry package, SPDX 2.3 `packages[].downloadLocation` must be
-  exactly `git+<canonical_source_url>@<git.sha1>` when `path_in_vcs` is empty,
-  or exactly `git+<canonical_source_url>@<git.sha1>#<path_in_vcs>` when it is
-  non-empty. The empty-path form must omit `#` entirely. The generator must
-  preserve the `canonical_source_url` bytes without URL normalisation and
-  reject a nonconforming download-location encoding.
+  lowercase hexadecimal characters. A present `path_in_vcs = ""` means
+  exactly the empty root path. An absent `path_in_vcs` means the empty root
+  path only for these exact closed archive identities:
+
+  ```text
+  fallible-iterator 0.2.0 4443176a9f2c162692bd3d352d745ef9413eec5782a80d8fd6f8a1ac692a07f7 03b701c04b37fcd1ab1045c4623542606abf378b
+  rustc-hash 1.1.0 08d43f7aa6b08d49f382cde6a7982047c3426db949b1424bc4b7ec9ae12c6ce2 6fc9a706a9312ee801c7e77ca06c0782fa9eadef
+  ```
+
+  A present non-empty `path_in_vcs` must be the exact direct URL fragment
+  path. It has one or more `/`-separated segments. Each segment must match
+  ASCII `[A-Za-z0-9._-]+` and must not be exactly `.` or `..`. The generator
+  must reject every other present value, any absent value outside the closed
+  identities, and a missing, malformed, ambiguous, or checksum-mismatched
+  archive or VCS file. It must read the `repository` value from that same
+  archive's Cargo manifest and use those exact bytes as `canonical_source_url`,
+  without normalisation. It must reject a missing, malformed, or mismatched
+  manifest repository value. The SBOM must record the parsed VCS revision and
+  the resulting path for every registry package. For each registry package,
+  SPDX 2.3 `packages[].downloadLocation` must be exactly
+  `git+<canonical_source_url>@<git.sha1>` for the empty root path, or exactly
+  `git+<canonical_source_url>@<git.sha1>#<path_in_vcs>` for a present non-empty
+  direct URL fragment path. The empty-root form must omit `#` entirely. The
+  generator must preserve the `canonical_source_url` bytes without URL
+  normalisation and reject a nonconforming download-location encoding.
 
   Every input object has exactly `path` and `sha256`. Paths are relative to the
   locked source root. SHA-256 values are lowercase hexadecimal digests of the
@@ -343,12 +355,15 @@ source authority. It must also reject `project_licence_text_input` on every
 other record. This exception does not change the generic-MIT rules.
 
 Acceptance invariant: for every registry package, the checked Cargo.lock
-checksum, archive VCS revision, archive `path_in_vcs`, exact manifest
-repository URL, SBOM VCS fields, and exact `packages[].downloadLocation`
-encoding agree. For `siphasher 1.0.3`, the record must additionally equal the
+checksum, archive VCS revision, archive root path, exact manifest repository
+URL, SBOM VCS fields, and exact `packages[].downloadLocation` encoding agree.
+A present empty `path_in_vcs` means only the empty root path. An absent value
+means the empty root path only for one of the two closed archive identities
+above. A present non-empty value must be the exact direct URL fragment path
+defined above. For `siphasher 1.0.3`, the record must additionally equal the
 complete closed exception above, including the regular Orna project-root
-`LICENSE` input at the accepted release commit; otherwise the protected
-release fails.
+`LICENSE` input at the accepted release commit; otherwise the protected release
+fails.
 
 The package build must fail on an unknown component, a missing copyright or
 licence mapping, a required but missing notice, a component present in only
@@ -580,11 +595,16 @@ The release mechanism is implemented only when tests prove all of these facts:
   `WITH` terms, derives the Debian source rendering only from
   `canonical_source_url`, pins every selected licence and notice input by path
   and digest, and uses exactly one holder branch;
-* every registry record has a checksum-bound crate archive, valid VCS revision
-  and `path_in_vcs`, exact unnormalised Cargo manifest repository URL, and
-  matching SBOM VCS fields and exact `packages[].downloadLocation`
-  `git+<canonical_source_url>@<git.sha1>` encoding, with
-  `#<path_in_vcs>` only for a non-empty path. The closed `siphasher 1.0.3`
+* every registry record has a checksum-bound crate archive, a valid VCS
+  revision, and either a present empty `path_in_vcs` that means exactly the
+  empty root path, an absent `path_in_vcs` for exactly one of the two closed
+  archive identities above, or a present non-empty direct URL fragment path
+  whose `/`-separated segments match ASCII `[A-Za-z0-9._-]+` and are not `.`
+  or `..`. Every other value fails. It has an exact unnormalised Cargo manifest
+  repository URL and matching SBOM VCS fields and exact
+  `packages[].downloadLocation` `git+<canonical_source_url>@<git.sha1>`
+  encoding, with no `#` for the empty root path and `#<path_in_vcs>` only for a
+  present non-empty direct URL fragment path. The closed `siphasher 1.0.3`
   exception alone may use
   `project_licence_text_input`, and it must bind the exact regular Orna
   project-root `LICENSE` input to the accepted release commit; every other
@@ -664,7 +684,7 @@ with the current development version. Those rows do not declare `1.0.0`.
 | `build(debian): separate development and release modes` | `packaging/debian/changelog`; `packaging/debian/rules`; `.github/workflows/debian-package.yml` | Add the exact unreleased development entry and require an explicit build mode. Change ordinary CI to call only `development-package`. Keep the current literal control and CI package identity for this row, but validate it against the changelog before build or test. Keep protected `1.0.0-1` closed. A dry-run, when added, validates only and does not change persistent state. |
 | `build(debian): derive development package identity` | `packaging/debian/control`; `packaging/debian/rules` | Derive the Debian control version, source and binary package identity, and package filename from `dpkg-parsechangelog`. Remove the temporary literal identity checks only after the derived identity has replaced them. Keep the exact `0.1.0-1` development contract and the closed protected mode. |
 | `build(debian): own dependency licence sources` | `LICENSE`; `packaging/debian/copyright`; `packaging/debian/dependency-licences.toml` | Define the exact Cargo.lock-keyed TOML record before adding inventory: common and conditional source fields, raw Cargo licence, normalised SPDX expression, one complete selected SPDX `OR` branch, selected-licence and notice inputs, canonical source URL, and exactly one holder branch. Derive the Debian source rendering from that URL. Generic MIT records require one of the closed four `{path, sha256}` identities and no notices. |
-| `build(debian): generate release evidence` | `packaging/debian/release-evidence.sh`; `packaging/debian/orna.install`; `packaging/debian/rules` | Validate the complete locked closure, every input path and digest, holder XOR, slash-to-OR normalisation, complete SPDX branch selection, and the closed generic-MIT exception. For every registry record, require checksum-bound archive and VCS evidence, exact unnormalised manifest repository URL, and matching SBOM VCS and `packages[].downloadLocation` fields. Permit the closed `siphasher 1.0.3` `project_licence_text_input` only when it is the exact regular Orna project-root `LICENSE` at the accepted release commit. Reject automatic holder inference and any new generic-MIT input identity until an ADR amendment adds its `{path, sha256}` pair. Install deterministic notices, SPDX 2.3 SBOM, changelog, copyright, and licence evidence bound by the manifest. |
+| `build(debian): generate release evidence` | `packaging/debian/release-evidence.sh`; `packaging/debian/orna.install`; `packaging/debian/rules` | Validate the complete locked closure, every input path and digest, holder XOR, slash-to-OR normalisation, complete SPDX branch selection, and the closed generic-MIT exception. For every registry record, require checksum-bound archive and VCS evidence, exact unnormalised manifest repository URL, and matching SBOM VCS and `packages[].downloadLocation` fields. Accept a present empty `path_in_vcs` as the empty root path, and accept an absent value only for the two closed checksum-and-revision archive identities in this decision. Require each present non-empty value to be the direct URL fragment path with `/`-separated ASCII `[A-Za-z0-9._-]+` segments other than `.` and `..`; reject every other value. Emit no `#` for the empty root path and emit `#<path_in_vcs>` only for a present non-empty path. Permit the closed `siphasher 1.0.3` `project_licence_text_input` only when it is the exact regular Orna project-root `LICENSE` at the accepted release commit. Reject automatic holder inference and any new generic-MIT input identity until an ADR amendment adds its `{path, sha256}` pair. Install deterministic notices, SPDX 2.3 SBOM, changelog, copyright, and licence evidence bound by the manifest. |
 | `build(release): pin public signing policy` | `packaging/debian/release-policy.toml`; `packaging/debian/orna-archive-keyring.gpg`; `packaging/debian/publish-repository.sh` | Pin full public tag-signer and repository-key fingerprints, rotation and revocation state, keyring bytes, 14-day validity, and the immutable generation publisher interface without a secret or endpoint. |
 | `test(release): prove protected publication` | `.github/workflows/debian-package.yml`; `.github/workflows/debian-release.yml`; `crates/orna-system-tests/scenarios/debian-release.sh` | Keep development artifacts non-production and use only non-production test keys and a synthetic candidate to prove mode separation, trust policy, signing, expiry, monotonic immutable generations, replay rejection, atomic promotion, tamper closure, predecessor closure, and no runtime Ed25519 authority. Production `1.0.0-1` remains closed. |
 | `release(product): accept the 1.0 product baseline` | `docs/releases/1.0-product-acceptance.md` | After the complete product review, accept every supported claim, evidence mapping, and explicit deferral. This row is a mandatory gate, not an assumed result of the earlier rows. |
