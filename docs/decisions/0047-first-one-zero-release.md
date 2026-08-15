@@ -123,8 +123,8 @@ The files have these owners:
   embedded PostgreSQL mappings. The Orna-owned source remains `Apache-2.0`.
   Its external Rust sections are an exact projection of
   `dependency-licences.toml`; they cannot introduce an independent component,
-  holder, or licence authority. A package-level declaration cannot replace a
-  required licence text.
+  holder, no-holder proof, or licence authority. A package-level declaration
+  cannot replace a required licence text.
 * The embedded PostgreSQL build accepted by work ADR 0019 owns the exact
   `POSTGRESQL-LICENSE` bytes from the pinned PostgreSQL source. The Debian
   package copies those bytes without rewriting them.
@@ -132,11 +132,12 @@ The files have these owners:
   Rust dependency licence and source inventory. Its primary key is the
   Cargo.lock triple `(name, version, checksum)`. Each record also contains the
   exact Cargo.lock source, canonical source URL, source revision when
-  applicable, SPDX licence expression, copyright holders, required notice
-  paths, and the SHA-256 digest of each licence or notice input. Records are
-  sorted by the byte order of name, version, then checksum. A name and version
-  without the Cargo.lock checksum is not an identity. Orna workspace packages
-  are owned by the Orna copyright record instead of this external inventory.
+  applicable, SPDX licence expression, copyright holders or an authorised
+  generic-MIT no-holder proof, required notice paths, and the SHA-256 digest
+  of each licence or notice input. Records are sorted by the byte order of
+  name, version, then checksum. A name and version without the Cargo.lock
+  checksum is not an identity. Orna workspace packages are owned by the Orna
+  copyright record instead of this external inventory.
 * The deterministic release-evidence generator owns
   `THIRD-PARTY-NOTICES`. It reads only the locked Rust closure, the pinned
   `dependency-licences.toml` records, the pinned PostgreSQL source and
@@ -152,12 +153,37 @@ The files have these owners:
   manifest and signed repository chain bind those final bytes without a
   circular checksum.
 
+Generic MIT attribution is permitted only when the record's declared SPDX
+licence expression offers `MIT` as the selected licence. In that case, the
+selected licence, the SBOM concluded licence, and the Debian copyright
+rendering must each be exactly `MIT`. The record must retain the canonical
+source URL, and the generic-MIT Debian copyright rendering must include that
+exact canonical source URL. A named upstream copyright holder is not required
+only when the exact selected MIT licence input and every required notice input
+name no holder.
+
+The no-holder case requires negative proof from those exact, digest-pinned
+inputs. Protected mode must reject the generic-MIT path if the declared SPDX
+expression does not offer `MIT`, the selected, concluded, or rendered licence
+is not exactly `MIT`, the canonical source URL is absent or differs from the
+record or Debian copyright rendering, a required licence or notice input is
+absent or digest-mismatched, or any selected MIT licence or required notice
+names a holder that the record and rendering omit. This path cannot replace a
+non-MIT obligation, a combined licence obligation, or another required notice
+with generic MIT text.
+
+Generic MIT attribution does not relax Cargo.lock identity, source, revision,
+digest, closure, notice, or bidirectional inventory checks. The generator
+must render all available required licence and notice text for the selected
+MIT licence exactly as required by the pinned inputs.
+
 The package build must fail on an unknown component, a missing copyright or
 licence mapping, a required but missing notice, a component present in only
 one of the notice and SBOM views, a non-deterministic output, or a difference
-between an SBOM checksum and the final package input. It must generate the
-notice and SBOM after the final dependency closure is fixed and before the
-distribution manifest is finalised.
+between an SBOM checksum and the final package input. It must also fail on a
+missing or false generic-MIT no-holder proof. It must generate the notice and
+SBOM after the final dependency closure is fixed and before the distribution
+manifest is finalised.
 
 The generator must compare the complete selected external Cargo.lock closure
 with `dependency-licences.toml` in both directions. It rejects a missing,
@@ -369,6 +395,13 @@ The release mechanism is implemented only when tests prove all of these facts:
 * every selected external Cargo.lock `(name, version, checksum)` has exactly
   one matching checked-in dependency licence and source record, and every
   extra, missing, changed, unsorted, or checksum-less external record fails;
+* generic MIT attribution is accepted only when the declared SPDX expression
+  offers `MIT`, the selected, concluded, and Debian-rendered licence are each
+  exactly `MIT`, the generic-MIT Debian copyright rendering includes the exact
+  canonical source URL, and the digest-pinned selected MIT licence and
+  required notices prove that no holder is named; a non-MIT or combined
+  obligation, an absent, changed, omitted, or mismatched source URL or input,
+  an omitted named holder, or another rendered or concluded licence fails;
 * the SPDX 2.3 SBOM and third-party notices agree with each other and with the
   final package, and changed or unknown closure members fail the build;
 * protected mode accepts only an active policy-listed full OpenPGP source-tag
@@ -434,8 +467,8 @@ with the current development version. Those rows do not declare `1.0.0`.
 | `feat(cli): report the canonical product version` | `crates/orna-server/src/main.rs`; `crates/orna-system-tests/tests/installed_product.rs` | Add exact `orna --version` output from `CARGO_PKG_VERSION` and prove the installed development package reports `0.1.0`. |
 | `build(debian): separate development and release modes` | `packaging/debian/changelog`; `packaging/debian/rules`; `.github/workflows/debian-package.yml` | Add the exact unreleased development entry and require an explicit build mode. Change ordinary CI to call only `development-package`. Keep the current literal control and CI package identity for this row, but validate it against the changelog before build or test. Keep protected `1.0.0-1` closed. A dry-run, when added, validates only and does not change persistent state. |
 | `build(debian): derive development package identity` | `packaging/debian/control`; `packaging/debian/rules` | Derive the Debian control version, source and binary package identity, and package filename from `dpkg-parsechangelog`. Remove the temporary literal identity checks only after the derived identity has replaced them. Keep the exact `0.1.0-1` development contract and the closed protected mode. |
-| `build(debian): own dependency licence sources` | `LICENSE`; `packaging/debian/copyright`; `packaging/debian/dependency-licences.toml` | Add the Orna licence authority and exact Cargo.lock-keyed external dependency source, licence, holder, notice, and digest inventory. |
-| `build(debian): generate release evidence` | `packaging/debian/release-evidence.sh`; `packaging/debian/orna.install`; `packaging/debian/rules` | Validate the complete locked closure and install deterministic notices, SPDX 2.3 SBOM, changelog, copyright, and licence evidence bound by the manifest. |
+| `build(debian): own dependency licence sources` | `LICENSE`; `packaging/debian/copyright`; `packaging/debian/dependency-licences.toml` | Add the Orna licence authority and exact Cargo.lock-keyed external dependency source, licence, holder or authorised generic-MIT no-holder proof, notice, and digest inventory. |
+| `build(debian): generate release evidence` | `packaging/debian/release-evidence.sh`; `packaging/debian/orna.install`; `packaging/debian/rules` | Validate the complete locked closure, including the generic-MIT negative proof and exact MIT conclusion and rendering where used, and install deterministic notices, SPDX 2.3 SBOM, changelog, copyright, and licence evidence bound by the manifest. |
 | `build(release): pin public signing policy` | `packaging/debian/release-policy.toml`; `packaging/debian/orna-archive-keyring.gpg`; `packaging/debian/publish-repository.sh` | Pin full public tag-signer and repository-key fingerprints, rotation and revocation state, keyring bytes, 14-day validity, and the immutable generation publisher interface without a secret or endpoint. |
 | `test(release): prove protected publication` | `.github/workflows/debian-package.yml`; `.github/workflows/debian-release.yml`; `crates/orna-system-tests/scenarios/debian-release.sh` | Keep development artifacts non-production and use only non-production test keys and a synthetic candidate to prove mode separation, trust policy, signing, expiry, monotonic immutable generations, replay rejection, atomic promotion, tamper closure, predecessor closure, and no runtime Ed25519 authority. Production `1.0.0-1` remains closed. |
 | `release(product): accept the 1.0 product baseline` | `docs/releases/1.0-product-acceptance.md` | After the complete product review, accept every supported claim, evidence mapping, and explicit deferral. This row is a mandatory gate, not an assumed result of the earlier rows. |
