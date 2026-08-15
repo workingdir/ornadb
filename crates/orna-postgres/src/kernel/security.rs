@@ -14,6 +14,7 @@ use orna_core::{
         SecurityAuditDecision, SecurityAuditDenial, SecurityAuditEvent, SecurityAuditKind,
         SecurityAuditOutcome, SecuritySnapshot, SessionBindingError,
     },
+    system::{SYS_INVOKE_FUNCTION_ID, system_function_by_id},
     value::{FunctionArgument, RecordValue, RuntimeValue},
 };
 use orna_protocol::encode_active_value;
@@ -73,8 +74,8 @@ impl PostgresKernel {
             .await
     }
 
-    /// Dispatches one authenticated raw call with zero arguments or one Boolean
-    /// or Reference argument.
+    /// Dispatches one authenticated raw call with zero arguments or one
+    /// supported scalar or Reference argument.
     ///
     /// Other argument shapes fail before PostgreSQL is opened. An admitted
     /// shape is authorised and audited before the active target or parameter
@@ -165,8 +166,8 @@ impl PostgresKernel {
             pause_after_raw_dispatch_recovery(test_barrier.as_ref()).await;
             let target = InvocationTarget::new(function, active.pair());
 
-            let decision = if function == CATALOGUE_HEALTH_FUNCTION_ID {
-                security.authorise_catalogue_health(authenticated_session, target)
+            let decision = if system_function_by_id(function).is_some() {
+                security.authorise_system_function(authenticated_session, target)
             } else {
                 security.authorise_execute(authenticated_session, target)
             };
@@ -212,6 +213,12 @@ impl PostgresKernel {
                                 )))
                             }
                         }
+                        None if function == SYS_INVOKE_FUNCTION_ID => Err(
+                            raw_call_target_unavailable(
+                                function,
+                                "sys.invoke requires its sealed request carrier",
+                            ),
+                        ),
                         Some(definition) if definition.domain() == FunctionDomain::Client => {
                             if arguments.is_empty() {
                                 evaluate_authorised_client_function(&active, &authorisation)
