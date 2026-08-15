@@ -296,6 +296,7 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
 
+    use orna_artifact::server_plan::{SelectBindValue, UniqueTextSelectedServerPlan};
     use orna_core::{
         CatalogueRevisionId, ExpressionId, FunctionId, FunctionRevisionId, SchemaId,
         SourceBundleId, SourceRevisionId, SourceUnitId, StandardLibraryRevisionId, TypeId,
@@ -725,6 +726,60 @@ mod tests {
         assert_eq!(name.resolved_type(), text);
         assert!(!name.nullable());
         assert!(name.unique());
+    }
+
+    #[test]
+    fn prepares_a_unique_text_selected_server_plan_from_the_canonical_standard_library() {
+        let verified = verified_canonical_standard_source_fixture();
+        let standard = check_standard_library_source(&verified).unwrap();
+        let active = empty_version_two_active(&verified);
+        let context =
+            StandardApplicationCheckContext::try_new(active.catalogue(), &standard).unwrap();
+        let bundle = SourceBundle::new([SourceUnit::new(
+            "application.orna",
+            "CREATE SCHEMA crm; \
+             CREATE TYPE crm.contact AS OBJECT (email TEXT UNIQUE, name TEXT NOT NULL); \
+             CREATE SERVER FUNCTION crm.by_email(p_email TEXT) \
+             RETURNS ROWS (contact REF crm.contact, name TEXT) \
+             SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE \
+             AS SELECT REF(selected), selected.name FROM crm.contact selected \
+             WHERE selected.email = p_email;",
+        )])
+        .unwrap();
+
+        let report = check_standard_application(&bundle, &context);
+        assert!(report.diagnostics().is_empty());
+        assert!(report.checked_bundle().is_some());
+
+        let prepared = prepare_standard_application(&report, active.pair(), &active).unwrap();
+        let candidate = prepared.candidate();
+        let contact = candidate
+            .object_type_by_name(&semantic_name(["crm", "contact"]))
+            .unwrap();
+        let email = contact.field_by_name("email").unwrap();
+        let function = &candidate.functions()[0];
+        let parameter = &function.parameters()[0];
+        let revision = &prepared.new_function_revisions()[0];
+
+        assert_eq!(function.domain(), FunctionDomain::Server);
+        assert_eq!(revision.artifact().kind(), ExecutableArtifactKind::Server);
+        assert_eq!(revision.artifact().format(), "orna.server-plan");
+        assert_eq!(revision.artifact().version(), 4);
+        let plan = UniqueTextSelectedServerPlan::decode(revision.artifact().payload()).unwrap();
+        assert_eq!(plan.scan().object_type, contact.id());
+        assert_eq!(
+            plan.selector(),
+            &SelectBindValue::Text {
+                scan_object_type: contact.id(),
+                field_owner: contact.id(),
+                field: email.id(),
+                parameter_owner: function.id(),
+                parameter: parameter.id(),
+                resolved_type: ResolvedType::Value(TypeId::from_bytes(CANONICAL_TYPE_IDS[5])),
+                field_nullable: true,
+                parameter_required_non_null: true,
+            }
+        );
     }
 
     #[test]
