@@ -147,6 +147,12 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/0021_nested_record_field_targets.sql"),
         data_step: None,
     },
+    Migration {
+        version: 22,
+        name: "protected invocation audit",
+        sql: include_str!("../../migrations/0022_invocation_audit.sql"),
+        data_step: None,
+    },
 ];
 const MIGRATION_DATA_STEP_SEPARATOR: &[u8] = b"\0orna.kernel.migration-step\0";
 const CANONICAL_HASH_V1_EMPTY_SEED_STEP: &[u8] = b"canonical-hash-v1-empty-seed/v1";
@@ -825,7 +831,7 @@ mod tests {
             validated_migration_registry()
                 .expect("registry is valid")
                 .len(),
-            21
+            22
         );
         assert_eq!(MIGRATIONS[0].version, 1);
         assert_eq!(MIGRATIONS[1].version, 2);
@@ -848,6 +854,7 @@ mod tests {
         assert_eq!(MIGRATIONS[18].version, 19);
         assert_eq!(MIGRATIONS[19].version, 20);
         assert_eq!(MIGRATIONS[20].version, 21);
+        assert_eq!(MIGRATIONS[21].version, 22);
         assert_eq!(MIGRATIONS[5].name, "definition reference write evidence");
         assert_eq!(MIGRATIONS[6].name, "standard catalogue type storage");
         assert_eq!(MIGRATIONS[7].name, "resolved value type storage");
@@ -864,6 +871,7 @@ mod tests {
         assert_eq!(MIGRATIONS[18].name, "standard opaque value storage");
         assert_eq!(MIGRATIONS[19].name, "standard enum record field storage");
         assert_eq!(MIGRATIONS[20].name, "nested record field targets");
+        assert_eq!(MIGRATIONS[21].name, "protected invocation audit");
         assert!(MIGRATIONS[6].data_step.is_none());
         assert!(MIGRATIONS[7].data_step.is_none());
         assert!(MIGRATIONS[8].data_step.is_none());
@@ -879,6 +887,37 @@ mod tests {
         assert!(MIGRATIONS[18].data_step.is_none());
         assert!(MIGRATIONS[19].data_step.is_none());
         assert!(MIGRATIONS[20].data_step.is_none());
+        assert!(MIGRATIONS[21].data_step.is_none());
+    }
+
+    #[test]
+    fn protected_invocation_audit_is_the_registered_version_twenty_two() {
+        let migration = &MIGRATIONS[21];
+
+        assert_eq!(migration.version, 22);
+        assert_eq!(migration.name, "protected invocation audit");
+        assert!(migration.data_step.is_none());
+        assert!(
+            migration
+                .sql
+                .contains("CREATE TABLE _orna_kernel.invocation_audit_events")
+        );
+        assert!(migration.sql.contains("UNIQUE (invocation_id)"));
+        assert!(
+            migration
+                .sql
+                .contains("invocation_audit_events_target_evidence_pair_check")
+        );
+        assert!(
+            migration
+                .sql
+                .contains("security_audit_events_invocation_evidence_key")
+        );
+        assert!(
+            migration
+                .sql
+                .contains("invocation_audit_events_security_evidence_fk")
+        );
     }
 
     #[tokio::test]
