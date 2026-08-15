@@ -1,0 +1,1064 @@
+format = 1
+
+[closure]
+cargo_version = "1.95.0"
+unit_graph_schema_version = 1
+root_package = "orna-server"
+root_binary = "orna"
+target = "x86_64-unknown-linux-gnu"
+external_registry_package_count = 81
+runtime_external_registry_package_count = 73
+
+[[dependency]]
+name = "async-trait"
+version = "0.1.91"
+checksum = "ae36dc4177970ef04fde5178d3e2429882def40e57a451f919c098f72baa6cec"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/dtolnay/async-trait"
+cargo_licence_raw = "MIT OR Apache-2.0"
+normalized_spdx_licence = "MIT OR Apache-2.0"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3" }]
+notice_inputs = []
+generic_mit_no_holder = true
+
+[[dependency]]
+name = "base64"
+version = "0.22.1"
+checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/marshallpierce/rust-base64"
+cargo_licence_raw = "MIT OR Apache-2.0"
+normalized_spdx_licence = "MIT OR Apache-2.0"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "0dd882e53de11566d50f8e8e2d5a651bcf3fabee4987d70f306233cf39094ba7" }]
+notice_inputs = []
+copyright_holders = ["Alice Maz"]
+
+[[dependency]]
+name = "bitflags"
+version = "2.13.1"
+checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/bitflags/bitflags"
+cargo_licence_raw = "MIT OR Apache-2.0"
+normalized_spdx_licence = "MIT OR Apache-2.0"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "6485b8ed310d3f0340bf1ad1f47645069ce4069dcc6bb46c7d5c6faf41de1fdb" }]
+notice_inputs = []
+copyright_holders = ["The Rust Project Developers"]
+
+[[dependency]]
+name = "block-buffer"
+version = "0.12.1"
+checksum = "d2f6c7dbe95a6ed67ad9f18e57daf93a2f034c524b99fd2b76d18fdfeb6660aa"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/RustCrypto/utils"
+cargo_licence_raw = "MIT OR Apache-2.0"
+normalized_spdx_licence = "MIT OR Apache-2.0"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "98181e7249d0c01737645ec982499ce99a0f07eb8f7d625b8840d799d10dbc01" }]
+notice_inputs = []
+copyright_holders = ["The RustCrypto Project Developers"]
+
+[[dependency]]
+name = "byteorder"
+version = "1.5.0"
+checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/BurntSushi/byteorder"
+cargo_licence_raw = "Unlicense OR MIT"
+normalized_spdx_licence = "Unlicense OR MIT"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "0f96a83840e146e43c0ec96a22ec1f392e0680e6c1226e6f3ba87e0740af850f" }]
+notice_inputs = [{ path = "COPYING", sha256 = "01c266bced4a434da0051174d6bee16a4c82cf634e2679b6155d40d75012390f" }]
+copyright_holders = ["Andrew Gallant"]
+
+[[dependency]]
+name = "bytes"
+version = "1.12.1"
+checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/tokio-rs/bytes"
+cargo_licence_raw = "MIT"
+normalized_spdx_licence = "MIT"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE", sha256 = "45f522cacecb1023856e46df79ca625dfc550c94910078bd8aec6e02880b3d42" }]
+notice_inputs = []
+copyright_holders = ["Carl Lerche"]
+
+[[dependency]]
+name = "cfg-if"
+version = "1.0.4"
+checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/rust-lang/cfg-if"
+cargo_licence_raw = "MIT OR Apache-2.0"
+normalized_spdx_licence = "MIT OR Apache-2.0"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "378f5840b258e2779c39418f3f2d7b2ba96f1c7917dd6be0713f88305dbda397" }]
+notice_inputs = []
+copyright_holders = ["Alex Crichton"]
+
+[[dependency]]
+name = "cfg_aliases"
+version = "0.2.2"
+checksum = "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/katharostech/cfg_aliases"
+cargo_licence_raw = "MIT"
+normalized_spdx_licence = "MIT"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE", sha256 = "31b94860253d8ec7b4529f51901044d3b459d6292d996504a36b1bae3a36a812" }]
+notice_inputs = [{ path = "NOTICES.md", sha256 = "1e2b7ade3fb228130408b9990cae6a7618eb314c75aa0b164bfe485d9d9756ee" }]
+copyright_holders = ["Katharos Technology"]
+
+[[dependency]]
+name = "chacha20"
+version = "0.10.1"
+checksum = "d524456ba66e72eb8b115ff89e01e497f8e6d11d78b70b1aa13c0fbd97540a81"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/RustCrypto/stream-ciphers"
+cargo_licence_raw = "MIT OR Apache-2.0"
+normalized_spdx_licence = "MIT OR Apache-2.0"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "b8c6939380a400f53e11923d50fcc4dd2fa1ba8339fd9d04cda38a0251b6c9b0" }]
+notice_inputs = []
+copyright_holders = ["The RustCrypto Project Developers"]
+
+[[dependency]]
+name = "cmov"
+version = "0.5.4"
+checksum = "0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/RustCrypto/utils"
+cargo_licence_raw = "Apache-2.0 OR MIT"
+normalized_spdx_licence = "Apache-2.0 OR MIT"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "70c9d40f1f9545c3f133b8a67206e89da850f6468eed072281bb3701514114a9" }]
+notice_inputs = []
+copyright_holders = ["The RustCrypto Project Developers"]
+
+[[dependency]]
+name = "const-oid"
+version = "0.10.2"
+checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/RustCrypto/formats"
+cargo_licence_raw = "Apache-2.0 OR MIT"
+normalized_spdx_licence = "Apache-2.0 OR MIT"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "73b9dc2e79c7308998dd30296e073aefaefb944a68fb89aa412c23c0edcabcaa" }]
+notice_inputs = []
+copyright_holders = ["The RustCrypto Project Developers"]
+
+[[dependency]]
+name = "countme"
+version = "3.0.1"
+checksum = "7704b5fdd17b18ae31c4c1da5a2e0305a2bf17b5249300a9ee9ed7b72114c636"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/matklad/countme"
+cargo_licence_raw = "MIT OR Apache-2.0"
+normalized_spdx_licence = "MIT OR Apache-2.0"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3" }]
+notice_inputs = []
+generic_mit_no_holder = true
+
+[[dependency]]
+name = "cpufeatures"
+version = "0.3.0"
+checksum = "8b2a41393f66f16b0823bb79094d54ac5fbd34ab292ddafb9a0456ac9f87d201"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/RustCrypto/utils"
+cargo_licence_raw = "MIT OR Apache-2.0"
+normalized_spdx_licence = "MIT OR Apache-2.0"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "ae9baa7beea910273c2f384c2a6b721fb7bd02bda3436074a1072e4ee689f985" }]
+notice_inputs = []
+copyright_holders = ["The RustCrypto Project Developers"]
+
+[[dependency]]
+name = "crypto-common"
+version = "0.2.2"
+checksum = "ce6e4c961d6cd6c9a86db418387425e8bdeaf05b3c8bc1411e6dca4c252f1453"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/RustCrypto/traits"
+cargo_licence_raw = "MIT OR Apache-2.0"
+normalized_spdx_licence = "MIT OR Apache-2.0"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "d2e7ec5355c96eeade56b09187ceb48a6a30299da3ce7531a66d3d11405ab963" }]
+notice_inputs = []
+copyright_holders = ["RustCrypto Developers"]
+
+[[dependency]]
+name = "ctutils"
+version = "0.4.2"
+checksum = "7d5515a3834141de9eafb9717ad39eea8247b5674e6066c404e8c4b365d2a29e"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/RustCrypto/utils"
+cargo_licence_raw = "Apache-2.0 OR MIT"
+normalized_spdx_licence = "Apache-2.0 OR MIT"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "91585c36e4fb9ab4ca0d3dfac5d66d3c0c62cc51f640a0e1196542daf2267eae" }]
+notice_inputs = []
+copyright_holders = ["The RustCrypto Project Developers"]
+
+[[dependency]]
+name = "digest"
+version = "0.11.3"
+checksum = "f1dd6dbb5841937940781866fa1281a1ff7bd3bf827091440879f9994983d5c2"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/RustCrypto/traits"
+cargo_licence_raw = "MIT OR Apache-2.0"
+normalized_spdx_licence = "MIT OR Apache-2.0"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "af59cea35d7f5e2777a713b8d155d65efa2c339eb43f3c14e868c6ac8506edad" }]
+notice_inputs = []
+copyright_holders = ["RustCrypto Developers","Artyom Pavlov"]
+
+[[dependency]]
+name = "fallible-iterator"
+version = "0.2.0"
+checksum = "4443176a9f2c162692bd3d352d745ef9413eec5782a80d8fd6f8a1ac692a07f7"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/sfackler/rust-fallible-iterator"
+cargo_licence_raw = "MIT/Apache-2.0"
+normalized_spdx_licence = "MIT OR Apache-2.0"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "0816e154b159ba255c563f7c8c7df5bbb8cc5fc96f5ab8cf9f4743b4f41fe7eb" }]
+notice_inputs = []
+copyright_holders = ["The rust-openssl-verify Developers"]
+
+[[dependency]]
+name = "filetime"
+version = "0.2.29"
+checksum = "5c287a33c7f0a620c38e641e7f60827713987b3c0f26e8ddc9462cc69cf75759"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/alexcrichton/filetime"
+cargo_licence_raw = "MIT/Apache-2.0"
+normalized_spdx_licence = "MIT OR Apache-2.0"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "378f5840b258e2779c39418f3f2d7b2ba96f1c7917dd6be0713f88305dbda397" }]
+notice_inputs = []
+copyright_holders = ["Alex Crichton"]
+
+[[dependency]]
+name = "futures-channel"
+version = "0.3.33"
+checksum = "262590f4fe6afeb0bc83be1daa64e52657fe185690a958af7f3ad0e92085c5ae"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/rust-lang/futures-rs"
+cargo_licence_raw = "MIT OR Apache-2.0"
+normalized_spdx_licence = "MIT OR Apache-2.0"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "6652c868f35dfe5e8ef636810a4e576b9d663f3a17fb0f5613ad73583e1b88fd" }]
+notice_inputs = []
+copyright_holders = ["Alex Crichton","The Tokio Authors"]
+
+[[dependency]]
+name = "futures-core"
+version = "0.3.33"
+checksum = "2cd50c473c80f6d7c3670a752354b8e569b1a7cbfdc0419ec88e5edad85e0dc7"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/rust-lang/futures-rs"
+cargo_licence_raw = "MIT OR Apache-2.0"
+normalized_spdx_licence = "MIT OR Apache-2.0"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "6652c868f35dfe5e8ef636810a4e576b9d663f3a17fb0f5613ad73583e1b88fd" }]
+notice_inputs = []
+copyright_holders = ["Alex Crichton","The Tokio Authors"]
+
+[[dependency]]
+name = "futures-sink"
+version = "0.3.33"
+checksum = "e34418ac499d6305c2fb5ad0ed2f6ac998c5f8ca209b4510f7f94242c647e307"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/rust-lang/futures-rs"
+cargo_licence_raw = "MIT OR Apache-2.0"
+normalized_spdx_licence = "MIT OR Apache-2.0"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "6652c868f35dfe5e8ef636810a4e576b9d663f3a17fb0f5613ad73583e1b88fd" }]
+notice_inputs = []
+copyright_holders = ["Alex Crichton","The Tokio Authors"]
+
+[[dependency]]
+name = "futures-task"
+version = "0.3.33"
+checksum = "b231ed28831efb4a61a08580c4bc233ec56bc009f4cd8f52da2c3cb97df0c109"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/rust-lang/futures-rs"
+cargo_licence_raw = "MIT OR Apache-2.0"
+normalized_spdx_licence = "MIT OR Apache-2.0"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "6652c868f35dfe5e8ef636810a4e576b9d663f3a17fb0f5613ad73583e1b88fd" }]
+notice_inputs = []
+copyright_holders = ["Alex Crichton","The Tokio Authors"]
+
+[[dependency]]
+name = "futures-util"
+version = "0.3.33"
+checksum = "a77a90a256fce34da66415271e30f94ee91c57b04b8a2c042d9cf3220179deaa"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/rust-lang/futures-rs"
+cargo_licence_raw = "MIT OR Apache-2.0"
+normalized_spdx_licence = "MIT OR Apache-2.0"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "6652c868f35dfe5e8ef636810a4e576b9d663f3a17fb0f5613ad73583e1b88fd" }]
+notice_inputs = []
+copyright_holders = ["Alex Crichton","The Tokio Authors"]
+
+[[dependency]]
+name = "getrandom"
+version = "0.3.4"
+checksum = "899def5c37c4fd7b2664648c28120ecec138e4d395b459e5ca34f9cce2dd77fd"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/rust-random/getrandom"
+cargo_licence_raw = "MIT OR Apache-2.0"
+normalized_spdx_licence = "MIT OR Apache-2.0"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "29e9fe5074bd27e0e5d5d110394fbbcd841baee2651a3c4b4560a632702cede4" }]
+notice_inputs = []
+copyright_holders = ["The rust-random Project Developers","The Rust Project Developers"]
+
+[[dependency]]
+name = "getrandom"
+version = "0.4.3"
+checksum = "300e883d756b2e4ec94e02791f39b04b522276138852cfc41d9fb7e904106099"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/rust-random/getrandom"
+cargo_licence_raw = "MIT OR Apache-2.0"
+normalized_spdx_licence = "MIT OR Apache-2.0"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "523a42c25d245dde9c015f882cec7f4555aad883382a6cf19b4b7d9b2cd5419b" }]
+notice_inputs = []
+copyright_holders = ["The rust-random Project Developers","The Rust Project Developers"]
+
+[[dependency]]
+name = "hashbrown"
+version = "0.14.5"
+checksum = "e5274423e17b7c9fc20b6e7e208532f9b19825d82dfd615708b70edd83df41f1"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/rust-lang/hashbrown"
+cargo_licence_raw = "MIT OR Apache-2.0"
+normalized_spdx_licence = "MIT OR Apache-2.0"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "ff8f68cb076caf8cefe7a6430d4ac086ce6af2ca8ce2c4e5a2004d4552ef52a2" }]
+notice_inputs = []
+copyright_holders = ["Amanieu d'Antras"]
+
+[[dependency]]
+name = "hmac"
+version = "0.13.0"
+checksum = "6303bc9732ae41b04cb554b844a762b4115a61bfaa81e3e83050991eeb56863f"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/RustCrypto/MACs"
+cargo_licence_raw = "MIT OR Apache-2.0"
+normalized_spdx_licence = "MIT OR Apache-2.0"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "9e0dfd2dd4173a530e238cb6adb37aa78c34c6bc7444e0e10c1ab5d8881f63ba" }]
+notice_inputs = []
+copyright_holders = ["Artyom Pavlov"]
+
+[[dependency]]
+name = "hybrid-array"
+version = "0.4.14"
+checksum = "707114b52a152fa7bdb290cd7cd5912d9467273b6d74e21b8d81aca1f8533f6b"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/RustCrypto/hybrid-array"
+cargo_licence_raw = "MIT OR Apache-2.0"
+normalized_spdx_licence = "MIT OR Apache-2.0"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "70c9d40f1f9545c3f133b8a67206e89da850f6468eed072281bb3701514114a9" }]
+notice_inputs = []
+copyright_holders = ["The RustCrypto Project Developers"]
+
+[[dependency]]
+name = "itoa"
+version = "1.0.18"
+checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/dtolnay/itoa"
+cargo_licence_raw = "MIT OR Apache-2.0"
+normalized_spdx_licence = "MIT OR Apache-2.0"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3" }]
+notice_inputs = []
+generic_mit_no_holder = true
+
+[[dependency]]
+name = "libc"
+version = "0.2.189"
+checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/rust-lang/libc"
+cargo_licence_raw = "MIT OR Apache-2.0"
+normalized_spdx_licence = "MIT OR Apache-2.0"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "123a331b5dbf04c30097fa43b8f858bc85df671fe776de498d01f3d6b7c1f69e" }]
+notice_inputs = []
+copyright_holders = ["The Rust Project Developers"]
+
+[[dependency]]
+name = "linux-raw-sys"
+version = "0.12.1"
+checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/sunfishcode/linux-raw-sys"
+cargo_licence_raw = "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT"
+normalized_spdx_licence = "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3" }]
+notice_inputs = [{ path = "COPYRIGHT", sha256 = "3290ae0fbc9ddb77d2239121d710f0bb9d31b3b4744e6d97fe01e652b4c1870b" }]
+copyright_holders = ["linux-raw-sys contributors","The Rust Project Developers"]
+
+[[dependency]]
+name = "lock_api"
+version = "0.4.14"
+checksum = "224399e74b87b5f3557511d98dff8b14089b3dadafcab6bb93eab67d3aace965"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/Amanieu/parking_lot"
+cargo_licence_raw = "MIT OR Apache-2.0"
+normalized_spdx_licence = "MIT OR Apache-2.0"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "c9a75f18b9ab2927829a208fc6aa2cf4e63b8420887ba29cdb265d6619ae82d5" }]
+notice_inputs = []
+copyright_holders = ["The Rust Project Developers"]
+
+[[dependency]]
+name = "log"
+version = "0.4.33"
+checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/rust-lang/log"
+cargo_licence_raw = "MIT OR Apache-2.0"
+normalized_spdx_licence = "MIT OR Apache-2.0"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "6485b8ed310d3f0340bf1ad1f47645069ce4069dcc6bb46c7d5c6faf41de1fdb" }]
+notice_inputs = []
+copyright_holders = ["The Rust Project Developers"]
+
+[[dependency]]
+name = "md-5"
+version = "0.11.0"
+checksum = "69b6441f590336821bb897fb28fc622898ccceb1d6cea3fde5ea86b090c4de98"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/RustCrypto/hashes"
+cargo_licence_raw = "MIT OR Apache-2.0"
+normalized_spdx_licence = "MIT OR Apache-2.0"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "831e0f43ad0bf014c1c4fec5767aae470434c1d66d6e671be2d823e729063e25" }]
+notice_inputs = []
+copyright_holders = ["The RustCrypto Project Developers","Artyom Pavlov","Mozilla Foundation","Graydon Hoare"]
+
+[[dependency]]
+name = "memchr"
+version = "2.8.3"
+checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/BurntSushi/memchr"
+cargo_licence_raw = "Unlicense OR MIT"
+normalized_spdx_licence = "Unlicense OR MIT"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "0f96a83840e146e43c0ec96a22ec1f392e0680e6c1226e6f3ba87e0740af850f" }]
+notice_inputs = [{ path = "COPYING", sha256 = "01c266bced4a434da0051174d6bee16a4c82cf634e2679b6155d40d75012390f" }]
+copyright_holders = ["Andrew Gallant"]
+
+[[dependency]]
+name = "mio"
+version = "1.2.2"
+checksum = "30d65c71f1ce40ab09135ce117d742b9f8a19ff91a41a8b57ed50bc2de59c427"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/tokio-rs/mio"
+cargo_licence_raw = "MIT"
+normalized_spdx_licence = "MIT"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE", sha256 = "07919255c7e04793d8ea760d6c2ce32d19f9ff02bdbdde3ce90b1e1880929a9b" }]
+notice_inputs = []
+copyright_holders = ["Carl Lerche and other MIO contributors"]
+
+[[dependency]]
+name = "nix"
+version = "0.31.3"
+checksum = "cf20d2fde8ff38632c426f1165ed7436270b44f199fc55284c38276f9db47c3d"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/nix-rust/nix"
+cargo_licence_raw = "MIT"
+normalized_spdx_licence = "MIT"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE", sha256 = "66e3ee1fa7f909ad3c612d556f2a0cdabcd809ad6e66f3b0605015ac64841b70" }]
+notice_inputs = []
+copyright_holders = ["Carl Lerche + nix-rust Authors"]
+
+[[dependency]]
+name = "parking_lot"
+version = "0.12.5"
+checksum = "93857453250e3077bd71ff98b6a65ea6621a19bb0f559a85248955ac12c45a1a"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/Amanieu/parking_lot"
+cargo_licence_raw = "MIT OR Apache-2.0"
+normalized_spdx_licence = "MIT OR Apache-2.0"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "c9a75f18b9ab2927829a208fc6aa2cf4e63b8420887ba29cdb265d6619ae82d5" }]
+notice_inputs = []
+copyright_holders = ["The Rust Project Developers"]
+
+[[dependency]]
+name = "parking_lot_core"
+version = "0.9.12"
+checksum = "2621685985a2ebf1c516881c026032ac7deafcda1a2c9b7850dc81e3dfcb64c1"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/Amanieu/parking_lot"
+cargo_licence_raw = "MIT OR Apache-2.0"
+normalized_spdx_licence = "MIT OR Apache-2.0"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "c9a75f18b9ab2927829a208fc6aa2cf4e63b8420887ba29cdb265d6619ae82d5" }]
+notice_inputs = []
+copyright_holders = ["The Rust Project Developers"]
+
+[[dependency]]
+name = "percent-encoding"
+version = "2.3.2"
+checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/servo/rust-url/"
+cargo_licence_raw = "MIT OR Apache-2.0"
+normalized_spdx_licence = "MIT OR Apache-2.0"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "b38f11f6096706e6de553dabe2a7ed142d59b6fa8c97e290c67496154745cdd5" }]
+notice_inputs = []
+copyright_holders = ["The rust-url developers"]
+
+[[dependency]]
+name = "phf"
+version = "0.13.1"
+checksum = "c1562dc717473dbaa4c1f85a36410e03c047b2e7df7f45ee938fbef64ae7fadf"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/rust-phf/rust-phf"
+cargo_licence_raw = "MIT"
+normalized_spdx_licence = "MIT"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE", sha256 = "0ab4d106b6faac07fb6a051815fd1b4d862d730895e2d7d7358c2f13565e7a38" }]
+notice_inputs = []
+copyright_holders = ["Steven Fackler","Yuki Okushi"]
+
+[[dependency]]
+name = "phf_shared"
+version = "0.13.1"
+checksum = "e57fef6bc5981e38c2ce2d63bfa546861309f875b8a75f092d1d54ae2d64f266"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/rust-phf/rust-phf"
+cargo_licence_raw = "MIT"
+normalized_spdx_licence = "MIT"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE", sha256 = "0ab4d106b6faac07fb6a051815fd1b4d862d730895e2d7d7358c2f13565e7a38" }]
+notice_inputs = []
+copyright_holders = ["Steven Fackler","Yuki Okushi"]
+
+[[dependency]]
+name = "pin-project-lite"
+version = "0.2.17"
+checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/taiki-e/pin-project-lite"
+cargo_licence_raw = "Apache-2.0 OR MIT"
+normalized_spdx_licence = "Apache-2.0 OR MIT"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3" }]
+notice_inputs = []
+generic_mit_no_holder = true
+
+[[dependency]]
+name = "postgres-protocol"
+version = "0.6.12"
+checksum = "08808e3c483c46e999108051c78334f473d5adb59d78bb80a1268c7e6aa6c514"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/rust-postgres/rust-postgres"
+cargo_licence_raw = "MIT OR Apache-2.0"
+normalized_spdx_licence = "MIT OR Apache-2.0"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "4d033ae2577fa5055e26ed7e4aa3b885522f20570d18366bbc0178e0ddc19e0f" }]
+notice_inputs = []
+copyright_holders = ["Steven Fackler"]
+
+[[dependency]]
+name = "postgres-types"
+version = "0.2.14"
+checksum = "851ca9db4932932d69f3ea811b1abe63087a0f740a47692619dd40d4899b68be"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/rust-postgres/rust-postgres"
+cargo_licence_raw = "MIT OR Apache-2.0"
+normalized_spdx_licence = "MIT OR Apache-2.0"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "4d033ae2577fa5055e26ed7e4aa3b885522f20570d18366bbc0178e0ddc19e0f" }]
+notice_inputs = []
+copyright_holders = ["Steven Fackler"]
+
+[[dependency]]
+name = "proc-macro2"
+version = "1.0.107"
+checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/dtolnay/proc-macro2"
+cargo_licence_raw = "MIT OR Apache-2.0"
+normalized_spdx_licence = "MIT OR Apache-2.0"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3" }]
+notice_inputs = []
+generic_mit_no_holder = true
+
+[[dependency]]
+name = "quote"
+version = "1.0.47"
+checksum = "1fbf4db142a473a8d80c26bbf18454ed458bf8d26c8219c331daecfdbd079001"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/dtolnay/quote"
+cargo_licence_raw = "MIT OR Apache-2.0"
+normalized_spdx_licence = "MIT OR Apache-2.0"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3" }]
+notice_inputs = []
+generic_mit_no_holder = true
+
+[[dependency]]
+name = "rand"
+version = "0.10.2"
+checksum = "c7f5fa3a058cd35567ef9bfa5e75732bee0f9e4c55fa90477bef2dfcdbc4be80"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/rust-random/rand"
+cargo_licence_raw = "MIT OR Apache-2.0"
+normalized_spdx_licence = "MIT OR Apache-2.0"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "209fbbe0ad52d9235e37badf9cadfe4dbdc87203179c0899e738b39ade42177b" }]
+notice_inputs = [{ path = "COPYRIGHT", sha256 = "90eb64f0279b0d9432accfa6023ff803bc4965212383697eee27a0f426d5f8d5" }]
+copyright_holders = ["Developers of the Rand project","The Rust Project Developers"]
+
+[[dependency]]
+name = "rand_core"
+version = "0.10.1"
+checksum = "63b8176103e19a2643978565ca18b50549f6101881c443590420e4dc998a3c69"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/rust-random/rand_core"
+cargo_licence_raw = "MIT OR Apache-2.0"
+normalized_spdx_licence = "MIT OR Apache-2.0"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "8b6e9feec03e7c9a5facb26855cecd31662bf989b636bcfe79521bdf8ac863f0" }]
+notice_inputs = [{ path = "COPYRIGHT", sha256 = "92b81db30f7ab6d693e0af5661a40d273ca1947e891123ed823924192c10cbc7" }]
+copyright_holders = ["The Rand Project Developers"]
+
+[[dependency]]
+name = "rowan"
+version = "0.16.1"
+checksum = "417a3a9f582e349834051b8a10c8d71ca88da4211e4093528e36b9845f6b5f21"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/rust-analyzer/rowan"
+cargo_licence_raw = "MIT OR Apache-2.0"
+normalized_spdx_licence = "MIT OR Apache-2.0"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3" }]
+notice_inputs = []
+generic_mit_no_holder = true
+
+[[dependency]]
+name = "rustc-hash"
+version = "1.1.0"
+checksum = "08d43f7aa6b08d49f382cde6a7982047c3426db949b1424bc4b7ec9ae12c6ce2"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/rust-lang-nursery/rustc-hash"
+cargo_licence_raw = "Apache-2.0/MIT"
+normalized_spdx_licence = "Apache-2.0 OR MIT"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3" }]
+notice_inputs = []
+generic_mit_no_holder = true
+
+[[dependency]]
+name = "rustix"
+version = "1.1.4"
+checksum = "b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/bytecodealliance/rustix"
+cargo_licence_raw = "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT"
+normalized_spdx_licence = "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3" }]
+notice_inputs = [{ path = "COPYRIGHT", sha256 = "377c2e7c53250cc5905c0b0532d35973392af16ffb9596a41d99d202cf3617c9" }]
+copyright_holders = ["rustix contributors","The Rust Project Developers"]
+
+[[dependency]]
+name = "scopeguard"
+version = "1.2.0"
+checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/bluss/scopeguard"
+cargo_licence_raw = "MIT OR Apache-2.0"
+normalized_spdx_licence = "MIT OR Apache-2.0"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "fb77f0a9c53e473abe5103c8632ef9f0f2874d4fb3f17cb2d8c661aab9cee9d7" }]
+notice_inputs = []
+copyright_holders = ["Ulrik Sverdrup \"bluss\" and scopeguard developers"]
+
+[[dependency]]
+name = "serde"
+version = "1.0.229"
+checksum = "4148590afebada386688f18773da617792bf2ef03ffc1e4cbd2b1d45b023e0ba"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/serde-rs/serde"
+cargo_licence_raw = "MIT OR Apache-2.0"
+normalized_spdx_licence = "MIT OR Apache-2.0"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3" }]
+notice_inputs = []
+generic_mit_no_holder = true
+
+[[dependency]]
+name = "serde_core"
+version = "1.0.229"
+checksum = "67dca2c9c51e58a4791a4b1ed58308b39c64224d349a935ab5039aa360942a48"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/serde-rs/serde"
+cargo_licence_raw = "MIT OR Apache-2.0"
+normalized_spdx_licence = "MIT OR Apache-2.0"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3" }]
+notice_inputs = []
+generic_mit_no_holder = true
+
+[[dependency]]
+name = "serde_derive"
+version = "1.0.229"
+checksum = "e7a5d71263a5a7d47b41f6b3f06ba276f10cc18b0931f1799f710578e2309348"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/serde-rs/serde"
+cargo_licence_raw = "MIT OR Apache-2.0"
+normalized_spdx_licence = "MIT OR Apache-2.0"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3" }]
+notice_inputs = []
+generic_mit_no_holder = true
+
+[[dependency]]
+name = "serde_json"
+version = "1.0.151"
+checksum = "c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/serde-rs/json"
+cargo_licence_raw = "MIT OR Apache-2.0"
+normalized_spdx_licence = "MIT OR Apache-2.0"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3" }]
+notice_inputs = []
+generic_mit_no_holder = true
+
+[[dependency]]
+name = "sha2"
+version = "0.11.0"
+checksum = "446ba717509524cb3f22f17ecc096f10f4822d76ab5c0b9822c5f9c284e825f4"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/RustCrypto/hashes"
+cargo_licence_raw = "MIT OR Apache-2.0"
+normalized_spdx_licence = "MIT OR Apache-2.0"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "831e0f43ad0bf014c1c4fec5767aae470434c1d66d6e671be2d823e729063e25" }]
+notice_inputs = []
+copyright_holders = ["The RustCrypto Project Developers","Artyom Pavlov","Mozilla Foundation","Graydon Hoare"]
+
+[[dependency]]
+name = "siphasher"
+version = "1.0.3"
+checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/jedisct1/rust-siphash"
+cargo_licence_raw = "MIT/Apache-2.0"
+normalized_spdx_licence = "MIT OR Apache-2.0"
+selected_licence = "Apache-2.0"
+selected_licence_inputs = [{ path = "COPYING", sha256 = "c962ee4d1d05ddc138b202b2540219ebc57893fcf97b364852094a9a94ce1365" }]
+project_licence_text_input = { path = "LICENSE", sha256 = "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30" }
+notice_inputs = []
+copyright_holders = ["2012-2016 The Rust Project Developers","2016-2026 Frank Denis"]
+
+[[dependency]]
+name = "slab"
+version = "0.4.12"
+checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/tokio-rs/slab"
+cargo_licence_raw = "MIT"
+normalized_spdx_licence = "MIT"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE", sha256 = "8ce0830173fdac609dfb4ea603fdc002c2f4af0dc9b1a005653f5da9cf534b18" }]
+notice_inputs = []
+copyright_holders = ["Carl Lerche"]
+
+[[dependency]]
+name = "smallvec"
+version = "1.15.2"
+checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/servo/rust-smallvec"
+cargo_licence_raw = "MIT OR Apache-2.0"
+normalized_spdx_licence = "MIT OR Apache-2.0"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "0b28172679e0009b655da42797c03fd163a3379d5cfa67ba1f1655e974a2a1a9" }]
+notice_inputs = []
+copyright_holders = ["The Servo Project Developers"]
+
+[[dependency]]
+name = "socket2"
+version = "0.6.5"
+checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/rust-lang/socket2"
+cargo_licence_raw = "MIT OR Apache-2.0"
+normalized_spdx_licence = "MIT OR Apache-2.0"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "378f5840b258e2779c39418f3f2d7b2ba96f1c7917dd6be0713f88305dbda397" }]
+notice_inputs = []
+copyright_holders = ["Alex Crichton"]
+
+[[dependency]]
+name = "stringprep"
+version = "0.1.5"
+checksum = "7b4df3d392d81bd458a8a621b8bffbd2302a12ffe288a9d931670948749463b1"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/sfackler/rust-stringprep"
+cargo_licence_raw = "MIT/Apache-2.0"
+normalized_spdx_licence = "MIT OR Apache-2.0"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "a07450fd4496cb8b58466e6d529f1f502444eee4a235659337e9194d694739d6" }]
+notice_inputs = []
+copyright_holders = ["The rust-stringprep Developers"]
+
+[[dependency]]
+name = "syn"
+version = "3.0.3"
+checksum = "53e9bae58849f64dfa4f5d5ae372c8341f7305f82a3868709269343628b659a3"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/dtolnay/syn"
+cargo_licence_raw = "MIT OR Apache-2.0"
+normalized_spdx_licence = "MIT OR Apache-2.0"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3" }]
+notice_inputs = []
+generic_mit_no_holder = true
+
+[[dependency]]
+name = "tar"
+version = "0.4.46"
+checksum = "3f6221d9a6003c78398e3b239969f352578258df48c8eb051caadae0015bc840"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/composefs/tar-rs"
+cargo_licence_raw = "MIT OR Apache-2.0"
+normalized_spdx_licence = "MIT OR Apache-2.0"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "8ca6b96cea9e67c6c5c63f452c31bd396db8bd2406231fdea5d48ef462b48077" }]
+notice_inputs = []
+copyright_holders = ["The tar-rs Project Contributors"]
+
+[[dependency]]
+name = "text-size"
+version = "1.1.1"
+checksum = "f18aa187839b2bdb1ad2fa35ead8c4c2976b64e4363c386d45ac0f7ee85c9233"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/rust-analyzer/text-size"
+cargo_licence_raw = "MIT OR Apache-2.0"
+normalized_spdx_licence = "MIT OR Apache-2.0"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "36516aefdc84c5d5a1e7485425913a22dbda69eb1930c5e84d6ae4972b5194b9" }]
+notice_inputs = []
+generic_mit_no_holder = true
+
+[[dependency]]
+name = "tinyvec"
+version = "1.12.0"
+checksum = "bb4ebadaa0af04fab11ae01eb5f9fdb5f9c5b875506e210e71c07873528baa7f"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/Lokathor/tinyvec"
+cargo_licence_raw = "Zlib OR Apache-2.0 OR MIT"
+normalized_spdx_licence = "Zlib OR Apache-2.0 OR MIT"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT.md", sha256 = "fd80a26fbb3f644af1fa994134446702932968519797227e07a1368dea80f0bc" }]
+notice_inputs = []
+generic_mit_no_holder = true
+
+[[dependency]]
+name = "tinyvec_macros"
+version = "0.1.1"
+checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/Soveu/tinyvec_macros"
+cargo_licence_raw = "MIT OR Apache-2.0 OR Zlib"
+normalized_spdx_licence = "MIT OR Apache-2.0 OR Zlib"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT.md", sha256 = "1dd8eca0f83669e75fa119e34fb9e1be9d16e3e9b6368962b8019db6e8ae5f7b" }]
+notice_inputs = []
+copyright_holders = ["Soveu"]
+
+[[dependency]]
+name = "tokio"
+version = "1.53.1"
+checksum = "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/tokio-rs/tokio"
+cargo_licence_raw = "MIT"
+normalized_spdx_licence = "MIT"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE", sha256 = "253cd04c6714889df2d32f3f64d669179a1c95c76ac43c40882c52eb06bc3552" }]
+notice_inputs = []
+copyright_holders = ["Tokio Contributors"]
+
+[[dependency]]
+name = "tokio-macros"
+version = "2.7.2"
+checksum = "78773a2a397f451582ce068015985c33193cf6dea8b74d2a639fe457b2f07b0e"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/tokio-rs/tokio"
+cargo_licence_raw = "MIT"
+normalized_spdx_licence = "MIT"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE", sha256 = "0b83dc40cba89b9922bb84b0a9c7d2768ce37c1d7e138b7424fd4549915778c9" }]
+notice_inputs = []
+copyright_holders = ["Yoshua Wuyts","Tokio Contributors"]
+
+[[dependency]]
+name = "tokio-postgres"
+version = "0.7.18"
+checksum = "a528f7d280f6d5b9cd149635c8705b0dd049754bc67d81d31fa25169a93809d3"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/rust-postgres/rust-postgres"
+cargo_licence_raw = "MIT OR Apache-2.0"
+normalized_spdx_licence = "MIT OR Apache-2.0"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "4d033ae2577fa5055e26ed7e4aa3b885522f20570d18366bbc0178e0ddc19e0f" }]
+notice_inputs = []
+copyright_holders = ["Steven Fackler"]
+
+[[dependency]]
+name = "tokio-util"
+version = "0.7.19"
+checksum = "494815d09bf52b5548659851081238f0ca39ff638363907596da739561c62c52"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/tokio-rs/tokio"
+cargo_licence_raw = "MIT"
+normalized_spdx_licence = "MIT"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE", sha256 = "253cd04c6714889df2d32f3f64d669179a1c95c76ac43c40882c52eb06bc3552" }]
+notice_inputs = []
+copyright_holders = ["Tokio Contributors"]
+
+[[dependency]]
+name = "typenum"
+version = "1.20.1"
+checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/paholg/typenum"
+cargo_licence_raw = "MIT OR Apache-2.0"
+normalized_spdx_licence = "MIT OR Apache-2.0"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "a825bd853ab71619a4923d7b4311221427848070ff44d990da39b0b274c1683f" }]
+notice_inputs = []
+copyright_holders = ["Paho Lurie-Gregg"]
+
+[[dependency]]
+name = "unicode-bidi"
+version = "0.3.18"
+checksum = "5c1cb5db39152898a79168971543b1cb5020dff7fe43c8dc468b0885f5e29df5"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/servo/unicode-bidi"
+cargo_licence_raw = "MIT OR Apache-2.0"
+normalized_spdx_licence = "MIT OR Apache-2.0"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "7b63ecd5f1902af1b63729947373683c32745c16a10e8e6292e2e2dcd7e90ae0" }]
+notice_inputs = [{ path = "COPYRIGHT", sha256 = "edb20b474f6cbd4f4db066b54a9e0f687d0009d309412a63431189b59b8e2a07" }, { path = "AUTHORS", sha256 = "1ff3a7c8519b29544bb28ba9b1e7502df0cb764051fb9a1172e60006aa2b8dcc" }]
+copyright_holders = ["The Rust Project Developers","The Servo Project Developers"]
+
+[[dependency]]
+name = "unicode-ident"
+version = "1.0.24"
+checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/dtolnay/unicode-ident"
+cargo_licence_raw = "(MIT OR Apache-2.0) AND Unicode-3.0"
+normalized_spdx_licence = "(MIT OR Apache-2.0) AND Unicode-3.0"
+selected_licence = "(MIT OR Apache-2.0) AND Unicode-3.0"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3" }, { path = "LICENSE-APACHE", sha256 = "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a" }, { path = "LICENSE-UNICODE", sha256 = "f7db81051789b729fea528a63ec4c938fdcb93d9d61d97dc8cc2e9df6d47f2a1" }]
+notice_inputs = []
+copyright_holders = ["Unicode, Inc."]
+
+[[dependency]]
+name = "unicode-normalization"
+version = "0.1.25"
+checksum = "5fd4f6878c9cb28d874b009da9e8d183b5abc80117c40bbd187a1fde336be6e8"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/unicode-rs/unicode-normalization"
+cargo_licence_raw = "MIT OR Apache-2.0"
+normalized_spdx_licence = "MIT OR Apache-2.0"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "7b63ecd5f1902af1b63729947373683c32745c16a10e8e6292e2e2dcd7e90ae0" }]
+notice_inputs = [{ path = "COPYRIGHT", sha256 = "23860c2a7b5d96b21569afedf033469bab9fe14a1b24a35068b8641c578ce24d" }]
+copyright_holders = ["The Rust Project Developers"]
+
+[[dependency]]
+name = "unicode-properties"
+version = "0.1.4"
+checksum = "7df058c713841ad818f1dc5d3fd88063241cc61f49f5fbea4b951e8cf5a8d71d"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/unicode-rs/unicode-properties"
+cargo_licence_raw = "MIT/Apache-2.0"
+normalized_spdx_licence = "MIT OR Apache-2.0"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "7b63ecd5f1902af1b63729947373683c32745c16a10e8e6292e2e2dcd7e90ae0" }]
+notice_inputs = [{ path = "COPYRIGHT", sha256 = "23860c2a7b5d96b21569afedf033469bab9fe14a1b24a35068b8641c578ce24d" }]
+copyright_holders = ["The Rust Project Developers"]
+
+[[dependency]]
+name = "uuid"
+version = "1.18.1"
+checksum = "2f87b8aa10b915a06587d0dec516c282ff295b475d94abf425d62b57710070a2"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/uuid-rs/uuid"
+cargo_licence_raw = "Apache-2.0 OR MIT"
+normalized_spdx_licence = "Apache-2.0 OR MIT"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "436bc5a105d8e57dcd8778730f3754f7bf39c14d2f530e4cde4bd2d17a83ec3d" }]
+notice_inputs = []
+copyright_holders = ["The Rust Project Developers","Ashley Mannix","Christopher Armstrong","Dylan DPC","Hunar Roop Kahlon"]
+
+[[dependency]]
+name = "whoami"
+version = "2.1.2"
+checksum = "998767ef88740d1f5b0682a9c53c24431453923962269c2db68ee43788c5a40d"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/ardaku/whoami"
+cargo_licence_raw = "Apache-2.0 OR BSL-1.0 OR MIT"
+normalized_spdx_licence = "Apache-2.0 OR BSL-1.0 OR MIT"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE_MIT", sha256 = "508a77d2e7b51d98adeed32648ad124b7b30241a8e70b2e72c99f92d8e5874d1" }]
+notice_inputs = [{ path = "README.md", sha256 = "d6e2c856d79310245758f0058e91c785007c2a82529543301181d10c9d37dba4" }]
+copyright_holders = ["The WhoAmI Contributors"]
+
+[[dependency]]
+name = "xattr"
+version = "1.6.1"
+checksum = "32e45ad4206f6d2479085147f02bc2ef834ac85886624a23575ae137c8aa8156"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/Stebalien/xattr"
+cargo_licence_raw = "MIT OR Apache-2.0"
+normalized_spdx_licence = "MIT OR Apache-2.0"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "8b427f5bc501764575e52ba4f9d95673cf8f6d80a86d0d06599852e1a9a20a36" }]
+notice_inputs = []
+copyright_holders = ["Steven Allen"]
+
+[[dependency]]
+name = "zmij"
+version = "1.0.23"
+checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
+cargo_lock_source = "registry+https://github.com/rust-lang/crates.io-index"
+canonical_source_url = "https://github.com/dtolnay/zmij"
+cargo_licence_raw = "MIT"
+normalized_spdx_licence = "MIT"
+selected_licence = "MIT"
+selected_licence_inputs = [{ path = "LICENSE-MIT", sha256 = "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3" }]
+notice_inputs = []
+generic_mit_no_holder = true
