@@ -107,3 +107,5 @@ source-of-truth or authority rules.
   [Raw Calls Select One Object by Unique Text](0052-raw-unique-text-server-select.md)
 * **work ADR 0053:**
   [Sealed `sys.invoke` Carriers Use Three ORV5 Codecs](0053-sealed-sys-invoke-carriers.md)
+* **work ADR 0054:**
+  [`sys.invoke` Has One Sealed Request Stream](0054-sealed-sys-invoke-signature-event-stream.md)
