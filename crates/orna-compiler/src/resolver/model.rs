@@ -21,7 +21,9 @@ use orna_core::ParameterId;
 use crate::{
     CompilerDiagnostic, ParseReport, SourceLocation,
     mutation::{MutationCatalogue, MutationField},
-    relational::{DistinctQueryIr, IdentitySelectedQueryIr, RelationalQueryIr},
+    relational::{
+        DistinctQueryIr, IdentitySelectedQueryIr, RelationalQueryIr, UniqueTextSelectedQueryIr,
+    },
 };
 
 use super::{
@@ -93,6 +95,7 @@ pub(crate) struct QueryField<T, F> {
     resolved_type: SemanticType<T>,
     standard_value_type: Option<TypeId>,
     nullable: bool,
+    unique: bool,
 }
 
 impl<T, F> QueryField<T, F> {
@@ -103,12 +106,19 @@ impl<T, F> QueryField<T, F> {
             resolved_type,
             standard_value_type: None,
             nullable,
+            unique: false,
         }
     }
 
     /// Attaches resolved standard value-type provenance for relational checking.
     pub(crate) const fn with_standard_value_type(mut self, type_id: TypeId) -> Self {
         self.standard_value_type = Some(type_id);
+        self
+    }
+
+    /// Attaches the durable uniqueness fact for one query-visible field.
+    pub(crate) const fn with_unique(mut self) -> Self {
+        self.unique = true;
         self
     }
 
@@ -136,6 +146,11 @@ impl<T, F> QueryField<T, F> {
     /// Reports whether the field can contain null.
     pub(crate) const fn nullable(&self) -> bool {
         self.nullable
+    }
+
+    /// Reports whether this field has the durable uniqueness fact.
+    pub(crate) const fn unique(&self) -> bool {
+        self.unique
     }
 }
 
@@ -472,8 +487,14 @@ impl QueryCatalogue<TypeId, FieldId> for CatalogueSnapshot {
 fn query_field_from_core(
     field: &orna_core::catalogue::FieldDefinition,
 ) -> Option<QueryField<TypeId, FieldId>> {
-    SemanticType::from_core(field.resolved_type())
-        .map(|resolved_type| QueryField::new(field.id(), resolved_type, field.nullable()))
+    SemanticType::from_core(field.resolved_type()).map(|resolved_type| {
+        let query_field = QueryField::new(field.id(), resolved_type, field.nullable());
+        if field.unique() {
+            query_field.with_unique()
+        } else {
+            query_field
+        }
+    })
 }
 
 #[cfg(test)]
@@ -1137,6 +1158,15 @@ pub(crate) enum CheckedServerFunctionBody {
             CheckedParameterId,
         >,
     ),
+    /// A checked SERVER query selected by one unique Text field.
+    UniqueTextSelectedQuery(
+        UniqueTextSelectedQueryIr<
+            CheckedTypeId,
+            CheckedFieldId,
+            CheckedFunctionId,
+            CheckedParameterId,
+        >,
+    ),
     /// A checked single-object mutation body.
     Mutation(
         crate::mutation::MutationPlanIr<
@@ -1217,6 +1247,7 @@ impl CheckedServerFunction {
             CheckedServerFunctionBody::Query(plan) => Some(plan),
             CheckedServerFunctionBody::DistinctQuery(_)
             | CheckedServerFunctionBody::IdentitySelectedQuery(_)
+            | CheckedServerFunctionBody::UniqueTextSelectedQuery(_)
             | CheckedServerFunctionBody::Mutation(_)
             | CheckedServerFunctionBody::Delete(_) => None,
         }
@@ -1230,6 +1261,7 @@ impl CheckedServerFunction {
             CheckedServerFunctionBody::DistinctQuery(plan) => Some(plan),
             CheckedServerFunctionBody::Query(_)
             | CheckedServerFunctionBody::IdentitySelectedQuery(_)
+            | CheckedServerFunctionBody::UniqueTextSelectedQuery(_)
             | CheckedServerFunctionBody::Mutation(_)
             | CheckedServerFunctionBody::Delete(_) => None,
         }
@@ -1251,6 +1283,29 @@ impl CheckedServerFunction {
             CheckedServerFunctionBody::IdentitySelectedQuery(plan) => Some(plan),
             CheckedServerFunctionBody::Query(_)
             | CheckedServerFunctionBody::DistinctQuery(_)
+            | CheckedServerFunctionBody::UniqueTextSelectedQuery(_)
+            | CheckedServerFunctionBody::Mutation(_)
+            | CheckedServerFunctionBody::Delete(_) => None,
+        }
+    }
+
+    /// Returns the checked unique-Text-selected query plan when the function has one.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn unique_text_selected_query_plan(
+        &self,
+    ) -> Option<
+        &UniqueTextSelectedQueryIr<
+            CheckedTypeId,
+            CheckedFieldId,
+            CheckedFunctionId,
+            CheckedParameterId,
+        >,
+    > {
+        match &self.body {
+            CheckedServerFunctionBody::UniqueTextSelectedQuery(plan) => Some(plan),
+            CheckedServerFunctionBody::Query(_)
+            | CheckedServerFunctionBody::DistinctQuery(_)
+            | CheckedServerFunctionBody::IdentitySelectedQuery(_)
             | CheckedServerFunctionBody::Mutation(_)
             | CheckedServerFunctionBody::Delete(_) => None,
         }
@@ -1271,6 +1326,7 @@ impl CheckedServerFunction {
             CheckedServerFunctionBody::Query(_)
             | CheckedServerFunctionBody::DistinctQuery(_)
             | CheckedServerFunctionBody::IdentitySelectedQuery(_)
+            | CheckedServerFunctionBody::UniqueTextSelectedQuery(_)
             | CheckedServerFunctionBody::Delete(_) => None,
             CheckedServerFunctionBody::Mutation(plan) => Some(plan),
         }
@@ -1286,6 +1342,7 @@ impl CheckedServerFunction {
             CheckedServerFunctionBody::Query(_)
             | CheckedServerFunctionBody::DistinctQuery(_)
             | CheckedServerFunctionBody::IdentitySelectedQuery(_)
+            | CheckedServerFunctionBody::UniqueTextSelectedQuery(_)
             | CheckedServerFunctionBody::Mutation(_) => None,
         }
     }

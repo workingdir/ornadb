@@ -84,6 +84,38 @@ pub(crate) struct IdentityQuerySelector<G = FunctionId, P = ParameterId> {
     parameter: P,
 }
 
+/// A checked SERVER query selected by one direct unique Text field.
+///
+/// This is separate from both general relational queries and identity-selected
+/// queries. The selector retains every fact required by the later version-four
+/// artifact without admitting a general parameter expression.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) struct UniqueTextSelectedQueryIr<
+    T = TypeId,
+    F = FieldId,
+    G = FunctionId,
+    P = ParameterId,
+> {
+    scan: ScanIr<T>,
+    projections: Vec<ExpressionIr<T, F>>,
+    selector: UniqueTextQuerySelector<T, F, G, P>,
+}
+
+/// The fixed `source_alias.unique_text_field = text_parameter` selector.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) struct UniqueTextQuerySelector<T = TypeId, F = FieldId, G = FunctionId, P = ParameterId>
+{
+    scan_object_type: T,
+    field_owner: T,
+    field: F,
+    parameter_owner: G,
+    parameter: P,
+    text_type: ValueType<T>,
+    parameter_required_non_null: bool,
+}
+
 /// The durable version and payload emitted for one checked server query.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct EncodedServerPlan {
@@ -141,6 +173,85 @@ impl<G, P> IdentityQuerySelector<G, P> {
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
+impl<T, F, G, P> UniqueTextSelectedQueryIr<T, F, G, P> {
+    /// Returns the query scan.
+    pub(crate) const fn scan(&self) -> &ScanIr<T> {
+        &self.scan
+    }
+
+    /// Returns projections in source order.
+    pub(crate) fn projections(&self) -> &[ExpressionIr<T, F>] {
+        &self.projections
+    }
+
+    /// Returns the one fixed unique Text selector.
+    pub(crate) const fn selector(&self) -> &UniqueTextQuerySelector<T, F, G, P> {
+        &self.selector
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl<T, F, G, P> UniqueTextQuerySelector<T, F, G, P> {
+    /// Returns the selected scan object identity.
+    pub(crate) const fn scan_object_type(&self) -> T
+    where
+        T: Copy,
+    {
+        self.scan_object_type
+    }
+
+    /// Returns the owner of the selected direct field.
+    pub(crate) const fn field_owner(&self) -> T
+    where
+        T: Copy,
+    {
+        self.field_owner
+    }
+
+    /// Returns the selected direct field identity.
+    pub(crate) const fn field(&self) -> F
+    where
+        F: Copy,
+    {
+        self.field
+    }
+
+    /// Returns the function that owns the selector parameter.
+    pub(crate) const fn parameter_owner(&self) -> G
+    where
+        G: Copy,
+    {
+        self.parameter_owner
+    }
+
+    /// Returns the selector parameter identity.
+    pub(crate) const fn parameter(&self) -> P
+    where
+        P: Copy,
+    {
+        self.parameter
+    }
+
+    /// Returns the exact resolved Text type and field nullability.
+    pub(crate) const fn text_type(&self) -> ValueType<T>
+    where
+        T: Copy,
+    {
+        self.text_type
+    }
+
+    /// Reports whether the selected unique Text field can contain null.
+    pub(crate) const fn field_nullable(&self) -> bool {
+        self.text_type.nullable()
+    }
+
+    /// Reports the checked required non-null parameter fact.
+    pub(crate) const fn parameter_required_non_null(&self) -> bool {
+        self.parameter_required_non_null
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 impl<T, F, G, P> IdentitySelectedQueryIr<T, F, G, P>
 where
     T: Copy,
@@ -174,6 +285,45 @@ where
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
+impl<T, F, G, P> UniqueTextSelectedQueryIr<T, F, G, P>
+where
+    T: Copy,
+    F: Copy,
+    G: Copy,
+    P: Copy,
+{
+    /// Rewrites every identity, rejecting the complete query when any mapping fails.
+    pub(crate) fn try_map_identities<T2, F2, G2, P2, E>(
+        &self,
+        mut map_type: impl FnMut(T) -> Result<T2, E>,
+        mut map_field: impl FnMut(F) -> Result<F2, E>,
+        mut map_function: impl FnMut(G) -> Result<G2, E>,
+        mut map_parameter: impl FnMut(P) -> Result<P2, E>,
+    ) -> Result<UniqueTextSelectedQueryIr<T2, F2, G2, P2>, E> {
+        Ok(UniqueTextSelectedQueryIr {
+            scan: ScanIr {
+                input: self.scan.input,
+                object_type: map_type(self.scan.object_type)?,
+            },
+            projections: self
+                .projections
+                .iter()
+                .map(|expression| try_map_expression(expression, &mut map_type, &mut map_field))
+                .collect::<Result<_, _>>()?,
+            selector: UniqueTextQuerySelector {
+                scan_object_type: map_type(self.selector.scan_object_type)?,
+                field_owner: map_type(self.selector.field_owner)?,
+                field: map_field(self.selector.field)?,
+                parameter_owner: map_function(self.selector.parameter_owner)?,
+                parameter: map_parameter(self.selector.parameter)?,
+                text_type: self.selector.text_type.try_map_identities(&mut map_type)?,
+                parameter_required_non_null: self.selector.parameter_required_non_null,
+            },
+        })
+    }
+}
+
 /// A checked relational query and the source references that produced it.
 ///
 /// The plan keeps no source data. References retain owned compiler locations
@@ -201,6 +351,8 @@ pub(crate) struct QueryParameter<T = TypeId, P = ParameterId> {
     semantic_name: String,
     parameter: P,
     semantic_type: SemanticType<T>,
+    standard_value_type: Option<TypeId>,
+    required_non_null: bool,
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -215,6 +367,8 @@ impl<T, P> QueryParameter<T, P> {
             semantic_name: semantic_name.into(),
             parameter,
             semantic_type,
+            standard_value_type: None,
+            required_non_null: false,
         }
     }
 
@@ -237,6 +391,28 @@ impl<T, P> QueryParameter<T, P> {
         T: Copy,
     {
         self.semantic_type
+    }
+
+    /// Attaches resolved standard value-type provenance for query checking.
+    pub(crate) const fn with_standard_value_type(mut self, type_id: TypeId) -> Self {
+        self.standard_value_type = Some(type_id);
+        self
+    }
+
+    /// Marks this parameter as the required non-null form accepted by the selector.
+    pub(crate) const fn with_required_non_null(mut self) -> Self {
+        self.required_non_null = true;
+        self
+    }
+
+    /// Returns the supplied standard value-type identity when one exists.
+    pub(crate) const fn standard_value_type(&self) -> Option<TypeId> {
+        self.standard_value_type
+    }
+
+    /// Reports whether this parameter has the required non-null selector fact.
+    pub(crate) const fn required_non_null(&self) -> bool {
+        self.required_non_null
     }
 }
 
@@ -282,6 +458,48 @@ impl<T, F, G, P> IdentitySelectedQueryReference<T, F, G, P> {
     }
 }
 
+/// One ordered unique-Text-selected query reference.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) enum UniqueTextSelectedQueryReference<
+    T = TypeId,
+    F = FieldId,
+    G = FunctionId,
+    P = ParameterId,
+> {
+    QueryObject {
+        object_type: T,
+        location: SourceLocation,
+    },
+    ObjectReference {
+        object_type: T,
+        location: SourceLocation,
+    },
+    QueryField {
+        owner: T,
+        field: F,
+        location: SourceLocation,
+    },
+    ParameterRead {
+        owner: G,
+        parameter: P,
+        location: SourceLocation,
+    },
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl<T, F, G, P> UniqueTextSelectedQueryReference<T, F, G, P> {
+    /// Returns the source location that produced this reference.
+    pub(crate) fn location(&self) -> &SourceLocation {
+        match self {
+            Self::QueryObject { location, .. }
+            | Self::ObjectReference { location, .. }
+            | Self::QueryField { location, .. }
+            | Self::ParameterRead { location, .. } => location,
+        }
+    }
+}
+
 /// A checked identity-selected query and its source evidence.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[cfg_attr(not(test), allow(dead_code))]
@@ -304,6 +522,32 @@ impl<T, F, G, P> IdentitySelectedQueryCheck<T, F, G, P> {
 
     /// Returns query references in deterministic source order.
     pub(crate) fn references(&self) -> &[IdentitySelectedQueryReference<T, F, G, P>] {
+        &self.references
+    }
+}
+
+/// A checked unique-Text-selected query and its source evidence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) struct UniqueTextSelectedQueryCheck<
+    T = TypeId,
+    F = FieldId,
+    G = FunctionId,
+    P = ParameterId,
+> {
+    plan: UniqueTextSelectedQueryIr<T, F, G, P>,
+    references: Vec<UniqueTextSelectedQueryReference<T, F, G, P>>,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl<T, F, G, P> UniqueTextSelectedQueryCheck<T, F, G, P> {
+    /// Returns the source-free checked query plan.
+    pub(crate) fn plan(&self) -> &UniqueTextSelectedQueryIr<T, F, G, P> {
+        &self.plan
+    }
+
+    /// Returns query references in deterministic source order.
+    pub(crate) fn references(&self) -> &[UniqueTextSelectedQueryReference<T, F, G, P>] {
         &self.references
     }
 }
@@ -1502,6 +1746,259 @@ where
     })
 }
 
+/// Checks the closed unique-Text-selected `SELECT` form from ADR 0052.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn check_unique_text_selected_query_in<T, F, G, P>(
+    query: &SelectQuery,
+    catalogue: &impl QueryCatalogue<T, F>,
+    function: G,
+    parameters: &[QueryParameter<T, P>],
+    logical_path: &str,
+) -> Result<UniqueTextSelectedQueryCheck<T, F, G, P>, Vec<CompilerDiagnostic>>
+where
+    T: Copy + Eq + fmt::Display,
+    F: Copy,
+    G: Copy,
+    P: Copy,
+{
+    check_unique_text_selected_query_with_intrinsic_boolean_in(
+        query,
+        catalogue,
+        function,
+        parameters,
+        logical_path,
+        IntrinsicBooleanType::Legacy,
+    )
+}
+
+/// Checks one unique-Text-selected query with explicit Boolean provenance.
+pub(crate) fn check_unique_text_selected_query_with_intrinsic_boolean_in<T, F, G, P>(
+    query: &SelectQuery,
+    catalogue: &impl QueryCatalogue<T, F>,
+    function: G,
+    parameters: &[QueryParameter<T, P>],
+    logical_path: &str,
+    intrinsic_boolean: IntrinsicBooleanType,
+) -> Result<UniqueTextSelectedQueryCheck<T, F, G, P>, Vec<CompilerDiagnostic>>
+where
+    T: Copy + Eq + fmt::Display,
+    F: Copy,
+    G: Copy,
+    P: Copy,
+{
+    check_supported_quantifier(query, logical_path)?;
+
+    if query.projections.is_empty() {
+        return Err(vec![diagnostic(
+            DiagnosticCode::DomainIncompatible,
+            "unique-Text-selected SELECT requires at least one projection",
+            logical_path,
+            &query.span,
+        )]);
+    }
+    if let Some(parameter) = query.projections.iter().find_map(parameter_read_in) {
+        return Err(vec![diagnostic(
+            DiagnosticCode::DomainIncompatible,
+            "unique-Text-selected SELECT permits a parameter read only as the right operand of WHERE source_alias.unique_text_field = selector_parameter",
+            logical_path,
+            &parameter.span,
+        )]);
+    }
+    if !query.ordering.is_empty() {
+        return Err(vec![diagnostic(
+            DiagnosticCode::DomainIncompatible,
+            "unique-Text-selected SELECT does not support ORDER BY",
+            logical_path,
+            &query.ordering[0].span,
+        )]);
+    }
+    if parameters.len() != 1 {
+        return Err(vec![diagnostic(
+            DiagnosticCode::DomainIncompatible,
+            "unique-Text-selected SELECT requires exactly one declared parameter",
+            logical_path,
+            &query.span,
+        )]);
+    }
+
+    let Some(QueryExpression::Equality { left, right, .. }) = query.predicate.as_ref() else {
+        return Err(vec![diagnostic(
+            DiagnosticCode::DomainIncompatible,
+            "unique-Text-selected SELECT requires WHERE source_alias.unique_text_field = selector_parameter",
+            logical_path,
+            query
+                .predicate
+                .as_ref()
+                .map_or(&query.span, |predicate| predicate.span()),
+        )]);
+    };
+    let QueryExpression::FieldPath { root, members, .. } = left.as_ref() else {
+        return Err(vec![diagnostic(
+            DiagnosticCode::DomainIncompatible,
+            "unique-Text-selected SELECT requires WHERE source_alias.unique_text_field = selector_parameter",
+            logical_path,
+            left.span(),
+        )]);
+    };
+    if members.len() != 1 {
+        return Err(vec![diagnostic(
+            DiagnosticCode::DomainIncompatible,
+            "unique-Text-selected SELECT requires one direct selector field",
+            logical_path,
+            left.span(),
+        )]);
+    }
+    let QueryExpression::ParameterRead { parameter } = right.as_ref() else {
+        return Err(vec![diagnostic(
+            DiagnosticCode::DomainIncompatible,
+            "unique-Text-selected SELECT requires WHERE source_alias.unique_text_field = selector_parameter",
+            logical_path,
+            right.span(),
+        )]);
+    };
+
+    let CheckedQuerySource {
+        context,
+        projections,
+        references,
+        diagnostics,
+    } = check_source_and_projections(query, catalogue, logical_path, intrinsic_boolean)?;
+    let mut diagnostics = diagnostics;
+    let _ = intrinsic_boolean_value_type::<T>(
+        intrinsic_boolean,
+        logical_path,
+        query
+            .predicate
+            .as_ref()
+            .map_or(&query.span, |predicate| predicate.span()),
+        &mut diagnostics,
+    );
+    if !diagnostics.is_empty() {
+        return Err(diagnostics);
+    }
+
+    let mut diagnostics = Vec::new();
+    if check_alias(root, &context, logical_path, &mut diagnostics).is_none() {
+        return Err(diagnostics);
+    }
+    let selector = &parameters[0];
+    let selector_name = normalise_name_part(parameter);
+    if selector.semantic_name() != selector_name {
+        return Err(vec![diagnostic(
+            DiagnosticCode::UnknownQualifiedName,
+            format!("this function has no parameter named {selector_name}"),
+            logical_path,
+            &parameter.span,
+        )]);
+    }
+    if !selector.required_non_null() {
+        return Err(vec![diagnostic(
+            DiagnosticCode::TypeMismatch,
+            format!("selector parameter {selector_name} must be required and non-null TEXT"),
+            logical_path,
+            &parameter.span,
+        )]);
+    }
+
+    let member = &members[0];
+    let field_name = normalise_name_part(member);
+    let Some(field) = catalogue.field_by_name(context.object_type, &field_name) else {
+        let object_type_name = catalogue
+            .object_type_name_by_id(context.object_type)
+            .expect("checked source object must retain its catalogue name");
+        return Err(vec![diagnostic(
+            DiagnosticCode::UnknownQualifiedName,
+            format!("unknown field {field_name} on {object_type_name}"),
+            logical_path,
+            &member.span,
+        )]);
+    };
+    let Some(field_text_type) = ValueType::from_semantic_type(
+        field.semantic_type(),
+        field.standard_value_type(),
+        field.nullable(),
+    ) else {
+        return Err(vec![diagnostic(
+            DiagnosticCode::TypeMismatch,
+            format!("field {field_name} has inconsistent standard value-type evidence"),
+            logical_path,
+            &member.span,
+        )]);
+    };
+    let Some(parameter_text_type) = ValueType::from_semantic_type(
+        selector.semantic_type(),
+        selector.standard_value_type(),
+        false,
+    ) else {
+        return Err(vec![diagnostic(
+            DiagnosticCode::TypeMismatch,
+            format!(
+                "selector parameter {selector_name} has inconsistent standard value-type evidence"
+            ),
+            logical_path,
+            &parameter.span,
+        )]);
+    };
+    if !field.unique()
+        || field_text_type.semantic_type()
+            != SemanticType::scalar(StandardScalar::CharacterLargeObject)
+    {
+        return Err(vec![diagnostic(
+            DiagnosticCode::TypeMismatch,
+            format!("selector field {field_name} must be UNIQUE TEXT"),
+            logical_path,
+            &member.span,
+        )]);
+    }
+    if parameter_text_type.semantic_type()
+        != SemanticType::scalar(StandardScalar::CharacterLargeObject)
+        || parameter_text_type.resolved_value() != field_text_type.resolved_value()
+    {
+        return Err(vec![diagnostic(
+            DiagnosticCode::TypeMismatch,
+            format!(
+                "selector parameter {selector_name} must use the selected field's exact TEXT type"
+            ),
+            logical_path,
+            &parameter.span,
+        )]);
+    }
+
+    let mut references = references
+        .into_iter()
+        .map(unique_text_selected_reference)
+        .collect::<Vec<_>>();
+    references.push(UniqueTextSelectedQueryReference::QueryField {
+        owner: context.object_type,
+        field: field.id(),
+        location: SourceLocation::from_syntax(logical_path, &member.span),
+    });
+    references.push(UniqueTextSelectedQueryReference::ParameterRead {
+        owner: function,
+        parameter: selector.parameter(),
+        location: SourceLocation::from_syntax(logical_path, &parameter.span),
+    });
+    Ok(UniqueTextSelectedQueryCheck {
+        plan: UniqueTextSelectedQueryIr {
+            scan: ScanIr {
+                input: context.input,
+                object_type: context.object_type,
+            },
+            projections,
+            selector: UniqueTextQuerySelector {
+                scan_object_type: context.object_type,
+                field_owner: context.object_type,
+                field: field.id(),
+                parameter_owner: function,
+                parameter: selector.parameter(),
+                text_type: field_text_type,
+                parameter_required_non_null: selector.required_non_null(),
+            },
+        },
+        references,
+    })
+}
+
 fn parameter_read_in(expression: &QueryExpression) -> Option<&NamePart> {
     match expression {
         QueryExpression::ParameterRead { parameter } => Some(parameter),
@@ -1539,6 +2036,39 @@ fn identity_selected_reference<T, F, G, P>(
             target: QueryReferenceTarget::Field { owner, field },
             location,
         } => IdentitySelectedQueryReference::QueryField {
+            owner,
+            field,
+            location,
+        },
+        _ => unreachable!("query reference kind and target always agree"),
+    }
+}
+
+fn unique_text_selected_reference<T, F, G, P>(
+    reference: QueryReference<T, F>,
+) -> UniqueTextSelectedQueryReference<T, F, G, P> {
+    match reference {
+        QueryReference {
+            kind: QueryReferenceKind::QueryObject,
+            target: QueryReferenceTarget::Object(object_type),
+            location,
+        } => UniqueTextSelectedQueryReference::QueryObject {
+            object_type,
+            location,
+        },
+        QueryReference {
+            kind: QueryReferenceKind::ObjectReference,
+            target: QueryReferenceTarget::Object(object_type),
+            location,
+        } => UniqueTextSelectedQueryReference::ObjectReference {
+            object_type,
+            location,
+        },
+        QueryReference {
+            kind: QueryReferenceKind::QueryField,
+            target: QueryReferenceTarget::Field { owner, field },
+            location,
+        } => UniqueTextSelectedQueryReference::QueryField {
             owner,
             field,
             location,
@@ -1912,10 +2442,11 @@ mod tests {
 
     use super::{
         ExpressionKind, IdentitySelectedQueryReference, IntrinsicBooleanType, NullOrder,
-        QueryParameter, QueryReferenceKind, QueryReferenceTarget, SortDirection, ValueType,
-        check_distinct_query_in, check_identity_selected_query_in,
-        check_identity_selected_query_with_intrinsic_boolean_in, check_query, check_query_in,
-        check_query_with_intrinsic_boolean_in, resolved_values_match,
+        QueryParameter, QueryReferenceKind, QueryReferenceTarget, SortDirection,
+        UniqueTextSelectedQueryReference, ValueType, check_distinct_query_in,
+        check_identity_selected_query_in, check_identity_selected_query_with_intrinsic_boolean_in,
+        check_query, check_query_in, check_query_with_intrinsic_boolean_in,
+        check_unique_text_selected_query_in, resolved_values_match,
         supports_server_select_distinct, supports_server_select_distinct_value,
         supports_server_select_equality, supports_server_select_equality_value,
     };
@@ -3206,6 +3737,262 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn checks_unique_text_selected_query_with_direct_field_facts_and_evidence() {
+        let email = FieldId::from_bytes([24; 16]);
+        let catalogue = ResolutionCatalogue::new(vec![QueryObjectType::new(
+            TASK_TYPE,
+            name(&["tasks", "task"]),
+            vec![
+                (
+                    "title".to_owned(),
+                    QueryField::new(
+                        TITLE_FIELD,
+                        SemanticType::scalar(StandardScalar::CharacterLargeObject),
+                        true,
+                    ),
+                ),
+                (
+                    "email".to_owned(),
+                    QueryField::new(
+                        email,
+                        SemanticType::scalar(StandardScalar::CharacterLargeObject),
+                        true,
+                    )
+                    .with_unique(),
+                ),
+            ],
+        )])
+        .unwrap();
+        let source = "SELECT t.title FROM tasks.task t WHERE t.email = p_email";
+        let query = query(source);
+        let check = check_unique_text_selected_query_in(
+            &query,
+            &catalogue,
+            SELECTOR_OWNER,
+            &[QueryParameter::new(
+                "p_email",
+                SELECTOR_PARAMETER,
+                SemanticType::scalar(StandardScalar::CharacterLargeObject),
+            )
+            .with_required_non_null()],
+            "tasks.orna",
+        )
+        .unwrap();
+
+        assert_eq!(check.plan().scan().object_type(), TASK_TYPE);
+        assert_eq!(check.plan().projections().len(), 1);
+        let selector = check.plan().selector();
+        assert_eq!(selector.scan_object_type(), TASK_TYPE);
+        assert_eq!(selector.field_owner(), TASK_TYPE);
+        assert_eq!(selector.field(), email);
+        assert_eq!(selector.parameter_owner(), SELECTOR_OWNER);
+        assert_eq!(selector.parameter(), SELECTOR_PARAMETER);
+        assert_eq!(
+            selector.text_type().semantic_type(),
+            SemanticType::scalar(StandardScalar::CharacterLargeObject)
+        );
+        assert!(selector.field_nullable());
+        assert!(selector.parameter_required_non_null());
+
+        let references = check.references();
+        assert_eq!(references.len(), 4);
+        assert!(matches!(
+            references[0],
+            UniqueTextSelectedQueryReference::QueryObject {
+                object_type: TASK_TYPE,
+                ..
+            }
+        ));
+        assert!(matches!(
+            references[1],
+            UniqueTextSelectedQueryReference::QueryField {
+                owner: TASK_TYPE,
+                field: TITLE_FIELD,
+                ..
+            }
+        ));
+        assert!(matches!(
+            references[2],
+            UniqueTextSelectedQueryReference::QueryField {
+                owner: TASK_TYPE,
+                field,
+                ..
+            } if field == email
+        ));
+        assert!(matches!(
+            references[3],
+            UniqueTextSelectedQueryReference::ParameterRead {
+                owner: SELECTOR_OWNER,
+                parameter: SELECTOR_PARAMETER,
+                ..
+            }
+        ));
+        assert_eq!(
+            references[2].location().span().start(),
+            query.span.start + source.rfind("t.email").unwrap() + 2
+        );
+        assert_eq!(
+            references[3].location().span().start(),
+            query.span.start + source.rfind("p_email").unwrap()
+        );
+
+        let mapped = check
+            .plan()
+            .try_map_identities(
+                |_| Ok::<u8, ()>(1),
+                |_| Ok::<u16, ()>(2),
+                |_| Ok::<u32, ()>(3),
+                |_| Ok::<u64, ()>(4),
+            )
+            .unwrap();
+        assert_eq!(mapped.selector().scan_object_type(), 1);
+        assert_eq!(mapped.selector().field_owner(), 1);
+        assert_eq!(mapped.selector().field(), 2);
+        assert_eq!(mapped.selector().parameter_owner(), 3);
+        assert_eq!(mapped.selector().parameter(), 4);
+    }
+
+    #[test]
+    fn unique_text_selected_query_requires_matching_v2_text_value_identity() {
+        let email = FieldId::from_bytes([24; 16]);
+        let text = TypeId::from_bytes([0xa1; 16]);
+        let other_text = TypeId::from_bytes([0xa2; 16]);
+        let catalogue = ResolutionCatalogue::new(vec![QueryObjectType::new(
+            TASK_TYPE,
+            name(&["tasks", "task"]),
+            vec![
+                (
+                    "title".to_owned(),
+                    QueryField::new(
+                        TITLE_FIELD,
+                        SemanticType::scalar(StandardScalar::CharacterLargeObject),
+                        false,
+                    )
+                    .with_standard_value_type(text),
+                ),
+                (
+                    "email".to_owned(),
+                    QueryField::new(
+                        email,
+                        SemanticType::scalar(StandardScalar::CharacterLargeObject),
+                        false,
+                    )
+                    .with_standard_value_type(text)
+                    .with_unique(),
+                ),
+            ],
+        )])
+        .unwrap();
+        let query = query("SELECT t.title FROM tasks.task t WHERE t.email = p_email");
+        let parameter = |type_id| {
+            QueryParameter::new(
+                "p_email",
+                SELECTOR_PARAMETER,
+                SemanticType::scalar(StandardScalar::CharacterLargeObject),
+            )
+            .with_standard_value_type(type_id)
+            .with_required_non_null()
+        };
+
+        let v2 = check_unique_text_selected_query_in(
+            &query,
+            &catalogue,
+            SELECTOR_OWNER,
+            &[parameter(text)],
+            "tasks.orna",
+        )
+        .unwrap();
+        assert_eq!(
+            v2.plan().selector().text_type().standard_value_type(),
+            Some(text)
+        );
+
+        let diagnostics = check_unique_text_selected_query_in(
+            &query,
+            &catalogue,
+            SELECTOR_OWNER,
+            &[parameter(other_text)],
+            "tasks.orna",
+        )
+        .unwrap_err();
+        assert_one_diagnostic(
+            &diagnostics,
+            DiagnosticCode::TypeMismatch,
+            "selector parameter p_email must use the selected field's exact TEXT type",
+            match query.predicate.as_ref() {
+                Some(QueryExpression::Equality { right, .. }) => right.span(),
+                _ => unreachable!(),
+            },
+        );
+
+        let legacy_parameter = QueryParameter::new(
+            "p_email",
+            SELECTOR_PARAMETER,
+            SemanticType::scalar(StandardScalar::CharacterLargeObject),
+        )
+        .with_required_non_null();
+        let diagnostics = check_unique_text_selected_query_in(
+            &query,
+            &catalogue,
+            SELECTOR_OWNER,
+            &[legacy_parameter],
+            "tasks.orna",
+        )
+        .unwrap_err();
+        assert_one_diagnostic(
+            &diagnostics,
+            DiagnosticCode::TypeMismatch,
+            "selector parameter p_email must use the selected field's exact TEXT type",
+            match query.predicate.as_ref() {
+                Some(QueryExpression::Equality { right, .. }) => right.span(),
+                _ => unreachable!(),
+            },
+        );
+
+        let legacy_catalogue = ResolutionCatalogue::new(vec![QueryObjectType::new(
+            TASK_TYPE,
+            name(&["tasks", "task"]),
+            vec![
+                (
+                    "title".to_owned(),
+                    QueryField::new(
+                        TITLE_FIELD,
+                        SemanticType::scalar(StandardScalar::CharacterLargeObject),
+                        false,
+                    ),
+                ),
+                (
+                    "email".to_owned(),
+                    QueryField::new(
+                        email,
+                        SemanticType::scalar(StandardScalar::CharacterLargeObject),
+                        false,
+                    )
+                    .with_unique(),
+                ),
+            ],
+        )])
+        .unwrap();
+        let diagnostics = check_unique_text_selected_query_in(
+            &query,
+            &legacy_catalogue,
+            SELECTOR_OWNER,
+            &[parameter(text)],
+            "tasks.orna",
+        )
+        .unwrap_err();
+        assert_one_diagnostic(
+            &diagnostics,
+            DiagnosticCode::TypeMismatch,
+            "selector parameter p_email must use the selected field's exact TEXT type",
+            match query.predicate.as_ref() {
+                Some(QueryExpression::Equality { right, .. }) => right.span(),
+                _ => unreachable!(),
+            },
+        );
     }
 
     #[test]
