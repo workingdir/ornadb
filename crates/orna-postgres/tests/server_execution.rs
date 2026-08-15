@@ -878,6 +878,17 @@ async fn authenticated_raw_unique_text_selected_select_requires_version_four_dis
                 .await?;
             require_unique_text_select_result(&selected, scalar_fixture, name)?;
         }
+        require_no_session_leaks(&database).await
+    })
+    .await?;
+
+    with_test_database(|database| async move {
+        let kernel = hostile_kernel(&database)?;
+        kernel.bootstrap().await?;
+        let empty = kernel.recover().await?;
+        let version_one = kernel
+            .apply(&candidate("CREATE SCHEMA raw_unique_text;\n", &empty)?)
+            .await?;
         let upgrade = orna_standard::prepare_standard_upgrade(&version_one)
             .map_err(|error| failure(format!("standard upgrade preparation failed: {error}")))?;
         let version_two = kernel.apply_standard_upgrade(&upgrade).await?;
