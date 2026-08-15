@@ -1707,7 +1707,10 @@ pub(crate) const fn raw_server_insert_target_is_unavailable(error: &ServerInsert
     }
 }
 
-/// The exact SERVER mutation family selected by one raw reference argument.
+/// The exact SERVER mutation family selected by one raw mutation call.
+///
+/// UPDATE accepts the retained one-Reference call or the bounded
+/// selector/value pair. DELETE accepts only the retained one-Reference call.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RawServerReferenceMutation {
     /// One accepted version-2 identity-selected UPDATE.
@@ -1743,7 +1746,23 @@ pub(crate) fn raw_server_reference_mutation_target(
     }
 }
 
-/// Executes one pinned raw SERVER UPDATE or DELETE selected by a reference.
+/// Reports whether one active artifact is a superficial version-2 UPDATE target.
+///
+/// This predicate does not inspect the function signature, plan payload, or
+/// arguments. The authorised UPDATE entry remains the validation authority.
+pub(crate) fn raw_server_reference_value_update_target_is_selected(
+    active: &ActiveDatabaseRevision,
+    function_id: FunctionId,
+) -> bool {
+    raw_server_reference_mutation_target(active, function_id)
+        == Some(RawServerReferenceMutation::Update)
+}
+
+/// Executes one pinned raw SERVER UPDATE or DELETE.
+///
+/// UPDATE accepts either its retained constant-assignment Reference selector
+/// or its Reference selector plus one caller value. DELETE accepts only its
+/// retained Reference selector.
 ///
 /// The caller owns recovery, authorisation, audit, savepoint, and commit. This
 /// entry neither opens a session nor starts or commits a transaction.
@@ -1786,10 +1805,21 @@ pub(crate) async fn execute_authorised_raw_server_reference_mutation(
     );
     match operation {
         RawServerReferenceMutation::Update => {
-            validate_raw_reference_update_shape(active, function, arguments)
-                .map_err(|error| update_not_committed(context, error))?;
+            let validated = if matches!(arguments, [_, _]) {
+                validate_active_raw_server_reference_value_update(active, function, arguments)
+            } else {
+                validate_raw_reference_update_shape(active, function, arguments).and_then(|()| {
+                    validate_active_mutation(
+                        active,
+                        function,
+                        arguments,
+                        MutationExecutionKind::Update,
+                    )
+                })
+            }
+            .map_err(|error| update_not_committed(context, error))?;
             let (result, _) =
-                execute_active_update(transaction, active, function, context, arguments)
+                execute_validated_active_update(transaction, active, context, validated, arguments)
                     .await
                     .map_err(|error| update_not_committed(context, error))?;
             Ok(result_rows_values(result.rows()))
@@ -1858,6 +1888,155 @@ fn validate_raw_reference_update_shape(
             function.id(),
             "raw reference UPDATE assignments must use only literal values",
         ));
+    }
+    Ok(())
+}
+
+fn validate_active_raw_server_reference_value_update<'a>(
+    active: &'a ActiveDatabaseRevision,
+    function: &FunctionDefinition,
+    arguments: &[FunctionArgument],
+) -> Result<ValidatedActiveMutation<'a>, PostgresKernelError> {
+    let validated =
+        validate_active_mutation(active, function, arguments, MutationExecutionKind::Update)?;
+    let value_parameter =
+        validate_raw_reference_value_update_shape(active, function, &validated.plan, arguments)?;
+    validate_raw_reference_value_update_text_argument(value_parameter, arguments)?;
+    Ok(validated)
+}
+
+fn validate_raw_reference_value_update_shape(
+    active: &ActiveDatabaseRevision,
+    function: &FunctionDefinition,
+    plan: &ServerMutationPlan,
+    arguments: &[FunctionArgument],
+) -> Result<ParameterId, PostgresKernelError> {
+    let Some(arguments) = raw_argument_pair_in_parameter_order(arguments) else {
+        return Err(argument_error(
+            None,
+            "a raw reference value UPDATE requires exactly two arguments",
+        ));
+    };
+    if arguments[0].parameter() == arguments[1].parameter() {
+        return Err(argument_error(
+            Some(arguments[1].parameter()),
+            "a raw reference value UPDATE requires two distinct parameter identities",
+        ));
+    }
+    if function.parameters().len() != 2 {
+        return Err(function_signature_error(
+            function.id(),
+            "a raw reference value UPDATE must declare exactly two parameters",
+        ));
+    }
+    let selector = plan
+        .selector()
+        .ok_or_else(|| plan_invariant("raw reference value UPDATE must contain a selector"))?;
+    if selector.owner() != function.id() {
+        return Err(plan_invariant(
+            "raw reference value UPDATE selector owner must match the active function",
+        ));
+    }
+
+    let mut value_parameter = None;
+    for argument in arguments {
+        let parameter = function
+            .parameter_by_id(argument.parameter())
+            .ok_or_else(|| {
+                argument_error(
+                    Some(argument.parameter()),
+                    "raw reference value UPDATE arguments must name declared parameters",
+                )
+            })?;
+        if argument.parameter() == selector.parameter() {
+            if parameter.resolved_type() != ResolvedType::reference(plan.target())
+                || !matches!(
+                    argument.value(),
+                    RuntimeValue::Reference { target, .. } if *target == plan.target()
+                )
+            {
+                return Err(argument_error(
+                    Some(argument.parameter()),
+                    "raw reference value UPDATE selector must be an exact target reference",
+                ));
+            }
+            if plan.assignments().iter().any(|assignment| {
+                matches!(
+                    assignment.expression().kind(),
+                    MutationExpressionKind::Parameter { owner, parameter }
+                        if *owner == function.id() && *parameter == argument.parameter()
+                )
+            }) {
+                return Err(argument_error(
+                    Some(argument.parameter()),
+                    "raw reference value UPDATE cannot assign from its selector parameter",
+                ));
+            }
+        } else {
+            let reads_value = plan.assignments().iter().any(|assignment| {
+                let expression = assignment.expression();
+                matches!(
+                    expression.kind(),
+                    MutationExpressionKind::Parameter { owner, parameter }
+                        if *owner == function.id() && *parameter == argument.parameter()
+                ) && runtime_types_match(
+                    active.catalogue_hash_context(),
+                    expression.resolved_type(),
+                    parameter.resolved_type(),
+                )
+            });
+            if !reads_value {
+                return Err(argument_error(
+                    Some(argument.parameter()),
+                    "raw reference value UPDATE must directly read its value parameter",
+                ));
+            }
+            value_parameter = Some(argument.parameter());
+        }
+    }
+    let value_parameter = value_parameter.ok_or_else(|| {
+        argument_error(
+            None,
+            "raw reference value UPDATE must supply one selector and one value",
+        )
+    })?;
+    if plan.assignments().iter().any(|assignment| {
+        !matches!(
+            assignment.expression().kind(),
+            MutationExpressionKind::Parameter { owner, parameter }
+                if *owner == function.id() && *parameter == value_parameter
+        ) && !matches!(
+            assignment.expression().kind(),
+            MutationExpressionKind::BooleanLiteral { .. } | MutationExpressionKind::TypedNull
+        )
+    }) {
+        return Err(function_signature_error(
+            function.id(),
+            "raw reference value UPDATE assignments must use the value parameter or literal values",
+        ));
+    }
+    Ok(value_parameter)
+}
+
+fn validate_raw_reference_value_update_text_argument(
+    value_parameter: ParameterId,
+    arguments: &[FunctionArgument],
+) -> Result<(), PostgresKernelError> {
+    let Some(arguments) = raw_argument_pair_in_parameter_order(arguments) else {
+        return Err(argument_error(
+            None,
+            "a raw reference value UPDATE requires exactly two arguments",
+        ));
+    };
+    for argument in arguments {
+        if argument.parameter() == value_parameter
+            && matches!(argument.value(), RuntimeValue::Text(value) if value.contains('\0'))
+        {
+            return Err(argument_error(
+                Some(argument.parameter()),
+                "raw Text UPDATE arguments cannot contain U+0000",
+            ));
+        }
     }
     Ok(())
 }
@@ -1997,6 +2176,16 @@ async fn execute_active_update(
 ) -> Result<(ServerUpdateResult, UniqueReferenceConstraints), PostgresKernelError> {
     let validated =
         validate_active_mutation(active, function, arguments, MutationExecutionKind::Update)?;
+    execute_validated_active_update(transaction, active, context, validated, arguments).await
+}
+
+async fn execute_validated_active_update(
+    transaction: &Transaction<'_>,
+    active: &ActiveDatabaseRevision,
+    context: ServerUpdateContext,
+    validated: ValidatedActiveMutation<'_>,
+    arguments: &[FunctionArgument],
+) -> Result<(ServerUpdateResult, UniqueReferenceConstraints), PostgresKernelError> {
     let selector = selector_object(&validated.plan, arguments)?;
     let lowered = lower_update_with_context(
         active.catalogue_hash_context(),
