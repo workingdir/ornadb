@@ -6727,6 +6727,598 @@ fn installed_unique_text_fields_reject_duplicates_and_persist_across_replay_rena
     );
 }
 
+/// Prove ADR 0052 through only the installed product's public command path.
+///
+/// The journey discovers the exact callable identities, proves authorisation
+/// before target inspection, and creates nullable and required unique Text
+/// rows. It then proves byte-exact selected reads, empty results, unavailable
+/// targets, replay, semantic rename, and restart without private database
+/// inspection or a regrant.
+#[test]
+#[ignore = "requires Docker, ORNA_SYSTEM_TEST_DEBIAN_PACKAGE, and unique Text selected SERVER SELECT in the installed orna executable"]
+fn installed_unique_text_select_binds_exact_text_and_survives_replay_rename_and_restart() {
+    let package = std::env::var("ORNA_SYSTEM_TEST_DEBIAN_PACKAGE")
+        .expect("ORNA_SYSTEM_TEST_DEBIAN_PACKAGE must point at the reproduced .deb package");
+    let artifact = FrozenPackageArtifact::new(PackageFormat::Debian, &package)
+        .expect("freeze the reproduced Debian package");
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+    let original = fs::read(fixtures.join("product_test_unique_text_select.orna"))
+        .expect("read the checked-in unique Text select fixture");
+    let renamed = fs::read(fixtures.join("product_test_unique_text_select_renamed.orna"))
+        .expect("read the checked-in renamed unique Text select fixture");
+    let machine = InstalledMachine::start(&artifact, &original)
+        .expect("start the installed unique Text select test machine");
+
+    let apply = machine
+        .run_as_orna(&["source", "apply", FIXTURE_PATH])
+        .expect("apply the installed unique Text select fixture");
+    let apply = require_success("orna source apply", apply).expect("source apply must succeed");
+    assert!(
+        apply.stderr.is_empty(),
+        "source apply must keep standard error empty"
+    );
+    let document = parse_apply_document(&apply.stdout).expect("source apply JSON must parse");
+    let expected_names = [
+        vec![
+            "unique_text_select_test".to_string(),
+            "create_account".to_string(),
+        ],
+        vec![
+            "unique_text_select_test".to_string(),
+            "create_account_without_email".to_string(),
+        ],
+        vec![
+            "unique_text_select_test".to_string(),
+            "find_by_email".to_string(),
+        ],
+        vec![
+            "unique_text_select_test".to_string(),
+            "find_by_username".to_string(),
+        ],
+        vec![
+            "unique_text_select_test".to_string(),
+            "read_accounts".to_string(),
+        ],
+    ];
+    assert_eq!(
+        document
+            .functions
+            .iter()
+            .map(|entry| entry.names().to_vec())
+            .collect::<Vec<_>>(),
+        expected_names,
+        "apply must report the five unique Text select functions in canonical name order"
+    );
+    let create = document
+        .function_id(&["unique_text_select_test", "create_account"])
+        .expect("apply must report create_account");
+    let create_without_email = document
+        .function_id(&["unique_text_select_test", "create_account_without_email"])
+        .expect("apply must report create_account_without_email");
+    let find_by_email = document
+        .function_id(&["unique_text_select_test", "find_by_email"])
+        .expect("apply must report find_by_email");
+    let find_by_username = document
+        .function_id(&["unique_text_select_test", "find_by_username"])
+        .expect("apply must report find_by_username");
+    let read_accounts = document
+        .function_id(&["unique_text_select_test", "read_accounts"])
+        .expect("apply must report read_accounts");
+    for (function, expected_parameters) in [
+        (create, ["p_email", "p_username"].as_slice()),
+        (create_without_email, ["p_username"].as_slice()),
+        (find_by_email, ["p_email"].as_slice()),
+        (find_by_username, ["p_username"].as_slice()),
+        (read_accounts, [].as_slice()),
+    ] {
+        let entry = document
+            .functions
+            .iter()
+            .find(|entry| entry.function_id() == function)
+            .expect("apply must retain every discovered function entry");
+        assert_eq!(
+            entry
+                .parameters()
+                .iter()
+                .map(ParameterEntry::name)
+                .collect::<Vec<_>>(),
+            expected_parameters,
+            "function must retain its exact ordered parameter declarations"
+        );
+    }
+    let p_create_email = document
+        .parameter_id(&["unique_text_select_test", "create_account"], "p_email")
+        .expect("apply must report create_account.p_email");
+    let p_create_username = document
+        .parameter_id(&["unique_text_select_test", "create_account"], "p_username")
+        .expect("apply must report create_account.p_username");
+    let p_create_without_email_username = document
+        .parameter_id(
+            &["unique_text_select_test", "create_account_without_email"],
+            "p_username",
+        )
+        .expect("apply must report create_account_without_email.p_username");
+    let p_find_email = document
+        .parameter_id(&["unique_text_select_test", "find_by_email"], "p_email")
+        .expect("apply must report find_by_email.p_email");
+    let p_find_username = document
+        .parameter_id(
+            &["unique_text_select_test", "find_by_username"],
+            "p_username",
+        )
+        .expect("apply must report find_by_username.p_username");
+    let parameter_ids = [
+        p_create_email,
+        p_create_username,
+        p_create_without_email_username,
+        p_find_email,
+        p_find_username,
+    ];
+    for (index, left) in parameter_ids.iter().enumerate() {
+        for right in &parameter_ids[index + 1..] {
+            assert_ne!(left, right, "every discovered ParameterId must be distinct");
+        }
+    }
+
+    // Every public function denies before a grant. The finder inputs are
+    // well-formed Text envelopes, but the denied results disclose no target
+    // or selected-row information.
+    for (command, input) in [
+        (
+            vec!["raw-call", create, p_create_email, p_create_username],
+            [
+                text_orv1_envelope("denied@example.test"),
+                text_orv1_envelope("denied"),
+            ]
+            .concat(),
+        ),
+        (
+            vec![
+                "raw-call",
+                create_without_email,
+                p_create_without_email_username,
+            ],
+            text_orv1_envelope("denied-without-email"),
+        ),
+        (
+            vec!["raw-call", find_by_email, p_find_email],
+            text_orv1_envelope("denied@example.test"),
+        ),
+        (
+            vec!["raw-call", find_by_username, p_find_username],
+            text_orv1_envelope("denied"),
+        ),
+        (vec!["raw-call", read_accounts], Vec::new()),
+    ] {
+        let denied = if input.is_empty() {
+            machine.run_as_orna(&command)
+        } else {
+            machine.run_as_orna_with_stdin(&command, &input)
+        }
+        .expect("run denied unique Text select raw call");
+        assert_denied("unique Text select raw call before grant", denied)
+            .expect("authorisation must precede target and value inspection");
+    }
+    for function in [
+        create,
+        create_without_email,
+        find_by_email,
+        find_by_username,
+        read_accounts,
+    ] {
+        require_silent_success(
+            "orna security grant-execute",
+            machine
+                .run_as_orna(&["security", "grant-execute", function])
+                .expect("grant unique Text select function"),
+        )
+        .expect("grant must succeed silently");
+    }
+
+    let create_account = |email: &str, username: &str, label: &'static str| {
+        let output = machine
+            .run_as_orna_with_stdin(
+                &["raw-call", create, p_create_email, p_create_username],
+                &[text_orv1_envelope(email), text_orv1_envelope(username)].concat(),
+            )
+            .expect("create unique Text select account");
+        parse_reference_envelope(
+            &require_value_success(label, output)
+                .expect("unique Text select account creation must succeed")
+                .stdout,
+        )
+        .expect("account creation must return one canonical Reference")
+    };
+    let create_without_email_account = |username: &str, label: &'static str| {
+        let output = machine
+            .run_as_orna_with_stdin(
+                &[
+                    "raw-call",
+                    create_without_email,
+                    p_create_without_email_username,
+                ],
+                &text_orv1_envelope(username),
+            )
+            .expect("create unique Text select account without email");
+        parse_reference_envelope(
+            &require_value_success(label, output)
+                .expect("nullable unique Text account creation must succeed")
+                .stdout,
+        )
+        .expect("nullable account creation must return one canonical Reference")
+    };
+    let select_by_email = |email: &str, label: &'static str| {
+        let output = machine
+            .run_as_orna_with_stdin(
+                &["raw-call", find_by_email, p_find_email],
+                &text_orv1_envelope(email),
+            )
+            .expect("run unique Text email selector");
+        let output = require_value_success(label, output).expect("email selector must succeed");
+        if output.stdout.is_empty() {
+            None
+        } else {
+            Some(
+                decode_unique_text_email_selection(&output.stdout)
+                    .expect("email selector must emit one strict Reference and Text result"),
+            )
+        }
+    };
+    let select_by_username = |username: &str, label: &'static str| {
+        let output = machine
+            .run_as_orna_with_stdin(
+                &["raw-call", find_by_username, p_find_username],
+                &text_orv1_envelope(username),
+            )
+            .expect("run unique Text username selector");
+        let output = require_value_success(label, output).expect("username selector must succeed");
+        if output.stdout.is_empty() {
+            None
+        } else {
+            Some(
+                decode_unique_text_username_selection(&output.stdout).expect(
+                    "username selector must emit one strict Reference and nullable Text result",
+                ),
+            )
+        }
+    };
+
+    let nullable_a = create_without_email_account("nullable-a", "create nullable account A");
+    let nullable_b = create_without_email_account("nullable-b", "create nullable account B");
+    assert_ne!(
+        nullable_a.object, nullable_b.object,
+        "the two nullable rows must have distinct object identities"
+    );
+    assert_eq!(
+        nullable_a.type_id, nullable_b.type_id,
+        "the two nullable rows must share one account type"
+    );
+
+    // A non-null empty Text selector cannot match either nullable email. It
+    // remains empty until a distinct empty Text value is stored.
+    assert!(
+        select_by_email("", "orna raw-call find_by_email empty before empty value").is_none(),
+        "nullable NULL email values must not match an empty Text selector"
+    );
+    let baseline = create_account(
+        "exact@example.test",
+        "baseline",
+        "create exact baseline account",
+    );
+    let variants = [
+        ("EXACT@example.test", "case"),
+        (" exact@example.test ", "whitespace"),
+        ("line\nending@example.test", "line-feed"),
+        ("line\r\nending@example.test", "carriage-return-line-feed"),
+        ("caf\u{e9}@example.test", "nfc"),
+        ("cafe\u{301}@example.test", "nfd"),
+        ("", "empty"),
+    ];
+    let variant_accounts = variants
+        .iter()
+        .map(|(email, username)| create_account(email, username, "create byte-distinct account"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        baseline.type_id, nullable_a.type_id,
+        "required and nullable accounts must share one object type"
+    );
+
+    // Each selector must use the exact bytes. Case, whitespace, line ending,
+    // and Unicode-normalisation variants are independent stored values.
+    let selected_baseline = select_by_email(
+        "exact@example.test",
+        "orna raw-call find_by_email exact baseline",
+    )
+    .expect("the exact Text selector must find its one stored row");
+    assert_unique_text_email_selection(&selected_baseline, &baseline, "baseline");
+    for ((email, username), account) in variants.iter().zip(&variant_accounts) {
+        let selected = select_by_email(email, "orna raw-call find_by_email byte-distinct")
+            .expect("each exact byte-distinct Text selector must find one row");
+        assert_unique_text_email_selection(&selected, account, username);
+    }
+    assert_ne!(
+        variant_accounts[0].object, baseline.object,
+        "case-distinct Text must retain a distinct selected object"
+    );
+    assert_ne!(
+        variant_accounts[5].object, variant_accounts[4].object,
+        "canonically equivalent but byte-distinct Text must retain distinct selected objects"
+    );
+
+    let selected_empty = select_by_email("", "orna raw-call find_by_email stored empty")
+        .expect("the stored empty Text must select one row");
+    assert_unique_text_email_selection(&selected_empty, &variant_accounts[6], "empty");
+    assert_ne!(
+        selected_empty.account.object, nullable_a.object,
+        "the empty Text selector must not select the first nullable NULL row"
+    );
+    assert_ne!(
+        selected_empty.account.object, nullable_b.object,
+        "the empty Text selector must not select the second nullable NULL row"
+    );
+    assert!(
+        select_by_email("absent@example.test", "orna raw-call find_by_email absent").is_none(),
+        "an absent Text selector must complete without values"
+    );
+    assert!(
+        select_by_username("absent", "orna raw-call find_by_username absent").is_none(),
+        "an absent required Text selector must complete without values"
+    );
+
+    let selected_username =
+        select_by_username("baseline", "orna raw-call find_by_username baseline")
+            .expect("the exact username selector must find its one stored row");
+    assert_unique_text_username_selection(
+        &selected_username,
+        &baseline,
+        Some("exact@example.test"),
+    );
+    let selected_nullable = select_by_username(
+        "nullable-a",
+        "orna raw-call find_by_username nullable account",
+    )
+    .expect("the username selector must find a nullable email row");
+    assert_unique_text_username_selection(&selected_nullable, &nullable_a, None);
+
+    // The granted finder with no canonical parameter has no usable target.
+    let unavailable = machine
+        .run_as_orna(&["raw-call", find_by_email])
+        .expect("run unavailable unique Text selector");
+    assert_target_unavailable("unique Text selector without parameter", unavailable)
+        .expect("the malformed allowed target must close as TARGET_UNAVAILABLE");
+
+    let rows = machine
+        .run_as_orna(&["raw-call", read_accounts])
+        .expect("read public unique Text select accounts");
+    let rows = require_value_success("orna raw-call read_accounts", rows)
+        .expect("public account reader must succeed");
+    let rows = decode_unique_text_accounts(&rows.stdout)
+        .expect("public account reader must emit complete strict account rows");
+    assert_eq!(
+        rows.len(),
+        10,
+        "the public reader must retain two NULL rows and eight non-null unique Text rows"
+    );
+    for expected in [
+        &nullable_a,
+        &nullable_b,
+        &baseline,
+        &variant_accounts[0],
+        &variant_accounts[1],
+        &variant_accounts[2],
+        &variant_accounts[3],
+        &variant_accounts[4],
+        &variant_accounts[5],
+        &variant_accounts[6],
+    ] {
+        assert!(
+            rows.iter().any(|row| {
+                row.account.type_id == expected.type_id && row.account.object == expected.object
+            }),
+            "the public reader must retain every created account identity"
+        );
+    }
+
+    // Exact replay keeps all callable identities and grants. Reuse the
+    // original selector identities without regranting.
+    let replay = require_success(
+        "orna source apply exact unique Text select replay",
+        machine
+            .run_as_orna(&["source", "apply", FIXTURE_PATH])
+            .expect("replay unique Text select source"),
+    )
+    .expect("exact unique Text select replay must succeed");
+    assert!(
+        replay.stderr.is_empty(),
+        "replay must keep standard error empty"
+    );
+    assert_eq!(
+        parse_apply_document(&replay.stdout)
+            .expect("replay JSON must parse")
+            .functions,
+        document.functions,
+        "exact replay must retain every function and ParameterId without regrant"
+    );
+    let replayed = select_by_email(
+        "exact@example.test",
+        "orna raw-call find_by_email after exact replay",
+    )
+    .expect("the original finder grant must survive exact replay");
+    assert_unique_text_email_selection(&replayed, &baseline, "baseline");
+
+    // The field rename changes source and catalogue revisions, but leaves the
+    // discovered function and parameter identities, grants, and row identity
+    // usable through the original raw-call command.
+    machine
+        .write_fixture(&renamed)
+        .expect("replace with renamed unique Text select fixture");
+    let renamed_apply = require_success(
+        "orna source apply renamed unique Text select",
+        machine
+            .run_as_orna(&["source", "apply", FIXTURE_PATH])
+            .expect("apply renamed unique Text select source"),
+    )
+    .expect("semantic unique Text select rename must succeed");
+    assert!(
+        renamed_apply.stderr.is_empty(),
+        "renamed source apply must keep standard error empty"
+    );
+    let renamed_document =
+        parse_apply_document(&renamed_apply.stdout).expect("renamed JSON must parse");
+    assert_ne!(
+        renamed_document.source_revision, document.source_revision,
+        "semantic rename must change the source revision"
+    );
+    assert_ne!(
+        renamed_document.catalogue_revision, document.catalogue_revision,
+        "semantic rename must change the catalogue revision"
+    );
+    assert_eq!(
+        renamed_document.functions, document.functions,
+        "semantic rename must retain every function and ParameterId identity"
+    );
+    let renamed_selected = select_by_email(
+        "exact@example.test",
+        "orna raw-call find_by_email after semantic rename",
+    )
+    .expect("the original finder identity and grant must survive semantic rename");
+    assert_unique_text_email_selection(&renamed_selected, &baseline, "baseline");
+    let renamed_nullable = select_by_username(
+        "nullable-b",
+        "orna raw-call find_by_username nullable after semantic rename",
+    )
+    .expect("the renamed selector must retain the nullable row identity");
+    assert_unique_text_username_selection(&renamed_nullable, &nullable_b, None);
+
+    machine
+        .restart_server()
+        .expect("restart installed unique Text select server");
+    let restarted_selected = select_by_email(
+        "cafe\u{301}@example.test",
+        "orna raw-call find_by_email after restart",
+    )
+    .expect("the original finder identity and grant must survive restart");
+    assert_unique_text_email_selection(&restarted_selected, &variant_accounts[5], "nfd");
+    let restarted_baseline =
+        select_by_username("baseline", "orna raw-call find_by_username after restart")
+            .expect("the original username selector identity and grant must survive restart");
+    assert_unique_text_username_selection(
+        &restarted_baseline,
+        &baseline,
+        Some("exact@example.test"),
+    );
+}
+
+/// One strict public result from `find_by_email`.
+struct UniqueTextEmailSelection {
+    account: OrvReference,
+    username: String,
+}
+
+/// One strict public result from `find_by_username`.
+struct UniqueTextUsernameSelection {
+    account: OrvReference,
+    email: Option<String>,
+}
+
+/// Decode the exact one-row `find_by_email` protocol result.
+///
+/// The result is exactly one canonical Reference envelope followed by one
+/// canonical non-null Text envelope. It has no row wrapper or trailing bytes.
+fn decode_unique_text_email_selection(bytes: &[u8]) -> Option<UniqueTextEmailSelection> {
+    let account = parse_reference_envelope(bytes.get(..41)?).ok()?;
+    let username = decode_unique_text_select_text(bytes.get(41..)?)?;
+    Some(UniqueTextEmailSelection { account, username })
+}
+
+/// Decode the exact one-row `find_by_username` protocol result.
+///
+/// The result is exactly one canonical Reference envelope followed by one
+/// canonical nullable Text envelope. It has no row wrapper or trailing bytes.
+fn decode_unique_text_username_selection(bytes: &[u8]) -> Option<UniqueTextUsernameSelection> {
+    let account = parse_reference_envelope(bytes.get(..41)?).ok()?;
+    let email = decode_unique_text_select_nullable_text(bytes.get(41..)?)?;
+    Some(UniqueTextUsernameSelection { account, email })
+}
+
+/// Decode one complete canonical non-null ORV1 Text envelope.
+fn decode_unique_text_select_text(bytes: &[u8]) -> Option<String> {
+    if bytes.len() < 25
+        || &bytes[..4] != b"ORV1"
+        || bytes[4] != 0x06
+        || bytes[5..20] != [0; 15]
+        || bytes[20] != 0x06
+    {
+        return None;
+    }
+    let length = u32::from_be_bytes(bytes[21..25].try_into().ok()?) as usize;
+    let end = 25_usize.checked_add(length)?;
+    if bytes.len() != end {
+        return None;
+    }
+    String::from_utf8(bytes[25..end].to_vec()).ok()
+}
+
+/// Decode one complete canonical nullable ORV1 Text envelope.
+fn decode_unique_text_select_nullable_text(bytes: &[u8]) -> Option<Option<String>> {
+    if bytes.len() < 25 || &bytes[..4] != b"ORV1" || bytes[5..20] != [0; 15] || bytes[20] != 0x06 {
+        return None;
+    }
+    let length = u32::from_be_bytes(bytes[21..25].try_into().ok()?) as usize;
+    match bytes[4] {
+        0x00 if length == 0 && bytes.len() == 25 => Some(None),
+        0x06 => {
+            let end = 25_usize.checked_add(length)?;
+            if bytes.len() != end {
+                return None;
+            }
+            String::from_utf8(bytes[25..end].to_vec()).ok().map(Some)
+        }
+        _ => None,
+    }
+}
+
+/// Require the one public row selected by an exact email value.
+fn assert_unique_text_email_selection(
+    actual: &UniqueTextEmailSelection,
+    expected_account: &OrvReference,
+    expected_username: &str,
+) {
+    assert_eq!(
+        actual.account.type_id, expected_account.type_id,
+        "selected account must retain its object type identity"
+    );
+    assert_eq!(
+        actual.account.object, expected_account.object,
+        "selected account must retain its object identity"
+    );
+    assert_eq!(
+        actual.username, expected_username,
+        "email selector must retain its declared Text projection"
+    );
+}
+
+/// Require the one public row selected by an exact username value.
+fn assert_unique_text_username_selection(
+    actual: &UniqueTextUsernameSelection,
+    expected_account: &OrvReference,
+    expected_email: Option<&str>,
+) {
+    assert_eq!(
+        actual.account.type_id, expected_account.type_id,
+        "selected account must retain its object type identity"
+    );
+    assert_eq!(
+        actual.account.object, expected_account.object,
+        "selected account must retain its object identity"
+    );
+    assert_eq!(
+        actual.email.as_deref(),
+        expected_email,
+        "username selector must retain its declared nullable Text projection"
+    );
+}
+
 /// One public account row from the unique Text installed journey.
 struct UniqueTextAccountRow {
     account: OrvReference,
