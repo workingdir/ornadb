@@ -97,3 +97,5 @@ source-of-truth or authority rules.
   [The First 1.0 Release Uses One Authenticated Debian Authority](0047-first-one-zero-release.md)
 * **work ADR 0048:**
   [Raw Reference Calls Select One Projected Object Row](0048-raw-identity-selected-server-select.md)
+* **work ADR 0049:**
+  [Canonical Raw Calls Bind One Bounded Argument Pair](0049-canonical-raw-argument-pairs.md)
