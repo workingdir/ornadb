@@ -6,19 +6,21 @@ use orna_core::{
     FunctionId, InvocationId, ParameterId, TypeId,
     catalogue::CatalogueSnapshot,
     revision::ActiveDatabaseRevision,
+    types::TypeDescriptor,
     value::{OpaqueCodecRegistry, RuntimeValue},
 };
 
 use crate::{
-    ValueCodecError, decode_active_value, decode_catalogue_value, decode_registered_value,
-    decode_value, encode_active_value, encode_catalogue_value, encode_registered_value,
-    encode_value,
+    ValueCodecError, decode_active_value, decode_catalogue_value, decode_constructed_value,
+    decode_registered_value, decode_value, encode_active_value, encode_catalogue_value,
+    encode_constructed_value, encode_registered_value, encode_value,
 };
 
 const MARKER: &[u8; 4] = b"ORF1";
 const CATALOGUE_MARKER: &[u8; 4] = b"ORF2";
 const ACTIVE_MARKER: &[u8; 4] = b"ORF3";
 const REGISTERED_MARKER: &[u8; 4] = b"ORF4";
+const CONSTRUCTED_MARKER: &[u8; 4] = b"ORF5";
 const HEADER_LENGTH: usize = 18;
 const PING_TAG: u8 = 0x06;
 const PONG_TAG: u8 = 0x86;
@@ -444,6 +446,7 @@ enum FrameVersion<'a> {
     Catalogue(&'a CatalogueSnapshot),
     Active(&'a ActiveDatabaseRevision),
     Registered(&'a ActiveDatabaseRevision, &'a OpaqueCodecRegistry),
+    Constructed(&'a ActiveDatabaseRevision, &'a OpaqueCodecRegistry),
 }
 
 impl FrameVersion<'_> {
@@ -453,6 +456,7 @@ impl FrameVersion<'_> {
             Self::Catalogue(_) => CATALOGUE_MARKER,
             Self::Active(_) => ACTIVE_MARKER,
             Self::Registered(_, _) => REGISTERED_MARKER,
+            Self::Constructed(_, _) => CONSTRUCTED_MARKER,
         }
     }
 
@@ -462,6 +466,9 @@ impl FrameVersion<'_> {
             Self::Catalogue(catalogue) => encode_catalogue_value(catalogue, value),
             Self::Active(active) => encode_active_value(active, value),
             Self::Registered(active, registry) => encode_registered_value(active, registry, value),
+            Self::Constructed(active, registry) => {
+                encode_constructed_value(active, registry, value)
+            }
         }
     }
 
@@ -473,15 +480,33 @@ impl FrameVersion<'_> {
             Self::Registered(active, registry) => {
                 decode_registered_value(active, registry, encoded)
             }
+            Self::Constructed(active, registry) => {
+                decode_constructed_value(active, registry, encoded)
+            }
         }
     }
 
     fn require_call_argument(self, value: &RuntimeValue) -> Result<(), FrameCodecError> {
-        if matches!(self, Self::Registered(_, _))
+        if matches!(self, Self::Registered(_, _) | Self::Constructed(_, _))
             && let RuntimeValue::Opaque(value) = value
         {
             return Err(FrameCodecError::OpaqueArgumentNotAccepted {
                 opaque_type: value.opaque_type(),
+            });
+        }
+        self.require_constructed_value_closed(value)
+    }
+
+    fn require_event_value(self, value: &RuntimeValue) -> Result<(), FrameCodecError> {
+        self.require_constructed_value_closed(value)
+    }
+
+    fn require_constructed_value_closed(self, value: &RuntimeValue) -> Result<(), FrameCodecError> {
+        if matches!(self, Self::Constructed(_, _))
+            && let RuntimeValue::Constructed(value) = value
+        {
+            return Err(FrameCodecError::ConstructedValueNotAccepted {
+                descriptor: value.descriptor().clone(),
             });
         }
         Ok(())
@@ -606,6 +631,23 @@ impl ProtocolConnection {
         self.receive_with_version(FrameVersion::Registered(active, registry), frame)
     }
 
+    /// Receives one registry-bound version-5 client frame.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ConnectionError`] when the frame violates a state transition,
+    /// bounded connection limit, active-revision rule, opaque argument boundary,
+    /// or closed constructed application-value boundary. An error leaves all
+    /// prior state unchanged.
+    pub fn receive_constructed(
+        &mut self,
+        active: &ActiveDatabaseRevision,
+        registry: &OpaqueCodecRegistry,
+        frame: ClientFrame,
+    ) -> Result<Option<ClientAction>, ConnectionError> {
+        self.receive_with_version(FrameVersion::Constructed(active, registry), frame)
+    }
+
     fn receive_with_version(
         &mut self,
         version: FrameVersion<'_>,
@@ -686,6 +728,23 @@ impl ProtocolConnection {
         action: ServerAction,
     ) -> Result<ServerFrame, ConnectionError> {
         self.apply_with_version(FrameVersion::Registered(active, registry), action)
+    }
+
+    /// Applies one registry-bound version-5 server-adapter result.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ConnectionError`] when the action violates the current call
+    /// state, sequence, frame, flow-control, active-revision, opaque registry,
+    /// or closed constructed application-value contract. An error leaves all
+    /// prior state and window credit unchanged.
+    pub fn apply_constructed(
+        &mut self,
+        active: &ActiveDatabaseRevision,
+        registry: &OpaqueCodecRegistry,
+        action: ServerAction,
+    ) -> Result<ServerFrame, ConnectionError> {
+        self.apply_with_version(FrameVersion::Constructed(active, registry), action)
     }
 
     fn apply_with_version(
@@ -1371,6 +1430,11 @@ pub enum FrameCodecError {
         /// The rejected opaque type identity.
         opaque_type: TypeId,
     },
+    /// Protocol 5 does not admit a constructed application argument or result.
+    ConstructedValueNotAccepted {
+        /// The rejected constructed value descriptor.
+        descriptor: TypeDescriptor,
+    },
     /// A failure payload is not one of the four closed values.
     InvalidFailure {
         /// The invalid four-byte failure value.
@@ -1447,6 +1511,8 @@ impl fmt::Display for FrameCodecError {
             Self::OpaqueArgumentNotAccepted { .. } => {
                 formatter.write_str("raw-call opaque arguments are not accepted")
             }
+            Self::ConstructedValueNotAccepted { .. } => formatter
+                .write_str("constructed runtime values are not accepted by protocol 5 frames"),
             Self::InvalidFailure { .. } => formatter.write_str("raw-call failure value is invalid"),
             Self::EmptyEventBatch => formatter.write_str("raw-call event batch is empty"),
             Self::TooManyEvents { .. } => {
@@ -1525,6 +1591,20 @@ pub fn encode_registered_client_frame(
     frame: &ClientFrame,
 ) -> Result<Vec<u8>, FrameCodecError> {
     encode_client_frame_with_version(FrameVersion::Registered(active, registry), frame)
+}
+
+/// Encodes one complete registry-bound version-5 client frame.
+///
+/// # Errors
+///
+/// Returns a [`FrameCodecError`] when the frame cannot satisfy the version-5
+/// envelope, active-revision, registry, or closed application-value contract.
+pub fn encode_constructed_client_frame(
+    active: &ActiveDatabaseRevision,
+    registry: &OpaqueCodecRegistry,
+    frame: &ClientFrame,
+) -> Result<Vec<u8>, FrameCodecError> {
+    encode_client_frame_with_version(FrameVersion::Constructed(active, registry), frame)
 }
 
 fn encode_client_frame_with_version(
@@ -1627,6 +1707,20 @@ pub fn decode_registered_client_frame(
     encoded: &[u8],
 ) -> Result<ClientFrame, FrameCodecError> {
     decode_client_frame_with_version(FrameVersion::Registered(active, registry), encoded)
+}
+
+/// Decodes one complete registry-bound version-5 client frame.
+///
+/// # Errors
+///
+/// Returns a [`FrameCodecError`] for an invalid version-5 envelope, payload,
+/// active value, opaque call argument, or constructed application value.
+pub fn decode_constructed_client_frame(
+    active: &ActiveDatabaseRevision,
+    registry: &OpaqueCodecRegistry,
+    encoded: &[u8],
+) -> Result<ClientFrame, FrameCodecError> {
+    decode_client_frame_with_version(FrameVersion::Constructed(active, registry), encoded)
 }
 
 fn decode_client_frame_with_version(
@@ -1750,6 +1844,20 @@ pub fn encode_registered_server_frame(
     encode_server_frame_with_version(FrameVersion::Registered(active, registry), frame)
 }
 
+/// Encodes one complete registry-bound version-5 server frame.
+///
+/// # Errors
+///
+/// Returns a [`FrameCodecError`] when the frame cannot satisfy the version-5
+/// envelope, active-revision, registry, or closed application-value contract.
+pub fn encode_constructed_server_frame(
+    active: &ActiveDatabaseRevision,
+    registry: &OpaqueCodecRegistry,
+    frame: &ServerFrame,
+) -> Result<Vec<u8>, FrameCodecError> {
+    encode_server_frame_with_version(FrameVersion::Constructed(active, registry), frame)
+}
+
 fn encode_server_frame_with_version(
     version: FrameVersion<'_>,
     frame: &ServerFrame,
@@ -1834,6 +1942,20 @@ pub fn decode_registered_server_frame(
     encoded: &[u8],
 ) -> Result<ServerFrame, FrameCodecError> {
     decode_server_frame_with_version(FrameVersion::Registered(active, registry), encoded)
+}
+
+/// Decodes one complete registry-bound version-5 server frame.
+///
+/// # Errors
+///
+/// Returns a [`FrameCodecError`] for an invalid version-5 envelope, payload,
+/// active value, registry-bound opaque value, or constructed application value.
+pub fn decode_constructed_server_frame(
+    active: &ActiveDatabaseRevision,
+    registry: &OpaqueCodecRegistry,
+    encoded: &[u8],
+) -> Result<ServerFrame, FrameCodecError> {
+    decode_server_frame_with_version(FrameVersion::Constructed(active, registry), encoded)
 }
 
 fn decode_server_frame_with_version(
@@ -2018,9 +2140,12 @@ fn encode_event_batch(
 
 fn encode_event(version: FrameVersion<'_>, event: &Event) -> Result<Vec<u8>, FrameCodecError> {
     match event {
-        Event::Value(value) => version
-            .encode_value(value)
-            .map_err(|source| FrameCodecError::Value { source }),
+        Event::Value(value) => {
+            version.require_event_value(value)?;
+            version
+                .encode_value(value)
+                .map_err(|source| FrameCodecError::Value { source })
+        }
         Event::Bytes(bytes) if bytes.is_empty() => Err(FrameCodecError::EmptyByteChunk),
         Event::Bytes(bytes) => {
             require_payload_limit(bytes.len())?;
@@ -2092,10 +2217,13 @@ fn decode_event(
     content: &[u8],
 ) -> Result<Event, FrameCodecError> {
     match (channel, kind) {
-        (Channel::ResultValues, 0x01) => version
-            .decode_value(content)
-            .map(Event::Value)
-            .map_err(|source| FrameCodecError::Value { source }),
+        (Channel::ResultValues, 0x01) => {
+            let value = version
+                .decode_value(content)
+                .map_err(|source| FrameCodecError::Value { source })?;
+            version.require_event_value(&value)?;
+            Ok(Event::Value(value))
+        }
         (Channel::ResultBytes, 0x02) if content.is_empty() => Err(FrameCodecError::EmptyByteChunk),
         (Channel::ResultBytes, 0x02) => Ok(Event::Bytes(content.to_vec())),
         (Channel::Diagnostic, 0x03) => Ok(Event::Failure(CallFailure::from_wire(

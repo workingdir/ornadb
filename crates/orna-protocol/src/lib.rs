@@ -7,11 +7,12 @@ pub use frame::{
     EventRecord, FrameCodecError, MAX_CHANNEL_WINDOW, MAX_FRAME_PAYLOAD_LENGTH, ProtocolConnection,
     RawCall, RawCallClient, RawCallClientError, RawCallClientResponse, ServerAction, ServerFrame,
     decode_active_client_frame, decode_active_server_frame, decode_catalogue_client_frame,
-    decode_catalogue_server_frame, decode_client_frame, decode_registered_client_frame,
+    decode_catalogue_server_frame, decode_client_frame, decode_constructed_client_frame,
+    decode_constructed_server_frame, decode_registered_client_frame,
     decode_registered_server_frame, decode_server_frame, encode_active_client_frame,
     encode_active_server_frame, encode_catalogue_client_frame, encode_catalogue_server_frame,
-    encode_client_frame, encode_registered_client_frame, encode_registered_server_frame,
-    encode_server_frame,
+    encode_client_frame, encode_constructed_client_frame, encode_constructed_server_frame,
+    encode_registered_client_frame, encode_registered_server_frame, encode_server_frame,
 };
 
 use std::{error::Error, fmt};
@@ -4643,6 +4644,28 @@ mod tests {
             let _ = decode_registered_client_frame(&active, &registry, &encoded);
             let _ = decode_registered_server_frame(&active, &registry, &encoded);
         }
+
+        #[test]
+        fn arbitrary_version_five_frame_envelopes_never_panic(
+            tag in any::<u8>(),
+            flags in any::<u8>(),
+            stream in any::<u64>(),
+            declared in any::<u32>(),
+            payload in prop::collection::vec(any::<u8>(), 0..=4_096),
+        ) {
+            let active = active_record_revision();
+            let registry = registered_opaque_codecs(
+                active.catalogue_hash_context().standard().unwrap(),
+            ).unwrap();
+            let mut encoded = b"ORF5".to_vec();
+            encoded.push(tag);
+            encoded.push(flags);
+            encoded.extend_from_slice(&stream.to_be_bytes());
+            encoded.extend_from_slice(&declared.to_be_bytes());
+            encoded.extend_from_slice(&payload);
+            let _ = decode_constructed_client_frame(&active, &registry, &encoded);
+            let _ = decode_constructed_server_frame(&active, &registry, &encoded);
+        }
     }
 
     fn constructed_collection_values(active: &ActiveDatabaseRevision) -> Vec<RuntimeValue> {
@@ -5778,12 +5801,497 @@ mod tests {
         assert!(encode_registered_server_frame(&active, &registry, &batch).is_ok());
     }
 
+    #[test]
+    fn orf5_retains_orf4_frames_and_embeds_orv5_values() {
+        let active = active_record_revision();
+        let standard = active.catalogue_hash_context().standard().unwrap();
+        let registry = registered_opaque_codecs(standard).unwrap();
+        let parameter = ParameterId::from_bytes([0x71; 16]);
+        let argument = ClientFrame::CallArgument {
+            stream: 7,
+            parameter,
+            value: RuntimeValue::Boolean(true),
+        };
+        let value = orv5_boolean(true);
+        let mut expected_argument = b"ORF5\x02\0".to_vec();
+        expected_argument.extend_from_slice(&7_u64.to_be_bytes());
+        expected_argument.extend_from_slice(&42_u32.to_be_bytes());
+        expected_argument.extend_from_slice(&parameter.to_bytes());
+        expected_argument.extend_from_slice(&value);
+        assert_eq!(
+            encode_constructed_client_frame(&active, &registry, &argument),
+            Ok(expected_argument.clone())
+        );
+        assert_eq!(
+            decode_constructed_client_frame(&active, &registry, &expected_argument),
+            Ok(argument)
+        );
+        assert_eq!(
+            decode_registered_client_frame(&active, &registry, &expected_argument),
+            Err(FrameCodecError::InvalidMarker)
+        );
+
+        let event_frame = ServerFrame::EventBatch {
+            stream: 7,
+            channel: Channel::ResultValues,
+            events: vec![EventRecord {
+                sequence: 1,
+                event: Event::Value(RuntimeValue::Boolean(true)),
+            }],
+        };
+        let mut expected_events = b"ORF5\x82\0".to_vec();
+        expected_events.extend_from_slice(&7_u64.to_be_bytes());
+        expected_events.extend_from_slice(&42_u32.to_be_bytes());
+        expected_events.push(0x01);
+        expected_events.extend_from_slice(&1_u16.to_be_bytes());
+        expected_events.extend_from_slice(&1_u64.to_be_bytes());
+        expected_events.push(0x01);
+        expected_events.extend_from_slice(&26_u32.to_be_bytes());
+        expected_events.extend_from_slice(&value);
+        assert_eq!(
+            encode_constructed_server_frame(&active, &registry, &event_frame),
+            Ok(expected_events.clone())
+        );
+        assert_eq!(
+            decode_constructed_server_frame(&active, &registry, &expected_events),
+            Ok(event_frame)
+        );
+        assert_eq!(
+            decode_registered_server_frame(&active, &registry, &expected_events),
+            Err(FrameCodecError::InvalidMarker)
+        );
+
+        let client_non_value = ClientFrame::Ping {
+            token: [1, 2, 3, 4, 5, 6, 7, 8],
+        };
+        let client_expected = orf5_frame(0x06, 0, &[1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(
+            encode_constructed_client_frame(&active, &registry, &client_non_value),
+            Ok(client_expected.clone())
+        );
+        assert_eq!(
+            decode_constructed_client_frame(&active, &registry, &client_expected),
+            Ok(client_non_value)
+        );
+
+        let server_non_value = ServerFrame::CallAccepted {
+            stream: 1,
+            invocation: InvocationId::from_bytes([0x72; 16]),
+        };
+        let server_expected = orf5_frame(0x81, 1, &[0x72; 16]);
+        assert_eq!(
+            encode_constructed_server_frame(&active, &registry, &server_non_value),
+            Ok(server_expected.clone())
+        );
+        assert_eq!(
+            decode_constructed_server_frame(&active, &registry, &server_expected),
+            Ok(server_non_value)
+        );
+
+        let enum_frame = ServerFrame::EventBatch {
+            stream: 9,
+            channel: Channel::ResultValues,
+            events: vec![EventRecord {
+                sequence: 1,
+                event: Event::Value(RuntimeValue::Enum(
+                    EnumValue::new(active.catalogue(), ENUM_TYPE, "lead").unwrap(),
+                )),
+            }],
+        };
+        let mut enum_value = b"ORV5".to_vec();
+        enum_value.push(0x0a);
+        enum_value.extend_from_slice(&ENUM_TYPE.to_bytes());
+        enum_value.extend_from_slice(&4_u32.to_be_bytes());
+        enum_value.extend_from_slice(b"lead");
+        let mut enum_payload = vec![0x01];
+        enum_payload.extend_from_slice(&1_u16.to_be_bytes());
+        enum_payload.extend_from_slice(&1_u64.to_be_bytes());
+        enum_payload.push(0x01);
+        enum_payload.extend_from_slice(&(enum_value.len() as u32).to_be_bytes());
+        enum_payload.extend_from_slice(&enum_value);
+        let enum_expected = orf5_frame(0x82, 9, &enum_payload);
+        assert_eq!(
+            encode_constructed_server_frame(&active, &registry, &enum_frame),
+            Ok(enum_expected.clone())
+        );
+        assert_eq!(
+            decode_constructed_server_frame(&active, &registry, &enum_expected),
+            Ok(enum_frame)
+        );
+
+        for marker in [b"ORF1", b"ORF2", b"ORF3", b"ORF4"] {
+            let mut crossed = expected_argument.clone();
+            crossed[..4].copy_from_slice(marker);
+            assert_eq!(
+                decode_constructed_client_frame(&active, &registry, &crossed),
+                Err(FrameCodecError::InvalidMarker)
+            );
+        }
+        for marker in [b"ORF1", b"ORF2", b"ORF3", b"ORF4"] {
+            let mut crossed = expected_events.clone();
+            crossed[..4].copy_from_slice(marker);
+            assert_eq!(
+                decode_constructed_server_frame(&active, &registry, &crossed),
+                Err(FrameCodecError::InvalidMarker)
+            );
+        }
+
+        assert_eq!(
+            decode_client_frame(&expected_argument),
+            Err(FrameCodecError::InvalidMarker)
+        );
+        assert_eq!(
+            decode_catalogue_client_frame(active.catalogue(), &expected_argument),
+            Err(FrameCodecError::InvalidMarker)
+        );
+        assert_eq!(
+            decode_active_client_frame(&active, &expected_argument),
+            Err(FrameCodecError::InvalidMarker)
+        );
+        assert_eq!(
+            decode_registered_client_frame(&active, &registry, &expected_argument),
+            Err(FrameCodecError::InvalidMarker)
+        );
+        assert_eq!(
+            decode_server_frame(&expected_events),
+            Err(FrameCodecError::InvalidMarker)
+        );
+        assert_eq!(
+            decode_catalogue_server_frame(active.catalogue(), &expected_events),
+            Err(FrameCodecError::InvalidMarker)
+        );
+        assert_eq!(
+            decode_active_server_frame(&active, &expected_events),
+            Err(FrameCodecError::InvalidMarker)
+        );
+        assert_eq!(
+            decode_registered_server_frame(&active, &registry, &expected_events),
+            Err(FrameCodecError::InvalidMarker)
+        );
+    }
+
+    #[test]
+    fn orf5_rejects_constructed_arguments_and_events_after_value_validation() {
+        let active = active_record_revision();
+        let standard = active.catalogue_hash_context().standard().unwrap();
+        let registry = registered_opaque_codecs(standard).unwrap();
+        let descriptor = TypeDescriptor::option(TypeDescriptor::named(BOOLEAN_TYPE_ID)).unwrap();
+        let value = RuntimeValue::option(
+            &active,
+            descriptor.clone(),
+            Some(RuntimeValue::Boolean(true)),
+        )
+        .unwrap();
+        let parameter = ParameterId::from_bytes([0x74; 16]);
+        let argument = ClientFrame::CallArgument {
+            stream: 7,
+            parameter,
+            value: value.clone(),
+        };
+        let expected_error = FrameCodecError::ConstructedValueNotAccepted {
+            descriptor: descriptor.clone(),
+        };
+        assert_eq!(
+            encode_constructed_client_frame(&active, &registry, &argument),
+            Err(expected_error.clone())
+        );
+        assert_eq!(
+            expected_error.to_string(),
+            "constructed runtime values are not accepted by protocol 5 frames"
+        );
+        assert!(std::error::Error::source(&expected_error).is_none());
+
+        let mut option_payload = 18_u16.to_be_bytes().to_vec();
+        option_payload.extend_from_slice(&[0x04, 0x00]);
+        option_payload.extend_from_slice(&BOOLEAN_TYPE_ID.to_bytes());
+        option_payload.push(1);
+        option_payload.extend_from_slice(&26_u32.to_be_bytes());
+        option_payload.extend_from_slice(&orv5_boolean(true));
+        let encoded_value = orv5_constructed(option_payload);
+        let mut encoded_argument = b"ORF5\x02\0".to_vec();
+        encoded_argument.extend_from_slice(&7_u64.to_be_bytes());
+        encoded_argument.extend_from_slice(
+            &(u32::try_from(parameter.to_bytes().len() + encoded_value.len()).unwrap())
+                .to_be_bytes(),
+        );
+        encoded_argument.extend_from_slice(&parameter.to_bytes());
+        encoded_argument.extend_from_slice(&encoded_value);
+        assert_eq!(
+            decode_constructed_client_frame(&active, &registry, &encoded_argument),
+            Err(expected_error.clone())
+        );
+
+        let mut malformed_argument = encoded_argument.clone();
+        malformed_argument[79] = 2;
+        assert_eq!(
+            decode_constructed_client_frame(&active, &registry, &malformed_argument),
+            Err(FrameCodecError::Value {
+                source: ValueCodecError::InvalidOptionPresence { value: 2 },
+            })
+        );
+
+        let event = ServerFrame::EventBatch {
+            stream: 7,
+            channel: Channel::ResultValues,
+            events: vec![EventRecord {
+                sequence: 1,
+                event: Event::Value(value),
+            }],
+        };
+        assert_eq!(
+            encode_constructed_server_frame(&active, &registry, &event),
+            Err(expected_error.clone())
+        );
+
+        let mut encoded_event = b"ORF5\x82\0".to_vec();
+        encoded_event.extend_from_slice(&7_u64.to_be_bytes());
+        encoded_event.extend_from_slice(
+            &(u32::try_from(1 + 2 + 8 + 1 + 4 + encoded_value.len()).unwrap()).to_be_bytes(),
+        );
+        encoded_event.push(0x01);
+        encoded_event.extend_from_slice(&1_u16.to_be_bytes());
+        encoded_event.extend_from_slice(&1_u64.to_be_bytes());
+        encoded_event.push(0x01);
+        encoded_event.extend_from_slice(&(encoded_value.len() as u32).to_be_bytes());
+        encoded_event.extend_from_slice(&encoded_value);
+        assert_eq!(
+            decode_constructed_server_frame(&active, &registry, &encoded_event),
+            Err(expected_error.clone())
+        );
+
+        let mut malformed_event = encoded_event;
+        malformed_event[79] = 2;
+        assert_eq!(
+            decode_constructed_server_frame(&active, &registry, &malformed_event),
+            Err(FrameCodecError::Value {
+                source: ValueCodecError::InvalidOptionPresence { value: 2 },
+            })
+        );
+    }
+
+    #[test]
+    fn orf5_accepts_opaque_results_and_rejects_opaque_arguments() {
+        let active = active_record_revision();
+        let standard = active.catalogue_hash_context().standard().unwrap();
+        let registry = registered_opaque_codecs(standard).unwrap();
+        let payload = [0x73; 16];
+        let opaque = RuntimeValue::Opaque(
+            OpaqueValue::new(&active, &registry, OPAQUE_TOKEN_TYPE_ID, payload).unwrap(),
+        );
+        let mut encoded_value = b"ORV5".to_vec();
+        encoded_value.push(0x0c);
+        encoded_value.extend_from_slice(&OPAQUE_TOKEN_TYPE_ID.to_bytes());
+        encoded_value.extend_from_slice(&16_u32.to_be_bytes());
+        encoded_value.extend_from_slice(&payload);
+
+        let result = ServerFrame::EventBatch {
+            stream: 8,
+            channel: Channel::ResultValues,
+            events: vec![EventRecord {
+                sequence: 1,
+                event: Event::Value(opaque.clone()),
+            }],
+        };
+        let mut result_payload = vec![0x01];
+        result_payload.extend_from_slice(&1_u16.to_be_bytes());
+        result_payload.extend_from_slice(&1_u64.to_be_bytes());
+        result_payload.push(0x01);
+        result_payload.extend_from_slice(&(encoded_value.len() as u32).to_be_bytes());
+        result_payload.extend_from_slice(&encoded_value);
+        let expected_result = orf5_frame(0x82, 8, &result_payload);
+        assert_eq!(
+            encode_constructed_server_frame(&active, &registry, &result),
+            Ok(expected_result.clone())
+        );
+        assert_eq!(
+            decode_constructed_server_frame(&active, &registry, &expected_result),
+            Ok(result)
+        );
+
+        let parameter = ParameterId::from_bytes([0x78; 16]);
+        let argument = ClientFrame::CallArgument {
+            stream: 8,
+            parameter,
+            value: opaque.clone(),
+        };
+        let opaque_error = FrameCodecError::OpaqueArgumentNotAccepted {
+            opaque_type: OPAQUE_TOKEN_TYPE_ID,
+        };
+        assert_eq!(
+            encode_constructed_client_frame(&active, &registry, &argument),
+            Err(opaque_error.clone())
+        );
+        let mut argument_payload = parameter.to_bytes().to_vec();
+        argument_payload.extend_from_slice(&encoded_value);
+        let expected_argument = orf5_frame(0x02, 8, &argument_payload);
+        assert_eq!(
+            decode_constructed_client_frame(&active, &registry, &expected_argument),
+            Err(opaque_error.clone())
+        );
+
+        let function = FunctionId::from_bytes([0x79; 16]);
+        let mut connection = ProtocolConnection::new();
+        connection
+            .receive_constructed(
+                &active,
+                &registry,
+                ClientFrame::CallRawStart {
+                    stream: 8,
+                    function,
+                },
+            )
+            .unwrap();
+        let before_argument = connection.clone();
+        assert_eq!(
+            connection.receive_constructed(
+                &active,
+                &registry,
+                ClientFrame::CallArgument {
+                    stream: 8,
+                    parameter,
+                    value: opaque,
+                },
+            ),
+            Err(ConnectionError::InvalidFrame {
+                source: opaque_error,
+            })
+        );
+        assert_eq!(connection, before_argument);
+    }
+
+    #[test]
+    fn orf5_constructed_rejection_preserves_connection_state_and_credit() {
+        let active = active_record_revision();
+        let standard = active.catalogue_hash_context().standard().unwrap();
+        let registry = registered_opaque_codecs(standard).unwrap();
+        let function = FunctionId::from_bytes([0x75; 16]);
+        let parameter = ParameterId::from_bytes([0x76; 16]);
+        let descriptor = TypeDescriptor::list(TypeDescriptor::named(BOOLEAN_TYPE_ID)).unwrap();
+        let constructed = RuntimeValue::list(
+            &active,
+            descriptor.clone(),
+            vec![RuntimeValue::Boolean(true)],
+        )
+        .unwrap();
+        let rejection = FrameCodecError::ConstructedValueNotAccepted { descriptor };
+        let mut connection = ProtocolConnection::new();
+        connection
+            .receive_constructed(
+                &active,
+                &registry,
+                ClientFrame::CallRawStart {
+                    stream: 1,
+                    function,
+                },
+            )
+            .unwrap();
+        let before_argument = connection.clone();
+        assert_eq!(
+            connection.receive_constructed(
+                &active,
+                &registry,
+                ClientFrame::CallArgument {
+                    stream: 1,
+                    parameter,
+                    value: constructed.clone(),
+                },
+            ),
+            Err(ConnectionError::InvalidFrame {
+                source: rejection.clone(),
+            })
+        );
+        assert_eq!(connection, before_argument);
+
+        connection
+            .receive_constructed(
+                &active,
+                &registry,
+                ClientFrame::WindowUpdate {
+                    stream: 1,
+                    channel: Channel::ResultValues,
+                    credit: 4096,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            connection
+                .receive_constructed(
+                    &active,
+                    &registry,
+                    ClientFrame::CallArgumentsComplete { stream: 1 },
+                )
+                .unwrap(),
+            Some(ClientAction::Dispatch {
+                stream: 1,
+                call: RawCall {
+                    function,
+                    arguments: vec![],
+                },
+            })
+        );
+        connection
+            .apply_constructed(
+                &active,
+                &registry,
+                ServerAction::Accepted {
+                    stream: 1,
+                    invocation: InvocationId::from_bytes([0x77; 16]),
+                },
+            )
+            .unwrap();
+
+        let before_event = connection.clone();
+        assert_eq!(
+            connection.apply_constructed(
+                &active,
+                &registry,
+                ServerAction::Events {
+                    stream: 1,
+                    events: vec![Event::Value(constructed)],
+                },
+            ),
+            Err(ConnectionError::InvalidFrame { source: rejection })
+        );
+        assert_eq!(connection, before_event);
+
+        assert_eq!(
+            connection
+                .apply_constructed(
+                    &active,
+                    &registry,
+                    ServerAction::Events {
+                        stream: 1,
+                        events: vec![Event::Value(RuntimeValue::Boolean(true))],
+                    },
+                )
+                .unwrap(),
+            ServerFrame::EventBatch {
+                stream: 1,
+                channel: Channel::ResultValues,
+                events: vec![EventRecord {
+                    sequence: 1,
+                    event: Event::Value(RuntimeValue::Boolean(true)),
+                }],
+            }
+        );
+    }
+
     fn orv5_constructed(payload: Vec<u8>) -> Vec<u8> {
         let mut encoded = b"ORV5".to_vec();
         encoded.push(0x0d);
         encoded.extend_from_slice(&[0; 16]);
         encoded.extend_from_slice(&(payload.len() as u32).to_be_bytes());
         encoded.extend_from_slice(&payload);
+        encoded
+    }
+
+    fn orf5_frame(tag: u8, stream: u64, payload: &[u8]) -> Vec<u8> {
+        let mut encoded = b"ORF5".to_vec();
+        encoded.push(tag);
+        encoded.push(0);
+        encoded.extend_from_slice(&stream.to_be_bytes());
+        encoded.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        encoded.extend_from_slice(payload);
         encoded
     }
 
