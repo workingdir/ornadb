@@ -300,7 +300,7 @@ pub enum PhysicalPlanError {
     },
     /// A new field uses the non-storable VOID scalar.
     UnsupportedVoidField { object_type: TypeId, field: FieldId },
-    /// The field requests uniqueness outside the required typed-reference shape.
+    /// The field requests uniqueness outside the Text or required-Reference shapes.
     UnsupportedUniqueField { object_type: TypeId, field: FieldId },
     /// Initial physical creation does not yet install field defaults.
     UnsupportedFieldDefault { object_type: TypeId, field: FieldId },
@@ -343,9 +343,8 @@ impl fmt::Display for PhysicalPlanError {
             Self::UnsupportedVoidField { .. } => {
                 formatter.write_str("VOID fields cannot be stored")
             }
-            Self::UnsupportedUniqueField { .. } => {
-                formatter.write_str("UNIQUE is supported only for required REF fields")
-            }
+            Self::UnsupportedUniqueField { .. } => formatter
+                .write_str("UNIQUE is supported only for TEXT fields or required REF fields"),
             Self::UnsupportedFieldDefault { .. } => {
                 formatter.write_str("physical field defaults are not supported")
             }
@@ -404,72 +403,98 @@ fn project_physical_field(
     object_type: TypeId,
     field: &FieldDefinition,
 ) -> Result<CreateField, PhysicalPlanError> {
-    if field.unique() && !field.is_required_unique_reference() {
-        return Err(PhysicalPlanError::UnsupportedUniqueField {
-            object_type,
-            field: field.id(),
-        });
-    }
-    if field.default_expression().is_some() {
+    if field.default_expression().is_some() && !field.unique() {
         return Err(PhysicalPlanError::UnsupportedFieldDefault {
             object_type,
             field: field.id(),
         });
     }
-
     let resolved_type = field.resolved_type();
     let legacy_scalar = resolved_type.legacy_scalar();
     let named_type = resolved_type.named_type();
     let reference_target = resolved_type.reference_target();
     let value_type = resolved_type.value_type();
 
-    let field_type = if let Some(scalar) = legacy_scalar {
-        PhysicalFieldType::Scalar(scalar)
-    } else if let Some(named_type) = named_type {
-        if revision.catalogue().enum_type_by_id(named_type).is_some() {
-            PhysicalFieldType::Enum(named_type)
-        } else if revision
-            .catalogue()
-            .record_value_type_by_id(named_type)
-            .is_some()
-        {
-            if field.nullable() {
-                return Err(PhysicalPlanError::UnsupportedNullableRecordField {
+    let projected = (|| {
+        if let Some(scalar) = legacy_scalar {
+            if field.unique() && revision.standard_catalogue().is_some() {
+                Err(PhysicalPlanError::UnsupportedUniqueField {
+                    object_type,
+                    field: field.id(),
+                })
+            } else {
+                Ok(PhysicalFieldType::Scalar(scalar))
+            }
+        } else if let Some(named_type) = named_type {
+            if revision.catalogue().enum_type_by_id(named_type).is_some() {
+                Ok(PhysicalFieldType::Enum(named_type))
+            } else if revision
+                .catalogue()
+                .record_value_type_by_id(named_type)
+                .is_some()
+            {
+                if field.nullable() {
+                    return Err(PhysicalPlanError::UnsupportedNullableRecordField {
+                        object_type,
+                        field: field.id(),
+                    });
+                }
+                Ok(PhysicalFieldType::Record(named_type))
+            } else {
+                Err(PhysicalPlanError::UnsupportedNamedFieldType {
+                    object_type,
+                    field: field.id(),
+                })
+            }
+        } else if let Some(target) = reference_target {
+            if revision.catalogue().object_type_by_id(target).is_none() {
+                return Err(PhysicalPlanError::UnknownReferenceTarget {
+                    object_type,
+                    field: field.id(),
+                    target,
+                });
+            }
+            Ok(PhysicalFieldType::Reference {
+                target,
+                on_delete: field.on_delete(),
+            })
+        } else if let Some(value_type) = value_type {
+            project_value_type(revision, object_type, field.id(), value_type)
+        } else {
+            // Unknown resolved-type projections must fail closed.
+            Err(PhysicalPlanError::UnsupportedNamedFieldType {
+                object_type,
+                field: field.id(),
+            })
+        }
+    })();
+    let field_type = if field.unique() {
+        // The unique-shape error remains authoritative for every closed type.
+        // Projection errors stay exact for fields that do not request UNIQUE.
+        match projected {
+            Ok(field_type @ PhysicalFieldType::Scalar(StandardScalar::CharacterLargeObject)) => {
+                field_type
+            }
+            Ok(field_type @ PhysicalFieldType::Reference { .. }) if !field.nullable() => field_type,
+            Ok(_) | Err(_) => {
+                return Err(PhysicalPlanError::UnsupportedUniqueField {
                     object_type,
                     field: field.id(),
                 });
             }
-            PhysicalFieldType::Record(named_type)
-        } else {
-            return Err(PhysicalPlanError::UnsupportedNamedFieldType {
-                object_type,
-                field: field.id(),
-            });
         }
-    } else if let Some(target) = reference_target {
-        if revision.catalogue().object_type_by_id(target).is_none() {
-            return Err(PhysicalPlanError::UnknownReferenceTarget {
-                object_type,
-                field: field.id(),
-                target,
-            });
-        }
-        PhysicalFieldType::Reference {
-            target,
-            on_delete: field.on_delete(),
-        }
-    } else if let Some(value_type) = value_type {
-        project_value_type(revision, object_type, field.id(), value_type)?
     } else {
-        // Unknown resolved-type projections must fail closed.
-        return Err(PhysicalPlanError::UnsupportedNamedFieldType {
-            object_type,
-            field: field.id(),
-        });
+        projected?
     };
 
     if field_type == PhysicalFieldType::Scalar(StandardScalar::Void) {
         return Err(PhysicalPlanError::UnsupportedVoidField {
+            object_type,
+            field: field.id(),
+        });
+    }
+    if field.default_expression().is_some() {
+        return Err(PhysicalPlanError::UnsupportedFieldDefault {
             object_type,
             field: field.id(),
         });
@@ -2876,6 +2901,459 @@ mod tests {
                 on_delete: Some(OnDeleteAction::Restrict),
             }
         );
+    }
+
+    #[test]
+    fn plans_new_unique_text_fields_from_exact_scalar_and_value_authority() {
+        let scalar_nullable = object(
+            FIRST_TYPE,
+            "scalar_nullable",
+            vec![field_with_options(
+                FIRST_FIELD,
+                "email",
+                0,
+                ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+                true,
+                true,
+                None,
+                None,
+            )],
+        );
+        let scalar_required = object(
+            SECOND_TYPE,
+            "scalar_required",
+            vec![field_with_options(
+                SECOND_FIELD,
+                "name",
+                0,
+                ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+                false,
+                true,
+                None,
+                None,
+            )],
+        );
+        let empty = active(Vec::new(), 1);
+        let scalar_candidate = candidate(
+            &empty,
+            vec![scalar_nullable.clone(), scalar_required.clone()],
+            2,
+        );
+        let scalar_plan = plan_physical_changes(&empty, &scalar_candidate)
+            .expect("version-one scalar Text UNIQUE fields must be physical");
+        assert_eq!(
+            scalar_plan
+                .create_objects()
+                .iter()
+                .map(CreateObject::type_id)
+                .collect::<Vec<_>>(),
+            vec![FIRST_TYPE, SECOND_TYPE]
+        );
+        for (field, nullable) in scalar_plan
+            .create_objects()
+            .iter()
+            .map(|object| &object.fields()[0])
+            .zip([true, false])
+        {
+            assert_eq!(
+                field.field_type(),
+                PhysicalFieldType::Scalar(StandardScalar::CharacterLargeObject)
+            );
+            assert_eq!(field.nullable(), nullable);
+            assert!(field.unique());
+        }
+
+        let text = TypeId::from_bytes([0xd9; 16]);
+        let standard = verified_standard(vec![standard_value_type(
+            text,
+            "orna.kernel.value.character-large-object@1",
+            ValueTypePersistence::Persistable,
+        )]);
+        let value_nullable = object(
+            FIRST_TYPE,
+            "value_nullable",
+            vec![field_with_options(
+                FIRST_FIELD,
+                "email",
+                0,
+                ResolvedType::Value(text),
+                true,
+                true,
+                None,
+                None,
+            )],
+        );
+        let value_required = object(
+            SECOND_TYPE,
+            "value_required",
+            vec![field_with_options(
+                SECOND_FIELD,
+                "name",
+                0,
+                ResolvedType::Value(text),
+                false,
+                true,
+                None,
+                None,
+            )],
+        );
+        let value_empty = active_version_two(Vec::new(), standard.clone(), 3);
+        let value_candidate = candidate_version_two(
+            &value_empty,
+            vec![value_nullable, value_required],
+            standard,
+            4,
+        );
+        let value_plan = plan_physical_changes(&value_empty, &value_candidate)
+            .expect("verified version-two Text UNIQUE fields must be physical");
+        assert_eq!(
+            value_plan
+                .create_objects()
+                .iter()
+                .map(|object| {
+                    let field = &object.fields()[0];
+                    (
+                        object.type_id(),
+                        field.field_type(),
+                        field.nullable(),
+                        field.unique(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    FIRST_TYPE,
+                    PhysicalFieldType::Scalar(StandardScalar::CharacterLargeObject),
+                    true,
+                    true,
+                ),
+                (
+                    SECOND_TYPE,
+                    PhysicalFieldType::Scalar(StandardScalar::CharacterLargeObject),
+                    false,
+                    true,
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn unique_text_replay_and_semantic_rename_keep_storage_unchanged() {
+        let installed = object(
+            FIRST_TYPE,
+            "person",
+            vec![field_with_options(
+                FIRST_FIELD,
+                "email",
+                0,
+                ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+                true,
+                true,
+                None,
+                None,
+            )],
+        );
+        let active = active(vec![installed.clone()], 1);
+        let replay = candidate(&active, vec![installed], 2);
+        assert_eq!(
+            plan_physical_changes(&active, &replay),
+            Ok(PhysicalPlan {
+                create_objects: Vec::new(),
+                add_field: None,
+            })
+        );
+        let renamed = candidate(
+            &active,
+            vec![object(
+                FIRST_TYPE,
+                "renamed_person",
+                vec![field_with_options(
+                    FIRST_FIELD,
+                    "renamed_email",
+                    0,
+                    ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+                    true,
+                    true,
+                    None,
+                    None,
+                )],
+            )],
+            3,
+        );
+        assert_eq!(
+            plan_physical_changes(&active, &renamed),
+            Ok(PhysicalPlan {
+                create_objects: Vec::new(),
+                add_field: None,
+            })
+        );
+    }
+
+    #[test]
+    fn unique_text_keeps_required_unique_references_admitted() {
+        let owner = object(
+            FIRST_TYPE,
+            "owner",
+            vec![field_with_options(
+                FIRST_FIELD,
+                "target",
+                0,
+                ResolvedType::reference(SECOND_TYPE),
+                false,
+                true,
+                None,
+                Some(OnDeleteAction::Restrict),
+            )],
+        );
+        let target = object(SECOND_TYPE, "target", Vec::new());
+        let empty = active(Vec::new(), 1);
+        let candidate = candidate(&empty, vec![owner, target], 2);
+
+        let plan = plan_physical_changes(&empty, &candidate)
+            .expect("ADR 0051 must retain the required unique Reference form");
+        assert_eq!(
+            plan.create_objects()[0].fields(),
+            [CreateField {
+                field_id: FIRST_FIELD,
+                field_type: PhysicalFieldType::Reference {
+                    target: SECOND_TYPE,
+                    on_delete: Some(OnDeleteAction::Restrict),
+                },
+                nullable: false,
+                unique: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn unique_text_keeps_other_unique_shapes_and_existing_changes_closed() {
+        let empty = active(Vec::new(), 1);
+        for (resolved_type, seed) in [
+            (ResolvedType::scalar(StandardScalar::Integer), 1),
+            (ResolvedType::Named(SECOND_TYPE), 2),
+        ] {
+            let candidate = candidate(
+                &empty,
+                vec![object(
+                    FIRST_TYPE,
+                    "closed",
+                    vec![field_with_options(
+                        FIRST_FIELD,
+                        "value",
+                        0,
+                        resolved_type,
+                        true,
+                        true,
+                        None,
+                        None,
+                    )],
+                )],
+                10 + seed,
+            );
+            assert_eq!(
+                plan_physical_changes(&empty, &candidate),
+                Err(PhysicalPlanError::UnsupportedUniqueField {
+                    object_type: FIRST_TYPE,
+                    field: FIRST_FIELD,
+                })
+            );
+        }
+
+        let text = TypeId::from_bytes([0xda; 16]);
+        let other = TypeId::from_bytes([0xdb; 16]);
+        let standard = verified_standard(vec![
+            standard_value_type(
+                text,
+                "orna.kernel.value.character-large-object@1",
+                ValueTypePersistence::Persistable,
+            ),
+            standard_value_type(
+                other,
+                "orna.kernel.value.integer@1",
+                ValueTypePersistence::Persistable,
+            ),
+        ]);
+        let value_empty = active_version_two(Vec::new(), standard.clone(), 20);
+        let other_value = candidate_version_two(
+            &value_empty,
+            vec![object(
+                FIRST_TYPE,
+                "closed_value",
+                vec![field_with_options(
+                    FIRST_FIELD,
+                    "value",
+                    0,
+                    ResolvedType::Value(other),
+                    true,
+                    true,
+                    None,
+                    None,
+                )],
+            )],
+            standard.clone(),
+            21,
+        );
+        assert_eq!(
+            plan_physical_changes(&value_empty, &other_value),
+            Err(PhysicalPlanError::UnsupportedUniqueField {
+                object_type: FIRST_TYPE,
+                field: FIRST_FIELD,
+            })
+        );
+
+        let base = object(
+            FIRST_TYPE,
+            "person",
+            vec![field_with_options(
+                FIRST_FIELD,
+                "email",
+                0,
+                ResolvedType::Value(text),
+                false,
+                true,
+                None,
+                None,
+            )],
+        );
+        let active = active_version_two(vec![base.clone()], standard.clone(), 22);
+        for (candidate_object, seed) in [
+            (
+                object(
+                    FIRST_TYPE,
+                    "person",
+                    vec![field_with_options(
+                        FIRST_FIELD,
+                        "email",
+                        0,
+                        ResolvedType::Value(text),
+                        false,
+                        false,
+                        None,
+                        None,
+                    )],
+                ),
+                23,
+            ),
+            (
+                object(
+                    FIRST_TYPE,
+                    "person",
+                    vec![
+                        base.fields()[0].clone(),
+                        field_with_options(
+                            SECOND_FIELD,
+                            "other_email",
+                            1,
+                            ResolvedType::Value(text),
+                            true,
+                            true,
+                            None,
+                            None,
+                        ),
+                    ],
+                ),
+                24,
+            ),
+        ] {
+            let candidate =
+                candidate_version_two(&active, vec![candidate_object], standard.clone(), seed);
+            assert_eq!(
+                plan_physical_changes(&active, &candidate),
+                Err(PhysicalPlanError::UnsupportedExistingObjectChange {
+                    object_type: FIRST_TYPE,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn version_two_unique_text_requires_verified_value_not_legacy_or_impostor_contracts() {
+        let text = TypeId::from_bytes([0xdc; 16]);
+        let transient_text = TypeId::from_bytes([0xdd; 16]);
+        let other_text_contract = TypeId::from_bytes([0xde; 16]);
+        let standard = verified_standard(vec![
+            standard_value_type(
+                text,
+                "orna.kernel.value.character-large-object@1",
+                ValueTypePersistence::Persistable,
+            ),
+            standard_value_type(
+                transient_text,
+                "orna.kernel.value.character-large-object@1",
+                ValueTypePersistence::Transient,
+            ),
+            standard_value_type(
+                other_text_contract,
+                "orna.kernel.value.character-large-object@2",
+                ValueTypePersistence::Persistable,
+            ),
+        ]);
+        let legacy = field_with_options(
+            FIRST_FIELD,
+            "email",
+            0,
+            ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+            true,
+            true,
+            None,
+            None,
+        );
+        // A version-two revision cannot retain a legacy scalar field. This
+        // constructor boundary closes the hostile input before physical
+        // planning; therefore it cannot reach the Text UNIQUE branch.
+        let legacy_source = source(1, None);
+        let legacy_catalogue = CatalogueSnapshot::new(
+            CatalogueRevisionId::from_bytes([2; 16]),
+            vec![schema()],
+            vec![object(FIRST_TYPE, "person", vec![legacy])],
+        )
+        .unwrap();
+        let legacy_origins = origins(&legacy_source, &legacy_catalogue);
+        let legacy = ActiveDatabaseRevision::new_with_catalogue_hash_context(
+            ActiveDatabaseRevisionInput::new(
+                RevisionPair::new(legacy_source.id(), legacy_catalogue.revision()),
+                legacy_source,
+                legacy_catalogue,
+                digest(1),
+                ActiveRevisionContent::new(Vec::new(), Vec::new(), legacy_origins, Vec::new()),
+            ),
+            CatalogueHashContext::version_two(standard.clone()),
+        );
+        assert!(
+            legacy.is_err(),
+            "version-two legacy Scalar(Text) must be closed before physical planning"
+        );
+
+        let empty = active_version_two(Vec::new(), standard.clone(), 3);
+        for (value_type, seed) in [(transient_text, 4), (other_text_contract, 5)] {
+            let candidate = candidate_version_two(
+                &empty,
+                vec![object(
+                    FIRST_TYPE,
+                    "person",
+                    vec![field_with_options(
+                        FIRST_FIELD,
+                        "email",
+                        0,
+                        ResolvedType::Value(value_type),
+                        true,
+                        true,
+                        None,
+                        None,
+                    )],
+                )],
+                standard.clone(),
+                seed,
+            );
+            assert_eq!(
+                plan_physical_changes(&empty, &candidate),
+                Err(PhysicalPlanError::UnsupportedUniqueField {
+                    object_type: FIRST_TYPE,
+                    field: FIRST_FIELD,
+                }),
+                "only the persistable exact version-two Text contract may be unique"
+            );
+        }
     }
 
     #[test]
