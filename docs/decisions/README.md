@@ -103,3 +103,5 @@ source-of-truth or authority rules.
   [Canonical Raw Calls Update One Selected Object with One Value](0050-canonical-raw-reference-value-update.md)
 * **work ADR 0051:**
   [Text Fields Have Byte-Exact Uniqueness](0051-unique-text-fields.md)
+* **work ADR 0052:**
+  [Raw Calls Select One Object by Unique Text](0052-raw-unique-text-server-select.md)
