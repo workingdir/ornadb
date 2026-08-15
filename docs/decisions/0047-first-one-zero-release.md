@@ -110,6 +110,7 @@ The production package must install this exact release-document inventory:
 /usr/share/doc/orna/changelog.Debian.gz
 /usr/share/doc/orna/copyright
 /usr/share/doc/orna/POSTGRESQL-LICENSE
+/usr/share/doc/orna/ZLIB-LICENSE
 /usr/share/doc/orna/THIRD-PARTY-NOTICES
 /usr/share/doc/orna/sbom.spdx.json
 ```
@@ -120,7 +121,8 @@ The files have these owners:
   `changelog.Debian.gz`. The package build compresses it reproducibly.
 * `packaging/debian/copyright` is the checked-in Debian copyright and licence
   document authority. It owns the Debian rendering and the Orna-owned and
-  embedded PostgreSQL mappings. The Orna-owned source remains `Apache-2.0`.
+  embedded PostgreSQL mappings. It also owns the zlib 1.3.2 static-link
+  mapping defined below. The Orna-owned source remains `Apache-2.0`.
   Its external Rust sections are an exact projection of
   `dependency-licences.toml`; they cannot introduce an independent component,
   holder, no-holder proof, or licence authority. A package-level declaration
@@ -128,6 +130,9 @@ The files have these owners:
 * The embedded PostgreSQL build accepted by work ADR 0019 owns the exact
   `POSTGRESQL-LICENSE` bytes from the pinned PostgreSQL source. The Debian
   package copies those bytes without rewriting them.
+* The verified zlib source archive owns the exact `ZLIB-LICENSE` bytes from
+  its pinned `LICENSE` input. The Debian package copies those bytes without
+  rewriting them.
 * `packaging/debian/dependency-licences.toml` is the checked-in exact external
   Rust dependency licence and source inventory. Its primary key is the
   Cargo.lock triple `(name, version, checksum)`. Records are sorted by the
@@ -193,11 +198,13 @@ The files have these owners:
   manifest repository value. The SBOM must record the parsed VCS revision and
   the resulting path for every registry package. For each registry package,
   SPDX 2.3 `packages[].downloadLocation` must be exactly
+  `https://static.crates.io/crates/<name>/<name>-<version>.crate`. Its one
+  `externalRefs` VCS locator must be exactly
   `git+<canonical_source_url>@<git.sha1>` for the empty root path, or exactly
   `git+<canonical_source_url>@<git.sha1>#<path_in_vcs>` for a present non-empty
   direct URL fragment path. The empty-root form must omit `#` entirely. The
   generator must preserve the `canonical_source_url` bytes without URL
-  normalisation and reject a nonconforming download-location encoding.
+  normalisation and reject a nonconforming download location or VCS locator.
 
   Every input object has exactly `path` and `sha256`. Paths are relative to the
   locked source root. SHA-256 values are lowercase hexadecimal digests of the
@@ -248,12 +255,15 @@ The files have these owners:
   different unit-graph schema version, or an unrecognised graph field or
   variant before it uses closure data.
 
-  `dependency-licences.toml` is a strict document container. It has exactly
-  `format = 1`, one `[closure]` table, and sorted `[[dependency]]` tables. The
-  `[closure]` table has exactly these required keys:
+  `dependency-licences.toml` is a strict format `2` document container. Format
+  `1` is not an accepted release-evidence input once native linkage is added.
+  It has exactly `format = 2`, one `[closure]` table, sorted
+  `[[dependency]]` tables, and exactly one `[[native_dependency]]` table. Its
+  top-level keys are exactly `format`, `closure`, `dependency`, and
+  `native_dependency`. The `[closure]` table has exactly these required keys:
 
   ```toml
-  format = 1
+  format = 2
 
   [closure]
   cargo_version = "<accepted pinned Cargo version>"
@@ -263,27 +273,173 @@ The files have these owners:
   target = "x86_64-unknown-linux-gnu"
   external_registry_package_count = 81
   runtime_external_registry_package_count = 73
+  native_dependency_count = 1
   ```
 
   `[[dependency]]` tables are sorted by the byte order of `name`, `version`,
   then `checksum`. The generator must reject an unknown top-level key, closure
-  key, or dependency key; a missing container element; a different format; or
-  a count that does not equal the selected unit-graph closure.
+  key, dependency key, or native dependency key; a missing container element;
+  a different format; or a count that does not equal the selected unit-graph
+  or native closure.
+
+  The `[[native_dependency]]` table has exactly `name`, `version`, `linkage`,
+  `archive_url`,
+  `archive_sha256`, `canonical_source_url`, `source_revision`,
+  `spdx_licence`, `selected_licence_inputs`, `notice_inputs`, and
+  `copyright_holders`, in that order. `[[native_dependency]]` tables sort by
+  the byte order of `name`, then `version`. The only accepted first-release
+  record is this record:
+
+  ```toml
+  [[native_dependency]]
+  name = "zlib"
+  version = "1.3.2"
+  linkage = "static"
+  archive_url = "https://zlib.net/zlib-1.3.2.tar.gz"
+  archive_sha256 = "bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16"
+  canonical_source_url = "https://github.com/madler/zlib"
+  source_revision = "da607da739fa6047df13e66a2af6b8bec7c2a498"
+  spdx_licence = "Zlib"
+  selected_licence_inputs = [{ path = "LICENSE", sha256 = "e32ff4e00d9d94930537635291da39e7e612703334bf6fde8c7f1686fe8a45a2" }]
+  notice_inputs = [{ path = "LICENSE", sha256 = "e32ff4e00d9d94930537635291da39e7e612703334bf6fde8c7f1686fe8a45a2" }]
+  copyright_holders = ["1995-2026 Jean-loup Gailly and Mark Adler"]
+  ```
+
+  The release build and gate verify the archive URL bytes, archive digest,
+  canonical source URL, source revision, regular `LICENSE` file, selected
+  licence input, notice input, and holder string before they compile or link
+  zlib. They build and link only the verified `libz.a`. The generator
+  independently re-verifies the archive, licence, notice, and linkage evidence
+  before it stages release evidence. It must reject a shared zlib object, a
+  second native dependency record, an omitted native record, an unknown native
+  key, or a changed value. zlib is part of the final native closure. The
+  generator must copy its exact `LICENSE` bytes to `ZLIB-LICENSE`, render its
+  source, `Zlib` licence, and exact holder string in Debian copyright, render
+  its `LICENSE` notice in `THIRD-PARTY-NOTICES`, and emit its SPDX package and
+  static-link relationship as specified below. A Cargo unit graph does not
+  establish zlib identity or native linkage.
 * The deterministic release-evidence generator owns
   `THIRD-PARTY-NOTICES`. It reads only the locked Rust closure, the pinned
-  `dependency-licences.toml` records, the pinned PostgreSQL source and
-  prepared-source inventories, and the changelog identity. It emits every
-  notice required by code or data present in the final package. An SBOM
-  identifier is not a substitute for required notice text.
+  `dependency-licences.toml` records, including the one native zlib record,
+  the pinned PostgreSQL source and prepared-source inventories, and the
+  changelog identity. It emits every notice required by code or data present
+  in the final package. An SBOM identifier is not a substitute for required
+  notice text.
 * The same generator owns `sbom.spdx.json`. It emits deterministic SPDX 2.3
-  JSON for `/usr/bin/orna`, the 73-package final executable Rust closure, the
-  build and proc-macro relationships defined above, the embedded PostgreSQL
-  source and support assets, and the other package data inputs. It records
-  package versions, source revisions, checksums, declared and concluded
-  licences, and relationships. It does not hash the enclosing
-  `.deb`, itself, or the later distribution manifest. The distribution
-  manifest and signed repository chain bind those final bytes without a
-  circular checksum.
+  JSON for `/usr/bin/orna` as the root `orna-server` workspace package, every
+  reached workspace Cargo package, all 81 reached registry packages, the build
+  and proc-macro relationships defined above, the embedded PostgreSQL source
+  and support assets as the PostgreSQL package, and the statically linked zlib
+  1.3.2 source as the zlib package. It records package versions, source
+  revisions, checksums, declared and concluded licences, and relationships. It
+  does not hash the enclosing `.deb`, itself, or the later distribution
+  manifest. The distribution manifest and signed repository chain bind those
+  final bytes without a circular checksum.
+
+  The SPDX document is one complete, deterministic SPDX 2.3 JSON document. It
+  has only these top-level fields: `SPDXID`, `creationInfo`, `dataLicense`,
+  `documentNamespace`, `name`, `packages`, `relationships`, and
+  `spdxVersion`. Their values are exactly:
+
+  * `spdxVersion = "SPDX-2.3"`, `dataLicense = "CC0-1.0"`, and
+    `SPDXID = "SPDXRef-DOCUMENT"`.
+  * `name = "orna-<debian-version>"` and
+    `documentNamespace = "https://github.com/workingdir/ornadb/releases/tag/v1.0.0#orna-<debian-version>.spdx"`, where `<debian-version>` is the
+    accepted changelog value `1.0.0-1`.
+  * `creationInfo` has only `created` and `creators`. `created` is the UTC
+    RFC 3339 whole-second rendering of `SOURCE_DATE_EPOCH`. `creators` is the
+    byte-sorted array `["Organization: Working Directory Ltd", "Tool: orna-release-evidence"]`.
+
+  Each reached workspace Cargo package has ID `SPDXRef-Workspace-<id>`. The
+  generator maps it from the reached unit to one Cargo workspace package by
+  exact package name, version, and repository-root-relative manifest path. It
+  rejects an absent, ambiguous, outside-root, symbolic, or non-regular manifest
+  path. `<id>` is the first 32 lowercase hexadecimal characters of SHA-256 over
+  these exact UTF-8 bytes, with each `\0` one NUL byte:
+
+  ```text
+  ornadb.release-evidence/workspace-id/v2\0<name>\0<version>\0<manifest-path>\0<release-commit>
+  ```
+
+  `<manifest-path>` uses `/` separators and is relative to the repository root.
+  `<release-commit>` is the 40-lowercase-hex commit named by the accepted
+  `v1.0.0` tag. The root workspace package is the mapped `orna-server` package.
+  Its ID is `<orna-server-workspace-package-id>`. The PostgreSQL and zlib
+  package IDs are respectively
+  `SPDXRef-PostgreSQL-18.4-f5cc81719e6da4cbdb1f797c48b693e91018153a` and
+  `SPDXRef-Zlib-1.3.2-da607da739fa6047df13e66a2af6b8bec7c2a498`. A registry
+  package ID is `SPDXRef-Cargo-<id>`, where `<id>` is the first 32 lowercase
+  hexadecimal characters of SHA-256 over
+  `ornadb.release-evidence/cargo-id/v1\0<name>\0<version>\0<checksum>`.
+  The generator rejects duplicate IDs, an ID that is not legal SPDX syntax,
+  or an ID that does not equal its defined input encoding.
+
+  Each package object has exactly `SPDXID`, `checksums`, `copyrightText`,
+  `downloadLocation`, `filesAnalyzed`, `licenseConcluded`,
+  `licenseDeclared`, `name`, `sourceInfo`, `versionInfo`, and `externalRefs`.
+  `checksums` has exactly one
+  `{algorithm: "SHA256", checksumValue: "<lowercase-sha256>"}` object.
+  `externalRefs` has exactly one
+  `{referenceCategory: "OTHER", referenceType: "vcs", referenceLocator: "<VCS-location>"}`
+  object. `filesAnalyzed` is `false`. `licenseDeclared` and
+  `licenseConcluded` are the exact selected SPDX obligation. `sourceInfo` is
+  exactly `"vcs: <VCS-location>"`. `downloadLocation` identifies the archive
+  or Git source that provides package bytes. `externalRefs[0].referenceLocator`
+  identifies the separately pinned VCS source. The generator rejects an
+  absent, additional, changed, or differently typed package field.
+
+  A workspace or PostgreSQL source checksum is the lowercase SHA-256 digest
+  of its canonical Git tree inventory. The inventory bytes are
+  `ornadb.release-evidence/git-tree/v1\0<commit>\0` followed by the byte-exact
+  output of `git ls-tree -r -z --full-tree <commit>`, with no added byte. The
+  Each workspace record uses its exact Cargo package version, the accepted
+  release commit,
+  `downloadLocation = "git+https://github.com/workingdir/ornadb.git@<release-commit>"`,
+  and that same URL as its VCS locator. Its `name` is the exact Cargo package
+  name, and both licence fields are `Apache-2.0`; its copyright text is
+  `Copyright 2026 Working Directory Ltd`. The PostgreSQL record uses version
+  `18.4`, commit `f5cc81719e6da4cbdb1f797c48b693e91018153a`,
+  `downloadLocation = "git+https://github.com/postgres/postgres.git@f5cc81719e6da4cbdb1f797c48b693e91018153a"`,
+  and that same URL as its VCS locator. The PostgreSQL package checksum binds
+  its pinned source inventory. Its prepared source and support assets remain
+  bound by the referenced embedded-engine manifest. Each workspace package
+  checksum binds its release source. The root `orna-server` package is the
+  workspace package that produces `/usr/bin/orna`.
+
+  zlib uses `Zlib` for both licence fields, its archive digest for `checksums`,
+  `https://zlib.net/zlib-1.3.2.tar.gz` for `downloadLocation`, and
+  `git+https://github.com/madler/zlib@da607da739fa6047df13e66a2af6b8bec7c2a498`
+  for its VCS locator. A registry package uses its Cargo.lock checksum for
+  `checksums`, the crate archive URL required above for `downloadLocation`,
+  and the required `git+<canonical_source_url>@<git.sha1>` form for its VCS
+  locator. The generator must verify that every archive checksum matches the
+  downloaded archive before it emits the package object.
+
+  `relationships` contains only objects with `spdxElementId`, `relationshipType`,
+  and `relatedSpdxElement`, with no comment. It contains
+  `SPDXRef-DOCUMENT DESCRIBES <orna-server-workspace-package-id>`, the projected Cargo
+  triples defined above, and these separately derived native linkage facts:
+
+  ```text
+  <orna-server-workspace-package-id> STATIC_LINK SPDXRef-PostgreSQL-18.4-f5cc81719e6da4cbdb1f797c48b693e91018153a
+  SPDXRef-PostgreSQL-18.4-f5cc81719e6da4cbdb1f797c48b693e91018153a STATIC_LINK SPDXRef-Zlib-1.3.2-da607da739fa6047df13e66a2af6b8bec7c2a498
+  ```
+
+  The rule that a relationship must correspond to one reached unit-graph edge
+  applies only to projected Cargo triples. It does not apply to the document
+  `DESCRIBES` relationship or to these root and PostgreSQL `STATIC_LINK`
+  relationships. The generator rejects a duplicate, self, unsupported, or
+  contradictory relationship.
+
+  Package objects sort by the UTF-8 byte sequence of `SPDXID`. Relationship
+  objects sort by the UTF-8 byte sequence of `spdxElementId`, then
+  `relationshipType`, then `relatedSpdxElement`. Checksum and creator arrays
+  use the order defined above. The generator serialises the complete document
+  as UTF-8 pretty JSON: two-space indentation, `\n` line endings, one final
+  `\n`, no trailing whitespace, and object keys in UTF-8 byte order. It
+  rejects output that cannot be parsed as JSON, contains a duplicate object
+  key, differs after this canonical reserialisation, or has a value that does
+  not satisfy this model.
 
 Generic MIT attribution is a closed exception. It is permitted only when
 `selected_licence` is the complete branch exactly `MIT`,
@@ -380,8 +536,39 @@ record. An external dependency without a Cargo.lock checksum is outside the
 first release policy and fails protected mode until a later accepted
 source-identity rule replaces this constraint.
 
-The distribution manifest binds the exact SHA-256 digest of each installed
-release document and of the final package payload inventory. The signed Debian
+The installed distribution manifest has format `2`. It retains every format
+`1` field with its current meaning: `rustc`, `cargo`, `builder_image`,
+`cargo_lock_sha256`, `rust_path_remap`, `rust_link_flags`,
+`embedded_engine_manifest_sha256`, `accepted_predecessor_engines`,
+`supported_forward_edges`, and `executable_sha256`. It adds exactly
+`product_version`, `debian_version`, `payload_file_count`, and `[[payload]]`
+records. Its top-level keys are exactly `format`, the retained format `1`
+fields, `product_version`, `debian_version`, `payload_file_count`, and
+`payload`. `format` is exactly `2`.
+`product_version` and `debian_version` are the exact changelog-derived values
+in the canonical release-identity table. An implementation must not remove,
+rename, or change a retained format `1` field when it moves to format `2`.
+`payload_file_count` is the unsigned decimal count of `[[payload]]` records.
+It must equal that count exactly.
+
+Each `[[payload]]` record has exactly `path`, `mode`, `length`, and `sha256`,
+in that order. `path` is a non-empty relative path below the installed payload
+root. It uses `/` separators, contains no empty, `.` or `..` segment, begins
+with none of `/` or `-`, and names one regular installed file. `mode` is its
+exact four-octal-digit installed mode. `length` is the unsigned decimal byte
+length of that file. `sha256` is the lowercase SHA-256 digest of that file's
+exact installed bytes. The records are sorted by the UTF-8 byte sequence of
+`path` and contain every installed regular payload file exactly once,
+including `/usr/bin/orna`, the embedded-engine manifest, and every release
+document listed above.
+
+`usr/share/orna/distribution-manifest.toml` is the one required exception. It
+must be installed but must not appear in `[[payload]]`. No other path may be
+excluded. This self-exclusion prevents a manifest checksum cycle. The package
+build verifies the full payload set, rejects an absent, duplicate, unsorted,
+unknown, non-regular, changed-mode, changed-length, changed-digest, wrong-count,
+or excluded non-manifest entry, and writes canonical TOML with one final
+newline. The signed Debian
 repository metadata then binds the exact `.deb` bytes. The copyright file,
 notices, SBOM, and manifests provide evidence. None is a signing or publication
 authority.
@@ -578,8 +765,11 @@ The release mechanism is implemented only when tests prove all of these facts:
   mismatch fails before signing;
 * two isolated release builds produce byte-identical `.deb`, manifest,
   changelog, copyright, licence, notice, SBOM, and payload bytes;
-* the exact release-document inventory is installed, manifest-bound, and
-  complete for the final embedded dependency closure;
+* the exact release-document inventory is installed, complete for the final
+  embedded dependency closure, and represented by the strict format `2`
+  manifest payload inventory; the manifest is its only excluded installed
+  regular file and every other payload file is present once with its exact
+  mode and digest;
 * every selected external Cargo.lock `(name, version, checksum)` has exactly
   one matching checked-in dependency licence and source record, and every
   extra, missing, changed, unsorted, or checksum-less external record fails;
@@ -587,8 +777,10 @@ The release mechanism is implemented only when tests prove all of these facts:
   dependency indices, and exactly 81 unique reachable external registry
   packages; its runtime traversal has exactly 73 external registry packages;
   every package maps uniquely to Cargo.lock; and the emitted SPDX 2.3
-  relationship triples have the required direction, type, deduplication, and
-  contradiction rejection;
+  Cargo-projected relationship triples have the required direction, type,
+  deduplication, and contradiction rejection. The document `DESCRIBES` and
+  root, PostgreSQL, and zlib `STATIC_LINK` relationships are separately
+  derived linkage facts and do not require a Cargo unit-graph edge;
 * every dependency-licences record has exactly the declared common and
   conditional TOML fields, applies slash licence normalisation to `OR`,
   selects one complete top-level SPDX `OR` branch without dropping `AND` or
@@ -601,10 +793,10 @@ The release mechanism is implemented only when tests prove all of these facts:
   archive identities above, or a present non-empty direct URL fragment path
   whose `/`-separated segments match ASCII `[A-Za-z0-9._-]+` and are not `.`
   or `..`. Every other value fails. It has an exact unnormalised Cargo manifest
-  repository URL and matching SBOM VCS fields and exact
-  `packages[].downloadLocation` `git+<canonical_source_url>@<git.sha1>`
-  encoding, with no `#` for the empty root path and `#<path_in_vcs>` only for a
-  present non-empty direct URL fragment path. The closed `siphasher 1.0.3`
+  repository URL and matching SBOM VCS fields, exact crate-archive
+  `packages[].downloadLocation`, and exact `externalRefs` VCS locator, with no
+  `#` for the empty root path and `#<path_in_vcs>` only for a present non-empty
+  direct URL fragment path. The closed `siphasher 1.0.3`
   exception alone may use
   `project_licence_text_input`, and it must bind the exact regular Orna
   project-root `LICENSE` input to the accepted release commit; every other
@@ -618,8 +810,18 @@ The release mechanism is implemented only when tests prove all of these facts:
   selected obligation, an absent, changed, omitted, or mismatched source URL
   or input, an omitted named holder, another rendered or concluded licence, or
   automatic no-holder inference fails;
-* the SPDX 2.3 SBOM and third-party notices agree with each other and with the
-  final package, and changed or unknown closure members fail the build;
+* `dependency-licences.toml` has only strict format `2` fields, exactly one
+  native zlib 1.3.2 record with every value in this decision, and native count
+  `1`; zlib source, static archive, copyright, notice, SBOM package, and
+  PostgreSQL static-link relationship agree, while an omitted, extra, changed,
+  or shared-link native input fails;
+* the SPDX 2.3 SBOM has only the specified top-level and package fields, legal
+  derived IDs, every reached workspace Cargo package, PostgreSQL, zlib, and 81
+  registry packages, exact source checksums, download locations, VCS locators,
+  relationships whose endpoints exist as package records, byte sorting, and
+  pretty JSON bytes. The SBOM and third-party notices agree with each other and
+  with the final package, and changed or unknown closure members fail the
+  build;
 * protected mode accepts only an active policy-listed full OpenPGP source-tag
   signer fingerprint and exact policy-bound Debian signer and public keyring,
   while unknown, retired, revoked, short, changed, or out-of-window identities
@@ -683,8 +885,8 @@ with the current development version. Those rows do not declare `1.0.0`.
 | `feat(cli): report the canonical product version` | `crates/orna-server/src/main.rs`; `crates/orna-system-tests/tests/installed_product.rs` | Add exact `orna --version` output from `CARGO_PKG_VERSION` and prove the installed development package reports `0.1.0`. |
 | `build(debian): separate development and release modes` | `packaging/debian/changelog`; `packaging/debian/rules`; `.github/workflows/debian-package.yml` | Add the exact unreleased development entry and require an explicit build mode. Change ordinary CI to call only `development-package`. Keep the current literal control and CI package identity for this row, but validate it against the changelog before build or test. Keep protected `1.0.0-1` closed. A dry-run, when added, validates only and does not change persistent state. |
 | `build(debian): derive development package identity` | `packaging/debian/control`; `packaging/debian/rules` | Derive the Debian control version, source and binary package identity, and package filename from `dpkg-parsechangelog`. Remove the temporary literal identity checks only after the derived identity has replaced them. Keep the exact `0.1.0-1` development contract and the closed protected mode. |
-| `build(debian): own dependency licence sources` | `LICENSE`; `packaging/debian/copyright`; `packaging/debian/dependency-licences.toml` | Define the exact Cargo.lock-keyed TOML record before adding inventory: common and conditional source fields, raw Cargo licence, normalised SPDX expression, one complete selected SPDX `OR` branch, selected-licence and notice inputs, canonical source URL, and exactly one holder branch. Derive the Debian source rendering from that URL. Generic MIT records require one of the closed four `{path, sha256}` identities and no notices. |
-| `build(debian): generate release evidence` | `packaging/debian/release-evidence.sh`; `packaging/debian/orna.install`; `packaging/debian/rules` | Validate the complete locked closure, every input path and digest, holder XOR, slash-to-OR normalisation, complete SPDX branch selection, and the closed generic-MIT exception. For every registry record, require checksum-bound archive and VCS evidence, exact unnormalised manifest repository URL, and matching SBOM VCS and `packages[].downloadLocation` fields. Accept a present empty `path_in_vcs` as the empty root path, and accept an absent value only for the two closed checksum-and-revision archive identities in this decision. Require each present non-empty value to be the direct URL fragment path with `/`-separated ASCII `[A-Za-z0-9._-]+` segments other than `.` and `..`; reject every other value. Emit no `#` for the empty root path and emit `#<path_in_vcs>` only for a present non-empty path. Permit the closed `siphasher 1.0.3` `project_licence_text_input` only when it is the exact regular Orna project-root `LICENSE` at the accepted release commit. Reject automatic holder inference and any new generic-MIT input identity until an ADR amendment adds its `{path, sha256}` pair. Install deterministic notices, SPDX 2.3 SBOM, changelog, copyright, and licence evidence bound by the manifest. |
+| `build(debian): own dependency licence sources` | `LICENSE`; `packaging/debian/copyright`; `packaging/debian/dependency-licences.toml` | Move the strict inventory container to format `2`. Define the exact Cargo.lock-keyed TOML record before adding inventory: common and conditional source fields, raw Cargo licence, normalised SPDX expression, one complete selected SPDX `OR` branch, selected-licence and notice inputs, canonical source URL, and exactly one holder branch. Add only the exact zlib 1.3.2 native record in this decision. Derive Debian copyright source rendering from canonical source URL. Generic MIT records require one of the closed four `{path, sha256}` identities and no notices. |
+| `build(debian): generate release evidence` | `packaging/debian/release-evidence.sh`; `packaging/debian/orna.install`; `packaging/debian/rules` | Validate the complete locked Cargo and native closure, every input path and digest, holder XOR, slash-to-OR normalisation, complete SPDX branch selection, the closed generic-MIT exception, and the exact static zlib 1.3.2 archive, source, licence, notice, holder, and link. For every registry record, require checksum-bound archive and VCS evidence, exact unnormalised manifest repository URL, exact crate-archive SBOM download location, and exact VCS locator. Accept a present empty `path_in_vcs` as the empty root path, and accept an absent value only for the two closed checksum-and-revision archive identities in this decision. Require each present non-empty value to be the direct URL fragment path with `/`-separated ASCII `[A-Za-z0-9._-]+` segments other than `.` and `..`; reject every other value. Emit no `#` for the empty root path and emit `#<path_in_vcs>` only for a present non-empty path. Permit the closed `siphasher 1.0.3` `project_licence_text_input` only when it is the exact regular Orna project-root `LICENSE` at the accepted release commit. Reject automatic holder inference and any new generic-MIT input identity until an ADR amendment adds its `{path, sha256}` pair. Emit the strict SPDX 2.3 package, ID, relationship, sort, and pretty-JSON contract. Replace the distribution manifest with strict format `2`, retain every format `1` field, and install its complete self-excluding payload inventory, including `ZLIB-LICENSE`, with deterministic notices, changelog, copyright, and licence evidence. |
 | `build(release): pin public signing policy` | `packaging/debian/release-policy.toml`; `packaging/debian/orna-archive-keyring.gpg`; `packaging/debian/publish-repository.sh` | Pin full public tag-signer and repository-key fingerprints, rotation and revocation state, keyring bytes, 14-day validity, and the immutable generation publisher interface without a secret or endpoint. |
 | `test(release): prove protected publication` | `.github/workflows/debian-package.yml`; `.github/workflows/debian-release.yml`; `crates/orna-system-tests/scenarios/debian-release.sh` | Keep development artifacts non-production and use only non-production test keys and a synthetic candidate to prove mode separation, trust policy, signing, expiry, monotonic immutable generations, replay rejection, atomic promotion, tamper closure, predecessor closure, and no runtime Ed25519 authority. Production `1.0.0-1` remains closed. |
 | `release(product): accept the 1.0 product baseline` | `docs/releases/1.0-product-acceptance.md` | After the complete product review, accept every supported claim, evidence mapping, and explicit deferral. This row is a mandatory gate, not an assumed result of the earlier rows. |
