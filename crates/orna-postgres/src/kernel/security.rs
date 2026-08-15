@@ -4,7 +4,8 @@ use orna_client::{
     ClientExecutionResult, evaluate_client_function as evaluate_authorised_client_function,
 };
 use orna_core::{
-    CatalogueRevisionId, FunctionId, PrincipalId, SecurityAuditEventId, SourceRevisionId,
+    CatalogueRevisionId, FunctionId, InvocationAuditEventId, InvocationId, PrincipalId,
+    SecurityAuditEventId, SourceRevisionId,
     catalogue::FunctionDomain,
     revision::{ActiveDatabaseRevision, RevisionPair},
     security::{
@@ -47,6 +48,76 @@ pub enum AuthenticatedRawCallResult {
     Client(RuntimeValue),
     /// Zero or more values returned in SERVER execution result order.
     Server(Vec<RuntimeValue>),
+}
+
+/// One closed durable `sys.invoke` decision for the PostgreSQL kernel.
+///
+/// This is private kernel state. It does not retain Request, bind, lifecycle,
+/// delivery, or error-detail data.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(dead_code)]
+pub(crate) struct InvocationAuditDecision {
+    invocation: InvocationId,
+    outcome: SecurityAuditOutcome,
+    session_principal: PrincipalId,
+    effective_principal: Option<PrincipalId>,
+    authorising_principal: Option<PrincipalId>,
+    target: Option<InvocationTarget>,
+    security_audit_event: Option<SecurityAuditEventId>,
+}
+
+#[allow(dead_code)]
+impl InvocationAuditDecision {
+    /// Creates one decision from durable matching `EXECUTE` evidence.
+    pub(crate) fn from_execute_evidence(
+        invocation: InvocationId,
+        evidence: &SecurityAuditEvent,
+    ) -> Result<Self, PostgresKernelError> {
+        let decision = evidence.decision();
+        if decision.kind() != SecurityAuditKind::Execute {
+            return Err(invocation_audit_invariant(
+                &invocation.canonical(),
+                "invocation decision requires EXECUTE audit evidence",
+            ));
+        }
+        let target = require_invocation_audit_value(
+            decision.target(),
+            &invocation.canonical(),
+            "EXECUTE evidence requires a target",
+        )?;
+        let session_principal = require_invocation_audit_value(
+            decision.session_principal(),
+            &invocation.canonical(),
+            "EXECUTE evidence requires a session principal",
+        )?;
+        let result = Self {
+            invocation,
+            outcome: decision.outcome(),
+            session_principal,
+            effective_principal: decision.effective_principal(),
+            authorising_principal: decision.authorising_principal(),
+            target: Some(target),
+            security_audit_event: Some(evidence.id()),
+        };
+        validate_invocation_audit_decision_shape(&result, &invocation.canonical())?;
+        Ok(result)
+    }
+
+    /// Creates the closed unresolved target-denied decision.
+    pub(crate) fn unresolved_denied(
+        invocation: InvocationId,
+        session_principal: PrincipalId,
+    ) -> Self {
+        Self {
+            invocation,
+            outcome: SecurityAuditOutcome::Denied,
+            session_principal,
+            effective_principal: None,
+            authorising_principal: None,
+            target: None,
+            security_audit_event: None,
+        }
+    }
 }
 
 impl AuthenticatedRawCallResult {
@@ -1403,6 +1474,72 @@ async fn append_security_audit_event(
     Ok(())
 }
 
+/// Appends one closed invocation decision in the caller's protected transaction.
+///
+/// PostgreSQL generates the relation sequence and recording time. The caller
+/// cannot supply Request, bind, lifecycle, delivery, or diagnostic data.
+#[allow(dead_code)]
+pub(crate) async fn append_invocation_audit_event(
+    transaction: &Transaction<'_>,
+    decision: InvocationAuditDecision,
+) -> Result<InvocationAuditEventId, PostgresKernelError> {
+    let record = decision.invocation.canonical();
+    validate_invocation_audit_decision_shape(&decision, &record)?;
+    let security_events = load_security_audit_events(transaction).await?;
+    validate_invocation_audit_evidence(&decision, &security_events, &record)?;
+    if let Some(target) = decision.target {
+        require_invocation_audit_target(transaction, target, &record).await?;
+    }
+
+    let event_id = InvocationAuditEventId::new();
+    let event_id_bytes = event_id.to_bytes().to_vec();
+    let invocation_id = decision.invocation.to_bytes().to_vec();
+    let outcome = encode_invocation_audit_outcome(decision.outcome);
+    let session_principal = decision.session_principal.to_bytes().to_vec();
+    let effective_principal = decision
+        .effective_principal
+        .map(|principal| principal.to_bytes().to_vec());
+    let authorising_principal = decision
+        .authorising_principal
+        .map(|principal| principal.to_bytes().to_vec());
+    let (function, source_revision, catalogue_revision) = decision
+        .target
+        .map(|target| {
+            (
+                Some(target.function().to_bytes().to_vec()),
+                Some(target.revision().source().to_bytes().to_vec()),
+                Some(target.revision().catalogue().to_bytes().to_vec()),
+            )
+        })
+        .unwrap_or((None, None, None));
+    let security_audit_event = decision
+        .security_audit_event
+        .map(|event| event.to_bytes().to_vec());
+    transaction
+        .execute(
+            "INSERT INTO _orna_kernel.invocation_audit_events
+                 (event_id, invocation_id, outcome, session_principal_id,
+                  effective_principal_id, authorising_principal_id, function_id,
+                  source_revision_id, catalogue_revision_id, security_audit_event_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+            &[
+                &event_id_bytes,
+                &invocation_id,
+                &outcome,
+                &session_principal,
+                &effective_principal,
+                &authorising_principal,
+                &function,
+                &source_revision,
+                &catalogue_revision,
+                &security_audit_event,
+            ],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?;
+    Ok(event_id)
+}
+
 async fn lock_active_revision(
     transaction: &Transaction<'_>,
     expected: RevisionPair,
@@ -1745,6 +1882,262 @@ async fn load_security_audit_events(
         .collect()
 }
 
+/// Validates every durable protected invocation decision during normal recovery.
+///
+/// The caller has already recovered one pinned active revision in the same
+/// read-only transaction. This function validates the historical target pair,
+/// complete row shape, and exact linked `EXECUTE` evidence without repairing
+/// any durable state.
+pub(crate) async fn recover_invocation_audit_events(
+    transaction: &Transaction<'_>,
+    _active: &ActiveDatabaseRevision,
+) -> Result<(), PostgresKernelError> {
+    require_invocation_audit_relation_columns(transaction).await?;
+    let security_events = load_security_audit_events(transaction).await?;
+    let rows = transaction
+        .query(
+            "SELECT sequence, event_id, recorded_at, invocation_id, outcome,
+                    session_principal_id, effective_principal_id,
+                    authorising_principal_id, function_id, source_revision_id,
+                    catalogue_revision_id, security_audit_event_id
+             FROM _orna_kernel.invocation_audit_events
+             ORDER BY sequence",
+            &[],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?;
+    for row in &rows {
+        let decision = decode_invocation_audit_decision(row)?;
+        let record = decision.invocation.canonical();
+        validate_invocation_audit_decision_shape(&decision, &record)?;
+        validate_invocation_audit_evidence(&decision, &security_events, &record)?;
+        if let Some(target) = decision.target {
+            require_invocation_audit_target(transaction, target, &record).await?;
+        }
+    }
+    Ok(())
+}
+
+fn decode_invocation_audit_decision(
+    row: &Row,
+) -> Result<InvocationAuditDecision, PostgresKernelError> {
+    let sequence: i64 = invocation_audit_column(row, "selected row", "sequence")?;
+    let record = sequence.to_string();
+    if sequence <= 0 {
+        return Err(invocation_audit_invariant(
+            &record,
+            "generated invocation audit sequence must be positive",
+        ));
+    }
+    let _: SystemTime = invocation_audit_column(row, &record, "recorded_at")?;
+    let _ = InvocationAuditEventId::from_bytes(invocation_audit_id(row, &record, "event_id")?);
+    let invocation = InvocationId::from_bytes(invocation_audit_id(row, &record, "invocation_id")?);
+    let outcome = decode_invocation_audit_outcome(
+        invocation_audit_column(row, &record, "outcome")?,
+        &record,
+    )?;
+    let session_principal =
+        PrincipalId::from_bytes(invocation_audit_id(row, &record, "session_principal_id")?);
+    let effective_principal = invocation_audit_optional_id(row, &record, "effective_principal_id")?
+        .map(PrincipalId::from_bytes);
+    let authorising_principal =
+        invocation_audit_optional_id(row, &record, "authorising_principal_id")?
+            .map(PrincipalId::from_bytes);
+    let function =
+        invocation_audit_optional_id(row, &record, "function_id")?.map(FunctionId::from_bytes);
+    let source_revision = invocation_audit_optional_id(row, &record, "source_revision_id")?
+        .map(SourceRevisionId::from_bytes);
+    let catalogue_revision = invocation_audit_optional_id(row, &record, "catalogue_revision_id")?
+        .map(CatalogueRevisionId::from_bytes);
+    let security_audit_event =
+        invocation_audit_optional_id(row, &record, "security_audit_event_id")?
+            .map(SecurityAuditEventId::from_bytes);
+    let target = match (function, source_revision, catalogue_revision) {
+        (Some(function), Some(source), Some(catalogue)) => Some(InvocationTarget::new(
+            function,
+            RevisionPair::new(source, catalogue),
+        )),
+        (None, None, None) => None,
+        _ => {
+            return Err(invocation_audit_invariant(
+                &record,
+                "target and pinned revision evidence must be present together",
+            ));
+        }
+    };
+    Ok(InvocationAuditDecision {
+        invocation,
+        outcome,
+        session_principal,
+        effective_principal,
+        authorising_principal,
+        target,
+        security_audit_event,
+    })
+}
+
+fn validate_invocation_audit_decision_shape(
+    decision: &InvocationAuditDecision,
+    record: &str,
+) -> Result<(), PostgresKernelError> {
+    if decision.effective_principal.is_some() != decision.authorising_principal.is_some() {
+        return Err(invocation_audit_invariant(
+            record,
+            "effective and authorising principals must be present together",
+        ));
+    }
+    if decision.target.is_some() != decision.security_audit_event.is_some() {
+        return Err(invocation_audit_invariant(
+            record,
+            "target, pinned revision, and security audit evidence must be present together",
+        ));
+    }
+    match (
+        decision.outcome,
+        decision.target,
+        decision.effective_principal,
+    ) {
+        (SecurityAuditOutcome::Allowed, Some(_), Some(_)) => Ok(()),
+        (SecurityAuditOutcome::Allowed, _, _) => Err(invocation_audit_invariant(
+            record,
+            "allowed invocation decision requires target and principal evidence",
+        )),
+        (SecurityAuditOutcome::Denied, None, None) => Ok(()),
+        (SecurityAuditOutcome::Denied, Some(_), _) => Ok(()),
+        (SecurityAuditOutcome::Denied, None, Some(_)) => Err(invocation_audit_invariant(
+            record,
+            "unresolved denied invocation cannot retain principal evidence",
+        )),
+    }
+}
+
+fn validate_invocation_audit_evidence(
+    decision: &InvocationAuditDecision,
+    security_events: &[SecurityAuditEvent],
+    record: &str,
+) -> Result<(), PostgresKernelError> {
+    let Some(event_id) = decision.security_audit_event else {
+        return Ok(());
+    };
+    let evidence = security_events
+        .iter()
+        .find(|event| event.id() == event_id)
+        .ok_or_else(|| {
+            invocation_audit_invariant(record, "linked security audit evidence is missing")
+        })?;
+    let security = evidence.decision();
+    if security.kind() != SecurityAuditKind::Execute
+        || security.outcome() != decision.outcome
+        || security.session_principal() != Some(decision.session_principal)
+        || security.effective_principal() != decision.effective_principal
+        || security.authorising_principal() != decision.authorising_principal
+        || security.target() != decision.target
+    {
+        return Err(invocation_audit_invariant(
+            record,
+            "linked security audit evidence does not match the invocation decision",
+        ));
+    }
+    Ok(())
+}
+
+async fn require_invocation_audit_target(
+    transaction: &Transaction<'_>,
+    target: InvocationTarget,
+    record: &str,
+) -> Result<(), PostgresKernelError> {
+    let function = target.function().to_bytes().to_vec();
+    let source = target.revision().source().to_bytes().to_vec();
+    let catalogue = target.revision().catalogue().to_bytes().to_vec();
+    let row = transaction
+        .query_opt(
+            "SELECT 1
+             FROM _orna_kernel.catalogue_functions AS function
+             JOIN _orna_kernel.catalogue_revisions AS revision
+               ON revision.id = function.catalogue_revision_id
+             WHERE function.catalogue_revision_id = $1
+               AND function.function_id = $2
+               AND revision.source_revision_id = $3",
+            &[&catalogue, &function, &source],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?;
+    if row.is_none() {
+        return Err(invocation_audit_invariant(
+            record,
+            "target function and pinned revision must exist together",
+        ));
+    }
+    Ok(())
+}
+
+#[allow(dead_code)]
+fn encode_invocation_audit_outcome(outcome: SecurityAuditOutcome) -> &'static str {
+    match outcome {
+        SecurityAuditOutcome::Allowed => "allowed",
+        SecurityAuditOutcome::Denied => "denied",
+    }
+}
+
+fn decode_invocation_audit_outcome(
+    outcome: String,
+    record: &str,
+) -> Result<SecurityAuditOutcome, PostgresKernelError> {
+    match outcome.as_str() {
+        "allowed" => Ok(SecurityAuditOutcome::Allowed),
+        "denied" => Ok(SecurityAuditOutcome::Denied),
+        _ => Err(invocation_audit_invariant(
+            record,
+            "invocation outcome must be allowed or denied",
+        )),
+    }
+}
+
+async fn require_invocation_audit_relation_columns(
+    transaction: &Transaction<'_>,
+) -> Result<(), PostgresKernelError> {
+    let rows = transaction
+        .query(
+            "SELECT attribute.attname
+             FROM pg_catalog.pg_attribute AS attribute
+             JOIN pg_catalog.pg_class AS class ON class.oid = attribute.attrelid
+             JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = class.relnamespace
+             WHERE namespace.nspname = '_orna_kernel'
+               AND class.relname = 'invocation_audit_events'
+               AND attribute.attnum > 0
+               AND NOT attribute.attisdropped
+             ORDER BY attribute.attnum",
+            &[],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?;
+    let names = rows
+        .iter()
+        .map(|row| invocation_audit_column(row, "relation", "attname"))
+        .collect::<Result<Vec<String>, _>>()?;
+    let expected = [
+        "sequence",
+        "event_id",
+        "recorded_at",
+        "invocation_id",
+        "outcome",
+        "session_principal_id",
+        "effective_principal_id",
+        "authorising_principal_id",
+        "function_id",
+        "source_revision_id",
+        "catalogue_revision_id",
+        "security_audit_event_id",
+    ];
+    if names != expected {
+        return Err(invocation_audit_invariant(
+            "relation",
+            "invocation audit relation has unsupported disclosure-bearing columns",
+        ));
+    }
+    Ok(())
+}
+
 fn decode_security_audit_event(row: &Row) -> Result<SecurityAuditEvent, PostgresKernelError> {
     let sequence: i64 = audit_column(row, "selected row", "sequence")?;
     let record = sequence.to_string();
@@ -1967,6 +2360,70 @@ fn require_audit_value<T>(
     value.ok_or_else(|| audit_invariant(record, rule))
 }
 
+#[allow(dead_code)]
+fn require_invocation_audit_value<T>(
+    value: Option<T>,
+    record: &str,
+    rule: &'static str,
+) -> Result<T, PostgresKernelError> {
+    value.ok_or_else(|| invocation_audit_invariant(record, rule))
+}
+
+fn invocation_audit_optional_id(
+    row: &Row,
+    record: &str,
+    column: &'static str,
+) -> Result<Option<[u8; 16]>, PostgresKernelError> {
+    let value: Option<Vec<u8>> = invocation_audit_column(row, record, column)?;
+    value
+        .map(|bytes| {
+            bytes.try_into().map_err(|_| {
+                invocation_audit_invariant(
+                    record,
+                    "invocation audit identity must be exactly sixteen bytes",
+                )
+            })
+        })
+        .transpose()
+}
+
+fn invocation_audit_id(
+    row: &Row,
+    record: &str,
+    column: &'static str,
+) -> Result<[u8; 16], PostgresKernelError> {
+    let bytes: Vec<u8> = invocation_audit_column(row, record, column)?;
+    bytes.try_into().map_err(|_| {
+        invocation_audit_invariant(
+            record,
+            "invocation audit identity must be exactly sixteen bytes",
+        )
+    })
+}
+
+fn invocation_audit_column<T: FromSqlOwned>(
+    row: &Row,
+    record: &str,
+    column: &'static str,
+) -> Result<T, PostgresKernelError> {
+    row.try_get(column)
+        .map_err(|source| PostgresKernelError::RowDecode {
+            relation: "_orna_kernel.invocation_audit_events",
+            record: record.to_owned(),
+            column,
+            rule: "invocation audit column must use its exact PostgreSQL type",
+            source,
+        })
+}
+
+fn invocation_audit_invariant(record: &str, rule: &'static str) -> PostgresKernelError {
+    PostgresKernelError::DurableInvariant {
+        relation: "_orna_kernel.invocation_audit_events",
+        record: record.to_owned(),
+        rule,
+    }
+}
+
 fn audit_optional_id(
     row: &Row,
     record: &str,
@@ -2103,9 +2560,67 @@ mod tests {
         },
         value::{EnumValue, RuntimeFloat},
     };
+    use std::time::UNIX_EPOCH;
 
     const RAW_CALL_FUNCTION: FunctionId = FunctionId::from_bytes([0x61; 16]);
     const RAW_CALL_PARAMETER: ParameterId = ParameterId::from_bytes([0x62; 16]);
+
+    #[test]
+    fn invocation_audit_decision_uses_only_closed_execute_evidence() {
+        let target = InvocationTarget::new(
+            FunctionId::from_bytes([0x81; 16]),
+            RevisionPair::new(
+                SourceRevisionId::from_bytes([0x82; 16]),
+                CatalogueRevisionId::from_bytes([0x83; 16]),
+            ),
+        );
+        let evidence = SecurityAuditEvent::new(
+            SecurityAuditEventId::from_bytes([0x84; 16]),
+            1,
+            UNIX_EPOCH,
+            SecurityAuditDecision::recover_execute_allowed(
+                PrincipalId::from_bytes([0x85; 16]),
+                PrincipalId::from_bytes([0x86; 16]),
+                PrincipalId::from_bytes([0x87; 16]),
+                target,
+            ),
+        );
+        let decision = InvocationAuditDecision::from_execute_evidence(
+            InvocationId::from_bytes([0x88; 16]),
+            &evidence,
+        )
+        .expect("allowed EXECUTE evidence must create one invocation decision");
+        assert_eq!(decision.outcome, SecurityAuditOutcome::Allowed);
+        assert_eq!(decision.target, Some(target));
+        assert_eq!(decision.security_audit_event, Some(evidence.id()));
+
+        let authentication = SecurityAuditEvent::new(
+            SecurityAuditEventId::from_bytes([0x89; 16]),
+            2,
+            UNIX_EPOCH,
+            SecurityAuditDecision::recover_authentication_allowed(PrincipalId::from_bytes(
+                [0x85; 16],
+            )),
+        );
+        assert!(matches!(
+            InvocationAuditDecision::from_execute_evidence(
+                InvocationId::from_bytes([0x8a; 16]),
+                &authentication,
+            ),
+            Err(PostgresKernelError::DurableInvariant {
+                relation: "_orna_kernel.invocation_audit_events",
+                rule: "invocation decision requires EXECUTE audit evidence",
+                ..
+            })
+        ));
+
+        let unresolved = InvocationAuditDecision::unresolved_denied(
+            InvocationId::from_bytes([0x8b; 16]),
+            PrincipalId::from_bytes([0x85; 16]),
+        );
+        validate_invocation_audit_decision_shape(&unresolved, "test")
+            .expect("unresolved denied decision must remain closed");
+    }
 
     #[test]
     fn raw_call_argument_shape_accepts_zero_one_and_supported_pairs() {
