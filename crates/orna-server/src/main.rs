@@ -16,6 +16,13 @@ mod source_check;
 
 const USAGE: &str = "Usage:\n  orna --version\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna security grant-execute <canonical-function-id>\n  orna raw-call <canonical-function-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id>";
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RawCallParameters {
+    None,
+    One(RawCallParameterId),
+    Pair(RawCallParameterId, RawCallParameterId),
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Command {
     Version,
@@ -25,7 +32,7 @@ enum Command {
     SourceCheck(String),
     SourceApply(String),
     SecurityGrantExecute(FunctionId),
-    RawCall(FunctionId, Option<RawCallParameterId>),
+    RawCall(FunctionId, RawCallParameters),
 }
 
 fn main() -> ExitCode {
@@ -127,9 +134,14 @@ fn main() -> ExitCode {
                 }
             }
         }
-        Command::RawCall(function, parameter) => match match parameter {
-            Some(parameter) => orna_server::run_local_raw_call_with_argument(function, parameter),
-            None => orna_server::run_local_raw_call(function),
+        Command::RawCall(function, parameters) => match match parameters {
+            RawCallParameters::None => orna_server::run_local_raw_call(function),
+            RawCallParameters::One(parameter) => {
+                orna_server::run_local_raw_call_with_argument(function, parameter)
+            }
+            RawCallParameters::Pair(first, second) => {
+                orna_server::run_local_raw_call_with_argument_pair(function, first, second)
+            }
         } {
             Ok(orna_server::LocalRawCallOutcome::Completed) => ExitCode::SUCCESS,
             Ok(orna_server::LocalRawCallOutcome::Failed(failure)) => {
@@ -183,23 +195,40 @@ where
         }
         Some(value) if value == OsStr::new("raw-call") => {
             let function = args.next()?.into_string().ok()?;
-            let parameter = match args.next() {
+            let first = match args.next() {
                 Some(parameter) => {
-                    Some(RawCallParameterId::from_canonical(&parameter.into_string().ok()?).ok()?)
+                    RawCallParameterId::from_canonical(&parameter.into_string().ok()?)
+                        .ok()
+                        .map(RawCallParameters::One)?
                 }
-                None => None,
+                None => RawCallParameters::None,
+            };
+            let parameters = match (first, args.next()) {
+                (RawCallParameters::One(first), Some(second)) => {
+                    let second =
+                        RawCallParameterId::from_canonical(&second.into_string().ok()?).ok()?;
+                    if first == second {
+                        return None;
+                    }
+                    RawCallParameters::Pair(first, second)
+                }
+                (parameters, None) => parameters,
+                (RawCallParameters::None | RawCallParameters::Pair(_, _), Some(_)) => {
+                    return None;
+                }
             };
             if args.next().is_some() {
                 return None;
             }
             if function == CATALOGUE_HEALTH_FUNCTION_NAME {
-                parameter
-                    .is_none()
-                    .then_some(Command::RawCall(CATALOGUE_HEALTH_FUNCTION_ID, None))
+                (parameters == RawCallParameters::None).then_some(Command::RawCall(
+                    CATALOGUE_HEALTH_FUNCTION_ID,
+                    RawCallParameters::None,
+                ))
             } else {
                 FunctionId::from_canonical(&function)
                     .ok()
-                    .map(|function| Command::RawCall(function, parameter))
+                    .map(|function| Command::RawCall(function, parameters))
             }
         }
         Some(value) if value == OsStr::new("security") => {
@@ -318,16 +347,16 @@ mod tests {
         let canonical = function.canonical();
         assert_eq!(
             parse_command(arguments(&["orna", "raw-call", &canonical])),
-            Some(Command::RawCall(function, None))
+            Some(Command::RawCall(function, RawCallParameters::None))
         );
         let health = CATALOGUE_HEALTH_FUNCTION_ID;
         assert_eq!(
             parse_command(arguments(&["orna", "raw-call", "sys.catalog.health"])),
-            Some(Command::RawCall(health, None))
+            Some(Command::RawCall(health, RawCallParameters::None))
         );
         assert_eq!(
             parse_command(arguments(&["orna", "raw-call", &health.canonical()])),
-            Some(Command::RawCall(health, None))
+            Some(Command::RawCall(health, RawCallParameters::None))
         );
         let parameter = ParameterId::from_bytes([0x22; 16]);
         let parameter_canonical = parameter.canonical();
@@ -338,7 +367,10 @@ mod tests {
                 &canonical,
                 &parameter_canonical
             ])),
-            Some(Command::RawCall(function, Some(parameter)))
+            Some(Command::RawCall(
+                function,
+                RawCallParameters::One(parameter)
+            ))
         );
         for values in [
             vec!["orna", "raw-call"],
@@ -359,6 +391,48 @@ mod tests {
                 "raw-call",
                 &canonical,
                 &parameter_canonical,
+                "extra",
+            ],
+        ] {
+            assert_eq!(parse_command(arguments(&values)), None, "{values:?}");
+        }
+    }
+
+    #[test]
+    fn accepts_two_distinct_raw_call_parameter_ids_in_token_order_and_rejects_duplicates() {
+        let function = FunctionId::from_bytes([0x11; 16]);
+        let first = ParameterId::from_bytes([0x22; 16]);
+        let second = ParameterId::from_bytes([0x33; 16]);
+        let function_canonical = function.canonical();
+        let first_canonical = first.canonical();
+        let second_canonical = second.canonical();
+        assert_eq!(
+            parse_command(arguments(&[
+                "orna",
+                "raw-call",
+                &function_canonical,
+                &first_canonical,
+                &second_canonical,
+            ])),
+            Some(Command::RawCall(
+                function,
+                RawCallParameters::Pair(first, second),
+            ))
+        );
+        for values in [
+            vec![
+                "orna",
+                "raw-call",
+                &function_canonical,
+                &first_canonical,
+                &first_canonical,
+            ],
+            vec![
+                "orna",
+                "raw-call",
+                &function_canonical,
+                &first_canonical,
+                &second_canonical,
                 "extra",
             ],
         ] {

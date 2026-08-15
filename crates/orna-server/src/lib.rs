@@ -19,6 +19,7 @@ pub use embedded::{
 pub use local_auth::{LocalAuthenticationError, authenticate_local_stream};
 pub use raw_call::{
     LocalRawCallError, LocalRawCallOutcome, run_local_raw_call, run_local_raw_call_with_argument,
+    run_local_raw_call_with_argument_pair,
 };
 pub use raw_client_dispatch::{RawClientDispatch, RawClientDispatchResult};
 pub use raw_socket::{
