@@ -40,7 +40,7 @@ use orna_core::{
 };
 use orna_postgres::{
     AuthenticatedRawCallResult, PostgresKernel, PostgresKernelError, ServerInsertError,
-    ServerMutationError,
+    ServerMutationError, ServerUpdateError,
 };
 use orna_protocol::{
     CallFailure, Channel, ClientFrame, Event, RawCall, ServerAction, ServerFrame,
@@ -147,7 +147,7 @@ const RAW_ARGUMENT_PAIR_SOCKET_SOURCE: &str = "CREATE SCHEMA raw_argument_pair_s
 /// second. Socket calls supply the selector first to prove ParameterId binding.
 const RAW_REFERENCE_VALUE_UPDATE_SOCKET_SOURCE: &str = "CREATE SCHEMA raw_reference_value_socket;\n\
     CREATE TYPE raw_reference_value_socket.probe AS OBJECT (\n\
-      stored TEXT NOT NULL, linked REF raw_reference_value_socket.probe\n\
+      stored TEXT NOT NULL UNIQUE, linked REF raw_reference_value_socket.probe\n\
     );\n\
     CREATE SERVER FUNCTION raw_reference_value_socket.create_probe(p_stored TEXT)\n\
     RETURNS ROWS (created REF raw_reference_value_socket.probe)\n\
@@ -3258,6 +3258,7 @@ async fn raw_reference_value_update_socket_retains_pair_authority() -> TestResul
             vec![LocalPeerCredential::new(uid, RAW_CLIENT_USER)],
         )?;
         kernel.replace_security_snapshot(&granted).await?;
+        let direct_session = granted.bind_authenticated_session(RAW_CLIENT_USER, vec![])?;
         let reference_credit = u64::try_from(
             encode_active_server_frame(
                 &active,
@@ -3339,22 +3340,146 @@ async fn raw_reference_value_update_socket_retains_pair_authority() -> TestResul
                 return Err(failure("reference value socket did not create two rows"));
             };
 
+            // The raw socket closes both conflict forms to the same public
+            // failure. The trusted direct dispatcher retains the typed
+            // source, because no socket frame may expose it.
+            let duplicate_value = RuntimeValue::Text(String::from("second"));
+            let duplicate_insert = RawClientDispatch::new(
+                kernel.clone(),
+                direct_session.clone(),
+                12,
+                RawCall {
+                    function: create,
+                    arguments: vec![orna_protocol::CallArgument {
+                        parameter: create_stored,
+                        value: duplicate_value.clone(),
+                    }],
+                },
+            )
+            .finish()
+            .await;
+            require_dispatch_failure(
+                &duplicate_insert,
+                12,
+                CallFailure::InternalFailure,
+                matches!(
+                    duplicate_insert.source(),
+                    Some(PostgresKernelError::ServerInsert(
+                        ServerInsertError::NotCommitted { source, .. }
+                    )) if matches!(source.as_ref(), ServerMutationError::UniqueTextConflict { .. })
+                ),
+                "a duplicate raw Text INSERT did not retain its private typed conflict",
+            )?;
+            let duplicate_update = RawClientDispatch::new(
+                kernel.clone(),
+                direct_session.clone(),
+                13,
+                RawCall {
+                    function: update_text,
+                    arguments: vec![
+                        orna_protocol::CallArgument {
+                            parameter: text_selector,
+                            value: first.clone(),
+                        },
+                        orna_protocol::CallArgument {
+                            parameter: text_value,
+                            value: duplicate_value.clone(),
+                        },
+                    ],
+                },
+            )
+            .finish()
+            .await;
+            require_dispatch_failure(
+                &duplicate_update,
+                13,
+                CallFailure::InternalFailure,
+                matches!(
+                    duplicate_update.source(),
+                    Some(PostgresKernelError::ServerUpdate(
+                        ServerUpdateError::NotCommitted { source, .. }
+                    )) if matches!(source.as_ref(), ServerMutationError::UniqueTextConflict { .. })
+                ),
+                "a duplicate raw Text UPDATE did not retain its private typed conflict",
+            )?;
+
+            for (stream, function, arguments) in [
+                (
+                    3,
+                    create,
+                    vec![(create_stored, duplicate_value.clone())],
+                ),
+                (
+                    4,
+                    update_text,
+                    vec![
+                        (text_selector, first.clone()),
+                        (text_value, duplicate_value.clone()),
+                    ],
+                ),
+            ] {
+                send_active_protocol_frame(
+                    &mut client,
+                    &active,
+                    &ClientFrame::CallRawStart { stream, function },
+                )
+                .await?;
+                for (parameter, value) in arguments {
+                    send_active_protocol_frame(
+                        &mut client,
+                        &active,
+                        &ClientFrame::CallArgument {
+                            stream,
+                            parameter,
+                            value,
+                        },
+                    )
+                    .await?;
+                }
+                send_active_protocol_frame(
+                    &mut client,
+                    &active,
+                    &ClientFrame::CallArgumentsComplete { stream },
+                )
+                .await?;
+                require(
+                    matches!(
+                        read_active_protocol_frame(&mut client, &active).await?,
+                        ServerFrame::CallAccepted { stream: actual, .. } if actual == stream
+                    ) && read_active_protocol_frame(&mut client, &active).await?
+                        == ServerFrame::CallFailed {
+                            stream,
+                            failure: CallFailure::InternalFailure,
+                        },
+                    "a duplicate raw Text mutation disclosed a private conflict fact",
+                )?;
+                require(
+                    timeout(
+                        Duration::from_millis(50),
+                        read_active_protocol_frame(&mut client, &active),
+                    )
+                    .await
+                    .is_err(),
+                    "a duplicate raw Text mutation emitted a value frame after its terminal failure",
+                )?;
+            }
+
             // Selector-first framing reverses the declaration order. The
             // accepted call emits no value until exact result credit arrives.
             for frame in [
-                ClientFrame::CallRawStart { stream: 3, function: update_text },
-                ClientFrame::CallArgument { stream: 3, parameter: text_selector, value: first.clone() },
+                ClientFrame::CallRawStart { stream: 5, function: update_text },
+                ClientFrame::CallArgument { stream: 5, parameter: text_selector, value: first.clone() },
                 ClientFrame::CallArgument {
-                    stream: 3,
+                    stream: 5,
                     parameter: text_value,
                     value: RuntimeValue::Text(String::from("changed")),
                 },
-                ClientFrame::CallArgumentsComplete { stream: 3 },
+                ClientFrame::CallArgumentsComplete { stream: 5 },
             ] {
                 send_active_protocol_frame(&mut client, &active, &frame).await?;
             }
             require(
-                matches!(read_active_protocol_frame(&mut client, &active).await?, ServerFrame::CallAccepted { stream: 3, .. }),
+                matches!(read_active_protocol_frame(&mut client, &active).await?, ServerFrame::CallAccepted { stream: 5, .. }),
                 "reference value socket did not accept the scalar pair UPDATE",
             )?;
             sleep(Duration::from_millis(50)).await;
@@ -3368,7 +3493,7 @@ async fn raw_reference_value_update_socket_retains_pair_authority() -> TestResul
                 "reference value socket emitted an UPDATE result without credit",
             )?;
             send_active_protocol_frame(&mut client, &active, &ClientFrame::WindowUpdate {
-                stream: 3,
+                stream: 5,
                 channel: Channel::ResultValues,
                 credit: reference_credit
                     .checked_sub(1)
@@ -3385,16 +3510,16 @@ async fn raw_reference_value_update_socket_retains_pair_authority() -> TestResul
                 "reference value socket emitted an UPDATE result before its exact credit boundary",
             )?;
             send_active_protocol_frame(&mut client, &active, &ClientFrame::WindowUpdate {
-                stream: 3, channel: Channel::ResultValues, credit: 1,
+                stream: 5, channel: Channel::ResultValues, credit: 1,
             }).await?;
             require(
                 matches!(
                     read_active_protocol_frame(&mut client, &active).await?,
-                    ServerFrame::EventBatch { stream: 3, events, .. }
+                    ServerFrame::EventBatch { stream: 5, events, .. }
                         if events.len() == 1 && events[0].sequence == 1
                             && events[0].event == Event::Value(first.clone())
                 ) && read_active_protocol_frame(&mut client, &active).await?
-                    == ServerFrame::CallCompleted { stream: 3 },
+                    == ServerFrame::CallCompleted { stream: 5 },
                 "reference value socket scalar UPDATE did not return the exact selector",
             )?;
 
@@ -3410,59 +3535,59 @@ async fn raw_reference_value_update_socket_retains_pair_authority() -> TestResul
                 .find(|candidate| candidate != first_object && candidate != second_object)
                 .ok_or_else(|| failure("reference value socket has no absent object identity"))?;
             for frame in [
-                ClientFrame::CallRawStart { stream: 4, function: update_text },
-                ClientFrame::CallArgument { stream: 4, parameter: text_value, value: RuntimeValue::Text(String::from("absent")) },
+                ClientFrame::CallRawStart { stream: 6, function: update_text },
+                ClientFrame::CallArgument { stream: 6, parameter: text_value, value: RuntimeValue::Text(String::from("absent")) },
                 ClientFrame::CallArgument {
-                    stream: 4,
+                    stream: 6,
                     parameter: text_selector,
                     value: RuntimeValue::Reference { target: probe, object: absent_object },
                 },
-                ClientFrame::WindowUpdate { stream: 4, channel: Channel::ResultValues, credit: 1024 },
-                ClientFrame::CallArgumentsComplete { stream: 4 },
+                ClientFrame::WindowUpdate { stream: 6, channel: Channel::ResultValues, credit: 1024 },
+                ClientFrame::CallArgumentsComplete { stream: 6 },
             ] {
                 send_active_protocol_frame(&mut client, &active, &frame).await?;
             }
             require(
-                matches!(read_active_protocol_frame(&mut client, &active).await?, ServerFrame::CallAccepted { stream: 4, .. })
+                matches!(read_active_protocol_frame(&mut client, &active).await?, ServerFrame::CallAccepted { stream: 6, .. })
                     && read_active_protocol_frame(&mut client, &active).await?
-                        == ServerFrame::CallCompleted { stream: 4 },
+                        == ServerFrame::CallCompleted { stream: 6 },
                 "reference value socket absent selector did not complete empty",
             )?;
 
             for frame in [
-                ClientFrame::CallRawStart { stream: 5, function: update_link },
-                ClientFrame::CallArgument { stream: 5, parameter: link_selector, value: second.clone() },
-                ClientFrame::CallArgument { stream: 5, parameter: link_value, value: first.clone() },
-                ClientFrame::WindowUpdate { stream: 5, channel: Channel::ResultValues, credit: 1024 },
-                ClientFrame::CallArgumentsComplete { stream: 5 },
+                ClientFrame::CallRawStart { stream: 7, function: update_link },
+                ClientFrame::CallArgument { stream: 7, parameter: link_selector, value: second.clone() },
+                ClientFrame::CallArgument { stream: 7, parameter: link_value, value: first.clone() },
+                ClientFrame::WindowUpdate { stream: 7, channel: Channel::ResultValues, credit: 1024 },
+                ClientFrame::CallArgumentsComplete { stream: 7 },
             ] {
                 send_active_protocol_frame(&mut client, &active, &frame).await?;
             }
             require(
-                matches!(read_active_protocol_frame(&mut client, &active).await?, ServerFrame::CallAccepted { stream: 5, .. })
+                matches!(read_active_protocol_frame(&mut client, &active).await?, ServerFrame::CallAccepted { stream: 7, .. })
                     && matches!(
                         read_active_protocol_frame(&mut client, &active).await?,
-                        ServerFrame::EventBatch { stream: 5, events, .. }
+                        ServerFrame::EventBatch { stream: 7, events, .. }
                             if events.len() == 1 && events[0].event == Event::Value(second.clone())
                     ) && read_active_protocol_frame(&mut client, &active).await?
-                        == ServerFrame::CallCompleted { stream: 5 },
+                        == ServerFrame::CallCompleted { stream: 7 },
                 "reference value socket Reference UPDATE did not bind the selected row",
             )?;
 
             // Cancellation remains public. The accepted mutation commits, so
             // the later socket read is the durable oracle.
             for frame in [
-                ClientFrame::CallRawStart { stream: 6, function: update_text },
-                ClientFrame::CallArgument { stream: 6, parameter: text_selector, value: first.clone() },
-                ClientFrame::CallArgument { stream: 6, parameter: text_value, value: RuntimeValue::Text(String::from("cancelled")) },
-                ClientFrame::CallArgumentsComplete { stream: 6 },
-                ClientFrame::CallCancel { stream: 6 },
+                ClientFrame::CallRawStart { stream: 8, function: update_text },
+                ClientFrame::CallArgument { stream: 8, parameter: text_selector, value: first.clone() },
+                ClientFrame::CallArgument { stream: 8, parameter: text_value, value: RuntimeValue::Text(String::from("second\n")) },
+                ClientFrame::CallArgumentsComplete { stream: 8 },
+                ClientFrame::CallCancel { stream: 8 },
             ] {
                 send_active_protocol_frame(&mut client, &active, &frame).await?;
             }
             require(
-                matches!(read_active_protocol_frame(&mut client, &active).await?, ServerFrame::CallAccepted { stream: 6, .. })
-                    && read_active_protocol_frame(&mut client, &active).await? == ServerFrame::CallCancelled { stream: 6 },
+                matches!(read_active_protocol_frame(&mut client, &active).await?, ServerFrame::CallAccepted { stream: 8, .. })
+                    && read_active_protocol_frame(&mut client, &active).await? == ServerFrame::CallCancelled { stream: 8 },
                 "reference value socket did not retain accepted-call cancellation",
             )?;
 
@@ -3470,23 +3595,23 @@ async fn raw_reference_value_update_socket_retains_pair_authority() -> TestResul
             wrong_bytes[0] ^= 1;
             let wrong = ParameterId::from_bytes(wrong_bytes);
             for frame in [
-                ClientFrame::CallRawStart { stream: 7, function: update_text },
-                ClientFrame::CallArgument { stream: 7, parameter: wrong, value: first.clone() },
-                ClientFrame::CallArgument { stream: 7, parameter: text_value, value: RuntimeValue::Text(String::from("wrong")) },
-                ClientFrame::CallArgumentsComplete { stream: 7 },
+                ClientFrame::CallRawStart { stream: 9, function: update_text },
+                ClientFrame::CallArgument { stream: 9, parameter: wrong, value: first.clone() },
+                ClientFrame::CallArgument { stream: 9, parameter: text_value, value: RuntimeValue::Text(String::from("wrong")) },
+                ClientFrame::CallArgumentsComplete { stream: 9 },
             ] {
                 send_active_protocol_frame(&mut client, &active, &frame).await?;
             }
             require(
-                matches!(read_active_protocol_frame(&mut client, &active).await?, ServerFrame::CallAccepted { stream: 7, .. })
+                matches!(read_active_protocol_frame(&mut client, &active).await?, ServerFrame::CallAccepted { stream: 9, .. })
                     && read_active_protocol_frame(&mut client, &active).await?
-                        == ServerFrame::CallFailed { stream: 7, failure: CallFailure::TargetUnavailable },
+                        == ServerFrame::CallFailed { stream: 9, failure: CallFailure::TargetUnavailable },
                 "reference value socket invalid pair did not stay redacted",
             )?;
 
             for (stream, function, arguments) in [
                 (
-                    8,
+                    10,
                     update_text,
                     vec![
                         (text_selector, RuntimeValue::Text(String::from("not-a-reference"))),
@@ -3494,7 +3619,7 @@ async fn raw_reference_value_update_socket_retains_pair_authority() -> TestResul
                     ],
                 ),
                 (
-                    9,
+                    11,
                     read_stored,
                     vec![
                         (text_selector, first.clone()),
@@ -3537,7 +3662,7 @@ async fn raw_reference_value_update_socket_retains_pair_authority() -> TestResul
                 )?;
             }
 
-            for (stream, function) in [(10, read_stored), (11, read_links)] {
+            for (stream, function) in [(12, read_stored), (13, read_links)] {
                 for frame in [
                     ClientFrame::CallRawStart { stream, function },
                     ClientFrame::WindowUpdate { stream, channel: Channel::ResultValues, credit: 2048 },
@@ -3562,11 +3687,11 @@ async fn raw_reference_value_update_socket_retains_pair_authority() -> TestResul
                 if !matches!(completed, ServerFrame::CallCompleted { stream: actual } if actual == stream) {
                     return Err(failure("reference value socket durable reader did not complete"));
                 }
-                if stream == 10 {
+                if stream == 12 {
                     require(
-                        values.iter().filter(|value| **value == RuntimeValue::Text(String::from("cancelled"))).count() == 1
+                        values.iter().filter(|value| **value == RuntimeValue::Text(String::from("second\n"))).count() == 1
                             && values.iter().filter(|value| **value == RuntimeValue::Text(String::from("second"))).count() == 1,
-                        "reference value socket cancelled UPDATE did not commit exactly one selected row",
+                        "reference value socket did not preserve a byte-distinct Text value after cancellation",
                     )?;
                 } else {
                     require(
@@ -3595,6 +3720,10 @@ async fn raw_reference_value_update_socket_retains_pair_authority() -> TestResul
             (SecurityAuditKind::Authentication, SecurityAuditOutcome::Allowed, None),
             (SecurityAuditKind::Execute, SecurityAuditOutcome::Allowed, Some(create)),
             (SecurityAuditKind::Execute, SecurityAuditOutcome::Allowed, Some(create)),
+            (SecurityAuditKind::Execute, SecurityAuditOutcome::Allowed, Some(create)),
+            (SecurityAuditKind::Execute, SecurityAuditOutcome::Allowed, Some(update_text)),
+            (SecurityAuditKind::Execute, SecurityAuditOutcome::Allowed, Some(create)),
+            (SecurityAuditKind::Execute, SecurityAuditOutcome::Allowed, Some(update_text)),
             (SecurityAuditKind::Execute, SecurityAuditOutcome::Allowed, Some(update_text)),
             (SecurityAuditKind::Execute, SecurityAuditOutcome::Allowed, Some(update_text)),
             (SecurityAuditKind::Execute, SecurityAuditOutcome::Allowed, Some(update_link)),
@@ -3615,6 +3744,11 @@ async fn raw_reference_value_update_socket_retains_pair_authority() -> TestResul
                         && decision.target().map(InvocationTarget::function) == function
                 }),
             "reference value socket changed the private typed audit sequence",
+        )?;
+        let audit_debug = format!("{audits:?}");
+        require(
+            !audit_debug.contains("second") && !audit_debug.contains("second\\n"),
+            "unique Text values leaked into the durable security audit",
         )?;
         require_no_database_sessions(&database).await
     })
