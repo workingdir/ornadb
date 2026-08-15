@@ -10,10 +10,11 @@ use orna_core::{
     revision::{ActiveDatabaseRevision, RevisionPair},
     security::{
         AuthenticatedSession, CATALOGUE_HEALTH_FUNCTION_ID, CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID,
-        ExecuteDecision, ExecuteGrant, InvocationTarget, LocalPeerAuthenticationError,
-        LocalPeerCredential, Principal, PrincipalKind, PrincipalStatus, RoleMembership,
-        SecurityAuditDecision, SecurityAuditDenial, SecurityAuditEvent, SecurityAuditKind,
-        SecurityAuditOutcome, SecuritySnapshot, SessionBindingError,
+        ExecuteDecision, ExecuteDenial, ExecuteGrant, InvocationTarget,
+        LocalPeerAuthenticationError, LocalPeerCredential, Principal, PrincipalKind,
+        PrincipalStatus, RoleMembership, SecurityAuditDecision, SecurityAuditDenial,
+        SecurityAuditEvent, SecurityAuditKind, SecurityAuditOutcome, SecuritySnapshot,
+        SessionBindingError,
     },
     system::{SYS_INVOKE_FUNCTION_ID, system_function_by_id},
     value::{FunctionArgument, RecordValue, RuntimeValue},
@@ -242,6 +243,10 @@ impl PostgresKernel {
 
             let decision = if system_function_by_id(function).is_some() {
                 security.authorise_system_function(authenticated_session, target)
+            } else if active.catalogue().function_by_id(function).is_none() {
+                // A verified-standard target can enter only through the sealed
+                // invocation boundary. Raw dispatch has no standard target path.
+                ExecuteDecision::Denied(ExecuteDenial::UnknownFunction)
             } else {
                 security.authorise_execute(authenticated_session, target)
             };
@@ -985,7 +990,7 @@ impl PostgresKernel {
                 current.local_peer_credentials().collect(),
             )
             .map_err(PostgresKernelError::SecuritySnapshot)?;
-            require_complete_function_set(&transaction, &candidate).await?;
+            require_complete_function_set(&active, &candidate)?;
             insert_execute_grant_if_absent(&transaction, requested_grant).await?;
             let recovered = recover_security_snapshot_for_active(&transaction, &active).await?;
             if !security_snapshots_match(&candidate, &recovered) {
@@ -1021,9 +1026,9 @@ impl PostgresKernel {
                 .map_err(PostgresKernelError::Database)?;
             require_current_migrations(&transaction).await?;
             lock_active_revision(&transaction, snapshot.revision()).await?;
-            require_complete_function_set(&transaction, snapshot).await?;
-            lock_catalogue_health_identity(&transaction).await?;
             let active = recover_active_revision(&transaction).await?;
+            require_complete_function_set(&active, snapshot)?;
+            lock_catalogue_health_identity(&transaction).await?;
             let current = recover_security_snapshot_for_active(&transaction, &active).await?;
             require_catalogue_health_identity_preserved(&current, snapshot)?;
             replace_security_rows(&transaction, snapshot).await?;
@@ -1572,39 +1577,40 @@ async fn lock_active_revision(
     Ok(())
 }
 
-async fn require_complete_function_set(
-    transaction: &Transaction<'_>,
+fn require_complete_function_set(
+    active: &ActiveDatabaseRevision,
     snapshot: &SecuritySnapshot,
 ) -> Result<(), PostgresKernelError> {
-    let rows = transaction
-        .query(
-            "SELECT function_id
-             FROM _orna_kernel.catalogue_functions
-             WHERE catalogue_revision_id = (
-                 SELECT catalogue_revision_id
-                 FROM _orna_kernel.active_revision
-                 WHERE singleton = true
-             )
-             ORDER BY function_id",
-            &[],
-        )
-        .await
-        .map_err(PostgresKernelError::Database)?;
-    let active = rows
-        .iter()
-        .map(|row| {
-            exact_id(
-                row,
-                "function_id",
-                "active function identity is not exactly 16 bytes",
-            )
-            .map(FunctionId::from_bytes)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    if active != snapshot.functions().collect::<Vec<_>>() {
+    if security_function_targets(active) != snapshot.functions().collect::<Vec<_>>() {
         return Err(PostgresKernelError::SecurityFunctionSetMismatch);
     }
     Ok(())
+}
+
+/// Returns the exact non-system `EXECUTE` target universe for one active revision.
+///
+/// The application catalogue and its pinned verified standard snapshot are both
+/// identity authorities. The standard side is empty until standard functions
+/// are admitted, but it remains part of this one ordered target set.
+fn security_function_targets(active: &ActiveDatabaseRevision) -> Vec<FunctionId> {
+    let mut functions = active
+        .catalogue()
+        .functions()
+        .iter()
+        .map(|function| function.id())
+        .collect::<Vec<_>>();
+    if let Some(standard) = active.catalogue_hash_context().standard() {
+        functions.extend(
+            standard
+                .catalogue()
+                .functions()
+                .iter()
+                .map(|function| function.id()),
+        );
+    }
+    functions.retain(|function| system_function_by_id(*function).is_none());
+    functions.sort_unstable();
+    functions
 }
 
 async fn replace_security_rows(
@@ -1702,12 +1708,7 @@ async fn recover_security_snapshot_for_active(
     transaction: &Transaction<'_>,
     active: &ActiveDatabaseRevision,
 ) -> Result<SecuritySnapshot, PostgresKernelError> {
-    let functions = active
-        .catalogue()
-        .functions()
-        .iter()
-        .map(|function| function.id())
-        .collect::<Vec<_>>();
+    let functions = security_function_targets(active);
     let principals = load_principals(transaction).await?;
     let memberships = load_memberships(transaction).await?;
     let grants = load_grants(transaction).await?;

@@ -1352,12 +1352,76 @@ async fn persists_recovers_revokes_and_disables_execute_authority() -> TestResul
             .find(|definition| definition.name().parts() == ["app", "read"])
             .ok_or_else(|| failure("security fixture SERVER function was not recovered"))?
             .id();
-        let functions = active
+        let mut functions = active
             .catalogue()
             .functions()
             .iter()
             .map(|definition| definition.id())
             .collect::<Vec<_>>();
+        functions.sort_unstable();
+        let standard = active
+            .catalogue_hash_context()
+            .standard()
+            .ok_or_else(|| failure("security fixture must use a pinned standard snapshot"))?;
+        require(
+            standard.catalogue().functions().is_empty(),
+            "the current verified standard snapshot must contribute no functions",
+        )?;
+        let recovered_empty = kernel.recover_security_snapshot().await?;
+        require(
+            recovered_empty.functions().collect::<Vec<_>>() == functions,
+            "security recovery did not derive the exact application and empty-standard target union",
+        )?;
+
+        let missing_target = SecuritySnapshot::new(
+            active.pair(),
+            functions[..1].to_vec(),
+            vec![],
+            vec![],
+            vec![],
+        )?;
+        let missing_error = kernel
+            .replace_security_snapshot(&missing_target)
+            .await
+            .expect_err("security replacement missing an application target must fail");
+        require(
+            matches!(
+                missing_error,
+                PostgresKernelError::SecurityFunctionSetMismatch
+            ),
+            "missing target replacement returned the wrong typed error",
+        )?;
+        let extra = FunctionId::from_bytes([0x39; 16]);
+        let mut extra_targets = functions.clone();
+        extra_targets.push(extra);
+        extra_targets.sort_unstable();
+        let extra_target = SecuritySnapshot::new(
+            active.pair(),
+            extra_targets,
+            vec![],
+            vec![],
+            vec![],
+        )?;
+        let extra_error = kernel
+            .replace_security_snapshot(&extra_target)
+            .await
+            .expect_err("security replacement with an extra target must fail");
+        require(
+            matches!(
+                extra_error,
+                PostgresKernelError::SecurityFunctionSetMismatch
+            ),
+            "extra target replacement returned the wrong typed error",
+        )?;
+        require(
+            kernel
+                .recover_security_snapshot()
+                .await?
+                .functions()
+                .collect::<Vec<_>>()
+                == functions,
+            "rejected target-set replacements changed recovered security targets",
+        )?;
 
         let granted = SecuritySnapshot::new_with_local_peer_credentials(
             active.pair(),
