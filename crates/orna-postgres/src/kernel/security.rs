@@ -25,8 +25,8 @@ use crate::{
     bootstrap::require_current_migrations,
     recovery::recover_active_revision,
     server_execution::{
-        ServerSelectResult, execute_authorised_server_select, into_raw_server_values,
-        raw_server_target_is_unavailable, validate_raw_server_select_target,
+        ServerSelectResult, execute_authorised_raw_server_select, execute_authorised_server_select,
+        raw_identity_selected_server_select_target_is_selected, raw_server_target_is_unavailable,
     },
     server_mutation_execution::{
         ServerInsertError, execute_authorised_raw_server_insert,
@@ -245,6 +245,10 @@ impl PostgresKernel {
                             let reference_mutation = reference_argument
                                 .then(|| raw_server_reference_mutation_target(&active, function))
                                 .flatten();
+                            let identity_selected_select = reference_argument
+                                && raw_identity_selected_server_select_target_is_selected(
+                                    &active, function,
+                                );
                             if raw_server_insert_target_is_selected(&active, function) {
                                 let savepoint = transaction
                                     .savepoint("raw_server_insert_execution")
@@ -317,7 +321,7 @@ impl PostgresKernel {
                                         ))
                                     }
                                 }
-                            } else if !arguments.is_empty() {
+                            } else if !arguments.is_empty() && !identity_selected_select {
                                 Err(raw_call_target_unavailable(
                                     function,
                                     "raw call arguments require a supported active SERVER mutation target",
@@ -327,19 +331,14 @@ impl PostgresKernel {
                                     .savepoint("raw_server_select_execution")
                                     .await
                                     .map_err(PostgresKernelError::Database)?;
-                                let server = async {
-                                    validate_raw_server_select_target(&active, function)?;
-                                    let result = execute_authorised_server_select(
-                                        &savepoint,
-                                        &active,
-                                        &authorisation,
-                                        &[],
-                                    )
-                                    .await?;
-                                    let values = into_raw_server_values(&active, function, result)?;
-                                    Ok(AuthenticatedRawCallResult::Server(values))
-                                }
-                                .await;
+                                let server = execute_authorised_raw_server_select(
+                                    &savepoint,
+                                    &active,
+                                    &authorisation,
+                                    arguments,
+                                )
+                                .await
+                                .map(AuthenticatedRawCallResult::Server);
                                 match server {
                                     Ok(result) => {
                                         savepoint
@@ -353,7 +352,13 @@ impl PostgresKernel {
                                             .rollback()
                                             .await
                                             .map_err(PostgresKernelError::Database)?;
-                                        Err(classify_raw_server_error(error))
+                                        Err(if identity_selected_select {
+                                            classify_raw_identity_selected_server_error(
+                                                error, function,
+                                            )
+                                        } else {
+                                            classify_raw_server_error(error)
+                                        })
                                     }
                                 }
                             }
@@ -1168,6 +1173,21 @@ fn classify_raw_server_error(error: PostgresKernelError) -> PostgresKernelError 
             PostgresKernelError::RawServerTargetUnavailable {
                 source: RawServerTargetError::Select(source),
             }
+        }
+        error => error,
+    }
+}
+
+fn classify_raw_identity_selected_server_error(
+    error: PostgresKernelError,
+    function: FunctionId,
+) -> PostgresKernelError {
+    match error {
+        PostgresKernelError::ServerSelect(source) if raw_server_target_is_unavailable(&source) => {
+            raw_call_target_unavailable(
+                function,
+                "raw identity-selected SERVER target is unavailable",
+            )
         }
         error => error,
     }

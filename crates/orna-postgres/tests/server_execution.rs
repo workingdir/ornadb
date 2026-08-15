@@ -23,11 +23,13 @@ use orna_core::{
 use orna_core::{
     PrincipalId,
     security::{
-        ExecuteDenial, ExecuteGrant, InvocationTarget, Principal, PrincipalKind, PrincipalStatus,
-        RoleMembership, SecurityAuditDenial, SecurityAuditEvent, SecurityAuditKind,
-        SecurityAuditOutcome, SecuritySnapshot,
+        CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID, ExecuteDenial, ExecuteGrant, InvocationTarget,
+        Principal, PrincipalKind, PrincipalStatus, RoleMembership, SecurityAuditDenial,
+        SecurityAuditEvent, SecurityAuditKind, SecurityAuditOutcome, SecuritySnapshot,
     },
 };
+#[cfg(feature = "test-hooks")]
+use orna_postgres::AuthenticatedRawCallResult;
 use orna_postgres::{PostgresKernel, PostgresKernelError, ServerSelectError, ServerSelectResult};
 use orna_protocol::{ValueCodecError, encode_active_value};
 use orna_standard::{
@@ -155,6 +157,8 @@ const WAIT: Duration = Duration::from_secs(5);
 const ARGUMENT_REJECTION_WAIT: Duration = Duration::from_secs(2);
 const PAYLOAD_LIMIT: usize = 16 * 1024 * 1024;
 const VARIABLE_PAYLOAD_MAXIMUM: usize = 5_592_377;
+#[cfg(feature = "test-hooks")]
+const RAW_IDENTITY_SERVICE_UID: u32 = 61_019;
 
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
@@ -801,6 +805,183 @@ async fn authenticated_server_select_commits_allowed_and_denied_execute_decision
             "failed authenticated SERVER audit inserted a decision",
         )?;
         Ok(())
+    })
+    .await
+}
+
+#[cfg(feature = "test-hooks")]
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn authenticated_raw_identity_selected_select_binds_reference_and_commits_audits()
+-> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = hostile_kernel(&database)?;
+        kernel.bootstrap().await?;
+        let empty = kernel.recover().await?;
+        let version_one = kernel
+            .apply(&candidate("CREATE SCHEMA raw_identity;\n", &empty)?)
+            .await?;
+        let upgrade = orna_standard::prepare_standard_upgrade(&version_one)
+            .map_err(|error| failure(format!("standard upgrade preparation failed: {error}")))?;
+        let version_two = kernel.apply_standard_upgrade(&upgrade).await?;
+        let applied = kernel
+            .apply(&standard_execution_candidate(
+                EXECUTION_SOURCE,
+                &version_two,
+                &upgrade,
+            )?)
+            .await?;
+        let fixture = Fixture::from_active(&applied)?;
+        insert_execution_rows(&database, fixture).await?;
+        kernel
+            .install_catalogue_health_service(RAW_IDENTITY_SERVICE_UID)
+            .await?;
+        let session = kernel
+            .authenticate_local_peer(RAW_IDENTITY_SERVICE_UID)
+            .await?;
+        let root_argument = selector_argument(fixture, fixture.root)?;
+
+        let denied = kernel
+            .dispatch_authenticated_raw_call_with_arguments(
+                &session,
+                fixture.select_node,
+                &root_argument,
+            )
+            .await
+            .expect_err("raw identity SELECT must deny before target inspection");
+        require(
+            matches!(
+                denied,
+                PostgresKernelError::RawExecuteDenied {
+                    pair,
+                    function,
+                    reason: ExecuteDenial::MissingExecuteGrant,
+                } if pair == applied.pair() && function == fixture.select_node
+            ),
+            "raw identity SELECT did not deny before target inspection",
+        )?;
+
+        kernel
+            .grant_catalogue_health_service_execute(applied.pair(), fixture.select_node)
+            .await?;
+        let selected = kernel
+            .dispatch_authenticated_raw_call_with_arguments(
+                &session,
+                fixture.select_node,
+                &root_argument,
+            )
+            .await?;
+        require(
+            selected
+                == AuthenticatedRawCallResult::Server(vec![
+                    RuntimeValue::Reference {
+                        target: fixture.node,
+                        object: fixture.root,
+                    },
+                    RuntimeValue::Integer(20),
+                    RuntimeValue::Text(String::from("other")),
+                    RuntimeValue::Boolean(false),
+                ]),
+            "raw identity SELECT did not return the exact ordered projected values",
+        )?;
+
+        let selected_null = kernel
+            .dispatch_authenticated_raw_call_with_arguments(
+                &session,
+                fixture.select_node,
+                &selector_argument(fixture, fixture.other)?,
+            )
+            .await?;
+        require(
+            matches!(
+                selected_null,
+                AuthenticatedRawCallResult::Server(values)
+                    if matches!(
+                        values.as_slice(),
+                        [
+                            RuntimeValue::Reference { target, object },
+                            RuntimeValue::Integer(10),
+                            RuntimeValue::Null(child_label),
+                            RuntimeValue::Null(same_as_child),
+                        ]
+                            if *target == fixture.node
+                                && *object == fixture.other
+                                && child_label.resolved_type()
+                                    == ResolvedType::scalar(StandardScalar::CharacterLargeObject)
+                                && same_as_child.resolved_type()
+                                    == ResolvedType::scalar(StandardScalar::Boolean)
+                    )
+            ),
+            "raw identity SELECT did not normalise the nullable projections in order",
+        )?;
+
+        let absent = kernel
+            .dispatch_authenticated_raw_call_with_arguments(
+                &session,
+                fixture.select_node,
+                &selector_argument(fixture, ObjectId::from_bytes([0x91; 16]))?,
+            )
+            .await?;
+        require(
+            absent == AuthenticatedRawCallResult::Server(vec![]),
+            "an absent same-type raw identity SELECT must complete without values",
+        )?;
+
+        let unavailable = kernel
+            .dispatch_authenticated_raw_call_with_arguments(
+                &session,
+                fixture.select_node,
+                &[FunctionArgument::new(
+                    ParameterId::from_bytes([0x92; 16]),
+                    RuntimeValue::Reference {
+                        target: fixture.node,
+                        object: fixture.root,
+                    },
+                )?],
+            )
+            .await
+            .expect_err("an allowed wrong ParameterId must be target-unavailable");
+        require(
+            matches!(
+                unavailable,
+                PostgresKernelError::RawCallTargetUnavailable { function, .. }
+                    if function == fixture.select_node
+            ),
+            "an allowed wrong ParameterId did not close as target-unavailable",
+        )?;
+
+        let execute = kernel
+            .recover_security_audit_events()
+            .await?
+            .into_iter()
+            .filter(|event| event.decision().kind() == SecurityAuditKind::Execute)
+            .collect::<Vec<_>>();
+        require(
+            execute.len() == 5,
+            "raw identity SELECT audit count differs",
+        )?;
+        let target = InvocationTarget::new(fixture.select_node, applied.pair());
+        require_server_execute_audit(
+            &execute[0],
+            SecurityAuditOutcome::Denied,
+            CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID,
+            None,
+            None,
+            target,
+            Some(ExecuteDenial::MissingExecuteGrant),
+        )?;
+        for event in &execute[1..] {
+            require_server_execute_audit(
+                event,
+                SecurityAuditOutcome::Allowed,
+                CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID,
+                Some(CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID),
+                Some(CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID),
+                target,
+                None,
+            )?;
+        }
+        require_no_session_leaks(&database).await
     })
     .await
 }
