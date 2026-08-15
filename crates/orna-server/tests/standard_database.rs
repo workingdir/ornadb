@@ -125,6 +125,24 @@ const RAW_CLIENT_INT_INSERT_SOURCE: &str = "CREATE SCHEMA raw_int_insert;\n\
     RETURNS ROWS (stored INT)\n\
     SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n\
     AS SELECT int_probe.stored FROM raw_int_insert.int_probe int_probe;\n";
+/// A two-Text-field object with one exact pair creator and separate readers.
+const RAW_ARGUMENT_PAIR_SOCKET_SOURCE: &str = "CREATE SCHEMA raw_argument_pair_socket;\n\
+    CREATE TYPE raw_argument_pair_socket.probe AS OBJECT (\n\
+      first TEXT NOT NULL, second TEXT NOT NULL\n\
+    );\n\
+    CREATE SERVER FUNCTION raw_argument_pair_socket.create_pair(p_first TEXT, p_second TEXT)\n\
+    RETURNS ROWS (created REF raw_argument_pair_socket.probe)\n\
+    SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE\n\
+    AS INSERT INTO raw_argument_pair_socket.probe AS made (first, second)\n\
+    VALUES (p_first, p_second) RETURNING REF(made);\n\
+    CREATE SERVER FUNCTION raw_argument_pair_socket.read_first()\n\
+    RETURNS ROWS (first TEXT)\n\
+    SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n\
+    AS SELECT probe.first FROM raw_argument_pair_socket.probe probe;\n\
+    CREATE SERVER FUNCTION raw_argument_pair_socket.read_second()\n\
+    RETURNS ROWS (second TEXT)\n\
+    SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n\
+    AS SELECT probe.second FROM raw_argument_pair_socket.probe probe;\n";
 const RAW_CLIENT_USER: PrincipalId = PrincipalId::from_bytes([0x71; 16]);
 const RAW_CLIENT_UNGRANTED_USER: PrincipalId = PrincipalId::from_bytes([0x72; 16]);
 const RAW_CLIENT_STALE_USER: PrincipalId = PrincipalId::from_bytes([0x73; 16]);
@@ -2562,6 +2580,536 @@ async fn server_raw_integer_dispatch_denies_then_grants_and_audits_exact_values(
 
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
+async fn raw_argument_pair_socket_binds_reverse_order_by_parameter_identity() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = kernel(&database)?;
+        let (active, standard_upgrade, _client, _server) =
+            install_raw_client_fixture(&kernel).await?;
+        let (active, probe, create_pair, first, second, read_first, read_second) =
+            install_raw_argument_pair_socket_fixture(&kernel, &active, &standard_upgrade).await?;
+        let functions = active
+            .catalogue()
+            .functions()
+            .iter()
+            .map(|function| function.id())
+            .collect::<Vec<_>>();
+        let uid = nix::unistd::getuid().as_raw();
+        let principal = Principal::new(
+            RAW_CLIENT_USER,
+            PrincipalKind::User,
+            PrincipalStatus::Active,
+        );
+        let denied_security = SecuritySnapshot::new_with_local_peer_credentials(
+            active.pair(),
+            functions.clone(),
+            vec![principal],
+            vec![],
+            vec![],
+            vec![LocalPeerCredential::new(uid, RAW_CLIENT_USER)],
+        )?;
+        kernel.replace_security_snapshot(&denied_security).await?;
+
+        // The local peer is authenticated. Denial still wins over the reversed
+        // same-typed values and their parameter identities.
+        let (server, client) = StandardUnixStream::pair()?;
+        client.set_nonblocking(true)?;
+        let mut client = UnixStream::from_std(client)?;
+        let connection = tokio::spawn(serve_local_raw_stream(
+            kernel.clone(),
+            server,
+            LocalRawSocketResources::new(),
+        ));
+        let denied_operation = async {
+            client
+                .write_all(b"ORNA\x01\x00\x00\x03\x00\x00\x00\x00")
+                .await?;
+            let mut acknowledgement = [0_u8; 12];
+            client.read_exact(&mut acknowledgement).await?;
+            require(
+                acknowledgement == *b"ORNA\x81\x00\x00\x03\x00\x00\x00\x00",
+                "argument-pair denied socket returned the wrong acknowledgement",
+            )?;
+            for frame in [
+                ClientFrame::CallRawStart {
+                    stream: 1,
+                    function: create_pair,
+                },
+                ClientFrame::CallArgument {
+                    stream: 1,
+                    parameter: second,
+                    value: RuntimeValue::Text(String::from("denied second")),
+                },
+                ClientFrame::CallArgument {
+                    stream: 1,
+                    parameter: first,
+                    value: RuntimeValue::Text(String::from("denied first")),
+                },
+                ClientFrame::CallArgumentsComplete { stream: 1 },
+            ] {
+                send_active_protocol_frame(&mut client, &active, &frame).await?;
+            }
+            require(
+                matches!(
+                    read_active_protocol_frame(&mut client, &active).await?,
+                    ServerFrame::CallAccepted { stream: 1, .. }
+                ) && read_active_protocol_frame(&mut client, &active).await?
+                    == ServerFrame::CallFailed {
+                        stream: 1,
+                        failure: CallFailure::ExecuteDenied,
+                    },
+                "argument-pair denied socket disclosed a target or value fact",
+            )
+        }
+        .await;
+        let shutdown = client.shutdown().await.map_err(Into::into);
+        let connection = connection.await.map_err(Into::into).and_then(|result| {
+            result.map_err(|error| -> Box<dyn Error + Send + Sync> { Box::new(error) })
+        });
+        finish_session(
+            denied_operation,
+            finish_session(shutdown, connection, "argument-pair denied socket cleanup"),
+            "argument-pair denied socket operation",
+        )?;
+
+        let granted_security = SecuritySnapshot::new_with_local_peer_credentials(
+            active.pair(),
+            functions,
+            vec![principal],
+            vec![],
+            vec![
+                ExecuteGrant::new(RAW_CLIENT_USER, create_pair),
+                ExecuteGrant::new(RAW_CLIENT_USER, read_first),
+                ExecuteGrant::new(RAW_CLIENT_USER, read_second),
+            ],
+            vec![LocalPeerCredential::new(uid, RAW_CLIENT_USER)],
+        )?;
+        kernel.replace_security_snapshot(&granted_security).await?;
+        let reference_credit = u64::try_from(
+            encode_active_server_frame(
+                &active,
+                &ServerFrame::EventBatch {
+                    stream: 2,
+                    channel: Channel::ResultValues,
+                    events: vec![orna_protocol::EventRecord {
+                        sequence: 1,
+                        event: Event::Value(RuntimeValue::Reference {
+                            target: probe,
+                            object: ObjectId::from_bytes([0x11; 16]),
+                        }),
+                    }],
+                },
+            )?
+            .len()
+                - 18,
+        )?;
+        let (server, client) = StandardUnixStream::pair()?;
+        client.set_nonblocking(true)?;
+        let mut client = UnixStream::from_std(client)?;
+        let connection = tokio::spawn(serve_local_raw_stream(
+            kernel.clone(),
+            server,
+            LocalRawSocketResources::new(),
+        ));
+        let granted_operation = async {
+            client
+                .write_all(b"ORNA\x01\x00\x00\x03\x00\x00\x00\x00")
+                .await?;
+            let mut acknowledgement = [0_u8; 12];
+            client.read_exact(&mut acknowledgement).await?;
+            require(
+                acknowledgement == *b"ORNA\x81\x00\x00\x03\x00\x00\x00\x00",
+                "argument-pair granted socket returned the wrong acknowledgement",
+            )?;
+
+            for frame in [
+                ClientFrame::CallRawStart {
+                    stream: 2,
+                    function: create_pair,
+                },
+                ClientFrame::CallArgument {
+                    stream: 2,
+                    parameter: second,
+                    value: RuntimeValue::Text(String::from("stored second")),
+                },
+                ClientFrame::CallArgument {
+                    stream: 2,
+                    parameter: first,
+                    value: RuntimeValue::Text(String::from("stored first")),
+                },
+                ClientFrame::CallArgumentsComplete { stream: 2 },
+            ] {
+                send_active_protocol_frame(&mut client, &active, &frame).await?;
+            }
+            require(
+                matches!(
+                    read_active_protocol_frame(&mut client, &active).await?,
+                    ServerFrame::CallAccepted { stream: 2, .. }
+                ),
+                "argument-pair granted socket did not accept the complete reverse-order pair",
+            )?;
+            sleep(Duration::from_millis(50)).await;
+            let mut unexpected = [0_u8; 1];
+            require(
+                matches!(
+                    client.try_read(&mut unexpected),
+                    Err(error) if error.kind() == ErrorKind::WouldBlock
+                ),
+                "argument-pair socket emitted a Reference without result-value credit",
+            )?;
+            send_active_protocol_frame(
+                &mut client,
+                &active,
+                &ClientFrame::WindowUpdate {
+                    stream: 2,
+                    channel: Channel::ResultValues,
+                    credit: reference_credit,
+                },
+            )
+            .await?;
+            let created = read_active_protocol_frame(&mut client, &active).await?;
+            let ServerFrame::EventBatch {
+                stream: 2, events, ..
+            } = created
+            else {
+                return Err(failure(
+                    "argument-pair socket did not emit one Reference event",
+                ));
+            };
+            let [
+                orna_protocol::EventRecord {
+                    sequence: 1,
+                    event: Event::Value(RuntimeValue::Reference { target, object }),
+                },
+            ] = events.as_slice()
+            else {
+                return Err(failure(
+                    "argument-pair socket returned the wrong create event",
+                ));
+            };
+            require(
+                *target == probe && *object != ObjectId::from_bytes([0; 16]),
+                "argument-pair socket returned the wrong created Reference",
+            )?;
+            require(
+                read_active_protocol_frame(&mut client, &active).await?
+                    == ServerFrame::CallCompleted { stream: 2 },
+                "argument-pair socket did not complete the credited create",
+            )?;
+
+            // The retained zero/one paths, every malformed pair shape, and a
+            // pair on a read target stay redacted after accepted framing.
+            let mut wrong_bytes = first.to_bytes();
+            wrong_bytes[0] ^= 0x01;
+            let wrong = ParameterId::from_bytes(wrong_bytes);
+            let mut third_bytes = second.to_bytes();
+            third_bytes[0] ^= 0x01;
+            let third = ParameterId::from_bytes(third_bytes);
+            require(
+                third != first && third != second && third != wrong,
+                "the third pair parameter must be a distinct synthetic identity",
+            )?;
+            let rejected = [
+                (3, create_pair, vec![]),
+                (
+                    4,
+                    create_pair,
+                    vec![(first, RuntimeValue::Text(String::from("missing second")))],
+                ),
+                (
+                    5,
+                    create_pair,
+                    vec![
+                        (wrong, RuntimeValue::Text(String::from("wrong"))),
+                        (second, RuntimeValue::Text(String::from("second"))),
+                    ],
+                ),
+                (
+                    6,
+                    create_pair,
+                    vec![
+                        (first, RuntimeValue::Text(String::from("third first"))),
+                        (second, RuntimeValue::Text(String::from("third second"))),
+                        (third, RuntimeValue::Text(String::from("third extra"))),
+                    ],
+                ),
+                (
+                    7,
+                    create_pair,
+                    vec![
+                        (first, RuntimeValue::Integer(7)),
+                        (second, RuntimeValue::Text(String::from("typed second"))),
+                    ],
+                ),
+                (
+                    8,
+                    read_first,
+                    vec![
+                        (first, RuntimeValue::Text(String::from("non-insert first"))),
+                        (
+                            second,
+                            RuntimeValue::Text(String::from("non-insert second")),
+                        ),
+                    ],
+                ),
+            ];
+            for (stream, function, arguments) in rejected {
+                send_active_protocol_frame(
+                    &mut client,
+                    &active,
+                    &ClientFrame::CallRawStart { stream, function },
+                )
+                .await?;
+                for (parameter, value) in arguments {
+                    send_active_protocol_frame(
+                        &mut client,
+                        &active,
+                        &ClientFrame::CallArgument {
+                            stream,
+                            parameter,
+                            value,
+                        },
+                    )
+                    .await?;
+                }
+                send_active_protocol_frame(
+                    &mut client,
+                    &active,
+                    &ClientFrame::CallArgumentsComplete { stream },
+                )
+                .await?;
+                require(
+                    matches!(
+                        read_active_protocol_frame(&mut client, &active).await?,
+                        ServerFrame::CallAccepted { stream: actual, .. } if actual == stream
+                    ) && read_active_protocol_frame(&mut client, &active).await?
+                        == ServerFrame::CallFailed {
+                            stream,
+                            failure: CallFailure::TargetUnavailable,
+                        },
+                    "argument-pair socket changed a closed target into public detail",
+                )?;
+            }
+
+            for frame in [
+                ClientFrame::CallRawStart {
+                    stream: 9,
+                    function: create_pair,
+                },
+                ClientFrame::CallArgument {
+                    stream: 9,
+                    parameter: second,
+                    value: RuntimeValue::Text(String::from("cancel second")),
+                },
+                ClientFrame::CallArgument {
+                    stream: 9,
+                    parameter: first,
+                    value: RuntimeValue::Text(String::from("cancel first")),
+                },
+                ClientFrame::CallArgumentsComplete { stream: 9 },
+                ClientFrame::CallCancel { stream: 9 },
+            ] {
+                send_active_protocol_frame(&mut client, &active, &frame).await?;
+            }
+            require(
+                matches!(
+                    read_active_protocol_frame(&mut client, &active).await?,
+                    ServerFrame::CallAccepted { stream: 9, .. }
+                ) && read_active_protocol_frame(&mut client, &active).await?
+                    == ServerFrame::CallCancelled { stream: 9 },
+                "argument-pair socket did not cancel the accepted complete pair",
+            )?;
+
+            for (stream, function, expected) in [
+                (
+                    10,
+                    read_first,
+                    [
+                        RuntimeValue::Text(String::from("stored first")),
+                        RuntimeValue::Text(String::from("cancel first")),
+                    ],
+                ),
+                (
+                    11,
+                    read_second,
+                    [
+                        RuntimeValue::Text(String::from("stored second")),
+                        RuntimeValue::Text(String::from("cancel second")),
+                    ],
+                ),
+            ] {
+                for frame in [
+                    ClientFrame::CallRawStart { stream, function },
+                    ClientFrame::WindowUpdate {
+                        stream,
+                        channel: Channel::ResultValues,
+                        credit: 1024,
+                    },
+                    ClientFrame::CallArgumentsComplete { stream },
+                ] {
+                    send_active_protocol_frame(&mut client, &active, &frame).await?;
+                }
+                let accepted = read_active_protocol_frame(&mut client, &active).await?;
+                let first_event = read_active_protocol_frame(&mut client, &active).await?;
+                let second_event = read_active_protocol_frame(&mut client, &active).await?;
+                let completed = read_active_protocol_frame(&mut client, &active).await?;
+                let text_value = |frame: &ServerFrame, sequence| match frame {
+                    ServerFrame::EventBatch {
+                        stream: actual,
+                        events,
+                        ..
+                    } if *actual == stream
+                        && events.len() == 1
+                        && events[0].sequence == sequence => match &events[0].event {
+                        Event::Value(RuntimeValue::Text(value)) => Some(value.clone()),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                let first_value = text_value(&first_event, 1);
+                let second_value = text_value(&second_event, 2);
+                let expected_first = match &expected[0] {
+                    RuntimeValue::Text(value) => value.as_str(),
+                    _ => unreachable!("the reader oracle uses only Text values"),
+                };
+                let expected_second = match &expected[1] {
+                    RuntimeValue::Text(value) => value.as_str(),
+                    _ => unreachable!("the reader oracle uses only Text values"),
+                };
+                let values_match = (first_value.as_deref() == Some(expected_first)
+                    && second_value.as_deref() == Some(expected_second))
+                    || (first_value.as_deref() == Some(expected_second)
+                        && second_value.as_deref() == Some(expected_first));
+                if !matches!(accepted, ServerFrame::CallAccepted { stream: actual, .. } if actual == stream)
+                    || !values_match
+                    || !matches!(completed, ServerFrame::CallCompleted { stream: actual } if actual == stream)
+                {
+                    return Err(failure(format!(
+                        "argument-pair socket read {stream} returned {accepted:?}, {first_event:?}, {second_event:?}, {completed:?}"
+                    )));
+                }
+            }
+
+            // Duplicate ParameterIds close the protocol connection before a
+            // completed RawCall exists. They emit no accepted frame, disclose
+            // no target, add no audit, and cannot add a row.
+            send_active_protocol_frame(
+                &mut client,
+                &active,
+                &ClientFrame::CallRawStart {
+                    stream: 12,
+                    function: create_pair,
+                },
+            )
+            .await?;
+            for value in ["duplicate first", "duplicate second"] {
+                send_active_protocol_frame(
+                    &mut client,
+                    &active,
+                    &ClientFrame::CallArgument {
+                        stream: 12,
+                        parameter: first,
+                        value: RuntimeValue::Text(String::from(value)),
+                    },
+                )
+                .await?;
+            }
+            require(
+                matches!(
+                    read_active_protocol_frame(&mut client, &active).await,
+                    Err(error) if error.to_string() == "early eof"
+                ),
+                "a duplicate argument pair did not fail closed before dispatch",
+            )?;
+            Ok(())
+        }
+        .await;
+        let shutdown = client.shutdown().await.map_err(Into::into);
+        let connection = connection.await?;
+        finish_session(
+            granted_operation,
+            shutdown,
+            "argument-pair granted socket operation",
+        )?;
+        require(
+            matches!(connection, Err(LocalRawSocketError::Connection { .. })),
+            "a duplicate argument pair did not close the protocol connection",
+        )?;
+
+        let audits = kernel.recover_security_audit_events().await?;
+        let actual = audits
+            .iter()
+            .map(|event| {
+                let decision = event.decision();
+                (decision.kind(), decision.outcome(), decision.target())
+            })
+            .collect::<Vec<_>>();
+        let allowed = SecurityAuditOutcome::Allowed;
+        let expected = vec![
+                    (SecurityAuditKind::Authentication, allowed, None),
+                    (
+                        SecurityAuditKind::Execute,
+                        SecurityAuditOutcome::Denied,
+                        Some(InvocationTarget::new(create_pair, active.pair())),
+                    ),
+                    (SecurityAuditKind::Authentication, allowed, None),
+                    (
+                        SecurityAuditKind::Execute,
+                        allowed,
+                        Some(InvocationTarget::new(create_pair, active.pair())),
+                    ),
+                    (
+                        SecurityAuditKind::Execute,
+                        allowed,
+                        Some(InvocationTarget::new(create_pair, active.pair())),
+                    ),
+                    (
+                        SecurityAuditKind::Execute,
+                        allowed,
+                        Some(InvocationTarget::new(create_pair, active.pair())),
+                    ),
+                    (
+                        SecurityAuditKind::Execute,
+                        allowed,
+                        Some(InvocationTarget::new(create_pair, active.pair())),
+                    ),
+                    (
+                        SecurityAuditKind::Execute,
+                        allowed,
+                        Some(InvocationTarget::new(create_pair, active.pair())),
+                    ),
+                    (
+                        SecurityAuditKind::Execute,
+                        allowed,
+                        Some(InvocationTarget::new(read_first, active.pair())),
+                    ),
+                    (
+                        SecurityAuditKind::Execute,
+                        allowed,
+                        Some(InvocationTarget::new(create_pair, active.pair())),
+                    ),
+                    (
+                        SecurityAuditKind::Execute,
+                        allowed,
+                        Some(InvocationTarget::new(read_first, active.pair())),
+                    ),
+                    (
+                        SecurityAuditKind::Execute,
+                        allowed,
+                        Some(InvocationTarget::new(read_second, active.pair())),
+                    ),
+        ];
+        if actual != expected {
+            return Err(failure(format!(
+                "argument-pair socket audit sequence changed: actual {actual:?}; expected {expected:?}"
+            )));
+        }
+        require_no_database_sessions(&database).await
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
 async fn serves_the_actual_local_peer_through_the_raw_socket_protocol() -> TestResult<()> {
     with_test_database(|database| async move {
         let kernel = kernel(&database)?;
@@ -3448,6 +3996,101 @@ async fn install_raw_int_insert_fixture(
         create_int,
         create_int_parameter,
         read_ints,
+    ))
+}
+
+async fn install_raw_argument_pair_socket_fixture(
+    kernel: &PostgresKernel,
+    active: &orna_core::revision::ActiveDatabaseRevision,
+    standard_upgrade: &orna_standard::StandardUpgrade,
+) -> TestResult<(
+    orna_core::revision::ActiveDatabaseRevision,
+    TypeId,
+    FunctionId,
+    ParameterId,
+    ParameterId,
+    FunctionId,
+    FunctionId,
+)> {
+    let last_ordinal = active
+        .source()
+        .units()
+        .len()
+        .checked_sub(1)
+        .ok_or_else(|| failure("raw argument-pair socket fixture has no retained source unit"))?;
+    let source = SourceBundle::new(active.source().units().iter().enumerate().map(
+        |(ordinal, unit)| {
+            let content = if ordinal == last_ordinal {
+                format!("{}\n{}", unit.content(), RAW_ARGUMENT_PAIR_SOCKET_SOURCE)
+            } else {
+                unit.content().to_owned()
+            };
+            SourceUnit::new(unit.logical_path(), content)
+        },
+    ))?;
+    let report = check_standard_application(
+        &source,
+        &StandardApplicationCheckContext::try_new(
+            active.catalogue(),
+            standard_upgrade.checked_standard_library(),
+        )?,
+    );
+    require(
+        report.diagnostics().is_empty(),
+        "raw argument-pair socket fixture did not compile",
+    )?;
+    let applied = kernel
+        .apply(&prepare_standard_application(
+            &report,
+            active.pair(),
+            active,
+        )?)
+        .await?;
+    let catalogue = applied.catalogue();
+    let probe = catalogue
+        .object_types()
+        .iter()
+        .find(|object| object.name().parts() == ["raw_argument_pair_socket", "probe"])
+        .ok_or_else(|| failure("raw argument-pair socket probe type is absent"))?
+        .id();
+    let function = |name: &[&str]| {
+        catalogue
+            .functions()
+            .iter()
+            .find(|function| function.name().parts() == name)
+            .map(|function| function.id())
+            .ok_or_else(|| {
+                failure(format!(
+                    "raw argument-pair socket function is absent: {name:?}"
+                ))
+            })
+    };
+    let create_pair = function(&["raw_argument_pair_socket", "create_pair"])?;
+    let definition = catalogue
+        .function_by_id(create_pair)
+        .ok_or_else(|| failure("raw argument-pair socket creator is absent"))?;
+    let first = definition
+        .parameter_by_name("p_first")
+        .ok_or_else(|| failure("raw argument-pair socket p_first is absent"))?
+        .id();
+    let second = definition
+        .parameter_by_name("p_second")
+        .ok_or_else(|| failure("raw argument-pair socket p_second is absent"))?
+        .id();
+    require(
+        first != second,
+        "raw argument-pair socket parameters must have distinct identities",
+    )?;
+    let read_first = function(&["raw_argument_pair_socket", "read_first"])?;
+    let read_second = function(&["raw_argument_pair_socket", "read_second"])?;
+    Ok((
+        applied,
+        probe,
+        create_pair,
+        first,
+        second,
+        read_first,
+        read_second,
     ))
 }
 
