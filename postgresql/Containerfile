@@ -54,7 +54,7 @@ RUN mkdir -p /build/tmp /build/zlib-source \
         PKG_CONFIG_LIBDIR=/nonexistent RANLIB=ranlib TMPDIR=/build/tmp TZ=UTC0 \
         make -j1 install \
     && test -f /build/zlib/lib/libz.a \
-    && rm -rf /build/zlib-source /build/zlib-source.tar.gz
+    && rm -rf /build/zlib-source
 
 RUN mkdir -p /build/rust-toolchain \
     && tar --extract --gzip --file=/build/rust-toolchain.tar.gz \
