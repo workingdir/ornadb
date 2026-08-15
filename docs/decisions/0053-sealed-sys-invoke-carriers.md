@@ -85,6 +85,15 @@ control fields. `InvokeEvent` owns one checked kind-specific body. The core
 model contains no encoded length, byte offset, ORV marker, or cached wire
 payload. Protocol code owns those facts.
 
+Core checks client offers for structural well-formedness only. It checks
+required fields, non-empty values, descriptor structure, `SET` and `STREAM`
+closure, nested-carrier closure, aggregate nodes, and redaction-safe accessors.
+It does not encode a descriptor or nested value to sort or deduplicate sinks,
+runtimes, consumed types, media types, contracts, or features. The source model
+may therefore retain structurally valid unordered or duplicate offer items
+until protocol encode or decode. A checked core Request is not by itself proof
+of canonical offer bytes.
+
 Core construction counts the same aggregate carrier tree in logical payload
 order. It accepts 65,536 nodes and returns
 `InvocationCarrierConstructionError::TooManyNodes { maximum: 65_536 }` before
@@ -153,6 +162,16 @@ preflight, an earlier malformed embedded ORV5 value precedes the limit; the
 limit precedes a stale, inactive, or malformed later embedded value. Encoding
 counts and revalidates the complete checked carrier in the same payload order
 before it emits the outer marker or payload.
+
+The protocol codec is the sole client-offer canonicalisation authority. For
+encoding, it obtains the complete provisional canonical ORV5 bytes for each
+offer item, rejects duplicate byte keys with original source indexes, sorts by
+the exact byte keys defined below, then emits one canonical sequence. Offer
+items include sinks, media types, runtimes, consumed descriptors, contracts,
+and features. For decoding, the codec requires each wire sequence to be
+strictly increasing by its same keys and rejects the first non-canonical or
+duplicate item. Core does not reproduce this provisional encoding or byte
+comparison.
 
 Each payload starts with version byte `0x01`. Every other version byte is
 rejected. Unknown discriminants, set flag bits, invalid UTF-8, non-canonical
@@ -416,6 +435,13 @@ Contracts are sorted by name bytes, version bytes, then feature-list bytes;
 exact duplicates fail. Runtime offers are sorted by name bytes, version bytes,
 then their complete remaining canonical bytes; exact duplicates fail.
 
+These are canonical wire rules. The protocol codec applies them from the exact
+provisional ORV5 bytes. Encoding accepts any structurally valid source order,
+emits one sorted order, and rejects duplicates. Decoding rejects a wire
+permutation instead of sorting it. `NonCanonicalOrder` is therefore a decode
+error for offer items; `DuplicateItem` applies to encode and decode. Core does
+not decide either error.
+
 `trusted` reports local installation policy. It does not grant a server or
 CLIENT function a capability, and it does not let the server load a native
 runtime.
@@ -617,9 +643,17 @@ Public behaviour tests must prove:
 * Value retains every admitted inner ORV5 family and active-revision check,
   while earlier markers, all three carrier identities, malformed inner values,
   stale definitions, and mismatched opaque registries fail;
+* core Request construction retains structurally valid unordered and duplicate
+  offer items, while it still rejects malformed fields, `SET`, `STREAM`, nested
+  carriers, excess nodes, and unsafe disclosure;
 * Request target alternatives, canonical argument order, caller invariants,
-  sink and runtime ordering, output requirements, control fields, and every
-  duplicate or closed value return exact typed errors;
+  output requirements, control fields, and every closed value return exact
+  typed errors without core offer-byte encoding;
+* protocol encoding gives every permutation of equal sinks, media types,
+  runtimes, consumed descriptors, contracts, and features identical canonical
+  bytes, rejects duplicate byte keys with original source indexes, and protocol
+  decoding rejects the first non-canonical or duplicate wire item through the
+  exact typed error;
 * deadline presence and every unknown discriminant, version, flag, count,
   length, UTF-8 sequence, truncation, overflow, and trailing byte fail without
   a partial carrier or unchecked allocation;
@@ -662,12 +696,14 @@ construct unchecked carrier state.
 4. `feat(core): construct checked invocation carriers` changes
    `crates/orna-core/src/invocation.rs`, `crates/orna-core/src/value.rs`, and
    `crates/orna-core/src/lib.rs`. It adds private-state checked Value, Request,
-   and Event models and exact safe accessors. It does not add bytes or a frame
-   position.
+   and Event models and exact safe accessors. It retains structurally valid
+   source-order client offers and does not sort, deduplicate, or encode them.
+   It does not add bytes or a frame position.
 5. `feat(protocol): encode sealed invocation carriers` changes
    `crates/orna-protocol/src/lib.rs` only. It adds the three ORV5 codec paths,
-   aggregate node preflight, exact goldens, and round trips while ordinary
-   frames remain closed.
+   aggregate node preflight, the sole exact-byte offer canonicalisation and
+   duplicate authority, exact goldens, and round trips while ordinary frames
+   remain closed.
 6. `test(protocol): exhaust invocation carrier failures` changes
    `crates/orna-protocol/src/lib.rs` only. It completes malformed, precedence,
    bound, arbitrary-input, redaction, and compatibility proof without a
