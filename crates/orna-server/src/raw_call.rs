@@ -1,4 +1,4 @@
-//! Fixed local client for one zero-argument or one-argument raw recovery call.
+//! Fixed local client for one bounded raw recovery call.
 
 use std::{
     fmt, fs,
@@ -82,8 +82,11 @@ impl fmt::Display for LocalRawCallError {
     }
 }
 
-fn read_raw_call_argument(input: &mut impl Read) -> Result<RuntimeValue, LocalRawCallError> {
-    let interrupts_seen = interruption_count();
+fn read_raw_call_envelope(
+    input: &mut impl Read,
+    interrupts_seen: u8,
+    maximum_encoded_length: usize,
+) -> Result<(RuntimeValue, usize), LocalRawCallError> {
     let mut encoded = vec![0; VALUE_HEADER_LENGTH];
     read_argument_input_exact(input, &mut encoded, interrupts_seen)?;
 
@@ -94,29 +97,61 @@ fn read_raw_call_argument(input: &mut impl Read) -> Result<RuntimeValue, LocalRa
     ) as usize;
     let encoded_length = VALUE_HEADER_LENGTH
         .checked_add(payload_length)
-        .filter(|length| *length <= MAX_ARGUMENT_VALUE_LENGTH)
+        .filter(|length| *length <= MAX_ARGUMENT_VALUE_LENGTH && *length <= maximum_encoded_length)
         .ok_or(LocalRawCallError::Input)?;
     encoded.resize(encoded_length, 0);
     read_argument_input_exact(input, &mut encoded[VALUE_HEADER_LENGTH..], interrupts_seen)?;
-
-    let mut trailing = [0];
-    loop {
-        if interruption_count() != interrupts_seen {
-            return Err(LocalRawCallError::Signal);
-        }
-        match input.read(&mut trailing) {
-            Ok(0) => break,
-            Ok(_) => return Err(LocalRawCallError::Input),
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(_) => return Err(LocalRawCallError::Input),
-        }
-    }
 
     let value = decode_value(&encoded).map_err(|_| LocalRawCallError::Input)?;
     if interruption_count() != interrupts_seen {
         return Err(LocalRawCallError::Signal);
     }
+    Ok((value, encoded_length))
+}
+
+fn require_argument_input_eof(
+    input: &mut impl Read,
+    interrupts_seen: u8,
+) -> Result<(), LocalRawCallError> {
+    let mut trailing = [0];
+    loop {
+        if interruption_count() != interrupts_seen {
+            return Err(LocalRawCallError::Signal);
+        }
+        let result = input.read(&mut trailing);
+        if interruption_count() != interrupts_seen {
+            return Err(LocalRawCallError::Signal);
+        }
+        match result {
+            Ok(0) => return Ok(()),
+            Ok(_) => return Err(LocalRawCallError::Input),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => return Err(LocalRawCallError::Input),
+        }
+    }
+}
+
+fn read_raw_call_argument(input: &mut impl Read) -> Result<RuntimeValue, LocalRawCallError> {
+    let interrupts_seen = interruption_count();
+    let (value, _) = read_raw_call_envelope(input, interrupts_seen, MAX_ARGUMENT_VALUE_LENGTH)?;
+    require_argument_input_eof(input, interrupts_seen)?;
     Ok(value)
+}
+
+fn read_raw_call_argument_pair(
+    input: &mut impl Read,
+) -> Result<[RuntimeValue; 2], LocalRawCallError> {
+    let interrupts_seen = interruption_count();
+    let (first, first_length) =
+        read_raw_call_envelope(input, interrupts_seen, MAX_ARGUMENT_VALUE_LENGTH)?;
+    let second_maximum = MAX_FRAME_PAYLOAD_LENGTH
+        .checked_sub(16)
+        .and_then(|remaining| remaining.checked_sub(first_length))
+        .and_then(|remaining| remaining.checked_sub(16))
+        .ok_or(LocalRawCallError::Input)?;
+    let (second, _) = read_raw_call_envelope(input, interrupts_seen, second_maximum)?;
+    require_argument_input_eof(input, interrupts_seen)?;
+    Ok([first, second])
 }
 
 fn read_argument_input_exact(
@@ -129,7 +164,11 @@ fn read_argument_input_exact(
         if interruption_count() != interrupts_seen {
             return Err(LocalRawCallError::Signal);
         }
-        match input.read(&mut bytes[read..]) {
+        let result = input.read(&mut bytes[read..]);
+        if interruption_count() != interrupts_seen {
+            return Err(LocalRawCallError::Signal);
+        }
+        match result {
             Ok(0) => return Err(LocalRawCallError::Input),
             Ok(length) => read += length,
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
@@ -164,7 +203,7 @@ pub fn run_local_raw_call(function: FunctionId) -> Result<LocalRawCallOutcome, L
         .try_lock()
         .map_err(|_| LocalRawCallError::Signal)?;
     let _interrupts = InterruptHandler::install()?;
-    run_local_raw_call_after_input(function, None)
+    run_local_raw_call_after_input(function, RawCallArguments::None)
 }
 
 /// Runs one protocol-1 call with one canonical standard-input argument.
@@ -191,6 +230,34 @@ pub fn run_local_raw_call_with_argument(
     )
 }
 
+/// Runs one protocol-1 call with one ordered pair of standard-input arguments.
+///
+/// Standard input must contain exactly two complete bounded `ORV1` envelopes
+/// followed by EOF. The first value belongs to `first_parameter` and the
+/// second belongs to `second_parameter`. Both values and their aggregate
+/// retained protocol bytes are validated before the fixed socket is checked.
+///
+/// # Errors
+///
+/// Returns [`LocalRawCallError::Input`] when the parameters are equal or the
+/// input is not exactly one canonical bounded argument pair. It returns the
+/// other [`LocalRawCallError`] variants for fixed-socket, negotiation,
+/// protocol, output, or signal failures.
+pub fn run_local_raw_call_with_argument_pair(
+    function: FunctionId,
+    first_parameter: ParameterId,
+    second_parameter: ParameterId,
+) -> Result<LocalRawCallOutcome, LocalRawCallError> {
+    run_local_raw_call_with_argument_pair_input(
+        function,
+        first_parameter,
+        second_parameter,
+        &mut StandardInput {
+            descriptor: nix::libc::STDIN_FILENO,
+        },
+    )
+}
+
 fn run_local_raw_call_with_argument_input(
     function: FunctionId,
     parameter: ParameterId,
@@ -205,12 +272,45 @@ fn run_local_raw_call_with_argument_input(
         return Ok(LocalRawCallOutcome::Cancelled);
     }
     let value = value?;
-    run_local_raw_call_after_input(function, Some((parameter, value)))
+    run_local_raw_call_after_input(function, RawCallArguments::One(parameter, value))
+}
+
+fn run_local_raw_call_with_argument_pair_input(
+    function: FunctionId,
+    first_parameter: ParameterId,
+    second_parameter: ParameterId,
+    input: &mut impl Read,
+) -> Result<LocalRawCallOutcome, LocalRawCallError> {
+    if first_parameter == second_parameter {
+        return Err(LocalRawCallError::Input);
+    }
+    let _owner = RAW_CALL_OWNER
+        .try_lock()
+        .map_err(|_| LocalRawCallError::Signal)?;
+    let _interrupts = InterruptHandler::install()?;
+    let values = read_raw_call_argument_pair(input);
+    if interruption_count() > 0 {
+        return Ok(LocalRawCallOutcome::Cancelled);
+    }
+    let [first_value, second_value] = values?;
+    run_local_raw_call_after_input(
+        function,
+        RawCallArguments::Pair(
+            (first_parameter, first_value),
+            (second_parameter, second_value),
+        ),
+    )
+}
+
+enum RawCallArguments {
+    None,
+    One(ParameterId, RuntimeValue),
+    Pair((ParameterId, RuntimeValue), (ParameterId, RuntimeValue)),
 }
 
 fn run_local_raw_call_after_input(
     function: FunctionId,
-    argument: Option<(ParameterId, RuntimeValue)>,
+    arguments: RawCallArguments,
 ) -> Result<LocalRawCallOutcome, LocalRawCallError> {
     if let Err(error) = require_fixed_socket() {
         return if interruption_count() > 0 {
@@ -235,15 +335,18 @@ fn run_local_raw_call_after_input(
     let mut output = StandardOutput {
         descriptor: nix::libc::STDOUT_FILENO,
     };
-    let result = match argument {
-        Some((parameter, value)) => run_connected_raw_call_with_argument(
+    let result = match arguments {
+        RawCallArguments::None => run_connected_raw_call(&mut stream, function, &mut output),
+        RawCallArguments::One(parameter, value) => run_connected_raw_call_with_argument(
             &mut stream,
             function,
             parameter,
             value,
             &mut output,
         ),
-        None => run_connected_raw_call(&mut stream, function, &mut output),
+        pair @ RawCallArguments::Pair(_, _) => {
+            run_connected_raw_call_with_arguments(&mut stream, function, pair, &mut output)
+        }
     };
     match result {
         Err(LocalRawCallError::Signal) if interruption_count() > 0 => {
@@ -500,7 +603,7 @@ fn run_connected_raw_call(
     function: FunctionId,
     output: &mut impl ValueOutput,
 ) -> Result<LocalRawCallOutcome, LocalRawCallError> {
-    run_connected_raw_call_with_optional_argument(stream, function, None, output)
+    run_connected_raw_call_with_arguments(stream, function, RawCallArguments::None, output)
 }
 
 fn run_connected_raw_call_with_argument(
@@ -510,18 +613,18 @@ fn run_connected_raw_call_with_argument(
     value: RuntimeValue,
     output: &mut impl ValueOutput,
 ) -> Result<LocalRawCallOutcome, LocalRawCallError> {
-    run_connected_raw_call_with_optional_argument(
+    run_connected_raw_call_with_arguments(
         stream,
         function,
-        Some((parameter, value)),
+        RawCallArguments::One(parameter, value),
         output,
     )
 }
 
-fn run_connected_raw_call_with_optional_argument(
+fn run_connected_raw_call_with_arguments(
     stream: &mut UnixStream,
     function: FunctionId,
-    argument: Option<(ParameterId, RuntimeValue)>,
+    arguments: RawCallArguments,
     output: &mut impl ValueOutput,
 ) -> Result<LocalRawCallOutcome, LocalRawCallError> {
     let mut interrupts_seen = 0;
@@ -548,16 +651,37 @@ fn run_connected_raw_call_with_optional_argument(
         return Ok(LocalRawCallOutcome::Cancelled);
     }
     let (mut client, [start, window, complete]) = RawCallClient::start(function);
-    let argument = argument.map(|(parameter, value)| ClientFrame::CallArgument {
-        stream: 1,
-        parameter,
-        value,
-    });
+    let arguments = match arguments {
+        RawCallArguments::None => [None, None],
+        RawCallArguments::One(parameter, value) => [
+            Some(ClientFrame::CallArgument {
+                stream: 1,
+                parameter,
+                value,
+            }),
+            None,
+        ],
+        RawCallArguments::Pair(
+            (first_parameter, first_value),
+            (second_parameter, second_value),
+        ) => [
+            Some(ClientFrame::CallArgument {
+                stream: 1,
+                parameter: first_parameter,
+                value: first_value,
+            }),
+            Some(ClientFrame::CallArgument {
+                stream: 1,
+                parameter: second_parameter,
+                value: second_value,
+            }),
+        ],
+    };
     let mut stream_created = false;
     let mut cancellation_sent = false;
     for frame in [start, window]
         .into_iter()
-        .chain(argument)
+        .chain(arguments.into_iter().flatten())
         .chain([complete])
     {
         let creates_stream = matches!(frame, ClientFrame::CallRawStart { .. });
@@ -1043,6 +1167,84 @@ mod tests {
     }
 
     #[test]
+    fn connected_client_writes_two_argument_frames_in_command_token_order() {
+        let _interrupt_guard = lock_interrupt_tests();
+        let function = FunctionId::from_bytes([0x11; 16]);
+        let first_parameter = ParameterId::from_bytes([0x33; 16]);
+        let second_parameter = ParameterId::from_bytes([0x44; 16]);
+        let (mut server, mut client_stream) = UnixStream::pair().unwrap();
+        for stream in [&server, &client_stream] {
+            stream.set_read_timeout(Some(IO_POLL_INTERVAL)).unwrap();
+            stream.set_write_timeout(Some(IO_POLL_INTERVAL)).unwrap();
+        }
+        INTERRUPTS.store(0, Ordering::SeqCst);
+        let server_task = thread::spawn(move || {
+            let mut hello = [0; CLIENT_HELLO.len()];
+            server.read_exact(&mut hello).unwrap();
+            assert_eq!(hello, CLIENT_HELLO);
+            server.write_all(&SERVER_ACK).unwrap();
+            for expected in 0..5 {
+                let encoded = read_test_frame(&mut server);
+                let frame = decode_client_frame(&encoded).unwrap();
+                match expected {
+                    0 => assert_eq!(
+                        frame,
+                        ClientFrame::CallRawStart {
+                            stream: 1,
+                            function,
+                        }
+                    ),
+                    1 => assert!(matches!(frame, ClientFrame::WindowUpdate { stream: 1, .. })),
+                    2 => assert_eq!(
+                        frame,
+                        ClientFrame::CallArgument {
+                            stream: 1,
+                            parameter: first_parameter,
+                            value: RuntimeValue::Boolean(true),
+                        }
+                    ),
+                    3 => assert_eq!(
+                        frame,
+                        ClientFrame::CallArgument {
+                            stream: 1,
+                            parameter: second_parameter,
+                            value: RuntimeValue::Integer(7),
+                        }
+                    ),
+                    _ => assert_eq!(frame, ClientFrame::CallArgumentsComplete { stream: 1 }),
+                }
+            }
+            for frame in [
+                ServerFrame::CallAccepted {
+                    stream: 1,
+                    invocation: orna_core::InvocationId::from_bytes([0x22; 16]),
+                },
+                ServerFrame::CallCompleted { stream: 1 },
+            ] {
+                server
+                    .write_all(&encode_server_frame(&frame).unwrap())
+                    .unwrap();
+            }
+        });
+        let mut output = Vec::new();
+        assert_eq!(
+            run_connected_raw_call_with_arguments(
+                &mut client_stream,
+                function,
+                RawCallArguments::Pair(
+                    (first_parameter, RuntimeValue::Boolean(true)),
+                    (second_parameter, RuntimeValue::Integer(7)),
+                ),
+                &mut output,
+            )
+            .unwrap(),
+            LocalRawCallOutcome::Completed
+        );
+        assert!(output.is_empty());
+        server_task.join().unwrap();
+    }
+
+    #[test]
     fn raw_call_argument_input_requires_one_complete_orv1_envelope() {
         let _interrupt_guard = lock_interrupt_tests();
         INTERRUPTS.store(0, Ordering::SeqCst);
@@ -1068,6 +1270,59 @@ mod tests {
             "orna: raw-call argument input is invalid"
         );
         assert!(error.source().is_none());
+    }
+
+    #[test]
+    fn raw_call_argument_pair_input_decodes_two_concatenated_orv1_envelopes_in_order() {
+        let _interrupt_guard = lock_interrupt_tests();
+        INTERRUPTS.store(0, Ordering::SeqCst);
+        let mut input = encode_value(&RuntimeValue::Boolean(true)).unwrap();
+        input.extend(encode_value(&RuntimeValue::Integer(7)).unwrap());
+        assert_eq!(
+            read_raw_call_argument_pair(&mut Cursor::new(input)).unwrap(),
+            [RuntimeValue::Boolean(true), RuntimeValue::Integer(7)]
+        );
+    }
+
+    #[test]
+    fn raw_call_argument_pair_input_rejects_malformed_truncated_and_trailing_boundaries() {
+        let _interrupt_guard = lock_interrupt_tests();
+        INTERRUPTS.store(0, Ordering::SeqCst);
+        let first = encode_value(&RuntimeValue::Boolean(true)).unwrap();
+        let second = encode_value(&RuntimeValue::Integer(7)).unwrap();
+        let mut malformed = first.clone();
+        malformed.extend([b'O', b'R', b'V', b'2']);
+        let mut truncated = first.clone();
+        truncated.extend(&second[..second.len() - 1]);
+        let mut trailing = first.clone();
+        trailing.extend(&second);
+        trailing.push(0xaa);
+        for input in [Vec::new(), first.clone(), malformed, truncated, trailing] {
+            require_raw_call_argument_input(
+                read_raw_call_argument_pair(&mut Cursor::new(input))
+                    .expect_err("invalid pair input must be rejected"),
+            );
+        }
+    }
+
+    #[test]
+    fn raw_call_argument_pair_input_rejects_the_retained_argument_aggregate_limit() {
+        let _interrupt_guard = lock_interrupt_tests();
+        INTERRUPTS.store(0, Ordering::SeqCst);
+        let first = encode_value(&RuntimeValue::Boolean(true)).unwrap();
+        let mut second_header = encode_value(&RuntimeValue::Boolean(true)).unwrap();
+        second_header.truncate(VALUE_HEADER_LENGTH);
+        second_header[VALUE_HEADER_LENGTH - 4..].copy_from_slice(
+            &((MAX_ARGUMENT_VALUE_LENGTH - VALUE_HEADER_LENGTH) as u32).to_be_bytes(),
+        );
+        let mut bytes = first;
+        bytes.extend(second_header);
+        let mut input = PairAggregateHeaderOnlyReader::new(&bytes, bytes.len());
+        require_raw_call_argument_input(
+            read_raw_call_argument_pair(&mut input)
+                .expect_err("the pair retained bytes must be bounded before a second payload read"),
+        );
+        assert!(!input.payload_requested);
     }
 
     #[test]
@@ -1154,6 +1409,38 @@ mod tests {
             let available = self.header.len() - self.position;
             let length = available.min(buffer.len());
             buffer[..length].copy_from_slice(&self.header[self.position..self.position + length]);
+            self.position += length;
+            Ok(length)
+        }
+    }
+
+    struct PairAggregateHeaderOnlyReader<'a> {
+        bytes: &'a [u8],
+        header_end: usize,
+        position: usize,
+        payload_requested: bool,
+    }
+
+    impl<'a> PairAggregateHeaderOnlyReader<'a> {
+        fn new(bytes: &'a [u8], header_end: usize) -> Self {
+            Self {
+                bytes,
+                header_end,
+                position: 0,
+                payload_requested: false,
+            }
+        }
+    }
+
+    impl Read for PairAggregateHeaderOnlyReader<'_> {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            if self.position >= self.header_end {
+                self.payload_requested = true;
+                panic!("the aggregate check must reject before reading the second payload");
+            }
+            let available = self.header_end - self.position;
+            let length = available.min(buffer.len());
+            buffer[..length].copy_from_slice(&self.bytes[self.position..self.position + length]);
             self.position += length;
             Ok(length)
         }
