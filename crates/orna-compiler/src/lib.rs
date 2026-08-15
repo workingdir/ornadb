@@ -695,6 +695,39 @@ mod tests {
     }
 
     #[test]
+    fn prepares_nullable_and_required_unique_text_fields_as_version_two_values() {
+        let verified = verified_canonical_standard_source_fixture();
+        let standard = check_standard_library_source(&verified).unwrap();
+        let active = empty_version_two_active(&verified);
+        let context =
+            StandardApplicationCheckContext::try_new(active.catalogue(), &standard).unwrap();
+        let bundle = SourceBundle::new([SourceUnit::new(
+            "application.orna",
+            "CREATE SCHEMA crm; CREATE TYPE crm.contact AS OBJECT (email TEXT UNIQUE, name TEXT NOT NULL UNIQUE);",
+        )])
+        .unwrap();
+
+        let report = check_standard_application(&bundle, &context);
+        assert!(report.diagnostics().is_empty());
+
+        let prepared = prepare_standard_application(&report, active.pair(), &active).unwrap();
+        let contact = prepared
+            .candidate()
+            .object_type_by_name(&semantic_name(["crm", "contact"]))
+            .unwrap();
+        let email = contact.field_by_name("email").unwrap();
+        let name = contact.field_by_name("name").unwrap();
+        let text = ResolvedType::Value(TypeId::from_bytes(CANONICAL_TYPE_IDS[5]));
+
+        assert_eq!(email.resolved_type(), text);
+        assert!(email.nullable());
+        assert!(email.unique());
+        assert_eq!(name.resolved_type(), text);
+        assert!(!name.nullable());
+        assert!(name.unique());
+    }
+
+    #[test]
     fn prepares_a_checked_client_boolean_constant() {
         let _allocation_lock = PREPARE_ALLOCATION_LOCK.lock().unwrap();
         let verified = verified_standard_source_fixture();

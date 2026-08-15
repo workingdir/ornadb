@@ -1357,12 +1357,12 @@ fn check_application_parsed(
 
             if field.unique
                 && semantic_type.is_some_and(|semantic_type| {
-                    !supports_required_unique_reference(semantic_type, field.nullable)
+                    !supports_unique_text_or_required_reference(semantic_type, field.nullable)
                 })
             {
                 diagnostics.push(diagnostic(
                     DiagnosticCode::TypeMismatch,
-                    REQUIRED_UNIQUE_REFERENCE_MESSAGE,
+                    UNIQUE_FIELD_MESSAGE,
                     header.logical_path,
                     &field.span,
                 ));
@@ -4398,15 +4398,18 @@ impl StandardTypeUseRecorder<'_, '_> {
     }
 }
 
-pub(crate) fn supports_required_unique_reference(
+pub(crate) fn supports_unique_text_or_required_reference(
     semantic_type: SemanticType<CheckedTypeId>,
     nullable: bool,
 ) -> bool {
-    !nullable && matches!(semantic_type, SemanticType::Reference { .. })
+    matches!(
+        semantic_type,
+        SemanticType::Scalar(StandardScalar::CharacterLargeObject)
+    ) || (!nullable && matches!(semantic_type, SemanticType::Reference { .. }))
 }
 
-pub(crate) const REQUIRED_UNIQUE_REFERENCE_MESSAGE: &str =
-    "UNIQUE is only available for REF fields that are NOT NULL";
+pub(crate) const UNIQUE_FIELD_MESSAGE: &str =
+    "UNIQUE is only available for TEXT fields or REF fields that are NOT NULL";
 
 fn resolve_closed_scalar(name: &QualifiedName) -> Option<StandardScalar> {
     if name.parts.len() != 1 || name.parts[0].text.starts_with('"') {
@@ -9167,8 +9170,47 @@ mod tests {
     }
 
     #[test]
+    fn resolves_nullable_and_required_unique_text_with_required_unique_reference() {
+        let source = "CREATE SCHEMA people; CREATE SCHEMA crm; \
+            CREATE TYPE crm.contact AS OBJECT (\
+                email TEXT UNIQUE,\
+                name CHARACTER LARGE OBJECT NOT NULL UNIQUE,\
+                owner REF people.owner NOT NULL UNIQUE\
+            ); \
+            CREATE TYPE people.owner AS OBJECT ();";
+
+        let report = check(&bundle([("unique_text.orna", source)]), &empty_catalogue());
+
+        assert!(report.diagnostics().is_empty());
+        let fields = report.checked_bundle().unwrap().object_types()[0].fields();
+        assert_eq!(fields.len(), 3);
+        assert_eq!(
+            fields[0].semantic_type(),
+            SemanticType::scalar(StandardScalar::CharacterLargeObject)
+        );
+        assert!(fields[0].nullable());
+        assert!(fields[0].unique());
+        assert_eq!(
+            fields[1].semantic_type(),
+            SemanticType::scalar(StandardScalar::CharacterLargeObject)
+        );
+        assert!(!fields[1].nullable());
+        assert!(fields[1].unique());
+        assert!(matches!(
+            fields[2].semantic_type(),
+            SemanticType::Reference { .. }
+        ));
+        assert!(!fields[2].nullable());
+        assert!(fields[2].unique());
+    }
+
+    #[test]
     fn rejects_unique_fields_outside_the_required_reference_shape() {
-        for spelling in LEGACY_CANONICAL_SCALAR_SPELLINGS {
+        for spelling in LEGACY_CANONICAL_SCALAR_SPELLINGS
+            .iter()
+            .copied()
+            .filter(|spelling| *spelling != "CHARACTER LARGE OBJECT")
+        {
             let source = format!(
                 "CREATE SCHEMA demo; CREATE TYPE demo.item AS OBJECT (value {} UNIQUE);",
                 spelling
@@ -9180,9 +9222,10 @@ mod tests {
             assert_eq!(report.diagnostics().len(), 1, "{source}");
             let diagnostic = &report.diagnostics()[0];
             assert_eq!(diagnostic.code(), DiagnosticCode::TypeMismatch);
+            assert_eq!(diagnostic.code().as_str(), "ORNA0201");
             assert_eq!(
                 diagnostic.message(),
-                "UNIQUE is only available for REF fields that are NOT NULL"
+                "UNIQUE is only available for TEXT fields or REF fields that are NOT NULL"
             );
             assert_eq!(diagnostic.location().logical_path(), "unique.orna");
             let start = source.find("value").unwrap();
@@ -9202,9 +9245,10 @@ mod tests {
         assert_eq!(report.diagnostics().len(), 1);
         let diagnostic = &report.diagnostics()[0];
         assert_eq!(diagnostic.code(), DiagnosticCode::TypeMismatch);
+        assert_eq!(diagnostic.code().as_str(), "ORNA0201");
         assert_eq!(
             diagnostic.message(),
-            "UNIQUE is only available for REF fields that are NOT NULL"
+            "UNIQUE is only available for TEXT fields or REF fields that are NOT NULL"
         );
         let start = source.find("owner REF").unwrap();
         assert_eq!(diagnostic.location().span().start(), start);
@@ -9245,15 +9289,11 @@ mod tests {
             ),
             (
                 DiagnosticCode::TypeMismatch,
-                "UNIQUE is only available for REF fields that are NOT NULL",
-            ),
-            (
-                DiagnosticCode::TypeMismatch,
                 "default constant does not match the field type and nullability",
             ),
             (
                 DiagnosticCode::TypeMismatch,
-                "UNIQUE is only available for REF fields that are NOT NULL",
+                "UNIQUE is only available for TEXT fields or REF fields that are NOT NULL",
             ),
         ];
         assert_eq!(report.diagnostics().len(), expected.len());
@@ -9292,26 +9332,37 @@ mod tests {
     }
 
     #[test]
-    fn required_unique_reference_support_is_closed_to_non_null_references() {
+    fn unique_text_or_required_reference_support_is_closed_to_accepted_shapes() {
         let type_id = CheckedTypeId::Existing(TypeId::from_bytes([1; 16]));
 
-        assert!(super::supports_required_unique_reference(
+        assert!(super::supports_unique_text_or_required_reference(
             SemanticType::reference(type_id),
             false
         ));
-        assert!(!super::supports_required_unique_reference(
+        assert!(!super::supports_unique_text_or_required_reference(
             SemanticType::reference(type_id),
             true
         ));
-        assert!(!super::supports_required_unique_reference(
+        assert!(super::supports_unique_text_or_required_reference(
+            SemanticType::scalar(StandardScalar::CharacterLargeObject),
+            true
+        ));
+        assert!(super::supports_unique_text_or_required_reference(
+            SemanticType::scalar(StandardScalar::CharacterLargeObject),
+            false
+        ));
+        assert!(!super::supports_unique_text_or_required_reference(
             SemanticType::Named(type_id),
             false
         ));
         for scalar in StandardScalar::ALL {
-            assert!(!super::supports_required_unique_reference(
-                SemanticType::scalar(scalar),
-                false
-            ));
+            assert_eq!(
+                super::supports_unique_text_or_required_reference(
+                    SemanticType::scalar(scalar),
+                    false
+                ),
+                scalar == StandardScalar::CharacterLargeObject
+            );
         }
     }
 

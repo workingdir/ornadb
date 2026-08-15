@@ -46,8 +46,8 @@ use orna_core::{
         FunctionDefinition, FunctionDomain, FunctionReturn, FunctionReturnColumnDefinition,
         FunctionSecurity, FunctionTransaction, FunctionVolatility, ObjectTypeDefinition,
         ParameterDefinition, QualifiedSemanticName, RecordValueFieldDefinition,
-        RecordValueTypeDefinition, SchemaDefinition, ValueTypeKind, ValueTypeMutability,
-        ValueTypePersistence,
+        RecordValueTypeDefinition, SchemaDefinition, ValueTypeDefinition, ValueTypeKind,
+        ValueTypeMutability, ValueTypePersistence,
     },
     revision::{
         ActiveDatabaseRevision, CatalogueHashContext, DefinitionIdentity, DefinitionOrigin,
@@ -75,7 +75,7 @@ use crate::{
     },
     relational::{supports_server_select_distinct, supports_server_select_equality},
     resolver::{
-        CheckedFieldRename, REQUIRED_UNIQUE_REFERENCE_MESSAGE, supports_required_unique_reference,
+        CheckedFieldRename, UNIQUE_FIELD_MESSAGE, supports_unique_text_or_required_reference,
     },
 };
 
@@ -580,6 +580,7 @@ pub(crate) fn prepare_checked_standard_upgrade_with_allocator(
         PreparedSource::from_active(active.source())
             .map_err(|_| PrepareStandardUpgradeError::ActiveSourceMismatch)?,
         PreparationMode::StandardV2Plan {
+            standard,
             declaration_evidence: matched.declaration_evidence.clone(),
             signature_evidence: matched.signature_evidence.clone(),
             standard_preflight: Box::new(matched.standard_preflight.clone()),
@@ -1142,6 +1143,7 @@ enum PreparationMode<'a> {
         standard_preflight: Box<StandardPreflight>,
     },
     StandardV2Plan {
+        standard: &'a crate::CheckedStandardLibrary,
         declaration_evidence: DeclarationEvidence,
         signature_evidence: SignatureEvidence,
         standard_preflight: Box<StandardPreflight>,
@@ -1325,6 +1327,15 @@ impl PreparationMode<'_> {
             Self::StandardV2Plan { .. } => CatalogueHashContext::version_one(),
             Self::StandardV2 { standard, .. } => {
                 CatalogueHashContext::version_two(standard.verified_snapshot().clone())
+            }
+        }
+    }
+
+    fn durable_standard_catalogue(&self) -> Option<&CatalogueSnapshot> {
+        match self {
+            Self::LegacyV1 | Self::StandardV1Match { .. } => None,
+            Self::StandardV2Plan { standard, .. } | Self::StandardV2 { standard, .. } => {
+                Some(standard.verified_snapshot().catalogue())
             }
         }
     }
@@ -3610,10 +3621,10 @@ fn validate_unique_fields(checked: &CheckedBundle) -> Result<(), PrepareError> {
         .flat_map(|object_type| object_type.fields())
     {
         if field.unique()
-            && !supports_required_unique_reference(field.semantic_type(), field.nullable())
+            && !supports_unique_text_or_required_reference(field.semantic_type(), field.nullable())
         {
             return Err(PrepareError::InvalidCheckedBundle {
-                reason: REQUIRED_UNIQUE_REFERENCE_MESSAGE,
+                reason: UNIQUE_FIELD_MESSAGE,
             });
         }
     }
@@ -5289,6 +5300,17 @@ impl<'a> CandidateBuilder<'a> {
                     true,
                     CandidateTypeProjection::Durable,
                 )?;
+                if checked_field.unique()
+                    && !supports_durable_unique_field(
+                        durable_type,
+                        checked_field.nullable(),
+                        self.mode.durable_standard_catalogue(),
+                    )
+                {
+                    return Err(PrepareError::InvalidCheckedBundle {
+                        reason: UNIQUE_FIELD_MESSAGE,
+                    });
+                }
                 compatibility_fields.push(FieldDefinition::new(
                     field_id,
                     checked_field.name(),
@@ -6414,6 +6436,30 @@ impl<'a> CandidateBuilder<'a> {
     }
 }
 
+fn supports_unique_text_value_type(value_type: &ValueTypeDefinition) -> bool {
+    value_type.kind() == ValueTypeKind::Primitive
+        && value_type.mutability() == ValueTypeMutability::Immutable
+        && value_type.persistence() == ValueTypePersistence::Persistable
+        && value_type.representation_contract() == "orna.kernel.value.character-large-object@1"
+}
+
+fn supports_durable_unique_field(
+    resolved_type: ResolvedType,
+    nullable: bool,
+    standard: Option<&CatalogueSnapshot>,
+) -> bool {
+    if !nullable && resolved_type.reference_target().is_some() {
+        return true;
+    }
+    match (standard, resolved_type) {
+        (None, ResolvedType::Scalar(StandardScalar::CharacterLargeObject)) => true,
+        (Some(standard), ResolvedType::Value(type_id)) => standard
+            .value_type_by_id(type_id)
+            .is_some_and(supports_unique_text_value_type),
+        _ => false,
+    }
+}
+
 fn standard_upgrade_reuse_is_current_only(
     semantic_hash_version: FunctionSemanticHashVersion,
 ) -> bool {
@@ -6457,7 +6503,8 @@ mod tests {
         catalogue::{
             CatalogueSnapshot, FieldDefinition, FunctionDefinition, FunctionDomain, FunctionReturn,
             FunctionSecurity, FunctionTransaction, FunctionVolatility, ObjectTypeDefinition,
-            ParameterDefinition,
+            ParameterDefinition, SchemaDefinition, ValueTypeDefinition, ValueTypeMutability,
+            ValueTypePersistence,
         },
         revision::{
             ActiveDatabaseRevision, DefinitionReferenceKind, DefinitionReferenceTarget,
@@ -6589,6 +6636,12 @@ mod tests {
             owner REF relations.owner NOT NULL UNIQUE\n\
         );\n\
         CREATE TYPE relations.owner AS OBJECT (name TEXT NOT NULL);\n";
+
+    const UNIQUE_TEXT_SOURCE: &str = "CREATE SCHEMA crm;\n\
+        CREATE TYPE crm.contact AS OBJECT (\n\
+            email TEXT UNIQUE,\n\
+            name CHARACTER LARGE OBJECT NOT NULL UNIQUE\n\
+        );\n";
 
     static CATALOGUE_ALLOCATION: AtomicUsize = AtomicUsize::new(0);
     static BUNDLE_ALLOCATION: AtomicUsize = AtomicUsize::new(0);
@@ -10792,9 +10845,166 @@ mod tests {
             ));
             assert_preparation_reason(
                 prepare(&malformed, empty.pair(), &empty),
-                REQUIRED_UNIQUE_REFERENCE_MESSAGE,
+                UNIQUE_FIELD_MESSAGE,
             );
         }
+    }
+
+    #[test]
+    fn prepares_unique_text_fields_and_rejects_hostile_checked_shapes() {
+        let empty = empty_active();
+        let report = checked_report(UNIQUE_TEXT_SOURCE, empty.catalogue());
+        assert!(report.diagnostics().is_empty());
+        let checked = report.checked_bundle().unwrap();
+        let checked_contact = checked
+            .object_types()
+            .iter()
+            .find(|object_type| object_type.name() == &semantic_name(&["crm", "contact"]))
+            .unwrap();
+        let checked_email = &checked_contact.fields()[0];
+
+        let prepared = prepare(&report, empty.pair(), &empty).unwrap();
+        let contact = prepared
+            .candidate()
+            .object_type_by_name(&semantic_name(&["crm", "contact"]))
+            .unwrap();
+        let email = contact.field_by_name("email").unwrap();
+        let name = contact.field_by_name("name").unwrap();
+        assert!(email.unique());
+        assert!(email.nullable());
+        assert_eq!(
+            email.resolved_type(),
+            ResolvedType::scalar(StandardScalar::CharacterLargeObject)
+        );
+        assert!(name.unique());
+        assert!(!name.nullable());
+        assert_eq!(
+            name.resolved_type(),
+            ResolvedType::scalar(StandardScalar::CharacterLargeObject)
+        );
+
+        for (semantic_type, nullable) in [
+            (SemanticType::scalar(StandardScalar::Boolean), false),
+            (SemanticType::reference(checked_contact.id()), true),
+            (SemanticType::Named(checked_contact.id()), false),
+        ] {
+            let mut hostile = report.clone();
+            assert!(hostile.replace_checked_field_facts_for_test(
+                checked_contact.id(),
+                checked_email.id(),
+                semantic_type,
+                nullable,
+                true,
+            ));
+            assert_preparation_reason(
+                prepare(&hostile, empty.pair(), &empty),
+                UNIQUE_FIELD_MESSAGE,
+            );
+        }
+    }
+
+    #[test]
+    fn durable_unique_field_support_requires_exact_legacy_or_standard_text_authority() {
+        let text_id = TypeId::from_bytes([0xa1; 16]);
+        let other_id = TypeId::from_bytes([0xa2; 16]);
+        let transient_id = TypeId::from_bytes([0xa3; 16]);
+        let opaque_id = TypeId::from_bytes([0xa4; 16]);
+        let accepted = ValueTypeDefinition::primitive(
+            text_id,
+            semantic_name(&["std", "types", "text"]),
+            ValueTypeMutability::Immutable,
+            ValueTypePersistence::Persistable,
+            "orna.kernel.value.character-large-object@1",
+        );
+        let other_contract = ValueTypeDefinition::primitive(
+            other_id,
+            semantic_name(&["std", "types", "other"]),
+            ValueTypeMutability::Immutable,
+            ValueTypePersistence::Persistable,
+            "other@1",
+        );
+        let transient = ValueTypeDefinition::primitive(
+            transient_id,
+            semantic_name(&["std", "types", "transient"]),
+            ValueTypeMutability::Immutable,
+            ValueTypePersistence::Transient,
+            "orna.kernel.value.character-large-object@1",
+        );
+        let opaque = ValueTypeDefinition::opaque(
+            opaque_id,
+            semantic_name(&["std", "types", "opaque"]),
+            "orna.kernel.value.character-large-object@1",
+        );
+        let standard = CatalogueSnapshot::new_with_types(
+            CatalogueRevisionId::from_bytes([0xa5; 16]),
+            vec![
+                SchemaDefinition::new(SchemaId::from_bytes([0xa8; 16]), semantic_name(&["std"])),
+                SchemaDefinition::new(
+                    SchemaId::from_bytes([0xa9; 16]),
+                    semantic_name(&["std", "types"]),
+                ),
+            ],
+            Vec::new(),
+            vec![accepted, other_contract, transient, opaque],
+            Vec::new(),
+        )
+        .expect("test standard catalogue must be valid");
+
+        for nullable in [false, true] {
+            assert!(supports_durable_unique_field(
+                ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+                nullable,
+                None,
+            ));
+            assert!(supports_durable_unique_field(
+                ResolvedType::value(text_id),
+                nullable,
+                Some(&standard),
+            ));
+        }
+        assert!(!supports_durable_unique_field(
+            ResolvedType::value(text_id),
+            false,
+            None,
+        ));
+        assert!(!supports_durable_unique_field(
+            ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+            false,
+            Some(&standard),
+        ));
+        for type_id in [
+            other_id,
+            transient_id,
+            opaque_id,
+            TypeId::from_bytes([0xa6; 16]),
+        ] {
+            assert!(!supports_durable_unique_field(
+                ResolvedType::value(type_id),
+                false,
+                Some(&standard),
+            ));
+        }
+        let owner = TypeId::from_bytes([0xa7; 16]);
+        assert!(supports_durable_unique_field(
+            ResolvedType::reference(owner),
+            false,
+            None,
+        ));
+        assert!(supports_durable_unique_field(
+            ResolvedType::reference(owner),
+            false,
+            Some(&standard),
+        ));
+        assert!(!supports_durable_unique_field(
+            ResolvedType::reference(owner),
+            true,
+            None,
+        ));
+        assert!(!supports_durable_unique_field(
+            ResolvedType::reference(owner),
+            true,
+            Some(&standard),
+        ));
     }
 
     #[test]
