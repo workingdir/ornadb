@@ -4,6 +4,9 @@ Apache-2.0; Copyright 2026 Working Directory Ltd
 PostgreSQL
 PostgreSQL; Copyright (c) 1996-2026 PostgreSQL Global Development Group; Copyright (c) 1994 The Regents of the University of California
 
+Zlib 1.3.2
+Zlib; 1995-2026 Jean-loup Gailly and Mark Adler; https://github.com/madler/zlib
+
 External Rust dependencies
 
 async-trait 0.1.91
