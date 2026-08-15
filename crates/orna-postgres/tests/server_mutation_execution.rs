@@ -334,6 +334,32 @@ const UNIQUE_REFERENCE_SOURCE: &str = "CREATE SCHEMA assignments;\n\
     WHERE REF(changed_assignment) = p_assignment\n\
     RETURNING REF(changed_assignment);\n";
 
+// ADR 0051 uses one compact fixture for both nullable and required unique
+// Text fields. The update parameter order intentionally puts the value before
+// the selector, so this test also proves selector/value binding by ParameterId.
+#[cfg(feature = "test-hooks")]
+const UNIQUE_TEXT_SOURCE: &str = "CREATE SCHEMA text_claims;\n\
+    CREATE TYPE text_claims.claim AS OBJECT (\n\
+      nullable_value TEXT UNIQUE, required_value TEXT NOT NULL UNIQUE\n\
+    );\n\
+    CREATE SERVER FUNCTION text_claims.create(\n\
+      p_nullable TEXT, p_required TEXT\n\
+    ) RETURNS ROWS (created REF text_claims.claim)\n\
+    SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE\n\
+    AS INSERT INTO text_claims.claim AS made (nullable_value, required_value)\n\
+    VALUES (p_nullable, p_required) RETURNING REF(made);\n\
+    CREATE SERVER FUNCTION text_claims.create_without_nullable(p_required TEXT)\n\
+    RETURNS ROWS (created REF text_claims.claim)\n\
+    SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE\n\
+    AS INSERT INTO text_claims.claim AS made (required_value)\n\
+    VALUES (p_required) RETURNING REF(made);\n\
+    CREATE SERVER FUNCTION text_claims.update(\n\
+      p_value TEXT, p_claim REF text_claims.claim\n\
+    ) RETURNS ROWS (updated REF text_claims.claim)\n\
+    SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE\n\
+    AS UPDATE text_claims.claim AS changed SET required_value = p_value\n\
+    WHERE REF(changed) = p_claim RETURNING REF(changed);\n";
+
 #[cfg(feature = "test-hooks")]
 const MUTATION_SOURCE_EDIT: &str = "-- source-only edit\n\
     CREATE SCHEMA tasks;\n\
@@ -1902,6 +1928,229 @@ async fn required_unique_reference_conflicts_are_typed_and_transactional() -> Te
     .await
 }
 
+#[cfg(feature = "test-hooks")]
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn unique_text_conflicts_are_typed_and_transactional() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = hostile_kernel(&database)?;
+        kernel.bootstrap().await?;
+        let empty = kernel.recover().await?;
+        let applied = kernel
+            .apply(&candidate(UNIQUE_TEXT_SOURCE, &empty)?)
+            .await?;
+        let fixture = UniqueTextFixture::from_active(&applied)?;
+
+        let first_null = insert_unique_text_null(&kernel, fixture, "required-null-a").await?;
+        let second_null = insert_unique_text_null(&kernel, fixture, "required-null-b").await?;
+        require(
+            first_null.object() != second_null.object(),
+            "nullable unique Text did not permit two NULL values",
+        )?;
+
+        let claimed = insert_unique_text(
+            &kernel,
+            fixture,
+            RuntimeValue::Text("nullable".into()),
+            "exact",
+        )
+        .await?;
+        let duplicate_insert = kernel
+            .execute_server_insert(
+                fixture.create,
+                &unique_text_arguments(fixture, RuntimeValue::Text("other".into()), "exact")?,
+            )
+            .await
+            .expect_err("an exact required unique Text INSERT must conflict");
+        require_unique_text_insert_conflict(
+            &duplicate_insert,
+            applied.pair(),
+            fixture,
+            fixture.required_field,
+        )?;
+        require_unique_text_row(
+            &database,
+            fixture,
+            claimed.object(),
+            Some("nullable"),
+            "exact",
+        )
+        .await?;
+
+        let duplicate_nullable = kernel
+            .execute_server_insert(
+                fixture.create,
+                &unique_text_arguments(
+                    fixture,
+                    RuntimeValue::Text("nullable".into()),
+                    "nullable-conflict",
+                )?,
+            )
+            .await
+            .expect_err("an exact nullable unique Text INSERT must conflict");
+        require_unique_text_insert_conflict(
+            &duplicate_nullable,
+            applied.pair(),
+            fixture,
+            fixture.nullable_field,
+        )?;
+
+        for value in ["", "Exact", "exact ", "exact\n", "e\u{301}", "\u{00e9}"] {
+            insert_unique_text(&kernel, fixture, RuntimeValue::Text(value.into()), value).await?;
+        }
+
+        let update_target = insert_unique_text(
+            &kernel,
+            fixture,
+            RuntimeValue::Text("update".into()),
+            "update-before",
+        )
+        .await?;
+        let duplicate_update = kernel
+            .execute_server_update(
+                fixture.update,
+                &unique_text_update_arguments(fixture, update_target.object(), "exact")?,
+            )
+            .await
+            .expect_err("a selector/value UPDATE to an exact Text value must conflict");
+        require_unique_text_update_conflict(&duplicate_update, applied.pair(), fixture)?;
+        require_unique_text_row(
+            &database,
+            fixture,
+            update_target.object(),
+            Some("update"),
+            "update-before",
+        )
+        .await?;
+
+        kernel
+            .execute_server_update(
+                fixture.update,
+                &unique_text_update_arguments(fixture, claimed.object(), "exact")?,
+            )
+            .await?;
+        require_unique_text_row(
+            &database,
+            fixture,
+            claimed.object(),
+            Some("nullable"),
+            "exact",
+        )
+        .await?;
+
+        let unrelated = execute_insert_with_installed_trigger(
+            &database,
+            &kernel,
+            fixture.create,
+            fixture.claim,
+            &unique_text_arguments(fixture, RuntimeValue::Text("unrelated".into()), "unrelated")?,
+            TriggerKind::UnrelatedUniqueViolation,
+            "unrelated unique Text INSERT",
+        )
+        .await?;
+        require_unrelated_unique_insert_failure(
+            &unrelated,
+            applied.pair(),
+            fixture.create,
+            fixture.create_revision,
+        )?;
+
+        let first_reached = Arc::new(tokio::sync::Barrier::new(2));
+        let first_resume = Arc::new(tokio::sync::Barrier::new(2));
+        let second_reached = Arc::new(tokio::sync::Barrier::new(2));
+        let second_resume = Arc::new(tokio::sync::Barrier::new(2));
+        let first_kernel = kernel.clone();
+        let first_arguments = unique_text_arguments(
+            fixture,
+            RuntimeValue::Text("concurrent-a".into()),
+            "concurrent",
+        )?;
+        let first_execution_reached = first_reached.clone();
+        let first_execution_resume = first_resume.clone();
+        let mut first = tokio::spawn(async move {
+            first_kernel
+                .execute_server_insert_with_test_barrier(
+                    fixture.create,
+                    &first_arguments,
+                    first_execution_reached,
+                    first_execution_resume,
+                )
+                .await
+        });
+        let second_kernel = kernel.clone();
+        let second_arguments = unique_text_arguments(
+            fixture,
+            RuntimeValue::Text("concurrent-b".into()),
+            "concurrent",
+        )?;
+        let second_execution_reached = second_reached.clone();
+        let second_execution_resume = second_resume.clone();
+        let mut second = tokio::spawn(async move {
+            second_kernel
+                .execute_server_insert_with_test_barrier(
+                    fixture.create,
+                    &second_arguments,
+                    second_execution_reached,
+                    second_execution_resume,
+                )
+                .await
+        });
+        wait_for_barrier(
+            &mut first,
+            first_reached,
+            "first unique Text claim",
+            "recovery",
+        )
+        .await?;
+        wait_for_barrier(
+            &mut second,
+            second_reached,
+            "second unique Text claim",
+            "recovery",
+        )
+        .await?;
+        let (first_release, second_release) = tokio::join!(
+            wait_for_barrier(
+                &mut first,
+                first_resume,
+                "first unique Text claim",
+                "resume"
+            ),
+            wait_for_barrier(
+                &mut second,
+                second_resume,
+                "second unique Text claim",
+                "resume"
+            ),
+        );
+        first_release?;
+        second_release?;
+        let (first_outcome, second_outcome) = tokio::join!(
+            wait_for_outcome(first, "first unique Text claim"),
+            wait_for_outcome(second, "second unique Text claim"),
+        );
+        let outcomes = [first_outcome?, second_outcome?];
+        require(
+            outcomes.iter().filter(|outcome| outcome.is_ok()).count() == 1,
+            "concurrent Text claims did not yield exactly one success",
+        )?;
+        for error in outcomes.iter().filter_map(|outcome| outcome.as_ref().err()) {
+            require_unique_text_insert_conflict(
+                error,
+                applied.pair(),
+                fixture,
+                fixture.required_field,
+            )?;
+        }
+        require(
+            count_rows(&database, fixture.claim).await? == 11,
+            "unique Text conflict changed the persisted set",
+        )?;
+        require_no_session_leaks(&database).await
+    })
+    .await
+}
+
 #[derive(Clone, Copy)]
 struct Fixture {
     owner: TypeId,
@@ -2143,6 +2392,74 @@ impl UniqueReferenceFixture {
             update_assignment_selector_parameter: parameter(update_assignment, "p_assignment")?,
             update_assignment_owner_parameter: parameter(update_assignment, "p_owner")?,
             update_assignment_label_parameter: parameter(update_assignment, "p_label")?,
+        })
+    }
+}
+
+#[cfg(feature = "test-hooks")]
+#[derive(Clone, Copy)]
+struct UniqueTextFixture {
+    claim: TypeId,
+    nullable_field: FieldId,
+    required_field: FieldId,
+    create: FunctionId,
+    create_revision: FunctionRevisionId,
+    create_nullable_parameter: ParameterId,
+    create_required_parameter: ParameterId,
+    create_without_nullable: FunctionId,
+    create_without_nullable_parameter: ParameterId,
+    update: FunctionId,
+    update_revision: FunctionRevisionId,
+    update_value_parameter: ParameterId,
+    update_selector_parameter: ParameterId,
+}
+
+#[cfg(feature = "test-hooks")]
+impl UniqueTextFixture {
+    fn from_active(active: &ActiveDatabaseRevision) -> TestResult<Self> {
+        let object = active
+            .catalogue()
+            .object_types()
+            .iter()
+            .find(|object| name_is(object.name().parts(), &["text_claims", "claim"]))
+            .ok_or_else(|| failure("text_claims.claim type is absent"))?;
+        let function = |name| {
+            active
+                .catalogue()
+                .functions()
+                .iter()
+                .find(|function| name_is(function.name().parts(), &["text_claims", name]))
+                .ok_or_else(|| failure(format!("text_claims.{name} function is absent")))
+        };
+        let parameter = |function: &orna_core::catalogue::FunctionDefinition, name| {
+            function
+                .parameter_by_name(name)
+                .map(|parameter| parameter.id())
+                .ok_or_else(|| failure(format!("text_claims parameter {name} is absent")))
+        };
+        let create = function("create")?;
+        let create_without_nullable = function("create_without_nullable")?;
+        let update = function("update")?;
+        Ok(Self {
+            claim: object.id(),
+            nullable_field: object
+                .field_by_name("nullable_value")
+                .map(|field| field.id())
+                .ok_or_else(|| failure("nullable unique Text field is absent"))?,
+            required_field: object
+                .field_by_name("required_value")
+                .map(|field| field.id())
+                .ok_or_else(|| failure("required unique Text field is absent"))?,
+            create: create.id(),
+            create_revision: create.current_revision(),
+            create_nullable_parameter: parameter(create, "p_nullable")?,
+            create_required_parameter: parameter(create, "p_required")?,
+            create_without_nullable: create_without_nullable.id(),
+            create_without_nullable_parameter: parameter(create_without_nullable, "p_required")?,
+            update: update.id(),
+            update_revision: update.current_revision(),
+            update_value_parameter: parameter(update, "p_value")?,
+            update_selector_parameter: parameter(update, "p_claim")?,
         })
     }
 }
@@ -4494,6 +4811,74 @@ fn assignment_update_arguments(
     ])
 }
 
+#[cfg(feature = "test-hooks")]
+async fn insert_unique_text(
+    kernel: &PostgresKernel,
+    fixture: UniqueTextFixture,
+    nullable: RuntimeValue,
+    required: &str,
+) -> TestResult<ServerInsertResult> {
+    Ok(kernel
+        .execute_server_insert(
+            fixture.create,
+            &unique_text_arguments(fixture, nullable, required)?,
+        )
+        .await?)
+}
+
+#[cfg(feature = "test-hooks")]
+async fn insert_unique_text_null(
+    kernel: &PostgresKernel,
+    fixture: UniqueTextFixture,
+    required: &str,
+) -> TestResult<ServerInsertResult> {
+    Ok(kernel
+        .execute_server_insert(
+            fixture.create_without_nullable,
+            &[FunctionArgument::new(
+                fixture.create_without_nullable_parameter,
+                RuntimeValue::Text(required.into()),
+            )?],
+        )
+        .await?)
+}
+
+#[cfg(feature = "test-hooks")]
+fn unique_text_arguments(
+    fixture: UniqueTextFixture,
+    nullable: RuntimeValue,
+    required: &str,
+) -> TestResult<Vec<FunctionArgument>> {
+    Ok(vec![
+        FunctionArgument::new(
+            fixture.create_required_parameter,
+            RuntimeValue::Text(required.into()),
+        )?,
+        FunctionArgument::new(fixture.create_nullable_parameter, nullable)?,
+    ])
+}
+
+#[cfg(feature = "test-hooks")]
+fn unique_text_update_arguments(
+    fixture: UniqueTextFixture,
+    selector: ObjectId,
+    required: &str,
+) -> TestResult<Vec<FunctionArgument>> {
+    Ok(vec![
+        FunctionArgument::new(
+            fixture.update_selector_parameter,
+            RuntimeValue::Reference {
+                target: fixture.claim,
+                object: selector,
+            },
+        )?,
+        FunctionArgument::new(
+            fixture.update_value_parameter,
+            RuntimeValue::Text(required.into()),
+        )?,
+    ])
+}
+
 fn task_arguments(fixture: Fixture, task: &ExactTask) -> TestResult<Vec<FunctionArgument>> {
     Ok(vec![
         FunctionArgument::new(
@@ -4943,6 +5328,101 @@ fn require_unique_update_result(
 }
 
 #[cfg(feature = "test-hooks")]
+fn require_unique_text_insert_conflict(
+    error: &PostgresKernelError,
+    pair: RevisionPair,
+    fixture: UniqueTextFixture,
+    expected_field: FieldId,
+) -> TestResult<()> {
+    let PostgresKernelError::ServerInsert(ServerInsertError::NotCommitted { context, source }) =
+        error
+    else {
+        return Err(failure(
+            "unique Text INSERT lacks a contextual NotCommitted result",
+        ));
+    };
+    require_context(*context, pair, fixture.create, fixture.create_revision)?;
+    require_unique_text_private_source(source.as_ref(), fixture, expected_field, "INSERT")?;
+    require(
+        source.to_string() == "this text value is already used by another object",
+        "unique Text INSERT display exposes the wrong text",
+    )?;
+    require(
+        error.to_string()
+            == "row creation failed: the row was not added: this text value is already used by another object",
+        "unique Text INSERT outer display differs",
+    )
+}
+
+#[cfg(feature = "test-hooks")]
+fn require_unique_text_update_conflict(
+    error: &PostgresKernelError,
+    pair: RevisionPair,
+    fixture: UniqueTextFixture,
+) -> TestResult<()> {
+    let PostgresKernelError::ServerUpdate(ServerUpdateError::NotCommitted { context, source }) =
+        error
+    else {
+        return Err(failure(
+            "unique Text UPDATE lacks a contextual NotCommitted result",
+        ));
+    };
+    require_context(*context, pair, fixture.update, fixture.update_revision)?;
+    require_unique_text_private_source(source.as_ref(), fixture, fixture.required_field, "UPDATE")?;
+    require(
+        source.to_string() == "this text value is already used by another object",
+        "unique Text UPDATE display exposes the wrong text",
+    )?;
+    require(
+        error.to_string()
+            == "object update failed: the object was not updated: this text value is already used by another object",
+        "unique Text UPDATE outer display differs",
+    )
+}
+
+#[cfg(feature = "test-hooks")]
+fn require_unique_text_private_source(
+    source: &ServerMutationError,
+    fixture: UniqueTextFixture,
+    expected_field: FieldId,
+    operation: &str,
+) -> TestResult<()> {
+    // This stays a runtime oracle until production provides the public enum
+    // variant. Debug retains the private typed context without placing it in a
+    // stable display, audit record, or socket frame.
+    let debug = format!("{source:?}");
+    require(
+        debug.contains("UniqueTextConflict"),
+        format!("unique Text {operation} was not classified as UniqueTextConflict"),
+    )?;
+    require(
+        debug.contains(&format!("{:?}", fixture.claim))
+            && debug.contains(&format!("{expected_field:?}")),
+        format!("unique Text {operation} private owner or field differs"),
+    )?;
+    let database = std::error::Error::source(source)
+        .and_then(|error| error.downcast_ref::<tokio_postgres::Error>())
+        .ok_or_else(|| {
+            failure(format!(
+                "unique Text {operation} lost its PostgreSQL source"
+            ))
+        })?;
+    let database = database.as_db_error().ok_or_else(|| {
+        failure(format!(
+            "unique Text {operation} PostgreSQL source has no database diagnostics"
+        ))
+    })?;
+    require(
+        database.code() == &SqlState::UNIQUE_VIOLATION,
+        format!("unique Text {operation} lost SQLSTATE 23505"),
+    )?;
+    require(
+        database.constraint() == Some(unique_constraint_name(expected_field).as_str()),
+        format!("unique Text {operation} constraint differs"),
+    )
+}
+
+#[cfg(feature = "test-hooks")]
 fn require_unrelated_unique_insert_failure(
     error: &PostgresKernelError,
     pair: RevisionPair,
@@ -5191,6 +5671,43 @@ async fn assignment_label_for_owner(
     }
     .await;
     finish_session(session, operation, "concurrent assignment inspection").await
+}
+
+#[cfg(feature = "test-hooks")]
+async fn require_unique_text_row(
+    database: &TestDatabase,
+    fixture: UniqueTextFixture,
+    object: ObjectId,
+    nullable: Option<&str>,
+    required: &str,
+) -> TestResult<()> {
+    let session = database.open().await?;
+    let operation: TestResult<(Option<String>, String)> = async {
+        let row = session
+            .client()
+            .query_one(
+                &format!(
+                    "SELECT {}, {} FROM {} WHERE _orna_object_id = $1",
+                    field(fixture.nullable_field),
+                    field(fixture.required_field),
+                    relation(fixture.claim),
+                ),
+                &[&object.to_bytes().to_vec()],
+            )
+            .await?;
+        Ok((row.try_get(0)?, row.try_get(1)?))
+    }
+    .await;
+    let (stored_nullable, stored_required) =
+        finish_session(session, operation, "unique Text row inspection").await?;
+    require(
+        stored_nullable.as_deref() == nullable,
+        "stored nullable unique Text differs",
+    )?;
+    require(
+        stored_required == required,
+        "stored required unique Text differs",
+    )
 }
 
 async fn install_public_decoy(database: &TestDatabase, target: TypeId) -> TestResult<()> {
