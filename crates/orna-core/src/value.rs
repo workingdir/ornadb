@@ -243,6 +243,12 @@ pub enum RuntimeValue {
     Opaque(OpaqueValue),
     /// A checked immutable constructed runtime value.
     Constructed(ConstructedValue),
+    /// One checked sealed invocation typed value.
+    InvokeValue(crate::invocation::InvokeValue),
+    /// One checked sealed root invocation request.
+    InvokeRequest(crate::invocation::InvokeRequest),
+    /// One checked sealed invocation event.
+    InvokeEvent(crate::invocation::InvokeEvent),
 }
 
 impl RuntimeValue {
@@ -268,6 +274,15 @@ impl RuntimeValue {
             Self::Record(value) => RuntimeType::Flat(ResolvedType::named(value.record_type)),
             Self::Opaque(value) => RuntimeType::Flat(ResolvedType::value(value.opaque_type)),
             Self::Constructed(value) => RuntimeType::Constructed(value.descriptor()),
+            Self::InvokeValue(_) => {
+                RuntimeType::Flat(ResolvedType::value(crate::system::SYS_INVOKE_VALUE_TYPE_ID))
+            }
+            Self::InvokeRequest(_) => RuntimeType::Flat(ResolvedType::value(
+                crate::system::SYS_INVOKE_REQUEST_TYPE_ID,
+            )),
+            Self::InvokeEvent(_) => {
+                RuntimeType::Flat(ResolvedType::value(crate::system::SYS_INVOKE_EVENT_TYPE_ID))
+            }
         }
     }
 
@@ -471,8 +486,100 @@ fn count_runtime_value_nodes(
         | RuntimeValue::Bytes(_)
         | RuntimeValue::Reference { .. }
         | RuntimeValue::Enum(_)
-        | RuntimeValue::Opaque(_) => add_runtime_value_nodes(total, 1),
+        | RuntimeValue::Opaque(_)
+        | RuntimeValue::InvokeValue(_)
+        | RuntimeValue::InvokeRequest(_)
+        | RuntimeValue::InvokeEvent(_) => add_runtime_value_nodes(total, 1),
     }
+}
+
+/// Counts ordinary runtime nodes for one invocation carrier and rejects any
+/// nested carrier before it can enter a checked carrier tree.
+pub(crate) fn count_invocation_runtime_value_nodes(
+    value: &RuntimeValue,
+) -> Result<usize, crate::invocation::InvocationCarrierConstructionError> {
+    use crate::invocation::{InvocationCarrierConstructionError, MAX_INVOCATION_CARRIER_NODES};
+
+    fn add(total: &mut usize, additional: usize) -> Result<(), InvocationCarrierConstructionError> {
+        let next = total.checked_add(additional).ok_or(
+            InvocationCarrierConstructionError::TooManyNodes {
+                maximum: MAX_INVOCATION_CARRIER_NODES,
+            },
+        )?;
+        if next > MAX_INVOCATION_CARRIER_NODES {
+            return Err(InvocationCarrierConstructionError::TooManyNodes {
+                maximum: MAX_INVOCATION_CARRIER_NODES,
+            });
+        }
+        *total = next;
+        Ok(())
+    }
+
+    fn count(
+        value: &RuntimeValue,
+        total: &mut usize,
+    ) -> Result<(), InvocationCarrierConstructionError> {
+        match value {
+            RuntimeValue::Constructed(value) => {
+                add(total, 1)?;
+                match value.kind() {
+                    ConstructedValueKind::Option(value) => {
+                        if let Some(value) = value {
+                            count(value, total)?;
+                        }
+                    }
+                    ConstructedValueKind::List(values) => {
+                        for value in values {
+                            count(value, total)?;
+                        }
+                    }
+                    ConstructedValueKind::Map(entries) => {
+                        for (key, value) in entries {
+                            count(key, total)?;
+                            count(value, total)?;
+                        }
+                    }
+                }
+                Ok(())
+            }
+            RuntimeValue::Record(value) => {
+                add(total, 1)?;
+                for field in value.fields() {
+                    count(field, total)?;
+                }
+                Ok(())
+            }
+            RuntimeValue::InvokeValue(_) => {
+                Err(InvocationCarrierConstructionError::NestedCarrier {
+                    carrier: crate::system::SYS_INVOKE_VALUE_TYPE_ID,
+                })
+            }
+            RuntimeValue::InvokeRequest(_) => {
+                Err(InvocationCarrierConstructionError::NestedCarrier {
+                    carrier: crate::system::SYS_INVOKE_REQUEST_TYPE_ID,
+                })
+            }
+            RuntimeValue::InvokeEvent(_) => {
+                Err(InvocationCarrierConstructionError::NestedCarrier {
+                    carrier: crate::system::SYS_INVOKE_EVENT_TYPE_ID,
+                })
+            }
+            RuntimeValue::Null(_)
+            | RuntimeValue::Boolean(_)
+            | RuntimeValue::Integer(_)
+            | RuntimeValue::BigInt(_)
+            | RuntimeValue::Float(_)
+            | RuntimeValue::Text(_)
+            | RuntimeValue::Bytes(_)
+            | RuntimeValue::Reference { .. }
+            | RuntimeValue::Enum(_)
+            | RuntimeValue::Opaque(_) => add(total, 1),
+        }
+    }
+
+    let mut total = 0;
+    count(value, &mut total)?;
+    Ok(total)
 }
 
 fn preflight_collection_descriptor(
@@ -1720,6 +1827,15 @@ impl FunctionArgument {
                 parameter,
                 opaque_type: value.opaque_type(),
             }),
+            RuntimeValue::InvokeValue(_)
+            | RuntimeValue::InvokeRequest(_)
+            | RuntimeValue::InvokeEvent(_) => {
+                Err(FunctionArgumentError::InvocationCarrierNotAccepted {
+                    parameter,
+                    carrier: crate::invocation::invocation_carrier_kind(&value)
+                        .expect("invocation runtime values have a carrier kind"),
+                })
+            }
         }
     }
 
@@ -1766,6 +1882,13 @@ pub enum FunctionArgumentError {
         /// The opaque type carried by the value.
         opaque_type: TypeId,
     },
+    /// A sealed invocation carrier is outside ordinary function arguments.
+    InvocationCarrierNotAccepted {
+        /// The parameter identity supplied with the carrier.
+        parameter: ParameterId,
+        /// The rejected carrier kind.
+        carrier: crate::system::InvocationCarrierKind,
+    },
 }
 
 impl fmt::Display for FunctionArgumentError {
@@ -1780,6 +1903,9 @@ impl fmt::Display for FunctionArgumentError {
             }
             Self::OpaqueValueNotAccepted { .. } => {
                 formatter.write_str("opaque function arguments are not accepted")
+            }
+            Self::InvocationCarrierNotAccepted { .. } => {
+                formatter.write_str("invocation carrier function arguments are not accepted")
             }
         }
     }
@@ -1929,6 +2055,13 @@ impl ResultRows {
                         opaque_type: value.opaque_type(),
                     });
                 }
+                if let Some(carrier) = crate::invocation::invocation_carrier_kind(value) {
+                    return Err(ResultRowsError::InvocationCarrierNotAccepted {
+                        row: row_index,
+                        column: column_index,
+                        carrier,
+                    });
+                }
                 if value.is_null() && !column.nullable {
                     return Err(ResultRowsError::NullInNonNullableColumn {
                         row: row_index,
@@ -2026,6 +2159,15 @@ pub enum ResultRowsError {
         /// The rejected opaque type identity.
         opaque_type: TypeId,
     },
+    /// A sealed invocation carrier occurred in a SERVER result row.
+    InvocationCarrierNotAccepted {
+        /// The zero-based result-row position.
+        row: usize,
+        /// The zero-based result-column position.
+        column: usize,
+        /// The rejected carrier kind.
+        carrier: crate::system::InvocationCarrierKind,
+    },
 }
 
 impl fmt::Display for ResultRowsError {
@@ -2072,6 +2214,12 @@ impl fmt::Display for ResultRowsError {
                 write!(
                     formatter,
                     "result row {row} column {column} cannot contain an opaque value"
+                )
+            }
+            Self::InvocationCarrierNotAccepted { row, column, .. } => {
+                write!(
+                    formatter,
+                    "result row {row} column {column} cannot contain an invocation carrier"
                 )
             }
         }
