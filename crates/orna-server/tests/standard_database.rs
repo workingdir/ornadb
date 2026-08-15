@@ -60,7 +60,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::UnixStream,
     sync::Barrier,
-    time::sleep,
+    time::{sleep, timeout},
 };
 
 #[path = "../../orna-postgres/tests/support/mod.rs"]
@@ -143,6 +143,37 @@ const RAW_ARGUMENT_PAIR_SOCKET_SOURCE: &str = "CREATE SCHEMA raw_argument_pair_s
     RETURNS ROWS (second TEXT)\n\
     SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n\
     AS SELECT probe.second FROM raw_argument_pair_socket.probe probe;\n";
+/// ADR 0050 uses a scalar and a Reference value with the selector declared
+/// second. Socket calls supply the selector first to prove ParameterId binding.
+const RAW_REFERENCE_VALUE_UPDATE_SOCKET_SOURCE: &str = "CREATE SCHEMA raw_reference_value_socket;\n\
+    CREATE TYPE raw_reference_value_socket.probe AS OBJECT (\n\
+      stored TEXT NOT NULL, linked REF raw_reference_value_socket.probe\n\
+    );\n\
+    CREATE SERVER FUNCTION raw_reference_value_socket.create_probe(p_stored TEXT)\n\
+    RETURNS ROWS (created REF raw_reference_value_socket.probe)\n\
+    SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE\n\
+    AS INSERT INTO raw_reference_value_socket.probe AS made (stored)\n\
+    VALUES (p_stored) RETURNING REF(made);\n\
+    CREATE SERVER FUNCTION raw_reference_value_socket.update_text(\n\
+      p_value TEXT, p_probe REF raw_reference_value_socket.probe\n\
+    ) RETURNS ROWS (updated REF raw_reference_value_socket.probe)\n\
+    SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE\n\
+    AS UPDATE raw_reference_value_socket.probe AS changed\n\
+    SET stored = p_value WHERE REF(changed) = p_probe RETURNING REF(changed);\n\
+    CREATE SERVER FUNCTION raw_reference_value_socket.update_link(\n\
+      p_value REF raw_reference_value_socket.probe, p_probe REF raw_reference_value_socket.probe\n\
+    ) RETURNS ROWS (updated REF raw_reference_value_socket.probe)\n\
+    SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE\n\
+    AS UPDATE raw_reference_value_socket.probe AS changed\n\
+    SET linked = p_value WHERE REF(changed) = p_probe RETURNING REF(changed);\n\
+    CREATE SERVER FUNCTION raw_reference_value_socket.read_stored()\n\
+    RETURNS ROWS (stored TEXT)\n\
+    SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n\
+    AS SELECT probe.stored FROM raw_reference_value_socket.probe probe;\n\
+    CREATE SERVER FUNCTION raw_reference_value_socket.read_links()\n\
+    RETURNS ROWS (linked REF raw_reference_value_socket.probe)\n\
+    SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n\
+    AS SELECT probe.linked FROM raw_reference_value_socket.probe probe;\n";
 const RAW_CLIENT_USER: PrincipalId = PrincipalId::from_bytes([0x71; 16]);
 const RAW_CLIENT_UNGRANTED_USER: PrincipalId = PrincipalId::from_bytes([0x72; 16]);
 const RAW_CLIENT_STALE_USER: PrincipalId = PrincipalId::from_bytes([0x73; 16]);
@@ -3109,6 +3140,488 @@ async fn raw_argument_pair_socket_binds_reverse_order_by_parameter_identity() ->
 }
 
 #[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service and ADR 0050 dispatch"]
+async fn raw_reference_value_update_socket_retains_pair_authority() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = kernel(&database)?;
+        let (active, standard_upgrade, _client, _server) =
+            install_raw_client_fixture(&kernel).await?;
+        let (
+            active,
+            probe,
+            create,
+            create_stored,
+            update_text,
+            text_value,
+            text_selector,
+            update_link,
+            link_value,
+            link_selector,
+            read_stored,
+            read_links,
+        ) = install_raw_reference_value_update_socket_fixture(&kernel, &active, &standard_upgrade)
+            .await?;
+        let functions = active
+            .catalogue()
+            .functions()
+            .iter()
+            .map(|function| function.id())
+            .collect::<Vec<_>>();
+        let uid = nix::unistd::getuid().as_raw();
+        let principal = Principal::new(
+            RAW_CLIENT_USER,
+            PrincipalKind::User,
+            PrincipalStatus::Active,
+        );
+        let denied = SecuritySnapshot::new_with_local_peer_credentials(
+            active.pair(),
+            functions.clone(),
+            vec![principal],
+            vec![],
+            vec![],
+            vec![LocalPeerCredential::new(uid, RAW_CLIENT_USER)],
+        )?;
+        kernel.replace_security_snapshot(&denied).await?;
+
+        // Authentication is local-peer binding. An ungranted pair must not
+        // disclose the selected Reference or the private update shape.
+        let (server, client) = StandardUnixStream::pair()?;
+        client.set_nonblocking(true)?;
+        let mut client = UnixStream::from_std(client)?;
+        let connection = tokio::spawn(serve_local_raw_stream(
+            kernel.clone(),
+            server,
+            LocalRawSocketResources::new(),
+        ));
+        let denied_operation = async {
+            client.write_all(b"ORNA\x01\x00\x00\x03\x00\x00\x00\x00").await?;
+            let mut acknowledgement = [0_u8; 12];
+            client.read_exact(&mut acknowledgement).await?;
+            require(
+                acknowledgement == *b"ORNA\x81\x00\x00\x03\x00\x00\x00\x00",
+                "reference value denied socket returned the wrong acknowledgement",
+            )?;
+            for frame in [
+                ClientFrame::CallRawStart { stream: 1, function: update_text },
+                ClientFrame::CallArgument {
+                    stream: 1,
+                    parameter: text_selector,
+                    value: RuntimeValue::Reference {
+                        target: probe,
+                        object: ObjectId::from_bytes([0x31; 16]),
+                    },
+                },
+                ClientFrame::CallArgument {
+                    stream: 1,
+                    parameter: text_value,
+                    value: RuntimeValue::Text(String::from("denied")),
+                },
+                ClientFrame::CallArgumentsComplete { stream: 1 },
+            ] {
+                send_active_protocol_frame(&mut client, &active, &frame).await?;
+            }
+            require(
+                matches!(
+                    read_active_protocol_frame(&mut client, &active).await?,
+                    ServerFrame::CallAccepted { stream: 1, .. }
+                ) && read_active_protocol_frame(&mut client, &active).await?
+                    == ServerFrame::CallFailed {
+                        stream: 1,
+                        failure: CallFailure::ExecuteDenied,
+                    },
+                "reference value denied socket disclosed an unavailable target fact",
+            )
+        }
+        .await;
+        let shutdown = client.shutdown().await.map_err(Into::into);
+        let connection = connection.await.map_err(Into::into).and_then(|result| {
+            result.map_err(|error| -> Box<dyn Error + Send + Sync> { Box::new(error) })
+        });
+        finish_session(
+            denied_operation,
+            finish_session(shutdown, connection, "reference value denied socket cleanup"),
+            "reference value denied socket operation",
+        )?;
+
+        let granted = SecuritySnapshot::new_with_local_peer_credentials(
+            active.pair(),
+            functions,
+            vec![principal],
+            vec![],
+            vec![
+                ExecuteGrant::new(RAW_CLIENT_USER, create),
+                ExecuteGrant::new(RAW_CLIENT_USER, update_text),
+                ExecuteGrant::new(RAW_CLIENT_USER, update_link),
+                ExecuteGrant::new(RAW_CLIENT_USER, read_stored),
+                ExecuteGrant::new(RAW_CLIENT_USER, read_links),
+            ],
+            vec![LocalPeerCredential::new(uid, RAW_CLIENT_USER)],
+        )?;
+        kernel.replace_security_snapshot(&granted).await?;
+        let reference_credit = u64::try_from(
+            encode_active_server_frame(
+                &active,
+                &ServerFrame::EventBatch {
+                    stream: 3,
+                    channel: Channel::ResultValues,
+                    events: vec![orna_protocol::EventRecord {
+                        sequence: 1,
+                        event: Event::Value(RuntimeValue::Reference {
+                            target: probe,
+                            object: ObjectId::from_bytes([0x32; 16]),
+                        }),
+                    }],
+                },
+            )?
+            .len()
+                - 18,
+        )?;
+        let (server, client) = StandardUnixStream::pair()?;
+        client.set_nonblocking(true)?;
+        let mut client = UnixStream::from_std(client)?;
+        let connection = tokio::spawn(serve_local_raw_stream(
+            kernel.clone(),
+            server,
+            LocalRawSocketResources::new(),
+        ));
+        let granted_operation = async {
+            client.write_all(b"ORNA\x01\x00\x00\x03\x00\x00\x00\x00").await?;
+            let mut acknowledgement = [0_u8; 12];
+            client.read_exact(&mut acknowledgement).await?;
+            require(
+                acknowledgement == *b"ORNA\x81\x00\x00\x03\x00\x00\x00\x00",
+                "reference value granted socket returned the wrong acknowledgement",
+            )?;
+
+            let mut created = Vec::new();
+            for (stream, stored) in [(1, "first"), (2, "second")] {
+                for frame in [
+                    ClientFrame::CallRawStart { stream, function: create },
+                    ClientFrame::CallArgument {
+                        stream,
+                        parameter: create_stored,
+                        value: RuntimeValue::Text(String::from(stored)),
+                    },
+                    ClientFrame::WindowUpdate {
+                        stream,
+                        channel: Channel::ResultValues,
+                        credit: 1024,
+                    },
+                    ClientFrame::CallArgumentsComplete { stream },
+                ] {
+                    send_active_protocol_frame(&mut client, &active, &frame).await?;
+                }
+                require(
+                    matches!(read_active_protocol_frame(&mut client, &active).await?, ServerFrame::CallAccepted { stream: actual, .. } if actual == stream),
+                    "reference value socket did not accept the create call",
+                )?;
+                let event = read_active_protocol_frame(&mut client, &active).await?;
+                let ServerFrame::EventBatch { events, .. } = event else {
+                    return Err(failure("reference value socket create did not return an event batch"));
+                };
+                let [orna_protocol::EventRecord {
+                    event: Event::Value(RuntimeValue::Reference { target, object }), ..
+                }] = events.as_slice() else {
+                    return Err(failure("reference value socket create did not return one Reference"));
+                };
+                require(
+                    *target == probe && *object != ObjectId::from_bytes([0; 16]),
+                    "reference value socket create returned the wrong Reference",
+                )?;
+                created.push(RuntimeValue::Reference { target: *target, object: *object });
+                require(
+                    read_active_protocol_frame(&mut client, &active).await?
+                        == ServerFrame::CallCompleted { stream },
+                    "reference value socket create did not complete",
+                )?;
+            }
+            let [first, second] = created.as_slice() else {
+                return Err(failure("reference value socket did not create two rows"));
+            };
+
+            // Selector-first framing reverses the declaration order. The
+            // accepted call emits no value until exact result credit arrives.
+            for frame in [
+                ClientFrame::CallRawStart { stream: 3, function: update_text },
+                ClientFrame::CallArgument { stream: 3, parameter: text_selector, value: first.clone() },
+                ClientFrame::CallArgument {
+                    stream: 3,
+                    parameter: text_value,
+                    value: RuntimeValue::Text(String::from("changed")),
+                },
+                ClientFrame::CallArgumentsComplete { stream: 3 },
+            ] {
+                send_active_protocol_frame(&mut client, &active, &frame).await?;
+            }
+            require(
+                matches!(read_active_protocol_frame(&mut client, &active).await?, ServerFrame::CallAccepted { stream: 3, .. }),
+                "reference value socket did not accept the scalar pair UPDATE",
+            )?;
+            sleep(Duration::from_millis(50)).await;
+            require(
+                timeout(
+                    Duration::from_millis(50),
+                    read_active_protocol_frame(&mut client, &active)
+                )
+                .await
+                .is_err(),
+                "reference value socket emitted an UPDATE result without credit",
+            )?;
+            send_active_protocol_frame(&mut client, &active, &ClientFrame::WindowUpdate {
+                stream: 3,
+                channel: Channel::ResultValues,
+                credit: reference_credit
+                    .checked_sub(1)
+                    .ok_or_else(|| failure("reference value event credit must be nonzero"))?,
+            })
+            .await?;
+            require(
+                timeout(
+                    Duration::from_millis(50),
+                    read_active_protocol_frame(&mut client, &active)
+                )
+                .await
+                .is_err(),
+                "reference value socket emitted an UPDATE result before its exact credit boundary",
+            )?;
+            send_active_protocol_frame(&mut client, &active, &ClientFrame::WindowUpdate {
+                stream: 3, channel: Channel::ResultValues, credit: 1,
+            }).await?;
+            require(
+                matches!(
+                    read_active_protocol_frame(&mut client, &active).await?,
+                    ServerFrame::EventBatch { stream: 3, events, .. }
+                        if events.len() == 1 && events[0].sequence == 1
+                            && events[0].event == Event::Value(first.clone())
+                ) && read_active_protocol_frame(&mut client, &active).await?
+                    == ServerFrame::CallCompleted { stream: 3 },
+                "reference value socket scalar UPDATE did not return the exact selector",
+            )?;
+
+            let RuntimeValue::Reference { object: first_object, .. } = first else {
+                return Err(failure("first reference value socket row is not a Reference"));
+            };
+            let RuntimeValue::Reference { object: second_object, .. } = second else {
+                return Err(failure("second reference value socket row is not a Reference"));
+            };
+            let absent_object = [[0x41; 16], [0x42; 16], [0x43; 16]]
+                .into_iter()
+                .map(ObjectId::from_bytes)
+                .find(|candidate| candidate != first_object && candidate != second_object)
+                .ok_or_else(|| failure("reference value socket has no absent object identity"))?;
+            for frame in [
+                ClientFrame::CallRawStart { stream: 4, function: update_text },
+                ClientFrame::CallArgument { stream: 4, parameter: text_value, value: RuntimeValue::Text(String::from("absent")) },
+                ClientFrame::CallArgument {
+                    stream: 4,
+                    parameter: text_selector,
+                    value: RuntimeValue::Reference { target: probe, object: absent_object },
+                },
+                ClientFrame::WindowUpdate { stream: 4, channel: Channel::ResultValues, credit: 1024 },
+                ClientFrame::CallArgumentsComplete { stream: 4 },
+            ] {
+                send_active_protocol_frame(&mut client, &active, &frame).await?;
+            }
+            require(
+                matches!(read_active_protocol_frame(&mut client, &active).await?, ServerFrame::CallAccepted { stream: 4, .. })
+                    && read_active_protocol_frame(&mut client, &active).await?
+                        == ServerFrame::CallCompleted { stream: 4 },
+                "reference value socket absent selector did not complete empty",
+            )?;
+
+            for frame in [
+                ClientFrame::CallRawStart { stream: 5, function: update_link },
+                ClientFrame::CallArgument { stream: 5, parameter: link_selector, value: second.clone() },
+                ClientFrame::CallArgument { stream: 5, parameter: link_value, value: first.clone() },
+                ClientFrame::WindowUpdate { stream: 5, channel: Channel::ResultValues, credit: 1024 },
+                ClientFrame::CallArgumentsComplete { stream: 5 },
+            ] {
+                send_active_protocol_frame(&mut client, &active, &frame).await?;
+            }
+            require(
+                matches!(read_active_protocol_frame(&mut client, &active).await?, ServerFrame::CallAccepted { stream: 5, .. })
+                    && matches!(
+                        read_active_protocol_frame(&mut client, &active).await?,
+                        ServerFrame::EventBatch { stream: 5, events, .. }
+                            if events.len() == 1 && events[0].event == Event::Value(second.clone())
+                    ) && read_active_protocol_frame(&mut client, &active).await?
+                        == ServerFrame::CallCompleted { stream: 5 },
+                "reference value socket Reference UPDATE did not bind the selected row",
+            )?;
+
+            // Cancellation remains public. The accepted mutation commits, so
+            // the later socket read is the durable oracle.
+            for frame in [
+                ClientFrame::CallRawStart { stream: 6, function: update_text },
+                ClientFrame::CallArgument { stream: 6, parameter: text_selector, value: first.clone() },
+                ClientFrame::CallArgument { stream: 6, parameter: text_value, value: RuntimeValue::Text(String::from("cancelled")) },
+                ClientFrame::CallArgumentsComplete { stream: 6 },
+                ClientFrame::CallCancel { stream: 6 },
+            ] {
+                send_active_protocol_frame(&mut client, &active, &frame).await?;
+            }
+            require(
+                matches!(read_active_protocol_frame(&mut client, &active).await?, ServerFrame::CallAccepted { stream: 6, .. })
+                    && read_active_protocol_frame(&mut client, &active).await? == ServerFrame::CallCancelled { stream: 6 },
+                "reference value socket did not retain accepted-call cancellation",
+            )?;
+
+            let mut wrong_bytes = text_selector.to_bytes();
+            wrong_bytes[0] ^= 1;
+            let wrong = ParameterId::from_bytes(wrong_bytes);
+            for frame in [
+                ClientFrame::CallRawStart { stream: 7, function: update_text },
+                ClientFrame::CallArgument { stream: 7, parameter: wrong, value: first.clone() },
+                ClientFrame::CallArgument { stream: 7, parameter: text_value, value: RuntimeValue::Text(String::from("wrong")) },
+                ClientFrame::CallArgumentsComplete { stream: 7 },
+            ] {
+                send_active_protocol_frame(&mut client, &active, &frame).await?;
+            }
+            require(
+                matches!(read_active_protocol_frame(&mut client, &active).await?, ServerFrame::CallAccepted { stream: 7, .. })
+                    && read_active_protocol_frame(&mut client, &active).await?
+                        == ServerFrame::CallFailed { stream: 7, failure: CallFailure::TargetUnavailable },
+                "reference value socket invalid pair did not stay redacted",
+            )?;
+
+            for (stream, function, arguments) in [
+                (
+                    8,
+                    update_text,
+                    vec![
+                        (text_selector, RuntimeValue::Text(String::from("not-a-reference"))),
+                        (text_value, first.clone()),
+                    ],
+                ),
+                (
+                    9,
+                    read_stored,
+                    vec![
+                        (text_selector, first.clone()),
+                        (text_value, RuntimeValue::Text(String::from("not-an-update"))),
+                    ],
+                ),
+            ] {
+                send_active_protocol_frame(
+                    &mut client,
+                    &active,
+                    &ClientFrame::CallRawStart { stream, function },
+                )
+                .await?;
+                for (parameter, value) in arguments {
+                    send_active_protocol_frame(
+                        &mut client,
+                        &active,
+                        &ClientFrame::CallArgument {
+                            stream,
+                            parameter,
+                            value,
+                        },
+                    )
+                    .await?;
+                }
+                send_active_protocol_frame(
+                    &mut client,
+                    &active,
+                    &ClientFrame::CallArgumentsComplete { stream },
+                )
+                .await?;
+                require(
+                    matches!(read_active_protocol_frame(&mut client, &active).await?, ServerFrame::CallAccepted { stream: actual, .. } if actual == stream)
+                        && matches!(
+                            read_active_protocol_frame(&mut client, &active).await?,
+                            ServerFrame::CallFailed { stream: actual, failure: CallFailure::TargetUnavailable }
+                                if actual == stream
+                        ),
+                    "reference value socket mistyped or non-update pair disclosed a target fact",
+                )?;
+            }
+
+            for (stream, function) in [(10, read_stored), (11, read_links)] {
+                for frame in [
+                    ClientFrame::CallRawStart { stream, function },
+                    ClientFrame::WindowUpdate { stream, channel: Channel::ResultValues, credit: 2048 },
+                    ClientFrame::CallArgumentsComplete { stream },
+                ] {
+                    send_active_protocol_frame(&mut client, &active, &frame).await?;
+                }
+                require(
+                    matches!(read_active_protocol_frame(&mut client, &active).await?, ServerFrame::CallAccepted { stream: actual, .. } if actual == stream),
+                    "reference value socket did not accept its durable reader",
+                )?;
+                let first_event = read_active_protocol_frame(&mut client, &active).await?;
+                let second_event = read_active_protocol_frame(&mut client, &active).await?;
+                let completed = read_active_protocol_frame(&mut client, &active).await?;
+                let values = [first_event, second_event].into_iter().filter_map(|frame| match frame {
+                    ServerFrame::EventBatch { events, .. } if events.len() == 1 => match &events[0].event {
+                        Event::Value(value) => Some(value.clone()),
+                        _ => None,
+                    },
+                    _ => None,
+                }).collect::<Vec<_>>();
+                if !matches!(completed, ServerFrame::CallCompleted { stream: actual } if actual == stream) {
+                    return Err(failure("reference value socket durable reader did not complete"));
+                }
+                if stream == 10 {
+                    require(
+                        values.iter().filter(|value| **value == RuntimeValue::Text(String::from("cancelled"))).count() == 1
+                            && values.iter().filter(|value| **value == RuntimeValue::Text(String::from("second"))).count() == 1,
+                        "reference value socket cancelled UPDATE did not commit exactly one selected row",
+                    )?;
+                } else {
+                    require(
+                        values.iter().filter(|value| **value == *first).count() == 1,
+                        "reference value socket Reference UPDATE did not store its Reference value",
+                    )?;
+                }
+            }
+            Ok(())
+        }
+        .await;
+        let shutdown = client.shutdown().await.map_err(Into::into);
+        let connection = connection.await.map_err(Into::into).and_then(|result| {
+            result.map_err(|error| -> Box<dyn Error + Send + Sync> { Box::new(error) })
+        });
+        finish_session(
+            granted_operation,
+            finish_session(shutdown, connection, "reference value granted socket cleanup"),
+            "reference value granted socket operation",
+        )?;
+
+        let audits = kernel.recover_security_audit_events().await?;
+        let expected = [
+            (SecurityAuditKind::Authentication, SecurityAuditOutcome::Allowed, None),
+            (SecurityAuditKind::Execute, SecurityAuditOutcome::Denied, Some(update_text)),
+            (SecurityAuditKind::Authentication, SecurityAuditOutcome::Allowed, None),
+            (SecurityAuditKind::Execute, SecurityAuditOutcome::Allowed, Some(create)),
+            (SecurityAuditKind::Execute, SecurityAuditOutcome::Allowed, Some(create)),
+            (SecurityAuditKind::Execute, SecurityAuditOutcome::Allowed, Some(update_text)),
+            (SecurityAuditKind::Execute, SecurityAuditOutcome::Allowed, Some(update_text)),
+            (SecurityAuditKind::Execute, SecurityAuditOutcome::Allowed, Some(update_link)),
+            (SecurityAuditKind::Execute, SecurityAuditOutcome::Allowed, Some(update_text)),
+            (SecurityAuditKind::Execute, SecurityAuditOutcome::Allowed, Some(update_text)),
+            (SecurityAuditKind::Execute, SecurityAuditOutcome::Allowed, Some(update_text)),
+            (SecurityAuditKind::Execute, SecurityAuditOutcome::Allowed, Some(read_stored)),
+            (SecurityAuditKind::Execute, SecurityAuditOutcome::Allowed, Some(read_stored)),
+            (SecurityAuditKind::Execute, SecurityAuditOutcome::Allowed, Some(read_links)),
+        ];
+        require(
+            audits.len() == expected.len()
+                && audits.iter().zip(expected).all(|(event, (kind, outcome, function))| {
+                    let decision = event.decision();
+                    decision.kind() == kind
+                        && decision.outcome() == outcome
+                        && decision.session_principal() == Some(RAW_CLIENT_USER)
+                        && decision.target().map(InvocationTarget::function) == function
+                }),
+            "reference value socket changed the private typed audit sequence",
+        )?;
+        require_no_database_sessions(&database).await
+    })
+    .await
+}
+
+#[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
 async fn serves_the_actual_local_peer_through_the_raw_socket_protocol() -> TestResult<()> {
     with_test_database(|database| async move {
@@ -4091,6 +4604,118 @@ async fn install_raw_argument_pair_socket_fixture(
         second,
         read_first,
         read_second,
+    ))
+}
+
+async fn install_raw_reference_value_update_socket_fixture(
+    kernel: &PostgresKernel,
+    active: &orna_core::revision::ActiveDatabaseRevision,
+    standard_upgrade: &orna_standard::StandardUpgrade,
+) -> TestResult<(
+    orna_core::revision::ActiveDatabaseRevision,
+    TypeId,
+    FunctionId,
+    ParameterId,
+    FunctionId,
+    ParameterId,
+    ParameterId,
+    FunctionId,
+    ParameterId,
+    ParameterId,
+    FunctionId,
+    FunctionId,
+)> {
+    let last_ordinal = active
+        .source()
+        .units()
+        .len()
+        .checked_sub(1)
+        .ok_or_else(|| failure("raw reference value socket fixture has no retained source unit"))?;
+    let source = SourceBundle::new(active.source().units().iter().enumerate().map(
+        |(ordinal, unit)| {
+            let content = if ordinal == last_ordinal {
+                format!(
+                    "{}\n{}",
+                    unit.content(),
+                    RAW_REFERENCE_VALUE_UPDATE_SOCKET_SOURCE
+                )
+            } else {
+                unit.content().to_owned()
+            };
+            SourceUnit::new(unit.logical_path(), content)
+        },
+    ))?;
+    let report = check_standard_application(
+        &source,
+        &StandardApplicationCheckContext::try_new(
+            active.catalogue(),
+            standard_upgrade.checked_standard_library(),
+        )?,
+    );
+    require(
+        report.diagnostics().is_empty(),
+        "raw reference value socket fixture did not compile",
+    )?;
+    let applied = kernel
+        .apply(&prepare_standard_application(
+            &report,
+            active.pair(),
+            active,
+        )?)
+        .await?;
+    let catalogue = applied.catalogue();
+    let probe = catalogue
+        .object_types()
+        .iter()
+        .find(|object| object.name().parts() == ["raw_reference_value_socket", "probe"])
+        .ok_or_else(|| failure("raw reference value socket probe type is absent"))?
+        .id();
+    let function = |name: &str| {
+        catalogue
+            .functions()
+            .iter()
+            .find(|function| function.name().parts() == ["raw_reference_value_socket", name])
+            .map(|function| function.id())
+            .ok_or_else(|| {
+                failure(format!(
+                    "raw reference value socket function is absent: {name}"
+                ))
+            })
+    };
+    let parameter = |function: FunctionId, name: &str| {
+        catalogue
+            .function_by_id(function)
+            .and_then(|definition| definition.parameter_by_name(name))
+            .map(|parameter| parameter.id())
+            .ok_or_else(|| {
+                failure(format!(
+                    "raw reference value socket parameter is absent: {name}"
+                ))
+            })
+    };
+    let create = function("create_probe")?;
+    let update_text = function("update_text")?;
+    let update_link = function("update_link")?;
+    let create_stored = parameter(create, "p_stored")?;
+    let text_value = parameter(update_text, "p_value")?;
+    let text_selector = parameter(update_text, "p_probe")?;
+    let link_value = parameter(update_link, "p_value")?;
+    let link_selector = parameter(update_link, "p_probe")?;
+    let read_stored = function("read_stored")?;
+    let read_links = function("read_links")?;
+    Ok((
+        applied,
+        probe,
+        create,
+        create_stored,
+        update_text,
+        text_value,
+        text_selector,
+        update_link,
+        link_value,
+        link_selector,
+        read_stored,
+        read_links,
     ))
 }
 
