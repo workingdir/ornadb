@@ -1,0 +1,60 @@
+CREATE SCHEMA argument_pairs_test;
+
+CREATE TYPE argument_pairs_test.int_pair AS OBJECT (
+    first INT NOT NULL,
+    second INT NOT NULL
+);
+
+CREATE SERVER FUNCTION argument_pairs_test.create_int_pair(p_first INT, p_second INT)
+RETURNS ROWS (created REF argument_pairs_test.int_pair)
+SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE
+AS INSERT INTO argument_pairs_test.int_pair AS made (first, second)
+VALUES (p_first, p_second) RETURNING REF(made);
+
+CREATE SERVER FUNCTION argument_pairs_test.read_int_pair(p_pair REF argument_pairs_test.int_pair)
+RETURNS ROWS (first INT, second INT)
+SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE
+AS SELECT int_pair.first, int_pair.second FROM argument_pairs_test.int_pair int_pair
+WHERE REF(int_pair) = p_pair;
+
+CREATE SERVER FUNCTION argument_pairs_test.read_int_first_values()
+RETURNS ROWS (first INT)
+SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE
+AS SELECT int_pair.first FROM argument_pairs_test.int_pair int_pair;
+
+CREATE TYPE argument_pairs_test.anchor AS OBJECT (
+    stored BOOLEAN NOT NULL
+);
+
+CREATE SERVER FUNCTION argument_pairs_test.create_anchor()
+RETURNS ROWS (created REF argument_pairs_test.anchor)
+SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE
+AS INSERT INTO argument_pairs_test.anchor AS made (stored)
+VALUES (TRUE) RETURNING REF(made);
+
+CREATE TYPE argument_pairs_test.text_anchor_pair AS OBJECT (
+    message TEXT NOT NULL,
+    anchor REF argument_pairs_test.anchor NOT NULL
+);
+
+CREATE SERVER FUNCTION argument_pairs_test.create_text_anchor_pair(
+    p_message TEXT,
+    p_anchor REF argument_pairs_test.anchor
+)
+RETURNS ROWS (created REF argument_pairs_test.text_anchor_pair)
+SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE
+AS INSERT INTO argument_pairs_test.text_anchor_pair AS made (message, anchor)
+VALUES (p_message, p_anchor) RETURNING REF(made);
+
+CREATE SERVER FUNCTION argument_pairs_test.read_text_anchor_pair(
+    p_pair REF argument_pairs_test.text_anchor_pair
+)
+RETURNS ROWS (message TEXT, anchor REF argument_pairs_test.anchor)
+SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE
+AS SELECT pair.message, pair.anchor FROM argument_pairs_test.text_anchor_pair pair
+WHERE REF(pair) = p_pair;
+
+CREATE SERVER FUNCTION argument_pairs_test.read_text_messages()
+RETURNS ROWS (message TEXT)
+SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE
+AS SELECT pair.message FROM argument_pairs_test.text_anchor_pair pair;
