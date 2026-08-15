@@ -3,21 +3,159 @@
 //! This module stores logical carrier data only. ORV5 bytes, envelope
 //! positions, and frame rules belong to `orna-protocol`.
 
-use std::{cmp::Ordering, error::Error, fmt};
+use std::{cmp::Ordering, collections::BTreeSet, error::Error, fmt};
 
 use crate::{
     FunctionId, InvocationId, ParameterId, PrincipalId, TypeId,
-    catalogue::QualifiedSemanticName,
+    catalogue::{CatalogueSnapshot, FunctionDefinition, FunctionSecurity, QualifiedSemanticName},
+    revision::ActiveDatabaseRevision,
+    security::{
+        AuthenticatedSession, ExecuteDecision, InvocationTarget as SecurityInvocationTarget,
+        SecuritySnapshot,
+    },
     system::{
         InvocationCarrierKind, SYS_INVOKE_EVENT_TYPE_ID, SYS_INVOKE_REQUEST_TYPE_ID,
         SYS_INVOKE_VALUE_TYPE_ID, invocation_carrier_by_id,
     },
     types::{TypeDescriptor, TypeDescriptorKind},
-    value::{RuntimeValue, count_invocation_runtime_value_nodes},
+    value::{RuntimeType, RuntimeValue, count_invocation_runtime_value_nodes},
 };
 
 /// The largest accepted aggregate node count in one invocation carrier tree.
 pub const MAX_INVOCATION_CARRIER_NODES: usize = 65_536;
+
+/// The closed redacted category from one protected invocation decision.
+///
+/// This result contains no target, signature, selector, value, binding, or
+/// security evidence. A durable audit slice consumes only this category.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProtectedInvocationDecision {
+    /// The exact sealed `sys.invoke` entry was rejected before request use.
+    EntryDenied,
+    /// The checked request did not match the authenticated protocol context.
+    RequestRejected,
+    /// A private target or final security decision denied invocation.
+    Denied,
+    /// A final security decision allowed a complete prebind.
+    Allowed,
+    /// A final security decision allowed disclosure of a redacted bind failure.
+    AllowedWithBindFailure,
+}
+
+/// Makes one complete protected invocation decision without exposing phases.
+///
+/// The caller must decode the retained Request envelope before this operation.
+/// `orna-core` does not decode ORV5 bytes, so it keeps the protocol boundary
+/// acyclic. This operation first checks the exact system entry, then checks
+/// the authenticated protocol major. It privately resolves one target in the
+/// pinned application and verified-standard catalogues, makes base `EXECUTE`
+/// authorisation, prebinds, and makes the final closed security decision.
+///
+/// Version 1 has no definer-owner, policy, or capability model. A target that
+/// requires unavailable semantics is denied before any binding fact escapes.
+pub fn decide_protected_invocation(
+    security: &SecuritySnapshot,
+    session: &AuthenticatedSession,
+    system_target: SecurityInvocationTarget,
+    active: &ActiveDatabaseRevision,
+    connection_protocol_major: u16,
+    request: &InvokeRequest,
+) -> ProtectedInvocationDecision {
+    if !matches!(
+        security.authorise_sys_invoke_entry(session, system_target),
+        ExecuteDecision::Allowed(_)
+    ) {
+        return ProtectedInvocationDecision::EntryDenied;
+    }
+
+    if request.client_offer().protocol_major() != connection_protocol_major {
+        return ProtectedInvocationDecision::RequestRejected;
+    }
+
+    let Some(target) = resolve_target_privately(active, request.target()) else {
+        return ProtectedInvocationDecision::Denied;
+    };
+    let security_target = SecurityInvocationTarget::new(target.id(), active.pair());
+    if !matches!(
+        security.authorise_execute(session, security_target),
+        ExecuteDecision::Allowed(_)
+    ) {
+        return ProtectedInvocationDecision::Denied;
+    }
+
+    let prebind = prebind_privately(&target, request);
+    if target.security() != FunctionSecurity::Invoker {
+        return ProtectedInvocationDecision::Denied;
+    }
+
+    match prebind {
+        PrivatePrebind::Complete => ProtectedInvocationDecision::Allowed,
+        PrivatePrebind::Failed => ProtectedInvocationDecision::AllowedWithBindFailure,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PrivatePrebind {
+    Complete,
+    Failed,
+}
+
+fn resolve_target_privately(
+    active: &ActiveDatabaseRevision,
+    selector: &InvocationTarget,
+) -> Option<FunctionDefinition> {
+    let application = active.catalogue();
+    let standard = active
+        .catalogue_hash_context()
+        .standard()
+        .map(|snapshot| snapshot.catalogue());
+    resolve_target_in_catalogues(application, standard, selector)
+}
+
+fn resolve_target_in_catalogues(
+    application: &CatalogueSnapshot,
+    standard: Option<&CatalogueSnapshot>,
+    selector: &InvocationTarget,
+) -> Option<FunctionDefinition> {
+    let application_target = match selector {
+        InvocationTarget::FunctionId(id) => application.function_by_id(*id),
+        InvocationTarget::QualifiedName(name) => application.function_by_name(name),
+    };
+    let standard_target = standard.and_then(|catalogue| match selector {
+        InvocationTarget::FunctionId(id) => catalogue.function_by_id(*id),
+        InvocationTarget::QualifiedName(name) => catalogue.function_by_name(name),
+    });
+    match (application_target, standard_target) {
+        (Some(_), Some(_)) | (None, None) => None,
+        (Some(function), None) | (None, Some(function)) => Some(function.clone()),
+    }
+}
+
+fn prebind_privately(function: &FunctionDefinition, request: &InvokeRequest) -> PrivatePrebind {
+    let mut bound = BTreeSet::new();
+    for argument in request.arguments() {
+        let parameter = match argument.selector() {
+            InvocationParameterSelector::ParameterId(id) => function.parameter_by_id(*id),
+            InvocationParameterSelector::Name(name) => function.parameter_by_name(name),
+        };
+        let Some(parameter) = parameter else {
+            return PrivatePrebind::Failed;
+        };
+        if !bound.insert(parameter.id())
+            || argument.value().value().runtime_type()
+                != RuntimeType::Flat(parameter.resolved_type())
+        {
+            return PrivatePrebind::Failed;
+        }
+    }
+    if function.parameters().iter().any(|parameter| {
+        parameter.default_expression().is_none() && !bound.contains(&parameter.id())
+    }) {
+        return PrivatePrebind::Failed;
+    }
+    PrivatePrebind::Complete
+}
 
 /// One failure from checked invocation-carrier construction.
 #[non_exhaustive]
@@ -1304,16 +1442,30 @@ fn selector_order(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::catalogue::{CatalogueSnapshot, ObjectTypeDefinition, SchemaDefinition};
+    use crate::catalogue::{
+        CatalogueSnapshot, FunctionDefinition, FunctionDomain, FunctionReturn, FunctionSecurity,
+        FunctionTransaction, FunctionVolatility, ObjectTypeDefinition, ParameterDefinition,
+        SchemaDefinition,
+    };
     use crate::revision::{
-        ActiveDatabaseRevision, DefinitionIdentity, DefinitionOrigin, RevisionPair, Sha256Digest,
-        SourceOrigin, StoredSourceRevision, StoredSourceUnit,
+        ActiveDatabaseRevision, DefinitionIdentity, DefinitionOrigin, ExecutableArtifact,
+        ExecutableArtifactKind, FunctionRevisionRecord, RevisionPair, Sha256Digest, SourceOrigin,
+        StoredSourceRevision, StoredSourceUnit,
     };
     use crate::value::{
         FunctionArgument, FunctionArgumentError, ResultColumn, ResultRow, ResultRows, RuntimeType,
     };
     use crate::{
-        CatalogueRevisionId, ObjectId, SchemaId, SourceBundleId, SourceRevisionId, SourceUnitId,
+        CatalogueRevisionId, FunctionId, FunctionRevisionId, ObjectId, SchemaId, SourceBundleId,
+        SourceRevisionId, SourceUnitId,
+    };
+    use crate::{
+        security::{
+            ExecuteGrant, InvocationTarget as SecurityInvocationTarget, Principal, PrincipalKind,
+            PrincipalStatus, SecuritySnapshot,
+        },
+        system::{CATALOGUE_HEALTH_FUNCTION_ID, SYS_INVOKE_FUNCTION_ID},
+        types::{ResolvedType, StandardScalar},
     };
 
     fn value(value: i32) -> InvokeValue {
@@ -1414,6 +1566,124 @@ mod tests {
             Vec::new(),
         )
         .expect("an active reference revision")
+    }
+
+    fn decision_function(security: FunctionSecurity) -> FunctionDefinition {
+        FunctionDefinition::new(
+            FunctionId::from_bytes([10; 16]),
+            QualifiedSemanticName::new(["app", "work"]).expect("a function name"),
+            FunctionDomain::Server,
+            vec![ParameterDefinition::new(
+                ParameterId::from_bytes([11; 16]),
+                "value",
+                0,
+                ResolvedType::scalar(StandardScalar::Integer),
+                None,
+            )],
+            FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Integer)),
+            FunctionRevisionId::from_bytes([12; 16]),
+            security,
+            Some(FunctionTransaction::Atomic),
+            FunctionVolatility::Immutable,
+        )
+    }
+
+    fn decision_active_revision(security: FunctionSecurity) -> ActiveDatabaseRevision {
+        let source_unit = SourceUnitId::from_bytes([13; 16]);
+        let source = StoredSourceRevision::new(
+            SourceBundleId::from_bytes([14; 16]),
+            SourceRevisionId::from_bytes([15; 16]),
+            None,
+            vec![
+                StoredSourceUnit::new(
+                    source_unit,
+                    0,
+                    "app.orna",
+                    "",
+                    Sha256Digest::from_bytes([16; 32]),
+                )
+                .expect("a source unit"),
+            ],
+            Sha256Digest::from_bytes([17; 32]),
+            Sha256Digest::from_bytes([18; 32]),
+        )
+        .expect("an application source revision");
+        let function = decision_function(security);
+        let catalogue = CatalogueSnapshot::new_with_functions(
+            CatalogueRevisionId::from_bytes([19; 16]),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes([20; 16]),
+                QualifiedSemanticName::new(["app"]).expect("a schema name"),
+            )],
+            vec![],
+            vec![function.clone()],
+        )
+        .expect("an application function catalogue");
+        let origin = SourceOrigin::new(source_unit, 0, 0).expect("a source origin");
+        let revision = FunctionRevisionRecord::new(
+            function.id(),
+            function.current_revision(),
+            1,
+            origin,
+            Sha256Digest::from_bytes([21; 32]),
+            Sha256Digest::from_bytes([22; 32]),
+            "orna.language/1",
+            ExecutableArtifact::new(
+                ExecutableArtifactKind::Server,
+                "orna.server-plan",
+                1,
+                vec![1],
+                Sha256Digest::from_bytes([23; 32]),
+            )
+            .expect("an executable artifact"),
+        )
+        .expect("a function revision");
+        ActiveDatabaseRevision::new(
+            RevisionPair::new(source.id(), catalogue.revision()),
+            source,
+            catalogue,
+            Sha256Digest::from_bytes([24; 32]),
+            vec![],
+            vec![revision],
+            vec![
+                DefinitionOrigin::new(
+                    DefinitionIdentity::Schema(SchemaId::from_bytes([20; 16])),
+                    origin,
+                ),
+                DefinitionOrigin::new(DefinitionIdentity::Function(function.id()), origin),
+                DefinitionOrigin::new(
+                    DefinitionIdentity::Parameter {
+                        owner: function.id(),
+                        parameter: ParameterId::from_bytes([11; 16]),
+                    },
+                    origin,
+                ),
+            ],
+            vec![],
+        )
+        .expect("an active function revision")
+    }
+
+    fn decision_security(
+        active: &ActiveDatabaseRevision,
+        grants: Vec<ExecuteGrant>,
+    ) -> SecuritySnapshot {
+        SecuritySnapshot::new(
+            active.pair(),
+            vec![FunctionId::from_bytes([10; 16])],
+            vec![Principal::new(
+                PrincipalId::from_bytes([25; 16]),
+                PrincipalKind::User,
+                PrincipalStatus::Active,
+            )],
+            vec![],
+            grants,
+        )
+        .expect("a security snapshot")
+    }
+
+    fn decision_request(arguments: Vec<InvocationArgument>) -> InvokeRequest {
+        request(arguments)
     }
 
     fn list_value(active: &ActiveDatabaseRevision, element_count: usize) -> InvokeValue {
@@ -1742,6 +2012,155 @@ mod tests {
             Err(InvocationCarrierConstructionError::InvalidField {
                 field: InvocationCarrierField::CancellationReason,
             })
+        );
+    }
+
+    #[test]
+    fn protected_decision_checks_the_exact_system_entry_before_request_context() {
+        let active = decision_active_revision(FunctionSecurity::Invoker);
+        let security = decision_security(&active, vec![]);
+        let session = security
+            .bind_authenticated_session(PrincipalId::from_bytes([25; 16]), vec![])
+            .expect("an active user session");
+        let request = decision_request(Vec::new());
+
+        assert_eq!(
+            decide_protected_invocation(
+                &security,
+                &session,
+                SecurityInvocationTarget::new(CATALOGUE_HEALTH_FUNCTION_ID, security.revision()),
+                &active,
+                4,
+                &request,
+            ),
+            ProtectedInvocationDecision::EntryDenied
+        );
+        assert_eq!(
+            decide_protected_invocation(
+                &security,
+                &session,
+                SecurityInvocationTarget::new(SYS_INVOKE_FUNCTION_ID, security.revision()),
+                &active,
+                4,
+                &request,
+            ),
+            ProtectedInvocationDecision::RequestRejected
+        );
+    }
+
+    #[test]
+    fn protected_decision_redacts_denials_and_allows_only_redacted_bind_failure() {
+        let active = decision_active_revision(FunctionSecurity::Invoker);
+        let security = decision_security(&active, vec![]);
+        let session = security
+            .bind_authenticated_session(PrincipalId::from_bytes([25; 16]), vec![])
+            .expect("an active user session");
+        let secret = "private-selector";
+        let denied_request = decision_request(vec![InvocationArgument::new(
+            InvocationParameterSelector::name(secret).expect("a selector"),
+            value(7),
+        )]);
+
+        let denied = decide_protected_invocation(
+            &security,
+            &session,
+            SecurityInvocationTarget::new(SYS_INVOKE_FUNCTION_ID, active.pair()),
+            &active,
+            5,
+            &denied_request,
+        );
+        assert_eq!(denied, ProtectedInvocationDecision::Denied);
+        assert!(!format!("{denied:?}").contains(secret));
+
+        let security = decision_security(
+            &active,
+            vec![ExecuteGrant::new(
+                PrincipalId::from_bytes([25; 16]),
+                FunctionId::from_bytes([10; 16]),
+            )],
+        );
+        let session = security
+            .bind_authenticated_session(PrincipalId::from_bytes([25; 16]), vec![])
+            .expect("an active user session");
+        let bind_failed_request = decision_request(vec![
+            InvocationArgument::new(
+                InvocationParameterSelector::parameter_id(ParameterId::from_bytes([11; 16])),
+                value(7),
+            ),
+            InvocationArgument::new(
+                InvocationParameterSelector::name("value").expect("a selector"),
+                value(7),
+            ),
+        ]);
+        assert_eq!(
+            decide_protected_invocation(
+                &security,
+                &session,
+                SecurityInvocationTarget::new(SYS_INVOKE_FUNCTION_ID, active.pair()),
+                &active,
+                5,
+                &bind_failed_request,
+            ),
+            ProtectedInvocationDecision::AllowedWithBindFailure
+        );
+    }
+
+    #[test]
+    fn protected_decision_resolves_ambiguity_privately_and_fails_closed_for_definer() {
+        let application = CatalogueSnapshot::new_with_functions(
+            CatalogueRevisionId::from_bytes([26; 16]),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes([27; 16]),
+                QualifiedSemanticName::new(["app"]).expect("a schema name"),
+            )],
+            vec![],
+            vec![decision_function(FunctionSecurity::Invoker)],
+        )
+        .expect("an application catalogue");
+        let standard = CatalogueSnapshot::new_with_functions(
+            CatalogueRevisionId::from_bytes([28; 16]),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes([29; 16]),
+                QualifiedSemanticName::new(["app"]).expect("a schema name"),
+            )],
+            vec![],
+            vec![decision_function(FunctionSecurity::Invoker)],
+        )
+        .expect("a standard catalogue fixture");
+        assert!(
+            resolve_target_in_catalogues(
+                &application,
+                Some(&standard),
+                &InvocationTarget::function_id(FunctionId::from_bytes([10; 16])),
+            )
+            .is_none()
+        );
+
+        let active = decision_active_revision(FunctionSecurity::Definer);
+        let security = decision_security(
+            &active,
+            vec![ExecuteGrant::new(
+                PrincipalId::from_bytes([25; 16]),
+                FunctionId::from_bytes([10; 16]),
+            )],
+        );
+        let session = security
+            .bind_authenticated_session(PrincipalId::from_bytes([25; 16]), vec![])
+            .expect("an active user session");
+        let request = decision_request(vec![InvocationArgument::new(
+            InvocationParameterSelector::parameter_id(ParameterId::from_bytes([11; 16])),
+            value(7),
+        )]);
+        assert_eq!(
+            decide_protected_invocation(
+                &security,
+                &session,
+                SecurityInvocationTarget::new(SYS_INVOKE_FUNCTION_ID, active.pair()),
+                &active,
+                5,
+                &request,
+            ),
+            ProtectedInvocationDecision::Denied
         );
     }
 }

@@ -10,8 +10,9 @@ use std::{
 };
 
 use crate::{
-    FunctionId, PrincipalId, SecurityAuditEventId, revision::RevisionPair,
-    system::system_function_by_id,
+    FunctionId, PrincipalId, SecurityAuditEventId,
+    revision::RevisionPair,
+    system::{SYS_INVOKE_FUNCTION_ID, system_function_by_id},
 };
 
 pub use crate::system::{CATALOGUE_HEALTH_FUNCTION_ID, CATALOGUE_HEALTH_FUNCTION_NAME};
@@ -968,6 +969,21 @@ impl SecuritySnapshot {
             return ExecuteDecision::Denied(reason);
         }
         Self::authorise_system_function_after_validation(session, target)
+    }
+
+    /// Checks the exact sealed entry required by one protected invocation.
+    ///
+    /// This crate-private operation is not a target authorisation. It admits
+    /// only the `sys.invoke` registry identity before request processing.
+    pub(crate) fn authorise_sys_invoke_entry(
+        &self,
+        session: &AuthenticatedSession,
+        target: InvocationTarget,
+    ) -> ExecuteDecision {
+        if target.function != SYS_INVOKE_FUNCTION_ID {
+            return ExecuteDecision::Denied(ExecuteDenial::UnknownFunction);
+        }
+        self.authorise_system_function(session, target)
     }
 
     fn authorise_system_function_after_validation(
