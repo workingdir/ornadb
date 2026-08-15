@@ -10,7 +10,7 @@ use crate::{
     catalogue::QualifiedSemanticName,
     system::{
         InvocationCarrierKind, SYS_INVOKE_EVENT_TYPE_ID, SYS_INVOKE_REQUEST_TYPE_ID,
-        SYS_INVOKE_VALUE_TYPE_ID,
+        SYS_INVOKE_VALUE_TYPE_ID, invocation_carrier_by_id,
     },
     types::{TypeDescriptor, TypeDescriptorKind},
     value::{RuntimeValue, count_invocation_runtime_value_nodes},
@@ -1241,7 +1241,13 @@ fn require_supported_descriptor(
     field: InvocationCarrierField,
 ) -> Result<(), InvocationCarrierConstructionError> {
     match descriptor.kind() {
-        TypeDescriptorKind::Named(_) | TypeDescriptorKind::Reference(_) => Ok(()),
+        TypeDescriptorKind::Named(type_id) | TypeDescriptorKind::Reference(type_id) => {
+            if invocation_carrier_by_id(type_id).is_some() {
+                Err(InvocationCarrierConstructionError::NestedCarrier { carrier: type_id })
+            } else {
+                Ok(())
+            }
+        }
         TypeDescriptorKind::List(child) | TypeDescriptorKind::Option(child) => {
             require_supported_descriptor(child, field)
         }
@@ -1601,6 +1607,43 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["z", "a", "a"]
         );
+        for carrier in [
+            SYS_INVOKE_VALUE_TYPE_ID,
+            SYS_INVOKE_REQUEST_TYPE_ID,
+            SYS_INVOKE_EVENT_TYPE_ID,
+        ] {
+            assert_eq!(
+                InvocationSinkOffer::new(
+                    TypeDescriptor::list(TypeDescriptor::named(carrier))
+                        .expect("a list descriptor"),
+                    ["text/plain"],
+                    false,
+                    0,
+                    None,
+                ),
+                Err(InvocationCarrierConstructionError::NestedCarrier { carrier })
+            );
+            assert_eq!(
+                InvocationRuntimeOffer::new(
+                    "runtime",
+                    "1",
+                    [TypeDescriptor::map(
+                        low.clone(),
+                        TypeDescriptor::option(
+                            TypeDescriptor::list(TypeDescriptor::reference(carrier))
+                                .expect("a list descriptor"),
+                        )
+                        .expect("an option descriptor"),
+                    )
+                    .expect("a map descriptor")],
+                    [],
+                    0,
+                    false,
+                    None,
+                ),
+                Err(InvocationCarrierConstructionError::NestedCarrier { carrier })
+            );
+        }
         assert_eq!(
             InvocationSinkOffer::new(
                 TypeDescriptor::set(low.clone()).expect("a set descriptor"),
