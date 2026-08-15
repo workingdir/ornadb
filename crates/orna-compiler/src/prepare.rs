@@ -58,6 +58,7 @@ use orna_core::{
         SourceOrigin, StoredSourceRevision, StoredSourceUnit, VerifiedStandardLibrarySnapshot,
     },
     source::{SourceBundle, SourceUnit},
+    system::INVOCATION_CARRIERS,
     types::{ResolvedType, StandardScalar, TypeDescriptor, TypeDescriptorKind},
 };
 
@@ -291,6 +292,15 @@ pub fn prepare(
     expected_base: RevisionPair,
     active: &ActiveDatabaseRevision,
 ) -> Result<DeployableRevision, PrepareError> {
+    prepare_with_allocator(report, expected_base, active, CandidateAllocator::legacy())
+}
+
+fn prepare_with_allocator(
+    report: &CheckReport,
+    expected_base: RevisionPair,
+    active: &ActiveDatabaseRevision,
+    mut allocations: CandidateAllocator,
+) -> Result<DeployableRevision, PrepareError> {
     if !report.diagnostics().is_empty() || report.checked_bundle().is_none() {
         return Err(PrepareError::CheckNotComplete {
             diagnostic_count: report.diagnostics().len(),
@@ -315,7 +325,6 @@ pub fn prepare(
     }
 
     preflight(report.parse_report(), checked, active)?;
-    let mut allocations = CandidateAllocator::legacy();
     let identities = IdentityMap::build_legacy(checked, active, &mut allocations)?;
     let source = PreparedSource::new(
         report.parse_report(),
@@ -4088,6 +4097,14 @@ impl CandidateAllocator {
         }
     }
 
+    #[cfg(test)]
+    fn legacy_with_source(source: CandidateIdSource) -> Self {
+        Self {
+            reserved: None,
+            source,
+        }
+    }
+
     fn standard(snapshot: &VerifiedStandardLibrarySnapshot) -> Self {
         Self::with_source(
             ReservedStandardIds::from_snapshot(snapshot),
@@ -4174,6 +4191,7 @@ impl CandidateAllocator {
                 .reserved
                 .as_ref()
                 .is_none_or(|reserved| !reserved.types.contains(&id))
+                && INVOCATION_CARRIERS.iter().all(|carrier| carrier.id() != id)
             {
                 return id;
             }
@@ -6682,15 +6700,18 @@ mod tests {
         },
     };
     use orna_core::{
+        canonical_hash::verify_standard_library_snapshot,
         catalogue::{
             CatalogueSnapshot, FieldDefinition, FunctionDefinition, FunctionDomain, FunctionReturn,
             FunctionSecurity, FunctionTransaction, FunctionVolatility, ObjectTypeDefinition,
-            ParameterDefinition, SchemaDefinition, ValueTypeDefinition, ValueTypeMutability,
-            ValueTypePersistence,
+            ParameterDefinition, PreludeTypeName, SchemaDefinition, TypeBinding,
+            ValueTypeDefinition, ValueTypeMutability, ValueTypePersistence,
         },
         revision::{
-            ActiveDatabaseRevision, DefinitionReferenceKind, DefinitionReferenceTarget,
-            ExecutableArtifactKind, FunctionRevisionRecord, Sha256Digest, SourceOrigin,
+            ActiveDatabaseRevision, ActiveDatabaseRevisionInput, ActiveRevisionContent,
+            CatalogueHashContext, DefinitionIdentity, DefinitionOrigin, DefinitionReferenceKind,
+            DefinitionReferenceTarget, ExecutableArtifactKind, FunctionRevisionRecord,
+            Sha256Digest, SourceOrigin, StandardLibraryDigestVersion, StandardLibrarySnapshot,
             StoredSourceRevision,
         },
         source::{SourceBundle, SourceUnit},
@@ -6699,7 +6720,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        check,
+        StandardApplicationCheckContext, check, check_standard_application,
+        check_standard_library_source,
         mutation::{
             MutationAssignment, MutationExpression, MutationExpressionKind,
             MutationRecordFieldExpression, MutationRecordFieldExpressionKind, MutationValueType,
@@ -7048,6 +7070,239 @@ mod tests {
 
     fn next_function_revision_id() -> FunctionRevisionId {
         FunctionRevisionId::new()
+    }
+
+    static INVOCATION_CARRIER_TYPE_ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
+
+    fn invocation_carrier_then_safe_type_id() -> TypeId {
+        let allocation = INVOCATION_CARRIER_TYPE_ALLOCATIONS.fetch_add(1, Ordering::SeqCst);
+        INVOCATION_CARRIERS
+            .get(allocation)
+            .map_or(TypeId::from_bytes([0xf3; 16]), |carrier| carrier.id())
+    }
+
+    fn carrier_reservation_candidate_source() -> CandidateIdSource {
+        CandidateIdSource {
+            catalogue_revision: || CatalogueRevisionId::from_bytes([0xa1; 16]),
+            source_bundle: || SourceBundleId::from_bytes([0xa2; 16]),
+            source_revision: || SourceRevisionId::from_bytes([0xa3; 16]),
+            source_unit: || SourceUnitId::from_bytes([0xa4; 16]),
+            schema: || SchemaId::from_bytes([0xa5; 16]),
+            type_id: invocation_carrier_then_safe_type_id,
+            function_revision: || FunctionRevisionId::from_bytes([0xa6; 16]),
+        }
+    }
+
+    fn invocation_carrier_standard() -> VerifiedStandardLibrarySnapshot {
+        const SOURCE: &str = "CREATE SCHEMA std;CREATE SCHEMA std.types;CREATE TYPE std.types.BOOLEAN AS VALUE PRIMITIVE KERNEL CONTRACT 'orna.kernel.value.boolean@1' IMMUTABLE PERSISTABLE;EXPORT TYPE std.types.BOOLEAN AS std.BOOLEAN;EXPORT TYPE std.BOOLEAN TO PRELUDE AS BOOLEAN;";
+        let unit = StoredSourceUnit::new(
+            SourceUnitId::from_bytes([4; 16]),
+            0,
+            "std/types.orna",
+            SOURCE,
+            source_unit_content_digest(SOURCE).unwrap(),
+        )
+        .unwrap();
+        let bundle_hash = source_bundle_digest(std::slice::from_ref(&unit)).unwrap();
+        let source = StoredSourceRevision::new(
+            SourceBundleId::from_bytes([5; 16]),
+            SourceRevisionId::from_bytes([6; 16]),
+            None,
+            vec![unit],
+            bundle_hash,
+            source_revision_record_digest(SourceBundleId::from_bytes([5; 16]), None, bundle_hash)
+                .unwrap(),
+        )
+        .unwrap();
+        let boolean = ValueTypeDefinition::primitive(
+            TypeId::from_bytes([3; 16]),
+            semantic_name(&["std", "types", "boolean"]),
+            ValueTypeMutability::Immutable,
+            ValueTypePersistence::Persistable,
+            "orna.kernel.value.boolean@1",
+        );
+        let qualified =
+            TypeBinding::qualified(semantic_name(&["std", "boolean"]), boolean.id()).unwrap();
+        let prelude =
+            TypeBinding::prelude(PreludeTypeName::new(["boolean"]).unwrap(), boolean.id()).unwrap();
+        let catalogue = CatalogueSnapshot::new_with_types(
+            CatalogueRevisionId::from_bytes([8; 16]),
+            vec![
+                SchemaDefinition::new(SchemaId::from_bytes([1; 16]), semantic_name(&["std"])),
+                SchemaDefinition::new(
+                    SchemaId::from_bytes([2; 16]),
+                    semantic_name(&["std", "types"]),
+                ),
+            ],
+            Vec::new(),
+            vec![boolean.clone()],
+            vec![qualified.clone(), prelude.clone()],
+        )
+        .unwrap();
+        let origins = vec![
+            DefinitionOrigin::new(
+                DefinitionIdentity::Schema(SchemaId::from_bytes([1; 16])),
+                SourceOrigin::new(source.units()[0].id(), 0, 18).unwrap(),
+            ),
+            DefinitionOrigin::new(
+                DefinitionIdentity::Schema(SchemaId::from_bytes([2; 16])),
+                SourceOrigin::new(source.units()[0].id(), 18, 42).unwrap(),
+            ),
+            DefinitionOrigin::new(
+                DefinitionIdentity::ValueType(boolean.id()),
+                SourceOrigin::new(source.units()[0].id(), 42, 159).unwrap(),
+            ),
+            DefinitionOrigin::new(
+                DefinitionIdentity::TypeBinding(qualified.id()),
+                SourceOrigin::new(source.units()[0].id(), 159, 204).unwrap(),
+            ),
+            DefinitionOrigin::new(
+                DefinitionIdentity::TypeBinding(prelude.id()),
+                SourceOrigin::new(source.units()[0].id(), 204, 250).unwrap(),
+            ),
+        ];
+        verify_standard_library_snapshot(
+            StandardLibrarySnapshot::new(
+                StandardLibraryRevisionId::from_bytes([7; 16]),
+                StandardLibraryDigestVersion::Version1,
+                source,
+                "orna.language/1",
+                catalogue,
+                origins,
+                Sha256Digest::from_bytes([
+                    0x72, 0x4b, 0x41, 0xcf, 0x68, 0x5c, 0x93, 0xa8, 0xc9, 0x8d, 0xf9, 0x3d, 0x96,
+                    0x77, 0x98, 0x98, 0x12, 0x34, 0xc0, 0x98, 0xf6, 0xc1, 0x00, 0xfa, 0x57, 0xe9,
+                    0xac, 0x00, 0xdd, 0x03, 0xfb, 0x6d,
+                ]),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn empty_standard_application_active(
+        standard: &VerifiedStandardLibrarySnapshot,
+    ) -> ActiveDatabaseRevision {
+        let unit = StoredSourceUnit::new(
+            SourceUnitId::from_bytes([0x21; 16]),
+            0,
+            "application.orna",
+            "",
+            source_unit_content_digest("").unwrap(),
+        )
+        .unwrap();
+        let bundle_hash = source_bundle_digest(std::slice::from_ref(&unit)).unwrap();
+        let source = StoredSourceRevision::new(
+            SourceBundleId::from_bytes([0x22; 16]),
+            SourceRevisionId::from_bytes([0x23; 16]),
+            None,
+            vec![unit],
+            bundle_hash,
+            source_revision_record_digest(
+                SourceBundleId::from_bytes([0x22; 16]),
+                None,
+                bundle_hash,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let catalogue = CatalogueSnapshot::new_with_types(
+            CatalogueRevisionId::from_bytes([0x24; 16]),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        let context = CatalogueHashContext::version_two(standard.clone());
+        let catalogue_hash =
+            catalogue_digest_with_context(&context, &catalogue, &[], &[], &[], &[]).unwrap();
+        ActiveDatabaseRevision::new_with_catalogue_hash_context(
+            ActiveDatabaseRevisionInput::new(
+                RevisionPair::new(source.id(), catalogue.revision()),
+                source,
+                catalogue,
+                catalogue_hash,
+                ActiveRevisionContent::new(Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+            ),
+            context,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn application_and_standard_preparation_retry_all_invocation_carriers_before_candidates() {
+        assert_eq!(
+            INVOCATION_CARRIERS
+                .iter()
+                .map(|carrier| carrier.id())
+                .collect::<Vec<_>>(),
+            vec![
+                orna_core::system::SYS_INVOKE_VALUE_TYPE_ID,
+                orna_core::system::SYS_INVOKE_REQUEST_TYPE_ID,
+                orna_core::system::SYS_INVOKE_EVENT_TYPE_ID,
+            ]
+        );
+
+        let active = empty_active();
+        let report = checked_report(
+            "CREATE SCHEMA app; CREATE TYPE app.item AS OBJECT (done BOOLEAN);",
+            active.catalogue(),
+        );
+        INVOCATION_CARRIER_TYPE_ALLOCATIONS.store(0, Ordering::SeqCst);
+        let application = prepare_with_allocator(
+            &report,
+            active.pair(),
+            &active,
+            CandidateAllocator::legacy_with_source(carrier_reservation_candidate_source()),
+        )
+        .unwrap();
+        assert_eq!(
+            application.candidate().object_types()[0].id(),
+            TypeId::from_bytes([0xf3; 16])
+        );
+        assert_eq!(
+            INVOCATION_CARRIER_TYPE_ALLOCATIONS.load(Ordering::SeqCst),
+            INVOCATION_CARRIERS.len() + 1
+        );
+
+        let verified = invocation_carrier_standard();
+        let standard = check_standard_library_source(&verified).unwrap();
+        let active = empty_standard_application_active(&verified);
+        let context =
+            StandardApplicationCheckContext::try_new(active.catalogue(), &standard).unwrap();
+        let bundle = SourceBundle::new([SourceUnit::new(
+            "application.orna",
+            "CREATE SCHEMA app; CREATE TYPE app.item AS OBJECT (done BOOLEAN);",
+        )])
+        .unwrap();
+        let report = check_standard_application(&bundle, &context);
+        assert!(report.diagnostics().is_empty());
+        INVOCATION_CARRIER_TYPE_ALLOCATIONS.store(0, Ordering::SeqCst);
+        let standard = prepare_standard_application_with_allocator(
+            &report,
+            active.pair(),
+            &active,
+            CandidateAllocator::with_source(
+                ReservedStandardIds::from_snapshot(&verified),
+                carrier_reservation_candidate_source(),
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            standard.candidate().object_types()[0].id(),
+            TypeId::from_bytes([0xf3; 16])
+        );
+        assert_eq!(
+            INVOCATION_CARRIER_TYPE_ALLOCATIONS.load(Ordering::SeqCst),
+            INVOCATION_CARRIERS.len() + 1
+        );
+
+        let mut untouched = CandidateAllocator::legacy_with_source(CandidateIdSource {
+            type_id: || TypeId::from_bytes([0xe1; 16]),
+            ..carrier_reservation_candidate_source()
+        });
+        assert_eq!(untouched.type_id(), TypeId::from_bytes([0xe1; 16]));
     }
 
     fn allocated_standard_upgrade_plan_for_construction_test() -> AllocatedStandardUpgradePlan {
