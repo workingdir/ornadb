@@ -8935,3 +8935,573 @@ fn installed_added_nullable_text_field_survives_live_rows_grants_replay_and_rest
     )
     .expect("the added nullable TEXT journey must pass");
 }
+
+/// Decode a complete row-major stream of canonical ORV1 Integer pairs.
+///
+/// Each row must contain exactly two standard INTEGER envelopes. The pairing
+/// remains part of the result, so callers can verify identity binding without
+/// assuming a database row order.
+fn decode_integer_pair_envelopes(bytes: &[u8]) -> Option<Vec<(i32, i32)>> {
+    const INTEGER_ENVELOPE_LENGTH: usize = 29;
+    const PAIR_LENGTH: usize = INTEGER_ENVELOPE_LENGTH * 2;
+    if !bytes.len().is_multiple_of(PAIR_LENGTH) {
+        return None;
+    }
+    bytes
+        .chunks_exact(PAIR_LENGTH)
+        .map(|row| {
+            let first = decode_integer_envelopes(&row[..INTEGER_ENVELOPE_LENGTH])?
+                .into_iter()
+                .next()?;
+            let second = decode_integer_envelopes(&row[INTEGER_ENVELOPE_LENGTH..])?
+                .into_iter()
+                .next()?;
+            Some((first, second))
+        })
+        .collect()
+}
+
+/// Decode a complete row-major stream of canonical ORV1 Text and Reference
+/// pairs, retaining the association between cells from the same row.
+fn decode_text_reference_pair_envelopes(bytes: &[u8]) -> Option<Vec<(String, OrvReference)>> {
+    let mut pairs = Vec::new();
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let text_header = bytes.get(offset..offset + 25)?;
+        if &text_header[..4] != b"ORV1"
+            || text_header[4] != 0x06
+            || text_header[5..20] != [0; 15]
+            || text_header[20] != 0x06
+        {
+            return None;
+        }
+        let text_length = u32::from_be_bytes(text_header[21..25].try_into().ok()?) as usize;
+        let text_end = offset.checked_add(25 + text_length)?;
+        let text = String::from_utf8(bytes.get(offset + 25..text_end)?.to_vec()).ok()?;
+        let reference_end = text_end.checked_add(41)?;
+        let reference = parse_reference_envelope(bytes.get(text_end..reference_end)?).ok()?;
+        pairs.push((text, reference));
+        offset = reference_end;
+    }
+    Some(pairs)
+}
+
+/// Prove ADR 0049 through the installed public raw-call product surface.
+///
+/// The journey discovers exact function and ParameterId tokens from source
+/// apply, proves both two-argument creators are denied before grants, then
+/// proves identity binding for same-type Integer and Text/Reference pairs with
+/// public identity-selected multi-column readers. It replays the exact fixture
+/// without regranting and restarts before reusing the original identities and
+/// grants.
+#[test]
+#[ignore = "requires Docker, ORNA_SYSTEM_TEST_DEBIAN_PACKAGE, and the ADR 0049 argument-pair commands in the installed orna executable"]
+fn installed_argument_pairs_bind_by_identity_across_replay_and_restart() {
+    let package = std::env::var("ORNA_SYSTEM_TEST_DEBIAN_PACKAGE")
+        .expect("ORNA_SYSTEM_TEST_DEBIAN_PACKAGE must point at the reproduced .deb package");
+    let artifact = FrozenPackageArtifact::new(PackageFormat::Debian, &package)
+        .expect("freeze the reproduced Debian package");
+    let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures")
+        .join("product_test_argument_pairs.orna");
+    let fixture = fs::read(&fixture_path).expect("read the checked-in argument-pair fixture");
+    let machine = InstalledMachine::start(&artifact, &fixture)
+        .expect("start the installed Debian test machine");
+
+    let apply = machine
+        .run_as_orna(&["source", "apply", FIXTURE_PATH])
+        .expect("run installed source apply");
+    let apply = require_success("orna source apply", apply).expect("source apply must succeed");
+    assert!(
+        apply.stderr.is_empty(),
+        "source apply must keep standard error empty"
+    );
+    let document = parse_apply_document(&apply.stdout).expect("source apply JSON must parse");
+    let expected_order = [
+        vec![
+            "argument_pairs_test".to_string(),
+            "create_anchor".to_string(),
+        ],
+        vec![
+            "argument_pairs_test".to_string(),
+            "create_int_pair".to_string(),
+        ],
+        vec![
+            "argument_pairs_test".to_string(),
+            "create_text_anchor_pair".to_string(),
+        ],
+        vec![
+            "argument_pairs_test".to_string(),
+            "read_int_first_values".to_string(),
+        ],
+        vec![
+            "argument_pairs_test".to_string(),
+            "read_int_pair".to_string(),
+        ],
+        vec![
+            "argument_pairs_test".to_string(),
+            "read_text_anchor_pair".to_string(),
+        ],
+        vec![
+            "argument_pairs_test".to_string(),
+            "read_text_messages".to_string(),
+        ],
+    ];
+    assert_eq!(
+        document
+            .functions
+            .iter()
+            .map(|entry| entry.names().to_vec())
+            .collect::<Vec<_>>(),
+        expected_order,
+        "apply must report all argument-pair functions in canonical name order"
+    );
+
+    let create_anchor = document
+        .function_id(&["argument_pairs_test", "create_anchor"])
+        .expect("apply must report create_anchor");
+    let create_int_pair = document
+        .function_id(&["argument_pairs_test", "create_int_pair"])
+        .expect("apply must report create_int_pair");
+    let create_text_anchor_pair = document
+        .function_id(&["argument_pairs_test", "create_text_anchor_pair"])
+        .expect("apply must report create_text_anchor_pair");
+    let read_int_pair = document
+        .function_id(&["argument_pairs_test", "read_int_pair"])
+        .expect("apply must report read_int_pair");
+    let read_int_first_values = document
+        .function_id(&["argument_pairs_test", "read_int_first_values"])
+        .expect("apply must report read_int_first_values");
+    let read_text_anchor_pair = document
+        .function_id(&["argument_pairs_test", "read_text_anchor_pair"])
+        .expect("apply must report read_text_anchor_pair");
+    let read_text_messages = document
+        .function_id(&["argument_pairs_test", "read_text_messages"])
+        .expect("apply must report read_text_messages");
+    let assert_parameter_names = |function: &[&str], expected: &[&str]| {
+        let entry = document
+            .functions
+            .iter()
+            .find(|entry| {
+                entry
+                    .names()
+                    .iter()
+                    .map(String::as_str)
+                    .eq(function.iter().copied())
+            })
+            .expect("apply must report the function entry");
+        let actual = entry
+            .parameters()
+            .iter()
+            .map(|parameter| parameter.name())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual, expected,
+            "each function must report its complete ordered parameter declaration"
+        );
+    };
+    for (function, parameters) in [
+        (&["argument_pairs_test", "create_anchor"][..], &[][..]),
+        (
+            &["argument_pairs_test", "create_int_pair"][..],
+            &["p_first", "p_second"][..],
+        ),
+        (
+            &["argument_pairs_test", "create_text_anchor_pair"][..],
+            &["p_message", "p_anchor"][..],
+        ),
+        (
+            &["argument_pairs_test", "read_int_first_values"][..],
+            &[][..],
+        ),
+        (
+            &["argument_pairs_test", "read_int_pair"][..],
+            &["p_pair"][..],
+        ),
+        (
+            &["argument_pairs_test", "read_text_anchor_pair"][..],
+            &["p_pair"][..],
+        ),
+        (&["argument_pairs_test", "read_text_messages"][..], &[][..]),
+    ] {
+        assert_parameter_names(function, parameters);
+    }
+    let p_first = document
+        .parameter_id(&["argument_pairs_test", "create_int_pair"], "p_first")
+        .expect("apply must report create_int_pair.p_first");
+    let p_second = document
+        .parameter_id(&["argument_pairs_test", "create_int_pair"], "p_second")
+        .expect("apply must report create_int_pair.p_second");
+    let p_message = document
+        .parameter_id(
+            &["argument_pairs_test", "create_text_anchor_pair"],
+            "p_message",
+        )
+        .expect("apply must report create_text_anchor_pair.p_message");
+    let p_anchor = document
+        .parameter_id(
+            &["argument_pairs_test", "create_text_anchor_pair"],
+            "p_anchor",
+        )
+        .expect("apply must report create_text_anchor_pair.p_anchor");
+    let p_int_pair = document
+        .parameter_id(&["argument_pairs_test", "read_int_pair"], "p_pair")
+        .expect("apply must report read_int_pair.p_pair");
+    let p_text_anchor_pair = document
+        .parameter_id(&["argument_pairs_test", "read_text_anchor_pair"], "p_pair")
+        .expect("apply must report read_text_anchor_pair.p_pair");
+    let parameter_ids = [
+        p_first,
+        p_second,
+        p_message,
+        p_anchor,
+        p_int_pair,
+        p_text_anchor_pair,
+    ];
+    for (index, left) in parameter_ids.iter().enumerate() {
+        for right in &parameter_ids[index + 1..] {
+            assert_ne!(left, right, "every discovered ParameterId must be distinct");
+        }
+    }
+
+    let denied_int_input = [integer_orv1_envelope(-19), integer_orv1_envelope(73)].concat();
+    let denied_int = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", create_int_pair, p_first, p_second],
+            &denied_int_input,
+        )
+        .expect("run denied Integer-pair creator");
+    assert_denied("Integer-pair creator before grant", denied_int)
+        .expect("Integer-pair creator must be denied before grant");
+    let denied_text_input = [
+        text_orv1_envelope("denied"),
+        reference_orv1_envelope([0x11; 16], [0x22; 16]),
+    ]
+    .concat();
+    let denied_text = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", create_text_anchor_pair, p_message, p_anchor],
+            &denied_text_input,
+        )
+        .expect("run denied Text/Reference-pair creator");
+    assert_denied("Text/Reference-pair creator before grant", denied_text)
+        .expect("Text/Reference-pair creator must be denied before grant");
+
+    for reader in [
+        read_int_pair,
+        read_int_first_values,
+        read_text_anchor_pair,
+        read_text_messages,
+    ] {
+        let granted = machine
+            .run_as_orna(&["security", "grant-execute", reader])
+            .expect("run installed reader grant command");
+        require_silent_success("orna security grant-execute reader", granted)
+            .expect("reader grant must succeed silently");
+    }
+    for reader in [read_int_first_values, read_text_messages] {
+        let empty = machine
+            .run_as_orna(&["raw-call", reader])
+            .expect("run empty public reader after denied creators");
+        require_silent_success("orna raw-call empty reader after denied creators", empty)
+            .expect("denied creators must leave the public reader empty");
+    }
+    for writer in [create_anchor, create_int_pair, create_text_anchor_pair] {
+        let granted = machine
+            .run_as_orna(&["security", "grant-execute", writer])
+            .expect("run installed writer grant command");
+        require_silent_success("orna security grant-execute writer", granted)
+            .expect("writer grant must succeed silently");
+    }
+
+    let first_int = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", create_int_pair, p_first, p_second],
+            &[integer_orv1_envelope(-19), integer_orv1_envelope(73)].concat(),
+        )
+        .expect("run first Integer-pair creator");
+    let first_int = require_value_success("orna raw-call create_int_pair first", first_int)
+        .expect("first Integer-pair create must succeed");
+    let first_int_reference = parse_reference_envelope(&first_int.stdout)
+        .expect("Integer-pair create must return one reference");
+    assert!(
+        !first_int_reference.object_is_zero(),
+        "Integer-pair create must return a real row"
+    );
+    let reversed_int = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", create_int_pair, p_second, p_first],
+            &[integer_orv1_envelope(-404), integer_orv1_envelope(909)].concat(),
+        )
+        .expect("run reversed Integer-pair creator");
+    let reversed_int =
+        require_value_success("orna raw-call create_int_pair reversed", reversed_int)
+            .expect("reversed Integer-pair create must succeed");
+    let reversed_int_reference = parse_reference_envelope(&reversed_int.stdout)
+        .expect("reversed Integer-pair create must return one reference");
+
+    let anchor_a = machine
+        .run_as_orna(&["raw-call", create_anchor])
+        .expect("create anchor A");
+    let anchor_a = parse_reference_envelope(
+        &require_value_success("orna raw-call create_anchor A", anchor_a)
+            .expect("anchor A create must succeed")
+            .stdout,
+    )
+    .expect("anchor A create must return one reference");
+    let anchor_b = machine
+        .run_as_orna(&["raw-call", create_anchor])
+        .expect("create anchor B");
+    let anchor_b = parse_reference_envelope(
+        &require_value_success("orna raw-call create_anchor B", anchor_b)
+            .expect("anchor B create must succeed")
+            .stdout,
+    )
+    .expect("anchor B create must return one reference");
+    assert_eq!(
+        anchor_a.type_id, anchor_b.type_id,
+        "anchors must have one target type"
+    );
+    assert_ne!(
+        anchor_a.object, anchor_b.object,
+        "anchors must be distinct rows"
+    );
+
+    let first_text = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", create_text_anchor_pair, p_message, p_anchor],
+            &[
+                text_orv1_envelope("first anchor"),
+                reference_orv1_envelope(anchor_a.type_id, anchor_a.object),
+            ]
+            .concat(),
+        )
+        .expect("run first Text/Reference-pair creator");
+    let first_text =
+        require_value_success("orna raw-call create_text_anchor_pair first", first_text)
+            .expect("first Text/Reference-pair create must succeed");
+    let first_text_reference = parse_reference_envelope(&first_text.stdout)
+        .expect("Text/Reference-pair create must return one reference");
+    let reversed_text = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", create_text_anchor_pair, p_anchor, p_message],
+            &[
+                reference_orv1_envelope(anchor_b.type_id, anchor_b.object),
+                text_orv1_envelope("second anchor"),
+            ]
+            .concat(),
+        )
+        .expect("run reversed Text/Reference-pair creator");
+    let reversed_text = require_value_success(
+        "orna raw-call create_text_anchor_pair reversed",
+        reversed_text,
+    )
+    .expect("reversed Text/Reference-pair create must succeed");
+    let reversed_text_reference = parse_reference_envelope(&reversed_text.stdout)
+        .expect("reversed Text/Reference-pair create must return one reference");
+
+    let assert_int_pair = |pair: &OrvReference, expected: (i32, i32), label: &'static str| {
+        let output = machine
+            .run_as_orna_with_stdin(
+                &["raw-call", read_int_pair, p_int_pair],
+                &reference_orv1_envelope(pair.type_id, pair.object),
+            )
+            .expect("run identity-selected Integer-pair reader");
+        let output = require_value_success(label, output)
+            .expect("identity-selected Integer-pair reader must succeed");
+        assert_eq!(
+            decode_integer_pair_envelopes(&output.stdout),
+            Some(vec![expected]),
+            "Integer reader must return one strict ORV1 pair for its selected row"
+        );
+    };
+    let assert_text_pair = |pair: &OrvReference,
+                            expected_message: &str,
+                            expected_anchor: &OrvReference,
+                            label: &'static str| {
+        let output = machine
+            .run_as_orna_with_stdin(
+                &["raw-call", read_text_anchor_pair, p_text_anchor_pair],
+                &reference_orv1_envelope(pair.type_id, pair.object),
+            )
+            .expect("run identity-selected Text/Reference-pair reader");
+        let output = require_value_success(label, output)
+            .expect("identity-selected Text/Reference-pair reader must succeed");
+        let actual = decode_text_reference_pair_envelopes(&output.stdout)
+            .expect("Text/Reference reader output must be one strict ORV1 pair");
+        assert_eq!(
+            actual.len(),
+            1,
+            "selected Text/Reference reader must return one row"
+        );
+        let (message, anchor) = &actual[0];
+        assert_eq!(
+            message, expected_message,
+            "selected row must retain its Text value"
+        );
+        assert_eq!(
+            anchor.type_id, expected_anchor.type_id,
+            "selected row must retain anchor type"
+        );
+        assert_eq!(
+            anchor.object, expected_anchor.object,
+            "selected row must retain its associated anchor"
+        );
+    };
+    assert_int_pair(&first_int_reference, (-19, 73), "read first Integer pair");
+    assert_int_pair(
+        &reversed_int_reference,
+        (909, -404),
+        "read reversed Integer pair",
+    );
+    assert_text_pair(
+        &first_text_reference,
+        "first anchor",
+        &anchor_a,
+        "read first Text/Reference pair",
+    );
+    assert_text_pair(
+        &reversed_text_reference,
+        "second anchor",
+        &anchor_b,
+        "read reversed Text/Reference pair",
+    );
+
+    let replay = machine
+        .run_as_orna(&["source", "apply", FIXTURE_PATH])
+        .expect("replay the installed argument-pair fixture");
+    let replay =
+        require_success("orna source apply replay", replay).expect("fixture replay must succeed");
+    assert!(
+        replay.stderr.is_empty(),
+        "fixture replay must keep standard error empty"
+    );
+    let replay_document = parse_apply_document(&replay.stdout).expect("replay JSON must parse");
+    assert_eq!(
+        replay_document.functions, document.functions,
+        "replay must preserve all function and ParameterId identities"
+    );
+    assert_int_pair(
+        &first_int_reference,
+        (-19, 73),
+        "read first Integer pair after replay",
+    );
+    assert_int_pair(
+        &reversed_int_reference,
+        (909, -404),
+        "read reversed Integer pair after replay",
+    );
+    assert_text_pair(
+        &first_text_reference,
+        "first anchor",
+        &anchor_a,
+        "read first Text/Reference pair after replay",
+    );
+    assert_text_pair(
+        &reversed_text_reference,
+        "second anchor",
+        &anchor_b,
+        "read reversed Text/Reference pair after replay",
+    );
+
+    machine
+        .restart_server()
+        .expect("installed server must restart cleanly");
+    assert_int_pair(
+        &first_int_reference,
+        (-19, 73),
+        "read first Integer pair after restart",
+    );
+    assert_int_pair(
+        &reversed_int_reference,
+        (909, -404),
+        "read reversed Integer pair after restart",
+    );
+    assert_text_pair(
+        &first_text_reference,
+        "first anchor",
+        &anchor_a,
+        "read first Text/Reference pair after restart",
+    );
+    assert_text_pair(
+        &reversed_text_reference,
+        "second anchor",
+        &anchor_b,
+        "read reversed Text/Reference pair after restart",
+    );
+    let after_restart_int = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", create_int_pair, p_first, p_second],
+            &[
+                integer_orv1_envelope(i32::MIN),
+                integer_orv1_envelope(i32::MAX),
+            ]
+            .concat(),
+        )
+        .expect("reuse original Integer-pair identities after restart");
+    let after_restart_int = require_value_success(
+        "orna raw-call create_int_pair after restart",
+        after_restart_int,
+    )
+    .expect("original Integer-pair grant must survive restart");
+    let after_restart_int_reference = parse_reference_envelope(&after_restart_int.stdout)
+        .expect("post-restart Integer-pair create must return one reference");
+    let after_restart_text = machine
+        .run_as_orna_with_stdin(
+            &["raw-call", create_text_anchor_pair, p_message, p_anchor],
+            &[
+                text_orv1_envelope("after restart"),
+                reference_orv1_envelope(anchor_a.type_id, anchor_a.object),
+            ]
+            .concat(),
+        )
+        .expect("reuse original Text/Reference-pair identities after restart");
+    let after_restart_text = require_value_success(
+        "orna raw-call create_text_anchor_pair after restart",
+        after_restart_text,
+    )
+    .expect("original Text/Reference-pair grant must survive restart");
+    let after_restart_text_reference = parse_reference_envelope(&after_restart_text.stdout)
+        .expect("post-restart Text/Reference-pair create must return one reference");
+    assert_int_pair(
+        &after_restart_int_reference,
+        (i32::MIN, i32::MAX),
+        "read post-restart Integer pair",
+    );
+    assert_text_pair(
+        &after_restart_text_reference,
+        "after restart",
+        &anchor_a,
+        "read post-restart Text/Reference pair",
+    );
+    let int_values = machine
+        .run_as_orna(&["raw-call", read_int_first_values])
+        .expect("run final Integer first-value reader");
+    let int_values = require_value_success("orna raw-call read_int_first_values", int_values)
+        .expect("Integer first-value reader must succeed");
+    let mut int_values = decode_integer_envelopes(&int_values.stdout)
+        .expect("Integer first-value reader output must be strict ORV1 Integers");
+    int_values.sort_unstable();
+    assert_eq!(
+        int_values,
+        vec![i32::MIN, -19, 909],
+        "Integer first-value reader must return the exact unordered stored multiset"
+    );
+    let text_messages = machine
+        .run_as_orna(&["raw-call", read_text_messages])
+        .expect("run final Text message reader");
+    let text_messages = require_value_success("orna raw-call read_text_messages", text_messages)
+        .expect("Text message reader must succeed");
+    let mut text_messages = decode_text_envelopes(&text_messages.stdout)
+        .expect("Text message reader output must be strict ORV1 Text values");
+    text_messages.sort_unstable();
+    assert_eq!(
+        text_messages,
+        vec![
+            "after restart".to_string(),
+            "first anchor".to_string(),
+            "second anchor".to_string(),
+        ],
+        "Text message reader must return the exact unordered stored multiset"
+    );
+}
