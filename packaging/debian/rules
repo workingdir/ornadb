@@ -41,7 +41,7 @@ validate-development-identity:
 	suite="$$(dpkg-parsechangelog -l"$(CHANGELOG)" -S Distribution)"; \
 	upstream_version="$${version%-*}"; debian_revision="$${version##*-}"; \
 	architecture="$$(dpkg --print-architecture)"; \
-	workspace_version="$$(sed -n '/^\[workspace.package\]/,/^\[/ { s/^version = "\\([^"\\]*\\)"/\\1/p }' "$(REPOSITORY_ROOT)/Cargo.toml")"; \
+	workspace_version="$$(sed -n '/^\[workspace.package\]/,/^\[/ { s/^version = "\([^"\]*\)"/\1/p }' "$(REPOSITORY_ROOT)/Cargo.toml")"; \
 	[[ "$${source}" == 'orna' && "$${version}" == '0.1.0-1' \
 		&& "$${upstream_version}" == '0.1.0' && "$${debian_revision}" == '1' \
 		&& "$${suite}" == 'UNRELEASED' && "$${architecture}" == 'amd64' \
