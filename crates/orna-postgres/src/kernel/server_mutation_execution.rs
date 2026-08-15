@@ -1392,8 +1392,8 @@ pub(crate) async fn execute_authorised_raw_server_insert(
         .await
 }
 
-/// Executes one pinned raw SERVER `INSERT` with zero arguments or one accepted
-/// scalar or Reference argument.
+/// Executes one pinned raw SERVER `INSERT` with zero arguments, one accepted
+/// scalar or Reference argument, or one bounded pair of those values.
 ///
 /// The caller owns recovery, authorisation, audit, savepoint, and commit. This
 /// entry validates the raw argument shape, then delegates stable identity and
@@ -1453,29 +1453,46 @@ fn validate_raw_server_insert_argument_shape(
     }
 
     match arguments {
-        [argument]
-            if matches!(
-                argument.value(),
-                RuntimeValue::Boolean(_)
-                    | RuntimeValue::Integer(_)
-                    | RuntimeValue::BigInt(_)
-                    | RuntimeValue::Float(_)
-                    | RuntimeValue::Text(_)
-                    | RuntimeValue::Bytes(_)
-                    | RuntimeValue::Reference { .. }
-            ) =>
-        {
-            Ok(())
-        }
+        [argument] if raw_server_insert_argument_is_supported(argument) => Ok(()),
         [argument] => Err(argument_error(
             Some(argument.parameter()),
             "raw SERVER INSERT calls accept only one supported scalar or Reference argument",
         )),
+        [first, second]
+            if raw_server_insert_argument_is_supported(first)
+                && raw_server_insert_argument_is_supported(second) =>
+        {
+            Ok(())
+        }
+        [first, second] => {
+            let rejected = if raw_server_insert_argument_is_supported(first) {
+                second
+            } else {
+                first
+            };
+            Err(argument_error(
+                Some(rejected.parameter()),
+                "raw SERVER INSERT argument pairs accept only supported scalar or Reference values",
+            ))
+        }
         _ => Err(argument_error(
             None,
-            "raw SERVER INSERT calls accept only one supported scalar or Reference argument",
+            "raw SERVER INSERT calls accept at most two supported scalar or Reference arguments",
         )),
     }
+}
+
+fn raw_server_insert_argument_is_supported(argument: &FunctionArgument) -> bool {
+    matches!(
+        argument.value(),
+        RuntimeValue::Boolean(_)
+            | RuntimeValue::Integer(_)
+            | RuntimeValue::BigInt(_)
+            | RuntimeValue::Float(_)
+            | RuntimeValue::Text(_)
+            | RuntimeValue::Bytes(_)
+            | RuntimeValue::Reference { .. }
+    )
 }
 
 fn validate_raw_reference_insert_parameter_use(
@@ -1557,17 +1574,91 @@ fn validate_raw_scalar_insert_parameter_use(
     Ok(())
 }
 
+fn validate_raw_argument_pair_insert_parameter_use(
+    active: &ActiveDatabaseRevision,
+    function: &FunctionDefinition,
+    plan: &ServerMutationPlan,
+    arguments: &[FunctionArgument],
+) -> Result<(), PostgresKernelError> {
+    let Some([first, second]) = raw_argument_pair_in_parameter_order(arguments) else {
+        return Ok(());
+    };
+    if first.parameter() == second.parameter() {
+        return Err(argument_error(
+            Some(second.parameter()),
+            "raw SERVER INSERT argument pairs require two distinct parameter identities",
+        ));
+    }
+    if function.parameters().len() != 2 {
+        return Err(function_signature_error(
+            function.id(),
+            "raw SERVER INSERT argument pairs require exactly two parameters",
+        ));
+    }
+    for argument in [first, second] {
+        let parameter = function
+            .parameter_by_id(argument.parameter())
+            .ok_or_else(|| {
+                argument_error(
+                    Some(argument.parameter()),
+                    "raw SERVER INSERT argument pairs must name declared parameters",
+                )
+            })?;
+        let reads_parameter = plan.assignments().iter().any(|assignment| {
+            let expression = assignment.expression();
+            matches!(
+                expression.kind(),
+                MutationExpressionKind::Parameter { owner, parameter: read }
+                    if *owner == function.id() && *read == parameter.id()
+            ) && runtime_types_match(
+                active.catalogue_hash_context(),
+                expression.resolved_type(),
+                parameter.resolved_type(),
+            )
+        });
+        if !reads_parameter {
+            return Err(argument_error(
+                Some(argument.parameter()),
+                "raw SERVER INSERT argument pairs must directly read both supplied parameters",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn raw_argument_pair_in_parameter_order(
+    arguments: &[FunctionArgument],
+) -> Option<[&FunctionArgument; 2]> {
+    let [first, second] = arguments else {
+        return None;
+    };
+    Some(if first.parameter() <= second.parameter() {
+        [first, second]
+    } else {
+        [second, first]
+    })
+}
+
 fn validate_raw_text_insert_argument(
     arguments: &[FunctionArgument],
 ) -> Result<(), PostgresKernelError> {
-    let [argument] = arguments else {
-        return Ok(());
+    let validate = |argument: &FunctionArgument| {
+        if matches!(argument.value(), RuntimeValue::Text(value) if value.contains('\0')) {
+            return Err(argument_error(
+                Some(argument.parameter()),
+                "raw Text INSERT arguments cannot contain U+0000",
+            ));
+        }
+        Ok(())
     };
-    if matches!(argument.value(), RuntimeValue::Text(value) if value.contains('\0')) {
-        return Err(argument_error(
-            Some(argument.parameter()),
-            "raw Text INSERT arguments cannot contain U+0000",
-        ));
+    if let Some(arguments) = raw_argument_pair_in_parameter_order(arguments) {
+        for argument in arguments {
+            validate(argument)?;
+        }
+    } else {
+        for argument in arguments {
+            validate(argument)?;
+        }
     }
     Ok(())
 }
@@ -1581,6 +1672,7 @@ fn validate_active_raw_server_insert<'a>(
         validate_active_mutation(active, function, arguments, MutationExecutionKind::Insert)?;
     validate_raw_reference_insert_parameter_use(function, &validated.plan, arguments)?;
     validate_raw_scalar_insert_parameter_use(active, function, &validated.plan, arguments)?;
+    validate_raw_argument_pair_insert_parameter_use(active, function, &validated.plan, arguments)?;
     validate_raw_text_insert_argument(arguments)?;
     Ok(validated)
 }
@@ -3930,10 +4022,17 @@ mod tests {
         FieldAssignment, MutationExpression, RecordFieldExpression,
     };
     use orna_core::{
-        CatalogueRevisionId, ExpressionId, FieldId, SchemaId, SourceRevisionId,
+        CatalogueRevisionId, ExpressionId, FieldId, SchemaId, SourceBundleId, SourceRevisionId,
+        canonical_hash::{
+            catalogue_digest_with_context, source_bundle_digest, source_revision_record_digest,
+        },
         catalogue::{
             EnumTypeDefinition, FieldDefinition, FunctionReturnColumnDefinition,
             ParameterDefinition, QualifiedSemanticName, SchemaDefinition,
+        },
+        revision::{
+            ActiveDatabaseRevisionInput, ActiveRevisionContent, CatalogueHashContext, RevisionPair,
+            StoredSourceRevision,
         },
         types::StandardScalar,
         value::{RuntimeFloat, RuntimeValue},
@@ -4319,6 +4418,40 @@ mod tests {
         )
     }
 
+    fn raw_pair_active() -> ActiveDatabaseRevision {
+        let bundle = SourceBundleId::from_bytes([0x73; 16]);
+        let bundle_hash = source_bundle_digest(&[]).unwrap();
+        let source = StoredSourceRevision::new(
+            bundle,
+            SourceRevisionId::from_bytes([0x74; 16]),
+            None,
+            Vec::new(),
+            bundle_hash,
+            source_revision_record_digest(bundle, None, bundle_hash).unwrap(),
+        )
+        .unwrap();
+        let catalogue = CatalogueSnapshot::new(
+            CatalogueRevisionId::from_bytes([0x75; 16]),
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        let context = CatalogueHashContext::version_one();
+        let catalogue_hash =
+            catalogue_digest_with_context(&context, &catalogue, &[], &[], &[], &[]).unwrap();
+        ActiveDatabaseRevision::new_with_catalogue_hash_context(
+            ActiveDatabaseRevisionInput::new(
+                RevisionPair::new(source.id(), catalogue.revision()),
+                source,
+                catalogue,
+                catalogue_hash,
+                ActiveRevisionContent::new(Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+            ),
+            context,
+        )
+        .unwrap()
+    }
+
     fn value_target_fields(reference_target: TypeId) -> Vec<FieldDefinition> {
         let mut fields = target_fields(reference_target);
         fields[0] = field(
@@ -4635,7 +4768,7 @@ mod tests {
     }
 
     #[test]
-    fn raw_insert_argument_shape_accepts_zero_parameters_and_rejects_extra_arguments() {
+    fn raw_insert_argument_shape_accepts_supported_pairs_and_rejects_three_arguments() {
         let zero = raw_zero_parameter_function();
         validate_raw_server_insert_argument_shape(&zero, &[]).unwrap();
 
@@ -4651,7 +4784,7 @@ mod tests {
             other => panic!("unexpected mutation error: {other:?}"),
         }
 
-        let two = [
+        let pair = [
             FunctionArgument::new(PARAMETER_TITLE, RuntimeValue::Boolean(true)).unwrap(),
             FunctionArgument::new(
                 ParameterId::from_bytes([0x71; 16]),
@@ -4659,19 +4792,173 @@ mod tests {
             )
             .unwrap(),
         ];
+        validate_raw_server_insert_argument_shape(&parameterised, &pair)
+            .expect("two supported arguments must pass the raw shape boundary");
+
+        let three = [
+            pair[0].clone(),
+            pair[1].clone(),
+            FunctionArgument::new(
+                ParameterId::from_bytes([0x72; 16]),
+                RuntimeValue::Boolean(true),
+            )
+            .unwrap(),
+        ];
         let error = expect_insert_error(
-            validate_raw_server_insert_argument_shape(&parameterised, &two).unwrap_err(),
+            validate_raw_server_insert_argument_shape(&parameterised, &three).unwrap_err(),
         );
         match error {
             ServerInsertError::Argument { parameter, rule } => {
                 assert_eq!(parameter, None);
                 assert_eq!(
                     rule,
-                    "raw SERVER INSERT calls accept only one supported scalar or Reference argument"
+                    "raw SERVER INSERT calls accept at most two supported scalar or Reference arguments"
                 );
             }
             other => panic!("unexpected mutation error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn raw_insert_pair_validator_requires_distinct_declared_direct_reads() {
+        let active = raw_pair_active();
+        let duplicate = [
+            FunctionArgument::new(PARAMETER_TITLE, RuntimeValue::Boolean(true)).unwrap(),
+            FunctionArgument::new(PARAMETER_TITLE, RuntimeValue::Boolean(false)).unwrap(),
+        ];
+        let error = expect_insert_error(
+            validate_raw_argument_pair_insert_parameter_use(
+                &active,
+                &raw_boolean_function(),
+                &valid_plan(),
+                &duplicate,
+            )
+            .unwrap_err(),
+        );
+        assert!(matches!(
+            error,
+            ServerInsertError::Argument {
+                parameter: Some(PARAMETER_TITLE),
+                rule: "raw SERVER INSERT argument pairs require two distinct parameter identities",
+            }
+        ));
+
+        let pair = valid_arguments();
+        let error = expect_insert_error(
+            validate_raw_argument_pair_insert_parameter_use(
+                &active,
+                &raw_boolean_function(),
+                &valid_plan(),
+                &pair,
+            )
+            .unwrap_err(),
+        );
+        assert!(matches!(
+            error,
+            ServerInsertError::FunctionSignature {
+                function: FUNCTION,
+                rule: "raw SERVER INSERT argument pairs require exactly two parameters",
+            }
+        ));
+
+        validate_raw_argument_pair_insert_parameter_use(
+            &active,
+            &valid_function(),
+            &valid_plan(),
+            &pair,
+        )
+        .expect("both declared parameters are direct INSERT reads");
+    }
+
+    #[test]
+    fn raw_insert_pair_failures_use_ascending_parameter_identity() {
+        let active = raw_pair_active();
+        let ignores_pair = ServerMutationPlan::new_insert(
+            TARGET,
+            [FieldAssignment::new(
+                TARGET,
+                FIELD_ENABLED,
+                MutationExpression::boolean_literal(true),
+            )],
+            TARGET,
+        )
+        .unwrap();
+        for arguments in [
+            [
+                FunctionArgument::new(PARAMETER_OWNER, RuntimeValue::Boolean(true)).unwrap(),
+                FunctionArgument::new(PARAMETER_TITLE, RuntimeValue::Boolean(false)).unwrap(),
+            ],
+            [
+                FunctionArgument::new(PARAMETER_TITLE, RuntimeValue::Boolean(false)).unwrap(),
+                FunctionArgument::new(PARAMETER_OWNER, RuntimeValue::Boolean(true)).unwrap(),
+            ],
+        ] {
+            let error = expect_insert_error(
+                validate_raw_argument_pair_insert_parameter_use(
+                    &active,
+                    &valid_function(),
+                    &ignores_pair,
+                    &arguments,
+                )
+                .unwrap_err(),
+            );
+            assert!(matches!(
+                error,
+                ServerInsertError::Argument {
+                    parameter: Some(PARAMETER_TITLE),
+                    rule: "raw SERVER INSERT argument pairs must directly read both supplied parameters",
+                }
+            ));
+        }
+
+        for arguments in [
+            [
+                FunctionArgument::new(PARAMETER_OWNER, RuntimeValue::Text("\0owner".into()))
+                    .unwrap(),
+                FunctionArgument::new(PARAMETER_TITLE, RuntimeValue::Text("\0title".into()))
+                    .unwrap(),
+            ],
+            [
+                FunctionArgument::new(PARAMETER_TITLE, RuntimeValue::Text("\0title".into()))
+                    .unwrap(),
+                FunctionArgument::new(PARAMETER_OWNER, RuntimeValue::Text("\0owner".into()))
+                    .unwrap(),
+            ],
+        ] {
+            let error =
+                expect_insert_error(validate_raw_text_insert_argument(&arguments).unwrap_err());
+            assert!(matches!(
+                error,
+                ServerInsertError::Argument {
+                    parameter: Some(PARAMETER_TITLE),
+                    rule: "raw Text INSERT arguments cannot contain U+0000",
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn raw_insert_boolean_singleton_keeps_its_direct_read_exception() {
+        let active = raw_pair_active();
+        let argument = FunctionArgument::new(PARAMETER_TITLE, RuntimeValue::Boolean(true)).unwrap();
+        let ignores_boolean = ServerMutationPlan::new_insert(
+            TARGET,
+            [FieldAssignment::new(
+                TARGET,
+                FIELD_ENABLED,
+                MutationExpression::boolean_literal(true),
+            )],
+            TARGET,
+        )
+        .unwrap();
+
+        validate_raw_scalar_insert_parameter_use(
+            &active,
+            &raw_boolean_function(),
+            &ignores_boolean,
+            std::slice::from_ref(&argument),
+        )
+        .expect("the retained Boolean singleton path does not require a direct parameter read");
     }
 
     #[test]
@@ -4756,7 +5043,8 @@ mod tests {
         )
         .unwrap();
         let error = expect_insert_error(
-            validate_raw_server_insert_argument_shape(&function, &[argument]).unwrap_err(),
+            validate_raw_server_insert_argument_shape(&function, std::slice::from_ref(&argument))
+                .unwrap_err(),
         );
         match error {
             ServerInsertError::Argument { parameter, rule } => {
@@ -4768,6 +5056,21 @@ mod tests {
             }
             other => panic!("unexpected mutation error: {other:?}"),
         }
+
+        let pair = [
+            FunctionArgument::new(PARAMETER_OWNER, RuntimeValue::Boolean(true)).unwrap(),
+            argument,
+        ];
+        let error = expect_insert_error(
+            validate_raw_server_insert_argument_shape(&function, &pair).unwrap_err(),
+        );
+        assert!(matches!(
+            error,
+            ServerInsertError::Argument {
+                parameter: Some(PARAMETER_TITLE),
+                rule: "raw SERVER INSERT argument pairs accept only supported scalar or Reference values",
+            }
+        ));
     }
 
     #[test]

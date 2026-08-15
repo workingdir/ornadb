@@ -74,8 +74,9 @@ impl PostgresKernel {
             .await
     }
 
-    /// Dispatches one authenticated raw call with zero arguments or one
-    /// supported scalar or Reference argument.
+    /// Dispatches one authenticated raw call with zero arguments, one
+    /// supported scalar or Reference argument, or one bounded pair of those
+    /// values.
     ///
     /// Other argument shapes fail before PostgreSQL is opened. An admitted
     /// shape is authorised and audited before the active target or parameter
@@ -1199,25 +1200,30 @@ fn validate_raw_call_argument_shape(
 ) -> Result<(), PostgresKernelError> {
     match arguments {
         [] => Ok(()),
-        [argument]
-            if matches!(
-                argument.value(),
-                RuntimeValue::Boolean(_)
-                    | RuntimeValue::Integer(_)
-                    | RuntimeValue::BigInt(_)
-                    | RuntimeValue::Float(_)
-                    | RuntimeValue::Text(_)
-                    | RuntimeValue::Bytes(_)
-                    | RuntimeValue::Reference { .. }
-            ) =>
+        [argument] if raw_call_argument_is_supported(argument) => Ok(()),
+        [first, second]
+            if raw_call_argument_is_supported(first) && raw_call_argument_is_supported(second) =>
         {
             Ok(())
         }
         _ => Err(raw_call_target_unavailable(
             function,
-            "raw calls accept zero arguments or one supported scalar or Reference argument",
+            "raw calls accept zero arguments, one supported value, or one supported argument pair",
         )),
     }
+}
+
+fn raw_call_argument_is_supported(argument: &FunctionArgument) -> bool {
+    matches!(
+        argument.value(),
+        RuntimeValue::Boolean(_)
+            | RuntimeValue::Integer(_)
+            | RuntimeValue::BigInt(_)
+            | RuntimeValue::Float(_)
+            | RuntimeValue::Text(_)
+            | RuntimeValue::Bytes(_)
+            | RuntimeValue::Reference { .. }
+    )
 }
 
 fn raw_call_target_unavailable(function: FunctionId, rule: &'static str) -> PostgresKernelError {
@@ -2065,7 +2071,7 @@ mod tests {
     const RAW_CALL_PARAMETER: ParameterId = ParameterId::from_bytes([0x62; 16]);
 
     #[test]
-    fn raw_call_argument_shape_accepts_zero_one_supported_scalar_or_one_reference() {
+    fn raw_call_argument_shape_accepts_zero_one_and_supported_pairs() {
         validate_raw_call_argument_shape(RAW_CALL_FUNCTION, &[])
             .expect("zero arguments must be accepted");
         for value in [
@@ -2099,6 +2105,26 @@ mod tests {
         );
         validate_raw_call_argument_shape(RAW_CALL_FUNCTION, std::slice::from_ref(&reference))
             .expect("one Reference argument must be accepted");
+
+        let supported = [
+            RuntimeValue::Boolean(false),
+            RuntimeValue::Integer(1),
+            RuntimeValue::BigInt(2),
+            RuntimeValue::Float(RuntimeFloat::new(3.5).expect("finite Float argument")),
+            RuntimeValue::Text("text".to_string()),
+            RuntimeValue::Bytes(vec![0x00, 0xff]),
+            reference.value().clone(),
+        ];
+        for (index, value) in supported.into_iter().enumerate() {
+            let pair = [
+                FunctionArgument::new(RAW_CALL_PARAMETER, RuntimeValue::Boolean(true))
+                    .expect("Boolean argument is valid"),
+                FunctionArgument::new(ParameterId::from_bytes([0x70 + index as u8; 16]), value)
+                    .expect("supported pair argument is valid"),
+            ];
+            validate_raw_call_argument_shape(RAW_CALL_FUNCTION, &pair)
+                .expect("a pair of supported arguments must be accepted");
+        }
     }
 
     #[test]
@@ -2135,11 +2161,25 @@ mod tests {
             .expect_err("one Enum argument must be rejected"),
             PostgresKernelError::RawCallTargetUnavailable {
                 function: RAW_CALL_FUNCTION,
-                rule: "raw calls accept zero arguments or one supported scalar or Reference argument",
+                rule: "raw calls accept zero arguments, one supported value, or one supported argument pair",
             }
         ));
 
-        let two = [
+        let unsupported_pair = [
+            FunctionArgument::new(RAW_CALL_PARAMETER, RuntimeValue::Boolean(true))
+                .expect("Boolean argument is valid"),
+            enum_argument.clone(),
+        ];
+        assert!(matches!(
+            validate_raw_call_argument_shape(RAW_CALL_FUNCTION, &unsupported_pair)
+                .expect_err("a pair with an Enum argument must be rejected"),
+            PostgresKernelError::RawCallTargetUnavailable {
+                function: RAW_CALL_FUNCTION,
+                rule: "raw calls accept zero arguments, one supported value, or one supported argument pair",
+            }
+        ));
+
+        let three = [
             FunctionArgument::new(RAW_CALL_PARAMETER, RuntimeValue::Boolean(true))
                 .expect("Boolean argument is valid"),
             FunctionArgument::new(
@@ -2147,13 +2187,18 @@ mod tests {
                 RuntimeValue::Boolean(false),
             )
             .expect("Boolean argument is valid"),
+            FunctionArgument::new(
+                ParameterId::from_bytes([0x65; 16]),
+                RuntimeValue::Boolean(true),
+            )
+            .expect("Boolean argument is valid"),
         ];
         assert!(matches!(
-            validate_raw_call_argument_shape(RAW_CALL_FUNCTION, &two)
-                .expect_err("two Boolean arguments must be rejected"),
+            validate_raw_call_argument_shape(RAW_CALL_FUNCTION, &three)
+                .expect_err("three arguments must be rejected"),
             PostgresKernelError::RawCallTargetUnavailable {
                 function: RAW_CALL_FUNCTION,
-                rule: "raw calls accept zero arguments or one supported scalar or Reference argument",
+                rule: "raw calls accept zero arguments, one supported value, or one supported argument pair",
             }
         ));
     }
