@@ -4,15 +4,18 @@ mod frame;
 
 pub use frame::{
     CallArgument, CallFailure, Channel, ClientAction, ClientFrame, ConnectionError, Event,
-    EventRecord, FrameCodecError, MAX_CHANNEL_WINDOW, MAX_FRAME_PAYLOAD_LENGTH, ProtocolConnection,
-    RawCall, RawCallClient, RawCallClientError, RawCallClientResponse, ServerAction, ServerFrame,
+    EventRecord, FrameCodecError, InvocationEventBatch, InvocationEventRecord, MAX_CHANNEL_WINDOW,
+    MAX_FRAME_PAYLOAD_LENGTH, ProtocolConnection, RawCall, RawCallClient, RawCallClientError,
+    RawCallClientResponse, RetainedInvokeRequest, ServerAction, ServerFrame,
     decode_active_client_frame, decode_active_server_frame, decode_catalogue_client_frame,
     decode_catalogue_server_frame, decode_client_frame, decode_constructed_client_frame,
-    decode_constructed_server_frame, decode_registered_client_frame,
-    decode_registered_server_frame, decode_server_frame, encode_active_client_frame,
-    encode_active_server_frame, encode_catalogue_client_frame, encode_catalogue_server_frame,
-    encode_client_frame, encode_constructed_client_frame, encode_constructed_server_frame,
-    encode_registered_client_frame, encode_registered_server_frame, encode_server_frame,
+    decode_constructed_server_frame, decode_invocation_event_batch, decode_invoke_request,
+    decode_registered_client_frame, decode_registered_server_frame, decode_retained_invoke_request,
+    decode_server_frame, encode_active_client_frame, encode_active_server_frame,
+    encode_catalogue_client_frame, encode_catalogue_server_frame, encode_client_frame,
+    encode_constructed_client_frame, encode_constructed_server_frame,
+    encode_invocation_event_batch, encode_invoke_request, encode_registered_client_frame,
+    encode_registered_server_frame, encode_server_frame,
 };
 
 use std::{cmp::Ordering, collections::BTreeMap, error::Error, fmt};
