@@ -673,8 +673,11 @@ Public behaviour tests must prove:
   one catalogue and security snapshot;
 * arbitrary bounded carrier bytes never panic;
 * ORV1 through ORV4 and ORF1 through ORF4 retain all bytes and closures; and
-* ORF5 still rejects these carriers in ordinary argument and result positions
-  until the separately accepted `sys.invoke` signature opens them.
+* Step 5 extends the shared frame closed-position check to all three
+  `RuntimeValue::Invoke*` variants, so ORF5 encoding and decoding reject them in
+  every ordinary argument and result position without changing connection
+  state or window credit. No ORF5 carrier position opens until the separately
+  accepted `sys.invoke` signature does so.
 
 Tests use public registry, checked carrier, codec, frame, security, and revision
 interfaces. They do not inspect source constants, duplicate the codec, or
@@ -700,10 +703,12 @@ construct unchecked carrier state.
    source-order client offers and does not sort, deduplicate, or encode them.
    It does not add bytes or a frame position.
 5. `feat(protocol): encode sealed invocation carriers` changes
-   `crates/orna-protocol/src/lib.rs` only. It adds the three ORV5 codec paths,
+   `crates/orna-protocol/src/lib.rs` and
+   `crates/orna-protocol/src/frame.rs`. It adds the three ORV5 codec paths,
    aggregate node preflight, the sole exact-byte offer canonicalisation and
-   duplicate authority, exact goldens, and round trips while ordinary frames
-   remain closed.
+   duplicate authority, exact goldens, and round trips. The frame module
+   extends its shared ordinary-position closure beyond `Constructed` to the
+   three new carrier variants; it does not open an ORF5 carrier position.
 6. `test(protocol): exhaust invocation carrier failures` changes
    `crates/orna-protocol/src/lib.rs` only. It completes malformed, precedence,
    bound, arbitrary-input, redaction, and compatibility proof without a
