@@ -1,0 +1,66 @@
+CREATE SCHEMA reference_value_update_test;
+
+CREATE TYPE reference_value_update_test.probe AS OBJECT (
+    stored TEXT NOT NULL,
+    linked REF reference_value_update_test.anchor
+);
+
+CREATE TYPE reference_value_update_test.anchor AS OBJECT (
+    active BOOLEAN NOT NULL
+);
+
+CREATE SERVER FUNCTION reference_value_update_test.create_probe(p_stored TEXT)
+RETURNS ROWS (created REF reference_value_update_test.probe)
+SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE
+AS INSERT INTO reference_value_update_test.probe AS made (stored)
+VALUES (p_stored) RETURNING REF(made);
+
+CREATE SERVER FUNCTION reference_value_update_test.create_anchor()
+RETURNS ROWS (created REF reference_value_update_test.anchor)
+SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE
+AS INSERT INTO reference_value_update_test.anchor AS made (active)
+VALUES (TRUE) RETURNING REF(made);
+
+CREATE SERVER FUNCTION reference_value_update_test.update_probe_stored(
+    p_stored TEXT,
+    p_probe REF reference_value_update_test.probe
+)
+RETURNS ROWS (updated REF reference_value_update_test.probe)
+SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE
+AS UPDATE reference_value_update_test.probe AS changed
+SET stored = p_stored
+WHERE REF(changed) = p_probe
+RETURNING REF(changed);
+
+CREATE SERVER FUNCTION reference_value_update_test.update_probe_link(
+    p_anchor REF reference_value_update_test.anchor,
+    p_probe REF reference_value_update_test.probe
+)
+RETURNS ROWS (updated REF reference_value_update_test.probe)
+SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE
+AS UPDATE reference_value_update_test.probe AS changed
+SET linked = p_anchor
+WHERE REF(changed) = p_probe
+RETURNING REF(changed);
+
+CREATE SERVER FUNCTION reference_value_update_test.read_probe(
+    p_probe REF reference_value_update_test.probe
+)
+RETURNS ROWS (
+    probe REF reference_value_update_test.probe,
+    stored TEXT,
+    linked REF reference_value_update_test.anchor
+)
+SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE
+AS SELECT REF(probe), probe.stored, probe.linked
+FROM reference_value_update_test.probe probe
+WHERE REF(probe) = p_probe;
+
+CREATE SERVER FUNCTION reference_value_update_test.read_anchor(
+    p_anchor REF reference_value_update_test.anchor
+)
+RETURNS ROWS (anchor REF reference_value_update_test.anchor, active BOOLEAN)
+SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE
+AS SELECT REF(anchor), anchor.active
+FROM reference_value_update_test.anchor anchor
+WHERE REF(anchor) = p_anchor;
