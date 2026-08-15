@@ -5,8 +5,9 @@ use std::{collections::BTreeMap, error::Error, fmt};
 use orna_core::{
     FunctionId, InvocationId, ParameterId, TypeId,
     catalogue::CatalogueSnapshot,
-    invocation::invocation_carrier_type_id,
+    invocation::{InvokeEvent, InvokeRequest, invocation_carrier_type_id},
     revision::ActiveDatabaseRevision,
+    system::{SYS_INVOKE_EVENT_TYPE_ID, SYS_INVOKE_REQUEST_TYPE_ID},
     types::TypeDescriptor,
     value::{OpaqueCodecRegistry, RuntimeValue},
 };
@@ -23,6 +24,10 @@ const ACTIVE_MARKER: &[u8; 4] = b"ORF3";
 const REGISTERED_MARKER: &[u8; 4] = b"ORF4";
 const CONSTRUCTED_MARKER: &[u8; 4] = b"ORF5";
 const HEADER_LENGTH: usize = 18;
+const ORV5_MARKER: &[u8; 4] = b"ORV5";
+const ORV5_HEADER_LENGTH: usize = 25;
+const ORV5_OPAQUE_TAG: u8 = 0x0c;
+const MAX_ORV5_PAYLOAD_LENGTH: usize = 16 * 1024 * 1024;
 const PING_TAG: u8 = 0x06;
 const PONG_TAG: u8 = 0x86;
 const CALL_RAW_START_TAG: u8 = 0x01;
@@ -32,6 +37,7 @@ const WINDOW_UPDATE_TAG: u8 = 0x04;
 const CALL_CANCEL_TAG: u8 = 0x05;
 const CALL_ACCEPTED_TAG: u8 = 0x81;
 const EVENT_BATCH_TAG: u8 = 0x82;
+const CANONICAL_VALUE_EVENT_KIND: u8 = 0x01;
 const CALL_COMPLETED_TAG: u8 = 0x83;
 const CALL_FAILED_TAG: u8 = 0x84;
 const CALL_CANCELLED_TAG: u8 = 0x85;
@@ -150,6 +156,124 @@ pub struct EventRecord {
     pub sequence: u64,
     /// The event content.
     pub event: Event,
+}
+
+/// One complete sealed Request envelope retained before protected invocation
+/// decoding.
+///
+/// The retained bytes are deliberately private. This type does not expose a
+/// byte slice and its `Debug` implementation reports only the encoded length.
+#[derive(Clone, Eq, PartialEq)]
+pub struct RetainedInvokeRequest {
+    encoded: Box<[u8]>,
+}
+
+impl RetainedInvokeRequest {
+    fn new(encoded: Vec<u8>) -> Result<Self, FrameCodecError> {
+        validate_invocation_carrier_envelope(&encoded, SYS_INVOKE_REQUEST_TYPE_ID)?;
+        Ok(Self::from_validated(encoded))
+    }
+
+    fn from_validated(encoded: Vec<u8>) -> Self {
+        Self {
+            encoded: encoded.into_boxed_slice(),
+        }
+    }
+
+    /// Returns the complete retained envelope length without exposing its
+    /// private bytes.
+    pub const fn encoded_length(&self) -> usize {
+        self.encoded.len()
+    }
+
+    /// Decodes this retained Request at the protected invocation boundary.
+    ///
+    /// This operation requires the pinned active revision and matching opaque
+    /// registry. The frame codec does not perform this decoding.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`FrameCodecError`] when the retained bytes no longer satisfy
+    /// the complete Request carrier contract for the supplied context.
+    pub fn decode(
+        &self,
+        active: &ActiveDatabaseRevision,
+        registry: &OpaqueCodecRegistry,
+    ) -> Result<InvokeRequest, FrameCodecError> {
+        validate_invocation_carrier_envelope(&self.encoded, SYS_INVOKE_REQUEST_TYPE_ID)?;
+        let RuntimeValue::InvokeRequest(request) =
+            decode_constructed_value(active, registry, &self.encoded)
+                .map_err(|source| FrameCodecError::Value { source })?
+        else {
+            unreachable!("a validated Request carrier must decode as InvokeRequest");
+        };
+        Ok(request)
+    }
+}
+
+impl fmt::Debug for RetainedInvokeRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RetainedInvokeRequest")
+            .field("encoded_length", &self.encoded.len())
+            .finish()
+    }
+}
+
+/// One typed sealed Event record with its independent raw-stream sequence.
+#[derive(Clone, Debug, PartialEq)]
+pub struct InvocationEventRecord {
+    outer_sequence: u64,
+    event: InvokeEvent,
+}
+
+impl InvocationEventRecord {
+    /// Creates one Event record for an invocation Event batch.
+    pub const fn new(outer_sequence: u64, event: InvokeEvent) -> Self {
+        Self {
+            outer_sequence,
+            event,
+        }
+    }
+
+    /// Returns the contiguous raw-stream Event record sequence.
+    pub const fn outer_sequence(&self) -> u64 {
+        self.outer_sequence
+    }
+
+    /// Returns the typed Event with its independent invocation sequence.
+    pub const fn event(&self) -> &InvokeEvent {
+        &self.event
+    }
+}
+
+/// One closed `RESULT_VALUES` Event batch for an accepted `sys.invoke` stream.
+#[derive(Clone, Debug, PartialEq)]
+pub struct InvocationEventBatch {
+    records: Vec<InvocationEventRecord>,
+}
+
+impl InvocationEventBatch {
+    /// Creates one non-empty Event batch with exact outer and inner ordering.
+    ///
+    /// The outer record sequence is positive and contiguous within this batch.
+    /// The retained Event sequence is contiguous within this batch and belongs
+    /// to one invocation identity. A later stream lifecycle owner checks the
+    /// required outer start at one and continuity across batches.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`FrameCodecError`] when the batch does not satisfy its
+    /// independent record contract.
+    pub fn new(records: Vec<InvocationEventRecord>) -> Result<Self, FrameCodecError> {
+        validate_invocation_event_records(&records)?;
+        Ok(Self { records })
+    }
+
+    /// Returns Event records in their retained wire order.
+    pub fn records(&self) -> &[InvocationEventRecord] {
+        &self.records
+    }
 }
 
 /// A frame sent from an authenticated client to the server.
@@ -1451,6 +1575,18 @@ pub enum FrameCodecError {
         /// The rejected sealed carrier identity.
         carrier: TypeId,
     },
+    /// A sealed invocation-carrier envelope does not use the opaque carrier tag.
+    InvocationCarrierWrongTag {
+        /// The rejected ORV5 tag.
+        tag: u8,
+    },
+    /// A sealed invocation-carrier envelope has the wrong exact carrier identity.
+    InvocationCarrierWrongType {
+        /// The required sealed carrier identity.
+        expected: TypeId,
+        /// The carrier identity found in the envelope.
+        actual: TypeId,
+    },
     /// A failure payload is not one of the four closed values.
     InvalidFailure {
         /// The invalid four-byte failure value.
@@ -1478,6 +1614,13 @@ pub enum FrameCodecError {
     TrailingEventBytes,
     /// Event sequences in one batch are zero, non-contiguous, or overflow.
     InvalidEventSequence,
+    /// A sealed invocation Event batch has a zero, non-contiguous, or
+    /// overflowing outer sequence.
+    InvalidInvocationOuterSequence,
+    /// Sealed invocation Events are not contiguous for one invocation identity.
+    InvalidInvocationEventSequence,
+    /// Sealed invocation Event records do not share one invocation identity.
+    MismatchedInvocationEvent,
     /// An event content field has the wrong fixed length.
     WrongEventContentLength {
         /// The recognised event kind.
@@ -1532,6 +1675,12 @@ impl fmt::Display for FrameCodecError {
             Self::InvocationCarrierNotAccepted { .. } => formatter.write_str(
                 "sealed invocation carriers are not accepted by ordinary protocol 5 frames",
             ),
+            Self::InvocationCarrierWrongTag { .. } => {
+                formatter.write_str("sealed invocation carrier tag is invalid")
+            }
+            Self::InvocationCarrierWrongType { .. } => {
+                formatter.write_str("sealed invocation carrier identity is invalid")
+            }
             Self::InvalidFailure { .. } => formatter.write_str("raw-call failure value is invalid"),
             Self::EmptyEventBatch => formatter.write_str("raw-call event batch is empty"),
             Self::TooManyEvents { .. } => {
@@ -1546,6 +1695,15 @@ impl fmt::Display for FrameCodecError {
                 formatter.write_str("raw-call event batch has trailing bytes")
             }
             Self::InvalidEventSequence => formatter.write_str("raw-call event sequence is invalid"),
+            Self::InvalidInvocationOuterSequence => {
+                formatter.write_str("sealed invocation outer event sequence is invalid")
+            }
+            Self::InvalidInvocationEventSequence => {
+                formatter.write_str("sealed invocation event sequence is invalid")
+            }
+            Self::MismatchedInvocationEvent => {
+                formatter.write_str("sealed invocation event identities do not match")
+            }
             Self::WrongEventContentLength { .. } => {
                 formatter.write_str("raw-call event content has the wrong length")
             }
@@ -1560,6 +1718,186 @@ impl Error for FrameCodecError {
             _ => None,
         }
     }
+}
+
+/// Encodes one checked `sys.invoke.Request` as a private retained ORV5 envelope.
+///
+/// The returned value does not expose its encoded bytes. A later protected
+/// invocation boundary must call [`RetainedInvokeRequest::decode`] with its
+/// pinned active revision and opaque registry.
+///
+/// # Errors
+///
+/// Returns a [`FrameCodecError`] when the Request cannot satisfy the ORV5
+/// carrier contract.
+pub fn encode_invoke_request(
+    active: &ActiveDatabaseRevision,
+    registry: &OpaqueCodecRegistry,
+    request: &InvokeRequest,
+) -> Result<RetainedInvokeRequest, FrameCodecError> {
+    let encoded = encode_constructed_value(
+        active,
+        registry,
+        &RuntimeValue::InvokeRequest(request.clone()),
+    )
+    .map_err(|source| FrameCodecError::Value { source })?;
+    RetainedInvokeRequest::new(encoded)
+}
+
+/// Validates and privately retains one complete `sys.invoke.Request` ORV5
+/// envelope.
+///
+/// This decoder checks only the envelope marker, opaque tag, exact Request
+/// identity, declared payload bounds, and trailing bytes. It does not decode
+/// Request fields or consult an active revision or opaque registry.
+///
+/// # Errors
+///
+/// Returns a [`FrameCodecError`] when the encoded value is not one complete
+/// bounded Request carrier envelope.
+pub fn decode_invoke_request(encoded: &[u8]) -> Result<RetainedInvokeRequest, FrameCodecError> {
+    validate_invocation_carrier_envelope(encoded, SYS_INVOKE_REQUEST_TYPE_ID)?;
+    Ok(RetainedInvokeRequest::from_validated(encoded.to_vec()))
+}
+
+/// Decodes one retained Request at the protected invocation boundary.
+///
+/// # Errors
+///
+/// Returns a [`FrameCodecError`] when the retained Request is invalid for the
+/// pinned active revision or opaque registry.
+pub fn decode_retained_invoke_request(
+    active: &ActiveDatabaseRevision,
+    registry: &OpaqueCodecRegistry,
+    request: &RetainedInvokeRequest,
+) -> Result<InvokeRequest, FrameCodecError> {
+    request.decode(active, registry)
+}
+
+/// Encodes one closed `RESULT_VALUES` Event-batch payload for `sys.invoke`.
+///
+/// The payload uses the work ADR 0026 event-batch shape: channel, count, then
+/// exact outer record sequence, canonical-value kind, content length, and one
+/// complete `sys.invoke.Event` ORV5 envelope per record.
+///
+/// # Errors
+///
+/// Returns a [`FrameCodecError`] when the Event batch cannot satisfy the
+/// independent Event carrier or raw-record contract.
+pub fn encode_invocation_event_batch(
+    active: &ActiveDatabaseRevision,
+    registry: &OpaqueCodecRegistry,
+    batch: &InvocationEventBatch,
+) -> Result<Vec<u8>, FrameCodecError> {
+    validate_invocation_event_records(batch.records())?;
+    let count =
+        u16::try_from(batch.records().len()).map_err(|_| FrameCodecError::TooManyEvents {
+            actual: batch.records().len(),
+        })?;
+    let mut payload = Vec::new();
+    payload.push(Channel::ResultValues.wire());
+    payload.extend_from_slice(&count.to_be_bytes());
+    for record in batch.records() {
+        let content = encode_constructed_value(
+            active,
+            registry,
+            &RuntimeValue::InvokeEvent(record.event().clone()),
+        )
+        .map_err(|source| FrameCodecError::Value { source })?;
+        validate_invocation_carrier_envelope(&content, SYS_INVOKE_EVENT_TYPE_ID)?;
+        let length =
+            u32::try_from(content.len()).map_err(|_| FrameCodecError::PayloadTooLarge {
+                actual: content.len(),
+                maximum: MAX_FRAME_PAYLOAD_LENGTH,
+            })?;
+        payload.extend_from_slice(&record.outer_sequence().to_be_bytes());
+        payload.push(CANONICAL_VALUE_EVENT_KIND);
+        payload.extend_from_slice(&length.to_be_bytes());
+        payload.extend_from_slice(&content);
+        require_payload_limit(payload.len())?;
+    }
+    Ok(payload)
+}
+
+/// Decodes one closed `RESULT_VALUES` Event-batch payload for `sys.invoke`.
+///
+/// This decoder fully validates and materialises every Event carrier. The
+/// outer record sequence is positive and contiguous. Event sequence continuity
+/// is checked within this batch for one invocation identity; a later lifecycle
+/// owner checks the required outer start at one and continuity across batches.
+///
+/// # Errors
+///
+/// Returns a [`FrameCodecError`] when the payload does not satisfy the exact
+/// Event batch or Event carrier contract.
+pub fn decode_invocation_event_batch(
+    active: &ActiveDatabaseRevision,
+    registry: &OpaqueCodecRegistry,
+    payload: &[u8],
+) -> Result<InvocationEventBatch, FrameCodecError> {
+    if payload.len() < 3 {
+        return Err(FrameCodecError::TruncatedEventBatch);
+    }
+    let channel = Channel::from_wire(payload[0])?;
+    if channel != Channel::ResultValues {
+        return Err(FrameCodecError::InvalidEventChannel {
+            channel,
+            kind: CANONICAL_VALUE_EVENT_KIND,
+        });
+    }
+    let count = u16::from_be_bytes(
+        payload[1..3]
+            .try_into()
+            .expect("event batch prefix length checked"),
+    );
+    if count == 0 {
+        return Err(FrameCodecError::EmptyEventBatch);
+    }
+    let mut remaining = &payload[3..];
+    let mut records = Vec::with_capacity(count as usize);
+    let mut previous_outer: Option<u64> = None;
+    for _ in 0..count as usize {
+        if remaining.len() < 13 {
+            return Err(FrameCodecError::TruncatedEventBatch);
+        }
+        let outer_sequence = u64::from_be_bytes(
+            remaining[..8]
+                .try_into()
+                .expect("event record prefix length checked"),
+        );
+        if outer_sequence == 0
+            || previous_outer.is_some_and(|value| value.checked_add(1) != Some(outer_sequence))
+        {
+            return Err(FrameCodecError::InvalidInvocationOuterSequence);
+        }
+        previous_outer = Some(outer_sequence);
+        let kind = remaining[8];
+        if kind != CANONICAL_VALUE_EVENT_KIND {
+            return Err(FrameCodecError::InvalidEventChannel { channel, kind });
+        }
+        let length = u32::from_be_bytes(
+            remaining[9..13]
+                .try_into()
+                .expect("event record prefix length checked"),
+        ) as usize;
+        remaining = &remaining[13..];
+        if remaining.len() < length {
+            return Err(FrameCodecError::TruncatedEventBatch);
+        }
+        let content = &remaining[..length];
+        remaining = &remaining[length..];
+        validate_invocation_carrier_envelope(content, SYS_INVOKE_EVENT_TYPE_ID)?;
+        let RuntimeValue::InvokeEvent(event) = decode_constructed_value(active, registry, content)
+            .map_err(|source| FrameCodecError::Value { source })?
+        else {
+            unreachable!("a validated Event carrier must decode as InvokeEvent");
+        };
+        records.push(InvocationEventRecord::new(outer_sequence, event));
+    }
+    if !remaining.is_empty() {
+        return Err(FrameCodecError::TrailingEventBytes);
+    }
+    InvocationEventBatch::new(records)
 }
 
 /// Encodes one complete client frame.
@@ -2031,6 +2369,94 @@ fn decode_server_frame_with_version(
     }
 }
 
+fn validate_invocation_carrier_envelope(
+    encoded: &[u8],
+    expected: TypeId,
+) -> Result<(), FrameCodecError> {
+    if encoded.len() < ORV5_HEADER_LENGTH {
+        return Err(FrameCodecError::Value {
+            source: ValueCodecError::TruncatedHeader {
+                actual: encoded.len(),
+            },
+        });
+    }
+    if &encoded[..ORV5_MARKER.len()] != ORV5_MARKER {
+        return Err(FrameCodecError::Value {
+            source: ValueCodecError::InvalidMarker,
+        });
+    }
+    let tag = encoded[ORV5_MARKER.len()];
+    if tag != ORV5_OPAQUE_TAG {
+        return Err(FrameCodecError::InvocationCarrierWrongTag { tag });
+    }
+    let actual = TypeId::from_bytes(
+        encoded[5..21]
+            .try_into()
+            .expect("ORV5 carrier header length checked"),
+    );
+    if actual != expected {
+        return Err(FrameCodecError::InvocationCarrierWrongType { expected, actual });
+    }
+    let declared = u32::from_be_bytes(
+        encoded[21..ORV5_HEADER_LENGTH]
+            .try_into()
+            .expect("ORV5 carrier header length checked"),
+    ) as usize;
+    if declared > MAX_ORV5_PAYLOAD_LENGTH {
+        return Err(FrameCodecError::Value {
+            source: ValueCodecError::PayloadTooLarge {
+                actual: declared,
+                maximum: MAX_ORV5_PAYLOAD_LENGTH,
+            },
+        });
+    }
+    let actual = encoded.len() - ORV5_HEADER_LENGTH;
+    if actual < declared {
+        return Err(FrameCodecError::Value {
+            source: ValueCodecError::TruncatedPayload { declared, actual },
+        });
+    }
+    if actual > declared {
+        return Err(FrameCodecError::Value {
+            source: ValueCodecError::TrailingBytes { declared, actual },
+        });
+    }
+    Ok(())
+}
+
+fn validate_invocation_event_records(
+    records: &[InvocationEventRecord],
+) -> Result<(), FrameCodecError> {
+    if records.is_empty() {
+        return Err(FrameCodecError::EmptyEventBatch);
+    }
+    let mut invocation: Option<InvocationId> = None;
+    let mut previous_inner: Option<u64> = None;
+    let mut previous_outer: Option<u64> = None;
+    for record in records {
+        if record.outer_sequence == 0
+            || previous_outer
+                .is_some_and(|value| value.checked_add(1) != Some(record.outer_sequence))
+        {
+            return Err(FrameCodecError::InvalidInvocationOuterSequence);
+        }
+        previous_outer = Some(record.outer_sequence);
+        match invocation {
+            Some(value) if value != record.event.invocation_id() => {
+                return Err(FrameCodecError::MismatchedInvocationEvent);
+            }
+            None => invocation = Some(record.event.invocation_id()),
+            Some(_) => {}
+        }
+        if previous_inner.is_some_and(|value| value.checked_add(1) != Some(record.event.sequence()))
+        {
+            return Err(FrameCodecError::InvalidInvocationEventSequence);
+        }
+        previous_inner = Some(record.event.sequence());
+    }
+    Ok(())
+}
+
 fn encode(
     version: FrameVersion<'_>,
     tag: u8,
@@ -2265,17 +2691,104 @@ fn decode_event(
 #[cfg(test)]
 mod tests {
     use orna_core::{
-        CatalogueRevisionId, FunctionId, ParameterId, SchemaId, TypeId,
+        CatalogueRevisionId, FunctionId, InvocationId, ParameterId, SchemaId, SourceBundleId,
+        SourceRevisionId, TypeId,
+        canonical_hash::{catalogue_digest, source_bundle_digest, source_revision_record_digest},
         catalogue::{
             CatalogueSnapshot, EnumTypeDefinition, QualifiedSemanticName, SchemaDefinition,
         },
+        invocation::{
+            InvocationCallerContext, InvocationCallerKind, InvocationClientOffer,
+            InvocationEventBody, InvocationTarget, InvocationTracePolicy, InvokeRequestInput,
+        },
+        revision::{ActiveDatabaseRevision, RevisionPair, StoredSourceRevision},
         value::EnumValue,
+    };
+    use orna_standard::{
+        registered_opaque_codecs, retained_standard_library_snapshot,
+        verify_standard_library_snapshot,
     };
     use proptest::prelude::*;
 
     use super::*;
 
     const ENUM_TYPE: TypeId = TypeId::from_bytes([0x51; 16]);
+
+    fn empty_active_revision() -> ActiveDatabaseRevision {
+        let source_bundle = SourceBundleId::from_bytes([0x81; 16]);
+        let source_revision = SourceRevisionId::from_bytes([0x82; 16]);
+        let bundle_hash = source_bundle_digest(&[]).unwrap();
+        let source = StoredSourceRevision::new(
+            source_bundle,
+            source_revision,
+            None,
+            Vec::new(),
+            bundle_hash,
+            source_revision_record_digest(source_bundle, None, bundle_hash).unwrap(),
+        )
+        .unwrap();
+        let catalogue = CatalogueSnapshot::new(
+            CatalogueRevisionId::from_bytes([0x83; 16]),
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        ActiveDatabaseRevision::new(
+            RevisionPair::new(source.id(), catalogue.revision()),
+            source,
+            catalogue.clone(),
+            catalogue_digest(&catalogue, &[], &[], &[], &[]).unwrap(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap()
+    }
+
+    fn test_registry() -> OpaqueCodecRegistry {
+        let standard =
+            verify_standard_library_snapshot(retained_standard_library_snapshot().unwrap())
+                .unwrap();
+        registered_opaque_codecs(&standard).unwrap()
+    }
+
+    fn minimal_request(idempotency_key: Option<Vec<u8>>) -> InvokeRequest {
+        InvokeRequest::new(InvokeRequestInput {
+            target: InvocationTarget::function_id(FunctionId::from_bytes([0x11; 16])),
+            arguments: Vec::new(),
+            caller_context: InvocationCallerContext::new(
+                InvocationCallerKind::Browser,
+                false,
+                false,
+                None,
+                None,
+                "en-GB",
+                "UTC",
+                None,
+            )
+            .unwrap(),
+            client_offer: InvocationClientOffer::new(
+                5,
+                "en-GB",
+                "UTC",
+                Vec::new(),
+                Vec::new(),
+                1_024,
+                0,
+                None,
+                None,
+            )
+            .unwrap(),
+            output_requirement: None,
+            state_profile: None,
+            trace_policy: InvocationTracePolicy::Off,
+            idempotency_key,
+            parent_invocation_id: None,
+            observer_context: None,
+        })
+        .unwrap()
+    }
 
     fn enum_catalogue(labels: &[&str]) -> CatalogueSnapshot {
         CatalogueSnapshot::new_with_enum_types(
@@ -2323,6 +2836,216 @@ mod tests {
         assert_eq!(
             decode_client_frame(&pong),
             Err(FrameCodecError::WrongDirection { tag: PONG_TAG })
+        );
+    }
+
+    #[test]
+    fn retained_invoke_request_validates_only_its_outer_envelope_before_protected_decode() {
+        let active = empty_active_revision();
+        let registry = test_registry();
+        let secret = b"not-visible-in-debug".to_vec();
+        let request = minimal_request(Some(secret.clone()));
+        let retained = encode_invoke_request(&active, &registry, &request).unwrap();
+        assert!(retained.encoded_length() > ORV5_HEADER_LENGTH);
+        assert_eq!(retained.decode(&active, &registry), Ok(request.clone()));
+        assert_eq!(
+            decode_retained_invoke_request(&active, &registry, &retained),
+            Ok(request)
+        );
+        let debug = format!("{retained:?}");
+        assert!(debug.contains("encoded_length"));
+        assert!(!debug.contains("ORV5"));
+        assert!(!debug.contains(std::str::from_utf8(&secret).unwrap()));
+
+        let encoded = encode_constructed_value(
+            &active,
+            &registry,
+            &RuntimeValue::InvokeRequest(minimal_request(Some(secret))),
+        )
+        .unwrap();
+        assert_eq!(decode_invoke_request(&encoded), Ok(retained));
+
+        // ORV5 Request payload byte zero is the fixed carrier-version byte.
+        // Retention checks only the complete outer envelope.
+        let mut invalid_inner = encoded.clone();
+        invalid_inner[ORV5_HEADER_LENGTH] = 2;
+        let retained_invalid_inner = decode_invoke_request(&invalid_inner).unwrap();
+        assert_eq!(
+            retained_invalid_inner.decode(&active, &registry),
+            Err(FrameCodecError::Value {
+                source: ValueCodecError::InvocationCarrier {
+                    carrier: SYS_INVOKE_REQUEST_TYPE_ID,
+                    source: crate::InvocationCarrierCodecError::UnsupportedVersion { actual: 2 },
+                },
+            })
+        );
+
+        let mut wrong_marker = encoded.clone();
+        wrong_marker[..4].copy_from_slice(b"ORV4");
+        assert_eq!(
+            decode_invoke_request(&wrong_marker),
+            Err(FrameCodecError::Value {
+                source: ValueCodecError::InvalidMarker,
+            })
+        );
+
+        let mut wrong_tag = encoded.clone();
+        wrong_tag[4] = 0x0d;
+        assert_eq!(
+            decode_invoke_request(&wrong_tag),
+            Err(FrameCodecError::InvocationCarrierWrongTag { tag: 0x0d })
+        );
+
+        let mut wrong_type = encoded.clone();
+        wrong_type[5..21].copy_from_slice(&SYS_INVOKE_EVENT_TYPE_ID.to_bytes());
+        assert_eq!(
+            decode_invoke_request(&wrong_type),
+            Err(FrameCodecError::InvocationCarrierWrongType {
+                expected: SYS_INVOKE_REQUEST_TYPE_ID,
+                actual: SYS_INVOKE_EVENT_TYPE_ID,
+            })
+        );
+
+        let mut truncated = encoded.clone();
+        let declared = u32::from_be_bytes(truncated[21..25].try_into().unwrap());
+        truncated[21..25].copy_from_slice(&(declared + 1).to_be_bytes());
+        assert_eq!(
+            decode_invoke_request(&truncated),
+            Err(FrameCodecError::Value {
+                source: ValueCodecError::TruncatedPayload {
+                    declared: (declared + 1) as usize,
+                    actual: declared as usize,
+                },
+            })
+        );
+
+        let mut trailing = encoded;
+        trailing.push(0);
+        assert!(matches!(
+            decode_invoke_request(&trailing),
+            Err(FrameCodecError::Value {
+                source: ValueCodecError::TrailingBytes { .. },
+            })
+        ));
+    }
+
+    #[test]
+    fn invocation_event_batch_keeps_outer_and_inner_sequences_independent() {
+        let active = empty_active_revision();
+        let registry = test_registry();
+        let invocation = InvocationId::from_bytes([0x61; 16]);
+        let started = InvokeEvent::new(
+            invocation,
+            0,
+            InvocationEventBody::Started {
+                visible_principal: None,
+            },
+        )
+        .unwrap();
+        let completed = InvokeEvent::new(
+            invocation,
+            1,
+            InvocationEventBody::Completed {
+                duration_nanoseconds: 7,
+            },
+        )
+        .unwrap();
+        let batch = InvocationEventBatch::new(vec![
+            InvocationEventRecord::new(1, started.clone()),
+            InvocationEventRecord::new(2, completed.clone()),
+        ])
+        .unwrap();
+        let encoded = encode_invocation_event_batch(&active, &registry, &batch).unwrap();
+        assert_eq!(encoded[..3], [Channel::ResultValues.wire(), 0, 2]);
+        assert_eq!(encoded[11], CANONICAL_VALUE_EVENT_KIND);
+        assert_eq!(
+            decode_invocation_event_batch(&active, &registry, &encoded),
+            Ok(batch)
+        );
+
+        let skipped = InvokeEvent::new(
+            invocation,
+            2,
+            InvocationEventBody::Completed {
+                duration_nanoseconds: 7,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            InvocationEventBatch::new(vec![
+                InvocationEventRecord::new(1, started.clone()),
+                InvocationEventRecord::new(2, skipped),
+            ]),
+            Err(FrameCodecError::InvalidInvocationEventSequence)
+        );
+        assert_eq!(
+            InvocationEventBatch::new(vec![InvocationEventRecord::new(0, started.clone())]),
+            Err(FrameCodecError::InvalidInvocationOuterSequence)
+        );
+
+        let other = InvokeEvent::new(
+            InvocationId::from_bytes([0x62; 16]),
+            1,
+            InvocationEventBody::Completed {
+                duration_nanoseconds: 7,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            InvocationEventBatch::new(vec![
+                InvocationEventRecord::new(1, started),
+                InvocationEventRecord::new(2, other),
+            ]),
+            Err(FrameCodecError::MismatchedInvocationEvent)
+        );
+
+        let mut wrong_outer = encoded.clone();
+        wrong_outer[3..11].copy_from_slice(&2_u64.to_be_bytes());
+        assert_eq!(
+            decode_invocation_event_batch(&active, &registry, &wrong_outer),
+            Err(FrameCodecError::InvalidInvocationOuterSequence)
+        );
+        let mut wrong_kind = encoded;
+        wrong_kind[11] = 0x02;
+        assert_eq!(
+            decode_invocation_event_batch(&active, &registry, &wrong_kind),
+            Err(FrameCodecError::InvalidEventChannel {
+                channel: Channel::ResultValues,
+                kind: 0x02,
+            })
+        );
+
+        let carrier_request = RuntimeValue::InvokeRequest(minimal_request(None));
+        assert_eq!(
+            encode_constructed_client_frame(
+                &active,
+                &registry,
+                &ClientFrame::CallArgument {
+                    stream: 1,
+                    parameter: ParameterId::from_bytes([0x63; 16]),
+                    value: carrier_request,
+                },
+            ),
+            Err(FrameCodecError::InvocationCarrierNotAccepted {
+                carrier: SYS_INVOKE_REQUEST_TYPE_ID,
+            })
+        );
+        assert_eq!(
+            encode_constructed_server_frame(
+                &active,
+                &registry,
+                &ServerFrame::EventBatch {
+                    stream: 1,
+                    channel: Channel::ResultValues,
+                    events: vec![EventRecord {
+                        sequence: 1,
+                        event: Event::Value(RuntimeValue::InvokeEvent(completed)),
+                    }],
+                },
+            ),
+            Err(FrameCodecError::InvocationCarrierNotAccepted {
+                carrier: SYS_INVOKE_EVENT_TYPE_ID,
+            })
         );
     }
 
