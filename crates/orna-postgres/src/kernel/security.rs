@@ -27,6 +27,7 @@ use crate::{
     server_execution::{
         ServerSelectResult, execute_authorised_raw_server_select, execute_authorised_server_select,
         raw_identity_selected_server_select_target_is_selected, raw_server_target_is_unavailable,
+        raw_unique_text_selected_server_select_target_is_selected,
     },
     server_mutation_execution::{
         RawServerReferenceMutation, ServerInsertError, execute_authorised_raw_server_insert,
@@ -260,6 +261,10 @@ impl PostgresKernel {
                                 && raw_identity_selected_server_select_target_is_selected(
                                     &active, function,
                                 );
+                            let unique_text_selected_select =
+                                raw_unique_text_selected_server_select_target_is_selected(
+                                    &active, function,
+                                );
                             if raw_server_insert_target_is_selected(&active, function) {
                                 let savepoint = transaction
                                     .savepoint("raw_server_insert_execution")
@@ -332,7 +337,10 @@ impl PostgresKernel {
                                         ))
                                     }
                                 }
-                            } else if !arguments.is_empty() && !identity_selected_select {
+                            } else if !arguments.is_empty()
+                                && !identity_selected_select
+                                && !unique_text_selected_select
+                            {
                                 Err(raw_call_target_unavailable(
                                     function,
                                     "raw call arguments require a supported active SERVER mutation target",
@@ -365,6 +373,10 @@ impl PostgresKernel {
                                             .map_err(PostgresKernelError::Database)?;
                                         Err(if identity_selected_select {
                                             classify_raw_identity_selected_server_error(
+                                                error, function,
+                                            )
+                                        } else if unique_text_selected_select {
+                                            classify_raw_unique_text_selected_server_error(
                                                 error, function,
                                             )
                                         } else {
@@ -1198,6 +1210,21 @@ fn classify_raw_identity_selected_server_error(
             raw_call_target_unavailable(
                 function,
                 "raw identity-selected SERVER target is unavailable",
+            )
+        }
+        error => error,
+    }
+}
+
+fn classify_raw_unique_text_selected_server_error(
+    error: PostgresKernelError,
+    function: FunctionId,
+) -> PostgresKernelError {
+    match error {
+        PostgresKernelError::ServerSelect(source) if raw_server_target_is_unavailable(&source) => {
+            raw_call_target_unavailable(
+                function,
+                "raw unique-Text-selected SERVER target is unavailable",
             )
         }
         error => error,
