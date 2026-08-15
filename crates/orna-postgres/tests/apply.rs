@@ -28,7 +28,7 @@ use orna_core::{
         StoredSourceRevision, StoredSourceUnit,
     },
     source::{SourceBundle, SourceUnit},
-    types::{ResolvedType, TypeDescriptorKind},
+    types::{ResolvedType, StandardScalar, TypeDescriptorKind},
     value::RuntimeValue,
 };
 #[cfg(feature = "test-hooks")]
@@ -119,6 +119,20 @@ const UNIQUE_REFERENCE_RENAMED_SOURCE: &str = "CREATE SCHEMA assignments;\n\
         assignee REF assignments.person NOT NULL UNIQUE\n\
     );\n\
     ALTER TYPE assignments.assignment RENAME FIELD owner TO assignee;\n";
+
+const UNIQUE_TEXT_ORIGINAL_SOURCE: &str = "CREATE SCHEMA accounts;\n\
+    CREATE TYPE accounts.account AS OBJECT (\n\
+        email TEXT UNIQUE,\n\
+        username TEXT NOT NULL UNIQUE\n\
+    );\n";
+
+const UNIQUE_TEXT_RENAMED_SOURCE: &str = "CREATE SCHEMA accounts;\n\
+    CREATE TYPE accounts.account AS OBJECT (\n\
+        contact_email TEXT UNIQUE,\n\
+        handle TEXT NOT NULL UNIQUE\n\
+    );\n\
+    ALTER TYPE accounts.account RENAME FIELD email TO contact_email;\n\
+    ALTER TYPE accounts.account RENAME FIELD username TO handle;\n";
 
 const MUTUAL_REFERENCE_SOURCE: &str = "CREATE SCHEMA graph;\n\
     CREATE TYPE graph.left AS OBJECT (right REF graph.right);\n\
@@ -1554,6 +1568,126 @@ async fn required_unique_reference_replay_and_rename_preserve_physical_identity(
 
         let final_recovered = kernel(&database)?.recover().await?;
         require_unique_reference_state(&database, &final_recovered, &proof, "assignee").await
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn unique_text_replay_and_rename_preserve_c_collation_and_physical_identity() -> TestResult<()>
+{
+    with_test_database(|database| async move {
+        let initial_kernel = kernel(&database)?;
+        initial_kernel.bootstrap().await?;
+        let original_candidate = candidate(
+            UNIQUE_TEXT_ORIGINAL_SOURCE,
+            &initial_kernel.recover().await?,
+        )?;
+        let original = initial_kernel.apply(&original_candidate).await?;
+        require_recovered_snapshot(&original_candidate, &original)?;
+
+        let account = original
+            .catalogue()
+            .object_types()
+            .iter()
+            .find(|object| object.name().parts() == ["accounts", "account"])
+            .ok_or_else(|| failure("initial apply did not create accounts.account"))?;
+        let email = account
+            .field_by_name("email")
+            .ok_or_else(|| failure("initial apply did not create account.email"))?;
+        let username = account
+            .field_by_name("username")
+            .ok_or_else(|| failure("initial apply did not create account.username"))?;
+        require(
+            account.fields().len() == 2
+                && email.nullable()
+                && email.unique()
+                && email.resolved_type()
+                    == ResolvedType::scalar(StandardScalar::CharacterLargeObject)
+                && !username.nullable()
+                && username.unique()
+                && username.resolved_type()
+                    == ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+            "initial apply changed the v1 unique Text field semantics",
+        )?;
+        require_unique_text_physical_shape(&database, account.id(), email.id()).await?;
+        require_unique_text_physical_shape(&database, account.id(), username.id()).await?;
+        let proof = UniqueTextProof {
+            object: account.id(),
+            nullable_field: email.id(),
+            required_field: username.id(),
+            physical: physical_catalogue(&database, account.id()).await?,
+        };
+
+        let replay_kernel = kernel(&database)?;
+        let recovered = replay_kernel.recover().await?;
+        require_unique_text_state(&database, &recovered, &proof, "email", "username").await?;
+        let replay_candidate = candidate(UNIQUE_TEXT_ORIGINAL_SOURCE, &recovered)?;
+        let replayed = replay_kernel.apply(&replay_candidate).await?;
+        require_recovered_snapshot(&replay_candidate, &replayed)?;
+        require_unique_text_state(&database, &replayed, &proof, "email", "username").await?;
+
+        let renamed_candidate = candidate(UNIQUE_TEXT_RENAMED_SOURCE, &replayed)?;
+        let renamed = replay_kernel.apply(&renamed_candidate).await?;
+        require_recovered_snapshot(&renamed_candidate, &renamed)?;
+        require_unique_text_state(&database, &renamed, &proof, "contact_email", "handle").await?;
+
+        let restarted = named_kernel(&database, "orna-unique-text-restart")?
+            .recover()
+            .await?;
+        require_unique_text_state(&database, &restarted, &proof, "contact_email", "handle").await
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn unique_text_non_c_collation_tamper_fails_recovery_closed() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let initial_kernel = kernel(&database)?;
+        initial_kernel.bootstrap().await?;
+        let original_candidate = candidate(
+            UNIQUE_TEXT_ORIGINAL_SOURCE,
+            &initial_kernel.recover().await?,
+        )?;
+        let original = initial_kernel.apply(&original_candidate).await?;
+        let account = original
+            .catalogue()
+            .object_types()
+            .iter()
+            .find(|object| object.name().parts() == ["accounts", "account"])
+            .ok_or_else(|| failure("initial apply did not create accounts.account"))?;
+        let email = account
+            .field_by_name("email")
+            .ok_or_else(|| failure("initial apply did not create account.email"))?;
+        tamper_unique_text_column_collation(&database, account.id(), email.id()).await?;
+
+        let error = kernel(&database)?
+            .recover()
+            .await
+            .expect_err("non-C unique Text column and index unexpectedly passed recovery");
+        let table_name = format!(
+            "t_{:032x}",
+            u128::from_be_bytes(account.id().to_bytes())
+        );
+        require(
+            error.to_string()
+                == format!(
+                    "durable invariant failed for _orna_data record {table_name}.2: column must have the exact private name, PostgreSQL type, shape, and PUBLIC access"
+                )
+                && std::error::Error::source(&error).is_none(),
+            "non-C unique Text tamper changed the exact source-free recovery failure",
+        )?;
+        match error {
+            PostgresKernelError::DurableInvariant {
+                relation: "_orna_data",
+                record,
+                rule: "column must have the exact private name, PostgreSQL type, shape, and PUBLIC access",
+            } if record == format!("{table_name}.2") => Ok(()),
+            error => Err(failure(format!(
+                "expected unique Text column collation invariant, got {error}"
+            ))),
+        }
     })
     .await
 }
@@ -3510,6 +3644,13 @@ struct UniqueReferenceProof {
     assignment_physical: PhysicalCatalogue,
 }
 
+struct UniqueTextProof {
+    object: TypeId,
+    nullable_field: FieldId,
+    required_field: FieldId,
+    physical: PhysicalCatalogue,
+}
+
 async fn require_unique_reference_state(
     database: &TestDatabase,
     active: &ActiveDatabaseRevision,
@@ -3540,6 +3681,118 @@ async fn require_unique_reference_state(
         physical_catalogue(database, proof.person).await? == proof.person_physical
             && physical_catalogue(database, proof.assignment).await? == proof.assignment_physical,
         "required unique reference replay or rename changed physical identities",
+    )
+}
+
+async fn require_unique_text_state(
+    database: &TestDatabase,
+    active: &ActiveDatabaseRevision,
+    proof: &UniqueTextProof,
+    nullable_name: &str,
+    required_name: &str,
+) -> TestResult<()> {
+    let account = active
+        .catalogue()
+        .object_type_by_id(proof.object)
+        .ok_or_else(|| failure("unique Text recovery lost the account TypeId"))?;
+    let nullable = account
+        .field_by_id(proof.nullable_field)
+        .ok_or_else(|| failure("unique Text recovery lost the nullable FieldId"))?;
+    let required = account
+        .field_by_id(proof.required_field)
+        .ok_or_else(|| failure("unique Text recovery lost the required FieldId"))?;
+    require(
+        account.name().parts() == ["accounts", "account"]
+            && account.fields().len() == 2
+            && nullable.name() == nullable_name
+            && nullable.nullable()
+            && nullable.unique()
+            && nullable.resolved_type()
+                == ResolvedType::scalar(StandardScalar::CharacterLargeObject)
+            && required.name() == required_name
+            && !required.nullable()
+            && required.unique()
+            && required.resolved_type()
+                == ResolvedType::scalar(StandardScalar::CharacterLargeObject),
+        "unique Text replay or rename changed semantic identity or field properties",
+    )?;
+    require_unique_text_physical_shape(database, proof.object, proof.nullable_field).await?;
+    require_unique_text_physical_shape(database, proof.object, proof.required_field).await?;
+    require(
+        physical_catalogue(database, proof.object).await? == proof.physical,
+        "unique Text replay or rename changed stable-ID PostgreSQL physical identities",
+    )
+}
+
+async fn require_unique_text_physical_shape(
+    database: &TestDatabase,
+    object: TypeId,
+    field_id: FieldId,
+) -> TestResult<()> {
+    let session = database.open().await?;
+    let operation = async {
+        let relation_name = relation(object);
+        let field_name = field(field_id);
+        let field_hex = format!("{:032x}", u128::from_be_bytes(field_id.to_bytes()));
+        let constraint_name = format!("uq_{field_hex}");
+        let row = session
+            .client()
+            .query_one(
+                "SELECT\n\
+                    a.attcollation = 'pg_catalog.\"C\"'::regcollation AS column_uses_c,\n\
+                    count(con.oid) = 1\n\
+                        AND bool_and(con.contype = 'u' AND con.conkey = ARRAY[a.attnum]::smallint[])\n\
+                        AND bool_and(i.indisunique AND NOT i.indnullsnotdistinct)\n\
+                        AND bool_and(i.indnkeyatts = 1 AND i.indnatts = 1)\n\
+                        AND bool_and(i.indcollation[0] = 'pg_catalog.\"C\"'::regcollation::oid)\n\
+                        AS stable_c_unique_constraint\n\
+                 FROM pg_attribute a\n\
+                 LEFT JOIN pg_constraint con\n\
+                   ON con.conrelid = a.attrelid AND con.conname = $3\n\
+                 LEFT JOIN pg_index i ON i.indexrelid = con.conindid\n\
+                 WHERE a.attrelid = to_regclass($1) AND a.attname = $2\n\
+                 GROUP BY a.attcollation, a.attnum",
+                &[&relation_name, &field_name, &constraint_name],
+            )
+            .await?;
+        let column_uses_c: bool = row.try_get(0)?;
+        let stable_c_unique_constraint: bool = row.try_get(1)?;
+        require(
+            column_uses_c && stable_c_unique_constraint,
+            "unique Text field did not use the required C-collated stable one-column NULLS DISTINCT constraint",
+        )
+    }
+    .await;
+    finish_test_session(
+        operation,
+        session.shutdown().await,
+        "unique Text physical inspection",
+    )
+}
+
+async fn tamper_unique_text_column_collation(
+    database: &TestDatabase,
+    object: TypeId,
+    field_id: FieldId,
+) -> TestResult<()> {
+    let session = database.open().await?;
+    let operation = session
+        .client()
+        .batch_execute(&format!(
+            "ALTER TABLE {relation} DROP CONSTRAINT {constraint};\n\
+             ALTER TABLE {relation}\n\
+               ALTER COLUMN {field} TYPE text COLLATE pg_catalog.\"default\" USING {field}::text;\n\
+             ALTER TABLE {relation} ADD CONSTRAINT {constraint} UNIQUE ({field});",
+            relation = relation(object),
+            field = field(field_id),
+            constraint = format!("uq_{:032x}", u128::from_be_bytes(field_id.to_bytes())),
+        ))
+        .await
+        .map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>);
+    finish_test_session(
+        operation,
+        session.shutdown().await,
+        "unique Text column collation tamper",
     )
 }
 
