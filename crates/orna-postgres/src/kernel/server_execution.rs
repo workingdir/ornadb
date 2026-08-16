@@ -3,7 +3,7 @@
 //! This module accepts only a recovered active revision and a canonical server
 //! plan. It never derives SQL from semantic names or accepts caller SQL.
 
-use std::{collections::BTreeMap, error::Error, fmt};
+use std::{collections::BTreeMap, error::Error, fmt, sync::OnceLock};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use futures_util::TryStreamExt;
@@ -16,15 +16,19 @@ use orna_artifact::server_plan::{
 };
 use orna_artifact::server_terminal_table::{self, TerminalTablePlan, TerminalTablePlanError};
 use orna_core::{
-    FieldId, FunctionId, FunctionRevisionId, ObjectId, ParameterId, TypeId,
+    FieldId, FunctionId, FunctionRevisionId, ObjectId, ParameterId, SourceUnitId, TypeId,
+    canonical_hash::artifact_payload_digest,
     catalogue::{
         CatalogueSnapshot, FunctionDefinition, FunctionDomain, FunctionReturn, FunctionSecurity,
-        FunctionTransaction, FunctionVolatility, ValueTypeKind, ValueTypeMutability,
-        ValueTypePersistence,
+        FunctionTransaction, FunctionVolatility, ParameterDefinition, QualifiedSemanticName,
+        TypeLookupName, ValueTypeKind, ValueTypeMutability, ValueTypePersistence,
     },
+    invocation::InvocationOutputRequirement,
+    presenter::{OutputResolutionError, PresenterEntry, PresenterRegistry},
     revision::{
         ActiveDatabaseRevision, CatalogueHashContext, DefinitionReferenceKind,
-        DefinitionReferenceTarget, ExecutableArtifactKind, FunctionRevisionRecord, RevisionPair,
+        DefinitionReferenceTarget, ExecutableArtifact, ExecutableArtifactKind,
+        FunctionRevisionRecord, RevisionPair, Sha256Digest, SourceOrigin,
     },
     security::{AuthorisedInvocation, InvocationTarget},
     types::{ResolvedType, StandardScalar},
@@ -84,6 +88,24 @@ const STD_JSON_VALUE_TYPE_ID: TypeId =
 /// The fixed ADR 0057 `std.data.Rows` value-type identity: `...12` (ADR 0058).
 const STD_DATA_ROWS_TYPE_ID: TypeId =
     TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x12]);
+/// The fixed ADR 0057 `std.json.encode` function identity: `...11`.
+const STD_JSON_ENCODE_FUNCTION_ID: FunctionId =
+    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x11]);
+/// The fixed ADR 0057 `std.json.encode.p_value` parameter identity: `...11`.
+const STD_JSON_ENCODE_PARAMETER_ID: ParameterId =
+    ParameterId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x11]);
+/// The fixed ADR 0057 `std.json.encode` function-revision identity: `...11`.
+const STD_JSON_ENCODE_FUNCTION_REVISION_ID: FunctionRevisionId =
+    FunctionRevisionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x11]);
+/// The fixed ADR 0057 `std.terminal.present_table` function identity: `...12`.
+const STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID: FunctionId =
+    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x12]);
+/// The fixed ADR 0057 `std.terminal.present_table.p_rows` parameter identity: `...12`.
+const STD_TERMINAL_PRESENT_TABLE_PARAMETER_ID: ParameterId =
+    ParameterId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x12]);
+/// The fixed ADR 0057 `std.terminal.present_table` function-revision identity: `...12`.
+const STD_TERMINAL_PRESENT_TABLE_FUNCTION_REVISION_ID: FunctionRevisionId =
+    FunctionRevisionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x12]);
 
 #[cfg(feature = "test-hooks")]
 struct SelectTestBarrier {
@@ -1544,9 +1566,8 @@ fn validate_standard_parameter_echo_argument(
 /// <len:u32 be> <bytes>`) with media type `application/json`.
 ///
 /// ADR 0057 step 7 wires the presenter engines into the sealed output
-/// resolution; until then they are reachable only from tests, so the closed
-/// engines and every helper they call stay live under the dead-code lint.
-#[allow(dead_code)]
+/// resolution; the sealed route (`dispatch_sealed_sys_invoke`) is the sole
+/// caller of this engine.
 pub(crate) fn execute_standard_json_encode(
     function: &FunctionDefinition,
     revision: &FunctionRevisionRecord,
@@ -1619,9 +1640,8 @@ pub(crate) fn execute_standard_json_encode(
 /// codec framing (`ORNA-TERMINAL-DOCUMENT/1 <len:u32 be> <utf-8>`).
 ///
 /// ADR 0057 step 7 wires the presenter engines into the sealed output
-/// resolution; until then they are reachable only from tests, so the closed
-/// engines and every helper they call stay live under the dead-code lint.
-#[allow(dead_code)]
+/// resolution; the sealed route (`dispatch_sealed_sys_invoke`) is the sole
+/// caller of this engine.
 pub(crate) fn execute_standard_terminal_table(
     function: &FunctionDefinition,
     revision: &FunctionRevisionRecord,
@@ -1666,6 +1686,317 @@ pub(crate) fn execute_standard_terminal_table(
         .map_err(ServerSelectError::PresenterOpaque)
         .map_err(server_error)?;
     Ok(RuntimeValue::Opaque(opaque))
+}
+
+/// One closed presentation failure from the sealed output route (ADR 0057
+/// step 7).
+///
+/// Both the unresolved-requirement and the no-path failures are presentation
+/// errors (spec exit 5); the sealed dispatch discloses neither variant in its
+/// public result. The `Kernel` variant carries only closed engine or
+/// invariant failures.
+#[derive(Debug)]
+pub(crate) enum SealedPresentationError {
+    /// The output requirement did not resolve against the presenter registry:
+    /// `ORNA0702` (spec exit 5).
+    OutputResolution(OutputResolutionError),
+    /// The resolved presenter's input pattern does not accept the canonical
+    /// result: `ORNA0701` (spec exit 5).
+    NoPath,
+    /// A closed presenter-engine or registry-invariant failure.
+    Kernel(PostgresKernelError),
+}
+
+impl SealedPresentationError {
+    /// Returns the stable spec code for this presentation failure.
+    #[cfg(test)]
+    pub(crate) const fn spec_code(&self) -> &'static str {
+        match self {
+            Self::OutputResolution(error) => error.spec_code(),
+            Self::NoPath => "ORNA0701",
+            Self::Kernel(_) => "ORNA0702",
+        }
+    }
+    /// Returns the spec exit code for a presentation error.
+    #[cfg(test)]
+    pub(crate) const fn exit_code(&self) -> u8 {
+        5
+    }
+}
+
+impl fmt::Display for SealedPresentationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::OutputResolution(error) => write!(formatter, "{error}"),
+            Self::NoPath => formatter.write_str("no presenter accepts the canonical result type"),
+            Self::Kernel(error) => write!(formatter, "{error}"),
+        }
+    }
+}
+
+/// The immutable sealed presenter registry (ADR 0057 step 7).
+///
+/// The standard snapshot does not yet declare the ADR 0057 presenter
+/// functions as standard-library objects, so the sealed route constructs the
+/// two known presenter records here: alias `json` -> `std.json.encode` (input
+/// `std.json.Value`, output `std.io.ByteStream` with media type
+/// `application/json`) and alias `table` -> `std.terminal.present_table`
+/// (input `std.data.Rows`, output `std.terminal.Document`, no media type).
+/// Both entries stream nothing and carry the default priority.
+fn sealed_presenter_registry() -> &'static PresenterRegistry {
+    static REGISTRY: OnceLock<PresenterRegistry> = OnceLock::new();
+    REGISTRY.get_or_init(|| {
+        let json = PresenterEntry::new(
+            String::from("json"),
+            STD_JSON_ENCODE_FUNCTION_ID,
+            STD_JSON_VALUE_TYPE_ID,
+            orna_standard::STD_IO_BYTE_STREAM_TYPE_ID,
+            Some(String::from("application/json")),
+            false,
+            0,
+        )
+        .expect("the fixed json presenter entry is valid");
+        let table = PresenterEntry::new(
+            String::from("table"),
+            STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID,
+            STD_DATA_ROWS_TYPE_ID,
+            orna_standard::STD_TERMINAL_DOCUMENT_TYPE_ID,
+            None,
+            false,
+            0,
+        )
+        .expect("the fixed table presenter entry is valid");
+        PresenterRegistry::new(vec![json, table]).expect("the fixed presenter registry is valid")
+    })
+}
+
+/// Resolves one sealed output requirement and presents the canonical result
+/// through the matched presenter engine (ADR 0057 step 7).
+///
+/// The requirement resolves against the sealed presenter registry with the
+/// alias > media-type > type-name precedence, then the matched presenter's
+/// input pattern is checked against the canonical result: `std.json.encode`
+/// accepts every argument the closed value channel can carry (any
+/// json-convertible flat value), while `std.terminal.present_table` accepts
+/// the canonical result only when it converts to a bounded `ResultRows` (the
+/// one-column, one-row `result` set this step builds). An unresolved alias,
+/// media type, or type name is [`SealedPresentationError::OutputResolution`]
+/// (`ORNA0702`); a result the matched presenter cannot accept is
+/// [`SealedPresentationError::NoPath`] (`ORNA0701`). The presented opaque
+/// value replaces the canonical value in the final `ValueBatch`.
+pub(crate) fn present_sealed_standard_output(
+    requirement: &InvocationOutputRequirement,
+    value: RuntimeValue,
+    active: &ActiveDatabaseRevision,
+    registry: &OpaqueCodecRegistry,
+) -> Result<RuntimeValue, SealedPresentationError> {
+    let entry = sealed_presenter_registry()
+        .resolve_requirement(requirement, |name| {
+            active
+                .catalogue()
+                .type_id_by_name(&TypeLookupName::qualified(name.clone()))
+        })
+        .map_err(SealedPresentationError::OutputResolution)?;
+    match entry.function() {
+        STD_JSON_ENCODE_FUNCTION_ID => {
+            let argument = FunctionArgument::new(STD_JSON_ENCODE_PARAMETER_ID, value)
+                .map_err(|_| SealedPresentationError::NoPath)?;
+            execute_standard_json_encode(
+                &sealed_json_encode_definition(),
+                &sealed_json_encode_revision(),
+                std::slice::from_ref(&argument),
+                active,
+                registry,
+            )
+            .map_err(sealed_presenter_engine_error)
+        }
+        STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID => {
+            let rows = sealed_result_rows(value)?;
+            execute_standard_terminal_table(
+                &sealed_terminal_table_definition(),
+                &sealed_terminal_table_revision(),
+                &rows,
+                active,
+                registry,
+            )
+            .map_err(sealed_presenter_engine_error)
+        }
+        other => Err(SealedPresentationError::Kernel(
+            PostgresKernelError::DurableInvariant {
+                relation: "sealed presenter registry",
+                record: other.canonical(),
+                rule: "the sealed presenter registry must name only the ADR 0057 presenters",
+            },
+        )),
+    }
+}
+
+/// Converts the canonical sealed result to the bounded `ResultRows` model the
+/// terminal-table engine accepts.
+///
+/// The canonical result cannot ride the value channel as rows, so this step
+/// wraps it as the one-column, one-row `result` set. Only flat runtime forms
+/// convert; opaque, constructed, and invocation-carrier values have no path
+/// to the terminal-document sink (`ORNA0701`).
+fn sealed_result_rows(value: RuntimeValue) -> Result<ResultRows, SealedPresentationError> {
+    let RuntimeType::Flat(resolved_type) = value.runtime_type() else {
+        return Err(SealedPresentationError::NoPath);
+    };
+    let column = ResultColumn::new("result", resolved_type, value.is_null())
+        .map_err(|_| SealedPresentationError::NoPath)?;
+    ResultRows::new(vec![column], vec![ResultRow::new([value])])
+        .map_err(|_| SealedPresentationError::NoPath)
+}
+
+/// Classifies one closed presenter-engine failure for the sealed route.
+///
+/// A conversion failure inside a presenter engine means the canonical result
+/// has no path to the matched sink (`ORNA0701`); every other engine failure
+/// is a closed kernel or registry invariant.
+fn sealed_presenter_engine_error(error: PostgresKernelError) -> SealedPresentationError {
+    match error {
+        PostgresKernelError::ServerSelect(ServerSelectError::Presenter { .. }) => {
+            SealedPresentationError::NoPath
+        }
+        other => SealedPresentationError::Kernel(other),
+    }
+}
+
+/// Builds the closed ADR 0057 `std.json.encode` definition the sealed route
+/// executes.
+///
+/// The exact shape matches the engine's signature validator: SERVER domain,
+/// one required non-null `std.json.Value` parameter, one single
+/// `std.io.ByteStream` result, INVOKER security, READ ONLY transaction, and
+/// STABLE volatility.
+fn sealed_json_encode_definition() -> FunctionDefinition {
+    FunctionDefinition::new(
+        STD_JSON_ENCODE_FUNCTION_ID,
+        QualifiedSemanticName::new(["std", "json", "encode"])
+            .expect("the fixed json-encode name is qualified"),
+        FunctionDomain::Server,
+        vec![ParameterDefinition::new(
+            STD_JSON_ENCODE_PARAMETER_ID,
+            "p_value",
+            0,
+            ResolvedType::named(STD_JSON_VALUE_TYPE_ID),
+            None,
+        )],
+        FunctionReturn::Single(ResolvedType::named(
+            orna_standard::STD_IO_BYTE_STREAM_TYPE_ID,
+        )),
+        STD_JSON_ENCODE_FUNCTION_REVISION_ID,
+        FunctionSecurity::Invoker,
+        Some(FunctionTransaction::ReadOnly),
+        FunctionVolatility::Stable,
+    )
+}
+
+/// Builds the closed ADR 0057 `std.json.encode` revision the sealed route
+/// executes: the canonical `orna.server-json-encode` version 1 artifact.
+fn sealed_json_encode_revision() -> FunctionRevisionRecord {
+    sealed_presenter_revision(
+        STD_JSON_ENCODE_FUNCTION_ID,
+        STD_JSON_ENCODE_FUNCTION_REVISION_ID,
+        server_json_encode::LANGUAGE_VERSION_IDENTITY,
+        sealed_presenter_artifact(
+            server_json_encode::FORMAT_IDENTITY,
+            server_json_encode::FORMAT_VERSION,
+            JsonEncodePlan::new(STD_JSON_ENCODE_PARAMETER_ID, STD_JSON_VALUE_TYPE_ID)
+                .expect("the fixed json-encode plan is valid")
+                .encode()
+                .expect("the fixed json-encode plan encodes"),
+        ),
+    )
+}
+
+/// Builds the closed ADR 0057 `std.terminal.present_table` definition the
+/// sealed route executes.
+///
+/// The exact shape matches the engine's signature validator: SERVER domain,
+/// one required non-null `std.data.Rows` parameter, one single
+/// `std.terminal.Document` result, INVOKER security, READ ONLY transaction,
+/// and STABLE volatility.
+fn sealed_terminal_table_definition() -> FunctionDefinition {
+    FunctionDefinition::new(
+        STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID,
+        QualifiedSemanticName::new(["std", "terminal", "present_table"])
+            .expect("the fixed present-table name is qualified"),
+        FunctionDomain::Server,
+        vec![ParameterDefinition::new(
+            STD_TERMINAL_PRESENT_TABLE_PARAMETER_ID,
+            "p_rows",
+            0,
+            ResolvedType::named(STD_DATA_ROWS_TYPE_ID),
+            None,
+        )],
+        FunctionReturn::Single(ResolvedType::named(
+            orna_standard::STD_TERMINAL_DOCUMENT_TYPE_ID,
+        )),
+        STD_TERMINAL_PRESENT_TABLE_FUNCTION_REVISION_ID,
+        FunctionSecurity::Invoker,
+        Some(FunctionTransaction::ReadOnly),
+        FunctionVolatility::Stable,
+    )
+}
+
+/// Builds the closed ADR 0057 `std.terminal.present_table` revision the
+/// sealed route executes: the canonical `orna.server-terminal-table` version
+/// 1 artifact.
+fn sealed_terminal_table_revision() -> FunctionRevisionRecord {
+    sealed_presenter_revision(
+        STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID,
+        STD_TERMINAL_PRESENT_TABLE_FUNCTION_REVISION_ID,
+        server_terminal_table::LANGUAGE_VERSION_IDENTITY,
+        sealed_presenter_artifact(
+            server_terminal_table::FORMAT_IDENTITY,
+            server_terminal_table::FORMAT_VERSION,
+            TerminalTablePlan::new(
+                STD_TERMINAL_PRESENT_TABLE_PARAMETER_ID,
+                STD_DATA_ROWS_TYPE_ID,
+            )
+            .expect("the fixed terminal-table plan is valid")
+            .encode()
+            .expect("the fixed terminal-table plan encodes"),
+        ),
+    )
+}
+
+/// Frames one closed presenter artifact payload as a canonical executable
+/// artifact.
+fn sealed_presenter_artifact(format: &str, version: u32, payload: Vec<u8>) -> ExecutableArtifact {
+    let content_hash =
+        artifact_payload_digest(&payload).expect("the fixed presenter artifact digests");
+    ExecutableArtifact::new(
+        ExecutableArtifactKind::Server,
+        format,
+        version,
+        payload,
+        content_hash,
+    )
+    .expect("the fixed presenter artifact is valid")
+}
+
+/// Builds one closed presenter revision record carrying the exact language
+/// version and canonical artifact of the pinned ADR 0057 presenter.
+fn sealed_presenter_revision(
+    function: FunctionId,
+    revision: FunctionRevisionId,
+    language_version: &str,
+    artifact: ExecutableArtifact,
+) -> FunctionRevisionRecord {
+    FunctionRevisionRecord::new(
+        function,
+        revision,
+        1,
+        SourceOrigin::new(SourceUnitId::from_bytes([0x91; 16]), 0, 1)
+            .expect("the fixed presenter source origin is valid"),
+        Sha256Digest::from_bytes([0x42; 32]),
+        Sha256Digest::from_bytes([0x43; 32]),
+        language_version,
+        artifact,
+    )
+    .expect("the fixed presenter revision is valid")
 }
 
 /// Validates one pinned function against the fixed ADR 0057
@@ -4246,8 +4577,8 @@ mod tests {
     use orna_artifact::server_plan::{IdentitySelector, Scan, ValueType};
     use orna_artifact::server_terminal_table::{self, TerminalTablePlan, TerminalTablePlanError};
     use orna_core::{
-        CatalogueRevisionId, ExpressionId, FieldId, ParameterId, SchemaId, SourceBundleId,
-        SourceRevisionId, SourceUnitId,
+        CatalogueRevisionId, ExpressionId, FieldId, InvocationId, ParameterId, PrincipalId,
+        SchemaId, SourceBundleId, SourceRevisionId, SourceUnitId,
         canonical_hash::{
             artifact_payload_digest, catalogue_digest_with_context, source_bundle_digest,
             source_revision_record_digest, source_unit_content_digest,
@@ -4257,7 +4588,10 @@ mod tests {
             ObjectTypeDefinition, ParameterDefinition, QualifiedSemanticName,
             RecordValueFieldDefinition, RecordValueTypeDefinition, SchemaDefinition,
         },
-        invocation::InvokeValue,
+        invocation::{
+            InvocationEventBody, InvocationOutputTypeSelector, InvocationStreamingRequirement,
+            InvokeValue,
+        },
         revision::{
             ActiveDatabaseRevisionInput, ActiveRevisionContent, CatalogueHashContext,
             DefinitionIdentity, DefinitionOrigin, ExecutableArtifact, ExecutableArtifactKind,
@@ -4351,25 +4685,6 @@ mod tests {
     fn echo_revision(function: FunctionId, parameter: ParameterId) -> FunctionRevisionRecord {
         revision_with_artifact(function, echo_artifact(parameter))
     }
-
-    /// The fixed ADR 0057 `std.json.encode` function identity: `...11`.
-    const STD_JSON_ENCODE_FUNCTION_ID: FunctionId =
-        FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x11]);
-    /// The fixed ADR 0057 `std.json.encode.p_value` parameter identity: `...11`.
-    const STD_JSON_ENCODE_PARAMETER_ID: ParameterId =
-        ParameterId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x11]);
-    /// The fixed ADR 0057 `std.json.encode` function-revision identity: `...11`.
-    const STD_JSON_ENCODE_FUNCTION_REVISION_ID: FunctionRevisionId =
-        FunctionRevisionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x11]);
-    /// The fixed ADR 0057 `std.terminal.present_table` function identity: `...12`.
-    const STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID: FunctionId =
-        FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x12]);
-    /// The fixed ADR 0057 `std.terminal.present_table.p_rows` parameter identity: `...12`.
-    const STD_TERMINAL_PRESENT_TABLE_PARAMETER_ID: ParameterId =
-        ParameterId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x12]);
-    /// The fixed ADR 0057 `std.terminal.present_table` function-revision identity: `...12`.
-    const STD_TERMINAL_PRESENT_TABLE_FUNCTION_REVISION_ID: FunctionRevisionId =
-        FunctionRevisionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x12]);
 
     /// The active-catalogue object type targeted by presenter reference tests.
     const PRESENTER_OBJECT_TYPE: TypeId = TypeId::from_bytes([0x91; 16]);
@@ -8417,6 +8732,300 @@ mod tests {
             value.canonical_payload(),
             frame_terminal_document("value\n-----\n3\n(1 row)\n")
         );
+    }
+
+    #[test]
+    fn sealed_output_json_requirement_emits_the_byte_stream_in_the_final_value_batch() {
+        let standard = presenter_standard();
+        let registry = orna_standard::registered_opaque_codecs(&standard)
+            .expect("the V3 opaque codecs register");
+        let active = presenter_active(&standard);
+        let requirement = InvocationOutputRequirement::new(
+            Some(String::from("json")),
+            None,
+            None,
+            InvocationStreamingRequirement::Unspecified,
+        )
+        .expect("the json output requirement is valid");
+        let presented = present_sealed_standard_output(
+            &requirement,
+            RuntimeValue::Integer(42),
+            &active,
+            &registry,
+        )
+        .expect("the json presenter must execute on the sealed canonical result");
+        let RuntimeValue::Opaque(value) = &presented else {
+            panic!("the json presenter must return one opaque value");
+        };
+        assert_eq!(
+            value.opaque_type(),
+            orna_standard::STD_IO_BYTE_STREAM_TYPE_ID
+        );
+        let mut expected = Vec::from(BYTE_STREAM_MAGIC.as_bytes());
+        expected.extend_from_slice(&16_u32.to_be_bytes());
+        expected.extend_from_slice(b"application/json");
+        expected.extend_from_slice(&2_u32.to_be_bytes());
+        expected.extend_from_slice(b"42");
+        assert_eq!(value.canonical_payload(), expected);
+
+        let principal = PrincipalId::from_bytes([0x61; 16]);
+        let invocation = InvocationId::from_bytes([0x62; 16]);
+        let events =
+            crate::kernel::security::sealed_completed_events(principal, invocation, presented)
+                .expect("the presented events are valid");
+        let records = events.records();
+        assert_eq!(records.len(), 3);
+        match records[1].event().body() {
+            InvocationEventBody::ValueBatch { values, .. } => {
+                let [value] = values.as_slice() else {
+                    panic!("the final ValueBatch must carry exactly one value");
+                };
+                let RuntimeValue::Opaque(opaque) = value.value() else {
+                    panic!("the final ValueBatch must carry the presented opaque value");
+                };
+                assert_eq!(
+                    opaque.opaque_type(),
+                    orna_standard::STD_IO_BYTE_STREAM_TYPE_ID
+                );
+                assert_eq!(opaque.canonical_payload(), expected);
+            }
+            other => panic!("expected a ValueBatch event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sealed_output_table_requirement_emits_the_terminal_document_in_the_final_value_batch() {
+        let standard = presenter_standard();
+        let registry = orna_standard::registered_opaque_codecs(&standard)
+            .expect("the V3 opaque codecs register");
+        let active = presenter_active(&standard);
+        let requirement = InvocationOutputRequirement::new(
+            Some(String::from("table")),
+            None,
+            None,
+            InvocationStreamingRequirement::Unspecified,
+        )
+        .expect("the table output requirement is valid");
+        let presented = present_sealed_standard_output(
+            &requirement,
+            RuntimeValue::Integer(42),
+            &active,
+            &registry,
+        )
+        .expect("the terminal-table presenter must execute on the sealed canonical result");
+        let RuntimeValue::Opaque(value) = &presented else {
+            panic!("the terminal-table presenter must return one opaque value");
+        };
+        assert_eq!(
+            value.opaque_type(),
+            orna_standard::STD_TERMINAL_DOCUMENT_TYPE_ID
+        );
+        assert_eq!(
+            value.canonical_payload(),
+            frame_terminal_document("result\n------\n42\n(1 row)\n")
+        );
+
+        let principal = PrincipalId::from_bytes([0x63; 16]);
+        let invocation = InvocationId::from_bytes([0x64; 16]);
+        let events =
+            crate::kernel::security::sealed_completed_events(principal, invocation, presented)
+                .expect("the presented events are valid");
+        let records = events.records();
+        assert_eq!(records.len(), 3);
+        match records[1].event().body() {
+            InvocationEventBody::ValueBatch { values, .. } => {
+                let [value] = values.as_slice() else {
+                    panic!("the final ValueBatch must carry exactly one value");
+                };
+                let RuntimeValue::Opaque(opaque) = value.value() else {
+                    panic!("the final ValueBatch must carry the presented opaque value");
+                };
+                assert_eq!(
+                    opaque.opaque_type(),
+                    orna_standard::STD_TERMINAL_DOCUMENT_TYPE_ID
+                );
+                assert_eq!(
+                    opaque.canonical_payload(),
+                    frame_terminal_document("result\n------\n42\n(1 row)\n")
+                );
+            }
+            other => panic!("expected a ValueBatch event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sealed_output_media_type_requirement_resolves_to_the_json_presenter() {
+        let standard = presenter_standard();
+        let registry = orna_standard::registered_opaque_codecs(&standard)
+            .expect("the V3 opaque codecs register");
+        let active = presenter_active(&standard);
+        let requirement = InvocationOutputRequirement::new(
+            None,
+            Some(String::from("application/json")),
+            None,
+            InvocationStreamingRequirement::Unspecified,
+        )
+        .expect("the media-type output requirement is valid");
+        let presented = present_sealed_standard_output(
+            &requirement,
+            RuntimeValue::Text("hello".to_owned()),
+            &active,
+            &registry,
+        )
+        .expect("the media-type requirement must resolve to the json presenter");
+        let RuntimeValue::Opaque(value) = &presented else {
+            panic!("the json presenter must return one opaque value");
+        };
+        assert_eq!(
+            value.opaque_type(),
+            orna_standard::STD_IO_BYTE_STREAM_TYPE_ID
+        );
+        let mut expected = Vec::from(BYTE_STREAM_MAGIC.as_bytes());
+        expected.extend_from_slice(&16_u32.to_be_bytes());
+        expected.extend_from_slice(b"application/json");
+        expected.extend_from_slice(&7_u32.to_be_bytes());
+        expected.extend_from_slice(b"\"hello\"");
+        assert_eq!(value.canonical_payload(), expected);
+    }
+
+    #[test]
+    fn sealed_output_unresolved_requirement_failures_are_closed() {
+        let standard = presenter_standard();
+        let registry = orna_standard::registered_opaque_codecs(&standard)
+            .expect("the V3 opaque codecs register");
+        let active = presenter_active(&standard);
+
+        let alias = InvocationOutputRequirement::new(
+            Some(String::from("xml")),
+            None,
+            None,
+            InvocationStreamingRequirement::Unspecified,
+        )
+        .expect("the alias requirement is valid");
+        assert!(matches!(
+            present_sealed_standard_output(&alias, RuntimeValue::Integer(1), &active, &registry),
+            Err(SealedPresentationError::OutputResolution(
+                OutputResolutionError::UnresolvedAlias { alias }
+            )) if alias == "xml"
+        ));
+
+        let media = InvocationOutputRequirement::new(
+            None,
+            Some(String::from("application/xml")),
+            None,
+            InvocationStreamingRequirement::Unspecified,
+        )
+        .expect("the media requirement is valid");
+        assert!(matches!(
+            present_sealed_standard_output(&media, RuntimeValue::Integer(1), &active, &registry),
+            Err(SealedPresentationError::OutputResolution(
+                OutputResolutionError::UnresolvedMediaType { media_type }
+            )) if media_type == "application/xml"
+        ));
+
+        let type_name = InvocationOutputRequirement::new(
+            None,
+            None,
+            Some(
+                InvocationOutputTypeSelector::qualified_name(
+                    QualifiedSemanticName::new(["std", "xml", "Value"]).expect("a qualified name"),
+                )
+                .expect("the type-name selector is valid"),
+            ),
+            InvocationStreamingRequirement::Unspecified,
+        )
+        .expect("the type-name requirement is valid");
+        assert!(matches!(
+            present_sealed_standard_output(
+                &type_name,
+                RuntimeValue::Integer(1),
+                &active,
+                &registry
+            ),
+            Err(SealedPresentationError::OutputResolution(
+                OutputResolutionError::UnresolvedTypeName { .. }
+            ))
+        ));
+
+        let error =
+            present_sealed_standard_output(&alias, RuntimeValue::Integer(1), &active, &registry)
+                .expect_err("an unresolved alias is a closed output-resolution failure");
+        assert_eq!(error.spec_code(), "ORNA0702");
+        assert_eq!(error.exit_code(), 5);
+    }
+
+    #[test]
+    fn sealed_output_no_path_failures_are_closed() {
+        let standard = presenter_standard();
+        let registry = orna_standard::registered_opaque_codecs(&standard)
+            .expect("the V3 opaque codecs register");
+        let active = presenter_active(&standard);
+
+        // An opaque canonical result has no path to the table sink: opaque
+        // values cannot ride a ResultRows cell.
+        let opaque = RuntimeValue::Opaque(
+            OpaqueValue::new(
+                &active,
+                &registry,
+                orna_standard::STD_TERMINAL_DOCUMENT_TYPE_ID,
+                frame_terminal_document("x\n-\nx\n(1 row)\n"),
+            )
+            .expect("the opaque test value is valid"),
+        );
+        let table = InvocationOutputRequirement::new(
+            Some(String::from("table")),
+            None,
+            None,
+            InvocationStreamingRequirement::Unspecified,
+        )
+        .expect("the table requirement is valid");
+        assert!(matches!(
+            present_sealed_standard_output(&table, opaque, &active, &registry),
+            Err(SealedPresentationError::NoPath)
+        ));
+
+        // A record canonical result has no path to the json sink: records are
+        // rejected by both the argument channel and the json conversion.
+        let record = RuntimeValue::Record(
+            RecordValue::new(
+                &active,
+                PRESENTER_RECORD_TYPE,
+                [
+                    ("x".to_owned(), RuntimeValue::Integer(1)),
+                    ("y".to_owned(), RuntimeValue::Text("a".to_owned())),
+                ],
+            )
+            .expect("the record test value is valid"),
+        );
+        let json = InvocationOutputRequirement::new(
+            Some(String::from("json")),
+            None,
+            None,
+            InvocationStreamingRequirement::Unspecified,
+        )
+        .expect("the json requirement is valid");
+        assert!(matches!(
+            present_sealed_standard_output(&json, record, &active, &registry),
+            Err(SealedPresentationError::NoPath)
+        ));
+
+        let error = present_sealed_standard_output(
+            &table,
+            RuntimeValue::Opaque(
+                OpaqueValue::new(
+                    &active,
+                    &registry,
+                    orna_standard::STD_TERMINAL_DOCUMENT_TYPE_ID,
+                    frame_terminal_document("x\n-\nx\n(1 row)\n"),
+                )
+                .expect("the opaque test value is valid"),
+            ),
+            &active,
+            &registry,
+        )
+        .expect_err("a result with no path to the offered sink is closed");
+        assert_eq!(error.spec_code(), "ORNA0701");
+        assert_eq!(error.exit_code(), 5);
     }
 
     #[test]
