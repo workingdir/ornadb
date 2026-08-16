@@ -44,6 +44,8 @@ const EXPECTED_KERNEL_TABLES: &[&str] = &[
     "definition_references",
     "function_artifacts",
     "function_revisions",
+    "inspect_snapshots",
+    "inspect_trace_events",
     "invocation_audit_events",
     "invocation_target_authorities",
     "schema_migrations",
@@ -837,8 +839,8 @@ async fn bootstrap_upgrades_the_registered_v20_empty_catalogue() -> TestResult<(
 
         let after = snapshot_upgrade_state(&database).await?;
         require(
-            after.migrations.len() == 25 && after.migrations[..20] == before.migrations[..],
-            format!("v21-v25 changed prior migration records: {:?}", after.migrations),
+            after.migrations.len() == 27 && after.migrations[..20] == before.migrations[..],
+            format!("v21-v27 changed prior migration records: {:?}", after.migrations),
         )?;
         require(
             after.migrations[20]
@@ -886,8 +888,26 @@ async fn bootstrap_upgrades_the_registered_v20_empty_catalogue() -> TestResult<(
             format!("v25 migration record is not exact: {:?}", after.migrations[24]),
         )?;
         require(
+            after.migrations[25]
+                == (
+                    26,
+                    "user state audit decisions".to_owned(),
+                    expected_migration_checksum(26, MIGRATIONS[25].2),
+                ),
+            format!("v26 migration record is not exact: {:?}", after.migrations[25]),
+        )?;
+        require(
+            after.migrations[26]
+                == (
+                    27,
+                    "inspect snapshots and trace".to_owned(),
+                    expected_migration_checksum(27, MIGRATIONS[26].2),
+                ),
+            format!("v27 migration record is not exact: {:?}", after.migrations[26]),
+        )?;
+        require(
             after.active_pair == before.active_pair,
-            "v21-v25 changed the active revision pair",
+            "v21-v27 changed the active revision pair",
         )?;
 
         let recovered = kernel.recover().await?;
@@ -895,7 +915,7 @@ async fn bootstrap_upgrades_the_registered_v20_empty_catalogue() -> TestResult<(
         require(
             recovered.pair().source().to_bytes().to_vec() == source_revision_id
                 && recovered.pair().catalogue().to_bytes().to_vec() == catalogue_revision_id,
-            "v21-v25 recovery does not preserve the active revision pair",
+            "v21-v27 recovery does not preserve the active revision pair",
         )?;
         Ok(())
     })
@@ -1116,6 +1136,390 @@ async fn inspect_user_state_cells_storage(database: &TestDatabase) -> TestResult
 
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
+async fn inspect_snapshots_migration_applies_cleanly_and_relations_are_closed() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = PostgresKernel::from_str(&database.connection_string())?;
+        kernel.bootstrap().await?;
+        inspect_inspect_storage(&database).await
+    })
+    .await
+}
+
+async fn inspect_inspect_storage(database: &TestDatabase) -> TestResult<()> {
+    let session = database.open().await?;
+    let inspection_result = async {
+        let client = session.client();
+        inspect_columns(
+            client,
+            "inspect_snapshots",
+            &[
+                ("epoch_id", "bytea", "bytea", "NO", Some("")),
+                ("invocation_id", "bytea", "bytea", "NO", Some("")),
+                (
+                    "recorded_at",
+                    "timestamp with time zone",
+                    "timestamptz",
+                    "NO",
+                    Some("transaction_timestamp()"),
+                ),
+                ("owner_principal_id", "bytea", "bytea", "NO", Some("")),
+                ("source_revision_id", "bytea", "bytea", "NO", Some("")),
+                ("catalogue_revision_id", "bytea", "bytea", "NO", Some("")),
+                ("summary_bytes", "bytea", "bytea", "NO", Some("")),
+            ],
+        )
+        .await?;
+        inspect_columns(
+            client,
+            "inspect_trace_events",
+            &[
+                ("invocation_id", "bytea", "bytea", "NO", Some("")),
+                ("sequence", "bigint", "int8", "NO", Some("")),
+                ("kind", "text", "text", "NO", Some("")),
+                ("payload_bytes", "bytea", "bytea", "NO", Some("")),
+                ("observer_invocation_id", "bytea", "bytea", "YES", Some("")),
+                (
+                    "recorded_at",
+                    "timestamp with time zone",
+                    "timestamptz",
+                    "NO",
+                    Some("transaction_timestamp()"),
+                ),
+            ],
+        )
+        .await?;
+        require_exact_constraint(
+            client,
+            "inspect_snapshots",
+            "inspect_snapshots_pkey",
+            "PRIMARY KEY (epoch_id)",
+            false,
+            false,
+        )
+        .await?;
+        require_exact_constraint(
+            client,
+            "inspect_trace_events",
+            "inspect_trace_events_pkey",
+            "PRIMARY KEY (invocation_id, sequence)",
+            false,
+            false,
+        )
+        .await?;
+        require_constraint(
+            client,
+            "inspect_snapshots",
+            "inspect_snapshots_identity_lengths",
+            "octet_length(epoch_id) = 16",
+        )
+        .await?;
+        require_constraint(
+            client,
+            "inspect_trace_events",
+            "inspect_trace_events_identity_lengths",
+            "octet_length(invocation_id) = 16",
+        )
+        .await?;
+        require_constraint(
+            client,
+            "inspect_trace_events",
+            "inspect_trace_events_sequence_check",
+            "sequence >= 0",
+        )
+        .await?;
+        require_constraint(
+            client,
+            "inspect_trace_events",
+            "inspect_trace_events_kind_check",
+            "'inspect_snapshot'",
+        )
+        .await?;
+        for privilege in [
+            "SELECT",
+            "INSERT",
+            "UPDATE",
+            "DELETE",
+            "TRUNCATE",
+            "REFERENCES",
+            "TRIGGER",
+            "MAINTAIN",
+        ] {
+            for relation in [
+                "_orna_kernel.inspect_snapshots",
+                "_orna_kernel.inspect_trace_events",
+            ] {
+                let row = client
+                    .query_one(
+                        "SELECT has_table_privilege('public', $1, $2)",
+                        &[&relation, &privilege],
+                    )
+                    .await?;
+                require(
+                    !value::<bool>(&row, 0)?,
+                    format!("PUBLIC has {privilege} on protected table {relation}"),
+                )?;
+            }
+        }
+
+        // The closed domains are enforced, not merely declared: a valid
+        // snapshot writes with its default timestamp, a duplicate epoch id
+        // is rejected, a short identity is rejected, an unknown invocation
+        // is rejected, and trace rows enforce the composite key, the closed
+        // kind set, non-negative sequences, and identity lengths.
+        client
+            .batch_execute(
+                "INSERT INTO _orna_kernel.invocation_audit_events
+                     (event_id, invocation_id, outcome, session_principal_id)
+                 VALUES
+                     (decode(repeat('e1', 16), 'hex'),
+                      decode(repeat('f1', 16), 'hex'), 'denied',
+                      decode(repeat('71', 16), 'hex'));",
+            )
+            .await?;
+        client
+            .batch_execute(
+                "INSERT INTO _orna_kernel.inspect_snapshots
+                     (epoch_id, invocation_id, recorded_at, owner_principal_id,
+                      source_revision_id, catalogue_revision_id, summary_bytes)
+                 VALUES
+                     (decode(repeat('d1', 16), 'hex'),
+                      decode(repeat('f1', 16), 'hex'),
+                      transaction_timestamp(),
+                      decode(repeat('71', 16), 'hex'),
+                      decode(repeat('d2', 16), 'hex'),
+                      decode(repeat('d3', 16), 'hex'),
+                      decode('00aabb', 'hex'));",
+            )
+            .await?;
+        let row = client
+            .query_one(
+                "SELECT recorded_at IS NOT NULL
+                 FROM _orna_kernel.inspect_snapshots
+                 WHERE epoch_id = decode(repeat('d1', 16), 'hex')",
+                &[],
+            )
+            .await?;
+        require(
+            value::<bool>(&row, 0)?,
+            "inspect_snapshots write did not stamp recorded_at",
+        )?;
+
+        let duplicate_epoch = client
+            .batch_execute(
+                "INSERT INTO _orna_kernel.inspect_snapshots
+                     (epoch_id, invocation_id, recorded_at, owner_principal_id,
+                      source_revision_id, catalogue_revision_id, summary_bytes)
+                 VALUES
+                     (decode(repeat('d1', 16), 'hex'),
+                      decode(repeat('f1', 16), 'hex'),
+                      transaction_timestamp(),
+                      decode(repeat('71', 16), 'hex'),
+                      decode(repeat('d2', 16), 'hex'),
+                      decode(repeat('d3', 16), 'hex'),
+                      decode('00ccdd', 'hex'));",
+            )
+            .await
+            .err();
+        require(
+            duplicate_epoch
+                .as_ref()
+                .and_then(|error| error.as_db_error())
+                .and_then(|error| error.constraint())
+                == Some("inspect_snapshots_pkey"),
+            format!("duplicate epoch id failed for the wrong reason: {duplicate_epoch:?}"),
+        )?;
+
+        let short_epoch = client
+            .batch_execute(
+                "INSERT INTO _orna_kernel.inspect_snapshots
+                     (epoch_id, invocation_id, recorded_at, owner_principal_id,
+                      source_revision_id, catalogue_revision_id, summary_bytes)
+                 VALUES
+                     (decode(repeat('d1', 15), 'hex'),
+                      decode(repeat('f1', 16), 'hex'),
+                      transaction_timestamp(),
+                      decode(repeat('71', 16), 'hex'),
+                      decode(repeat('d2', 16), 'hex'),
+                      decode(repeat('d3', 16), 'hex'),
+                      decode('00aabb', 'hex'));",
+            )
+            .await
+            .err();
+        require(
+            short_epoch
+                .as_ref()
+                .and_then(|error| error.as_db_error())
+                .and_then(|error| error.constraint())
+                == Some("inspect_snapshots_identity_lengths"),
+            format!("short epoch identity failed for the wrong reason: {short_epoch:?}"),
+        )?;
+
+        let unknown_invocation = client
+            .batch_execute(
+                "INSERT INTO _orna_kernel.inspect_snapshots
+                     (epoch_id, invocation_id, recorded_at, owner_principal_id,
+                      source_revision_id, catalogue_revision_id, summary_bytes)
+                 VALUES
+                     (decode(repeat('d4', 16), 'hex'),
+                      decode(repeat('f9', 16), 'hex'),
+                      transaction_timestamp(),
+                      decode(repeat('71', 16), 'hex'),
+                      decode(repeat('d2', 16), 'hex'),
+                      decode(repeat('d3', 16), 'hex'),
+                      decode('00aabb', 'hex'));",
+            )
+            .await
+            .err();
+        require(
+            unknown_invocation
+                .as_ref()
+                .and_then(|error| error.as_db_error())
+                .and_then(|error| error.constraint())
+                == Some("inspect_snapshots_invocation_fk"),
+            format!(
+                "unknown invocation failed for the wrong reason: {unknown_invocation:?}"
+            ),
+        )?;
+
+        client
+            .batch_execute(
+                "INSERT INTO _orna_kernel.inspect_trace_events
+                     (invocation_id, sequence, kind, payload_bytes,
+                      observer_invocation_id, recorded_at)
+                 VALUES
+                     (decode(repeat('f1', 16), 'hex'), 0, 'started',
+                      decode('00aa', 'hex'), NULL, transaction_timestamp()),
+                     (decode(repeat('f1', 16), 'hex'), 1, 'value_batch',
+                      decode('00bb', 'hex'),
+                      decode(repeat('f2', 16), 'hex'), transaction_timestamp()),
+                     (decode(repeat('f1', 16), 'hex'), 2, 'completed',
+                      decode('00cc', 'hex'), NULL, transaction_timestamp()),
+                     (decode(repeat('f1', 16), 'hex'), 3, 'inspect_snapshot',
+                      decode('00dd', 'hex'), NULL, transaction_timestamp());",
+            )
+            .await?;
+
+        let duplicate_trace = client
+            .batch_execute(
+                "INSERT INTO _orna_kernel.inspect_trace_events
+                     (invocation_id, sequence, kind, payload_bytes,
+                      observer_invocation_id, recorded_at)
+                 VALUES
+                     (decode(repeat('f1', 16), 'hex'), 0, 'started',
+                      decode('00ee', 'hex'), NULL, transaction_timestamp());",
+            )
+            .await
+            .err();
+        require(
+            duplicate_trace
+                .as_ref()
+                .and_then(|error| error.as_db_error())
+                .and_then(|error| error.constraint())
+                == Some("inspect_trace_events_pkey"),
+            format!("duplicate trace key failed for the wrong reason: {duplicate_trace:?}"),
+        )?;
+
+        let bad_kind = client
+            .batch_execute(
+                "INSERT INTO _orna_kernel.inspect_trace_events
+                     (invocation_id, sequence, kind, payload_bytes,
+                      observer_invocation_id, recorded_at)
+                 VALUES
+                     (decode(repeat('f1', 16), 'hex'), 4, 'snapshot',
+                      decode('00ee', 'hex'), NULL, transaction_timestamp());",
+            )
+            .await
+            .err();
+        require(
+            bad_kind
+                .as_ref()
+                .and_then(|error| error.as_db_error())
+                .and_then(|error| error.constraint())
+                == Some("inspect_trace_events_kind_check"),
+            format!("unclosed trace kind failed for the wrong reason: {bad_kind:?}"),
+        )?;
+
+        let negative_sequence = client
+            .batch_execute(
+                "INSERT INTO _orna_kernel.inspect_trace_events
+                     (invocation_id, sequence, kind, payload_bytes,
+                      observer_invocation_id, recorded_at)
+                 VALUES
+                     (decode(repeat('f1', 16), 'hex'), -1, 'started',
+                      decode('00ee', 'hex'), NULL, transaction_timestamp());",
+            )
+            .await
+            .err();
+        require(
+            negative_sequence
+                .as_ref()
+                .and_then(|error| error.as_db_error())
+                .and_then(|error| error.constraint())
+                == Some("inspect_trace_events_sequence_check"),
+            format!(
+                "negative trace sequence failed for the wrong reason: {negative_sequence:?}"
+            ),
+        )?;
+
+        let short_observer = client
+            .batch_execute(
+                "INSERT INTO _orna_kernel.inspect_trace_events
+                     (invocation_id, sequence, kind, payload_bytes,
+                      observer_invocation_id, recorded_at)
+                 VALUES
+                     (decode(repeat('f1', 16), 'hex'), 4, 'started',
+                      decode('00ee', 'hex'),
+                      decode(repeat('f3', 15), 'hex'), transaction_timestamp());",
+            )
+            .await
+            .err();
+        require(
+            short_observer
+                .as_ref()
+                .and_then(|error| error.as_db_error())
+                .and_then(|error| error.constraint())
+                == Some("inspect_trace_events_identity_lengths"),
+            format!(
+                "short observer identity failed for the wrong reason: {short_observer:?}"
+            ),
+        )?;
+
+        let unknown_trace_invocation = client
+            .batch_execute(
+                "INSERT INTO _orna_kernel.inspect_trace_events
+                     (invocation_id, sequence, kind, payload_bytes,
+                      observer_invocation_id, recorded_at)
+                 VALUES
+                     (decode(repeat('fa', 16), 'hex'), 0, 'started',
+                      decode('00ee', 'hex'), NULL, transaction_timestamp());",
+            )
+            .await
+            .err();
+        require(
+            unknown_trace_invocation
+                .as_ref()
+                .and_then(|error| error.as_db_error())
+                .and_then(|error| error.constraint())
+                == Some("inspect_trace_events_invocation_fk"),
+            format!(
+                "unknown trace invocation failed for the wrong reason: {unknown_trace_invocation:?}"
+            ),
+        )?;
+        Ok(())
+    }
+    .await;
+    let shutdown_result = session.shutdown().await;
+    match (inspection_result, shutdown_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(inspection_error), Err(shutdown_error)) => Err(failure(format!(
+            "inspect storage inspection failed: {inspection_error}; shutdown failed: {shutdown_error}"
+        ))),
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
 async fn bootstrap_enforces_nested_record_field_target_storage() -> TestResult<()> {
     with_test_database(|database| async move {
         let session = database.open().await?;
@@ -1179,8 +1583,8 @@ async fn bootstrap_upgrades_v5_write_reference_evidence_without_mutating_semanti
 
         let after = snapshot_upgrade_state(&database).await?;
         require(
-            after.migrations.len() == 25 && after.migrations[..5] == before.migrations[..],
-            format!("v6-v25 changed prior migration records: {:?}", after.migrations),
+            after.migrations.len() == 27 && after.migrations[..5] == before.migrations[..],
+            format!("v6-v27 changed prior migration records: {:?}", after.migrations),
         )?;
         require(
             after.migrations[5]
