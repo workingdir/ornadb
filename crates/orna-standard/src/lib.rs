@@ -1285,15 +1285,19 @@ pub fn prepare_standard_upgrade_v1_to_v2(
     )
 }
 
-/// The fail-closed seam for the append-only `orna.std/2` to `orna.std/3`
-/// standard upgrade (work ADR 0058).
+/// Prepares the append-only `orna.std/2` to `orna.std/3` standard upgrade
+/// (work ADR 0059).
 ///
-/// The compiler-backed install pipeline is V1-to-V2 shaped and work ADR 0055
-/// defers upgrades after `orna.std/2` to a later standard-upgrade decision,
-/// so this build registers the V3 snapshot but cannot install it. The
-/// function fails closed when the active revision pins a standard other than
-/// `orna.std/2`, retains and verifies the V3 snapshot (proving the
-/// registration is coherent), and then reports `UnsupportedStandardUpgrade`.
+/// This is the only path that selects `orna.std/3`. It fails closed when the
+/// active revision pins any standard other than `orna.std/2` (an
+/// already-installed V3 or a wrong V1 base). It retains and verifies the
+/// immutable `orna.std/2` parent snapshot before it prepares V3: V3 is the
+/// append-only child, so the parent must be present and coherent; the
+/// PostgreSQL apply path persists the parent alongside the child in the same
+/// activation transaction. It then retains and verifies V3, checks the V3
+/// snapshot with the compiler's V3 branch, and prepares the companion
+/// application revision through the shared `prepare_checked_standard_upgrade`
+/// machinery, exactly as the V1-to-V2 path does.
 pub fn prepare_standard_upgrade_v2_to_v3(
     active: &ActiveDatabaseRevision,
 ) -> Result<StandardUpgrade, StandardUpgradeError> {
@@ -1307,15 +1311,18 @@ pub fn prepare_standard_upgrade_v2_to_v3(
         });
     }
 
-    let version_three = retained_standard_library_v3_snapshot()
+    let version_two = retained_standard_library_v2_snapshot()
         .map_err(|source| StandardUpgradeError::StandardLibrary { source })?;
-    verify_standard_library_v3_snapshot(version_three)
+    verify_standard_library_v2_snapshot(version_two)
         .map_err(|source| StandardUpgradeError::StandardLibrary { source })?;
 
-    Err(StandardUpgradeError::UnsupportedStandardUpgrade {
-        from: STANDARD_LIBRARY_V2_REVISION_ID,
-        to: STANDARD_LIBRARY_V3_REVISION_ID,
-    })
+    prepare_standard_upgrade_with(
+        active,
+        retained_standard_library_v3_snapshot,
+        verify_standard_library_v3_snapshot,
+        check_standard_library_source,
+        prepare_checked_standard_upgrade,
+    )
 }
 
 fn prepare_standard_upgrade_with<Retain, Verify, Check, Prepare>(
@@ -5656,66 +5663,121 @@ EXPORT TYPE std.io.ByteStream AS std.ByteStream;
     }
 
     #[test]
-    fn prepare_standard_upgrade_v2_to_v3_fails_closed() {
-        // A base that pins no standard retains and verifies V3, then reports
-        // that the install pipeline is not yet supported.
-        let empty = empty_active_revision();
-        let error = prepare_standard_upgrade_v2_to_v3(&empty)
-            .expect_err("the V2-to-V3 upgrade is not yet supported");
-        assert!(matches!(
-            &error,
-            StandardUpgradeError::UnsupportedStandardUpgrade { from, to }
-                if *from == STANDARD_LIBRARY_V2_REVISION_ID
-                    && *to == STANDARD_LIBRARY_V3_REVISION_ID
-        ));
-        assert_eq!(
-            error.to_string(),
-            format!(
-                "the {STANDARD_LIBRARY_V2_REVISION_ID} to {STANDARD_LIBRARY_V3_REVISION_ID} standard upgrade is not supported by this build"
-            )
-        );
+    fn prepares_the_v2_to_v3_standard_upgrade_from_an_empty_active_revision() {
+        let active = empty_active_revision();
 
-        // A base that pins V1 or V3 fails closed before retaining V3.
+        let upgrade = prepare_standard_upgrade_v2_to_v3(&active)
+            .expect("the V2-to-V3 standard upgrade prepares");
+
+        assert_eq!(
+            upgrade
+                .checked_standard_library()
+                .verified_snapshot()
+                .revision(),
+            STANDARD_LIBRARY_V3_REVISION_ID
+        );
+        assert_eq!(
+            upgrade.verified_standard_snapshot().revision(),
+            STANDARD_LIBRARY_V3_REVISION_ID
+        );
+        assert_eq!(
+            upgrade.verified_standard_snapshot().source().parent(),
+            Some(STANDARD_SOURCE_V2_REVISION_ID),
+            "V3 must be the append-only child of the retained V2 source revision"
+        );
+        let executable = upgrade
+            .checked_standard_library()
+            .checked_executable()
+            .expect("the V3 upgrade retains the executable");
+        assert_eq!(executable.function_id(), STD_INVOKE_ECHO_FUNCTION_ID);
+        assert_eq!(
+            upgrade.application_revision().expected_base(),
+            active.pair()
+        );
+        assert_eq!(
+            upgrade
+                .application_revision()
+                .catalogue_hash_context()
+                .standard()
+                .map(|snapshot| snapshot.revision()),
+            Some(STANDARD_LIBRARY_V3_REVISION_ID)
+        );
+        assert_eq!(
+            upgrade
+                .application_revision()
+                .catalogue_hash_context()
+                .standard()
+                .map(|snapshot| snapshot.digest_version()),
+            Some(StandardLibraryDigestVersion::Version2)
+        );
+    }
+
+    #[test]
+    fn prepare_standard_upgrade_v2_to_v3_fails_closed() {
+        // A base that pins V1 is not the V2 parent and fails closed before the
+        // V3 pipeline runs.
         let version_one = verify_standard_library_snapshot(
             retained_standard_library_snapshot().expect("the retained V1 source is valid"),
         )
         .expect("the retained V1 standard source verifies");
         let pinned_one = empty_version_two_active_revision(&version_one);
+        let error =
+            prepare_standard_upgrade_v2_to_v3(&pinned_one).expect_err("V1 is not the V2 base");
         assert!(matches!(
-            prepare_standard_upgrade_v2_to_v3(&pinned_one).expect_err("V1 is not the V2 base"),
+            &error,
             StandardUpgradeError::Prepare {
                 source: orna_compiler::PrepareStandardUpgradeError::StandardLibraryAlreadyInstalled {
                     revision
                 }
-            } if revision == STANDARD_LIBRARY_REVISION_ID
+            } if *revision == STANDARD_LIBRARY_REVISION_ID
         ));
+        assert_eq!(
+            error.to_string(),
+            format!("standard library {STANDARD_LIBRARY_REVISION_ID} is already installed")
+        );
 
+        // A base that already pins V3 cannot upgrade to the installed target.
         let version_three = verify_standard_library_v3_snapshot(
             retained_standard_library_v3_snapshot().expect("the retained V3 source is valid"),
         )
         .expect("the retained V3 standard source verifies");
         let pinned_three = empty_version_two_active_revision(&version_three);
+        let error =
+            prepare_standard_upgrade_v2_to_v3(&pinned_three).expect_err("V3 is not the V2 base");
         assert!(matches!(
-            prepare_standard_upgrade_v2_to_v3(&pinned_three).expect_err("V3 is not the V2 base"),
+            &error,
             StandardUpgradeError::Prepare {
                 source: orna_compiler::PrepareStandardUpgradeError::StandardLibraryAlreadyInstalled {
                     revision
                 }
-            } if revision == STANDARD_LIBRARY_V3_REVISION_ID
+            } if *revision == STANDARD_LIBRARY_V3_REVISION_ID
         ));
+        assert_eq!(
+            error.to_string(),
+            format!("standard library {STANDARD_LIBRARY_V3_REVISION_ID} is already installed")
+        );
 
-        // A V2-pinned base reaches the retain-and-verify gate and reports the
-        // unsupported install.
+        // A V2-pinned base reaches the shared prepare machinery, which closes
+        // the upgrade because the companion revision must be prepared from a
+        // standard-free application base.
         let version_two = verify_standard_library_v2_snapshot(
             retained_standard_library_v2_snapshot().expect("the retained V2 source is valid"),
         )
         .expect("the retained V2 standard source verifies");
         let pinned_two = empty_version_two_active_revision(&version_two);
+        let error = prepare_standard_upgrade_v2_to_v3(&pinned_two)
+            .expect_err("an installed V2 standard must close the upgrade");
         assert!(matches!(
-            prepare_standard_upgrade_v2_to_v3(&pinned_two).expect_err("the install is unsupported"),
-            StandardUpgradeError::UnsupportedStandardUpgrade { from, to }
-                if from == STANDARD_LIBRARY_V2_REVISION_ID
-                    && to == STANDARD_LIBRARY_V3_REVISION_ID
+            &error,
+            StandardUpgradeError::Prepare {
+                source: orna_compiler::PrepareStandardUpgradeError::StandardLibraryAlreadyInstalled {
+                    revision
+                }
+            } if *revision == STANDARD_LIBRARY_V2_REVISION_ID
         ));
+        assert_eq!(
+            error.to_string(),
+            format!("standard library {STANDARD_LIBRARY_V2_REVISION_ID} is already installed")
+        );
     }
 }
