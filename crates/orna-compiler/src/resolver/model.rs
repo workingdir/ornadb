@@ -656,6 +656,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn checked_client_capability_records_redacted_name_and_argument_source() {
+        let literal = super::CheckedClientCapability::new(
+            "std.fs.read",
+            super::CheckedClientCapabilityArgument::Text("/home/bob".to_owned()),
+        );
+        assert_eq!(literal.name(), "std.fs.read");
+        assert_eq!(
+            literal.argument(),
+            &super::CheckedClientCapabilityArgument::Text("/home/bob".to_owned())
+        );
+
+        let parameter = super::CheckedClientCapability::new(
+            "std.secret.use",
+            super::CheckedClientCapabilityArgument::Parameter("p_key".to_owned()),
+        );
+        assert_eq!(parameter.name(), "std.secret.use");
+        assert_eq!(
+            parameter.argument(),
+            &super::CheckedClientCapabilityArgument::Parameter("p_key".to_owned())
+        );
+
+        assert_ne!(literal, parameter);
+        assert_eq!(literal.clone(), literal);
+    }
+
     fn name(parts: &[&str]) -> QualifiedSemanticName {
         QualifiedSemanticName::new(parts.iter().copied()).unwrap()
     }
@@ -951,6 +977,53 @@ impl CheckedClientFunctionBody {
     }
 }
 
+/// The checked argument source of one CLIENT capability requirement.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CheckedClientCapabilityArgument {
+    /// A literal scope value written in the declaration.
+    Text(String),
+    /// A reference to a declared function parameter.
+    Parameter(String),
+}
+
+/// One checked CLIENT capability requirement (ADR 0060).
+///
+/// The checked name is the closed qualified vocabulary name (for example
+/// `std.fs.read`); the argument source is the declaration's literal scope or
+/// parameter reference. The invocation-time gate resolves parameter
+/// references to invocation values before asking the local grant set.
+///
+/// This slice records the requirement on the in-memory checked model only:
+/// durable capability persistence (a catalogue or revision column, or a
+/// client-plan format extension) is deferred to a later ADR. The enforcement
+/// gate reads the requirement from the checked model or from caller-supplied
+/// declarations.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CheckedClientCapability {
+    name: String,
+    argument: CheckedClientCapabilityArgument,
+}
+
+impl CheckedClientCapability {
+    /// Creates a checked capability requirement from its closed name and argument source.
+    pub fn new(name: impl Into<String>, argument: CheckedClientCapabilityArgument) -> Self {
+        Self {
+            name: name.into(),
+            argument,
+        }
+    }
+
+    /// Returns the closed qualified capability name (no arguments).
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Returns the declared argument source.
+    pub fn argument(&self) -> &CheckedClientCapabilityArgument {
+        &self.argument
+    }
+}
+
 /// A checked CLIENT function with a closed Boolean constant body.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CheckedClientFunction {
@@ -965,6 +1038,7 @@ pub struct CheckedClientFunction {
     pub(super) location: SourceLocation,
     pub(super) body: CheckedClientFunctionBody,
     pub(super) references: Vec<CheckedDefinitionReference>,
+    pub(super) capabilities: Vec<CheckedClientCapability>,
 }
 
 impl CheckedClientFunction {
@@ -1025,6 +1099,15 @@ impl CheckedClientFunction {
     /// Returns checked definition references in source-resolution order.
     pub fn references(&self) -> &[CheckedDefinitionReference] {
         &self.references
+    }
+
+    /// Returns the checked capability requirements in declaration order.
+    ///
+    /// The accepted CLIENT body forms declare zero capabilities in this
+    /// slice, so the list is empty for checked functions; tests and later
+    /// body forms record requirements here.
+    pub fn capabilities(&self) -> &[CheckedClientCapability] {
+        &self.capabilities
     }
 }
 

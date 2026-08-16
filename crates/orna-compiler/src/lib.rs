@@ -22,7 +22,8 @@ pub use prepare::{
 
 pub use orna_core::revision::EMPTY_APPLICATION_CATALOGUE_REVISION_ID;
 pub use resolver::{
-    CheckReport, CheckedApplicationTypeUse, CheckedBundle, CheckedClientFunction, CheckedDefault,
+    CheckReport, CheckedApplicationTypeUse, CheckedBundle, CheckedClientCapability,
+    CheckedClientCapabilityArgument, CheckedClientFunction, CheckedDefault,
     CheckedDefinitionReference, CheckedDefinitionReferenceTarget, CheckedExpressionId,
     CheckedField, CheckedFieldId, CheckedFunctionId, CheckedObjectReferenceUse, CheckedObjectType,
     CheckedParameterId, CheckedSchema, CheckedSchemaId, CheckedServerFunction,

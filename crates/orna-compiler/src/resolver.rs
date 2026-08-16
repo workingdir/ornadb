@@ -12,7 +12,8 @@ pub use identity::{
     ProvisionalParameterId, ProvisionalSchemaId, ProvisionalTypeId,
 };
 pub use model::{
-    CheckReport, CheckedApplicationTypeUse, CheckedBundle, CheckedClientFunction, CheckedDefault,
+    CheckReport, CheckedApplicationTypeUse, CheckedBundle, CheckedClientCapability,
+    CheckedClientCapabilityArgument, CheckedClientFunction, CheckedDefault,
     CheckedDefinitionReference, CheckedDefinitionReferenceTarget, CheckedField,
     CheckedObjectReferenceUse, CheckedObjectType, CheckedSchema, CheckedServerFunction,
     CheckedServerFunctionParameter, CheckedServerFunctionReturnColumn,
@@ -3547,6 +3548,52 @@ fn parse_client_capability_argument(text: &str) -> Option<ClientCapabilityArgume
     normalise_client_parameter_name(text).map(ClientCapabilityArgument::Parameter)
 }
 
+/// Records one validated capability requirement in the checked CLIENT model.
+///
+/// The checked name is the closed qualified vocabulary name and the argument
+/// source is the declaration's literal scope value or parameter reference.
+/// Validation has already run, so a non-vocabulary name, wrong argument
+/// shape, or undeclared parameter cannot reach this conversion; unknown
+/// forms map to `None` and are skipped.
+fn checked_client_capability(
+    capability: &CapabilitySpecification,
+) -> Option<CheckedClientCapability> {
+    let name = semantic_name(&capability.name);
+    client_capability_entry(&name)?;
+    let arguments = capability.arguments.as_ref()?;
+    let argument = parse_client_capability_argument(&arguments.text)?;
+    let argument = match argument {
+        ClientCapabilityArgument::TextLiteral => {
+            CheckedClientCapabilityArgument::Text(unquote_client_text_literal(&arguments.text)?)
+        }
+        ClientCapabilityArgument::Parameter(parameter) => {
+            CheckedClientCapabilityArgument::Parameter(parameter)
+        }
+    };
+    Some(CheckedClientCapability::new(name.to_string(), argument))
+}
+
+/// Unquotes one validated single-quoted CLIENT text literal.
+///
+/// A doubled quote inside the literal is a single literal quote, mirroring
+/// `normalise_client_parameter_name`'s handling of quoted parameter names.
+fn unquote_client_text_literal(text: &str) -> Option<String> {
+    let text = text.trim();
+    if !is_client_text_literal(text) {
+        return None;
+    }
+    let inner = &text[1..text.len() - 1];
+    let mut value = String::with_capacity(inner.len());
+    let mut characters = inner.chars().peekable();
+    while let Some(character) = characters.next() {
+        value.push(character);
+        if character == '\'' && characters.peek() == Some(&'\'') {
+            characters.next();
+        }
+    }
+    Some(value)
+}
+
 fn is_client_text_literal(text: &str) -> bool {
     let mut characters = text.chars();
     if characters.next() != Some('\'') || !text.ends_with('\'') {
@@ -3754,6 +3801,11 @@ fn check_client_functions(
                     location: location(input.logical_path, &body_source.span),
                 },
                 references: Vec::new(),
+                capabilities: input
+                    .capabilities
+                    .iter()
+                    .filter_map(checked_client_capability)
+                    .collect(),
             })
         })
         .collect()
