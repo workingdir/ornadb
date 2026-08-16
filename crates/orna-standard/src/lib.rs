@@ -1523,6 +1523,46 @@ pub fn prepare_standard_upgrade_v2_to_v3(
     )
 }
 
+/// Prepares the append-only `orna.std/3` to `orna.std/4` standard upgrade
+/// (work ADR 0062).
+///
+/// This is the only path that selects `orna.std/4`. It fails closed when the
+/// active revision pins any standard other than `orna.std/3` (an
+/// already-installed V4 or a wrong V1/V2 base). It retains and verifies the
+/// immutable `orna.std/3` parent snapshot before it prepares V4: V4 is the
+/// append-only child, so the parent must be present and coherent; the
+/// PostgreSQL apply path persists the parent alongside the child in the same
+/// activation transaction. It then retains and verifies V4, checks the V4
+/// snapshot with the compiler's V4 branch, and prepares the companion
+/// application revision through the shared `prepare_checked_standard_upgrade`
+/// machinery, exactly as the V2-to-V3 path does.
+pub fn prepare_standard_upgrade_v3_to_v4(
+    active: &ActiveDatabaseRevision,
+) -> Result<StandardUpgrade, StandardUpgradeError> {
+    if let Some(installed) = active.catalogue_hash_context().standard()
+        && installed.revision() != STANDARD_LIBRARY_V3_REVISION_ID
+    {
+        return Err(StandardUpgradeError::Prepare {
+            source: PrepareStandardUpgradeError::StandardLibraryAlreadyInstalled {
+                revision: installed.revision(),
+            },
+        });
+    }
+
+    let version_three = retained_standard_library_v3_snapshot()
+        .map_err(|source| StandardUpgradeError::StandardLibrary { source })?;
+    verify_standard_library_v3_snapshot(version_three)
+        .map_err(|source| StandardUpgradeError::StandardLibrary { source })?;
+
+    prepare_standard_upgrade_with(
+        active,
+        retained_standard_library_v4_snapshot,
+        verify_standard_library_v4_snapshot,
+        check_standard_library_source,
+        prepare_checked_standard_upgrade,
+    )
+}
+
 fn prepare_standard_upgrade_with<Retain, Verify, Check, Prepare>(
     active: &ActiveDatabaseRevision,
     retain: Retain,
