@@ -1,0 +1,16 @@
+CREATE SCHEMA std.terminal;
+CREATE SCHEMA std.io;
+
+CREATE TYPE std.terminal.Document AS VALUE OPAQUE
+    KERNEL CONTRACT 'orna.std.value.terminal-document@1'
+    IMMUTABLE
+    TRANSIENT;
+
+EXPORT TYPE std.terminal.Document AS std.Document;
+
+CREATE TYPE std.io.ByteStream AS VALUE OPAQUE
+    KERNEL CONTRACT 'orna.std.value.byte-stream@1'
+    IMMUTABLE
+    TRANSIENT;
+
+EXPORT TYPE std.io.ByteStream AS std.ByteStream;
