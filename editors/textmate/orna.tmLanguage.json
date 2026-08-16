@@ -1,0 +1,278 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Orna",
+  "scopeName": "source.orna",
+  "patterns": [
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#strings"
+    },
+    {
+      "include": "#declarations"
+    },
+    {
+      "include": "#literals"
+    },
+    {
+      "include": "#function-calls"
+    },
+    {
+      "include": "#scalar-types"
+    },
+    {
+      "include": "#keywords"
+    },
+    {
+      "include": "#numbers"
+    },
+    {
+      "include": "#operators"
+    },
+    {
+      "include": "#identifiers"
+    }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-dash.orna",
+          "match": "--.*$"
+        },
+        {
+          "name": "comment.block.orna",
+          "begin": "/\\*",
+          "end": "\\*/"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.single.orna",
+          "match": "'(?:''|[^'])*'"
+        },
+        {
+          "name": "string.quoted.double.orna",
+          "match": "\"(?:\"\"|[^\"])*\""
+        }
+      ]
+    },
+    "declarations": {
+      "patterns": [
+        {
+          "begin": "(?i)(\\bCREATE\\s+EXTERNAL\\s+CLIENT\\s+)(FUNCTION\\b)\\s*",
+          "beginCaptures": {
+            "1": {
+              "name": "keyword.control.orna"
+            },
+            "2": {
+              "name": "keyword.control.orna"
+            }
+          },
+          "end": "(?=\\s|[;,(\\[\\]{}]|$)",
+          "patterns": [
+            {
+              "match": "[A-Za-z_][A-Za-z0-9_]*(?=\\.)",
+              "name": "entity.name.namespace.orna"
+            },
+            {
+              "match": "[A-Za-z_][A-Za-z0-9_]*",
+              "name": "entity.name.function.orna"
+            }
+          ]
+        },
+        {
+          "begin": "(?i)(\\bCREATE\\s+CLIENT\\s+)(FUNCTION\\b)\\s*",
+          "beginCaptures": {
+            "1": {
+              "name": "keyword.control.orna"
+            },
+            "2": {
+              "name": "keyword.control.orna"
+            }
+          },
+          "end": "(?=\\s|[;,(\\[\\]{}]|$)",
+          "patterns": [
+            {
+              "match": "[A-Za-z_][A-Za-z0-9_]*(?=\\.)",
+              "name": "entity.name.namespace.orna"
+            },
+            {
+              "match": "[A-Za-z_][A-Za-z0-9_]*",
+              "name": "entity.name.function.orna"
+            }
+          ]
+        },
+        {
+          "begin": "(?i)(\\bCREATE\\s+)(FUNCTION\\b)\\s*",
+          "beginCaptures": {
+            "1": {
+              "name": "keyword.control.orna"
+            },
+            "2": {
+              "name": "keyword.control.orna"
+            }
+          },
+          "end": "(?=\\s|[;,(\\[\\]{}]|$)",
+          "patterns": [
+            {
+              "match": "[A-Za-z_][A-Za-z0-9_]*(?=\\.)",
+              "name": "entity.name.namespace.orna"
+            },
+            {
+              "match": "[A-Za-z_][A-Za-z0-9_]*",
+              "name": "entity.name.function.orna"
+            }
+          ]
+        },
+        {
+          "begin": "(?i)(\\bCREATE\\s+)(TYPE\\b)\\s*",
+          "beginCaptures": {
+            "1": {
+              "name": "keyword.control.orna"
+            },
+            "2": {
+              "name": "keyword.control.orna"
+            }
+          },
+          "end": "(?=\\s|[;,(\\[\\]{}]|$)",
+          "patterns": [
+            {
+              "match": "[A-Za-z_][A-Za-z0-9_]*(?=\\.)",
+              "name": "entity.name.namespace.orna"
+            },
+            {
+              "match": "[A-Za-z_][A-Za-z0-9_]*",
+              "name": "entity.name.type.orna"
+            }
+          ]
+        },
+        {
+          "begin": "(?i)(\\bCREATE\\s+)(SCHEMA\\b)\\s*",
+          "beginCaptures": {
+            "1": {
+              "name": "keyword.control.orna"
+            },
+            "2": {
+              "name": "keyword.control.orna"
+            }
+          },
+          "end": "(?=\\s|[;,(\\[\\]{}]|$)",
+          "patterns": [
+            {
+              "match": "[A-Za-z_][A-Za-z0-9_]*(?=\\.)",
+              "name": "entity.name.namespace.orna"
+            },
+            {
+              "match": "[A-Za-z_][A-Za-z0-9_]*",
+              "name": "entity.name.namespace.orna"
+            }
+          ]
+        },
+        {
+          "begin": "(?i)(\\bALTER\\s+)(FUNCTION\\b)\\s*",
+          "beginCaptures": {
+            "1": {
+              "name": "keyword.control.orna"
+            },
+            "2": {
+              "name": "keyword.control.orna"
+            }
+          },
+          "end": "(?=\\s|[;,(\\[\\]{}]|$)",
+          "patterns": [
+            {
+              "match": "[A-Za-z_][A-Za-z0-9_]*(?=\\.)",
+              "name": "entity.name.namespace.orna"
+            },
+            {
+              "match": "[A-Za-z_][A-Za-z0-9_]*",
+              "name": "entity.name.function.orna"
+            }
+          ]
+        },
+        {
+          "begin": "(?i)(\\bALTER\\s+)(TYPE\\b)\\s*",
+          "beginCaptures": {
+            "1": {
+              "name": "keyword.control.orna"
+            },
+            "2": {
+              "name": "keyword.control.orna"
+            }
+          },
+          "end": "(?=\\s|[;,(\\[\\]{}]|$)",
+          "patterns": [
+            {
+              "match": "[A-Za-z_][A-Za-z0-9_]*(?=\\.)",
+              "name": "entity.name.namespace.orna"
+            },
+            {
+              "match": "[A-Za-z_][A-Za-z0-9_]*",
+              "name": "entity.name.type.orna"
+            }
+          ]
+        }
+      ]
+    },
+    "literals": {
+      "patterns": [
+        {
+          "name": "constant.language.orna",
+          "match": "(?i)\\b(?:TRUE|FALSE|NULL)\\b"
+        }
+      ]
+    },
+    "function-calls": {
+      "patterns": [
+        {
+          "name": "entity.name.function.orna",
+          "match": "\\b[A-Za-z_][A-Za-z0-9_]*(?=\\s*\\()"
+        }
+      ]
+    },
+    "scalar-types": {
+      "patterns": [
+        {
+          "name": "storage.type.orna",
+          "match": "(?i)\\b(?:BIGINT|BOOL|BYTES|DATE|DECIMAL|DURATION|FLOAT|INT|TEXT|TIME|TIMESTAMP|UUID|VOID)\\b"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.orna",
+          "match": "(?i)\\b(?:ADD|ALL|ALTER|AND|AS|ASC|ATOMIC|AWAIT|BEGIN|BETWEEN|BY|CALL|CAPABILITY|CASCADE|CASE|CHECK|CLIENT|CONST|CONTRACT|CREATE|CROSS|DEFAULT|DEFINER|DELETE|DESC|DISABLED|DISTINCT|DOCUMENTATION|DROP|ELSE|ELSIF|END|ENUM|EXECUTE|EXISTS|EXPORT|EXTERNAL|FALSE|FIELD|FINAL|FIRST|FOR|FROM|FULL|FUNCTION|GRANT|GROUP|HAVING|IF|ILIKE|IMMUTABLE|IN|INNER|INSERT|INSPECT|INTO|INVOKER|IS|JOIN|KERNEL|LAST|LEFT|LET|LIKE|LIMIT|LIST|LOCAL|LOOP|MANUAL|MAP|NOT|NULL|NULLS|OBJECT|OFFSET|ON|ONLY|OPAQUE|OPTION|OR|ORDER|OUTER|PERSISTABLE|PRIMITIVE|READ|REF|RENAME|REQUIRES|RESTRICT|RETURN|RETURNING|RETURNS|REVOKE|RIGHT|ROLE|ROWS|RUNTIME|SCHEMA|SCOPE|SEALED|SECURITY|SELECT|SERVER|SESSION|SET|STABLE|STATE|STREAM|TABLE|THEN|TO|TRANSACTION|TRANSIENT|TRUE|TYPE|UNION|UNIQUE|UPDATE|USER|VALUE|VALUES|VOLATILE|VOLATILITY|WHEN|WHERE|WHILE)\\b"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.orna",
+          "match": "\\b\\d+(?:\\.\\d+)?\\b"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.orna",
+          "match": ":=|=>|<>|!=|<=|>=|\\|\\||[=<>+*/%.,;()\\[\\]{}-]"
+        }
+      ]
+    },
+    "identifiers": {
+      "patterns": [
+        {
+          "name": "variable.other.orna",
+          "match": "[A-Za-z_][A-Za-z0-9_]*"
+        }
+      ]
+    }
+  }
+}
