@@ -113,3 +113,5 @@ source-of-truth or authority rules.
   [`orna.std/2` Is an Immutable Executable Source Snapshot](0055-standard-executable-source-units.md)
 * **work ADR 0056:**
   [`orna invoke` Binds Typed Arguments Through the Sealed Route](0056-orna-invoke-cli.md)
+* **work ADR 0057:**
+  [Terminal Documents, JSON Output, and the TTY Runtime](0057-terminal-documents-json-output.md)
