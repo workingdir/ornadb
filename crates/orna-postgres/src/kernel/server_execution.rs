@@ -1319,9 +1319,7 @@ fn map_distinct_plan_decode_error(error: server_plan::ServerPlanError) -> Postgr
 /// integer.
 ///
 /// The sealed `sys.invoke` execution step (ADR 0055 implementation order item
-/// 11) is the sole caller. Until that step wires the pinned standard target
-/// here, the seam has no non-test caller and is intentionally allowed dead.
-#[allow(dead_code)]
+/// 11) is the sole caller (`dispatch_sealed_sys_invoke`).
 pub(crate) fn execute_standard_parameter_echo(
     function: &FunctionDefinition,
     revision: &FunctionRevisionRecord,

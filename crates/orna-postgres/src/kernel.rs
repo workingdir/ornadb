@@ -10,10 +10,12 @@ use orna_core::{
     FunctionId,
     canonical_hash::CanonicalHashError,
     catalogue::CatalogueSnapshotError,
+    invocation::InvocationCarrierConstructionError,
     physical::PhysicalPlanError,
     revision::{CatalogueHashVersion, RevisionInvariantError, RevisionPair},
     security::{ExecuteDenial, LocalPeerAuthenticationError, SecuritySnapshotError},
 };
+use orna_protocol::FrameCodecError;
 use orna_standard::StandardUpgradeIdentity;
 
 use tokio::task::{JoinError, JoinHandle};
@@ -42,7 +44,7 @@ pub(crate) mod storage;
 
 pub use apply::StandardContextIdentity;
 pub use bootstrap::ActiveRevision;
-pub use security::{AuthenticatedRawCallResult, RecordArgumentPreflight};
+pub use security::{AuthenticatedRawCallResult, RecordArgumentPreflight, SealedInvocationResult};
 pub use server_execution::{ServerSelectContext, ServerSelectError, ServerSelectResult};
 pub use server_mutation_execution::{
     ServerDeleteCommitState, ServerDeleteContext, ServerDeleteError, ServerDeleteResult,
@@ -218,6 +220,10 @@ pub enum PostgresKernelError {
         /// The closed raw-call rule that rejected the target.
         rule: &'static str,
     },
+    /// A sealed `sys.invoke` carrier or event failed checked construction.
+    InvocationCarrier(InvocationCarrierConstructionError),
+    /// A sealed `sys.invoke` carrier or event batch failed the frame codec.
+    SealedInvocation(FrameCodecError),
     /// An allowed SERVER function is unavailable at the closed raw-call boundary.
     RawServerTargetUnavailable {
         /// The exact typed SERVER target validation failure.
@@ -351,6 +357,12 @@ impl fmt::Display for PostgresKernelError {
                     function.canonical()
                 )
             }
+            Self::InvocationCarrier(error) => {
+                write!(formatter, "sealed invocation carrier failed: {error}")
+            }
+            Self::SealedInvocation(error) => {
+                write!(formatter, "sealed sys.invoke carrier failed: {error}")
+            }
             Self::RawServerTargetUnavailable { source } => {
                 write!(formatter, "raw SERVER target is unavailable: {source}")
             }
@@ -415,6 +427,8 @@ impl Error for PostgresKernelError {
             Self::SecuritySnapshot(error) => Some(error),
             Self::ClientExecution(error) => Some(error),
             Self::LocalPeerAuthentication(error) => Some(error),
+            Self::InvocationCarrier(error) => Some(error),
+            Self::SealedInvocation(error) => Some(error),
             Self::PhysicalPlan(error) => Some(error),
             Self::ServerSelect(error) => Some(error),
             Self::RawServerTargetUnavailable { source } => Some(source),

@@ -6,8 +6,13 @@ use orna_client::{
 use orna_core::{
     CatalogueRevisionId, FunctionId, FunctionRevisionId, InvocationAuditEventId, InvocationId,
     PrincipalId, SecurityAuditEventId, SourceRevisionId, StandardLibraryRevisionId,
-    catalogue::FunctionDomain,
-    revision::{ActiveDatabaseRevision, RevisionPair},
+    catalogue::{FunctionDefinition, FunctionDomain},
+    invocation::{
+        InvocationArgument, InvocationEventBody, InvocationParameterSelector,
+        InvocationTarget as InvocationRequestTarget, InvokeEvent, InvokeValue,
+        ProtectedInvocationDecision, decide_protected_invocation,
+    },
+    revision::{ActiveDatabaseRevision, RevisionPair, StandardExecutable},
     security::{
         AuthenticatedSession, CATALOGUE_HEALTH_FUNCTION_ID, CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID,
         ExecuteDecision, ExecuteDenial, ExecuteGrant, InvocationTarget,
@@ -19,7 +24,11 @@ use orna_core::{
     system::{SYS_INVOKE_FUNCTION_ID, system_function_by_id},
     value::{FunctionArgument, RecordValue, RuntimeValue},
 };
-use orna_protocol::encode_active_value;
+use orna_protocol::{
+    InvocationEventBatch, InvocationEventRecord, RetainedInvokeRequest,
+    decode_retained_invoke_request, encode_active_value,
+};
+use orna_standard::registered_opaque_codecs;
 use tokio_postgres::{IsolationLevel, Row, Transaction, types::FromSqlOwned};
 
 use crate::{
@@ -27,7 +36,8 @@ use crate::{
     bootstrap::require_current_migrations,
     recovery::{load_verified_standard_library, recover_active_revision},
     server_execution::{
-        ServerSelectResult, execute_authorised_raw_server_select, execute_authorised_server_select,
+        ServerSelectError, ServerSelectResult, execute_authorised_raw_server_select,
+        execute_authorised_server_select, execute_standard_parameter_echo,
         raw_identity_selected_server_select_target_is_selected, raw_server_target_is_unavailable,
         raw_unique_text_selected_server_select_target_is_selected,
     },
@@ -51,12 +61,40 @@ pub enum AuthenticatedRawCallResult {
     Server(Vec<RuntimeValue>),
 }
 
+/// The owned redacted result of one sealed `sys.invoke` dispatch.
+///
+/// The completed variant carries the full Event batch so a server adapter can
+/// deliver `InvocationStarted(0)`, `ValueBatch(1)`, and `InvocationCompleted(2)`
+/// and then complete the call (`CALL_COMPLETED`). The other variants are
+/// closed and disclose no target, signature, selector, value, binding, or
+/// security evidence.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SealedInvocationResult {
+    /// The invocation completed with its complete Event sequence.
+    Completed {
+        /// The invocation identity shared by every retained Event.
+        invocation: InvocationId,
+        /// The complete `InvocationStarted(0)`, `ValueBatch(1)`,
+        /// `InvocationCompleted(2)` Event batch.
+        events: InvocationEventBatch,
+    },
+    /// The final allowed decision disclosed a redacted bind failure.
+    BindFailure {
+        /// The invocation identity.
+        invocation: InvocationId,
+    },
+    /// The invocation was denied without executing any artifact.
+    Denied {
+        /// The invocation identity.
+        invocation: InvocationId,
+    },
+}
+
 /// One closed durable `sys.invoke` decision for the PostgreSQL kernel.
 ///
 /// This is private kernel state. It does not retain Request, bind, lifecycle,
 /// delivery, or error-detail data.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(dead_code)]
 pub(crate) struct InvocationAuditDecision {
     invocation: InvocationId,
     outcome: SecurityAuditOutcome,
@@ -67,7 +105,6 @@ pub(crate) struct InvocationAuditDecision {
     security_audit_event: Option<SecurityAuditEventId>,
 }
 
-#[allow(dead_code)]
 impl InvocationAuditDecision {
     /// Creates one decision from durable matching `EXECUTE` evidence.
     pub(crate) fn from_execute_evidence(
@@ -484,6 +521,200 @@ impl PostgresKernel {
                 .await
                 .map_err(PostgresKernelError::Database)?;
             execution
+        }
+        .await;
+        finish_authenticated_server_select_session(operation, database_session.shutdown().await)
+    }
+
+    /// Dispatches one sealed `sys.invoke` Request inside one transaction.
+    ///
+    /// This is the sole caller of [`execute_standard_parameter_echo`] and the
+    /// only boundary through which a verified-standard target can execute
+    /// (ADR 0055 implementation order item 11). It recovers the active
+    /// revision and its security snapshot, decodes the retained Request
+    /// against the opaque codec registry of the exact verified standard
+    /// snapshot, makes the redacted protected decision, and then either
+    /// executes the pinned standard parameter-echo executable (emitting
+    /// `InvocationStarted(0)`, `ValueBatch(1)`, `InvocationCompleted(2)`) or
+    /// returns the closed denial without executing any artifact. Every
+    /// decision is appended as protected security and invocation audit
+    /// evidence before the transaction commits; the invocation-audit row
+    /// keeps the historical application `RevisionPair` as its durable
+    /// standard pin.
+    ///
+    /// Sealed execution of an `Application` target is not admitted by this
+    /// step: the raw dispatcher remains the application-call boundary. A
+    /// request that privately resolves to an application target fails closed
+    /// after the protected decision, before any artifact executes.
+    pub async fn dispatch_sealed_sys_invoke(
+        &self,
+        authenticated_session: &AuthenticatedSession,
+        connection_protocol_major: u16,
+        request: &RetainedInvokeRequest,
+    ) -> Result<SealedInvocationResult, PostgresKernelError> {
+        let mut database_session = self.open().await?;
+        let operation = async {
+            let transaction = database_session
+                .client
+                .build_transaction()
+                .isolation_level(IsolationLevel::RepeatableRead)
+                .start()
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            require_current_migrations(&transaction).await?;
+            let active = configure_and_recover(&transaction).await?;
+            let security = recover_security_snapshot_for_active(&transaction, &active).await?;
+            let standard = active.catalogue_hash_context().standard().ok_or_else(|| {
+                PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.active_revision",
+                    record: active.pair().catalogue().canonical(),
+                    rule: "sealed sys.invoke requires the accepted verified standard snapshot",
+                }
+            })?;
+            let registry = registered_opaque_codecs(standard).map_err(|_| {
+                PostgresKernelError::DurableInvariant {
+                    relation: "_orna_kernel.standard_library_revisions",
+                    record: standard.revision().canonical(),
+                    rule: "the verified standard snapshot must bind its opaque codec registry",
+                }
+            })?;
+            let decoded = decode_retained_invoke_request(&active, &registry, request)
+                .map_err(PostgresKernelError::SealedInvocation)?;
+            let invocation = InvocationId::new();
+            let system_target = InvocationTarget::new(SYS_INVOKE_FUNCTION_ID, active.pair());
+            let decision = decide_protected_invocation(
+                &security,
+                authenticated_session,
+                system_target,
+                &active,
+                connection_protocol_major,
+                &decoded,
+            );
+            let result = match decision {
+                ProtectedInvocationDecision::Allowed => {
+                    let target =
+                        resolve_sealed_target(&active, decoded.target()).ok_or_else(|| {
+                            sealed_target_invariant(
+                                &active,
+                                "allowed sealed invocation target must resolve",
+                            )
+                        })?;
+                    let SealedResolvedTarget::VerifiedStandard {
+                        definition,
+                        executable,
+                    } = target
+                    else {
+                        return Err(sealed_target_invariant(
+                            &active,
+                            "sealed execution requires a verified-standard target",
+                        ));
+                    };
+                    let arguments = bind_sealed_invoke_arguments(definition, decoded.arguments())?;
+                    let value = execute_standard_parameter_echo(
+                        definition,
+                        executable.revision(),
+                        &arguments,
+                    )?;
+                    let events = sealed_echo_events(authenticated_session, invocation, value)?;
+                    let security_target = InvocationTarget::verified_standard(
+                        definition.id(),
+                        active.pair(),
+                        standard.revision(),
+                        executable.revision().id(),
+                    );
+                    append_allowed_invocation_audit(
+                        &transaction,
+                        &security,
+                        authenticated_session,
+                        security_target,
+                        invocation,
+                    )
+                    .await?;
+                    SealedInvocationResult::Completed { invocation, events }
+                }
+                ProtectedInvocationDecision::AllowedWithBindFailure => {
+                    let target =
+                        resolve_sealed_target(&active, decoded.target()).ok_or_else(|| {
+                            sealed_target_invariant(
+                                &active,
+                                "bind-failed sealed invocation target must resolve",
+                            )
+                        })?;
+                    append_allowed_invocation_audit(
+                        &transaction,
+                        &security,
+                        authenticated_session,
+                        sealed_security_target(&active, target),
+                        invocation,
+                    )
+                    .await?;
+                    SealedInvocationResult::BindFailure { invocation }
+                }
+                ProtectedInvocationDecision::EntryDenied => {
+                    let entry_target = InvocationTarget::new(SYS_INVOKE_FUNCTION_ID, active.pair());
+                    let reason = match security
+                        .authorise_system_function(authenticated_session, entry_target)
+                    {
+                        ExecuteDecision::Denied(reason) => reason,
+                        ExecuteDecision::Allowed(_) => ExecuteDenial::UnknownFunction,
+                    };
+                    append_security_audit_event(
+                        &transaction,
+                        SecurityAuditDecision::execute_denied(
+                            authenticated_session,
+                            entry_target,
+                            reason,
+                        ),
+                    )
+                    .await?;
+                    append_invocation_audit_event(
+                        &transaction,
+                        InvocationAuditDecision::unresolved_denied(
+                            invocation,
+                            authenticated_session.principal(),
+                        ),
+                    )
+                    .await?;
+                    SealedInvocationResult::Denied { invocation }
+                }
+                ProtectedInvocationDecision::RequestRejected => {
+                    append_invocation_audit_event(
+                        &transaction,
+                        InvocationAuditDecision::unresolved_denied(
+                            invocation,
+                            authenticated_session.principal(),
+                        ),
+                    )
+                    .await?;
+                    SealedInvocationResult::Denied { invocation }
+                }
+                ProtectedInvocationDecision::Denied => {
+                    append_sealed_denied_audit(
+                        &transaction,
+                        &security,
+                        authenticated_session,
+                        &active,
+                        decoded.target(),
+                        invocation,
+                    )
+                    .await?;
+                    SealedInvocationResult::Denied { invocation }
+                }
+                _ => {
+                    append_unresolved_invocation_audit(
+                        &transaction,
+                        authenticated_session,
+                        invocation,
+                    )
+                    .await?;
+                    SealedInvocationResult::Denied { invocation }
+                }
+            };
+            transaction
+                .commit()
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            Ok(result)
         }
         .await;
         finish_authenticated_server_select_session(operation, database_session.shutdown().await)
@@ -1419,7 +1650,7 @@ fn raw_server_insert_argument_target_is_unavailable(
 async fn append_security_audit_event(
     transaction: &Transaction<'_>,
     decision: SecurityAuditDecision,
-) -> Result<(), PostgresKernelError> {
+) -> Result<SecurityAuditEventId, PostgresKernelError> {
     let event = SecurityAuditEventId::new();
     let event_id = event.to_bytes().to_vec();
     let kind = match decision.kind() {
@@ -1476,14 +1707,13 @@ async fn append_security_audit_event(
         )
         .await
         .map_err(PostgresKernelError::Database)?;
-    Ok(())
+    Ok(event)
 }
 
 /// Appends one closed invocation decision in the caller's protected transaction.
 ///
 /// PostgreSQL generates the relation sequence and recording time. The caller
 /// cannot supply Request, bind, lifecycle, delivery, or diagnostic data.
-#[allow(dead_code)]
 pub(crate) async fn append_invocation_audit_event(
     transaction: &Transaction<'_>,
     decision: InvocationAuditDecision,
@@ -1543,6 +1773,294 @@ pub(crate) async fn append_invocation_audit_event(
         .await
         .map_err(PostgresKernelError::Database)?;
     Ok(event_id)
+}
+
+/// One privately resolved sealed invocation target for the PostgreSQL kernel.
+///
+/// This mirrors the closed resolution inside `orna-core` so the durable audit
+/// and execution steps can re-derive the exact pinned target without exposing
+/// any resolution phase. An application target carries no executable pin; a
+/// verified-standard target carries the exact executable and standard
+/// revisions of the pinned snapshot.
+enum SealedResolvedTarget<'a> {
+    Application(&'a FunctionDefinition),
+    VerifiedStandard {
+        definition: &'a FunctionDefinition,
+        executable: &'a StandardExecutable,
+    },
+}
+
+/// Resolves one sealed request target in the pinned application and
+/// verified-standard catalogues, mirroring the private core resolution.
+///
+/// A function present in both catalogues is ambiguous and resolves to
+/// neither, exactly as at the protected boundary. A verified-standard target
+/// resolves only when its executable pin matches the snapshot's current
+/// function revision.
+fn resolve_sealed_target<'a>(
+    active: &'a ActiveDatabaseRevision,
+    selector: &InvocationRequestTarget,
+) -> Option<SealedResolvedTarget<'a>> {
+    let application = active.catalogue();
+    let standard = active.catalogue_hash_context().standard();
+    let application_target = match selector {
+        InvocationRequestTarget::FunctionId(id) => application.function_by_id(*id),
+        InvocationRequestTarget::QualifiedName(name) => application.function_by_name(name),
+        _ => None,
+    };
+    let standard_target = standard.and_then(|snapshot| match selector {
+        InvocationRequestTarget::FunctionId(id) => snapshot.catalogue().function_by_id(*id),
+        InvocationRequestTarget::QualifiedName(name) => snapshot.catalogue().function_by_name(name),
+        _ => None,
+    });
+    match (application_target, standard_target) {
+        (Some(_), Some(_)) | (None, None) => None,
+        (Some(definition), None) => Some(SealedResolvedTarget::Application(definition)),
+        (None, Some(definition)) => {
+            let snapshot = standard.expect("a standard target requires the pinned snapshot");
+            let executable = snapshot
+                .executables()
+                .iter()
+                .find(|executable| executable.function() == definition.id())?;
+            if executable.revision().id() != definition.current_revision() {
+                return None;
+            }
+            Some(SealedResolvedTarget::VerifiedStandard {
+                definition,
+                executable,
+            })
+        }
+    }
+}
+
+/// Returns the closed two-class security target for one privately resolved
+/// sealed target.
+fn sealed_security_target(
+    active: &ActiveDatabaseRevision,
+    target: SealedResolvedTarget<'_>,
+) -> InvocationTarget {
+    match target {
+        SealedResolvedTarget::Application(definition) => {
+            InvocationTarget::new(definition.id(), active.pair())
+        }
+        SealedResolvedTarget::VerifiedStandard {
+            definition,
+            executable,
+        } => {
+            let standard = active
+                .catalogue_hash_context()
+                .standard()
+                .expect("a verified-standard target requires the pinned snapshot");
+            InvocationTarget::verified_standard(
+                definition.id(),
+                active.pair(),
+                standard.revision(),
+                executable.revision().id(),
+            )
+        }
+    }
+}
+
+fn sealed_target_invariant(
+    active: &ActiveDatabaseRevision,
+    rule: &'static str,
+) -> PostgresKernelError {
+    PostgresKernelError::DurableInvariant {
+        relation: "active catalogue",
+        record: active.pair().catalogue().canonical(),
+        rule,
+    }
+}
+
+/// Binds one sealed request's checked arguments to the pinned function.
+///
+/// The protected decision already ran private prebind, so every selector
+/// resolves and every value matches the declared type. This step re-checks
+/// the boundary and constructs the typed arguments the closed engine accepts.
+fn bind_sealed_invoke_arguments(
+    definition: &FunctionDefinition,
+    arguments: &[InvocationArgument],
+) -> Result<Vec<FunctionArgument>, PostgresKernelError> {
+    let mut bound = Vec::with_capacity(arguments.len());
+    for argument in arguments {
+        let parameter = match argument.selector() {
+            InvocationParameterSelector::ParameterId(id) => definition.parameter_by_id(*id),
+            InvocationParameterSelector::Name(name) => definition.parameter_by_name(name),
+            _ => None,
+        };
+        let Some(parameter) = parameter else {
+            return Err(PostgresKernelError::ServerSelect(
+                ServerSelectError::Argument {
+                    parameter: None,
+                    rule: "sealed invocation argument selector must resolve to a pinned parameter",
+                },
+            ));
+        };
+        let value = argument.value().clone().into_value();
+        let argument = FunctionArgument::new(parameter.id(), value).map_err(|_| {
+            PostgresKernelError::ServerSelect(ServerSelectError::Argument {
+                parameter: Some(parameter.id()),
+                rule: "sealed invocation argument must be one non-null typed value",
+            })
+        })?;
+        bound.push(argument);
+    }
+    Ok(bound)
+}
+
+/// Builds the exact sealed Event sequence for one completed parameter echo.
+///
+/// The batch carries `InvocationStarted(0)`, `ValueBatch(1)` with the typed
+/// integer, and `InvocationCompleted(2)` as one contiguous outer record
+/// sequence `1, 2, 3`. A server adapter delivers this batch on the
+/// `RESULT_VALUES` channel and then completes the call.
+fn sealed_echo_events(
+    authenticated_session: &AuthenticatedSession,
+    invocation: InvocationId,
+    value: RuntimeValue,
+) -> Result<InvocationEventBatch, PostgresKernelError> {
+    let started = InvokeEvent::new(
+        invocation,
+        0,
+        InvocationEventBody::Started {
+            visible_principal: Some(authenticated_session.principal()),
+        },
+    )
+    .map_err(PostgresKernelError::InvocationCarrier)?;
+    let values = InvokeEvent::new(
+        invocation,
+        1,
+        InvocationEventBody::value_batch(
+            None,
+            [InvokeValue::new(value.clone()).map_err(PostgresKernelError::InvocationCarrier)?],
+        )
+        .map_err(PostgresKernelError::InvocationCarrier)?,
+    )
+    .map_err(PostgresKernelError::InvocationCarrier)?;
+    let completed = InvokeEvent::new(
+        invocation,
+        2,
+        InvocationEventBody::Completed {
+            duration_nanoseconds: 0,
+        },
+    )
+    .map_err(PostgresKernelError::InvocationCarrier)?;
+    InvocationEventBatch::new(vec![
+        InvocationEventRecord::new(1, started),
+        InvocationEventRecord::new(2, values),
+        InvocationEventRecord::new(3, completed),
+    ])
+    .map_err(PostgresKernelError::SealedInvocation)
+}
+
+/// Appends the allowed `EXECUTE` security evidence and the linked allowed
+/// invocation decision for one protected sealed decision.
+///
+/// The protected decision already allowed the invocation. This step re-runs
+/// the pure authorisation to obtain the immutable decision evidence, appends
+/// it, and links the invocation-audit row to that exact evidence.
+async fn append_allowed_invocation_audit(
+    transaction: &Transaction<'_>,
+    security: &SecuritySnapshot,
+    authenticated_session: &AuthenticatedSession,
+    target: InvocationTarget,
+    invocation: InvocationId,
+) -> Result<(), PostgresKernelError> {
+    let authorisation = match security.authorise_execute(authenticated_session, target) {
+        ExecuteDecision::Allowed(authorisation) => authorisation,
+        ExecuteDecision::Denied(_) => {
+            return Err(PostgresKernelError::DurableInvariant {
+                relation: "active security snapshot",
+                record: target.function().canonical(),
+                rule: "allowed sealed invocation must re-authorise its pinned target",
+            });
+        }
+    };
+    let event_id = append_security_audit_event(
+        transaction,
+        SecurityAuditDecision::execute_allowed(&authorisation),
+    )
+    .await?;
+    append_linked_invocation_audit(transaction, invocation, event_id).await
+}
+
+/// Appends the denied `EXECUTE` evidence and linked denied invocation
+/// decision for one sealed target-level denial.
+///
+/// When the private denial reason cannot be re-derived without disclosing a
+/// protected fact, only the closed unresolved invocation decision is
+/// appended.
+async fn append_sealed_denied_audit(
+    transaction: &Transaction<'_>,
+    security: &SecuritySnapshot,
+    authenticated_session: &AuthenticatedSession,
+    active: &ActiveDatabaseRevision,
+    selector: &InvocationRequestTarget,
+    invocation: InvocationId,
+) -> Result<(), PostgresKernelError> {
+    let Some(target) = resolve_sealed_target(active, selector) else {
+        return append_unresolved_invocation_audit(transaction, authenticated_session, invocation)
+            .await;
+    };
+    let security_target = sealed_security_target(active, target);
+    let reason = match security.authorise_execute(authenticated_session, security_target) {
+        ExecuteDecision::Denied(reason) => reason,
+        ExecuteDecision::Allowed(_) => {
+            // The protected denial came from a private rule that must not
+            // disclose a target fact. Record the closed unresolved denial.
+            return append_unresolved_invocation_audit(
+                transaction,
+                authenticated_session,
+                invocation,
+            )
+            .await;
+        }
+    };
+    let event_id = append_security_audit_event(
+        transaction,
+        SecurityAuditDecision::execute_denied(authenticated_session, security_target, reason),
+    )
+    .await?;
+    append_linked_invocation_audit(transaction, invocation, event_id).await
+}
+
+/// Loads one appended security audit event and links it to the invocation
+/// decision through the closed `EXECUTE` evidence contract.
+async fn append_linked_invocation_audit(
+    transaction: &Transaction<'_>,
+    invocation: InvocationId,
+    event_id: SecurityAuditEventId,
+) -> Result<(), PostgresKernelError> {
+    let events = load_security_audit_events(transaction).await?;
+    let event = events
+        .iter()
+        .find(|event| event.id() == event_id)
+        .ok_or_else(|| PostgresKernelError::DurableInvariant {
+            relation: "_orna_kernel.security_audit_events",
+            record: event_id.canonical(),
+            rule: "appended security audit evidence must recover in the same transaction",
+        })?;
+    append_invocation_audit_event(
+        transaction,
+        InvocationAuditDecision::from_execute_evidence(invocation, event)?,
+    )
+    .await?;
+    Ok(())
+}
+
+/// Appends the closed unresolved denied invocation decision for one sealed
+/// request that never reached a durable target.
+async fn append_unresolved_invocation_audit(
+    transaction: &Transaction<'_>,
+    authenticated_session: &AuthenticatedSession,
+    invocation: InvocationId,
+) -> Result<(), PostgresKernelError> {
+    append_invocation_audit_event(
+        transaction,
+        InvocationAuditDecision::unresolved_denied(invocation, authenticated_session.principal()),
+    )
+    .await?;
+    Ok(())
 }
 
 async fn lock_active_revision(
@@ -2386,7 +2904,6 @@ async fn require_invocation_audit_target(
     Ok(())
 }
 
-#[allow(dead_code)]
 fn encode_invocation_audit_outcome(outcome: SecurityAuditOutcome) -> &'static str {
     match outcome {
         SecurityAuditOutcome::Allowed => "allowed",
