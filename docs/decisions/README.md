@@ -111,3 +111,5 @@ source-of-truth or authority rules.
   [`sys.invoke` Has One Sealed Request Stream](0054-sealed-sys-invoke-signature-event-stream.md)
 * **work ADR 0055:**
   [`orna.std/2` Is an Immutable Executable Source Snapshot](0055-standard-executable-source-units.md)
+* **work ADR 0056:**
+  [`orna invoke` Binds Typed Arguments Through the Sealed Route](0056-orna-invoke-cli.md)
