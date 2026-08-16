@@ -1,0 +1,438 @@
+====================
+client function with expression body
+====================
+
+CREATE CLIENT FUNCTION studio.main()
+RETURNS std.ui.UI
+AS
+    std.ui.window(
+        title   => 'Orna Studio',
+        content => studio.workspace_shell()
+    );
+
+---
+
+(source_file
+  (create_client_function_statement
+    (kw_create)
+    (kw_client)
+    (kw_function)
+    name: (qualified_name
+      (qualified_name
+        (identifier))
+      (dot)
+      (identifier))
+    parameters: (parameter_list
+      (lparen)
+      (rparen))
+    (kw_returns)
+    returns: (return_type_spec
+      (type_spec
+        (qualified_name
+          (qualified_name
+            (qualified_name
+              (identifier))
+            (dot)
+            (identifier))
+          (dot)
+          (identifier))))
+    body: (function_body
+      (kw_as)
+      (expression
+        (logical_expression
+          (comparison_expression
+            (additive_expression
+              (multiplicative_expression
+                (unary_expression
+                  (postfix_expression
+                    (primary_expression
+                      (qualified_name
+                        (qualified_name
+                          (qualified_name
+                            (identifier))
+                          (dot)
+                          (identifier))
+                        (dot)
+                        (identifier)))
+                    (lparen)
+                    (argument_list
+                      (argument
+                        name: (identifier)
+                        (arrow_operator)
+                        value: (expression
+                          (logical_expression
+                            (comparison_expression
+                              (additive_expression
+                                (multiplicative_expression
+                                  (unary_expression
+                                    (postfix_expression
+                                      (primary_expression
+                                        (literal
+                                          (string_literal)))))))))))
+                      (comma)
+                      (argument
+                        name: (identifier)
+                        (arrow_operator)
+                        value: (expression
+                          (logical_expression
+                            (comparison_expression
+                              (additive_expression
+                                (multiplicative_expression
+                                  (unary_expression
+                                    (postfix_expression
+                                      (primary_expression
+                                        (qualified_name
+                                          (qualified_name
+                                            (identifier))
+                                          (dot)
+                                          (identifier)))
+                                      (lparen)
+                                      (rparen))))))))))
+                    (rparen)))))))))
+    (semicolon)))
+
+====================
+client function with procedural body
+====================
+
+CREATE CLIENT FUNCTION tasks.overdue_window()
+RETURNS std.ui.UI
+IS
+    STATE filter TEXT
+        SCOPE USER
+        DEFAULT '';
+
+    LET rows std.data.Resource<TABLE(
+        task REF tasks.task,
+        title TEXT
+    )> := std.data.resource(tasks.overdue);
+BEGIN
+    RETURN std.ui.window(
+        title => 'Overdue Tasks',
+        content => std.ui.column(
+            children => [
+                std.ui.text_input(
+                    value       => filter,
+                    placeholder => 'Filter tasks',
+                    on_change   => filter.SET
+                )
+            ]
+        )
+    );
+END;
+
+---
+
+(source_file
+  (create_client_function_statement
+    (kw_create)
+    (kw_client)
+    (kw_function)
+    name: (qualified_name
+      (qualified_name
+        (identifier))
+      (dot)
+      (identifier))
+    parameters: (parameter_list
+      (lparen)
+      (rparen))
+    (kw_returns)
+    returns: (return_type_spec
+      (type_spec
+        (qualified_name
+          (qualified_name
+            (qualified_name
+              (identifier))
+            (dot)
+            (identifier))
+          (dot)
+          (identifier))))
+    body: (function_body
+      (procedural_body
+        (kw_is)
+        (state_declaration
+          (kw_state)
+          name: (identifier)
+          type: (type_spec
+            (scalar_type
+              (kw_text)))
+          (kw_scope)
+          (kw_user)
+          (kw_default)
+          default: (expression
+            (logical_expression
+              (comparison_expression
+                (additive_expression
+                  (multiplicative_expression
+                    (unary_expression
+                      (postfix_expression
+                        (primary_expression
+                          (literal
+                            (string_literal))))))))))
+          (semicolon))
+        (let_declaration
+          (kw_let)
+          name: (kw_rows)
+          type: (type_spec
+            (qualified_name
+              (qualified_name
+                (qualified_name
+                  (identifier))
+                (dot)
+                (identifier))
+              (dot)
+              (identifier))
+            (lt)
+            (type_spec
+              (kw_table)
+              (lparen)
+              (table_column_definition
+                name: (identifier)
+                type: (type_spec
+                  (kw_ref)
+                  (type_spec
+                    (qualified_name
+                      (qualified_name
+                        (identifier))
+                      (dot)
+                      (identifier)))))
+              (comma)
+              (table_column_definition
+                name: (identifier)
+                type: (type_spec
+                  (scalar_type
+                    (kw_text))))
+              (rparen))
+            (gt))
+          (assignment_operator)
+          value: (expression
+            (logical_expression
+              (comparison_expression
+                (additive_expression
+                  (multiplicative_expression
+                    (unary_expression
+                      (postfix_expression
+                        (primary_expression
+                          (qualified_name
+                            (qualified_name
+                              (qualified_name
+                                (identifier))
+                              (dot)
+                              (identifier))
+                            (dot)
+                            (identifier)))
+                        (lparen)
+                        (argument_list
+                          (argument
+                            value: (expression
+                              (logical_expression
+                                (comparison_expression
+                                  (additive_expression
+                                    (multiplicative_expression
+                                      (unary_expression
+                                        (postfix_expression
+                                          (primary_expression
+                                            (qualified_name
+                                              (qualified_name
+                                                (identifier))
+                                              (dot)
+                                              (identifier))))))))))))
+                        (rparen))))))))
+          (semicolon))
+        (kw_begin)
+        (procedural_statement
+          (return_statement
+            (kw_return)
+            (expression
+              (logical_expression
+                (comparison_expression
+                  (additive_expression
+                    (multiplicative_expression
+                      (unary_expression
+                        (postfix_expression
+                          (primary_expression
+                            (qualified_name
+                              (qualified_name
+                                (qualified_name
+                                  (identifier))
+                                (dot)
+                                (identifier))
+                              (dot)
+                              (identifier)))
+                          (lparen)
+                          (argument_list
+                            (argument
+                              name: (identifier)
+                              (arrow_operator)
+                              value: (expression
+                                (logical_expression
+                                  (comparison_expression
+                                    (additive_expression
+                                      (multiplicative_expression
+                                        (unary_expression
+                                          (postfix_expression
+                                            (primary_expression
+                                              (literal
+                                                (string_literal)))))))))))
+                            (comma)
+                            (argument
+                              name: (identifier)
+                              (arrow_operator)
+                              value: (expression
+                                (logical_expression
+                                  (comparison_expression
+                                    (additive_expression
+                                      (multiplicative_expression
+                                        (unary_expression
+                                          (postfix_expression
+                                            (primary_expression
+                                              (qualified_name
+                                                (qualified_name
+                                                  (qualified_name
+                                                    (identifier))
+                                                  (dot)
+                                                  (identifier))
+                                                (dot)
+                                                (identifier)))
+                                            (lparen)
+                                            (argument_list
+                                              (argument
+                                                name: (identifier)
+                                                (arrow_operator)
+                                                value: (expression
+                                                  (logical_expression
+                                                    (comparison_expression
+                                                      (additive_expression
+                                                        (multiplicative_expression
+                                                          (unary_expression
+                                                            (postfix_expression
+                                                              (primary_expression
+                                                                (list_literal
+                                                                  (lbracket)
+                                                                  (expression
+                                                                    (logical_expression
+                                                                      (comparison_expression
+                                                                        (additive_expression
+                                                                          (multiplicative_expression
+                                                                            (unary_expression
+                                                                              (postfix_expression
+                                                                                (primary_expression
+                                                                                  (qualified_name
+                                                                                    (qualified_name
+                                                                                      (qualified_name
+                                                                                        (identifier))
+                                                                                      (dot)
+                                                                                      (identifier))
+                                                                                    (dot)
+                                                                                    (identifier)))
+                                                                                (lparen)
+                                                                                (argument_list
+                                                                                  (argument
+                                                                                    name: (kw_value)
+                                                                                    (arrow_operator)
+                                                                                    value: (expression
+                                                                                      (logical_expression
+                                                                                        (comparison_expression
+                                                                                          (additive_expression
+                                                                                            (multiplicative_expression
+                                                                                              (unary_expression
+                                                                                                (postfix_expression
+                                                                                                  (primary_expression
+                                                                                                    (qualified_name
+                                                                                                      (identifier)))))))))))
+                                                                                  (comma)
+                                                                                  (argument
+                                                                                    name: (identifier)
+                                                                                    (arrow_operator)
+                                                                                    value: (expression
+                                                                                      (logical_expression
+                                                                                        (comparison_expression
+                                                                                          (additive_expression
+                                                                                            (multiplicative_expression
+                                                                                              (unary_expression
+                                                                                                (postfix_expression
+                                                                                                  (primary_expression
+                                                                                                    (literal
+                                                                                                      (string_literal)))))))))))
+                                                                                  (comma)
+                                                                                  (argument
+                                                                                    name: (identifier)
+                                                                                    (arrow_operator)
+                                                                                    value: (expression
+                                                                                      (logical_expression
+                                                                                        (comparison_expression
+                                                                                          (additive_expression
+                                                                                            (multiplicative_expression
+                                                                                              (unary_expression
+                                                                                                (postfix_expression
+                                                                                                  (primary_expression
+                                                                                                    (qualified_name
+                                                                                                      (qualified_name
+                                                                                                        (identifier))
+                                                                                                      (dot)
+                                                                                                      (kw_set))))))))))))
+                                                                                (rparen))))))))
+                                                                  (rbracket))))))))))))
+                                            (rparen))))))))))
+                          (rparen))))))))
+            (semicolon)))
+        (kw_end)))
+    (semicolon)))
+
+====================
+external client function
+====================
+
+CREATE EXTERNAL CLIENT FUNCTION std.rpc.send (
+    p_message TEXT
+)
+RETURNS VOID
+RUNTIME CONTRACT 'orna.rpc.send@1'
+REQUIRES CAPABILITY std.net.listen;
+
+---
+
+(source_file
+  (create_external_client_function_statement
+    (kw_create)
+    (kw_external)
+    (kw_client)
+    (kw_function)
+    name: (qualified_name
+      (qualified_name
+        (qualified_name
+          (identifier))
+        (dot)
+        (identifier))
+      (dot)
+      (identifier))
+    parameters: (parameter_list
+      (lparen)
+      (parameter_definition
+        name: (identifier)
+        type: (type_spec
+          (scalar_type
+            (kw_text))))
+      (rparen))
+    (kw_returns)
+    returns: (return_type_spec
+      (type_spec
+        (scalar_type
+          (kw_void))))
+    (kw_runtime)
+    (kw_contract)
+    (string_literal)
+    (capability_clause
+      (kw_requires)
+      (kw_capability)
+      (capability_spec
+        (qualified_name
+          (qualified_name
+            (qualified_name
+              (identifier))
+            (dot)
+            (identifier))
+          (dot)
+          (identifier))))
+    (semicolon)))
+
