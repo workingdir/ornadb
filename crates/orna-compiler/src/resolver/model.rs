@@ -5,7 +5,7 @@ use std::{collections::HashMap, error::Error, fmt, hash::Hash};
 use orna_artifact::server_parameter_echo::ServerParameterEchoError;
 use orna_core::{
     CatalogueRevisionId, FieldId, FunctionId, FunctionRevisionId, ParameterId, SchemaId,
-    StandardLibraryRevisionId, TypeBindingId, TypeId,
+    SourceUnitId, StandardLibraryRevisionId, TypeBindingId, TypeId,
     canonical_hash::CanonicalHashError,
     catalogue::{
         CatalogueSnapshot, FunctionDomain, FunctionSecurity, FunctionTransaction,
@@ -13,8 +13,9 @@ use orna_core::{
         ValueTypeKind, ValueTypeMutability, ValueTypePersistence,
     },
     revision::{
-        DefinitionReference, DefinitionReferenceKind, ExecutableArtifact, RevisionInvariantError,
-        Sha256Digest, SourceOrigin, VerifiedStandardLibrarySnapshot,
+        DefinitionReference, DefinitionReferenceKind, ExecutableArtifact,
+        FunctionSemanticHashVersion, RevisionInvariantError, Sha256Digest, SourceOrigin,
+        VerifiedStandardLibrarySnapshot,
     },
     types::{ResolvedType, StandardScalar},
 };
@@ -1496,6 +1497,7 @@ pub struct CheckedStandardLibrary {
     pub(super) schemas: Vec<CheckedStandardSchema>,
     pub(super) value_types: Vec<CheckedStandardValueType>,
     pub(super) type_bindings: Vec<CheckedStandardTypeBinding>,
+    pub(super) checked_executable: Option<CheckedStandardExecutable>,
 }
 
 impl CheckedStandardLibrary {
@@ -1518,6 +1520,13 @@ impl CheckedStandardLibrary {
     pub fn type_bindings(&self) -> &[CheckedStandardTypeBinding] {
         &self.type_bindings
     }
+
+    /// Returns the checked V2 executable facts for the one standard function.
+    ///
+    /// Version 1 snapshots carry no executable and return `None`.
+    pub fn checked_executable(&self) -> Option<&CheckedStandardExecutable> {
+        self.checked_executable.as_ref()
+    }
 }
 
 /// The fixed ADR 0055 `std.invoke` schema identity: 15 zero bytes then `0x03`.
@@ -1534,6 +1543,15 @@ pub const STD_INVOKE_ECHO_FUNCTION_REVISION_ID: FunctionRevisionId =
     FunctionRevisionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10]);
 /// The `std.invoke.echo` revision number: version 1 (ADR 0055).
 pub const STD_INVOKE_ECHO_REVISION_NUMBER: u64 = 1;
+/// The fixed ADR 0055 `std/types.orna` source-unit identity: `...02`.
+pub const STD_TYPES_SOURCE_UNIT_ID: SourceUnitId =
+    SourceUnitId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02]);
+/// The fixed ADR 0055 `std/invoke.orna` source-unit identity: `...03`.
+pub const STD_INVOKE_SOURCE_UNIT_ID: SourceUnitId =
+    SourceUnitId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x03]);
+/// The fixed ADR 0055 INTEGER value-type identity: `...02`.
+pub const STD_INTEGER_TYPE_ID: TypeId =
+    TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02]);
 
 /// The checked executable facts for the one accepted standard parameter-echo
 /// function (`std.invoke.echo`, ADR 0055).
@@ -1582,6 +1600,113 @@ impl CheckedStandardParameterEcho {
     /// Returns the ordered durable reference sequence for this executable.
     pub fn references(&self) -> &[DefinitionReference] {
         &self.references
+    }
+}
+
+/// The checked executable facts for the one V2 standard executable
+/// (`std.invoke.echo`, ADR 0055), reconciled against both retained source
+/// units and the verified snapshot executable evidence.
+///
+/// The model carries the fixed function, parameter, and version-1 revision
+/// identities, the positive revision number, the checked declaration origin
+/// and content hash, the version-2 semantic digest, the language version, the
+/// complete 44-byte `orna.server-parameter-echo` artifact, the three ordered
+/// durable references, and the three checked origins (the `std.invoke`
+/// schema, the function declaration, and the `p_value` parameter declaration)
+/// on the retained `std/invoke.orna` unit.
+///
+/// Step 10 reconstructs the durable `StandardExecutable` record from these
+/// facts: `FunctionRevisionRecord::new(function_id, revision_id,
+/// revision_number, declaration_origin, declaration_content_hash,
+/// semantic_hash, language_version, artifact).with_semantic_hash_version(
+/// semantic_hash_version)` with the exact reference sequence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CheckedStandardExecutable {
+    pub(super) function_id: FunctionId,
+    pub(super) parameter_id: ParameterId,
+    pub(super) revision_id: FunctionRevisionId,
+    pub(super) revision_number: u64,
+    pub(super) declaration_origin: SourceOrigin,
+    pub(super) declaration_content_hash: Sha256Digest,
+    pub(super) semantic_hash: Sha256Digest,
+    pub(super) semantic_hash_version: FunctionSemanticHashVersion,
+    pub(super) language_version: String,
+    pub(super) artifact: ExecutableArtifact,
+    pub(super) references: Vec<DefinitionReference>,
+    pub(super) schema_origin: SourceOrigin,
+    pub(super) function_origin: SourceOrigin,
+    pub(super) parameter_origin: SourceOrigin,
+}
+
+impl CheckedStandardExecutable {
+    /// Returns the fixed `std.invoke.echo` function identity.
+    pub const fn function_id(&self) -> FunctionId {
+        self.function_id
+    }
+
+    /// Returns the fixed `std.invoke.echo.p_value` parameter identity.
+    pub const fn parameter_id(&self) -> ParameterId {
+        self.parameter_id
+    }
+
+    /// Returns the fixed version-1 function-revision identity.
+    pub const fn revision_id(&self) -> FunctionRevisionId {
+        self.revision_id
+    }
+
+    /// Returns the positive per-function revision number.
+    pub const fn revision_number(&self) -> u64 {
+        self.revision_number
+    }
+
+    /// Returns the checked declaration range in the retained invoke unit.
+    pub const fn declaration_origin(&self) -> SourceOrigin {
+        self.declaration_origin
+    }
+
+    /// Returns the exact declaration content hash.
+    pub const fn declaration_content_hash(&self) -> Sha256Digest {
+        self.declaration_content_hash
+    }
+
+    /// Returns the version-2 semantic digest.
+    pub const fn semantic_hash(&self) -> Sha256Digest {
+        self.semantic_hash
+    }
+
+    /// Returns the durable semantic-hash contract version.
+    pub const fn semantic_hash_version(&self) -> FunctionSemanticHashVersion {
+        self.semantic_hash_version
+    }
+
+    /// Returns the nonempty language version label.
+    pub fn language_version(&self) -> &str {
+        &self.language_version
+    }
+
+    /// Returns the complete server parameter-echo artifact.
+    pub fn artifact(&self) -> &ExecutableArtifact {
+        &self.artifact
+    }
+
+    /// Returns the ordered durable reference sequence for this executable.
+    pub fn references(&self) -> &[DefinitionReference] {
+        &self.references
+    }
+
+    /// Returns the checked `CREATE SCHEMA std.invoke;` origin.
+    pub const fn schema_origin(&self) -> SourceOrigin {
+        self.schema_origin
+    }
+
+    /// Returns the checked `CREATE SERVER FUNCTION` declaration origin.
+    pub const fn function_origin(&self) -> SourceOrigin {
+        self.function_origin
+    }
+
+    /// Returns the checked `p_value INTEGER` parameter declaration origin.
+    pub const fn parameter_origin(&self) -> SourceOrigin {
+        self.parameter_origin
     }
 }
 
@@ -1679,14 +1804,25 @@ pub enum StandardLibraryCheckError {
     MissingFunctionOrigin,
     /// The origins do not contain the fixed parameter declaration origin.
     MissingParameterOrigin,
+    /// The origins do not contain the fixed `std.invoke` schema declaration origin.
+    MissingSchemaOrigin,
     /// The function and parameter origins do not belong to the same source unit.
     OriginSourceUnitMismatch,
+    /// The verified executable standard snapshot does not carry exactly one
+    /// executable record.
+    ExecutableCount {
+        /// The retained executable count.
+        actual: usize,
+    },
+    /// A stored executable fact does not agree with the checked source facts.
+    ExecutableMismatch,
     /// The server parameter-echo artifact could not be encoded.
     Artifact {
         /// The exact artifact encoder failure.
         source: ServerParameterEchoError,
     },
-    /// The artifact payload could not be hashed.
+    /// A canonical digest (artifact payload, declaration content, or semantic
+    /// hash) could not be computed.
     Digest {
         /// The exact canonical-hash failure.
         source: CanonicalHashError,
@@ -1787,8 +1923,18 @@ impl fmt::Display for StandardLibraryCheckError {
             Self::MissingParameterOrigin => formatter.write_str(
                 "the origins do not contain the fixed std.invoke.echo.p_value parameter origin",
             ),
+            Self::MissingSchemaOrigin => formatter.write_str(
+                "the origins do not contain the fixed std.invoke schema declaration origin",
+            ),
             Self::OriginSourceUnitMismatch => formatter.write_str(
                 "the standard function and parameter origins must belong to the same source unit",
+            ),
+            Self::ExecutableCount { actual } => write!(
+                formatter,
+                "the verified executable standard library has {actual} executable records, expected exactly one"
+            ),
+            Self::ExecutableMismatch => formatter.write_str(
+                "the verified executable standard library does not match its stored executable evidence",
             ),
             Self::Artifact { source } => write!(
                 formatter,
@@ -1796,7 +1942,7 @@ impl fmt::Display for StandardLibraryCheckError {
             ),
             Self::Digest { source } => write!(
                 formatter,
-                "the standard parameter-echo artifact payload could not be hashed: {source}"
+                "a canonical digest for the standard executable could not be computed: {source}"
             ),
             Self::Revision { source } => write!(
                 formatter,
