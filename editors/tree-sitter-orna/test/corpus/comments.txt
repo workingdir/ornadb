@@ -1,0 +1,47 @@
+====================
+line and block comments
+====================
+
+-- A leading line comment
+CREATE SCHEMA demo; -- trailing comment
+/* A block
+   comment */
+CREATE TYPE demo.item AS OBJECT (
+    name TEXT NOT NULL /* inline */ 
+);
+
+---
+
+(source_file
+  (comment)
+  (create_schema_statement
+    (kw_create)
+    (kw_schema)
+    name: (qualified_name
+      (identifier))
+    (semicolon))
+  (comment)
+  (comment)
+  (create_type_statement
+    (create_object_type_statement
+      (kw_create)
+      (kw_type)
+      name: (qualified_name
+        (qualified_name
+          (identifier))
+        (dot)
+        (identifier))
+      (kw_as)
+      (kw_object)
+      (lparen)
+      (field_definition
+        name: (identifier)
+        type: (type_spec
+          (scalar_type
+            (kw_text)))
+        (kw_not)
+        (kw_null))
+      (comment)
+      (rparen)
+      (semicolon))))
+
