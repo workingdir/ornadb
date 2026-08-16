@@ -1376,9 +1376,7 @@ async fn inspect_inspect_storage(database: &TestDatabase) -> TestResult<()> {
                 .and_then(|error| error.as_db_error())
                 .and_then(|error| error.constraint())
                 == Some("inspect_snapshots_invocation_fk"),
-            format!(
-                "unknown invocation failed for the wrong reason: {unknown_invocation:?}"
-            ),
+            format!("unknown invocation failed for the wrong reason: {unknown_invocation:?}"),
         )?;
 
         client
@@ -1456,9 +1454,7 @@ async fn inspect_inspect_storage(database: &TestDatabase) -> TestResult<()> {
                 .and_then(|error| error.as_db_error())
                 .and_then(|error| error.constraint())
                 == Some("inspect_trace_events_sequence_check"),
-            format!(
-                "negative trace sequence failed for the wrong reason: {negative_sequence:?}"
-            ),
+            format!("negative trace sequence failed for the wrong reason: {negative_sequence:?}"),
         )?;
 
         let short_observer = client
@@ -1479,9 +1475,7 @@ async fn inspect_inspect_storage(database: &TestDatabase) -> TestResult<()> {
                 .and_then(|error| error.as_db_error())
                 .and_then(|error| error.constraint())
                 == Some("inspect_trace_events_identity_lengths"),
-            format!(
-                "short observer identity failed for the wrong reason: {short_observer:?}"
-            ),
+            format!("short observer identity failed for the wrong reason: {short_observer:?}"),
         )?;
 
         let unknown_trace_invocation = client
