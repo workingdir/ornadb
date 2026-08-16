@@ -171,6 +171,12 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/0025_user_state_cells.sql"),
         data_step: None,
     },
+    Migration {
+        version: 26,
+        name: "user state audit decisions",
+        sql: include_str!("../../migrations/0026_user_state_audit.sql"),
+        data_step: None,
+    },
 ];
 const MIGRATION_DATA_STEP_SEPARATOR: &[u8] = b"\0orna.kernel.migration-step\0";
 const CANONICAL_HASH_V1_EMPTY_SEED_STEP: &[u8] = b"canonical-hash-v1-empty-seed/v1";
@@ -849,7 +855,7 @@ mod tests {
             validated_migration_registry()
                 .expect("registry is valid")
                 .len(),
-            25
+            26
         );
         assert_eq!(MIGRATIONS[0].version, 1);
         assert_eq!(MIGRATIONS[1].version, 2);
