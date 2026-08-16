@@ -2139,6 +2139,7 @@ fn echo_invoke_request(value: i32, output: Option<String>) -> TestResult<Install
         None,
         false,
         false,
+        None,
     ))
 }
 
@@ -2150,7 +2151,7 @@ fn installed_invoke_request(
     no_progress: bool,
     explain: bool,
 ) -> InstalledInvokeRequest {
-    InstalledInvokeRequest::new(target, arguments, None, None, no_progress, explain)
+    InstalledInvokeRequest::new(target, arguments, None, None, no_progress, explain, None)
 }
 
 /// Runs one installed `orna invoke` command through the exact host flow
