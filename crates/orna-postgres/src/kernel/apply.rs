@@ -19,8 +19,9 @@ use orna_core::{
         ActiveDatabaseRevision, ActiveDatabaseRevisionInput, ActiveRevisionContent,
         CatalogueHashContext, DefinitionIdentity, DefinitionOrigin, DefinitionReference,
         DefinitionReferenceKind, DefinitionReferenceTarget, DeployableRevision,
-        FunctionRevisionRecord, RecordValueFieldDescriptorClass, RevisionPair, Sha256Digest,
-        SourceOrigin, VerifiedStandardLibrarySnapshot, validate_persistable_catalogue,
+        ExecutableArtifactKind, FunctionRevisionRecord, RecordValueFieldDescriptorClass,
+        RevisionPair, Sha256Digest, SourceOrigin, StandardExecutable, StandardLibraryDigestVersion,
+        VerifiedStandardLibrarySnapshot, validate_persistable_catalogue,
     },
     types::{ResolvedType, StandardScalar, TypeDescriptor},
 };
@@ -314,6 +315,7 @@ async fn apply_materialized_candidate(
         persist_standard_library(transaction, standard).await?;
     }
     persist_candidate(transaction, candidate, encoder).await?;
+    persist_target_authorities(transaction, candidate, standard).await?;
     transaction
         .batch_execute("SET CONSTRAINTS ALL IMMEDIATE")
         .await
@@ -425,6 +427,27 @@ async fn lock_active_pair(
     Ok(RevisionPair::new(source, catalogue))
 }
 
+/// One durable application identity that would collide with the executable
+/// standard snapshot. The compiler identity vocabulary ends at the catalogue
+/// type families; the kernel scan extends the disjointness check to the V2
+/// executable function, parameter, and function-revision identities.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StandardExecutableIdentity {
+    /// A standard catalogue function identity.
+    Function(FunctionId),
+    /// A pinned standard function-revision identity.
+    FunctionRevision(FunctionRevisionId),
+}
+
+/// One durable application parameter identity, scoped by its owning function.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct StandardExecutableParameter {
+    /// The owning standard catalogue function identity.
+    function: FunctionId,
+    /// The parameter identity owned by that function.
+    parameter: ParameterId,
+}
+
 #[derive(Default)]
 struct ReservedIdentityLists {
     standard_library_revisions: Vec<(StandardUpgradeIdentity, Vec<u8>)>,
@@ -435,6 +458,9 @@ struct ReservedIdentityLists {
     schemas: Vec<(StandardUpgradeIdentity, Vec<u8>)>,
     types: Vec<(StandardUpgradeIdentity, Vec<u8>)>,
     type_bindings: Vec<(StandardUpgradeIdentity, Vec<u8>)>,
+    functions: Vec<(StandardExecutableIdentity, Vec<u8>)>,
+    function_revisions: Vec<(StandardExecutableIdentity, Vec<u8>)>,
+    parameters: Vec<StandardExecutableParameter>,
 }
 
 impl ReservedIdentityLists {
@@ -504,6 +530,24 @@ fn upgrade_reserved_identities(
             bytes(binding.id()),
         ));
     }
+    for function in catalogue.functions() {
+        identities.functions.push((
+            StandardExecutableIdentity::Function(function.id()),
+            bytes(function.id()),
+        ));
+        for parameter in function.parameters() {
+            identities.parameters.push(StandardExecutableParameter {
+                function: function.id(),
+                parameter: parameter.id(),
+            });
+        }
+    }
+    for executable in snapshot.executables() {
+        identities.function_revisions.push((
+            StandardExecutableIdentity::FunctionRevision(executable.revision().id()),
+            bytes(executable.revision().id()),
+        ));
+    }
     identities
 }
 
@@ -530,6 +574,7 @@ fn active_visible_reserved_identities(active: &ActiveDatabaseRevision) -> Reserv
         ));
     }
     append_catalogue_reserved_identities(catalogue, &mut identities);
+    append_application_executable_reserved_identities(active, &mut identities);
     if let Some(standard) = active.catalogue_hash_context().standard() {
         let source = standard.source();
         let catalogue = standard.catalogue();
@@ -556,8 +601,63 @@ fn active_visible_reserved_identities(active: &ActiveDatabaseRevision) -> Reserv
             ));
         }
         append_catalogue_reserved_identities(catalogue, &mut identities);
+        append_standard_executable_reserved_identities(standard, &mut identities);
     }
     identities
+}
+
+fn append_application_executable_reserved_identities(
+    active: &ActiveDatabaseRevision,
+    identities: &mut ReservedIdentityLists,
+) {
+    for function in active.catalogue().functions() {
+        identities.functions.push((
+            StandardExecutableIdentity::Function(function.id()),
+            bytes(function.id()),
+        ));
+        for parameter in function.parameters() {
+            identities.parameters.push(StandardExecutableParameter {
+                function: function.id(),
+                parameter: parameter.id(),
+            });
+        }
+    }
+    for revision in active.function_revisions() {
+        identities.function_revisions.push((
+            StandardExecutableIdentity::FunctionRevision(revision.id()),
+            bytes(revision.id()),
+        ));
+    }
+    for revision in active.historical_function_revisions() {
+        identities.function_revisions.push((
+            StandardExecutableIdentity::FunctionRevision(revision.id()),
+            bytes(revision.id()),
+        ));
+    }
+}
+
+fn append_standard_executable_reserved_identities(
+    standard: &VerifiedStandardLibrarySnapshot,
+    identities: &mut ReservedIdentityLists,
+) {
+    for function in standard.catalogue().functions() {
+        identities.functions.push((
+            StandardExecutableIdentity::Function(function.id()),
+            bytes(function.id()),
+        ));
+        for parameter in function.parameters() {
+            identities.parameters.push(StandardExecutableParameter {
+                function: function.id(),
+                parameter: parameter.id(),
+            });
+        }
+    }
+    for executable in standard.executables() {
+        identities.function_revisions.push((
+            StandardExecutableIdentity::FunctionRevision(executable.revision().id()),
+            bytes(executable.revision().id()),
+        ));
+    }
 }
 
 fn append_catalogue_reserved_identities(
@@ -683,7 +783,206 @@ async fn scan_reserved_standard_identities(
             return Err(PostgresKernelError::ReservedStandardIdentity { identity: reserved });
         }
     }
+
+    if let Some(identity) =
+        first_active_standard_executable_identity(&active.functions, &upgrade.functions)
+    {
+        return Err(standard_executable_reserved(identity));
+    }
+    let requested = upgrade
+        .functions
+        .iter()
+        .map(|(_, bytes)| bytes.clone())
+        .collect::<Vec<_>>();
+    if !requested.is_empty() {
+        let excluded = active
+            .functions
+            .iter()
+            .map(|(_, bytes)| bytes.clone())
+            .collect::<Vec<_>>();
+        let rows = transaction
+            .query(
+                "SELECT function_id AS identity FROM _orna_kernel.catalogue_functions
+                 WHERE function_id = ANY($1) AND NOT (function_id = ANY($2))
+                 ORDER BY function_id LIMIT 1",
+                &[&requested, &excluded],
+            )
+            .await
+            .map_err(PostgresKernelError::Database)?;
+        if let Some(row) = rows.first() {
+            let identity: Vec<u8> = row
+                .try_get("identity")
+                .map_err(PostgresKernelError::Database)?;
+            let Some(reserved) =
+                first_inactive_standard_executable_identity(&upgrade.functions, &[identity])
+            else {
+                return Err(invariant(
+                    "reserved standard function identity query must return one requested identity",
+                ));
+            };
+            return Err(standard_executable_reserved(reserved));
+        }
+    }
+    for function in standard.catalogue().functions() {
+        let name = function.name().parts().to_vec();
+        let rows = transaction
+            .query(
+                "SELECT function_id AS identity FROM _orna_kernel.catalogue_functions
+                 WHERE name_parts = $1 ORDER BY function_id LIMIT 1",
+                &[&name],
+            )
+            .await
+            .map_err(PostgresKernelError::Database)?;
+        if !rows.is_empty() {
+            return Err(standard_executable_name_reserved(function.name()));
+        }
+    }
+
+    if let Some(identity) = first_active_standard_executable_identity(
+        &active.function_revisions,
+        &upgrade.function_revisions,
+    ) {
+        return Err(standard_executable_reserved(identity));
+    }
+    let requested = upgrade
+        .function_revisions
+        .iter()
+        .map(|(_, bytes)| bytes.clone())
+        .collect::<Vec<_>>();
+    if !requested.is_empty() {
+        let excluded = active
+            .function_revisions
+            .iter()
+            .map(|(_, bytes)| bytes.clone())
+            .collect::<Vec<_>>();
+        let rows = transaction
+            .query(
+                "SELECT id AS identity FROM _orna_kernel.function_revisions
+                 WHERE id = ANY($1) AND NOT (id = ANY($2))
+                 ORDER BY id LIMIT 1",
+                &[&requested, &excluded],
+            )
+            .await
+            .map_err(PostgresKernelError::Database)?;
+        if let Some(row) = rows.first() {
+            let identity: Vec<u8> = row
+                .try_get("identity")
+                .map_err(PostgresKernelError::Database)?;
+            let Some(reserved) = first_inactive_standard_executable_identity(
+                &upgrade.function_revisions,
+                &[identity],
+            ) else {
+                return Err(invariant(
+                    "reserved standard function revision query must return one requested identity",
+                ));
+            };
+            return Err(standard_executable_reserved(reserved));
+        }
+    }
+
+    if let Some(parameter) =
+        first_active_standard_parameter(&active.parameters, &upgrade.parameters)
+    {
+        return Err(standard_executable_parameter_reserved(parameter));
+    }
+    let parameter_functions = upgrade
+        .parameters
+        .iter()
+        .map(|parameter| bytes(parameter.function))
+        .collect::<Vec<_>>();
+    let parameter_ids = upgrade
+        .parameters
+        .iter()
+        .map(|parameter| bytes(parameter.parameter))
+        .collect::<Vec<_>>();
+    if !parameter_functions.is_empty() {
+        let rows = transaction
+            .query(
+                "SELECT 1 FROM _orna_kernel.catalogue_function_parameters AS parameter
+                 JOIN unnest($1::bytea[], $2::bytea[])
+                   AS wanted(function_id, parameter_id)
+                   ON parameter.function_id = wanted.function_id
+                  AND parameter.parameter_id = wanted.parameter_id
+                 LIMIT 1",
+                &[&parameter_functions, &parameter_ids],
+            )
+            .await
+            .map_err(PostgresKernelError::Database)?;
+        if !rows.is_empty() {
+            return Err(standard_executable_parameter_reserved(
+                upgrade.parameters[0],
+            ));
+        }
+    }
     Ok(())
+}
+
+fn standard_executable_reserved(identity: StandardExecutableIdentity) -> PostgresKernelError {
+    let (relation, rule) = match identity {
+        StandardExecutableIdentity::Function(_) => (
+            "_orna_kernel.catalogue_functions",
+            "application catalogue functions must not reuse a standard executable function identity",
+        ),
+        StandardExecutableIdentity::FunctionRevision(_) => (
+            "_orna_kernel.function_revisions",
+            "application function revisions must not reuse a standard executable revision identity",
+        ),
+    };
+    PostgresKernelError::DurableInvariant {
+        relation,
+        record: format!("{identity:?}"),
+        rule,
+    }
+}
+
+fn standard_executable_name_reserved(name: &QualifiedSemanticName) -> PostgresKernelError {
+    PostgresKernelError::DurableInvariant {
+        relation: "_orna_kernel.catalogue_functions",
+        record: name.parts().join("."),
+        rule: "application catalogue functions must not reuse a standard executable function name",
+    }
+}
+
+fn standard_executable_parameter_reserved(
+    parameter: StandardExecutableParameter,
+) -> PostgresKernelError {
+    PostgresKernelError::DurableInvariant {
+        relation: "_orna_kernel.catalogue_function_parameters",
+        record: format!("{:?}", parameter.parameter),
+        rule: "application catalogue parameters must not reuse a standard executable parameter identity within its owning function",
+    }
+}
+
+fn first_active_standard_executable_identity(
+    active: &[(StandardExecutableIdentity, Vec<u8>)],
+    upgrade: &[(StandardExecutableIdentity, Vec<u8>)],
+) -> Option<StandardExecutableIdentity> {
+    active
+        .iter()
+        .find(|(_, bytes)| upgrade.iter().any(|(_, wanted)| wanted == bytes))
+        .map(|(identity, _)| *identity)
+}
+
+fn first_inactive_standard_executable_identity(
+    upgrade: &[(StandardExecutableIdentity, Vec<u8>)],
+    inactive_raw_order: &[Vec<u8>],
+) -> Option<StandardExecutableIdentity> {
+    inactive_raw_order.iter().find_map(|identity| {
+        upgrade
+            .iter()
+            .find(|(_, wanted)| wanted == identity)
+            .map(|(reserved, _)| *reserved)
+    })
+}
+
+fn first_active_standard_parameter(
+    active: &[StandardExecutableParameter],
+    upgrade: &[StandardExecutableParameter],
+) -> Option<StandardExecutableParameter> {
+    active
+        .iter()
+        .find(|parameter| upgrade.contains(parameter))
+        .copied()
 }
 
 fn first_active_reserved_identity(
@@ -1217,6 +1516,437 @@ async fn persist_standard_library(
             )
             .await
             .map_err(PostgresKernelError::Database)?;
+    }
+    validate_standard_executable_facts(
+        standard.digest_version(),
+        standard.catalogue(),
+        standard.executables(),
+    )?;
+    if standard.digest_version() == StandardLibraryDigestVersion::Version2 {
+        persist_standard_executable_facts(transaction, standard).await?;
+    }
+    Ok(())
+}
+
+/// Fail-closed checks for the executable facts of one verified standard
+/// snapshot. A version-1 snapshot must carry no executable; a version-2
+/// snapshot must carry exactly one executable whose catalogue function,
+/// current revision, artifact domain, and reference evidence agree.
+fn validate_standard_executable_facts(
+    digest_version: StandardLibraryDigestVersion,
+    catalogue: &CatalogueSnapshot,
+    executables: &[StandardExecutable],
+) -> Result<(), PostgresKernelError> {
+    match digest_version {
+        StandardLibraryDigestVersion::Version1 => {
+            if !executables.is_empty() {
+                return Err(invariant(
+                    "version-one standard library snapshot must not carry executable records",
+                ));
+            }
+        }
+        StandardLibraryDigestVersion::Version2 => {
+            if executables.len() != 1 {
+                return Err(invariant(
+                    "version-two standard library snapshot must carry exactly one executable",
+                ));
+            }
+            let executable = &executables[0];
+            let function = catalogue
+                .function_by_id(executable.function())
+                .ok_or_else(|| {
+                    invariant("standard executable function must exist in the standard catalogue")
+                })?;
+            if function.current_revision() != executable.revision().id() {
+                return Err(invariant(
+                    "standard catalogue function and executable current revision must agree",
+                ));
+            }
+            if executable.revision().function() != executable.function() {
+                return Err(invariant(
+                    "standard executable revision function must agree with its executable",
+                ));
+            }
+            let domain_matches = match function.domain() {
+                FunctionDomain::Server => matches!(
+                    executable.revision().artifact().kind(),
+                    ExecutableArtifactKind::Server
+                ),
+                FunctionDomain::Client => matches!(
+                    executable.revision().artifact().kind(),
+                    ExecutableArtifactKind::Client
+                ),
+            };
+            if !domain_matches {
+                return Err(invariant(
+                    "standard executable artifact kind must match its function domain",
+                ));
+            }
+            for (index, reference) in executable.references().iter().enumerate() {
+                let ordinal = u32::try_from(index).map_err(|_| {
+                    invariant("standard executable reference ordinal must fit the u32 range")
+                })?;
+                if reference.ordinal() != ordinal
+                    || reference.source_function() != executable.function()
+                    || reference.source_revision() != executable.revision().id()
+                {
+                    return Err(invariant(
+                        "standard executable references must name the exact function revision with contiguous zero-based ordinals",
+                    ));
+                }
+            }
+        }
+        _ => {
+            return Err(invariant(
+                "standard library digest version is not supported by PostgreSQL persistence",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Persists the complete V2 standard executable facts: the immutable function
+/// revision, its server artifact, the catalogue function with its resolved
+/// signature, the ordered parameter records, and the ordered reference
+/// sequence. Every row is written under the selected standard revision.
+async fn persist_standard_executable_facts(
+    transaction: &Transaction<'_>,
+    standard: &VerifiedStandardLibrarySnapshot,
+) -> Result<(), PostgresKernelError> {
+    validate_standard_executable_facts(
+        standard.digest_version(),
+        standard.catalogue(),
+        standard.executables(),
+    )?;
+    let catalogue = standard.catalogue();
+    let executable = &standard.executables()[0];
+    let function = catalogue
+        .function_by_id(executable.function())
+        .ok_or_else(|| {
+            invariant("standard executable function must exist in the standard catalogue")
+        })?;
+    let revision = executable.revision();
+    let artifact = revision.artifact();
+    let standard_revision = standard.revision();
+    let function_origin = origin(
+        standard.origins(),
+        DefinitionIdentity::Function(function.id()),
+    )?;
+    let schema = schema_for_name(catalogue, function.name())?;
+    let revision_number = positive_i64(
+        revision.revision_number(),
+        "standard function revision number",
+    )?;
+    let artifact_version = positive_i32(
+        artifact.version(),
+        "standard function artifact format version",
+    )?;
+    let semantic_hash_version = semantic_hash_version(revision.semantic_hash_version())?;
+
+    transaction
+        .execute(
+            "INSERT INTO _orna_kernel.standard_function_revisions
+                (standard_library_revision_id, function_revision_id, function_id,
+                 revision_number, declaration_source_unit_id, declaration_source_start,
+                 declaration_source_end, declaration_content_hash, semantic_hash,
+                 semantic_hash_version, language_version, hash_contract_version)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+            &[
+                &bytes(standard_revision),
+                &bytes(revision.id()),
+                &bytes(revision.function()),
+                &revision_number,
+                &bytes(revision.declaration_origin().source_unit()),
+                &i64::from(revision.declaration_origin().byte_start()),
+                &i64::from(revision.declaration_origin().byte_end()),
+                &digest(revision.declaration_content_hash()),
+                &digest(revision.semantic_hash()),
+                &semantic_hash_version,
+                &revision.language_version(),
+                &CONTRACT_VERSION,
+            ],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?;
+
+    transaction
+        .execute(
+            "INSERT INTO _orna_kernel.standard_function_artifacts
+                (standard_library_revision_id, function_revision_id, artifact_kind,
+                 format, format_version, payload, content_hash, hash_algorithm,
+                 hash_contract_version)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, 'sha256', $8)",
+            &[
+                &bytes(standard_revision),
+                &bytes(revision.id()),
+                &artifact_kind(artifact.kind()),
+                &artifact.format(),
+                &artifact_version,
+                &artifact.payload(),
+                &digest(artifact.content_hash()),
+                &CONTRACT_VERSION,
+            ],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?;
+
+    let (return_shape, return_kind, return_scalar, return_value_type) = match function.return_type()
+    {
+        FunctionReturn::Single(value) => {
+            let columns = standard_resolved_type_columns(*value, true)?;
+            (
+                "single",
+                Some(columns.kind),
+                columns.scalar,
+                columns.value_type.map(bytes),
+            )
+        }
+        FunctionReturn::Rows(_) => {
+            return Err(invariant(
+                "standard catalogue functions with ROWS results are not supported by standard persistence",
+            ));
+        }
+    };
+    transaction
+        .execute(
+            "INSERT INTO _orna_kernel.standard_catalogue_functions
+                (standard_library_revision_id, function_id, schema_id, name_parts,
+                 domain, security_mode, transaction_mode, volatility, return_shape,
+                 return_type_kind, return_scalar_type, return_value_type_id,
+                 current_function_revision_id, source_unit_id, source_start, source_end)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)",
+            &[
+                &bytes(standard_revision),
+                &bytes(function.id()),
+                &bytes(schema),
+                &function.name().parts(),
+                &function_domain(function.domain()),
+                &function_security(function.security()),
+                &function_transaction(function.transaction())?,
+                &function_volatility(function.volatility()),
+                &return_shape,
+                &return_kind,
+                &return_scalar,
+                &return_value_type,
+                &bytes(function.current_revision()),
+                &bytes(function_origin.source_unit()),
+                &i64::from(function_origin.byte_start()),
+                &i64::from(function_origin.byte_end()),
+            ],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?;
+
+    for parameter in function.parameters() {
+        let columns = standard_resolved_type_columns(parameter.resolved_type(), false)?;
+        let parameter_origin = origin(
+            standard.origins(),
+            DefinitionIdentity::Parameter {
+                owner: function.id(),
+                parameter: parameter.id(),
+            },
+        )?;
+        transaction
+            .execute(
+                "INSERT INTO _orna_kernel.standard_catalogue_function_parameters
+                    (standard_library_revision_id, function_id, parameter_id, name,
+                     ordinal, type_kind, scalar_type, value_type_id,
+                     source_unit_id, source_start, source_end)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+                &[
+                    &bytes(standard_revision),
+                    &bytes(function.id()),
+                    &bytes(parameter.id()),
+                    &parameter.name(),
+                    &i64::from(parameter.ordinal()),
+                    &columns.kind,
+                    &columns.scalar,
+                    &columns.value_type.map(bytes),
+                    &bytes(parameter_origin.source_unit()),
+                    &i64::from(parameter_origin.byte_start()),
+                    &i64::from(parameter_origin.byte_end()),
+                ],
+            )
+            .await
+            .map_err(PostgresKernelError::Database)?;
+    }
+
+    for reference in executable.references() {
+        let (target_kind, target_definition_id, owner_type, owner_function, standard_pin) =
+            standard_reference_target_columns(reference.target(), standard_revision)?;
+        let reference_kind = reference_kind(reference.kind())?;
+        let source = reference.source_origin();
+        transaction
+            .execute(
+                "INSERT INTO _orna_kernel.standard_definition_references
+                    (standard_library_revision_id, function_revision_id, ordinal,
+                     target_definition_id, target_kind, target_owner_type_id,
+                     target_owner_function_id, target_standard_library_revision_id,
+                     reference_kind, source_unit_id, source_start, source_end)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+                &[
+                    &bytes(standard_revision),
+                    &bytes(reference.source_revision()),
+                    &i64::from(reference.ordinal()),
+                    &target_definition_id,
+                    &target_kind,
+                    &owner_type,
+                    &owner_function,
+                    &standard_pin,
+                    &reference_kind,
+                    &bytes(source.source_unit()),
+                    &i64::from(source.byte_start()),
+                    &i64::from(source.byte_end()),
+                ],
+            )
+            .await
+            .map_err(PostgresKernelError::Database)?;
+    }
+    Ok(())
+}
+
+/// The closed resolved-type projection persisted for standard catalogue
+/// functions and parameters. Standard signatures resolve to legacy scalars or
+/// pinned standard value types; every other shape is rejected.
+struct StandardResolvedTypeColumns {
+    kind: &'static str,
+    scalar: Option<&'static str>,
+    value_type: Option<TypeId>,
+}
+
+fn standard_resolved_type_columns(
+    value: ResolvedType,
+    allow_void: bool,
+) -> Result<StandardResolvedTypeColumns, PostgresKernelError> {
+    if let Some(value) = value.legacy_scalar() {
+        return Ok(StandardResolvedTypeColumns {
+            kind: "scalar",
+            scalar: Some(scalar(value, allow_void)?),
+            value_type: None,
+        });
+    }
+    if let Some(value_type) = value.value_type() {
+        return Ok(StandardResolvedTypeColumns {
+            kind: "value",
+            scalar: None,
+            value_type: Some(value_type),
+        });
+    }
+    Err(invariant(
+        "standard catalogue resolved types must be scalar or standard value types",
+    ))
+}
+
+/// The closed reference target projection persisted for standard definition
+/// references. The standard pin is the row's own standard revision.
+type StandardReferenceTargetColumns = (
+    &'static str,
+    Vec<u8>,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+);
+
+fn standard_reference_target_columns(
+    value: DefinitionReferenceTarget,
+    standard_revision: StandardLibraryRevisionId,
+) -> Result<StandardReferenceTargetColumns, PostgresKernelError> {
+    Ok(match value {
+        DefinitionReferenceTarget::ObjectType(id) => ("object_type", bytes(id), None, None, None),
+        DefinitionReferenceTarget::Field { owner, field } => {
+            ("field", bytes(field), Some(bytes(owner)), None, None)
+        }
+        DefinitionReferenceTarget::Function(id) => ("function", bytes(id), None, None, None),
+        DefinitionReferenceTarget::Parameter { owner, parameter } => (
+            "parameter",
+            bytes(parameter),
+            None,
+            Some(bytes(owner)),
+            None,
+        ),
+        DefinitionReferenceTarget::ValueType(id) => (
+            "value_type",
+            bytes(id),
+            None,
+            None,
+            Some(bytes(standard_revision)),
+        ),
+        DefinitionReferenceTarget::Expression(id) => ("expression", bytes(id), None, None, None),
+        _ => {
+            return Err(invariant(
+                "definition reference target is not supported by standard persistence",
+            ));
+        }
+    })
+}
+
+/// Persists one target-authority row for every applied application catalogue
+/// function and, for a version-two standard install, one standard authority
+/// row under the new application catalogue revision. Apply is the only writer
+/// of this relation; the migration backfilled the historical application
+/// rows. A missing or duplicate authority row fails the apply closed.
+async fn persist_target_authorities(
+    transaction: &Transaction<'_>,
+    candidate: &DeployableRevision,
+    standard: Option<&VerifiedStandardLibrarySnapshot>,
+) -> Result<(), PostgresKernelError> {
+    let catalogue_revision = candidate.candidate().revision();
+    let mut expected_authority_count = candidate.candidate().functions().len() as i64;
+    for function in candidate.candidate().functions() {
+        transaction
+            .execute(
+                "INSERT INTO _orna_kernel.invocation_target_authorities
+                    (catalogue_revision_id, function_id, target_class,
+                     function_revision_id, standard_library_revision_id)
+                 VALUES ($1, $2, 'application', $3, NULL)",
+                &[
+                    &bytes(catalogue_revision),
+                    &bytes(function.id()),
+                    &bytes(function.current_revision()),
+                ],
+            )
+            .await
+            .map_err(PostgresKernelError::Database)?;
+    }
+    if let Some(standard) = standard
+        && standard.digest_version() == StandardLibraryDigestVersion::Version2
+    {
+        validate_standard_executable_facts(
+            standard.digest_version(),
+            standard.catalogue(),
+            standard.executables(),
+        )?;
+        let executable = &standard.executables()[0];
+        transaction
+            .execute(
+                "INSERT INTO _orna_kernel.invocation_target_authorities
+                    (catalogue_revision_id, function_id, target_class,
+                     function_revision_id, standard_library_revision_id)
+                 VALUES ($1, $2, 'standard', $3, $4)",
+                &[
+                    &bytes(catalogue_revision),
+                    &bytes(executable.function()),
+                    &bytes(executable.revision().id()),
+                    &bytes(standard.revision()),
+                ],
+            )
+            .await
+            .map_err(PostgresKernelError::Database)?;
+        expected_authority_count += 1;
+    }
+    let rows = transaction
+        .query(
+            "SELECT count(*) FROM _orna_kernel.invocation_target_authorities
+             WHERE catalogue_revision_id = $1",
+            &[&bytes(catalogue_revision)],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?;
+    let written: i64 = rows[0].try_get(0).map_err(PostgresKernelError::Database)?;
+    if written != expected_authority_count {
+        return Err(invariant(
+            "invocation target authority rows must match the applied catalogue functions exactly",
+        ));
     }
     Ok(())
 }
@@ -2577,36 +3307,42 @@ type ReferenceInsertColumns = (
 #[cfg(test)]
 mod tests {
     use orna_core::{
-        CatalogueRevisionId, ExpressionId, FieldId, FunctionId, ParameterId, SchemaId,
-        SourceBundleId, SourceRevisionId, SourceUnitId, StandardLibraryRevisionId, TypeId,
+        CatalogueRevisionId, ExpressionId, FieldId, FunctionId, FunctionRevisionId, ParameterId,
+        SchemaId, SourceBundleId, SourceRevisionId, SourceUnitId, StandardLibraryRevisionId,
+        TypeId,
         canonical_hash::{
             catalogue_digest_with_context, source_bundle_digest, source_revision_record_digest,
             source_unit_content_digest, verify_standard_library_snapshot,
         },
         catalogue::{
-            CatalogueSnapshot, EnumTypeDefinition, FieldDefinition, FunctionTransaction,
-            ObjectTypeDefinition, QualifiedSemanticName, RecordValueFieldDefinition,
-            RecordValueTypeDefinition, SchemaDefinition, ValueTypeKind,
+            CatalogueSnapshot, EnumTypeDefinition, FieldDefinition, FunctionDefinition,
+            FunctionDomain, FunctionReturn, FunctionSecurity, FunctionTransaction,
+            FunctionVolatility, ObjectTypeDefinition, QualifiedSemanticName,
+            RecordValueFieldDefinition, RecordValueTypeDefinition, SchemaDefinition, ValueTypeKind,
         },
         physical::{PhysicalPlanError, plan_physical_changes},
         revision::{
             ActiveDatabaseRevision, ActiveDatabaseRevisionInput, ActiveRevisionContent,
             CatalogueHashContext, DefinitionIdentity, DefinitionOrigin, DefinitionReferenceKind,
             DefinitionReferenceTarget, DeployableRevision, DeployableRevisionContent,
-            DeployableRevisionInput, ExecutableArtifactKind, RevisionPair, Sha256Digest,
-            SourceOrigin, StandardLibraryDigestVersion, StandardLibrarySnapshot,
-            StoredSourceRevision, StoredSourceUnit,
+            DeployableRevisionInput, ExecutableArtifact, ExecutableArtifactKind,
+            FunctionRevisionRecord, RevisionPair, Sha256Digest, SourceOrigin, StandardExecutable,
+            StandardLibraryDigestVersion, StandardLibrarySnapshot, StoredSourceRevision,
+            StoredSourceUnit,
         },
         types::{ResolvedType, StandardScalar, TypeDescriptor},
     };
 
     use super::{
         CandidateEncoder, LegacyTypeColumns, POSTGRES_REFERENCE_KINDS, StandardContextIdentity,
-        TypeColumns, artifact_kind, first_active_reserved_identity,
-        first_inactive_reserved_identity, function_transaction, guard_standard_context_transition,
-        legacy_type_projection, materialize, positive_i32, positive_i64, reference_kind,
-        reference_target, scalar, standard_value_kind, type_columns, validate_candidate_preflight,
-        validate_expected_base,
+        StandardExecutableIdentity, StandardExecutableParameter, TypeColumns, artifact_kind,
+        first_active_reserved_identity, first_active_standard_executable_identity,
+        first_active_standard_parameter, first_inactive_reserved_identity,
+        first_inactive_standard_executable_identity, function_transaction,
+        guard_standard_context_transition, legacy_type_projection, materialize, positive_i32,
+        positive_i64, reference_kind, reference_target, scalar, standard_reference_target_columns,
+        standard_resolved_type_columns, standard_value_kind, type_columns,
+        validate_candidate_preflight, validate_expected_base, validate_standard_executable_facts,
     };
     use crate::PostgresKernelError;
 
@@ -3582,5 +4318,290 @@ mod tests {
         assert_eq!(positive_i64(i64::MAX as u64, "test").unwrap(), i64::MAX);
         assert!(positive_i64(0, "test").is_err());
         assert!(positive_i64(i64::MAX as u64 + 1, "test").is_err());
+    }
+
+    #[test]
+    fn standard_executable_contract_fails_closed_on_sequences_and_agreement() {
+        let empty = CatalogueSnapshot::new(
+            CatalogueRevisionId::from_bytes([0x30; 16]),
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        assert!(
+            validate_standard_executable_facts(
+                StandardLibraryDigestVersion::Version1,
+                &empty,
+                &[],
+            )
+            .is_ok()
+        );
+
+        let executable = standard_executable_fixture();
+        let function = executable_function_fixture(executable.revision().id());
+        let catalogue = CatalogueSnapshot::new_with_functions(
+            CatalogueRevisionId::from_bytes([0x30; 16]),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes([1; 16]),
+                QualifiedSemanticName::new(["std", "invoke"]).unwrap(),
+            )],
+            Vec::new(),
+            vec![function.clone()],
+        )
+        .unwrap();
+
+        assert!(
+            validate_standard_executable_facts(
+                StandardLibraryDigestVersion::Version1,
+                &catalogue,
+                std::slice::from_ref(&executable),
+            )
+            .is_err()
+        );
+        assert!(
+            validate_standard_executable_facts(
+                StandardLibraryDigestVersion::Version2,
+                &catalogue,
+                &[],
+            )
+            .is_err()
+        );
+        assert!(
+            validate_standard_executable_facts(
+                StandardLibraryDigestVersion::Version2,
+                &catalogue,
+                &[executable.clone(), executable.clone()],
+            )
+            .is_err()
+        );
+        assert!(
+            validate_standard_executable_facts(
+                StandardLibraryDigestVersion::Version2,
+                &catalogue,
+                std::slice::from_ref(&executable),
+            )
+            .is_ok()
+        );
+
+        let wrong_revision =
+            standard_executable_fixture_with_revision(FunctionRevisionId::from_bytes([0x55; 16]));
+        let error = validate_standard_executable_facts(
+            StandardLibraryDigestVersion::Version2,
+            &catalogue,
+            std::slice::from_ref(&wrong_revision),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            PostgresKernelError::DurableInvariant { rule, .. }
+                if rule == "standard catalogue function and executable current revision must agree"
+        ));
+    }
+
+    #[test]
+    fn standard_resolved_type_columns_close_scalar_and_value_shapes() {
+        let scalar =
+            standard_resolved_type_columns(ResolvedType::scalar(StandardScalar::Integer), true)
+                .unwrap();
+        assert_eq!(scalar.kind, "scalar");
+        assert_eq!(scalar.scalar, Some("integer"));
+        assert!(scalar.value_type.is_none());
+
+        let value_type = TypeId::from_bytes([0x77; 16]);
+        let resolved = ResolvedType::value(value_type);
+        let value = standard_resolved_type_columns(resolved, false).unwrap();
+        assert_eq!(value.kind, "value");
+        assert!(value.scalar.is_none());
+        assert_eq!(value.value_type, Some(value_type));
+
+        let void =
+            standard_resolved_type_columns(ResolvedType::scalar(StandardScalar::Void), false);
+        assert!(void.is_err());
+        assert!(
+            standard_resolved_type_columns(ResolvedType::scalar(StandardScalar::Void), true)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn standard_reference_target_columns_preserve_owner_and_pin_shapes() {
+        let standard_revision = StandardLibraryRevisionId::from_bytes([0x44; 16]);
+        let object = TypeId::from_bytes([1; 16]);
+        let (kind, target, owner_type, owner_function, pin) = standard_reference_target_columns(
+            DefinitionReferenceTarget::ObjectType(object),
+            standard_revision,
+        )
+        .unwrap();
+        assert_eq!(kind, "object_type");
+        assert_eq!(target, object.to_bytes().to_vec());
+        assert!(owner_type.is_none());
+        assert!(owner_function.is_none());
+        assert!(pin.is_none());
+
+        let field = FieldId::from_bytes([2; 16]);
+        let (kind, target, owner_type, owner_function, pin) = standard_reference_target_columns(
+            DefinitionReferenceTarget::Field {
+                owner: object,
+                field,
+            },
+            standard_revision,
+        )
+        .unwrap();
+        assert_eq!(kind, "field");
+        assert_eq!(target, field.to_bytes().to_vec());
+        assert_eq!(owner_type, Some(object.to_bytes().to_vec()));
+        assert!(owner_function.is_none());
+        assert!(pin.is_none());
+
+        let function = FunctionId::from_bytes([0x10; 16]);
+        let (kind, target, owner_type, owner_function, pin) = standard_reference_target_columns(
+            DefinitionReferenceTarget::Function(function),
+            standard_revision,
+        )
+        .unwrap();
+        assert_eq!(kind, "function");
+        assert_eq!(target, function.to_bytes().to_vec());
+        assert!(owner_type.is_none());
+        assert!(owner_function.is_none());
+        assert!(pin.is_none());
+
+        let parameter = ParameterId::from_bytes([0x10; 16]);
+        let (kind, target, owner_type, owner_function, pin) = standard_reference_target_columns(
+            DefinitionReferenceTarget::Parameter {
+                owner: function,
+                parameter,
+            },
+            standard_revision,
+        )
+        .unwrap();
+        assert_eq!(kind, "parameter");
+        assert_eq!(target, parameter.to_bytes().to_vec());
+        assert!(owner_type.is_none());
+        assert_eq!(owner_function, Some(function.to_bytes().to_vec()));
+        assert!(pin.is_none());
+
+        let value_type = TypeId::from_bytes([2; 16]);
+        let (kind, target, owner_type, owner_function, pin) = standard_reference_target_columns(
+            DefinitionReferenceTarget::ValueType(value_type),
+            standard_revision,
+        )
+        .unwrap();
+        assert_eq!(kind, "value_type");
+        assert_eq!(target, value_type.to_bytes().to_vec());
+        assert!(owner_type.is_none());
+        assert!(owner_function.is_none());
+        assert_eq!(pin, Some(standard_revision.to_bytes().to_vec()));
+    }
+
+    #[test]
+    fn standard_executable_identity_selectors_keep_active_before_inactive() {
+        let active_function = (
+            StandardExecutableIdentity::Function(FunctionId::from_bytes([1; 16])),
+            vec![1; 16],
+        );
+        let inactive_function = (
+            StandardExecutableIdentity::Function(FunctionId::from_bytes([2; 16])),
+            vec![2; 16],
+        );
+        assert_eq!(
+            first_active_standard_executable_identity(
+                std::slice::from_ref(&active_function),
+                &[inactive_function],
+            ),
+            None
+        );
+        assert_eq!(
+            first_active_standard_executable_identity(
+                std::slice::from_ref(&active_function),
+                std::slice::from_ref(&active_function),
+            ),
+            Some(StandardExecutableIdentity::Function(
+                FunctionId::from_bytes([1; 16])
+            ))
+        );
+        let revision = (
+            StandardExecutableIdentity::FunctionRevision(FunctionRevisionId::from_bytes([9; 16])),
+            vec![9; 16],
+        );
+        assert_eq!(
+            first_inactive_standard_executable_identity(
+                std::slice::from_ref(&revision),
+                &[vec![9; 16]]
+            ),
+            Some(StandardExecutableIdentity::FunctionRevision(
+                FunctionRevisionId::from_bytes([9; 16])
+            ))
+        );
+        assert_eq!(
+            first_inactive_standard_executable_identity(&[revision], &[vec![8; 16]]),
+            None
+        );
+    }
+
+    #[test]
+    fn standard_parameter_selector_matches_scoped_pairs() {
+        let function = FunctionId::from_bytes([0x10; 16]);
+        let parameter = ParameterId::from_bytes([0x10; 16]);
+        let wanted = StandardExecutableParameter {
+            function,
+            parameter,
+        };
+        assert_eq!(first_active_standard_parameter(&[], &[wanted]), None);
+        assert_eq!(
+            first_active_standard_parameter(&[wanted], &[wanted]),
+            Some(wanted)
+        );
+        let other_owner = StandardExecutableParameter {
+            function: FunctionId::from_bytes([0x11; 16]),
+            parameter,
+        };
+        assert_eq!(
+            first_active_standard_parameter(&[other_owner], &[wanted]),
+            None
+        );
+    }
+
+    fn standard_executable_fixture() -> StandardExecutable {
+        standard_executable_fixture_with_revision(FunctionRevisionId::from_bytes([0x10; 16]))
+    }
+
+    fn standard_executable_fixture_with_revision(
+        revision_id: FunctionRevisionId,
+    ) -> StandardExecutable {
+        let function = FunctionId::from_bytes([0x10; 16]);
+        let artifact = ExecutableArtifact::new(
+            ExecutableArtifactKind::Server,
+            "orna.server-parameter-echo",
+            1,
+            vec![0x4f, 0x52, 0x4e, 0x41, 0x50, 0x45, 0, 0, 0, 0, 0, 1],
+            Sha256Digest::from_bytes([7; 32]),
+        )
+        .unwrap();
+        let revision = FunctionRevisionRecord::new(
+            function,
+            revision_id,
+            1,
+            SourceOrigin::new(SourceUnitId::from_bytes([3; 16]), 0, 1).unwrap(),
+            Sha256Digest::from_bytes([5; 32]),
+            Sha256Digest::from_bytes([6; 32]),
+            "orna.language/1",
+            artifact,
+        )
+        .unwrap();
+        StandardExecutable::new(function, revision, Vec::new()).unwrap()
+    }
+
+    fn executable_function_fixture(current_revision: FunctionRevisionId) -> FunctionDefinition {
+        FunctionDefinition::new(
+            FunctionId::from_bytes([0x10; 16]),
+            QualifiedSemanticName::new(["std", "invoke", "echo"]).unwrap(),
+            FunctionDomain::Server,
+            Vec::new(),
+            FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Integer)),
+            current_revision,
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Stable,
+        )
     }
 }
