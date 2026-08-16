@@ -348,7 +348,7 @@ impl PostgresKernel {
                     "_orna_kernel.user_state_cells",
                     row,
                     "value_bytes",
-                    "USER state typed value",
+                    "value_bytes",
                 )?;
                 let value = decode_constructed_value(&active, &registry, &value_bytes)
                     .map_err(PostgresKernelError::InspectValueCodec)?;
@@ -358,14 +358,14 @@ impl PostgresKernel {
                     "_orna_kernel.user_state_cells",
                     row,
                     "value_type_id",
-                    "USER state value type",
+                    "value_type_id",
                 )?);
                 let revision = decode_revision(row)?;
                 let updated_at: SystemTime = inspect_column(
                     "_orna_kernel.user_state_cells",
                     row,
                     "updated_at",
-                    "USER state update timestamp",
+                    "updated_at",
                 )?;
                 let value = if include_values { Some(value) } else { None };
                 cells.push(StateCellRow::new(
@@ -515,21 +515,41 @@ impl PostgresKernel {
             require_current_migrations(&transaction).await?;
             let active = configure_and_recover(&transaction).await?;
             let registry = inspect_value_registry(&active)?;
-            let rows = transaction
-                .query(
-                    "SELECT invocation_id, sequence, kind, payload_bytes,
-                            observer_invocation_id, recorded_at
-                     FROM _orna_kernel.inspect_trace_events
-                     WHERE invocation_id = $1 AND sequence > $2
-                     ORDER BY sequence",
-                    &[&invocation_id.to_bytes().to_vec(), &after],
-                )
-                .await
-                .map_err(PostgresKernelError::Database)?;
+            // `after_sequence` is a resume cursor: 0 (the spec default) means
+            // "from the start" and returns the full stream including sequence
+            // 0; any positive value returns only rows strictly after it.
+            let rows = if after == 0 {
+                transaction
+                    .query(
+                        "SELECT invocation_id, sequence, kind, payload_bytes,
+                                observer_invocation_id, recorded_at
+                         FROM _orna_kernel.inspect_trace_events
+                         WHERE invocation_id = $1
+                         ORDER BY sequence",
+                        &[&invocation_id.to_bytes().to_vec()],
+                    )
+                    .await
+                    .map_err(PostgresKernelError::Database)?
+            } else {
+                transaction
+                    .query(
+                        "SELECT invocation_id, sequence, kind, payload_bytes,
+                                observer_invocation_id, recorded_at
+                         FROM _orna_kernel.inspect_trace_events
+                         WHERE invocation_id = $1 AND sequence > $2
+                         ORDER BY sequence",
+                        &[&invocation_id.to_bytes().to_vec(), &after],
+                    )
+                    .await
+                    .map_err(PostgresKernelError::Database)?
+            };
             let mut events = Vec::with_capacity(rows.len());
             for row in &rows {
                 let record = row_invocation_record(row)?;
-                if !include_observer && record.observer_invocation == observer_invocation {
+                if !include_observer
+                    && observer_invocation.is_some()
+                    && record.observer_invocation == observer_invocation
+                {
                     continue;
                 }
                 if !matches!(
@@ -715,7 +735,6 @@ pub(crate) async fn recover_inspect_relations(
     active: &ActiveDatabaseRevision,
 ) -> Result<(), PostgresKernelError> {
     require_inspect_relation_columns(transaction).await?;
-    let registry = inspect_value_registry(active)?;
 
     let rows = transaction
         .query(
@@ -728,11 +747,7 @@ pub(crate) async fn recover_inspect_relations(
         )
         .await
         .map_err(PostgresKernelError::Database)?;
-    for row in &rows {
-        decode_inspect_snapshot_row(row, active, &registry)?;
-    }
-
-    let rows = transaction
+    let trace_rows = transaction
         .query(
             "SELECT invocation_id, sequence, kind, payload_bytes,
                     observer_invocation_id, recorded_at
@@ -742,8 +757,24 @@ pub(crate) async fn recover_inspect_relations(
         )
         .await
         .map_err(PostgresKernelError::Database)?;
+
+    // A fresh database before the first standard upgrade legitimately has no
+    // verified standard snapshot and no inspection relations. The registry is
+    // only needed to decode stored payloads, so recovery proceeds without it
+    // when both relations are empty; any stored row still requires the
+    // accepted standard (fail closed, never silently skipped).
+    if rows.is_empty() && trace_rows.is_empty() {
+        return Ok(());
+    }
+    let registry = inspect_value_registry(active)?;
+    let registry = &registry;
+
     for row in &rows {
-        let record = row_invocation_record(row)?;
+        decode_inspect_snapshot_row(row, active, registry)?;
+    }
+
+    for record_row in &trace_rows {
+        let record = row_invocation_record(record_row)?;
         if !INSPECT_TRACE_KINDS.contains(&record.kind.as_str()) {
             return Err(PostgresKernelError::DurableInvariant {
                 relation: INSPECT_TRACE_RELATION,
@@ -765,7 +796,7 @@ pub(crate) async fn recover_inspect_relations(
             continue;
         }
         let RuntimeValue::InvokeEvent(event) =
-            decode_constructed_value(active, &registry, &record.payload_bytes)
+            decode_constructed_value(active, registry, &record.payload_bytes)
                 .map_err(PostgresKernelError::InspectValueCodec)?
         else {
             return Err(PostgresKernelError::DurableInvariant {
@@ -995,7 +1026,7 @@ fn row_invocation_record(row: &Row) -> Result<InvocationTraceRecord, PostgresKer
         INSPECT_TRACE_RELATION,
         row,
         "invocation_id",
-        "inspection trace invocation identity",
+        "invocation_id",
     )?);
     let record = invocation.canonical();
     let sequence: i64 = inspect_column(INSPECT_TRACE_RELATION, row, &record, "sequence")?;
@@ -1035,32 +1066,32 @@ fn decode_inspect_snapshot_row(
         INSPECT_SNAPSHOT_RELATION,
         row,
         "epoch_id",
-        "inspection epoch identity",
+        "epoch_id",
     )?);
     let record = epoch_id.canonical();
     let invocation_id = InvocationId::from_bytes(inspect_id(
         INSPECT_SNAPSHOT_RELATION,
         row,
         &record,
-        "inspection epoch invocation identity",
+        "invocation_id",
     )?);
     let owner = PrincipalId::from_bytes(inspect_id(
         INSPECT_SNAPSHOT_RELATION,
         row,
         &record,
-        "inspection epoch owner principal",
+        "owner_principal_id",
     )?);
     let source_revision_id = SourceRevisionId::from_bytes(inspect_id(
         INSPECT_SNAPSHOT_RELATION,
         row,
         &record,
-        "inspection epoch source revision",
+        "source_revision_id",
     )?);
     let catalogue_revision_id = CatalogueRevisionId::from_bytes(inspect_id(
         INSPECT_SNAPSHOT_RELATION,
         row,
         &record,
-        "inspection epoch catalogue revision",
+        "catalogue_revision_id",
     )?);
     let _recorded_at: SystemTime =
         inspect_column(INSPECT_SNAPSHOT_RELATION, row, &record, "recorded_at")?;
@@ -1107,7 +1138,7 @@ fn decode_security_decision_row(row: &Row) -> Result<SecurityDecisionRow, Postgr
         "_orna_kernel.security_audit_events",
         row,
         "event_id",
-        "security decision audit identity",
+        "event_id",
     )?);
     let record = event_id.canonical();
     let kind: String = inspect_column(
@@ -1212,7 +1243,7 @@ fn decode_state_cell_key(row: &Row) -> Result<UserStateKeyWithoutPrincipal, Post
         "_orna_kernel.user_state_cells",
         row,
         record,
-        "USER state root function",
+        "root_function_id",
     )?);
     let state_profile: String = inspect_column(
         "_orna_kernel.user_state_cells",
@@ -1224,7 +1255,7 @@ fn decode_state_cell_key(row: &Row) -> Result<UserStateKeyWithoutPrincipal, Post
         "_orna_kernel.user_state_cells",
         row,
         record,
-        "USER state function",
+        "function_id",
     )?);
     let instance_key: String = inspect_column(
         "_orna_kernel.user_state_cells",
@@ -1236,7 +1267,7 @@ fn decode_state_cell_key(row: &Row) -> Result<UserStateKeyWithoutPrincipal, Post
         "_orna_kernel.user_state_cells",
         row,
         record,
-        "USER state slot",
+        "state_slot_id",
     )?);
     UserStateKeyWithoutPrincipal::new(
         root_function,
@@ -1656,8 +1687,14 @@ impl<'a> PayloadReader<'a> {
     }
 
     fn take_id(&mut self, rule: &'static str) -> Result<[u8; 16], PostgresKernelError> {
-        let bytes = self.take_bytes(rule)?;
-        bytes.try_into().map_err(|_| self.invalid(rule))
+        if self.remaining() < 16 {
+            return Err(self.invalid(rule));
+        }
+        let bytes: [u8; 16] = self.bytes[self.position..self.position + 16]
+            .try_into()
+            .map_err(|_| self.invalid(rule))?;
+        self.position += 16;
+        Ok(bytes)
     }
 
     fn take_opt_id(&mut self, rule: &'static str) -> Result<Option<[u8; 16]>, PostgresKernelError> {
