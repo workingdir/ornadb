@@ -20,14 +20,20 @@ pub use model::{
     CheckedStandardApplicationField, CheckedStandardApplicationObjectType,
     CheckedStandardApplicationParameter, CheckedStandardApplicationRecordValueField,
     CheckedStandardApplicationRecordValueType, CheckedStandardApplicationReturnColumn,
-    CheckedStandardApplicationServerFunction, CheckedStandardExecutable, CheckedStandardLibrary,
-    CheckedStandardParameterEcho, CheckedStandardSchema, CheckedStandardTypeBinding,
-    CheckedStandardTypeReference, CheckedStandardValueType, CheckedTypeUseKind,
-    CheckedValueTypeUse, ConstantValue, STD_INTEGER_TYPE_ID, STD_INVOKE_ECHO_FUNCTION_ID,
+    CheckedStandardApplicationServerFunction, CheckedStandardExecutable, CheckedStandardJsonEncode,
+    CheckedStandardLibrary, CheckedStandardParameterEcho, CheckedStandardSchema,
+    CheckedStandardTerminalPresentTable, CheckedStandardTypeBinding, CheckedStandardTypeReference,
+    CheckedStandardValueType, CheckedTypeUseKind, CheckedValueTypeUse, ConstantValue,
+    STD_DATA_ROWS_TYPE_ID, STD_DATA_SCHEMA_ID, STD_INTEGER_TYPE_ID, STD_INVOKE_ECHO_FUNCTION_ID,
     STD_INVOKE_ECHO_FUNCTION_REVISION_ID, STD_INVOKE_ECHO_PARAMETER_ID,
     STD_INVOKE_ECHO_REVISION_NUMBER, STD_INVOKE_SCHEMA_ID, STD_INVOKE_SOURCE_UNIT_ID,
-    STD_TYPES_SOURCE_UNIT_ID, SemanticType, StandardApplicationCheckContext,
-    StandardApplicationCheckReport, StandardApplicationContextError, StandardLibraryCheckError,
+    STD_IO_BYTE_STREAM_TYPE_ID, STD_IO_SCHEMA_ID, STD_JSON_ENCODE_FUNCTION_ID,
+    STD_JSON_ENCODE_FUNCTION_REVISION_ID, STD_JSON_ENCODE_PARAMETER_ID, STD_JSON_SCHEMA_ID,
+    STD_JSON_VALUE_TYPE_ID, STD_TERMINAL_DOCUMENT_TYPE_ID, STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID,
+    STD_TERMINAL_PRESENT_TABLE_FUNCTION_REVISION_ID, STD_TERMINAL_PRESENT_TABLE_PARAMETER_ID,
+    STD_TERMINAL_SCHEMA_ID, STD_TYPES_SOURCE_UNIT_ID, SemanticType,
+    StandardApplicationCheckContext, StandardApplicationCheckReport,
+    StandardApplicationContextError, StandardLibraryCheckError,
 };
 pub(crate) use model::{
     CheckedClientFunctionBody, CheckedFieldRename, CheckedServerFunctionBody, QueryCatalogue,
@@ -43,7 +49,7 @@ use std::{
 
 use orna_artifact::server_parameter_echo::{self, ServerParameterEcho};
 use orna_core::{
-    ExpressionId, TypeId,
+    ExpressionId, FunctionId, FunctionRevisionId, ParameterId, SchemaId, TypeId,
     canonical_hash::{
         artifact_payload_digest, function_declaration_digest, function_semantic_digest_with_version,
     },
@@ -759,6 +765,334 @@ pub fn check_standard_parameter_echo(
         revision_id: STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
         artifact,
         references,
+    })
+}
+
+/// The closed expected shape of one ADR 0057 standard presenter declaration.
+///
+/// Both presenters share one exact-shape contract: a SERVER function with the
+/// fixed qualified name in the fixed schema, exactly one required non-null
+/// parameter with the fixed name and value-type identity, one single result
+/// with the fixed value-type identity, `SECURITY INVOKER`, `TRANSACTION READ
+/// ONLY`, `VOLATILITY STABLE`, zero capability clauses, and the closed
+/// parameter-select body naming the fixed parameter. The two checkers differ
+/// only in these fixed facts.
+struct PresenterShape {
+    /// The exact expected presenter function name.
+    function_name: QualifiedSemanticName,
+    /// The exact expected presenter schema name.
+    schema_name: QualifiedSemanticName,
+    /// The exact expected presenter parameter name.
+    parameter_name: &'static str,
+    /// The fixed presenter function identity.
+    function_id: FunctionId,
+    /// The fixed presenter parameter identity.
+    parameter_id: ParameterId,
+    /// The fixed version-1 function-revision identity.
+    revision_id: FunctionRevisionId,
+    /// The fixed presenter schema identity.
+    schema_id: SchemaId,
+    /// The fixed parameter value-type identity.
+    parameter_type_id: TypeId,
+    /// The fixed result value-type identity.
+    result_type_id: TypeId,
+}
+
+/// The checked declaration facts shared by the two presenter checkers.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CheckedStandardPresenter {
+    function_id: FunctionId,
+    parameter_id: ParameterId,
+    revision_id: FunctionRevisionId,
+}
+
+/// Checks one parsed declaration against one closed ADR 0057 standard
+/// presenter shape.
+///
+/// The checker accepts ONLY the exact presenter shape carried by [`PresenterShape`]:
+/// a SERVER function with the fixed qualified name, exactly one required
+/// non-null parameter with the fixed name (no default expression; the grammar
+/// has no nullable parameter spelling, so required non-null is the only
+/// form), one single result with the fixed value-type identity (never
+/// `ROWS`), `SECURITY INVOKER`, `TRANSACTION READ ONLY`, `VOLATILITY STABLE`,
+/// zero capability clauses, and the closed `SELECT <parameter>` body naming
+/// the fixed parameter. It rejects every other name, parameter count or name,
+/// default, type, result shape, security, transaction, volatility, capability,
+/// and body variation before any artifact is constructed.
+///
+/// The supplied catalogue must contain the fixed identities: the presenter
+/// schema, the presenter function, and its parameter, and the function must
+/// be a SERVER function. Both written type spellings must resolve through the
+/// catalogue to the fixed parameter and result value-type identities, which
+/// therefore must hold value types at those identities. The supplied origins
+/// must contain the fixed function and parameter declaration origins on the
+/// same source unit.
+///
+/// ADR 0057 step 4 (`feat(artifact): encode terminal and json presenter
+/// plans`) consumes the returned facts to construct the closed server
+/// artifacts and their ordered durable references.
+fn check_standard_presenter_declaration(
+    declaration: &ServerFunctionDeclaration,
+    catalogue: &CatalogueSnapshot,
+    origins: &[DefinitionOrigin],
+    shape: &PresenterShape,
+) -> Result<CheckedStandardPresenter, StandardLibraryCheckError> {
+    let name = semantic_name(&declaration.name);
+    if name != shape.function_name {
+        return Err(StandardLibraryCheckError::PresenterUnexpectedName {
+            expected: shape.function_name.clone(),
+            actual: name,
+        });
+    }
+
+    if declaration.parameters.len() != 1 {
+        return Err(
+            StandardLibraryCheckError::PresenterUnexpectedParameterCount {
+                actual: declaration.parameters.len(),
+            },
+        );
+    }
+    let parameter = &declaration.parameters[0];
+    let parameter_name = semantic_part(&parameter.name);
+    if parameter_name != shape.parameter_name {
+        return Err(
+            StandardLibraryCheckError::PresenterUnexpectedParameterName {
+                expected: shape.parameter_name.to_owned(),
+                actual: parameter_name,
+            },
+        );
+    }
+    if parameter.default_expression.is_some() {
+        return Err(StandardLibraryCheckError::PresenterParameterDefault);
+    }
+    if resolved_standard_type_id(&parameter.type_specification, catalogue)
+        != Some(shape.parameter_type_id)
+    {
+        return Err(
+            StandardLibraryCheckError::PresenterUnexpectedParameterType {
+                expected: shape.parameter_type_id,
+            },
+        );
+    }
+
+    let FunctionReturnType::Single(result_specification) = &declaration.return_type else {
+        return Err(StandardLibraryCheckError::PresenterUnexpectedResultShape);
+    };
+    if resolved_standard_type_id(result_specification, catalogue) != Some(shape.result_type_id) {
+        return Err(StandardLibraryCheckError::PresenterUnexpectedResultType {
+            expected: shape.result_type_id,
+        });
+    }
+
+    let security = declaration
+        .security
+        .ok_or(StandardLibraryCheckError::PresenterMissingSecurity)?;
+    if security != SyntaxFunctionSecurity::Invoker {
+        return Err(StandardLibraryCheckError::PresenterUnexpectedSecurity { actual: security });
+    }
+    let transaction = declaration
+        .transaction
+        .ok_or(StandardLibraryCheckError::PresenterMissingTransaction)?;
+    if transaction != SyntaxFunctionTransaction::ReadOnly {
+        return Err(StandardLibraryCheckError::PresenterUnexpectedTransaction {
+            actual: transaction,
+        });
+    }
+    let volatility = declaration
+        .volatility
+        .ok_or(StandardLibraryCheckError::PresenterMissingVolatility)?;
+    if volatility != SyntaxFunctionVolatility::Stable {
+        return Err(StandardLibraryCheckError::PresenterUnexpectedVolatility {
+            actual: volatility,
+        });
+    }
+    if !declaration.capabilities.is_empty() {
+        return Err(StandardLibraryCheckError::PresenterCapabilityClause);
+    }
+
+    let body = declaration
+        .body
+        .as_no_input_parameter_select()
+        .ok_or(StandardLibraryCheckError::PresenterUnexpectedBody)?;
+    let body_identifier = semantic_part(&body.parameter);
+    if body_identifier != shape.parameter_name {
+        return Err(
+            StandardLibraryCheckError::PresenterUnexpectedBodyIdentifier {
+                expected: shape.parameter_name.to_owned(),
+                actual: body_identifier,
+            },
+        );
+    }
+
+    let schema = catalogue
+        .schema_by_id(shape.schema_id)
+        .ok_or(StandardLibraryCheckError::PresenterMissingSchema)?;
+    if schema.name() != &shape.schema_name {
+        return Err(StandardLibraryCheckError::PresenterSchemaNameMismatch {
+            expected: shape.schema_name.clone(),
+            actual: schema.name().clone(),
+        });
+    }
+    let function = catalogue
+        .function_by_id(shape.function_id)
+        .ok_or(StandardLibraryCheckError::PresenterMissingFunction)?;
+    if function.name() != &shape.function_name {
+        return Err(StandardLibraryCheckError::PresenterFunctionNameMismatch {
+            expected: shape.function_name.clone(),
+            actual: function.name().clone(),
+        });
+    }
+    if function.domain() != FunctionDomain::Server {
+        return Err(StandardLibraryCheckError::PresenterUnexpectedDomain {
+            actual: function.domain(),
+        });
+    }
+    let parameter_definition = function
+        .parameter_by_id(shape.parameter_id)
+        .ok_or(StandardLibraryCheckError::PresenterMissingParameter)?;
+    if parameter_definition.name() != shape.parameter_name {
+        return Err(StandardLibraryCheckError::PresenterParameterNameMismatch {
+            expected: shape.parameter_name.to_owned(),
+            actual: parameter_definition.name().to_owned(),
+        });
+    }
+
+    let function_origin = origins
+        .iter()
+        .find(|origin| origin.identity() == DefinitionIdentity::Function(shape.function_id))
+        .ok_or(StandardLibraryCheckError::PresenterMissingFunctionOrigin)?;
+    let parameter_origin = origins
+        .iter()
+        .find(|origin| {
+            origin.identity()
+                == DefinitionIdentity::Parameter {
+                    owner: shape.function_id,
+                    parameter: shape.parameter_id,
+                }
+        })
+        .ok_or(StandardLibraryCheckError::PresenterMissingParameterOrigin)?;
+    if function_origin.source().source_unit() != parameter_origin.source().source_unit() {
+        return Err(StandardLibraryCheckError::OriginSourceUnitMismatch);
+    }
+
+    Ok(CheckedStandardPresenter {
+        function_id: shape.function_id,
+        parameter_id: shape.parameter_id,
+        revision_id: shape.revision_id,
+    })
+}
+
+/// Checks one parsed declaration against the closed ADR 0057 `std.json.encode`
+/// presenter shape.
+///
+/// The checker accepts ONLY the exact `std.json.encode` shape: a SERVER
+/// function named `std.json.encode` with exactly one required non-null
+/// `p_value` parameter that resolves through the catalogue to
+/// `json_value_type_id`, one single result that resolves to the fixed
+/// `std.io.ByteStream` value type (`...16`, ADR 0058), `SECURITY INVOKER`,
+/// `TRANSACTION READ ONLY`, `VOLATILITY STABLE`, zero capability clauses, and
+/// the closed `SELECT p_value` body. It rejects every other name, parameter
+/// count or name, default, type, result shape, security, transaction,
+/// volatility, capability, and body variation before any artifact is
+/// constructed.
+///
+/// The supplied catalogue must contain the fixed identities: the `std.json`
+/// schema, the `std.json.encode` function, and its `p_value` parameter, and
+/// the function must be a SERVER function. Both written type spellings must
+/// resolve through the catalogue to `json_value_type_id` and the fixed
+/// `std.io.ByteStream` value type, which therefore must hold value types at
+/// those identities. The supplied origins must contain the fixed function and
+/// parameter declaration origins on the same source unit.
+///
+/// `std.json.Value` is not yet registered in `orna.std/3` (work ADR 0058
+/// registered only `std.terminal.Document` and `std.io.ByteStream`), so its
+/// identity is supplied by the caller exactly as ADR 0055 step 4 supplied the
+/// INTEGER identity to [`check_standard_parameter_echo`].
+///
+/// ADR 0057 step 4 (`feat(artifact): encode terminal and json presenter
+/// plans`) consumes the returned facts to construct the
+/// `orna.server-json-encode` artifact and its ordered durable references.
+pub fn check_standard_json_encode(
+    declaration: &ServerFunctionDeclaration,
+    catalogue: &CatalogueSnapshot,
+    origins: &[DefinitionOrigin],
+    json_value_type_id: TypeId,
+) -> Result<CheckedStandardJsonEncode, StandardLibraryCheckError> {
+    let shape = PresenterShape {
+        function_name: QualifiedSemanticName::new(["std", "json", "encode"])
+            .expect("the fixed standard function name is valid"),
+        schema_name: QualifiedSemanticName::new(["std", "json"])
+            .expect("the fixed standard schema is valid"),
+        parameter_name: "p_value",
+        function_id: STD_JSON_ENCODE_FUNCTION_ID,
+        parameter_id: STD_JSON_ENCODE_PARAMETER_ID,
+        revision_id: STD_JSON_ENCODE_FUNCTION_REVISION_ID,
+        schema_id: STD_JSON_SCHEMA_ID,
+        parameter_type_id: json_value_type_id,
+        result_type_id: STD_IO_BYTE_STREAM_TYPE_ID,
+    };
+    let checked = check_standard_presenter_declaration(declaration, catalogue, origins, &shape)?;
+    Ok(CheckedStandardJsonEncode {
+        function_id: checked.function_id,
+        parameter_id: checked.parameter_id,
+        revision_id: checked.revision_id,
+    })
+}
+
+/// Checks one parsed declaration against the closed ADR 0057
+/// `std.terminal.present_table` presenter shape.
+///
+/// The checker accepts ONLY the exact `std.terminal.present_table` shape: a
+/// SERVER function named `std.terminal.present_table` with exactly one
+/// required non-null `p_rows` parameter that resolves through the catalogue
+/// to `rows_type_id`, one single result that resolves to the fixed
+/// `std.terminal.Document` value type (`...15`, ADR 0058), `SECURITY
+/// INVOKER`, `TRANSACTION READ ONLY`, `VOLATILITY STABLE`, zero capability
+/// clauses, and the closed `SELECT p_rows` body. It rejects every other name,
+/// parameter count or name, default, type, result shape, security,
+/// transaction, volatility, capability, and body variation before any
+/// artifact is constructed.
+///
+/// The supplied catalogue must contain the fixed identities: the `std.terminal`
+/// schema, the `std.terminal.present_table` function, and its `p_rows`
+/// parameter, and the function must be a SERVER function. Both written type
+/// spellings must resolve through the catalogue to `rows_type_id` and the
+/// fixed `std.terminal.Document` value type, which therefore must hold value
+/// types at those identities. The supplied origins must contain the fixed
+/// function and parameter declaration origins on the same source unit.
+///
+/// `std.data.Rows` is not yet registered in `orna.std/3` (work ADR 0058
+/// registered only `std.terminal.Document` and `std.io.ByteStream`), so its
+/// identity is supplied by the caller exactly as ADR 0055 step 4 supplied the
+/// INTEGER identity to [`check_standard_parameter_echo`].
+///
+/// ADR 0057 step 4 (`feat(artifact): encode terminal and json presenter
+/// plans`) consumes the returned facts to construct the
+/// `orna.server-terminal-table` artifact and its ordered durable references.
+pub fn check_standard_terminal_present_table(
+    declaration: &ServerFunctionDeclaration,
+    catalogue: &CatalogueSnapshot,
+    origins: &[DefinitionOrigin],
+    rows_type_id: TypeId,
+) -> Result<CheckedStandardTerminalPresentTable, StandardLibraryCheckError> {
+    let shape = PresenterShape {
+        function_name: QualifiedSemanticName::new(["std", "terminal", "present_table"])
+            .expect("the fixed standard function name is valid"),
+        schema_name: QualifiedSemanticName::new(["std", "terminal"])
+            .expect("the fixed standard schema is valid"),
+        parameter_name: "p_rows",
+        function_id: STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID,
+        parameter_id: STD_TERMINAL_PRESENT_TABLE_PARAMETER_ID,
+        revision_id: STD_TERMINAL_PRESENT_TABLE_FUNCTION_REVISION_ID,
+        schema_id: STD_TERMINAL_SCHEMA_ID,
+        parameter_type_id: rows_type_id,
+        result_type_id: STD_TERMINAL_DOCUMENT_TYPE_ID,
+    };
+    let checked = check_standard_presenter_declaration(declaration, catalogue, origins, &shape)?;
+    Ok(CheckedStandardTerminalPresentTable {
+        function_id: checked.function_id,
+        parameter_id: checked.parameter_id,
+        revision_id: checked.revision_id,
     })
 }
 
@@ -5408,19 +5742,27 @@ mod tests {
 
     use super::{
         CheckAssignments, CheckedApplicationTypeUse, CheckedDefinitionReferenceTarget,
-        CheckedStandardExecutable, CheckedStandardParameterEcho, CheckedTypeId, CheckedTypeUseKind,
+        CheckedStandardExecutable, CheckedStandardJsonEncode, CheckedStandardParameterEcho,
+        CheckedStandardTerminalPresentTable, CheckedTypeId, CheckedTypeUseKind,
         CheckedValueTypeUse, ConstantValue, DiagnosticCode, IdentityAssignments,
-        NewApplicationCheckError, STD_INTEGER_TYPE_ID, STD_INVOKE_ECHO_FUNCTION_ID,
-        STD_INVOKE_ECHO_FUNCTION_REVISION_ID, STD_INVOKE_ECHO_PARAMETER_ID,
-        STD_INVOKE_ECHO_REVISION_NUMBER, STD_INVOKE_SCHEMA_ID, STD_INVOKE_SOURCE_UNIT_ID,
-        STD_TYPES_SOURCE_UNIT_ID, SemanticType, StandardApplicationCheckContext,
-        StandardApplicationContextError, StandardLibraryCheckError, StandardSourceFamilies, check,
-        check_new_application, check_new_application_with_catalogue, check_standard_application,
-        check_standard_library_source, check_standard_library_source_v2_parts,
-        check_standard_parameter_echo, checked_standard_library_with_contract_overrides_for_test,
-        location, reconcile_standard_executable, reconcile_standard_source,
-        sort_standard_type_uses, supports_record_value_scalar, unquoted_prelude_name,
-        unquoted_semantic_name,
+        NewApplicationCheckError, STD_DATA_ROWS_TYPE_ID, STD_DATA_SCHEMA_ID, STD_INTEGER_TYPE_ID,
+        STD_INVOKE_ECHO_FUNCTION_ID, STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+        STD_INVOKE_ECHO_PARAMETER_ID, STD_INVOKE_ECHO_REVISION_NUMBER, STD_INVOKE_SCHEMA_ID,
+        STD_INVOKE_SOURCE_UNIT_ID, STD_IO_BYTE_STREAM_TYPE_ID, STD_IO_SCHEMA_ID,
+        STD_JSON_ENCODE_FUNCTION_ID, STD_JSON_ENCODE_FUNCTION_REVISION_ID,
+        STD_JSON_ENCODE_PARAMETER_ID, STD_JSON_SCHEMA_ID, STD_JSON_VALUE_TYPE_ID,
+        STD_TERMINAL_DOCUMENT_TYPE_ID, STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID,
+        STD_TERMINAL_PRESENT_TABLE_FUNCTION_REVISION_ID, STD_TERMINAL_PRESENT_TABLE_PARAMETER_ID,
+        STD_TERMINAL_SCHEMA_ID, STD_TYPES_SOURCE_UNIT_ID, SemanticType,
+        StandardApplicationCheckContext, StandardApplicationContextError,
+        StandardLibraryCheckError, StandardSourceFamilies, check, check_new_application,
+        check_new_application_with_catalogue, check_standard_application,
+        check_standard_json_encode, check_standard_library_source,
+        check_standard_library_source_v2_parts, check_standard_parameter_echo,
+        check_standard_terminal_present_table,
+        checked_standard_library_with_contract_overrides_for_test, location,
+        reconcile_standard_executable, reconcile_standard_source, sort_standard_type_uses,
+        supports_record_value_scalar, unquoted_prelude_name, unquoted_semantic_name,
     };
     use crate::mutation::{MutationExpressionKind, MutationRecordFieldExpressionKind};
     use crate::{
@@ -14114,6 +14456,832 @@ mod tests {
         assert!(matches!(
             error,
             StandardLibraryCheckError::MissingParameterOrigin
+        ));
+    }
+
+    const STD_JSON_ENCODE_SOURCE: &str = "CREATE SCHEMA std.json;\nCREATE SERVER FUNCTION std.json.encode(\n    p_value std.json.Value\n)\nRETURNS std.io.ByteStream\nSECURITY INVOKER\nTRANSACTION READ ONLY\nVOLATILITY STABLE\nAS\n    SELECT p_value;";
+    const STD_TERMINAL_PRESENT_TABLE_SOURCE: &str = "CREATE SCHEMA std.data;\nCREATE SERVER FUNCTION std.terminal.present_table(\n    p_rows std.data.Rows\n)\nRETURNS std.terminal.Document\nSECURITY INVOKER\nTRANSACTION READ ONLY\nVOLATILITY STABLE\nAS\n    SELECT p_rows;";
+    /// The fixed ADR 0057 `std/present.orna` source-unit identity: `...05`.
+    const STD_PRESENT_SOURCE_UNIT_ID: SourceUnitId =
+        SourceUnitId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x05]);
+
+    fn presenter_declaration(source: &str) -> ServerFunctionDeclaration {
+        let report = parse_bundle(
+            &SourceBundle::new([SourceUnit::new("std/present.orna", source)]).unwrap(),
+        );
+        assert!(
+            report.diagnostics().is_empty(),
+            "unexpected parse diagnostics: {:?}",
+            report.diagnostics()
+        );
+        assert_eq!(report.units().len(), 1);
+        assert_eq!(report.units()[0].parsed().server_functions().len(), 1);
+        report.units()[0].parsed().server_functions()[0].clone()
+    }
+
+    #[derive(Clone, Copy)]
+    enum PresenterKind {
+        JsonEncode,
+        TerminalPresentTable,
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn presenter_catalogue(
+        kind: PresenterKind,
+        with_schema: bool,
+        with_value_types: bool,
+        with_function: bool,
+        with_parameter: bool,
+        client_domain: bool,
+    ) -> CatalogueSnapshot {
+        let (
+            schema_id,
+            function_id,
+            parameter_id,
+            revision_id,
+            function_parts,
+            parameter_name,
+            parameter_type_id,
+            result_type_id,
+        ) = match kind {
+            PresenterKind::JsonEncode => (
+                STD_JSON_SCHEMA_ID,
+                STD_JSON_ENCODE_FUNCTION_ID,
+                STD_JSON_ENCODE_PARAMETER_ID,
+                STD_JSON_ENCODE_FUNCTION_REVISION_ID,
+                ["std", "json", "encode"],
+                "p_value",
+                STD_JSON_VALUE_TYPE_ID,
+                STD_IO_BYTE_STREAM_TYPE_ID,
+            ),
+            PresenterKind::TerminalPresentTable => (
+                STD_TERMINAL_SCHEMA_ID,
+                STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID,
+                STD_TERMINAL_PRESENT_TABLE_PARAMETER_ID,
+                STD_TERMINAL_PRESENT_TABLE_FUNCTION_REVISION_ID,
+                ["std", "terminal", "present_table"],
+                "p_rows",
+                STD_DATA_ROWS_TYPE_ID,
+                STD_TERMINAL_DOCUMENT_TYPE_ID,
+            ),
+        };
+        // When the presenter schema is absent, it still must exist for the
+        // value types that live in its namespace, so it moves to a foreign
+        // identity and the fixed-identity lookup misses.
+        let presenter_schema_id = if with_schema {
+            schema_id
+        } else {
+            SchemaId::from_bytes([0x99; 16])
+        };
+        let schemas = [
+            (STD_TERMINAL_SCHEMA_ID, ["std", "terminal"]),
+            (STD_IO_SCHEMA_ID, ["std", "io"]),
+            (STD_DATA_SCHEMA_ID, ["std", "data"]),
+            (STD_JSON_SCHEMA_ID, ["std", "json"]),
+        ]
+        .into_iter()
+        .map(|(id, parts)| {
+            let id = if id == schema_id {
+                presenter_schema_id
+            } else {
+                id
+            };
+            SchemaDefinition::new(id, QualifiedSemanticName::new(parts).unwrap())
+        })
+        .collect();
+        let value_types = if with_value_types {
+            vec![
+                ValueTypeDefinition::opaque(
+                    STD_TERMINAL_DOCUMENT_TYPE_ID,
+                    QualifiedSemanticName::new(["std", "terminal", "document"]).unwrap(),
+                    "orna.std.value.terminal-document@1",
+                ),
+                ValueTypeDefinition::opaque(
+                    STD_IO_BYTE_STREAM_TYPE_ID,
+                    QualifiedSemanticName::new(["std", "io", "bytestream"]).unwrap(),
+                    "orna.std.value.byte-stream@1",
+                ),
+                ValueTypeDefinition::opaque(
+                    STD_DATA_ROWS_TYPE_ID,
+                    QualifiedSemanticName::new(["std", "data", "rows"]).unwrap(),
+                    "orna.std.value.rows@1",
+                ),
+                ValueTypeDefinition::opaque(
+                    STD_JSON_VALUE_TYPE_ID,
+                    QualifiedSemanticName::new(["std", "json", "value"]).unwrap(),
+                    "orna.std.value.json@1",
+                ),
+            ]
+        } else {
+            Vec::new()
+        };
+        let functions = if with_function {
+            let parameters = if with_parameter {
+                vec![ParameterDefinition::new(
+                    parameter_id,
+                    parameter_name,
+                    0,
+                    ResolvedType::Named(parameter_type_id),
+                    None,
+                )]
+            } else {
+                Vec::new()
+            };
+            vec![FunctionDefinition::new(
+                function_id,
+                QualifiedSemanticName::new(function_parts).unwrap(),
+                if client_domain {
+                    FunctionDomain::Client
+                } else {
+                    FunctionDomain::Server
+                },
+                parameters,
+                FunctionReturn::Single(ResolvedType::Named(result_type_id)),
+                revision_id,
+                FunctionSecurity::Invoker,
+                if client_domain {
+                    None
+                } else {
+                    Some(FunctionTransaction::ReadOnly)
+                },
+                FunctionVolatility::Stable,
+            )]
+        } else {
+            Vec::new()
+        };
+        CatalogueSnapshot::new_with_functions_and_types(
+            CatalogueRevisionId::from_bytes([0x21; 16]),
+            schemas,
+            vec![],
+            value_types,
+            vec![],
+            functions,
+        )
+        .unwrap()
+    }
+
+    fn json_encode_catalogue(
+        with_schema: bool,
+        with_value_types: bool,
+        with_function: bool,
+        with_parameter: bool,
+        client_domain: bool,
+    ) -> CatalogueSnapshot {
+        presenter_catalogue(
+            PresenterKind::JsonEncode,
+            with_schema,
+            with_value_types,
+            with_function,
+            with_parameter,
+            client_domain,
+        )
+    }
+
+    fn present_table_catalogue(
+        with_schema: bool,
+        with_value_types: bool,
+        with_function: bool,
+        with_parameter: bool,
+        client_domain: bool,
+    ) -> CatalogueSnapshot {
+        presenter_catalogue(
+            PresenterKind::TerminalPresentTable,
+            with_schema,
+            with_value_types,
+            with_function,
+            with_parameter,
+            client_domain,
+        )
+    }
+
+    fn presenter_origins(
+        source: &str,
+        function_id: FunctionId,
+        parameter_id: ParameterId,
+    ) -> Vec<DefinitionOrigin> {
+        let declaration = presenter_declaration(source);
+        let span = |start: usize, end: usize| {
+            SourceOrigin::new(
+                STD_PRESENT_SOURCE_UNIT_ID,
+                u32::try_from(start).unwrap(),
+                u32::try_from(end).unwrap(),
+            )
+            .unwrap()
+        };
+        let mut origins = vec![DefinitionOrigin::new(
+            DefinitionIdentity::Function(function_id),
+            span(declaration.span.start, declaration.span.end),
+        )];
+        if let Some(parameter) = declaration.parameters.first() {
+            origins.push(DefinitionOrigin::new(
+                DefinitionIdentity::Parameter {
+                    owner: function_id,
+                    parameter: parameter_id,
+                },
+                span(parameter.span.start, parameter.span.end),
+            ));
+        }
+        origins
+    }
+
+    fn check_json_encode(
+        source: &str,
+    ) -> Result<CheckedStandardJsonEncode, StandardLibraryCheckError> {
+        let declaration = presenter_declaration(source);
+        let catalogue = json_encode_catalogue(true, true, true, true, false);
+        let origins = presenter_origins(
+            source,
+            STD_JSON_ENCODE_FUNCTION_ID,
+            STD_JSON_ENCODE_PARAMETER_ID,
+        );
+        check_standard_json_encode(&declaration, &catalogue, &origins, STD_JSON_VALUE_TYPE_ID)
+    }
+
+    fn check_present_table(
+        source: &str,
+    ) -> Result<CheckedStandardTerminalPresentTable, StandardLibraryCheckError> {
+        let declaration = presenter_declaration(source);
+        let catalogue = present_table_catalogue(true, true, true, true, false);
+        let origins = presenter_origins(
+            source,
+            STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID,
+            STD_TERMINAL_PRESENT_TABLE_PARAMETER_ID,
+        );
+        check_standard_terminal_present_table(
+            &declaration,
+            &catalogue,
+            &origins,
+            STD_DATA_ROWS_TYPE_ID,
+        )
+    }
+
+    #[test]
+    fn checks_the_exact_json_encode_presenter_declaration() {
+        let checked = check_json_encode(STD_JSON_ENCODE_SOURCE).unwrap();
+        assert_eq!(checked.function_id(), STD_JSON_ENCODE_FUNCTION_ID);
+        assert_eq!(checked.parameter_id(), STD_JSON_ENCODE_PARAMETER_ID);
+        assert_eq!(checked.revision_id(), STD_JSON_ENCODE_FUNCTION_REVISION_ID);
+    }
+
+    #[test]
+    fn checks_the_exact_terminal_present_table_presenter_declaration() {
+        let checked = check_present_table(STD_TERMINAL_PRESENT_TABLE_SOURCE).unwrap();
+        assert_eq!(
+            checked.function_id(),
+            STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID
+        );
+        assert_eq!(
+            checked.parameter_id(),
+            STD_TERMINAL_PRESENT_TABLE_PARAMETER_ID
+        );
+        assert_eq!(
+            checked.revision_id(),
+            STD_TERMINAL_PRESENT_TABLE_FUNCTION_REVISION_ID
+        );
+    }
+
+    #[test]
+    fn presenter_rejects_every_name_variation() {
+        for source in [
+            STD_JSON_ENCODE_SOURCE.replacen("std.json.encode", "std.json.other", 1),
+            STD_JSON_ENCODE_SOURCE.replacen("std.json.encode", "std.io.encode", 1),
+            STD_JSON_ENCODE_SOURCE.replacen("std.json.encode", "app.encode", 1),
+        ] {
+            let error = check_json_encode(&source).unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    StandardLibraryCheckError::PresenterUnexpectedName { .. }
+                ),
+                "unexpected rejection: {error}"
+            );
+        }
+        for source in [
+            STD_TERMINAL_PRESENT_TABLE_SOURCE.replacen(
+                "std.terminal.present_table",
+                "std.terminal.render",
+                1,
+            ),
+            STD_TERMINAL_PRESENT_TABLE_SOURCE.replacen(
+                "std.terminal.present_table",
+                "std.data.present_table",
+                1,
+            ),
+            STD_TERMINAL_PRESENT_TABLE_SOURCE.replacen(
+                "std.terminal.present_table",
+                "app.table",
+                1,
+            ),
+        ] {
+            let error = check_present_table(&source).unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    StandardLibraryCheckError::PresenterUnexpectedName { .. }
+                ),
+                "unexpected rejection: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn presenter_rejects_missing_extra_and_different_parameters() {
+        let missing = check_json_encode(&STD_JSON_ENCODE_SOURCE.replacen(
+            "(\n    p_value std.json.Value\n)",
+            "()",
+            1,
+        ))
+        .unwrap_err();
+        assert!(matches!(
+            missing,
+            StandardLibraryCheckError::PresenterUnexpectedParameterCount { actual: 0 }
+        ));
+        let extra = check_json_encode(&STD_JSON_ENCODE_SOURCE.replacen(
+            "(\n    p_value std.json.Value\n)",
+            "(\n    p_value std.json.Value,\n    p_extra std.json.Value\n)",
+            1,
+        ))
+        .unwrap_err();
+        assert!(matches!(
+            extra,
+            StandardLibraryCheckError::PresenterUnexpectedParameterCount { actual: 2 }
+        ));
+        let renamed = check_json_encode(&STD_JSON_ENCODE_SOURCE.replacen("p_value", "p_other", 1))
+            .unwrap_err();
+        assert!(matches!(
+            renamed,
+            StandardLibraryCheckError::PresenterUnexpectedParameterName { expected, actual }
+                if expected == "p_value" && actual == "p_other"
+        ));
+        let rows_renamed = check_present_table(
+            &STD_TERMINAL_PRESENT_TABLE_SOURCE.replacen("p_rows", "p_other", 1),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            rows_renamed,
+            StandardLibraryCheckError::PresenterUnexpectedParameterName { expected, actual }
+                if expected == "p_rows" && actual == "p_other"
+        ));
+    }
+
+    #[test]
+    fn presenter_rejects_parameter_default() {
+        let error = check_json_encode(&STD_JSON_ENCODE_SOURCE.replacen(
+            "p_value std.json.Value\n)",
+            "p_value std.json.Value DEFAULT 0\n)",
+            1,
+        ))
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            StandardLibraryCheckError::PresenterParameterDefault
+        ));
+    }
+
+    #[test]
+    fn presenter_rejects_wrong_parameter_and_result_types() {
+        let wrong_parameter =
+            check_json_encode(&STD_JSON_ENCODE_SOURCE.replacen("std.json.Value", "BOOLEAN", 1))
+                .unwrap_err();
+        assert!(matches!(
+            wrong_parameter,
+            StandardLibraryCheckError::PresenterUnexpectedParameterType { .. }
+        ));
+        let rows = check_json_encode(&STD_JSON_ENCODE_SOURCE.replacen(
+            "RETURNS std.io.ByteStream\n",
+            "RETURNS ROWS (value std.json.Value)\n",
+            1,
+        ))
+        .unwrap_err();
+        assert!(matches!(
+            rows,
+            StandardLibraryCheckError::PresenterUnexpectedResultShape
+        ));
+        let wrong_result = check_json_encode(&STD_JSON_ENCODE_SOURCE.replacen(
+            "RETURNS std.io.ByteStream",
+            "RETURNS std.terminal.Document",
+            1,
+        ))
+        .unwrap_err();
+        assert!(matches!(
+            wrong_result,
+            StandardLibraryCheckError::PresenterUnexpectedResultType { .. }
+        ));
+        let table_wrong_parameter =
+            check_present_table(&STD_TERMINAL_PRESENT_TABLE_SOURCE.replacen(
+                "std.data.Rows",
+                "std.terminal.Document",
+                1,
+            ))
+            .unwrap_err();
+        assert!(matches!(
+            table_wrong_parameter,
+            StandardLibraryCheckError::PresenterUnexpectedParameterType { .. }
+        ));
+        let table_wrong_result = check_present_table(&STD_TERMINAL_PRESENT_TABLE_SOURCE.replacen(
+            "RETURNS std.terminal.Document",
+            "RETURNS std.io.ByteStream",
+            1,
+        ))
+        .unwrap_err();
+        assert!(matches!(
+            table_wrong_result,
+            StandardLibraryCheckError::PresenterUnexpectedResultType { .. }
+        ));
+    }
+
+    #[test]
+    fn presenter_rejects_missing_clauses() {
+        let missing_security =
+            check_json_encode(&STD_JSON_ENCODE_SOURCE.replacen("SECURITY INVOKER\n", "", 1))
+                .unwrap_err();
+        assert!(matches!(
+            missing_security,
+            StandardLibraryCheckError::PresenterMissingSecurity
+        ));
+        let missing_transaction =
+            check_json_encode(&STD_JSON_ENCODE_SOURCE.replacen("TRANSACTION READ ONLY\n", "", 1))
+                .unwrap_err();
+        assert!(matches!(
+            missing_transaction,
+            StandardLibraryCheckError::PresenterMissingTransaction
+        ));
+        let missing_volatility =
+            check_json_encode(&STD_JSON_ENCODE_SOURCE.replacen("VOLATILITY STABLE\n", "", 1))
+                .unwrap_err();
+        assert!(matches!(
+            missing_volatility,
+            StandardLibraryCheckError::PresenterMissingVolatility
+        ));
+        let table_missing_security = check_present_table(
+            &STD_TERMINAL_PRESENT_TABLE_SOURCE.replacen("SECURITY INVOKER\n", "", 1),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            table_missing_security,
+            StandardLibraryCheckError::PresenterMissingSecurity
+        ));
+        let table_missing_transaction = check_present_table(
+            &STD_TERMINAL_PRESENT_TABLE_SOURCE.replacen("TRANSACTION READ ONLY\n", "", 1),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            table_missing_transaction,
+            StandardLibraryCheckError::PresenterMissingTransaction
+        ));
+        let table_missing_volatility = check_present_table(
+            &STD_TERMINAL_PRESENT_TABLE_SOURCE.replacen("VOLATILITY STABLE\n", "", 1),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            table_missing_volatility,
+            StandardLibraryCheckError::PresenterMissingVolatility
+        ));
+    }
+
+    #[test]
+    fn presenter_rejects_different_clause_values() {
+        let definer = check_json_encode(&STD_JSON_ENCODE_SOURCE.replacen(
+            "SECURITY INVOKER",
+            "SECURITY DEFINER",
+            1,
+        ))
+        .unwrap_err();
+        assert!(matches!(
+            definer,
+            StandardLibraryCheckError::PresenterUnexpectedSecurity {
+                actual: SyntaxFunctionSecurity::Definer
+            }
+        ));
+        for (spelling, expected) in [
+            ("ATOMIC", SyntaxFunctionTransaction::Atomic),
+            ("MANUAL", SyntaxFunctionTransaction::Manual),
+        ] {
+            let error = check_json_encode(&STD_JSON_ENCODE_SOURCE.replacen(
+                "TRANSACTION READ ONLY",
+                &format!("TRANSACTION {spelling}"),
+                1,
+            ))
+            .unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    StandardLibraryCheckError::PresenterUnexpectedTransaction { actual }
+                        if actual == expected
+                ),
+                "unexpected rejection: {error}"
+            );
+        }
+        for (spelling, expected) in [
+            ("IMMUTABLE", SyntaxFunctionVolatility::Immutable),
+            ("VOLATILE", SyntaxFunctionVolatility::Volatile),
+        ] {
+            let error = check_present_table(&STD_TERMINAL_PRESENT_TABLE_SOURCE.replacen(
+                "VOLATILITY STABLE",
+                &format!("VOLATILITY {spelling}"),
+                1,
+            ))
+            .unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    StandardLibraryCheckError::PresenterUnexpectedVolatility { actual }
+                        if actual == expected
+                ),
+                "unexpected rejection: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn presenter_rejects_capability_clause() {
+        let error = check_json_encode(&STD_JSON_ENCODE_SOURCE.replacen(
+            "AS\n    SELECT",
+            "REQUIRES CAPABILITY std.invoke.audit\nAS\n    SELECT",
+            1,
+        ))
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            StandardLibraryCheckError::PresenterCapabilityClause
+        ));
+        let table_error = check_present_table(&STD_TERMINAL_PRESENT_TABLE_SOURCE.replacen(
+            "AS\n    SELECT",
+            "REQUIRES CAPABILITY std.invoke.audit\nAS\n    SELECT",
+            1,
+        ))
+        .unwrap_err();
+        assert!(matches!(
+            table_error,
+            StandardLibraryCheckError::PresenterCapabilityClause
+        ));
+    }
+
+    #[test]
+    fn presenter_rejects_wrong_body_identifier_and_other_bodies() {
+        let wrong_identifier = check_json_encode(&STD_JSON_ENCODE_SOURCE.replacen(
+            "SELECT p_value",
+            "SELECT p_other",
+            1,
+        ))
+        .unwrap_err();
+        assert!(matches!(
+            wrong_identifier,
+            StandardLibraryCheckError::PresenterUnexpectedBodyIdentifier { expected, actual }
+                if expected == "p_value" && actual == "p_other"
+        ));
+        let table_wrong_identifier = check_present_table(
+            &STD_TERMINAL_PRESENT_TABLE_SOURCE.replacen("SELECT p_rows", "SELECT p_other", 1),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            table_wrong_identifier,
+            StandardLibraryCheckError::PresenterUnexpectedBodyIdentifier { expected, actual }
+                if expected == "p_rows" && actual == "p_other"
+        ));
+        let other_body = check_json_encode(&STD_JSON_ENCODE_SOURCE.replacen(
+            "SELECT p_value;",
+            "SELECT i.value FROM std.items i;",
+            1,
+        ))
+        .unwrap_err();
+        assert!(matches!(
+            other_body,
+            StandardLibraryCheckError::PresenterUnexpectedBody
+        ));
+        let table_other_body = check_present_table(&STD_TERMINAL_PRESENT_TABLE_SOURCE.replacen(
+            "SELECT p_rows;",
+            "SELECT i.value FROM std.items i;",
+            1,
+        ))
+        .unwrap_err();
+        assert!(matches!(
+            table_other_body,
+            StandardLibraryCheckError::PresenterUnexpectedBody
+        ));
+    }
+
+    #[test]
+    fn presenter_rejects_missing_fixed_catalogue_identities() {
+        let declaration = presenter_declaration(STD_JSON_ENCODE_SOURCE);
+        let origins = presenter_origins(
+            STD_JSON_ENCODE_SOURCE,
+            STD_JSON_ENCODE_FUNCTION_ID,
+            STD_JSON_ENCODE_PARAMETER_ID,
+        );
+
+        let missing_schema = check_standard_json_encode(
+            &declaration,
+            &json_encode_catalogue(false, true, true, true, false),
+            &origins,
+            STD_JSON_VALUE_TYPE_ID,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            missing_schema,
+            StandardLibraryCheckError::PresenterMissingSchema
+        ));
+
+        // Without the fixed value types, `std.json.Value` cannot resolve in
+        // this catalogue, so the closed rejection is the parameter-type error.
+        let missing_value_types = check_standard_json_encode(
+            &declaration,
+            &json_encode_catalogue(true, false, true, true, false),
+            &origins,
+            STD_JSON_VALUE_TYPE_ID,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            missing_value_types,
+            StandardLibraryCheckError::PresenterUnexpectedParameterType { .. }
+        ));
+
+        let missing_function = check_standard_json_encode(
+            &declaration,
+            &json_encode_catalogue(true, true, false, false, false),
+            &origins,
+            STD_JSON_VALUE_TYPE_ID,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            missing_function,
+            StandardLibraryCheckError::PresenterMissingFunction
+        ));
+
+        let missing_parameter = check_standard_json_encode(
+            &declaration,
+            &json_encode_catalogue(true, true, true, false, false),
+            &origins,
+            STD_JSON_VALUE_TYPE_ID,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            missing_parameter,
+            StandardLibraryCheckError::PresenterMissingParameter
+        ));
+    }
+
+    #[test]
+    fn presenter_rejects_client_domain_function() {
+        let declaration = presenter_declaration(STD_JSON_ENCODE_SOURCE);
+        let origins = presenter_origins(
+            STD_JSON_ENCODE_SOURCE,
+            STD_JSON_ENCODE_FUNCTION_ID,
+            STD_JSON_ENCODE_PARAMETER_ID,
+        );
+        let error = check_standard_json_encode(
+            &declaration,
+            &json_encode_catalogue(true, true, true, true, true),
+            &origins,
+            STD_JSON_VALUE_TYPE_ID,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            StandardLibraryCheckError::PresenterUnexpectedDomain {
+                actual: FunctionDomain::Client
+            }
+        ));
+
+        let table_declaration = presenter_declaration(STD_TERMINAL_PRESENT_TABLE_SOURCE);
+        let table_origins = presenter_origins(
+            STD_TERMINAL_PRESENT_TABLE_SOURCE,
+            STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID,
+            STD_TERMINAL_PRESENT_TABLE_PARAMETER_ID,
+        );
+        let table_error = check_standard_terminal_present_table(
+            &table_declaration,
+            &present_table_catalogue(true, true, true, true, true),
+            &table_origins,
+            STD_DATA_ROWS_TYPE_ID,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            table_error,
+            StandardLibraryCheckError::PresenterUnexpectedDomain {
+                actual: FunctionDomain::Client
+            }
+        ));
+    }
+
+    #[test]
+    fn presenter_rejects_missing_origins() {
+        let declaration = presenter_declaration(STD_JSON_ENCODE_SOURCE);
+        let catalogue = json_encode_catalogue(true, true, true, true, false);
+        let origins = presenter_origins(
+            STD_JSON_ENCODE_SOURCE,
+            STD_JSON_ENCODE_FUNCTION_ID,
+            STD_JSON_ENCODE_PARAMETER_ID,
+        );
+
+        let without_function = origins
+            .iter()
+            .filter(|origin| {
+                origin.identity() != DefinitionIdentity::Function(STD_JSON_ENCODE_FUNCTION_ID)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let error = check_standard_json_encode(
+            &declaration,
+            &catalogue,
+            &without_function,
+            STD_JSON_VALUE_TYPE_ID,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            StandardLibraryCheckError::PresenterMissingFunctionOrigin
+        ));
+
+        let without_parameter = origins
+            .iter()
+            .filter(|origin| {
+                origin.identity()
+                    != DefinitionIdentity::Parameter {
+                        owner: STD_JSON_ENCODE_FUNCTION_ID,
+                        parameter: STD_JSON_ENCODE_PARAMETER_ID,
+                    }
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let error = check_standard_json_encode(
+            &declaration,
+            &catalogue,
+            &without_parameter,
+            STD_JSON_VALUE_TYPE_ID,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            StandardLibraryCheckError::PresenterMissingParameterOrigin
+        ));
+
+        let table_declaration = presenter_declaration(STD_TERMINAL_PRESENT_TABLE_SOURCE);
+        let table_catalogue = present_table_catalogue(true, true, true, true, false);
+        let table_origins = presenter_origins(
+            STD_TERMINAL_PRESENT_TABLE_SOURCE,
+            STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID,
+            STD_TERMINAL_PRESENT_TABLE_PARAMETER_ID,
+        );
+        let table_without_function = table_origins
+            .iter()
+            .filter(|origin| {
+                origin.identity()
+                    != DefinitionIdentity::Function(STD_TERMINAL_PRESENT_TABLE_FUNCTION_ID)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let error = check_standard_terminal_present_table(
+            &table_declaration,
+            &table_catalogue,
+            &table_without_function,
+            STD_DATA_ROWS_TYPE_ID,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            StandardLibraryCheckError::PresenterMissingFunctionOrigin
+        ));
+    }
+
+    #[test]
+    fn presenter_rejects_origin_source_unit_mismatch() {
+        let declaration = presenter_declaration(STD_JSON_ENCODE_SOURCE);
+        let catalogue = json_encode_catalogue(true, true, true, true, false);
+        let origins = presenter_origins(
+            STD_JSON_ENCODE_SOURCE,
+            STD_JSON_ENCODE_FUNCTION_ID,
+            STD_JSON_ENCODE_PARAMETER_ID,
+        );
+        let moved = origins
+            .iter()
+            .map(|origin| {
+                if origin.identity()
+                    == (DefinitionIdentity::Parameter {
+                        owner: STD_JSON_ENCODE_FUNCTION_ID,
+                        parameter: STD_JSON_ENCODE_PARAMETER_ID,
+                    })
+                {
+                    DefinitionOrigin::new(
+                        origin.identity(),
+                        SourceOrigin::new(
+                            SourceUnitId::from_bytes([0x42; 16]),
+                            origin.source().byte_start(),
+                            origin.source().byte_end(),
+                        )
+                        .unwrap(),
+                    )
+                } else {
+                    origin.clone()
+                }
+            })
+            .collect::<Vec<_>>();
+        let error =
+            check_standard_json_encode(&declaration, &catalogue, &moved, STD_JSON_VALUE_TYPE_ID)
+                .unwrap_err();
+        assert!(matches!(
+            error,
+            StandardLibraryCheckError::OriginSourceUnitMismatch
         ));
     }
 
