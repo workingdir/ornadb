@@ -29,6 +29,77 @@ pub const SYS_INVOKE_FUNCTION_ID: FunctionId =
 /// The exact resolved name of the mandatory invocation gateway.
 pub const SYS_INVOKE_FUNCTION_NAME: &str = "sys.invoke";
 
+/// The stable identity of the sealed `sys.inspect.snapshot` function.
+pub const SYS_INSPECT_SNAPSHOT_FUNCTION_ID: FunctionId =
+    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x03]);
+
+/// The exact resolved name of the sealed inspect-snapshot function.
+pub const SYS_INSPECT_SNAPSHOT_FUNCTION_NAME: &str = "sys.inspect.snapshot";
+
+/// The stable identity of the sealed `sys.inspect.invocation_nodes` function.
+pub const SYS_INSPECT_INVOCATION_NODES_FUNCTION_ID: FunctionId =
+    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x04]);
+
+/// The exact resolved name of the sealed invocation-nodes projection.
+pub const SYS_INSPECT_INVOCATION_NODES_FUNCTION_NAME: &str = "sys.inspect.invocation_nodes";
+
+/// The stable identity of the sealed `sys.inspect.calls` function.
+pub const SYS_INSPECT_CALLS_FUNCTION_ID: FunctionId =
+    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x05]);
+
+/// The exact resolved name of the sealed calls projection.
+pub const SYS_INSPECT_CALLS_FUNCTION_NAME: &str = "sys.inspect.calls";
+
+/// The stable identity of the sealed `sys.inspect.resources` function.
+pub const SYS_INSPECT_RESOURCES_FUNCTION_ID: FunctionId =
+    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x06]);
+
+/// The exact resolved name of the sealed resources projection.
+pub const SYS_INSPECT_RESOURCES_FUNCTION_NAME: &str = "sys.inspect.resources";
+
+/// The stable identity of the sealed `sys.inspect.state_cells` function.
+pub const SYS_INSPECT_STATE_CELLS_FUNCTION_ID: FunctionId =
+    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x07]);
+
+/// The exact resolved name of the sealed state-cells projection.
+pub const SYS_INSPECT_STATE_CELLS_FUNCTION_NAME: &str = "sys.inspect.state_cells";
+
+/// The stable identity of the sealed `sys.inspect.ui_nodes` function.
+pub const SYS_INSPECT_UI_NODES_FUNCTION_ID: FunctionId =
+    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x08]);
+
+/// The exact resolved name of the sealed ui-nodes projection.
+pub const SYS_INSPECT_UI_NODES_FUNCTION_NAME: &str = "sys.inspect.ui_nodes";
+
+/// The stable identity of the sealed `sys.inspect.presentation_candidates` function.
+pub const SYS_INSPECT_PRESENTATION_CANDIDATES_FUNCTION_ID: FunctionId =
+    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x09]);
+
+/// The exact resolved name of the sealed presentation-candidates projection.
+pub const SYS_INSPECT_PRESENTATION_CANDIDATES_FUNCTION_NAME: &str =
+    "sys.inspect.presentation_candidates";
+
+/// The stable identity of the sealed `sys.inspect.runtime_bindings` function.
+pub const SYS_INSPECT_RUNTIME_BINDINGS_FUNCTION_ID: FunctionId =
+    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x0a]);
+
+/// The exact resolved name of the sealed runtime-bindings projection.
+pub const SYS_INSPECT_RUNTIME_BINDINGS_FUNCTION_NAME: &str = "sys.inspect.runtime_bindings";
+
+/// The stable identity of the sealed `sys.inspect.security_decisions` function.
+pub const SYS_INSPECT_SECURITY_DECISIONS_FUNCTION_ID: FunctionId =
+    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x0b]);
+
+/// The exact resolved name of the sealed security-decisions projection.
+pub const SYS_INSPECT_SECURITY_DECISIONS_FUNCTION_NAME: &str = "sys.inspect.security_decisions";
+
+/// The stable identity of the sealed `sys.inspect.trace` function.
+pub const SYS_INSPECT_TRACE_FUNCTION_ID: FunctionId =
+    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x0c]);
+
+/// The exact resolved name of the sealed trace function.
+pub const SYS_INSPECT_TRACE_FUNCTION_NAME: &str = "sys.inspect.trace";
+
 /// The stable identity of the sole sealed `sys.invoke` parameter.
 pub const SYS_INVOKE_PARAMETER_ID: ParameterId =
     ParameterId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3]);
@@ -66,11 +137,66 @@ pub const SYS_INVOKE_EVENT_TYPE_NAME: &str = "sys.invoke.Event";
 /// The immutable representation contract of the sealed invocation-event carrier.
 pub const SYS_INVOKE_EVENT_REPRESENTATION_CONTRACT: &str = "orna.sys.invoke.event@1";
 
+/// The stable identity of the sealed `sys.inspect.invocation` carrier.
+pub const SYS_INSPECT_INVOCATION_TYPE_ID: TypeId =
+    TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xf3]);
+
+/// The exact semantic name of the sealed inspect-invocation carrier.
+pub const SYS_INSPECT_INVOCATION_TYPE_NAME: &str = "sys.inspect.invocation";
+
+/// The immutable representation contract of the sealed inspect-invocation carrier.
+pub const SYS_INSPECT_INVOCATION_REPRESENTATION_CONTRACT: &str = "orna.sys.inspect.invocation@1";
+
+/// The stable identity of the sealed `sys.inspect.snapshot` carrier.
+pub const SYS_INSPECT_SNAPSHOT_TYPE_ID: TypeId =
+    TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xf4]);
+
+/// The exact semantic name of the sealed inspect-snapshot carrier.
+pub const SYS_INSPECT_SNAPSHOT_TYPE_NAME: &str = "sys.inspect.snapshot";
+
+/// The immutable representation contract of the sealed inspect-snapshot carrier.
+pub const SYS_INSPECT_SNAPSHOT_REPRESENTATION_CONTRACT: &str = "orna.sys.inspect.snapshot@1";
+
+/// The stable identity of the sealed `sys.inspect.snapshot_options` carrier.
+pub const SYS_INSPECT_SNAPSHOT_OPTIONS_TYPE_ID: TypeId =
+    TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xf5]);
+
+/// The exact semantic name of the sealed inspect-snapshot-options carrier.
+pub const SYS_INSPECT_SNAPSHOT_OPTIONS_TYPE_NAME: &str = "sys.inspect.snapshot_options";
+
+/// The immutable representation contract of the sealed inspect-options carrier.
+pub const SYS_INSPECT_SNAPSHOT_OPTIONS_REPRESENTATION_CONTRACT: &str =
+    "orna.sys.inspect.snapshot_options@1";
+
+/// The stable identity of the sealed `sys.inspect.trace_event` carrier.
+pub const SYS_INSPECT_TRACE_EVENT_TYPE_ID: TypeId =
+    TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xf6]);
+
+/// The exact semantic name of the sealed inspect-trace-event carrier.
+pub const SYS_INSPECT_TRACE_EVENT_TYPE_NAME: &str = "sys.inspect.trace_event";
+
+/// The immutable representation contract of the sealed inspect-trace-event carrier.
+pub const SYS_INSPECT_TRACE_EVENT_REPRESENTATION_CONTRACT: &str = "orna.sys.inspect.trace_event@1";
+
 const CATALOGUE_HEALTH_NAME_PARTS: &[&str] = &["sys", "catalog", "health"];
 const SYS_INVOKE_NAME_PARTS: &[&str] = &["sys", "invoke"];
 const SYS_INVOKE_VALUE_NAME_PARTS: &[&str] = &["sys", "invoke", "Value"];
 const SYS_INVOKE_REQUEST_NAME_PARTS: &[&str] = &["sys", "invoke", "Request"];
 const SYS_INVOKE_EVENT_NAME_PARTS: &[&str] = &["sys", "invoke", "Event"];
+const SYS_INSPECT_SNAPSHOT_FUNCTION_NAME_PARTS: &[&str] = &["sys", "inspect", "snapshot"];
+const SYS_INSPECT_INVOCATION_NODES_FUNCTION_NAME_PARTS: &[&str] =
+    &["sys", "inspect", "invocation_nodes"];
+const SYS_INSPECT_CALLS_FUNCTION_NAME_PARTS: &[&str] = &["sys", "inspect", "calls"];
+const SYS_INSPECT_RESOURCES_FUNCTION_NAME_PARTS: &[&str] = &["sys", "inspect", "resources"];
+const SYS_INSPECT_STATE_CELLS_FUNCTION_NAME_PARTS: &[&str] = &["sys", "inspect", "state_cells"];
+const SYS_INSPECT_UI_NODES_FUNCTION_NAME_PARTS: &[&str] = &["sys", "inspect", "ui_nodes"];
+const SYS_INSPECT_PRESENTATION_CANDIDATES_FUNCTION_NAME_PARTS: &[&str] =
+    &["sys", "inspect", "presentation_candidates"];
+const SYS_INSPECT_RUNTIME_BINDINGS_FUNCTION_NAME_PARTS: &[&str] =
+    &["sys", "inspect", "runtime_bindings"];
+const SYS_INSPECT_SECURITY_DECISIONS_FUNCTION_NAME_PARTS: &[&str] =
+    &["sys", "inspect", "security_decisions"];
+const SYS_INSPECT_TRACE_FUNCTION_NAME_PARTS: &[&str] = &["sys", "inspect", "trace"];
 
 /// The behaviour selected for one sealed system function.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -80,6 +206,12 @@ pub enum SystemFunctionKind {
     Health,
     /// Plans and coordinates one authenticated root invocation.
     Invoke,
+    /// Captures one immutable inspection snapshot epoch.
+    InspectSnapshot,
+    /// Reads one closed projection over an inspection epoch.
+    InspectProjection,
+    /// Streams the sequence-addressable trace of one invocation.
+    InspectTrace,
 }
 
 /// The sealed invocation-carrier behaviour selected by one registry entry.
@@ -274,6 +406,44 @@ const SYS_INVOKE_SIGNATURE: SystemInvocationSignature = SystemInvocationSignatur
     SYS_INVOKE_EVENT_TYPE_ID,
 );
 
+/// The immutable sealed signature shape of one `sys.inspect` entry.
+///
+/// The ten entries use three closed shapes: snapshot capture (two sealed
+/// parameters and no result stream), the eight projections (one sealed
+/// snapshot parameter and no result stream), and the trace stream (two
+/// sealed parameters and one sealed stream item type). A caller can obtain a
+/// signature only from the sealed system-function registry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SystemInspectSignature {
+    parameter_count: u8,
+    stream_item_type: Option<TypeId>,
+}
+
+impl SystemInspectSignature {
+    const fn new(parameter_count: u8, stream_item_type: Option<TypeId>) -> Self {
+        Self {
+            parameter_count,
+            stream_item_type,
+        }
+    }
+
+    /// Returns the fixed sealed parameter count.
+    pub const fn parameter_count(self) -> u8 {
+        self.parameter_count
+    }
+
+    /// Returns the sealed stream item type when the entry returns a stream.
+    pub const fn stream_item_type(self) -> Option<TypeId> {
+        self.stream_item_type
+    }
+}
+
+const SYS_INSPECT_SNAPSHOT_SIGNATURE: SystemInspectSignature = SystemInspectSignature::new(2, None);
+const SYS_INSPECT_PROJECTION_SIGNATURE: SystemInspectSignature =
+    SystemInspectSignature::new(1, None);
+const SYS_INSPECT_TRACE_SIGNATURE: SystemInspectSignature =
+    SystemInspectSignature::new(2, Some(SYS_INSPECT_TRACE_EVENT_TYPE_ID));
+
 /// One immutable entry in the sealed system-function registry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SystemFunctionDefinition {
@@ -281,6 +451,7 @@ pub struct SystemFunctionDefinition {
     id: FunctionId,
     name_parts: &'static [&'static str],
     invocation_signature: Option<SystemInvocationSignature>,
+    inspect_signature: Option<SystemInspectSignature>,
 }
 
 impl SystemFunctionDefinition {
@@ -289,12 +460,14 @@ impl SystemFunctionDefinition {
         id: FunctionId,
         name_parts: &'static [&'static str],
         invocation_signature: Option<SystemInvocationSignature>,
+        inspect_signature: Option<SystemInspectSignature>,
     ) -> Self {
         Self {
             kind,
             id,
             name_parts,
             invocation_signature,
+            inspect_signature,
         }
     }
 
@@ -320,6 +493,14 @@ impl SystemFunctionDefinition {
         self.invocation_signature
     }
 
+    /// Returns the sealed inspect signature when this entry is a `sys.inspect`
+    /// function.
+    ///
+    /// Other system functions do not have an inspect signature.
+    pub const fn inspect_signature(self) -> Option<SystemInspectSignature> {
+        self.inspect_signature
+    }
+
     pub(crate) fn has_name(self, name: &QualifiedSemanticName) -> bool {
         name.parts()
             .iter()
@@ -335,12 +516,84 @@ pub const SYSTEM_FUNCTIONS: &[SystemFunctionDefinition] = &[
         CATALOGUE_HEALTH_FUNCTION_ID,
         CATALOGUE_HEALTH_NAME_PARTS,
         None,
+        None,
     ),
     SystemFunctionDefinition::new(
         SystemFunctionKind::Invoke,
         SYS_INVOKE_FUNCTION_ID,
         SYS_INVOKE_NAME_PARTS,
         Some(SYS_INVOKE_SIGNATURE),
+        None,
+    ),
+    SystemFunctionDefinition::new(
+        SystemFunctionKind::InspectSnapshot,
+        SYS_INSPECT_SNAPSHOT_FUNCTION_ID,
+        SYS_INSPECT_SNAPSHOT_FUNCTION_NAME_PARTS,
+        None,
+        Some(SYS_INSPECT_SNAPSHOT_SIGNATURE),
+    ),
+    SystemFunctionDefinition::new(
+        SystemFunctionKind::InspectProjection,
+        SYS_INSPECT_INVOCATION_NODES_FUNCTION_ID,
+        SYS_INSPECT_INVOCATION_NODES_FUNCTION_NAME_PARTS,
+        None,
+        Some(SYS_INSPECT_PROJECTION_SIGNATURE),
+    ),
+    SystemFunctionDefinition::new(
+        SystemFunctionKind::InspectProjection,
+        SYS_INSPECT_CALLS_FUNCTION_ID,
+        SYS_INSPECT_CALLS_FUNCTION_NAME_PARTS,
+        None,
+        Some(SYS_INSPECT_PROJECTION_SIGNATURE),
+    ),
+    SystemFunctionDefinition::new(
+        SystemFunctionKind::InspectProjection,
+        SYS_INSPECT_RESOURCES_FUNCTION_ID,
+        SYS_INSPECT_RESOURCES_FUNCTION_NAME_PARTS,
+        None,
+        Some(SYS_INSPECT_PROJECTION_SIGNATURE),
+    ),
+    SystemFunctionDefinition::new(
+        SystemFunctionKind::InspectProjection,
+        SYS_INSPECT_STATE_CELLS_FUNCTION_ID,
+        SYS_INSPECT_STATE_CELLS_FUNCTION_NAME_PARTS,
+        None,
+        Some(SYS_INSPECT_PROJECTION_SIGNATURE),
+    ),
+    SystemFunctionDefinition::new(
+        SystemFunctionKind::InspectProjection,
+        SYS_INSPECT_UI_NODES_FUNCTION_ID,
+        SYS_INSPECT_UI_NODES_FUNCTION_NAME_PARTS,
+        None,
+        Some(SYS_INSPECT_PROJECTION_SIGNATURE),
+    ),
+    SystemFunctionDefinition::new(
+        SystemFunctionKind::InspectProjection,
+        SYS_INSPECT_PRESENTATION_CANDIDATES_FUNCTION_ID,
+        SYS_INSPECT_PRESENTATION_CANDIDATES_FUNCTION_NAME_PARTS,
+        None,
+        Some(SYS_INSPECT_PROJECTION_SIGNATURE),
+    ),
+    SystemFunctionDefinition::new(
+        SystemFunctionKind::InspectProjection,
+        SYS_INSPECT_RUNTIME_BINDINGS_FUNCTION_ID,
+        SYS_INSPECT_RUNTIME_BINDINGS_FUNCTION_NAME_PARTS,
+        None,
+        Some(SYS_INSPECT_PROJECTION_SIGNATURE),
+    ),
+    SystemFunctionDefinition::new(
+        SystemFunctionKind::InspectProjection,
+        SYS_INSPECT_SECURITY_DECISIONS_FUNCTION_ID,
+        SYS_INSPECT_SECURITY_DECISIONS_FUNCTION_NAME_PARTS,
+        None,
+        Some(SYS_INSPECT_PROJECTION_SIGNATURE),
+    ),
+    SystemFunctionDefinition::new(
+        SystemFunctionKind::InspectTrace,
+        SYS_INSPECT_TRACE_FUNCTION_ID,
+        SYS_INSPECT_TRACE_FUNCTION_NAME_PARTS,
+        None,
+        Some(SYS_INSPECT_TRACE_SIGNATURE),
     ),
 ];
 
@@ -381,8 +634,8 @@ mod tests {
     }
 
     #[test]
-    fn system_registry_contains_exactly_the_two_sealed_entries_in_order() {
-        assert_eq!(SYSTEM_FUNCTIONS.len(), 2);
+    fn system_registry_contains_exactly_the_twelve_sealed_entries_in_order() {
+        assert_eq!(SYSTEM_FUNCTIONS.len(), 12);
         let health = SYSTEM_FUNCTIONS[0];
         assert_eq!(health.kind(), SystemFunctionKind::Health);
         assert_eq!(health.id(), CATALOGUE_HEALTH_FUNCTION_ID);
@@ -394,6 +647,20 @@ mod tests {
         assert_eq!(invoke.kind(), SystemFunctionKind::Invoke);
         assert_eq!(invoke.id(), SYS_INVOKE_FUNCTION_ID);
         assert!(parts_equal(invoke.name_parts(), &["sys", "invoke"]));
+        let snapshot = SYSTEM_FUNCTIONS[2];
+        assert_eq!(snapshot.kind(), SystemFunctionKind::InspectSnapshot);
+        assert_eq!(snapshot.id(), SYS_INSPECT_SNAPSHOT_FUNCTION_ID);
+        assert!(parts_equal(
+            snapshot.name_parts(),
+            &["sys", "inspect", "snapshot"]
+        ));
+        let trace = SYSTEM_FUNCTIONS[11];
+        assert_eq!(trace.kind(), SystemFunctionKind::InspectTrace);
+        assert_eq!(trace.id(), SYS_INSPECT_TRACE_FUNCTION_ID);
+        assert!(parts_equal(
+            trace.name_parts(),
+            &["sys", "inspect", "trace"]
+        ));
     }
 
     #[test]
@@ -418,6 +685,11 @@ mod tests {
             &["Sys", "catalog", "health"][..],
             &["catalog", "health"][..],
             &["sys", "invok"][..],
+            &["sys", "inspect"][..],
+            &["sys", "inspect", "snapshotx"][..],
+            &["sys", "inspect", "Snapshot"][..],
+            &["sys", "inspect", "snapshot", "extra"][..],
+            &["sys", "inspect", "trace_events"][..],
             &["app", "unknown"][..],
         ] {
             assert!(
@@ -431,7 +703,7 @@ mod tests {
     fn system_function_lookup_rejects_unknown_identities() {
         for bytes in [
             [0; 16],
-            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3],
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x0d],
             [0x7f; 16],
         ] {
             assert!(system_function_by_id(FunctionId::from_bytes(bytes)).is_none());
@@ -485,6 +757,174 @@ mod tests {
         .expect("the literal health identity must resolve");
 
         assert!(health.invocation_signature().is_none());
+    }
+
+    #[test]
+    fn inspect_entries_expose_the_sealed_function_ids_and_names_in_order() {
+        let expected = [
+            (
+                SYS_INSPECT_SNAPSHOT_FUNCTION_ID,
+                "sys.inspect.snapshot",
+                SystemFunctionKind::InspectSnapshot,
+            ),
+            (
+                SYS_INSPECT_INVOCATION_NODES_FUNCTION_ID,
+                "sys.inspect.invocation_nodes",
+                SystemFunctionKind::InspectProjection,
+            ),
+            (
+                SYS_INSPECT_CALLS_FUNCTION_ID,
+                "sys.inspect.calls",
+                SystemFunctionKind::InspectProjection,
+            ),
+            (
+                SYS_INSPECT_RESOURCES_FUNCTION_ID,
+                "sys.inspect.resources",
+                SystemFunctionKind::InspectProjection,
+            ),
+            (
+                SYS_INSPECT_STATE_CELLS_FUNCTION_ID,
+                "sys.inspect.state_cells",
+                SystemFunctionKind::InspectProjection,
+            ),
+            (
+                SYS_INSPECT_UI_NODES_FUNCTION_ID,
+                "sys.inspect.ui_nodes",
+                SystemFunctionKind::InspectProjection,
+            ),
+            (
+                SYS_INSPECT_PRESENTATION_CANDIDATES_FUNCTION_ID,
+                "sys.inspect.presentation_candidates",
+                SystemFunctionKind::InspectProjection,
+            ),
+            (
+                SYS_INSPECT_RUNTIME_BINDINGS_FUNCTION_ID,
+                "sys.inspect.runtime_bindings",
+                SystemFunctionKind::InspectProjection,
+            ),
+            (
+                SYS_INSPECT_SECURITY_DECISIONS_FUNCTION_ID,
+                "sys.inspect.security_decisions",
+                SystemFunctionKind::InspectProjection,
+            ),
+            (
+                SYS_INSPECT_TRACE_FUNCTION_ID,
+                "sys.inspect.trace",
+                SystemFunctionKind::InspectTrace,
+            ),
+        ];
+        for (index, (id, name, kind)) in expected.into_iter().enumerate() {
+            let entry = SYSTEM_FUNCTIONS[2 + index];
+            assert_eq!(entry.id(), id);
+            assert_eq!(entry.kind(), kind);
+            assert_eq!(entry.name_parts().join("."), name);
+            assert_eq!(system_function_by_id(id), Some(entry));
+            let parts: Vec<&str> = name.split('.').collect();
+            assert_eq!(system_function_by_name(&qualified(&parts)), Some(entry));
+        }
+    }
+
+    #[test]
+    fn inspect_entries_expose_the_closed_signature_shapes() {
+        let snapshot = system_function_by_id(SYS_INSPECT_SNAPSHOT_FUNCTION_ID)
+            .expect("the snapshot identity must resolve");
+        let signature = snapshot
+            .inspect_signature()
+            .expect("sys.inspect.snapshot must expose its sealed signature");
+        assert_eq!(signature.parameter_count(), 2);
+        assert_eq!(signature.stream_item_type(), None);
+        assert!(snapshot.invocation_signature().is_none());
+
+        for id in [
+            SYS_INSPECT_INVOCATION_NODES_FUNCTION_ID,
+            SYS_INSPECT_CALLS_FUNCTION_ID,
+            SYS_INSPECT_RESOURCES_FUNCTION_ID,
+            SYS_INSPECT_STATE_CELLS_FUNCTION_ID,
+            SYS_INSPECT_UI_NODES_FUNCTION_ID,
+            SYS_INSPECT_PRESENTATION_CANDIDATES_FUNCTION_ID,
+            SYS_INSPECT_RUNTIME_BINDINGS_FUNCTION_ID,
+            SYS_INSPECT_SECURITY_DECISIONS_FUNCTION_ID,
+        ] {
+            let projection = system_function_by_id(id).expect("a projection identity must resolve");
+            let signature = projection
+                .inspect_signature()
+                .expect("a projection must expose its sealed signature");
+            assert_eq!(signature.parameter_count(), 1);
+            assert_eq!(signature.stream_item_type(), None);
+            assert!(projection.invocation_signature().is_none());
+        }
+
+        let trace = system_function_by_id(SYS_INSPECT_TRACE_FUNCTION_ID)
+            .expect("the trace identity must resolve");
+        let signature = trace
+            .inspect_signature()
+            .expect("sys.inspect.trace must expose its sealed signature");
+        assert_eq!(signature.parameter_count(), 2);
+        assert_eq!(
+            signature.stream_item_type(),
+            Some(SYS_INSPECT_TRACE_EVENT_TYPE_ID)
+        );
+        assert!(trace.invocation_signature().is_none());
+
+        let health = system_function_by_id(CATALOGUE_HEALTH_FUNCTION_ID)
+            .expect("the health identity must resolve");
+        assert!(health.inspect_signature().is_none());
+        let invoke = system_function_by_id(SYS_INVOKE_FUNCTION_ID)
+            .expect("the invoke identity must resolve");
+        assert!(invoke.inspect_signature().is_none());
+    }
+
+    #[test]
+    fn inspect_carrier_identities_are_sealed_and_collision_free() {
+        let identities = [
+            (
+                SYS_INSPECT_INVOCATION_TYPE_ID,
+                "sys.inspect.invocation",
+                "orna.sys.inspect.invocation@1",
+                TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xf3]),
+            ),
+            (
+                SYS_INSPECT_SNAPSHOT_TYPE_ID,
+                "sys.inspect.snapshot",
+                "orna.sys.inspect.snapshot@1",
+                TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xf4]),
+            ),
+            (
+                SYS_INSPECT_SNAPSHOT_OPTIONS_TYPE_ID,
+                "sys.inspect.snapshot_options",
+                "orna.sys.inspect.snapshot_options@1",
+                TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xf5]),
+            ),
+            (
+                SYS_INSPECT_TRACE_EVENT_TYPE_ID,
+                "sys.inspect.trace_event",
+                "orna.sys.inspect.trace_event@1",
+                TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xf6]),
+            ),
+        ];
+        let mut ids = [SYS_INSPECT_INVOCATION_TYPE_ID; 4];
+        for (index, (id, name, contract, expected_bytes)) in identities.into_iter().enumerate() {
+            ids[index] = id;
+            assert_eq!(id, expected_bytes);
+            assert_eq!(id.to_bytes()[15], 0xf3 + index as u8);
+            assert!(name.starts_with("sys.inspect."));
+            assert!(contract.starts_with("orna.sys.inspect."));
+            assert!(contract.ends_with("@1"));
+        }
+        let mut sorted = ids.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            4,
+            "inspect carriers must be mutually distinct"
+        );
+        assert!(
+            !INVOCATION_CARRIERS
+                .iter()
+                .any(|carrier| ids.contains(&carrier.id())),
+            "inspect carriers must not collide with the invocation carriers"
+        );
     }
 
     #[test]
