@@ -10,10 +10,11 @@ use orna_core::{
     FunctionId,
     canonical_hash::CanonicalHashError,
     catalogue::CatalogueSnapshotError,
+    inspect::InspectError,
     invocation::InvocationCarrierConstructionError,
     physical::PhysicalPlanError,
     revision::{CatalogueHashVersion, RevisionInvariantError, RevisionPair},
-    security::{ExecuteDenial, LocalPeerAuthenticationError, SecuritySnapshotError},
+    security::{ExecuteDenial, InspectDenial, LocalPeerAuthenticationError, SecuritySnapshotError},
     state::UserStateError,
 };
 use orna_protocol::{FrameCodecError, ValueCodecError};
@@ -28,6 +29,8 @@ pub(crate) mod apply;
 pub(crate) mod bootstrap;
 #[path = "kernel/decode.rs"]
 pub(crate) mod decode;
+#[path = "kernel/inspect.rs"]
+pub(crate) mod inspect;
 #[path = "kernel/physical.rs"]
 pub(crate) mod physical;
 #[path = "kernel/recovery.rs"]
@@ -55,6 +58,7 @@ pub use server_mutation_execution::{
     ServerMutationCommitState, ServerMutationContext, ServerMutationError, ServerUpdateCommitState,
     ServerUpdateContext, ServerUpdateError, ServerUpdateResult,
 };
+pub use orna_core::inspect::InspectSnapshotEpoch;
 pub use state::UserStateInstanceRequest;
 
 /// The typed source for an unavailable authenticated raw SERVER target.
@@ -239,6 +243,15 @@ pub enum PostgresKernelError {
     UserState(UserStateError),
     /// A USER state value failed the canonical ORV5 codec.
     UserStateValueCodec(ValueCodecError),
+    /// An inspection model invariant failed with a closed error.
+    Inspect(InspectError),
+    /// The session principal was denied INSPECT access to an inspection epoch.
+    InspectDenied {
+        /// The fail-closed denial reason.
+        reason: InspectDenial,
+    },
+    /// An inspection payload failed the canonical ORV5 codec.
+    InspectValueCodec(ValueCodecError),
     /// A kernel-supplied local peer UID could not establish an Orna session.
     LocalPeerAuthentication(LocalPeerAuthenticationError),
     /// The candidate was prepared against a revision pair that is no longer active.
@@ -383,6 +396,19 @@ impl fmt::Display for PostgresKernelError {
             Self::UserStateValueCodec(error) => {
                 write!(formatter, "USER state value codec failed: {error}")
             }
+            Self::Inspect(error) => {
+                write!(formatter, "inspection model invariant failed: {error}")
+            }
+            Self::InspectDenied { reason } => {
+                write!(
+                    formatter,
+                    "INSPECT access was denied: {}",
+                    reason.audit_reason()
+                )
+            }
+            Self::InspectValueCodec(error) => {
+                write!(formatter, "inspection payload codec failed: {error}")
+            }
             Self::LocalPeerAuthentication(error) => {
                 write!(formatter, "local peer authentication failed: {error}")
             }
@@ -442,6 +468,8 @@ impl Error for PostgresKernelError {
             Self::ClientExecution(error) => Some(error),
             Self::UserState(error) => Some(error),
             Self::UserStateValueCodec(error) => Some(error),
+            Self::Inspect(error) => Some(error),
+            Self::InspectValueCodec(error) => Some(error),
             Self::LocalPeerAuthentication(error) => Some(error),
             Self::InvocationCarrier(error) => Some(error),
             Self::SealedInvocation(error) => Some(error),
@@ -464,6 +492,7 @@ impl Error for PostgresKernelError {
             | Self::ServerExecuteDenied { .. }
             | Self::RawExecuteDenied { .. }
             | Self::RawCallTargetUnavailable { .. }
+            | Self::InspectDenied { .. }
             | Self::DurableInvariant { .. } => None,
         }
     }
