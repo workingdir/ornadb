@@ -595,7 +595,10 @@ fn upgrade_reserved_identities(
     identities
 }
 
-fn active_visible_reserved_identities(active: &ActiveDatabaseRevision) -> ReservedIdentityLists {
+fn active_visible_reserved_identities(
+    active: &ActiveDatabaseRevision,
+    include_standard: bool,
+) -> ReservedIdentityLists {
     let mut identities = ReservedIdentityLists::default();
     let source = active.source();
     let catalogue = active.catalogue();
@@ -619,7 +622,7 @@ fn active_visible_reserved_identities(active: &ActiveDatabaseRevision) -> Reserv
     }
     append_catalogue_reserved_identities(catalogue, &mut identities);
     append_application_executable_reserved_identities(active, &mut identities);
-    if let Some(standard) = active.catalogue_hash_context().standard() {
+    if include_standard && let Some(standard) = active.catalogue_hash_context().standard() {
         let source = standard.source();
         let catalogue = standard.catalogue();
         identities.standard_library_revisions.push((
@@ -752,7 +755,13 @@ async fn scan_reserved_standard_identities(
     standard: &VerifiedStandardLibrarySnapshot,
 ) -> Result<(), PostgresKernelError> {
     let upgrade = upgrade_reserved_identities(standard);
-    let active = active_visible_reserved_identities(active);
+    // The in-memory collision check considers only the active revision's own
+    // application identities: the pinned standard is the append-only parent
+    // edge (work ADR 0059), so its reserved identities legitimately overlap
+    // the upgrade's retained parent units. The database scan below still
+    // excludes those already-installed parent rows from its collision check.
+    let active_own = active_visible_reserved_identities(active, false);
+    let active = active_visible_reserved_identities(active, true);
     let queries = [
         "SELECT id AS identity FROM _orna_kernel.standard_library_revisions
          WHERE id = ANY($1) AND NOT (id = ANY($2)) ORDER BY id LIMIT 1",
@@ -790,13 +799,14 @@ async fn scan_reserved_standard_identities(
          WHERE type_binding_id = ANY($1) AND NOT (type_binding_id = ANY($2))
          ORDER BY type_binding_id LIMIT 1",
     ];
-    for ((upgrade_class, active_class), query) in upgrade
+    for (((upgrade_class, active_own_class), active_class), query) in upgrade
         .classes()
         .into_iter()
+        .zip(active_own.classes())
         .zip(active.classes())
         .zip(queries)
     {
-        if let Some(identity) = first_active_reserved_identity(active_class, upgrade_class) {
+        if let Some(identity) = first_active_reserved_identity(active_own_class, upgrade_class) {
             return Err(PostgresKernelError::ReservedStandardIdentity { identity });
         }
         let requested = upgrade_class
@@ -829,7 +839,7 @@ async fn scan_reserved_standard_identities(
     }
 
     if let Some(identity) =
-        first_active_standard_executable_identity(&active.functions, &upgrade.functions)
+        first_active_standard_executable_identity(&active_own.functions, &upgrade.functions)
     {
         return Err(standard_executable_reserved(identity));
     }
@@ -883,7 +893,7 @@ async fn scan_reserved_standard_identities(
     }
 
     if let Some(identity) = first_active_standard_executable_identity(
-        &active.function_revisions,
+        &active_own.function_revisions,
         &upgrade.function_revisions,
     ) {
         return Err(standard_executable_reserved(identity));
@@ -925,7 +935,7 @@ async fn scan_reserved_standard_identities(
     }
 
     if let Some(parameter) =
-        first_active_standard_parameter(&active.parameters, &upgrade.parameters)
+        first_active_standard_parameter(&active_own.parameters, &upgrade.parameters)
     {
         return Err(standard_executable_parameter_reserved(parameter));
     }
@@ -1333,7 +1343,7 @@ async fn persist_candidate(
     encoder: &CandidateEncoder<'_>,
 ) -> Result<(), PostgresKernelError> {
     let source = candidate.source();
-    persist_source(transaction, source).await?;
+    persist_source(transaction, source, false).await?;
     transaction
         .execute(
             "INSERT INTO _orna_kernel.catalogue_revisions
@@ -1360,6 +1370,7 @@ async fn persist_candidate(
 async fn persist_source(
     transaction: &Transaction<'_>,
     source: &orna_core::revision::StoredSourceRevision,
+    reuse_existing_units: bool,
 ) -> Result<(), PostgresKernelError> {
     transaction
         .execute(
@@ -1375,6 +1386,45 @@ async fn persist_source(
         .await
         .map_err(PostgresKernelError::Database)?;
     for unit in source.units() {
+        if reuse_existing_units {
+            // The append-only standard parent edge (work ADR 0059): an
+            // already-installed unit with the same reserved identity is the
+            // retained parent unit. It must be byte-identical and is
+            // re-parented into the child bundle so the child snapshot owns
+            // its complete unit set; any other pre-existing row fails closed.
+            let existing = transaction
+                .query_opt(
+                    "SELECT ordinal, logical_path, content, content_hash
+                     FROM _orna_kernel.source_units WHERE id = $1",
+                    &[&bytes(unit.id())],
+                )
+                .await
+                .map_err(PostgresKernelError::Database)?;
+            if let Some(row) = existing {
+                let ordinal: i64 = row.try_get(0).map_err(PostgresKernelError::Database)?;
+                let logical_path: String = row.try_get(1).map_err(PostgresKernelError::Database)?;
+                let content: String = row.try_get(2).map_err(PostgresKernelError::Database)?;
+                let content_hash: Vec<u8> =
+                    row.try_get(3).map_err(PostgresKernelError::Database)?;
+                if ordinal != i64::from(unit.ordinal())
+                    || logical_path != unit.logical_path()
+                    || content != unit.content()
+                    || content_hash != digest(unit.content_hash())
+                {
+                    return Err(invariant(
+                        "reused standard source unit must be byte-identical to the retained parent",
+                    ));
+                }
+                transaction
+                    .execute(
+                        "UPDATE _orna_kernel.source_units SET bundle_id = $1 WHERE id = $2",
+                        &[&bytes(source.bundle()), &bytes(unit.id())],
+                    )
+                    .await
+                    .map_err(PostgresKernelError::Database)?;
+                continue;
+            }
+        }
         transaction
             .execute(
                 "INSERT INTO _orna_kernel.source_units
@@ -1417,7 +1467,7 @@ async fn persist_standard_library(
     transaction: &Transaction<'_>,
     standard: &VerifiedStandardLibrarySnapshot,
 ) -> Result<(), PostgresKernelError> {
-    persist_source(transaction, standard.source()).await?;
+    persist_source(transaction, standard.source(), true).await?;
     transaction
         .execute(
             "INSERT INTO _orna_kernel.standard_library_revisions
