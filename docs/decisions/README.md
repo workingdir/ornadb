@@ -117,3 +117,5 @@ source-of-truth or authority rules.
   [Terminal Documents, JSON Output, and the TTY Runtime](0057-terminal-documents-json-output.md)
 * **work ADR 0058:**
   [`orna.std/3` Standard Output Value Types](0058-orna-std-3-output-value-types.md)
+* **work ADR 0059:**
+  [Offline LSP and Editor Tooling for `.orna` Source](0059-offline-lsp-editor-tooling.md)
