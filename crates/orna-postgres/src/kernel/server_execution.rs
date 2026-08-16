@@ -1391,8 +1391,8 @@ fn validate_standard_parameter_echo_signature(
             "standard parameter echo functions must return a single INTEGER value",
         ));
     };
-    if parameter.resolved_type() != ResolvedType::value(INTEGER_TYPE_ID)
-        || *result_type != ResolvedType::value(INTEGER_TYPE_ID)
+    if !is_standard_integer_type(&parameter.resolved_type())
+        || !is_standard_integer_type(result_type)
     {
         return Err(function_signature_error(
             function.id(),
@@ -1418,6 +1418,19 @@ fn validate_standard_parameter_echo_signature(
         ));
     }
     Ok(parameter.id())
+}
+
+/// Returns whether one resolved type is the standard INTEGER of the pinned
+/// V2 context.
+///
+/// The retained standard catalogue declares the echo parameter and result as
+/// the primitive `Scalar(Integer)` form, while the pinned echo artifact
+/// carries the durable `Value(INTEGER_TYPE_ID)` identity. Both denote the
+/// same standard INTEGER (`orna.std/2` value type `...02`), so the closed
+/// signature validator admits exactly these two forms and nothing else.
+fn is_standard_integer_type(resolved_type: &ResolvedType) -> bool {
+    *resolved_type == ResolvedType::value(INTEGER_TYPE_ID)
+        || *resolved_type == ResolvedType::scalar(StandardScalar::Integer)
 }
 
 /// Validates the exact bound argument of one standard parameter-echo call.

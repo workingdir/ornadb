@@ -25,7 +25,10 @@ use orna_core::{
     },
     types::{ResolvedType, StandardScalar, TypeDescriptor},
 };
-use orna_standard::{StandardUpgrade, StandardUpgradeIdentity};
+use orna_standard::{
+    STANDARD_SOURCE_REVISION_ID, StandardUpgrade, StandardUpgradeIdentity,
+    retained_standard_library_snapshot, verify_standard_library_snapshot,
+};
 use tokio_postgres::{Client, IsolationLevel, Transaction};
 
 use crate::{
@@ -268,6 +271,7 @@ async fn apply_standard_upgrade_transaction(
         ));
     }
     scan_reserved_standard_identities(transaction, &active, standard).await?;
+    persist_retained_v1_standard_parent(transaction, standard).await?;
 
     let materialized = materialize(candidate, &active)?;
     let encoder = CandidateEncoder::new(candidate.catalogue_hash_context(), candidate.candidate());
@@ -281,6 +285,46 @@ async fn apply_standard_upgrade_transaction(
         Some(standard),
     )
     .await
+}
+
+/// Persists the retained version-one standard as historical state when the
+/// installed standard's source revision descends from it (ADR 0055).
+///
+/// The V1-to-V2 upgrade is prepared against the empty expected base, so a
+/// fresh database has no V1 rows. The V2 source revision is the append-only
+/// child of the exact V1 standard source revision, so the single install
+/// transaction must persist V1 as retained historical standard state before
+/// V2 can claim its parent. The operation is idempotent: a database that
+/// already retains V1 is left untouched, and only the exact V2 parent edge is
+/// repaired.
+async fn persist_retained_v1_standard_parent(
+    transaction: &Transaction<'_>,
+    standard: &VerifiedStandardLibrarySnapshot,
+) -> Result<(), PostgresKernelError> {
+    if standard.digest_version() != StandardLibraryDigestVersion::Version2 {
+        return Ok(());
+    }
+    if standard.source().parent() != Some(STANDARD_SOURCE_REVISION_ID) {
+        return Ok(());
+    }
+    let parent = standard
+        .source()
+        .parent()
+        .expect("the exact V2 parent edge was checked above");
+    let row = transaction
+        .query_opt(
+            "SELECT 1 FROM _orna_kernel.source_revisions WHERE id = $1",
+            &[&bytes(parent)],
+        )
+        .await
+        .map_err(PostgresKernelError::Database)?;
+    if row.is_some() {
+        return Ok(());
+    }
+    let retained = retained_standard_library_snapshot()
+        .and_then(verify_standard_library_snapshot)
+        .map_err(|_| invariant("the retained version-one standard must remain verifiable"))?;
+    persist_standard_library(transaction, &retained).await
 }
 
 fn validate_expected_base(
