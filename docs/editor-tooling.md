@@ -23,6 +23,12 @@ The language server provides:
   comments, and operators.
 - Document symbols (schemas, types, functions, fields, parameters).
 - Hover for declared names and standard scalar types.
+- Rich hover documentation: full signatures, per-parameter and
+  per-field detail with modifiers, `DOCUMENTATION` clause text, usage
+  examples, and a link to the grammar specification when the spec
+  bundle is reachable from the document.
+- Keyword hovers: every language keyword has a reference entry with a
+  summary, grammar context, and a source example.
 - Go-to-definition and find-references within the open document.
 - Completion for keywords, scalar types, standard-library types, and
   names declared in the document.
@@ -165,6 +171,20 @@ Point the client at the `orna-lsp` binary with language id `orna`,
 file patterns `["**/*.orna"]`, and UTF-16 position encoding (the
 default). The server needs no configuration and no workspace
 initialization beyond the standard handshake.
+
+## Writing documentation for hovers
+
+Attach `DOCUMENTATION '...'` clauses to object and value types, fields,
+and parameters. The language server renders the text in hovers:
+
+```sql
+CREATE TYPE tasks.task AS OBJECT (
+    title TEXT NOT NULL DOCUMENTATION 'the task title'
+) DOCUMENTATION 'a durable task';
+```
+
+The clauses are part of the grammar (`spec/spec/orna.ebnf`) and are
+captured by the lossless parser; they never change runtime behaviour.
 
 ## Language reference for tooling authors
 
