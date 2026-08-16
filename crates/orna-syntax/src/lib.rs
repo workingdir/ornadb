@@ -402,6 +402,8 @@ pub enum ServerFunctionBody {
     SqlUpdate(SqlUpdateBody),
     /// A parsed single-object Orna relational delete retained with its exact source.
     SqlDelete(SqlDeleteBody),
+    /// A parsed closed `SELECT <parameter>` body with no object source.
+    NoInputParameterSelect(NoInputParameterSelectBody),
 }
 
 impl ServerFunctionBody {
@@ -444,6 +446,15 @@ impl ServerFunctionBody {
             _ => None,
         }
     }
+
+    /// Returns the closed no-input parameter select when this body contains one.
+    #[must_use]
+    pub fn as_no_input_parameter_select(&self) -> Option<&NoInputParameterSelectBody> {
+        match self {
+            Self::NoInputParameterSelect(select) => Some(select),
+            _ => None,
+        }
+    }
 }
 
 /// The relational query body of a server function.
@@ -453,6 +464,18 @@ pub struct SqlQueryBody {
     pub source: SourceSlice,
     /// The typed Orna query syntax.
     pub query: SelectQuery,
+}
+
+/// The closed `SELECT <parameter>` body of a server function.
+///
+/// This body has no object source, predicate, ordering, or other clause. It
+/// is disjoint from [`SelectQuery`], which always requires an object source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NoInputParameterSelectBody {
+    /// The exact source text for the body, without the declaration terminator.
+    pub source: SourceSlice,
+    /// The bare parameter identifier selected by the body.
+    pub parameter: NamePart,
 }
 
 /// The closed value forms supported by SQL mutation bodies.
@@ -1826,7 +1849,8 @@ mod tests {
             }
             ServerFunctionBody::SqlInsert(_)
             | ServerFunctionBody::SqlUpdate(_)
-            | ServerFunctionBody::SqlDelete(_) => {
+            | ServerFunctionBody::SqlDelete(_)
+            | ServerFunctionBody::NoInputParameterSelect(_) => {
                 panic!("tasks.overdue must use a SELECT body")
             }
         }
@@ -2913,6 +2937,104 @@ mod tests {
                 end: from_start + "FROM".len(),
             }
         );
+    }
+
+    #[test]
+    fn parses_a_no_input_parameter_select_server_body() {
+        let source = "CREATE SERVER FUNCTION f(p_value INTEGER) RETURNS INTEGER AS SELECT p_value;";
+        let parsed = parse(source);
+
+        assert!(parsed.diagnostics().is_empty());
+        assert_eq!(parsed.syntax().text(), source);
+        assert_eq!(parsed.server_functions().len(), 1);
+
+        let function = &parsed.server_functions()[0];
+        assert!(function.body.as_sql_query().is_none());
+        let select = function
+            .body
+            .as_no_input_parameter_select()
+            .expect("f must use a no-input parameter select body");
+        let select_start = source.find("SELECT").expect("SELECT exists");
+        assert_eq!(select.source.text, "SELECT p_value");
+        assert_eq!(
+            select.source.span,
+            SourceSpan {
+                start: select_start,
+                end: select_start + "SELECT p_value".len(),
+            }
+        );
+        assert_eq!(select.parameter.text, "p_value");
+        let parameter_start = source.rfind("p_value").expect("parameter exists");
+        assert_eq!(
+            select.parameter.span,
+            SourceSpan {
+                start: parameter_start,
+                end: parameter_start + "p_value".len(),
+            }
+        );
+        assert_eq!(
+            &source[select.parameter.span.start..select.parameter.span.end],
+            "p_value"
+        );
+    }
+
+    #[test]
+    fn keeps_rejecting_no_from_select_bodies_outside_the_exact_shape() {
+        for (body, message) in [
+            (
+                "SELECT TRUE",
+                "the current Orna SELECT parser does not yet implement SELECT query bodies without FROM; expected FROM followed by an aliased object source",
+            ),
+            (
+                "SELECT NULL",
+                "the current Orna SELECT parser does not yet implement bare alias expressions; expected a field path",
+            ),
+            (
+                "SELECT p_value + 1",
+                "the current Orna SELECT parser does not yet implement bare alias expressions; expected a field path",
+            ),
+            ("SELECT 1", "expected a query expression in SELECT query"),
+            (
+                "SELECT p_value, p_value",
+                "the current Orna SELECT parser does not yet implement bare alias expressions; expected a field path",
+            ),
+            (
+                "SELECT DISTINCT p_value",
+                "the current Orna SELECT parser does not yet implement bare alias expressions; expected a field path",
+            ),
+            (
+                "SELECT p_value WHERE p_value = 1",
+                "the current Orna SELECT parser does not yet implement bare alias expressions; expected a field path",
+            ),
+            (
+                "SELECT p_value ORDER BY p_value",
+                "the current Orna SELECT parser does not yet implement bare alias expressions; expected a field path",
+            ),
+        ] {
+            let source = format!("CREATE SERVER FUNCTION tasks.bad() RETURNS TEXT AS {body};");
+            let parsed = parse(&source);
+
+            assert_eq!(parsed.syntax().text(), source, "body: {body}");
+            assert!(parsed.server_functions().is_empty(), "body: {body}");
+            assert_eq!(parsed.diagnostics().len(), 1, "body: {body}");
+            assert_eq!(parsed.diagnostics()[0].code, "ORNA0001", "body: {body}");
+            assert_eq!(parsed.diagnostics()[0].message, message, "body: {body}");
+        }
+    }
+
+    #[test]
+    fn keeps_parsing_from_queries_as_sql_query_bodies() {
+        let source = "CREATE SERVER FUNCTION tasks.list() RETURNS ROWS (task REF tasks.task) AS SELECT t.title FROM tasks.task t;";
+        let parsed = parse(source);
+
+        assert!(parsed.diagnostics().is_empty());
+        let body = &parsed.server_functions()[0].body;
+        assert!(body.as_no_input_parameter_select().is_none());
+        let query = body
+            .as_sql_query()
+            .expect("tasks.list must use a SELECT body");
+        assert_eq!(query.source.text, "SELECT t.title FROM tasks.task t");
+        assert_eq!(query.query.source_object.alias.text, "t");
     }
 
     #[test]
