@@ -79,6 +79,14 @@ const TTY_RUNTIME_VERSION: &str = orna_runtime_tty::RUNTIME_VERSION;
 /// Today the only installed family is [`RuntimeFamily::Tty`]; the spec's
 /// other desktop families (`qt`, `gtk`, `imgui`, `swiftui`, `web`) parse to
 /// `None` so an override to one fails closed at the CLI as a usage error.
+///
+/// `#[allow(clippy::manual_non_exhaustive)]`: the hidden variant below is
+/// deliberately not the `#[non_exhaustive]` marker. A marker would make the
+/// selection policy's fail-closed arm unreachable inside this crate (the
+/// compiler sees a one-variant enum), and the arm must stay live: it is
+/// what rejects a recognised-but-not-installed family once a second variant
+/// exists, and the unit tests exercise it.
+#[allow(clippy::manual_non_exhaustive)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RuntimeFamily {
     /// The terminal runtime (`orna-runtime-tty`).
@@ -1052,6 +1060,7 @@ mod tests {
         value::RuntimeValue,
     };
     use orna_protocol::{InvocationEventBatch, InvocationEventRecord};
+    use orna_standard::STD_UI_TYPE_ID;
 
     const ENCODED_VALUE: &[u8] = b"ORV5-encoded-value";
 
@@ -1337,6 +1346,62 @@ mod tests {
         assert_eq!(runtime.preference_rank(), 0);
         assert!(runtime.trusted());
         assert!(runtime.limits().is_none());
+    }
+
+    /// Builds one echo request with the given runtime override.
+    fn runtime_request(runtime: Option<RuntimeFamily>) -> InstalledInvokeRequest {
+        InstalledInvokeRequest::new(
+            InvocationTarget::qualified_name(
+                QualifiedSemanticName::new(["std", "invoke", "echo"]).expect("qualified name"),
+            )
+            .expect("target"),
+            Vec::new(),
+            None,
+            None,
+            false,
+            false,
+            runtime,
+        )
+    }
+
+    #[test]
+    fn selection_policy_defaults_to_tty_and_rejects_unknown_families() {
+        // No override selects the installed tty runtime...
+        assert_eq!(
+            selected_runtime(&runtime_request(None)),
+            Ok(Some(RuntimeFamily::Tty))
+        );
+        // ...and an explicit tty override selects the same runtime.
+        assert_eq!(
+            selected_runtime(&runtime_request(Some(RuntimeFamily::Tty))),
+            Ok(Some(RuntimeFamily::Tty))
+        );
+        // A recognised-but-not-installed family fails closed as a usage
+        // error naming the family. `--runtime` parsing never produces this
+        // variant today — unknown families are rejected at the CLI — so
+        // the hidden variant stands in for the future family that will.
+        let error = selected_runtime(&runtime_request(Some(RuntimeFamily::NotInstalled)))
+            .expect_err("a not-installed family is rejected");
+        assert_eq!(error.kind(), InstalledInvokeErrorKind::Usage);
+        assert!(error.message().contains("not-installed"));
+    }
+
+    #[test]
+    fn tty_default_selection_maps_document_and_byte_stream() {
+        let selected =
+            selected_runtime(&runtime_request(None)).expect("the default selects the tty runtime");
+        assert_eq!(selected, Some(RuntimeFamily::Tty));
+        // The tty family's sink map consumes exactly the two standard
+        // sink types; a UI value keeps the ORV5 envelope.
+        assert_eq!(
+            select_runtime_sink(STD_TERMINAL_DOCUMENT_TYPE_ID),
+            Some(orna_runtime_tty::Sink::Document)
+        );
+        assert_eq!(
+            select_runtime_sink(STD_IO_BYTE_STREAM_TYPE_ID),
+            Some(orna_runtime_tty::Sink::ByteStream)
+        );
+        assert_eq!(select_runtime_sink(STD_UI_TYPE_ID), None);
     }
 
     fn echo_definition() -> FunctionDefinition {
