@@ -301,6 +301,45 @@ const ACCEPTED_V3_STANDARD_LIBRARY_DIGEST: Sha256Digest = Sha256Digest::from_byt
 const ACCEPTED_V3_ARTIFACT_DIGEST: Sha256Digest = ACCEPTED_V2_ARTIFACT_DIGEST;
 const ACCEPTED_V3_SEMANTIC_DIGEST: Sha256Digest = ACCEPTED_V2_SEMANTIC_DIGEST;
 
+/// The standard-library version represented by the V4 manifest (work ADR 0062).
+pub const STANDARD_LIBRARY_V4_VERSION_IDENTITY: &str = "orna.std/4";
+
+/// The stable identity of `orna.std/4`.
+pub const STANDARD_LIBRARY_V4_REVISION_ID: StandardLibraryRevisionId =
+    StandardLibraryRevisionId::from_bytes(reserved_id(4));
+
+/// The stable identity of the V4 standard catalogue revision.
+pub const STANDARD_CATALOGUE_V4_REVISION_ID: CatalogueRevisionId =
+    CatalogueRevisionId::from_bytes(reserved_id(4));
+
+/// The stable identity reserved for the V4 standard source bundle.
+pub const STANDARD_SOURCE_V4_BUNDLE_ID: SourceBundleId = SourceBundleId::from_bytes(reserved_id(4));
+
+/// The stable identity reserved for the V4 standard source revision.
+pub const STANDARD_SOURCE_V4_REVISION_ID: SourceRevisionId =
+    SourceRevisionId::from_bytes(reserved_id(4));
+
+/// The logical path reserved for the retained V4 ui source unit.
+pub const STD_UI_SOURCE_LOGICAL_PATH: &str = "std/ui.orna";
+
+/// The stable identity of the retained `std/ui.orna` unit in the V4 bundle.
+pub const STD_UI_SOURCE_UNIT_ID: SourceUnitId = SourceUnitId::from_bytes(reserved_id(5));
+
+/// The stable identity of the `std.ui` schema.
+pub const STD_UI_SCHEMA_ID: SchemaId = SchemaId::from_bytes(reserved_id(8));
+
+/// The stable identity of `std.ui.UI`.
+pub const STD_UI_TYPE_ID: TypeId = TypeId::from_bytes(reserved_id(19));
+
+/// The kernel representation contract of `std.ui.UI`.
+pub const STD_UI_CONTRACT: &str = "orna.std.value.ui@1";
+
+/// The canonical ASCII magic prefix of a `std.ui.UI` payload.
+///
+/// The canonical payload is exactly `ORNA-UI/1 ` followed by a big-endian
+/// `u32` body length and the body bytes (work ADR 0062 provisional frame).
+pub const UI_MAGIC: &str = "ORNA-UI/1 ";
+
 #[derive(Clone, Copy)]
 struct ValueTypeFact {
     id: TypeId,
