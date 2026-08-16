@@ -6,6 +6,8 @@
 
 pub mod client_plan;
 pub mod constant_expression;
+pub mod server_json_encode;
 pub mod server_mutation_plan;
 pub mod server_parameter_echo;
 pub mod server_plan;
+pub mod server_terminal_table;
