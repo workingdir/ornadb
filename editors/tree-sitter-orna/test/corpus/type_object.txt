@@ -1,0 +1,122 @@
+====================
+create object type with field modifiers
+====================
+
+CREATE TYPE people.person AS OBJECT (
+    name       TEXT NOT NULL,
+    email      TEXT UNIQUE,
+    birthday   DATE,
+    age        INT DEFAULT 0,
+    status     TEXT NULL,
+    owner      REF people.person ON DELETE SET NULL,
+    score      DECIMAL CHECK (score >= 0)
+) FINAL DOCUMENTATION 'A person record';
+
+---
+
+(source_file
+  (create_type_statement
+    (create_object_type_statement
+      (kw_create)
+      (kw_type)
+      name: (qualified_name
+        (qualified_name
+          (identifier))
+        (dot)
+        (identifier))
+      (kw_as)
+      (kw_object)
+      (lparen)
+      (field_definition
+        name: (identifier)
+        type: (type_spec
+          (scalar_type
+            (kw_text)))
+        (kw_not)
+        (kw_null))
+      (comma)
+      (field_definition
+        name: (identifier)
+        type: (type_spec
+          (scalar_type
+            (kw_text)))
+        (kw_unique))
+      (comma)
+      (field_definition
+        name: (identifier)
+        type: (type_spec
+          (scalar_type
+            (kw_date))))
+      (comma)
+      (field_definition
+        name: (identifier)
+        type: (type_spec
+          (scalar_type
+            (kw_int)))
+        (kw_default)
+        (expression
+          (logical_expression
+            (comparison_expression
+              (additive_expression
+                (multiplicative_expression
+                  (unary_expression
+                    (postfix_expression
+                      (primary_expression
+                        (literal
+                          (number)))))))))))
+      (comma)
+      (field_definition
+        name: (identifier)
+        type: (type_spec
+          (scalar_type
+            (kw_text)))
+        (kw_null))
+      (comma)
+      (field_definition
+        name: (identifier)
+        type: (type_spec
+          (kw_ref)
+          (type_spec
+            (qualified_name
+              (qualified_name
+                (identifier))
+              (dot)
+              (identifier))))
+        (kw_on)
+        (kw_delete)
+        (kw_set)
+        (kw_null))
+      (comma)
+      (field_definition
+        name: (identifier)
+        type: (type_spec
+          (scalar_type
+            (kw_decimal)))
+        (kw_check)
+        (lparen)
+        (expression
+          (logical_expression
+            (comparison_expression
+              (comparison_expression
+                (additive_expression
+                  (multiplicative_expression
+                    (unary_expression
+                      (postfix_expression
+                        (primary_expression
+                          (qualified_name
+                            (identifier))))))))
+              (comparison_operator)
+              (additive_expression
+                (multiplicative_expression
+                  (unary_expression
+                    (postfix_expression
+                      (primary_expression
+                        (literal
+                          (number))))))))))
+        (rparen))
+      (rparen)
+      (kw_final)
+      (kw_documentation)
+      (string_literal)
+      (semicolon))))
+
