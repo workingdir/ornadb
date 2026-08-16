@@ -31,14 +31,16 @@ pub use resolver::{
     CheckedStandardApplicationField, CheckedStandardApplicationObjectType,
     CheckedStandardApplicationParameter, CheckedStandardApplicationRecordValueField,
     CheckedStandardApplicationRecordValueType, CheckedStandardApplicationReturnColumn,
-    CheckedStandardApplicationServerFunction, CheckedStandardLibrary, CheckedStandardSchema,
-    CheckedStandardTypeBinding, CheckedStandardTypeReference, CheckedStandardValueType,
-    CheckedTypeId, CheckedTypeUseKind, CheckedValueTypeUse, ConstantValue,
-    NewApplicationCheckError, ProvisionalExpressionId, ProvisionalFieldId, ProvisionalFunctionId,
-    ProvisionalParameterId, ProvisionalSchemaId, ProvisionalTypeId, SemanticType,
-    StandardApplicationCheckContext, StandardApplicationCheckReport,
+    CheckedStandardApplicationServerFunction, CheckedStandardLibrary, CheckedStandardParameterEcho,
+    CheckedStandardSchema, CheckedStandardTypeBinding, CheckedStandardTypeReference,
+    CheckedStandardValueType, CheckedTypeId, CheckedTypeUseKind, CheckedValueTypeUse,
+    ConstantValue, NewApplicationCheckError, ProvisionalExpressionId, ProvisionalFieldId,
+    ProvisionalFunctionId, ProvisionalParameterId, ProvisionalSchemaId, ProvisionalTypeId,
+    STD_INVOKE_ECHO_FUNCTION_ID, STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+    STD_INVOKE_ECHO_PARAMETER_ID, STD_INVOKE_ECHO_REVISION_NUMBER, STD_INVOKE_SCHEMA_ID,
+    SemanticType, StandardApplicationCheckContext, StandardApplicationCheckReport,
     StandardApplicationContextError, StandardLibraryCheckError, check, check_new_application,
-    check_standard_application, check_standard_library_source,
+    check_standard_application, check_standard_library_source, check_standard_parameter_echo,
 };
 
 /// Resolves an identifier component with Orna quoted-name rules.

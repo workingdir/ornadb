@@ -2,21 +2,26 @@
 
 use std::{collections::HashMap, error::Error, fmt, hash::Hash};
 
+use orna_artifact::server_parameter_echo::ServerParameterEchoError;
 use orna_core::{
-    CatalogueRevisionId, FieldId, SchemaId, StandardLibraryRevisionId, TypeBindingId, TypeId,
+    CatalogueRevisionId, FieldId, FunctionId, FunctionRevisionId, ParameterId, SchemaId,
+    StandardLibraryRevisionId, TypeBindingId, TypeId,
+    canonical_hash::CanonicalHashError,
     catalogue::{
         CatalogueSnapshot, FunctionDomain, FunctionSecurity, FunctionTransaction,
         FunctionVolatility, OnDeleteAction, QualifiedSemanticName, TypeBindingKind, TypeLookupName,
         ValueTypeKind, ValueTypeMutability, ValueTypePersistence,
     },
     revision::{
-        DefinitionReferenceKind, Sha256Digest, SourceOrigin, VerifiedStandardLibrarySnapshot,
+        DefinitionReference, DefinitionReferenceKind, ExecutableArtifact, RevisionInvariantError,
+        Sha256Digest, SourceOrigin, VerifiedStandardLibrarySnapshot,
     },
     types::{ResolvedType, StandardScalar},
 };
-
-#[cfg(test)]
-use orna_core::ParameterId;
+use orna_syntax::{
+    FunctionSecurity as SyntaxFunctionSecurity, FunctionTransaction as SyntaxFunctionTransaction,
+    FunctionVolatility as SyntaxFunctionVolatility,
+};
 
 use crate::{
     CompilerDiagnostic, ParseReport, SourceLocation,
@@ -1515,6 +1520,71 @@ impl CheckedStandardLibrary {
     }
 }
 
+/// The fixed ADR 0055 `std.invoke` schema identity: 15 zero bytes then `0x03`.
+pub const STD_INVOKE_SCHEMA_ID: SchemaId =
+    SchemaId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x03]);
+/// The fixed ADR 0055 `std.invoke.echo` function identity: 15 zero bytes then `0x10`.
+pub const STD_INVOKE_ECHO_FUNCTION_ID: FunctionId =
+    FunctionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10]);
+/// The fixed ADR 0055 `std.invoke.echo.p_value` parameter identity: `...10`.
+pub const STD_INVOKE_ECHO_PARAMETER_ID: ParameterId =
+    ParameterId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10]);
+/// The fixed ADR 0055 `std.invoke.echo` function-revision identity: `...10`.
+pub const STD_INVOKE_ECHO_FUNCTION_REVISION_ID: FunctionRevisionId =
+    FunctionRevisionId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10]);
+/// The `std.invoke.echo` revision number: version 1 (ADR 0055).
+pub const STD_INVOKE_ECHO_REVISION_NUMBER: u64 = 1;
+
+/// The checked executable facts for the one accepted standard parameter-echo
+/// function (`std.invoke.echo`, ADR 0055).
+///
+/// The model carries the fixed function, parameter, and version-1 revision
+/// identities, the complete 44-byte `orna.server-parameter-echo` artifact,
+/// and the three ordered durable references (parameter type, result type,
+/// body parameter read).
+///
+/// Step 6 (`feat(compiler): reconcile executable standard source`) wires the
+/// checker into the standard source checker and consumes these facts to build
+/// the `StandardExecutable` record: `FunctionRevisionRecord::new(function_id,
+/// revision_id, STD_INVOKE_ECHO_REVISION_NUMBER, declaration_origin,
+/// declaration_content_hash, semantic_hash, "orna.language/1", artifact)`
+/// with this artifact and the exact reference sequence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CheckedStandardParameterEcho {
+    pub(super) function_id: FunctionId,
+    pub(super) parameter_id: ParameterId,
+    pub(super) revision_id: FunctionRevisionId,
+    pub(super) artifact: ExecutableArtifact,
+    pub(super) references: Vec<DefinitionReference>,
+}
+
+impl CheckedStandardParameterEcho {
+    /// Returns the fixed `std.invoke.echo` function identity.
+    pub const fn function_id(&self) -> FunctionId {
+        self.function_id
+    }
+
+    /// Returns the fixed `std.invoke.echo.p_value` parameter identity.
+    pub const fn parameter_id(&self) -> ParameterId {
+        self.parameter_id
+    }
+
+    /// Returns the fixed version-1 function-revision identity.
+    pub const fn revision_id(&self) -> FunctionRevisionId {
+        self.revision_id
+    }
+
+    /// Returns the complete server parameter-echo artifact.
+    pub fn artifact(&self) -> &ExecutableArtifact {
+        &self.artifact
+    }
+
+    /// Returns the ordered durable reference sequence for this executable.
+    pub fn references(&self) -> &[DefinitionReference] {
+        &self.references
+    }
+}
+
 /// A failure while reconciling retained source with a verified standard library.
 #[non_exhaustive]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1531,6 +1601,101 @@ pub enum StandardLibraryCheckError {
     },
     /// Source facts, catalogue facts, or origins do not agree.
     SourceMismatch,
+    /// The declared server function name is not `std.invoke.echo`.
+    UnexpectedName {
+        /// The declared semantic function name.
+        actual: QualifiedSemanticName,
+    },
+    /// The declaration does not declare exactly one parameter.
+    UnexpectedParameterCount {
+        /// The declared parameter count.
+        actual: usize,
+    },
+    /// The single declared parameter is not `p_value`.
+    UnexpectedParameterName {
+        /// The declared semantic parameter name.
+        actual: String,
+    },
+    /// The single parameter declares a default expression.
+    ParameterDefault,
+    /// The single parameter does not resolve to the fixed INTEGER value type.
+    UnexpectedParameterType,
+    /// The declared result is not one single value.
+    UnexpectedResultShape,
+    /// The single result does not resolve to the fixed INTEGER value type.
+    UnexpectedResultType,
+    /// The declaration omits the security mode.
+    MissingSecurity,
+    /// The declared security mode is not exactly `SECURITY INVOKER`.
+    UnexpectedSecurity {
+        /// The declared security mode.
+        actual: SyntaxFunctionSecurity,
+    },
+    /// The declaration omits the transaction mode.
+    MissingTransaction,
+    /// The declared transaction mode is not exactly `TRANSACTION READ ONLY`.
+    UnexpectedTransaction {
+        /// The declared transaction mode.
+        actual: SyntaxFunctionTransaction,
+    },
+    /// The declaration omits the volatility mode.
+    MissingVolatility,
+    /// The declared volatility mode is not exactly `VOLATILITY STABLE`.
+    UnexpectedVolatility {
+        /// The declared volatility mode.
+        actual: SyntaxFunctionVolatility,
+    },
+    /// The declaration requires a capability clause.
+    CapabilityClause,
+    /// The body is not the exact closed `SELECT p_value` parameter-select form.
+    UnexpectedBody,
+    /// The no-input parameter select names an identifier other than `p_value`.
+    UnexpectedBodyIdentifier {
+        /// The identifier selected by the body.
+        actual: String,
+    },
+    /// The catalogue does not contain the fixed `std.invoke` schema.
+    MissingSchema,
+    /// The schema at the fixed `std.invoke` identity has a different name.
+    SchemaNameMismatch {
+        /// The name of the schema at the fixed identity.
+        actual: QualifiedSemanticName,
+    },
+    /// The catalogue does not contain the fixed `std.invoke.echo` function.
+    MissingFunction,
+    /// The function at the fixed identity has a different name.
+    FunctionNameMismatch {
+        /// The name of the function at the fixed identity.
+        actual: QualifiedSemanticName,
+    },
+    /// The fixed function has no parameter at the fixed `p_value` identity.
+    MissingParameter,
+    /// The parameter at the fixed identity has a different name.
+    ParameterNameMismatch {
+        /// The name of the parameter at the fixed identity.
+        actual: String,
+    },
+    /// The origins do not contain the fixed function declaration origin.
+    MissingFunctionOrigin,
+    /// The origins do not contain the fixed parameter declaration origin.
+    MissingParameterOrigin,
+    /// The function and parameter origins do not belong to the same source unit.
+    OriginSourceUnitMismatch,
+    /// The server parameter-echo artifact could not be encoded.
+    Artifact {
+        /// The exact artifact encoder failure.
+        source: ServerParameterEchoError,
+    },
+    /// The artifact payload could not be hashed.
+    Digest {
+        /// The exact canonical-hash failure.
+        source: CanonicalHashError,
+    },
+    /// The executable facts violate a revision invariant.
+    Revision {
+        /// The exact revision invariant failure.
+        source: RevisionInvariantError,
+    },
 }
 
 impl fmt::Display for StandardLibraryCheckError {
@@ -1545,6 +1710,97 @@ impl fmt::Display for StandardLibraryCheckError {
             }
             Self::SourceMismatch => formatter.write_str(
                 "the verified standard library source does not match its catalogue and origins",
+            ),
+            Self::UnexpectedName { actual } => write!(
+                formatter,
+                "the standard parameter-echo declaration must be named std.invoke.echo, not {actual}"
+            ),
+            Self::UnexpectedParameterCount { actual } => write!(
+                formatter,
+                "the standard parameter-echo declaration must declare exactly one parameter, not {actual}"
+            ),
+            Self::UnexpectedParameterName { actual } => write!(
+                formatter,
+                "the standard parameter-echo parameter must be p_value, not {actual}"
+            ),
+            Self::ParameterDefault => formatter.write_str(
+                "the standard parameter-echo parameter must not declare a default expression",
+            ),
+            Self::UnexpectedParameterType => formatter.write_str(
+                "the standard parameter-echo parameter must resolve to the INTEGER value type",
+            ),
+            Self::UnexpectedResultShape => formatter
+                .write_str("the standard parameter-echo declaration must return one single value"),
+            Self::UnexpectedResultType => formatter.write_str(
+                "the standard parameter-echo result must resolve to the INTEGER value type",
+            ),
+            Self::MissingSecurity => formatter
+                .write_str("the standard parameter-echo declaration must declare SECURITY INVOKER"),
+            Self::UnexpectedSecurity { actual } => write!(
+                formatter,
+                "the standard parameter-echo declaration must declare SECURITY INVOKER, not {actual:?}"
+            ),
+            Self::MissingTransaction => formatter.write_str(
+                "the standard parameter-echo declaration must declare TRANSACTION READ ONLY",
+            ),
+            Self::UnexpectedTransaction { actual } => write!(
+                formatter,
+                "the standard parameter-echo declaration must declare TRANSACTION READ ONLY, not {actual:?}"
+            ),
+            Self::MissingVolatility => formatter.write_str(
+                "the standard parameter-echo declaration must declare VOLATILITY STABLE",
+            ),
+            Self::UnexpectedVolatility { actual } => write!(
+                formatter,
+                "the standard parameter-echo declaration must declare VOLATILITY STABLE, not {actual:?}"
+            ),
+            Self::CapabilityClause => formatter
+                .write_str("the standard parameter-echo declaration must not require a capability"),
+            Self::UnexpectedBody => formatter.write_str(
+                "the standard parameter-echo body must be the exact SELECT p_value form",
+            ),
+            Self::UnexpectedBodyIdentifier { actual } => write!(
+                formatter,
+                "the standard parameter-echo body must select p_value, not {actual}"
+            ),
+            Self::MissingSchema => formatter
+                .write_str("the catalogue does not contain the fixed std.invoke schema identity"),
+            Self::SchemaNameMismatch { actual } => write!(
+                formatter,
+                "the schema at the fixed identity is named {actual}, not std.invoke"
+            ),
+            Self::MissingFunction => formatter.write_str(
+                "the catalogue does not contain the fixed std.invoke.echo function identity",
+            ),
+            Self::FunctionNameMismatch { actual } => write!(
+                formatter,
+                "the function at the fixed identity is named {actual}, not std.invoke.echo"
+            ),
+            Self::MissingParameter => formatter
+                .write_str("the fixed function has no parameter at the fixed p_value identity"),
+            Self::ParameterNameMismatch { actual } => write!(
+                formatter,
+                "the parameter at the fixed identity is named {actual}, not p_value"
+            ),
+            Self::MissingFunctionOrigin => formatter
+                .write_str("the origins do not contain the fixed std.invoke.echo function origin"),
+            Self::MissingParameterOrigin => formatter.write_str(
+                "the origins do not contain the fixed std.invoke.echo.p_value parameter origin",
+            ),
+            Self::OriginSourceUnitMismatch => formatter.write_str(
+                "the standard function and parameter origins must belong to the same source unit",
+            ),
+            Self::Artifact { source } => write!(
+                formatter,
+                "the standard parameter-echo artifact could not be encoded: {source}"
+            ),
+            Self::Digest { source } => write!(
+                formatter,
+                "the standard parameter-echo artifact payload could not be hashed: {source}"
+            ),
+            Self::Revision { source } => write!(
+                formatter,
+                "the standard parameter-echo executable facts violate a revision invariant: {source}"
             ),
         }
     }
