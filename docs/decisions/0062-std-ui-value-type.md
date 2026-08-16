@@ -46,18 +46,26 @@ guessed.
 | `std/ui.orna` `SourceUnitId` | `...05` |
 | `std.terminal` `SchemaId` | `...04` |
 | `std.io` `SchemaId` | `...05` |
-| `std.ui` `SchemaId` | `...06` |
+| `std.io` `SchemaId` | `...05` |
+| `std.json` `SchemaId` | `...06` |
+| `std.data` `SchemaId` | `...07` |
+| `std.ui` `SchemaId` | `...08` |
 | `std.terminal.Document` `TypeId` | `...15` |
 | `std.io.ByteStream` `TypeId` | `...16` |
-| `std.ui.UI` `TypeId` | `...17` |
+| `std.json.Value` `TypeId` | `...17` |
+| `std.data.Rows` `TypeId` | `...18` |
+| `std.ui.UI` `TypeId` | `...19` |
 | `std.ui.UI` kernel contract | `orna.std.value.ui@1` |
 
 The identity values above are the V1-V3 manifest facts plus one new
-`...05` source unit, one new `...06` schema, and the next reserved type
-identity `...17` (the reserved sequence: `opaque_token` `...14`,
-`Document` ind `...15`, `ByteStream` `...16`). `...17` is not yet claimed
-by any other manifest constant; the resolver model verifies the invariant
-during the V3/V4 reconcile tests.
+`...05` source unit, one new `...08` schema, and the next free reserved
+type identity `...19`. The reserved sequence after
+`std.types.opaque_token` (`...14`) is `Document` `...15`, `ByteStream`
+`...16`; work ADR 0057 already claims `...17` (`std.json.Value`) and
+`...18` (`std.data.Rows`) in the compiler resolver model, so `...19` is
+the next unattributed byte. `...19` is not claimed by any other
+identity kind or crate; the resolver model verifies the invariant
+during the V4 reconcile tests.
 
 The ordered source bundle is exact:
 
@@ -93,7 +101,7 @@ The unit declares exactly one schema, one opaque value type, and one
 qualified export, and nothing else. The semantic name in the `orna.std/4`
 catalogue is `std.ui.ui` (lower case, matching the existing standard
 manifest convention); the source spelling is case-insensitive. The
-qualified binding is `std.UI` (target `...17`), following the
+qualified binding is `std.UI` (target `...19`), following the
 `std.Document` / `std.ByteStream` export pattern.
 
 The type carries the `KERNEL CONTRACT 'orna.std.value.ui@1'` exactly
