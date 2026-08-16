@@ -1,0 +1,52 @@
+{
+  "name": "orna-vscode",
+  "displayName": "Orna",
+  "description": "Language support for the Orna language.",
+  "version": "0.1.0",
+  "publisher": "ornadb",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "onLanguage:orna"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "orna",
+        "aliases": [
+          "Orna",
+          "orna"
+        ],
+        "extensions": [
+          ".orna"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "orna",
+        "scopeName": "source.orna",
+        "path": "./syntaxes/orna.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "Orna",
+      "properties": {
+        "orna.lsp.path": {
+          "type": "string",
+          "default": "orna-lsp",
+          "description": "Path to the orna-lsp binary"
+        }
+      }
+    }
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  }
+}
