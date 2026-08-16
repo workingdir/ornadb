@@ -19,7 +19,7 @@ use orna_core::{
         LocalPeerAuthenticationError, LocalPeerCredential, Principal, PrincipalKind,
         PrincipalStatus, RoleMembership, SecurityAuditDecision, SecurityAuditDenial,
         SecurityAuditEvent, SecurityAuditKind, SecurityAuditOutcome, SecurityFunctionTarget,
-        SecuritySnapshot, SessionBindingError, TargetClass,
+        SecuritySnapshot, SessionBindingError, TargetClass, UserStateAuditOperation,
     },
     system::{SYS_INVOKE_FUNCTION_ID, system_function_by_id},
     value::{FunctionArgument, RecordValue, RuntimeValue},
@@ -1698,7 +1698,7 @@ fn raw_server_insert_argument_target_is_unavailable(
     }
 }
 
-async fn append_security_audit_event(
+pub(crate) async fn append_security_audit_event(
     transaction: &Transaction<'_>,
     decision: SecurityAuditDecision,
 ) -> Result<SecurityAuditEventId, PostgresKernelError> {
@@ -1724,12 +1724,24 @@ async fn append_security_audit_event(
             Some(target.revision().source().to_bytes().to_vec()),
             Some(target.revision().catalogue().to_bytes().to_vec()),
         ),
-        None => (None, None, None),
+        None => (
+            decision
+                .user_state_root_function()
+                .map(|function| function.to_bytes().to_vec()),
+            None,
+            None,
+        ),
     };
     let denial_reason = match decision.denial() {
         None => decision
-            .capability_name()
-            .map(encode_capability_audit_denial),
+            .user_state_operation()
+            .zip(decision.user_state_cell_count())
+            .map(|(operation, cell_count)| encode_user_state_audit_detail(operation, cell_count))
+            .or_else(|| {
+                decision
+                    .capability_name()
+                    .map(encode_capability_audit_denial)
+            }),
         Some(SecurityAuditDenial::Authentication(reason)) => {
             Some(encode_authentication_audit_denial(reason).to_owned())
         }
@@ -2280,7 +2292,7 @@ async fn recover_security_snapshot(
     recover_security_snapshot_for_active(transaction, &active).await
 }
 
-async fn recover_security_snapshot_for_active(
+pub(crate) async fn recover_security_snapshot_for_active(
     transaction: &Transaction<'_>,
     active: &ActiveDatabaseRevision,
 ) -> Result<SecuritySnapshot, PostgresKernelError> {
@@ -3162,6 +3174,35 @@ fn decode_security_audit_event(row: &Row) -> Result<SecurityAuditEvent, Postgres
                 )
             })?
         }
+        ("user_state", "allowed")
+            if effective_principal.is_none()
+                && authorising_principal.is_none()
+                && function.is_some()
+                && source_revision.is_none()
+                && catalogue_revision.is_none() =>
+        {
+            let operation_detail = require_audit_value(
+                denial_reason,
+                &record,
+                "USER state audit requires an operation and cell count",
+            )?;
+            let (operation, cell_count) =
+                decode_user_state_audit_detail(&operation_detail, &record)?;
+            SecurityAuditDecision::recover_user_state_allowed(
+                require_audit_value(
+                    session_principal,
+                    &record,
+                    "USER state audit requires a session principal",
+                )?,
+                operation,
+                require_audit_value(
+                    function,
+                    &record,
+                    "USER state audit requires a root function",
+                )?,
+                cell_count,
+            )
+        }
         _ => {
             return Err(audit_invariant(
                 &record,
@@ -3288,11 +3329,60 @@ fn encode_security_audit_kind(kind: SecurityAuditKind) -> &'static str {
         SecurityAuditKind::Authentication => "authentication",
         SecurityAuditKind::Execute => "execute",
         SecurityAuditKind::Capability => "capability",
+        SecurityAuditKind::UserState => "user_state",
     }
 }
 
 fn encode_capability_audit_denial(capability: &str) -> String {
     format!("capability:{capability}")
+}
+fn encode_user_state_audit_detail(operation: UserStateAuditOperation, cell_count: u64) -> String {
+    let operation = match operation {
+        UserStateAuditOperation::Load => "load",
+        UserStateAuditOperation::Write => "write",
+    };
+    format!("user_state:{operation}:cells={cell_count}")
+}
+
+fn decode_user_state_audit_detail(
+    value: &str,
+    record: &str,
+) -> Result<(UserStateAuditOperation, u64), PostgresKernelError> {
+    let Some(rest) = value.strip_prefix("user_state:") else {
+        return Err(audit_invariant(
+            record,
+            "USER state audit detail must start with user_state:",
+        ));
+    };
+    let Some((operation, count)) = rest.split_once(":cells=") else {
+        return Err(audit_invariant(
+            record,
+            "USER state audit detail must contain an operation and cell count",
+        ));
+    };
+    let operation = match operation {
+        "load" => UserStateAuditOperation::Load,
+        "write" => UserStateAuditOperation::Write,
+        _ => {
+            return Err(audit_invariant(
+                record,
+                "USER state audit operation must be load or write",
+            ));
+        }
+    };
+    let cell_count = count.parse::<u64>().map_err(|_| {
+        audit_invariant(
+            record,
+            "USER state audit cell count must be a canonical unsigned integer",
+        )
+    })?;
+    if encode_user_state_audit_detail(operation, cell_count) != value {
+        return Err(audit_invariant(
+            record,
+            "USER state audit detail is not canonical",
+        ));
+    }
+    Ok((operation, cell_count))
 }
 
 fn decode_capability_audit_denial(

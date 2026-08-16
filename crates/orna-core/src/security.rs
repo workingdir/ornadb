@@ -502,6 +502,17 @@ pub enum SecurityAuditKind {
     Execute,
     /// The local client checked a CLIENT function capability requirement.
     Capability,
+    /// An authenticated session loaded or wrote durable USER state cells.
+    UserState,
+}
+
+/// The closed USER state operation family recorded in protected audit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UserStateAuditOperation {
+    /// A `load_user_state` operation.
+    Load,
+    /// A `write_user_state` operation.
+    Write,
 }
 
 /// Whether a protected security decision allowed or denied its operation.
@@ -559,10 +570,16 @@ enum SecurityAuditDecisionShape {
         target: InvocationTarget,
         capability: String,
     },
+    UserStateAllowed {
+        session_principal: PrincipalId,
+        operation: UserStateAuditOperation,
+        root_function: FunctionId,
+        cell_count: u64,
+    },
 }
 
-/// An immutable authentication, `EXECUTE`, or CLIENT capability decision
-/// prepared for auditing.
+/// An immutable authentication, `EXECUTE`, CLIENT capability, or USER state
+/// decision prepared for auditing.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SecurityAuditDecision(SecurityAuditDecisionShape);
 
@@ -699,6 +716,59 @@ impl SecurityAuditDecision {
             capability,
         }))
     }
+    /// Records an allowed USER state operation for a trusted session.
+    ///
+    /// Only the operation kind, principal, root function, and cell count are
+    /// retained; typed value payloads are never written to audit.
+    pub fn user_state_allowed(
+        session: &AuthenticatedSession,
+        operation: UserStateAuditOperation,
+        root_function: FunctionId,
+        cell_count: u64,
+    ) -> Self {
+        Self::recover_user_state_allowed(session.principal, operation, root_function, cell_count)
+    }
+
+    /// Recovers an allowed USER state operation from protected storage.
+    pub const fn recover_user_state_allowed(
+        session_principal: PrincipalId,
+        operation: UserStateAuditOperation,
+        root_function: FunctionId,
+        cell_count: u64,
+    ) -> Self {
+        Self(SecurityAuditDecisionShape::UserStateAllowed {
+            session_principal,
+            operation,
+            root_function,
+            cell_count,
+        })
+    }
+
+    /// Returns the USER state operation when this decision records one.
+    pub const fn user_state_operation(&self) -> Option<UserStateAuditOperation> {
+        match self.0 {
+            SecurityAuditDecisionShape::UserStateAllowed { operation, .. } => Some(operation),
+            _ => None,
+        }
+    }
+
+    /// Returns the root function when this decision records USER state.
+    pub const fn user_state_root_function(&self) -> Option<FunctionId> {
+        match self.0 {
+            SecurityAuditDecisionShape::UserStateAllowed { root_function, .. } => {
+                Some(root_function)
+            }
+            _ => None,
+        }
+    }
+
+    /// Returns the cell count when this decision records USER state.
+    pub const fn user_state_cell_count(&self) -> Option<u64> {
+        match self.0 {
+            SecurityAuditDecisionShape::UserStateAllowed { cell_count, .. } => Some(cell_count),
+            _ => None,
+        }
+    }
 
     /// Returns the closed event kind.
     pub const fn kind(&self) -> SecurityAuditKind {
@@ -711,6 +781,7 @@ impl SecurityAuditDecision {
             | SecurityAuditDecisionShape::ExecuteDenied { .. } => SecurityAuditKind::Execute,
             SecurityAuditDecisionShape::CapabilityAllowed { .. }
             | SecurityAuditDecisionShape::CapabilityDenied { .. } => SecurityAuditKind::Capability,
+            SecurityAuditDecisionShape::UserStateAllowed { .. } => SecurityAuditKind::UserState,
         }
     }
 
@@ -719,7 +790,8 @@ impl SecurityAuditDecision {
         match self.0 {
             SecurityAuditDecisionShape::AuthenticationAllowed { .. }
             | SecurityAuditDecisionShape::ExecuteAllowed { .. }
-            | SecurityAuditDecisionShape::CapabilityAllowed { .. } => SecurityAuditOutcome::Allowed,
+            | SecurityAuditDecisionShape::CapabilityAllowed { .. }
+            | SecurityAuditDecisionShape::UserStateAllowed { .. } => SecurityAuditOutcome::Allowed,
             SecurityAuditDecisionShape::AuthenticationDenied { .. }
             | SecurityAuditDecisionShape::ExecuteDenied { .. }
             | SecurityAuditDecisionShape::CapabilityDenied { .. } => SecurityAuditOutcome::Denied,
@@ -740,6 +812,9 @@ impl SecurityAuditDecision {
                 session_principal, ..
             }
             | SecurityAuditDecisionShape::CapabilityDenied {
+                session_principal, ..
+            }
+            | SecurityAuditDecisionShape::UserStateAllowed {
                 session_principal, ..
             } => Some(session_principal),
             SecurityAuditDecisionShape::AuthenticationDenied {
@@ -2312,6 +2387,39 @@ mod tests {
                 ExecuteDenial::MissingExecuteGrant
             ))
         );
+    }
+    #[test]
+    fn user_state_audit_decision_retains_only_redacted_operation_facts() {
+        let snapshot = SecuritySnapshot::new(
+            REVISION,
+            vec![FUNCTION],
+            vec![active(USER, PrincipalKind::User)],
+            vec![],
+            vec![],
+        )
+        .expect("valid USER state audit snapshot");
+        let session = snapshot
+            .bind_authenticated_session(USER, vec![])
+            .expect("valid USER state audit session");
+        let decision = SecurityAuditDecision::user_state_allowed(
+            &session,
+            UserStateAuditOperation::Write,
+            FUNCTION,
+            7,
+        );
+        assert_eq!(decision.kind(), SecurityAuditKind::UserState);
+        assert_eq!(decision.outcome(), SecurityAuditOutcome::Allowed);
+        assert_eq!(decision.session_principal(), Some(USER));
+        assert_eq!(
+            decision.user_state_operation(),
+            Some(UserStateAuditOperation::Write)
+        );
+        assert_eq!(decision.user_state_root_function(), Some(FUNCTION));
+        assert_eq!(decision.user_state_cell_count(), Some(7));
+        assert_eq!(decision.effective_principal(), None);
+        assert_eq!(decision.authorising_principal(), None);
+        assert_eq!(decision.target(), None);
+        assert_eq!(decision.denial(), None);
     }
 
     #[test]
