@@ -1,0 +1,30 @@
+====================
+create enum type
+====================
+
+CREATE TYPE tasks.priority AS ENUM ('low', 'medium', 'high',);
+
+---
+
+(source_file
+  (create_type_statement
+    (create_enum_type_statement
+      (kw_create)
+      (kw_type)
+      name: (qualified_name
+        (qualified_name
+          (identifier))
+        (dot)
+        (identifier))
+      (kw_as)
+      (kw_enum)
+      (lparen)
+      (string_literal)
+      (comma)
+      (string_literal)
+      (comma)
+      (string_literal)
+      (comma)
+      (rparen)
+      (semicolon))))
+
