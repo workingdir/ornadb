@@ -2307,7 +2307,9 @@ fn retained_standard_library_v2_snapshot_from_source(
 /// validate it, but cannot add or select a codec. The accepted V1 and V2
 /// snapshots bind only the fixed-length `std.types.opaque_token` codec; the
 /// accepted `orna.std/3` snapshot additionally binds the two framed output
-/// codecs for `std.terminal.Document` and `std.io.ByteStream` (work ADR 0058).
+/// codecs for `std.terminal.Document` and `std.io.ByteStream` (work ADR
+/// 0058); the accepted `orna.std/4` snapshot additionally binds the
+/// `ORNA-UI/1 ` length-prefixed-UTF-8 codec for `std.ui.UI` (work ADR 0062).
 pub fn registered_opaque_codecs(
     standard: &VerifiedStandardLibrarySnapshot,
 ) -> Result<OpaqueCodecRegistry, RegisteredOpaqueCodecsError> {
@@ -2323,7 +2325,33 @@ pub fn registered_opaque_codecs(
     )
     .map_err(|source| RegisteredOpaqueCodecsError::Registry { source })?;
 
-    let registrations = if is_accepted_v3_standard(standard) {
+    let registrations = if is_accepted_v4_standard(standard) {
+        let document = OpaqueCodecRegistration::length_prefixed_utf8(
+            STD_TERMINAL_DOCUMENT_TYPE_ID,
+            semantic_name("std.terminal.document", ["std", "terminal", "document"])
+                .map_err(|source| RegisteredOpaqueCodecsError::Manifest { source })?,
+            STD_TERMINAL_DOCUMENT_CONTRACT,
+            TERMINAL_DOCUMENT_MAGIC,
+        )
+        .map_err(|source| RegisteredOpaqueCodecsError::Registry { source })?;
+        let byte_stream = OpaqueCodecRegistration::media_type_framed(
+            STD_IO_BYTE_STREAM_TYPE_ID,
+            semantic_name("std.io.bytestream", ["std", "io", "bytestream"])
+                .map_err(|source| RegisteredOpaqueCodecsError::Manifest { source })?,
+            STD_IO_BYTE_STREAM_CONTRACT,
+            BYTE_STREAM_MAGIC,
+        )
+        .map_err(|source| RegisteredOpaqueCodecsError::Registry { source })?;
+        let ui = OpaqueCodecRegistration::length_prefixed_utf8(
+            STD_UI_TYPE_ID,
+            semantic_name("std.ui.ui", ["std", "ui", "ui"])
+                .map_err(|source| RegisteredOpaqueCodecsError::Manifest { source })?,
+            STD_UI_CONTRACT,
+            UI_MAGIC,
+        )
+        .map_err(|source| RegisteredOpaqueCodecsError::Registry { source })?;
+        vec![opaque_token, document, byte_stream, ui]
+    } else if is_accepted_v3_standard(standard) {
         let document = OpaqueCodecRegistration::length_prefixed_utf8(
             STD_TERMINAL_DOCUMENT_TYPE_ID,
             semantic_name("std.terminal.document", ["std", "terminal", "document"])
@@ -2382,6 +2410,18 @@ fn is_accepted_v3_standard(standard: &VerifiedStandardLibrarySnapshot) -> bool {
         && standard.source().parent() == Some(STANDARD_SOURCE_V2_REVISION_ID)
         && standard.source().revision_hash() == ACCEPTED_V3_SOURCE_REVISION_DIGEST
         && standard.digest() == ACCEPTED_V3_STANDARD_LIBRARY_DIGEST
+}
+
+/// Returns whether one verified snapshot is exactly the accepted `orna.std/4`
+/// standard library (work ADR 0062).
+fn is_accepted_v4_standard(standard: &VerifiedStandardLibrarySnapshot) -> bool {
+    standard.revision() == STANDARD_LIBRARY_V4_REVISION_ID
+        && standard.catalogue().revision() == STANDARD_CATALOGUE_V4_REVISION_ID
+        && standard.source().bundle() == STANDARD_SOURCE_V4_BUNDLE_ID
+        && standard.source().id() == STANDARD_SOURCE_V4_REVISION_ID
+        && standard.source().parent() == Some(STANDARD_SOURCE_V3_REVISION_ID)
+        && standard.source().revision_hash() == ACCEPTED_V4_SOURCE_REVISION_DIGEST
+        && standard.digest() == ACCEPTED_V4_STANDARD_LIBRARY_DIGEST
 }
 
 /// An error from binding checked-in opaque codecs to a standard snapshot.
@@ -6677,6 +6717,76 @@ EXPORT TYPE std.ui.UI AS std.UI;
                 })
             );
         }
+    }
+
+    #[test]
+    fn v4_registered_opaque_codecs_construct_the_ui_payloads() {
+        let verified = verify_standard_library_v4_snapshot(
+            retained_standard_library_v4_snapshot()
+                .expect("the retained V4 standard source is valid"),
+        )
+        .expect("the retained V4 standard source verifies");
+        let registry = registered_opaque_codecs(&verified).expect("the V4 opaque codecs register");
+        let active = empty_version_two_active_revision(&verified);
+
+        let mut ui_payload = Vec::from(UI_MAGIC.as_bytes());
+        ui_payload.extend_from_slice(&5_u32.to_be_bytes());
+        ui_payload.extend_from_slice(b"hello");
+        let ui = OpaqueValue::new(&active, &registry, STD_UI_TYPE_ID, &ui_payload)
+            .expect("the ui payload constructs");
+        assert_eq!(ui.opaque_type(), STD_UI_TYPE_ID);
+        assert_eq!(ui.canonical_payload(), ui_payload);
+
+        // The V4 registry also binds the opaque-token, terminal-document, and
+        // byte-stream codecs unchanged.
+        let token = OpaqueValue::new(&active, &registry, OPAQUE_TOKEN_TYPE_ID, [0xab; 16])
+            .expect("the opaque-token payload constructs");
+        assert_eq!(token.opaque_type(), OPAQUE_TOKEN_TYPE_ID);
+        let mut document_payload = Vec::from(TERMINAL_DOCUMENT_MAGIC.as_bytes());
+        document_payload.extend_from_slice(&2_u32.to_be_bytes());
+        document_payload.extend_from_slice(b"{}");
+        let document = OpaqueValue::new(
+            &active,
+            &registry,
+            STD_TERMINAL_DOCUMENT_TYPE_ID,
+            &document_payload,
+        )
+        .expect("the terminal document payload constructs");
+        assert_eq!(document.opaque_type(), STD_TERMINAL_DOCUMENT_TYPE_ID);
+        let mut byte_stream_payload = Vec::from(BYTE_STREAM_MAGIC.as_bytes());
+        byte_stream_payload.extend_from_slice(&16_u32.to_be_bytes());
+        byte_stream_payload.extend_from_slice(b"application/json");
+        byte_stream_payload.extend_from_slice(&0_u32.to_be_bytes());
+        let byte_stream = OpaqueValue::new(
+            &active,
+            &registry,
+            STD_IO_BYTE_STREAM_TYPE_ID,
+            &byte_stream_payload,
+        )
+        .expect("the byte-stream payload constructs");
+        assert_eq!(byte_stream.opaque_type(), STD_IO_BYTE_STREAM_TYPE_ID);
+
+        assert_eq!(
+            OpaqueValue::new(&active, &registry, STD_UI_TYPE_ID, b"WRONG-UI/1 \0\0\0\0"),
+            Err(OpaqueValueError::InvalidMagic {
+                opaque_type: STD_UI_TYPE_ID,
+            })
+        );
+        // The V3 registry does not yet bind the ui codec.
+        let version_three = verify_standard_library_v3_snapshot(
+            retained_standard_library_v3_snapshot()
+                .expect("the retained V3 standard source is valid"),
+        )
+        .expect("the retained V3 standard source verifies");
+        let version_three_registry =
+            registered_opaque_codecs(&version_three).expect("the V3 opaque codecs register");
+        let active_three = empty_version_two_active_revision(&version_three);
+        assert_eq!(
+            OpaqueValue::new(&active_three, &version_three_registry, STD_UI_TYPE_ID, &ui_payload),
+            Err(OpaqueValueError::UnregisteredType {
+                opaque_type: STD_UI_TYPE_ID,
+            })
+        );
     }
 
     #[test]
