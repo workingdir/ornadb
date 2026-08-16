@@ -704,7 +704,7 @@ pub(super) fn catalogue_hash_context_for(
     }
 }
 
-async fn load_verified_standard_library(
+pub(crate) async fn load_verified_standard_library(
     transaction: &Transaction<'_>,
     expected_revision: StandardLibraryRevisionId,
 ) -> Result<VerifiedStandardLibrarySnapshot, PostgresKernelError> {
