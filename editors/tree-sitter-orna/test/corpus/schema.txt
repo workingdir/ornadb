@@ -1,0 +1,42 @@
+====================
+create schema
+====================
+
+CREATE SCHEMA people;
+CREATE SCHEMA std.invoke;
+
+---
+
+(source_file
+  (create_schema_statement
+    (kw_create)
+    (kw_schema)
+    name: (qualified_name
+      (identifier))
+    (semicolon))
+  (create_schema_statement
+    (kw_create)
+    (kw_schema)
+    name: (qualified_name
+      (qualified_name
+        (identifier))
+      (dot)
+      (identifier))
+    (semicolon)))
+
+====================
+create schema lowercase keywords
+====================
+
+create schema demo;
+
+---
+
+(source_file
+  (create_schema_statement
+    (kw_create)
+    (kw_schema)
+    name: (qualified_name
+      (identifier))
+    (semicolon)))
+
