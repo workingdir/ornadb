@@ -597,6 +597,23 @@ impl<'source> Parser<'source> {
         };
 
         self.skip_trivia();
+        let capabilities = if self
+            .current()
+            .is_some_and(|token| token.is_word("REQUIRES"))
+        {
+            match self.parse_capability_clause() {
+                Some(capabilities) => capabilities,
+                None => {
+                    self.recover_statement();
+                    self.builder.finish_node();
+                    return;
+                }
+            }
+        } else {
+            Vec::new()
+        };
+
+        self.skip_trivia();
         let Some(body) = self.parse_client_function_body() else {
             self.recover_statement();
             self.builder.finish_node();
@@ -620,6 +637,7 @@ impl<'source> Parser<'source> {
                 end: parameter_list_end,
             },
             return_type,
+            capabilities,
             body,
             span: SourceSpan {
                 start: statement_start,
@@ -996,10 +1014,7 @@ impl<'source> Parser<'source> {
             self.skip_trivia();
 
             let mut capabilities = Vec::new();
-            if self.current().is_none()
-                || self
-                    .current()
-                    .is_some_and(|token| token.is_kind(TokenKind::Semicolon) || token.is_word("AS"))
+            if self.current().is_none() || self.current().is_some_and(Self::ends_capability_clause)
             {
                 self.error_current(
                     "ORNA0001",
@@ -1018,9 +1033,7 @@ impl<'source> Parser<'source> {
                     self.bump();
                     self.skip_trivia();
                     if self.current().is_none()
-                        || self.current().is_some_and(|token| {
-                            token.is_kind(TokenKind::Semicolon) || token.is_word("AS")
-                        })
+                        || self.current().is_some_and(Self::ends_capability_clause)
                     {
                         self.error_current(
                             "ORNA0001",
@@ -1031,18 +1044,30 @@ impl<'source> Parser<'source> {
                     capabilities.push(self.parse_capability_specification()?);
                     continue;
                 }
-                if self.current().is_some_and(|token| token.is_word("AS")) {
+                if self.current().is_some_and(Self::ends_capability_clause) {
                     return Some(capabilities);
                 }
                 self.error_current(
                     "ORNA0001",
-                    "expected ',' or AS after a capability requirement",
+                    "expected ',' or a body keyword after a capability requirement",
                 );
                 return None;
             }
         })();
         self.builder.finish_node();
         result
+    }
+
+    /// Whether the current token ends a capability clause: the statement
+    /// terminator or the keyword that introduces the function body.
+    ///
+    /// SERVER bodies follow `AS`; CLIENT bodies follow `RETURN` (or the
+    /// documented `IS` long form).
+    fn ends_capability_clause(token: &Token<'source>) -> bool {
+        token.is_kind(TokenKind::Semicolon)
+            || token.is_word("AS")
+            || token.is_word("IS")
+            || token.is_word("RETURN")
     }
 
     fn parse_capability_specification(&mut self) -> Option<CapabilitySpecification> {
