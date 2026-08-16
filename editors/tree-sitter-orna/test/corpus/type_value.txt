@@ -1,0 +1,208 @@
+====================
+create value record type
+====================
+
+CREATE TYPE accounts.audit_entry AS VALUE (
+    created_at TIMESTAMP DEFAULT sys.time.now(),
+    note TEXT CHECK (note <> '')
+) IMMUTABLE DOCUMENTATION 'An audit entry';
+
+---
+
+(source_file
+  (create_type_statement
+    (create_value_type_statement
+      (kw_create)
+      (kw_type)
+      name: (qualified_name
+        (qualified_name
+          (identifier))
+        (dot)
+        (identifier))
+      (kw_as)
+      (kw_value)
+      (lparen)
+      (field_definition
+        name: (identifier)
+        type: (type_spec
+          (scalar_type
+            (kw_timestamp)))
+        (kw_default)
+        (expression
+          (logical_expression
+            (comparison_expression
+              (additive_expression
+                (multiplicative_expression
+                  (unary_expression
+                    (postfix_expression
+                      (primary_expression
+                        (qualified_name
+                          (qualified_name
+                            (qualified_name
+                              (identifier))
+                            (dot)
+                            (kw_time))
+                          (dot)
+                          (identifier)))
+                      (lparen)
+                      (rparen)))))))))
+      (comma)
+      (field_definition
+        name: (identifier)
+        type: (type_spec
+          (scalar_type
+            (kw_text)))
+        (kw_check)
+        (lparen)
+        (expression
+          (logical_expression
+            (comparison_expression
+              (comparison_expression
+                (additive_expression
+                  (multiplicative_expression
+                    (unary_expression
+                      (postfix_expression
+                        (primary_expression
+                          (qualified_name
+                            (identifier))))))))
+              (comparison_operator)
+              (additive_expression
+                (multiplicative_expression
+                  (unary_expression
+                    (postfix_expression
+                      (primary_expression
+                        (literal
+                          (string_literal))))))))))
+        (rparen))
+      (rparen)
+      (kw_immutable)
+      (kw_documentation)
+      (string_literal)
+      (semicolon))))
+
+====================
+create opaque value type
+====================
+
+CREATE TYPE std.terminal.Document AS VALUE OPAQUE
+    KERNEL CONTRACT 'orna.std.value.terminal-document@1'
+    IMMUTABLE
+    TRANSIENT;
+
+---
+
+(source_file
+  (create_type_statement
+    (create_value_type_statement
+      (kw_create)
+      (kw_type)
+      name: (qualified_name
+        (qualified_name
+          (qualified_name
+            (identifier))
+          (dot)
+          (identifier))
+        (dot)
+        (identifier))
+      (kw_as)
+      (kw_value)
+      (kw_opaque)
+      (kw_kernel)
+      (kw_contract)
+      (string_literal)
+      (kw_immutable)
+      (kw_transient)
+      (semicolon))))
+
+====================
+create primitive value type
+====================
+
+CREATE TYPE std.types.BOOLEAN AS VALUE PRIMITIVE
+    KERNEL CONTRACT 'orna.kernel.value.boolean@1'
+    IMMUTABLE
+    PERSISTABLE;
+
+---
+
+(source_file
+  (create_type_statement
+    (create_value_type_statement
+      (kw_create)
+      (kw_type)
+      name: (qualified_name
+        (qualified_name
+          (qualified_name
+            (identifier))
+          (dot)
+          (identifier))
+        (dot)
+        (identifier))
+      (kw_as)
+      (kw_value)
+      (kw_primitive)
+      (kw_kernel)
+      (kw_contract)
+      (string_literal)
+      (kw_immutable)
+      (kw_persistable)
+      (semicolon))))
+
+====================
+export type
+====================
+
+EXPORT TYPE std.types.BOOLEAN AS std.BOOLEAN;
+EXPORT TYPE std.BOOLEAN TO PRELUDE AS BOOLEAN;
+EXPORT TYPE std.CHARACTER_LARGE_OBJECT TO PRELUDE AS CHARACTER LARGE OBJECT;
+
+---
+
+(source_file
+  (export_type_statement
+    (kw_export)
+    (kw_type)
+    name: (qualified_name
+      (qualified_name
+        (qualified_name
+          (identifier))
+        (dot)
+        (identifier))
+      (dot)
+      (identifier))
+    (kw_as)
+    alias: (qualified_name
+      (qualified_name
+        (identifier))
+      (dot)
+      (identifier))
+    (semicolon))
+  (export_type_statement
+    (kw_export)
+    (kw_type)
+    name: (qualified_name
+      (qualified_name
+        (identifier))
+      (dot)
+      (identifier))
+    (kw_to)
+    (kw_prelude)
+    (kw_as)
+    prelude_name: (identifier)
+    (semicolon))
+  (export_type_statement
+    (kw_export)
+    (kw_type)
+    name: (qualified_name
+      (qualified_name
+        (identifier))
+      (dot)
+      (identifier))
+    (kw_to)
+    (kw_prelude)
+    (kw_as)
+    prelude_name: (identifier)
+    prelude_name: (identifier)
+    prelude_name: (kw_object)
+    (semicolon)))
+
