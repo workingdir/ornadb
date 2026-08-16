@@ -5,6 +5,7 @@
 
 pub mod canonical_hash;
 pub mod catalogue;
+pub mod inspect;
 pub mod invocation;
 pub mod invocation_binding;
 pub mod physical;
@@ -186,6 +187,7 @@ define_id!(InvocationId, "invocation");
 define_id!(InvocationAuditEventId, "invocation-audit-event");
 define_id!(PrincipalId, "principal");
 define_id!(SecurityAuditEventId, "security-audit-event");
+define_id!(InspectEpochId, "inspect-epoch");
 
 #[cfg(test)]
 mod tests {
