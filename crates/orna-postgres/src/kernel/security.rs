@@ -7,6 +7,7 @@ use orna_core::{
     CatalogueRevisionId, FunctionId, FunctionRevisionId, InvocationAuditEventId, InvocationId,
     PrincipalId, SecurityAuditEventId, SourceRevisionId, StandardLibraryRevisionId,
     catalogue::{FunctionDefinition, FunctionDomain},
+    inspect::InspectPrivilege,
     invocation::{
         InvocationArgument, InvocationEventBody, InvocationParameterSelector,
         InvocationTarget as InvocationRequestTarget, InvokeEvent, InvokeValue,
@@ -15,11 +16,12 @@ use orna_core::{
     revision::{ActiveDatabaseRevision, RevisionPair, StandardExecutable},
     security::{
         AuthenticatedSession, CATALOGUE_HEALTH_FUNCTION_ID, CATALOGUE_HEALTH_SERVICE_PRINCIPAL_ID,
-        ExecuteDecision, ExecuteDenial, ExecuteGrant, InvocationTarget,
-        LocalPeerAuthenticationError, LocalPeerCredential, Principal, PrincipalKind,
-        PrincipalStatus, RoleMembership, SecurityAuditDecision, SecurityAuditDenial,
-        SecurityAuditEvent, SecurityAuditKind, SecurityAuditOutcome, SecurityFunctionTarget,
-        SecuritySnapshot, SessionBindingError, TargetClass, UserStateAuditOperation,
+        ExecuteDecision, ExecuteDenial, ExecuteGrant, InspectDenial, InspectEpochScope,
+        InvocationTarget, LocalPeerAuthenticationError, LocalPeerCredential, Principal,
+        PrincipalKind, PrincipalStatus, RoleMembership, SecurityAuditDecision,
+        SecurityAuditDenial, SecurityAuditEvent, SecurityAuditKind, SecurityAuditOutcome,
+        SecurityFunctionTarget, SecuritySnapshot, SessionBindingError, TargetClass,
+        UserStateAuditOperation,
     },
     system::{SYS_INVOKE_FUNCTION_ID, system_function_by_id},
     value::{FunctionArgument, RecordValue, RuntimeValue},
@@ -1741,6 +1743,12 @@ pub(crate) async fn append_security_audit_event(
                 decision
                     .capability_name()
                     .map(encode_capability_audit_denial)
+            })
+            .or_else(|| {
+                decision
+                    .inspect_requested()
+                    .zip(decision.inspect_epoch_scope())
+                    .map(|(requested, scope)| encode_inspect_audit_detail(requested, scope))
             }),
         Some(SecurityAuditDenial::Authentication(reason)) => {
             Some(encode_authentication_audit_denial(reason).to_owned())
@@ -1750,6 +1758,9 @@ pub(crate) async fn append_security_audit_event(
         }
         Some(SecurityAuditDenial::Capability { capability }) => {
             Some(encode_capability_audit_denial(&capability))
+        }
+        Some(SecurityAuditDenial::Inspect(reason)) => {
+            Some(encode_inspect_audit_denial(reason).to_owned())
         }
     };
     transaction
@@ -3203,6 +3214,59 @@ fn decode_security_audit_event(row: &Row) -> Result<SecurityAuditEvent, Postgres
                 cell_count,
             )
         }
+        ("inspect", "allowed")
+            if effective_principal.is_none()
+                && authorising_principal.is_none()
+                && function.is_none()
+                && source_revision.is_none()
+                && catalogue_revision.is_none() =>
+        {
+            // The protected columns retain only the closed capture detail in
+            // the denial-reason column; the epoch owner is never stored.
+            let (requested, scope) = decode_inspect_audit_detail(
+                &require_audit_value(
+                    denial_reason,
+                    &record,
+                    "INSPECT audit requires a capture detail",
+                )?,
+                &record,
+            )?;
+            SecurityAuditDecision::recover_inspect_allowed(
+                require_audit_value(
+                    session_principal,
+                    &record,
+                    "INSPECT audit requires a session principal",
+                )?,
+                requested,
+                scope,
+                None,
+            )
+        }
+        ("inspect", "denied")
+            if effective_principal.is_none()
+                && authorising_principal.is_none()
+                && function.is_none()
+                && source_revision.is_none()
+                && catalogue_revision.is_none() =>
+        {
+            let reason = decode_inspect_audit_denial(
+                require_audit_value(
+                    denial_reason,
+                    &record,
+                    "denied INSPECT requires a reason",
+                )?,
+                &record,
+            )?;
+            SecurityAuditDecision::recover_inspect_denied(
+                require_audit_value(
+                    session_principal,
+                    &record,
+                    "denied INSPECT requires a session principal",
+                )?,
+                None,
+                reason,
+            )
+        }
         _ => {
             return Err(audit_invariant(
                 &record,
@@ -3330,6 +3394,7 @@ fn encode_security_audit_kind(kind: SecurityAuditKind) -> &'static str {
         SecurityAuditKind::Execute => "execute",
         SecurityAuditKind::Capability => "capability",
         SecurityAuditKind::UserState => "user_state",
+        SecurityAuditKind::Inspect => "inspect",
     }
 }
 
@@ -3393,6 +3458,122 @@ fn decode_capability_audit_denial(
         .strip_prefix("capability:")
         .map(str::to_owned)
         .ok_or_else(|| audit_invariant(record, "capability denial reason is unsupported"))
+}
+
+/// Encodes one closed INSPECT denial reason exactly as the pure model names it.
+fn encode_inspect_audit_denial(reason: InspectDenial) -> &'static str {
+    reason.audit_reason()
+}
+
+/// Encodes the allowed INSPECT capture detail into the protected `denial_reason`
+/// column, mirroring the USER state operation detail pattern: the column
+/// carries a closed `inspect:...` detail for allowed rows and a closed
+/// `inspect:...` denial reason for denied rows.
+fn encode_inspect_audit_detail(requested: InspectPrivilege, scope: InspectEpochScope) -> String {
+    format!(
+        "inspect:requested={}:scope={}",
+        encode_inspect_privilege(requested),
+        encode_inspect_scope(scope)
+    )
+}
+
+fn encode_inspect_privilege(privilege: InspectPrivilege) -> &'static str {
+    match privilege {
+        InspectPrivilege::OwnInvocation => "own-invocation",
+        InspectPrivilege::SessionInvocations => "session-invocations",
+        InspectPrivilege::AnyInvocation => "any-invocation",
+        InspectPrivilege::Values => "values",
+        InspectPrivilege::Source => "source",
+        InspectPrivilege::SecurityDetails => "security-details",
+        InspectPrivilege::RuntimeInternals => "runtime-internals",
+    }
+}
+
+fn encode_inspect_scope(scope: InspectEpochScope) -> &'static str {
+    match scope {
+        InspectEpochScope::Own => "own",
+        InspectEpochScope::Session => "session",
+        InspectEpochScope::Foreign => "foreign",
+    }
+}
+
+fn decode_inspect_privilege(
+    value: &str,
+    record: &str,
+) -> Result<InspectPrivilege, PostgresKernelError> {
+    match value {
+        "own-invocation" => Ok(InspectPrivilege::OwnInvocation),
+        "session-invocations" => Ok(InspectPrivilege::SessionInvocations),
+        "any-invocation" => Ok(InspectPrivilege::AnyInvocation),
+        "values" => Ok(InspectPrivilege::Values),
+        "source" => Ok(InspectPrivilege::Source),
+        "security-details" => Ok(InspectPrivilege::SecurityDetails),
+        "runtime-internals" => Ok(InspectPrivilege::RuntimeInternals),
+        _ => Err(audit_invariant(
+            record,
+            "INSPECT requested privilege is unsupported",
+        )),
+    }
+}
+
+fn decode_inspect_scope(value: &str, record: &str) -> Result<InspectEpochScope, PostgresKernelError> {
+    match value {
+        "own" => Ok(InspectEpochScope::Own),
+        "session" => Ok(InspectEpochScope::Session),
+        "foreign" => Ok(InspectEpochScope::Foreign),
+        _ => Err(audit_invariant(
+            record,
+            "INSPECT epoch scope is unsupported",
+        )),
+    }
+}
+
+fn decode_inspect_audit_detail(
+    value: &str,
+    record: &str,
+) -> Result<(InspectPrivilege, InspectEpochScope), PostgresKernelError> {
+    let Some(rest) = value.strip_prefix("inspect:") else {
+        return Err(audit_invariant(
+            record,
+            "INSPECT audit detail must start with inspect:",
+        ));
+    };
+    let Some((requested, scope)) = rest.split_once(":scope=") else {
+        return Err(audit_invariant(
+            record,
+            "INSPECT audit detail must carry a requested privilege and scope",
+        ));
+    };
+    let Some(requested) = requested.strip_prefix("requested=") else {
+        return Err(audit_invariant(
+            record,
+            "INSPECT audit detail must carry a requested privilege",
+        ));
+    };
+    let requested = decode_inspect_privilege(requested, record)?;
+    let scope = decode_inspect_scope(scope, record)?;
+    if encode_inspect_audit_detail(requested, scope) != value {
+        return Err(audit_invariant(
+            record,
+            "INSPECT audit detail is not canonical",
+        ));
+    }
+    Ok((requested, scope))
+}
+
+fn decode_inspect_audit_denial(
+    value: String,
+    record: &str,
+) -> Result<InspectDenial, PostgresKernelError> {
+    match value.as_str() {
+        "inspect:missing-privilege" => Ok(InspectDenial::MissingPrivilege),
+        "inspect:missing-epoch" => Ok(InspectDenial::MissingEpoch),
+        "inspect:observer-suppressed" => Ok(InspectDenial::ObserverSuppressed),
+        _ => Err(audit_invariant(
+            record,
+            "INSPECT denial reason is unsupported",
+        )),
+    }
 }
 
 fn require_audit_value<T>(
@@ -4109,6 +4290,9 @@ mod tests {
             }
             Some(SecurityAuditDenial::Capability { capability }) => {
                 Some(encode_capability_audit_denial(&capability))
+            }
+            Some(SecurityAuditDenial::Inspect(reason)) => {
+                Some(encode_inspect_audit_denial(reason).to_owned())
             }
         };
 
