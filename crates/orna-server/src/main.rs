@@ -6,6 +6,9 @@ use std::{
 
 use orna_core::{
     FunctionId, ParameterId as RawCallParameterId,
+    catalogue::QualifiedSemanticName,
+    invocation::{InvocationTarget, InvocationTracePolicy},
+    invocation_binding::CliArgumentInput,
     security::{CATALOGUE_HEALTH_FUNCTION_ID, CATALOGUE_HEALTH_FUNCTION_NAME},
 };
 use orna_protocol::CallFailure;
@@ -14,13 +17,34 @@ mod package_maintenance;
 mod security_admin;
 mod source_check;
 
-const USAGE: &str = "Usage:\n  orna --version\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna security grant-execute <canonical-function-id>\n  orna raw-call <canonical-function-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id>";
+const USAGE: &str = "Usage:\n  orna --version\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna security grant-execute <canonical-function-id>\n  orna raw-call <canonical-function-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id>\n  orna invoke <qualified-name | canonical-function-id> [options]";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RawCallParameters {
     None,
     One(RawCallParameterId),
     Pair(RawCallParameterId, RawCallParameterId),
+}
+
+/// One parsed `orna invoke` command (ADR 0056 step 4).
+///
+/// The parser strips option prefixes, splits `--arg <parameter>=<value>`
+/// pairs, and reads `--args-file` documents into [`CliArgumentInput`] values
+/// before the host reflects the resolved signature and binds them.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct InvokeArguments {
+    /// The target selector exactly as supplied.
+    target: InvocationTarget,
+    /// Raw CLI arguments to bind against the resolved signature.
+    arguments: Vec<CliArgumentInput>,
+    /// The raw `--output <alias|media-type|type-name>` value, when present.
+    output: Option<String>,
+    /// The `--trace` policy, when present; absent means off.
+    trace: Option<InvocationTracePolicy>,
+    /// Suppress progress diagnostics (`--no-progress`).
+    no_progress: bool,
+    /// Print the plan instead of dispatching (`--explain`).
+    explain: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -33,6 +57,7 @@ enum Command {
     SourceApply(String),
     SecurityGrantExecute(FunctionId),
     RawCall(FunctionId, RawCallParameters),
+    Invoke(InvokeArguments),
 }
 
 fn main() -> ExitCode {
@@ -161,6 +186,32 @@ fn main() -> ExitCode {
                 ExitCode::from(7)
             }
         },
+        Command::Invoke(arguments) => {
+            let stdout = io::stdout();
+            let mut stdout = stdout.lock();
+            let stderr = io::stderr();
+            let mut stderr = stderr.lock();
+            let request = orna_server::InstalledInvokeRequest::new(
+                arguments.target,
+                arguments.arguments,
+                arguments.output,
+                arguments.trace,
+                arguments.no_progress,
+                arguments.explain,
+            );
+            match orna_server::run_installed_invoke(request, &mut stdout, &mut stderr) {
+                Ok(orna_server::InstalledInvokeOutcome::Completed) => ExitCode::SUCCESS,
+                Ok(orna_server::InstalledInvokeOutcome::TargetFailure) => ExitCode::from(1),
+                Ok(orna_server::InstalledInvokeOutcome::Denied) => ExitCode::from(4),
+                Ok(orna_server::InstalledInvokeOutcome::Cancelled) => ExitCode::from(6),
+                // A future closed outcome falls back to protocol / internal.
+                Ok(_) => ExitCode::from(7),
+                Err(error) => {
+                    write_stderr_line(&error.to_string());
+                    ExitCode::from(invoke_error_exit_code(&error))
+                }
+            }
+        }
     }
 }
 
@@ -231,6 +282,7 @@ where
                     .map(|function| Command::RawCall(function, parameters))
             }
         }
+        Some(value) if value == OsStr::new("invoke") => parse_invoke_command(args),
         Some(value) if value == OsStr::new("security") => {
             if args.next().as_deref() != Some(OsStr::new("grant-execute")) {
                 return None;
@@ -244,6 +296,163 @@ where
                 .map(Command::SecurityGrantExecute)
         }
         _ => None,
+    }
+}
+
+/// Parses one `orna invoke <target> [options]` command (ADR 0056 step 4).
+///
+/// The target is exactly one positional: a dotted qualified name of two or
+/// more parts or a canonical opaque [`FunctionId`]. Options are `--arg
+/// <parameter>=<value>` (canonical), `--<anything-else> <value>` (friendly),
+/// `--args-file <path>`, `--output <value>`, `--trace <value>`, and the
+/// value-less `--explain` and `--no-progress`. A second positional, an
+/// unknown flag without a value, an empty `--output`, an invalid trace
+/// value, or a malformed `--arg` pair is a usage error (`None`).
+fn parse_invoke_command<I>(args: I) -> Option<Command>
+where
+    I: IntoIterator<Item = OsString>,
+{
+    let mut args = args.into_iter();
+    let target = parse_invoke_target(&args.next()?.into_string().ok()?)?;
+    let mut arguments = Vec::new();
+    let mut output = None;
+    let mut trace = None;
+    let mut no_progress = false;
+    let mut explain = false;
+    while let Some(flag) = args.next() {
+        let flag = flag.into_string().ok()?;
+        let name = flag.strip_prefix("--")?;
+        match name {
+            "arg" => {
+                let pair = args.next()?.into_string().ok()?;
+                let (parameter, value) = pair.split_once('=')?;
+                if parameter.is_empty() {
+                    return None;
+                }
+                arguments.push(CliArgumentInput::Canonical {
+                    parameter: parameter.to_owned(),
+                    value: value.to_owned(),
+                });
+            }
+            "args-file" => {
+                let path = args.next()?.into_string().ok()?;
+                arguments.extend(parse_args_file(&path, &target)?);
+            }
+            "output" => {
+                let value = args.next()?.into_string().ok()?;
+                if value.is_empty() {
+                    return None;
+                }
+                output = Some(value);
+            }
+            "trace" => {
+                let value = args.next()?.into_string().ok()?;
+                trace = Some(parse_trace(&value)?);
+            }
+            "explain" => explain = true,
+            "no-progress" => no_progress = true,
+            _ => {
+                let value = args.next()?.into_string().ok()?;
+                arguments.push(CliArgumentInput::Friendly {
+                    name: name.to_owned(),
+                    value,
+                });
+            }
+        }
+    }
+    Some(Command::Invoke(InvokeArguments {
+        target,
+        arguments,
+        output,
+        trace,
+        no_progress,
+        explain,
+    }))
+}
+
+/// Parses one invoke target: a qualified name first, then a canonical
+/// [`FunctionId`]. A name of fewer than two parts cannot be a qualified
+/// function name and falls through to the opaque identity form.
+fn parse_invoke_target(value: &str) -> Option<InvocationTarget> {
+    parse_qualified_name(value).or_else(|| {
+        FunctionId::from_canonical(value)
+            .ok()
+            .map(InvocationTarget::function_id)
+    })
+}
+
+/// Parses one dotted qualified name of two or more parts.
+fn parse_qualified_name(value: &str) -> Option<InvocationTarget> {
+    let name = QualifiedSemanticName::new(value.split('.').collect::<Vec<_>>()).ok()?;
+    InvocationTarget::qualified_name(name).ok()
+}
+
+/// Validates one `--trace` value against the five trace policies.
+fn parse_trace(value: &str) -> Option<InvocationTracePolicy> {
+    match value {
+        "off" => Some(InvocationTracePolicy::Off),
+        "basic" => Some(InvocationTracePolicy::Basic),
+        "normal" => Some(InvocationTracePolicy::Normal),
+        "verbose" => Some(InvocationTracePolicy::Verbose),
+        "profile" => Some(InvocationTracePolicy::Profile),
+        _ => None,
+    }
+}
+
+/// Parses one `--args-file` document into typed CLI argument inputs.
+///
+/// The accepted minimal closed form is the ADR 0056 subset of the spec
+/// `invoke_request_v2` JSON representation: an object with exactly `target`
+/// and `arguments` keys. `target` is either `{"function_id": ...}` or
+/// `{"qualified_name": ...}` and must resolve to the same target as the
+/// command line; `arguments` maps each parameter selector (canonical
+/// [`FunctionId`]-style [`orna_core::ParameterId`] text or source name) to
+/// its CLI string value. Any other shape is a usage error.
+fn parse_args_file(path: &str, command_target: &InvocationTarget) -> Option<Vec<CliArgumentInput>> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let document: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&text).ok()?;
+    if document.len() != 2 {
+        return None;
+    }
+    let file_target = parse_json_target(document.get("target")?)?;
+    if &file_target != command_target {
+        return None;
+    }
+    let arguments = document.get("arguments")?.as_object()?;
+    let mut inputs = Vec::with_capacity(arguments.len());
+    for (parameter, value) in arguments {
+        inputs.push(CliArgumentInput::Canonical {
+            parameter: parameter.clone(),
+            value: value.as_str()?.to_owned(),
+        });
+    }
+    Some(inputs)
+}
+
+/// Parses one `invoke_request_v2` JSON target value, which is exactly one of
+/// the opaque identity or qualified-name forms.
+fn parse_json_target(value: &serde_json::Value) -> Option<InvocationTarget> {
+    let object = value.as_object()?;
+    match (object.get("function_id"), object.get("qualified_name")) {
+        (Some(function_id), None) => FunctionId::from_canonical(function_id.as_str()?)
+            .ok()
+            .map(InvocationTarget::function_id),
+        (None, Some(qualified_name)) => parse_qualified_name(qualified_name.as_str()?),
+        _ => None,
+    }
+}
+
+/// Maps one installed invoke failure to its ADR 0056 spec exit code.
+const fn invoke_error_exit_code(error: &orna_server::InstalledInvokeError) -> u8 {
+    match error.kind() {
+        orna_server::InstalledInvokeErrorKind::Usage => 2,
+        orna_server::InstalledInvokeErrorKind::Authentication => 3,
+        orna_server::InstalledInvokeErrorKind::Authorisation => 4,
+        orna_server::InstalledInvokeErrorKind::Presentation => 5,
+        orna_server::InstalledInvokeErrorKind::Cancelled => 6,
+        orna_server::InstalledInvokeErrorKind::Internal => 7,
+        // A future closed kind falls back to protocol / internal.
+        _ => 7,
     }
 }
 
@@ -638,11 +847,380 @@ mod tests {
         );
     }
 
+    fn invoke_command(
+        target: InvocationTarget,
+        arguments: Vec<CliArgumentInput>,
+        output: Option<String>,
+        trace: Option<InvocationTracePolicy>,
+        no_progress: bool,
+        explain: bool,
+    ) -> Command {
+        Command::Invoke(InvokeArguments {
+            target,
+            arguments,
+            output,
+            trace,
+            no_progress,
+            explain,
+        })
+    }
+
+    fn echo_target() -> InvocationTarget {
+        InvocationTarget::qualified_name(
+            QualifiedSemanticName::new(["std", "invoke", "echo"]).expect("qualified name"),
+        )
+        .expect("target")
+    }
+
+    fn write_temp_args_file(contents: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "orna-invoke-args-file-{}-{}.json",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::write(&path, contents).expect("write temporary args file");
+        path
+    }
+
+    #[test]
+    fn accepts_one_exact_invoke_qualified_name_target() {
+        assert_eq!(
+            parse_command(arguments(&["orna", "invoke", "std.invoke.echo"])),
+            Some(invoke_command(
+                echo_target(),
+                Vec::new(),
+                None,
+                None,
+                false,
+                false
+            ))
+        );
+    }
+
+    #[test]
+    fn accepts_one_exact_invoke_canonical_identity_target() {
+        let function = FunctionId::from_bytes([0x44; 16]);
+        let canonical = function.canonical();
+        assert_eq!(
+            parse_command(arguments(&["orna", "invoke", &canonical])),
+            Some(invoke_command(
+                InvocationTarget::function_id(function),
+                Vec::new(),
+                None,
+                None,
+                false,
+                false,
+            ))
+        );
+    }
+
+    #[test]
+    fn accepts_invoke_friendly_flag_sugar() {
+        assert_eq!(
+            parse_command(arguments(&[
+                "orna",
+                "invoke",
+                "std.invoke.echo",
+                "--name",
+                "hello"
+            ])),
+            Some(invoke_command(
+                echo_target(),
+                vec![CliArgumentInput::Friendly {
+                    name: "name".to_owned(),
+                    value: "hello".to_owned(),
+                }],
+                None,
+                None,
+                false,
+                false,
+            ))
+        );
+    }
+
+    #[test]
+    fn accepts_invoke_canonical_arg_pairs() {
+        assert_eq!(
+            parse_command(arguments(&[
+                "orna",
+                "invoke",
+                "std.invoke.echo",
+                "--arg",
+                "p_name=value",
+                "--arg",
+                "p_count=41",
+            ])),
+            Some(invoke_command(
+                echo_target(),
+                vec![
+                    CliArgumentInput::Canonical {
+                        parameter: "p_name".to_owned(),
+                        value: "value".to_owned(),
+                    },
+                    CliArgumentInput::Canonical {
+                        parameter: "p_count".to_owned(),
+                        value: "41".to_owned(),
+                    },
+                ],
+                None,
+                None,
+                false,
+                false,
+            ))
+        );
+    }
+
+    #[test]
+    fn accepts_every_invoke_trace_value() {
+        for (value, policy) in [
+            ("off", InvocationTracePolicy::Off),
+            ("basic", InvocationTracePolicy::Basic),
+            ("normal", InvocationTracePolicy::Normal),
+            ("verbose", InvocationTracePolicy::Verbose),
+            ("profile", InvocationTracePolicy::Profile),
+        ] {
+            assert_eq!(
+                parse_command(arguments(&[
+                    "orna",
+                    "invoke",
+                    "std.invoke.echo",
+                    "--trace",
+                    value,
+                ])),
+                Some(invoke_command(
+                    echo_target(),
+                    Vec::new(),
+                    None,
+                    Some(policy),
+                    false,
+                    false,
+                )),
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_invoke_options_in_any_order() {
+        assert_eq!(
+            parse_command(arguments(&[
+                "orna",
+                "invoke",
+                "std.invoke.echo",
+                "--arg",
+                "p_name=value",
+                "--p_count",
+                "41",
+                "--output",
+                "json",
+                "--trace",
+                "normal",
+                "--explain",
+                "--no-progress",
+            ])),
+            Some(invoke_command(
+                echo_target(),
+                vec![
+                    CliArgumentInput::Canonical {
+                        parameter: "p_name".to_owned(),
+                        value: "value".to_owned(),
+                    },
+                    CliArgumentInput::Friendly {
+                        name: "p_count".to_owned(),
+                        value: "41".to_owned(),
+                    },
+                ],
+                Some("json".to_owned()),
+                Some(InvocationTracePolicy::Normal),
+                true,
+                true,
+            ))
+        );
+    }
+
+    #[test]
+    fn accepts_an_invoke_args_file_document() {
+        let path = write_temp_args_file(
+            r#"{"target": {"qualified_name": "std.invoke.echo"}, "arguments": {"p_name": "value"}}"#,
+        );
+        let path_text = path.to_str().expect("temp path is unicode");
+        assert_eq!(
+            parse_command(arguments(&[
+                "orna",
+                "invoke",
+                "std.invoke.echo",
+                "--args-file",
+                path_text,
+            ])),
+            Some(invoke_command(
+                echo_target(),
+                vec![CliArgumentInput::Canonical {
+                    parameter: "p_name".to_owned(),
+                    value: "value".to_owned(),
+                }],
+                None,
+                None,
+                false,
+                false,
+            ))
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn accepts_an_invoke_args_file_with_a_matching_canonical_target() {
+        let function = FunctionId::from_bytes([0x44; 16]);
+        let canonical = function.canonical();
+        let path = write_temp_args_file(&format!(
+            r#"{{"target": {{"function_id": "{canonical}"}}, "arguments": {{"p_name": "value"}}}}"#
+        ));
+        let path_text = path.to_str().expect("temp path is unicode");
+        assert_eq!(
+            parse_command(arguments(&[
+                "orna",
+                "invoke",
+                &canonical,
+                "--args-file",
+                path_text
+            ])),
+            Some(invoke_command(
+                InvocationTarget::function_id(function),
+                vec![CliArgumentInput::Canonical {
+                    parameter: "p_name".to_owned(),
+                    value: "value".to_owned(),
+                }],
+                None,
+                None,
+                false,
+                false,
+            ))
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn rejects_invoke_usage_shapes() {
+        let function = FunctionId::from_bytes([0x44; 16]);
+        let canonical = function.canonical();
+        let mut invalid = vec![
+            vec!["orna", "invoke"],
+            vec!["orna", "invoke", "std.invoke.echo", "extra"],
+            vec!["orna", "invoke", "std.invoke.echo", "std.invoke.echo"],
+            vec!["orna", "invoke", "std.invoke.echo", "--bogus"],
+            vec!["orna", "invoke", "std.invoke.echo", "--trace", "chatty"],
+            vec!["orna", "invoke", "std.invoke.echo", "--output", ""],
+            vec!["orna", "invoke", "std.invoke.echo", "--arg", "p_name"],
+            vec!["orna", "invoke", "std.invoke.echo", "--arg", "=value"],
+            vec!["orna", "invoke", "std.invoke.echo", "--arg"],
+            vec!["orna", "invoke", "std.invoke.echo", "--trace"],
+            vec!["orna", "invoke", "std.invoke.echo", "--output"],
+            vec!["orna", "invoke", "std.invoke.echo", "--name"],
+            vec!["orna", "invoke", "echo"],
+            vec!["orna", "invoke", ""],
+            vec!["orna", "invoke", "function:not-an-id"],
+            vec!["orna", "invoke", "std.invoke.echo", "trailing", "extra"],
+        ];
+        invalid.push(vec!["orna", "invoke", &canonical, "--no-progress", "extra"]);
+        for values in invalid {
+            assert_eq!(parse_command(arguments(&values)), None, "{values:?}");
+        }
+    }
+
+    #[test]
+    fn rejects_invoke_args_file_shapes() {
+        let mismatched_target = write_temp_args_file(
+            r#"{"target": {"qualified_name": "sys.other.func"}, "arguments": {"p_name": "value"}}"#,
+        );
+        let extra_key = write_temp_args_file(
+            r#"{"target": {"qualified_name": "std.invoke.echo"}, "arguments": {"p_name": "value"}, "trace": "normal"}"#,
+        );
+        let typed_value = write_temp_args_file(
+            r#"{"target": {"qualified_name": "std.invoke.echo"}, "arguments": {"p_name": 41}}"#,
+        );
+        let both_targets = write_temp_args_file(
+            r#"{"target": {"function_id": "function:289144gj289144gj289144gj28", "qualified_name": "std.invoke.echo"}, "arguments": {}}"#,
+        );
+        let neither_target = write_temp_args_file(r#"{"target": {}, "arguments": {}}"#);
+        let malformed_json = write_temp_args_file(r#"{"target": "std.invoke.echo""#);
+        let missing_file = std::env::temp_dir().join(format!(
+            "orna-invoke-args-file-missing-{}.json",
+            std::process::id()
+        ));
+        let mut paths = Vec::new();
+        for path in [
+            mismatched_target,
+            extra_key,
+            typed_value,
+            both_targets,
+            neither_target,
+            malformed_json,
+        ] {
+            paths.push(path.to_str().expect("temp path is unicode").to_owned());
+            let _ = std::fs::remove_file(&path);
+        }
+        paths.push(
+            missing_file
+                .to_str()
+                .expect("temp path is unicode")
+                .to_owned(),
+        );
+        let invalid = paths
+            .iter()
+            .map(|path| {
+                vec![
+                    "orna",
+                    "invoke",
+                    "std.invoke.echo",
+                    "--args-file",
+                    path.as_str(),
+                ]
+            })
+            .collect::<Vec<_>>();
+        for values in invalid {
+            assert_eq!(parse_command(arguments(&values)), None, "{values:?}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_non_unicode_invoke_target() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let non_unicode = OsString::from_vec(b"std.invoke.\xff".to_vec());
+        assert_eq!(
+            parse_command(vec![
+                OsString::from("orna"),
+                OsString::from("invoke"),
+                non_unicode,
+            ]),
+            None
+        );
+    }
+
+    #[test]
+    fn invoke_error_exit_codes_follow_the_spec_table() {
+        use orna_server::{InstalledInvokeError, InstalledInvokeErrorKind};
+
+        for (kind, expected) in [
+            (InstalledInvokeErrorKind::Usage, 2),
+            (InstalledInvokeErrorKind::Authentication, 3),
+            (InstalledInvokeErrorKind::Authorisation, 4),
+            (InstalledInvokeErrorKind::Presentation, 5),
+            (InstalledInvokeErrorKind::Cancelled, 6),
+            (InstalledInvokeErrorKind::Internal, 7),
+        ] {
+            let error = InstalledInvokeError::new(kind, "message".to_owned());
+            assert_eq!(invoke_error_exit_code(&error), expected, "{kind:?}");
+        }
+    }
+
     #[test]
     fn usage_diagnostic_is_exact() {
         assert_eq!(
             USAGE,
-            "Usage:\n  orna --version\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna security grant-execute <canonical-function-id>\n  orna raw-call <canonical-function-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id>"
+            "Usage:\n  orna --version\n  orna server run\n  orna server upgrade\n  orna server backend-shell\n  orna source check <file.orna>\n  orna source apply <file.orna>\n  orna security grant-execute <canonical-function-id>\n  orna raw-call <canonical-function-id>\n  orna raw-call <canonical-function-id> <canonical-parameter-id>\n  orna invoke <qualified-name | canonical-function-id> [options]"
         );
     }
 }
