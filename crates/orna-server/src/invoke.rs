@@ -212,7 +212,26 @@ pub fn run_installed_invoke(
             )
         })?;
 
-    runtime.block_on(host_invoke(kernel, request, stdout, stderr))
+    runtime.block_on(run_invoke_with_kernel(kernel, request, stdout, stderr))
+}
+
+/// Runs one installed sealed `orna invoke` command against a caller-supplied
+/// kernel (ADR 0056 step 5 live-proof seam).
+///
+/// The public entry [`run_installed_invoke`] inspects the fixed private
+/// instance and delegates here; the live proof drives the exact
+/// reflect-bind-encode-authenticate-dispatch-render path against the Compose
+/// PostgreSQL test kernel with the invoking process's local peer credentials.
+/// Public consumers keep [`run_installed_invoke`]; this seam is hidden from
+/// the documented API surface.
+#[doc(hidden)]
+pub async fn run_invoke_with_kernel(
+    kernel: PostgresKernel,
+    request: InstalledInvokeRequest,
+    stdout: &mut impl Write,
+    stderr: &mut impl Write,
+) -> Result<InstalledInvokeOutcome, InstalledInvokeError> {
+    host_invoke(kernel, request, stdout, stderr).await
 }
 
 async fn host_invoke(
