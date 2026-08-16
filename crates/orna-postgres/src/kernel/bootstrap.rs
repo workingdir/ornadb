@@ -153,6 +153,12 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/0022_invocation_audit.sql"),
         data_step: None,
     },
+    Migration {
+        version: 23,
+        name: "executable standard relations",
+        sql: include_str!("../../migrations/0023_executable_standard_snapshots.sql"),
+        data_step: None,
+    },
 ];
 const MIGRATION_DATA_STEP_SEPARATOR: &[u8] = b"\0orna.kernel.migration-step\0";
 const CANONICAL_HASH_V1_EMPTY_SEED_STEP: &[u8] = b"canonical-hash-v1-empty-seed/v1";
@@ -831,7 +837,7 @@ mod tests {
             validated_migration_registry()
                 .expect("registry is valid")
                 .len(),
-            22
+            23
         );
         assert_eq!(MIGRATIONS[0].version, 1);
         assert_eq!(MIGRATIONS[1].version, 2);
@@ -855,6 +861,7 @@ mod tests {
         assert_eq!(MIGRATIONS[19].version, 20);
         assert_eq!(MIGRATIONS[20].version, 21);
         assert_eq!(MIGRATIONS[21].version, 22);
+        assert_eq!(MIGRATIONS[22].version, 23);
         assert_eq!(MIGRATIONS[5].name, "definition reference write evidence");
         assert_eq!(MIGRATIONS[6].name, "standard catalogue type storage");
         assert_eq!(MIGRATIONS[7].name, "resolved value type storage");
@@ -872,6 +879,7 @@ mod tests {
         assert_eq!(MIGRATIONS[19].name, "standard enum record field storage");
         assert_eq!(MIGRATIONS[20].name, "nested record field targets");
         assert_eq!(MIGRATIONS[21].name, "protected invocation audit");
+        assert_eq!(MIGRATIONS[22].name, "executable standard relations");
         assert!(MIGRATIONS[6].data_step.is_none());
         assert!(MIGRATIONS[7].data_step.is_none());
         assert!(MIGRATIONS[8].data_step.is_none());
@@ -888,6 +896,62 @@ mod tests {
         assert!(MIGRATIONS[19].data_step.is_none());
         assert!(MIGRATIONS[20].data_step.is_none());
         assert!(MIGRATIONS[21].data_step.is_none());
+        assert!(MIGRATIONS[22].data_step.is_none());
+    }
+
+    #[test]
+    fn executable_standard_relations_is_the_registered_version_twenty_three() {
+        let migration = &MIGRATIONS[22];
+
+        assert_eq!(migration.version, 23);
+        assert_eq!(migration.name, "executable standard relations");
+        assert!(migration.data_step.is_none());
+        assert!(
+            migration
+                .sql
+                .contains("CREATE TABLE _orna_kernel.standard_catalogue_functions")
+        );
+        assert!(
+            migration
+                .sql
+                .contains("CREATE TABLE _orna_kernel.standard_catalogue_function_parameters")
+        );
+        assert!(
+            migration
+                .sql
+                .contains("CREATE TABLE _orna_kernel.standard_function_revisions")
+        );
+        assert!(
+            migration
+                .sql
+                .contains("CREATE TABLE _orna_kernel.standard_function_artifacts")
+        );
+        assert!(
+            migration
+                .sql
+                .contains("CREATE TABLE _orna_kernel.standard_definition_references")
+        );
+        assert!(
+            migration
+                .sql
+                .contains("CREATE TABLE _orna_kernel.invocation_target_authorities")
+        );
+        assert!(
+            migration
+                .sql
+                .contains("INSERT INTO _orna_kernel.invocation_target_authorities")
+        );
+        assert!(
+            migration
+                .sql
+                .contains("DROP CONSTRAINT invocation_audit_events_target_fk")
+        );
+        assert!(migration.sql.contains(
+            "REFERENCES _orna_kernel.invocation_target_authorities(
+        catalogue_revision_id,
+        function_id
+    )"
+        ));
     }
 
     #[test]
