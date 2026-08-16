@@ -70,6 +70,20 @@ The grammar uses standard capture names (`@keyword`, `@type`, `@function`,
 ` highlighting works without extra configuration once the parser is
 installed.
 
+## File icons
+
+With `nvim-web-devicons`, add an Orna entry so file pickers and the
+statusline show a database-style mark:
+
+```lua
+require("nvim-web-devicons").set_icon({
+    orna = { icon = "\u{f1c0}", color = "#818cf8", name = "Orna" },
+})
+require("nvim-web-devicons").set_default_icon_set()
+```
+
+`\u{f1c0}` is the nerd-font database glyph. Any nerd-font glyph works.
+
 ## Features
 
 - Filetype detection for `.orna` files.

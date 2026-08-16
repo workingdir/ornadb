@@ -44,9 +44,17 @@
                     "description": "Path to the orna-lsp binary"
                 }
             }
-        }
+        },
+        "iconThemes": [
+            {
+                "id": "orna-file-icons",
+                "label": "Orna File Icons",
+                "path": "./icon-theme.json"
+            }
+        ]
     },
     "dependencies": {
         "vscode-languageclient": "^9.0.1"
-    }
+    },
+    "icon": "resources/icons/orna-icon.png"
 }
