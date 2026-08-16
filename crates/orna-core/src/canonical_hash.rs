@@ -46,6 +46,7 @@ const FUNCTION_DECLARATION_DOMAIN: &[u8] = b"ornadb.hash/function-declaration/v1
 const FUNCTION_SEMANTIC_DOMAIN: &[u8] = b"ornadb.hash/function-semantic/v1\0";
 const FUNCTION_SEMANTIC_V2_DOMAIN: &[u8] = b"ornadb.hash/function-semantic/v2\0";
 const STANDARD_LIBRARY_DOMAIN: &[u8] = b"ornadb.hash/standard-library/v1\0";
+const STANDARD_LIBRARY_V2_DOMAIN: &[u8] = b"ornadb.hash/standard-library/v2\0";
 const ARTIFACT_PAYLOAD_DOMAIN: &[u8] = b"ornadb.hash/artifact-payload/v1\0";
 
 /// One typed fact that cannot be represented by the selected catalogue hash contract.
@@ -131,6 +132,15 @@ pub enum CanonicalHashError {
     StandardLibraryDigestMismatch {
         /// The inconsistent standard-library revision.
         revision: StandardLibraryRevisionId,
+    },
+    /// A caller required a different standard-library digest contract.
+    StandardLibraryDigestVersionMismatch {
+        /// The selected standard-library revision.
+        revision: StandardLibraryRevisionId,
+        /// The required digest contract.
+        expected: StandardLibraryDigestVersion,
+        /// The retained digest contract.
+        actual: StandardLibraryDigestVersion,
     },
     /// A resolved value type requires the version-2 catalogue hash contract.
     ResolvedValueRequiresCatalogueHashVersionTwo {
@@ -360,6 +370,8 @@ impl fmt::Display for CanonicalHashError {
             StandardLibraryDigestMismatch { .. } => {
                 formatter.write_str("stored standard library digest differs from canonical facts")
             }
+            StandardLibraryDigestVersionMismatch { .. } => formatter
+                .write_str("standard library digest contract differs from the required version"),
             ResolvedValueRequiresCatalogueHashVersionTwo { .. } => {
                 formatter.write_str("resolved value type requires catalogue hash version 2")
             }
@@ -614,10 +626,31 @@ pub fn standard_library_digest(
     Ok(digest)
 }
 
-/// Verifies a retained standard snapshot and returns its unforgeable trust capability.
+/// Verifies a retained version-1 standard snapshot and returns its trust capability.
 pub fn verify_standard_library_snapshot(
     standard: StandardLibrarySnapshot,
 ) -> Result<VerifiedStandardLibrarySnapshot, CanonicalHashError> {
+    verify_standard_library_snapshot_version(standard, StandardLibraryDigestVersion::Version1)
+}
+
+/// Verifies a retained executable standard snapshot under the V2 contract.
+pub fn verify_standard_library_v2_snapshot(
+    standard: StandardLibrarySnapshot,
+) -> Result<VerifiedStandardLibrarySnapshot, CanonicalHashError> {
+    verify_standard_library_snapshot_version(standard, StandardLibraryDigestVersion::Version2)
+}
+
+fn verify_standard_library_snapshot_version(
+    standard: StandardLibrarySnapshot,
+    expected: StandardLibraryDigestVersion,
+) -> Result<VerifiedStandardLibrarySnapshot, CanonicalHashError> {
+    if standard.digest_version() != expected {
+        return Err(CanonicalHashError::StandardLibraryDigestVersionMismatch {
+            revision: standard.revision(),
+            expected,
+            actual: standard.digest_version(),
+        });
+    }
     standard_library_digest(&standard)?;
     Ok(VerifiedStandardLibrarySnapshot::new(standard))
 }
@@ -625,10 +658,6 @@ pub fn verify_standard_library_snapshot(
 fn calculate_standard_library_digest(
     standard: &StandardLibrarySnapshot,
 ) -> Result<Sha256Digest, CanonicalHashError> {
-    match standard.digest_version() {
-        StandardLibraryDigestVersion::Version1 => {}
-    }
-
     let source_hash = source_revision_digest(standard.source())?;
     if source_hash != standard.source().revision_hash() {
         return Err(CanonicalHashError::StandardSourceRevisionHashMismatch {
@@ -638,32 +667,109 @@ fn calculate_standard_library_digest(
 
     let expressions = HashMap::new();
     let origins = complete_origins(standard.catalogue(), &expressions, standard.origins())?;
-    let mut encoder = Encoder::new(STANDARD_LIBRARY_DOMAIN);
-    encoder.u32(StandardLibraryDigestVersion::Version1.to_u32());
-    encoder.standard_library_revision_id(standard.revision());
-    encoder.source_revision_id(standard.source().id());
-    encoder.digest_value(standard.source().revision_hash());
-    encoder.text(standard.language_version(), "standard language version")?;
-    encode_standard_schemas(&mut encoder, standard.catalogue(), &origins)?;
-    encode_value_types(
-        &mut encoder,
-        standard.catalogue().value_types(),
-        Some(&origins),
-    )?;
-    if !standard.catalogue().enum_types().is_empty() {
-        encode_enum_types(
-            &mut encoder,
-            standard.catalogue().enum_types(),
-            Some(&origins),
-        )?;
+    match standard.digest_version() {
+        StandardLibraryDigestVersion::Version1 => {
+            let mut encoder = Encoder::new(STANDARD_LIBRARY_DOMAIN);
+            encoder.u32(StandardLibraryDigestVersion::Version1.to_u32());
+            encoder.standard_library_revision_id(standard.revision());
+            encoder.source_revision_id(standard.source().id());
+            encoder.digest_value(standard.source().revision_hash());
+            encoder.text(standard.language_version(), "standard language version")?;
+            encode_standard_schemas(&mut encoder, standard.catalogue(), &origins)?;
+            encode_value_types(
+                &mut encoder,
+                standard.catalogue().value_types(),
+                Some(&origins),
+            )?;
+            if !standard.catalogue().enum_types().is_empty() {
+                encode_enum_types(
+                    &mut encoder,
+                    standard.catalogue().enum_types(),
+                    Some(&origins),
+                )?;
+            }
+            encode_type_bindings(
+                &mut encoder,
+                standard.catalogue().type_bindings(),
+                Some(&origins),
+            )?;
+            Ok(encoder.digest())
+        }
+        StandardLibraryDigestVersion::Version2 => {
+            let (revisions, references) = standard_executable_facts(standard)?;
+            let mut encoder = Encoder::new(STANDARD_LIBRARY_V2_DOMAIN);
+            encoder.u32(StandardLibraryDigestVersion::Version2.to_u32());
+            encoder.standard_library_revision_id(standard.revision());
+            encoder.source_revision_id(standard.source().id());
+            encoder.digest_value(standard.source().revision_hash());
+            encoder.text(standard.language_version(), "standard language version")?;
+            encode_catalogue_schemas(&mut encoder, standard.catalogue().schemas())?;
+            encode_value_types(&mut encoder, standard.catalogue().value_types(), None)?;
+            encode_enum_types(&mut encoder, standard.catalogue().enum_types(), None)?;
+            encode_type_bindings(&mut encoder, standard.catalogue().type_bindings(), None)?;
+            encode_catalogue_functions(&mut encoder, standard.catalogue())?;
+            encode_current_function_revisions_with_contract(
+                &mut encoder,
+                &revisions,
+                CurrentFunctionRevisionEncoding::Version2,
+            )?;
+            encode_definition_references(&mut encoder, &references)?;
+            encode_definition_origins(&mut encoder, standard.origins())?;
+            Ok(encoder.digest())
+        }
     }
-    encode_type_bindings(
-        &mut encoder,
-        standard.catalogue().type_bindings(),
-        Some(&origins),
-    )?;
+}
 
-    Ok(encoder.digest())
+fn standard_executable_facts(
+    standard: &StandardLibrarySnapshot,
+) -> Result<(Vec<FunctionRevisionRecord>, Vec<DefinitionReference>), CanonicalHashError> {
+    let revisions = standard
+        .executables()
+        .iter()
+        .map(|executable| executable.revision().clone())
+        .collect::<Vec<_>>();
+    let references = standard
+        .executables()
+        .iter()
+        .flat_map(|executable| executable.references().iter().cloned())
+        .collect::<Vec<_>>();
+    let expressions = HashMap::new();
+    let revisions_by_function = current_function_revisions(standard.catalogue(), &revisions)?;
+    validate_catalogue_references(
+        standard.catalogue(),
+        None,
+        &expressions,
+        &revisions_by_function,
+        &references,
+    )?;
+    for function in standard.catalogue().functions() {
+        let revision = revisions_by_function.get(&function.id()).ok_or(
+            CanonicalHashError::MissingCurrentFunctionRevision {
+                function: function.id(),
+                revision: function.current_revision(),
+            },
+        )?;
+        let function_references = references
+            .iter()
+            .filter(|reference| reference.source_function() == function.id())
+            .cloned()
+            .collect::<Vec<_>>();
+        let semantic_hash = function_semantic_digest_with_version(
+            revision.semantic_hash_version(),
+            function,
+            revision.language_version(),
+            revision.artifact(),
+            &[],
+            &function_references,
+        )?;
+        if semantic_hash != revision.semantic_hash() {
+            return Err(CanonicalHashError::FunctionSemanticHashMismatch {
+                function: function.id(),
+                revision: revision.id(),
+            });
+        }
+    }
+    Ok((revisions, references))
 }
 
 #[cfg(test)]
@@ -2352,11 +2458,13 @@ mod tests {
     use crate::{
         CatalogueRevisionId,
         catalogue::{
-            EnumTypeDefinition, FieldDefinition, FunctionReturnColumnDefinition, PreludeTypeName,
-            RecordValueFieldDefinition, RecordValueTypeDefinition, SchemaDefinition, TypeBinding,
-            ValueTypeDefinition, ValueTypeMutability, ValueTypePersistence,
+            EnumTypeDefinition, FieldDefinition, FunctionDefinition, FunctionReturn,
+            FunctionReturnColumnDefinition, FunctionSecurity, FunctionTransaction,
+            FunctionVolatility, PreludeTypeName, RecordValueFieldDefinition,
+            RecordValueTypeDefinition, SchemaDefinition, TypeBinding, ValueTypeDefinition,
+            ValueTypeMutability, ValueTypePersistence,
         },
-        revision::{CatalogueHashContext, SourceOrigin},
+        revision::{CatalogueHashContext, SourceOrigin, StandardExecutable},
         types::{ResolvedType, StandardScalar, TypeDescriptor},
     };
 
@@ -2527,6 +2635,184 @@ mod tests {
 
     fn verified_standard_snapshot(reverse: bool) -> VerifiedStandardLibrarySnapshot {
         verify_standard_library_snapshot(standard_snapshot(reverse, None)).unwrap()
+    }
+
+    fn standard_v2_snapshot(retained_digest: Option<Sha256Digest>) -> StandardLibrarySnapshot {
+        let types = source_unit(
+            SourceUnitId::from_bytes(id::<90>()),
+            0,
+            "std/types.orna",
+            "CREATE SCHEMA std;\n",
+        );
+        let invoke_source = "CREATE SERVER FUNCTION std.invoke.echo() RETURNS BOOLEAN SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE AS SELECT TRUE;\n";
+        let invoke = source_unit(
+            SourceUnitId::from_bytes(id::<91>()),
+            1,
+            "std/invoke.orna",
+            invoke_source,
+        );
+        let bundle_hash = source_bundle_digest(&[types.clone(), invoke.clone()]).unwrap();
+        let source = StoredSourceRevision::new(
+            SourceBundleId::from_bytes(id::<92>()),
+            SourceRevisionId::from_bytes(id::<93>()),
+            Some(SourceRevisionId::from_bytes(id::<94>())),
+            vec![types, invoke],
+            bundle_hash,
+            source_revision_record_digest(
+                SourceBundleId::from_bytes(id::<92>()),
+                Some(SourceRevisionId::from_bytes(id::<94>())),
+                bundle_hash,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let function = FunctionDefinition::new(
+            FunctionId::from_bytes(id::<95>()),
+            QualifiedSemanticName::new(["std", "invoke", "echo"]).unwrap(),
+            FunctionDomain::Server,
+            vec![],
+            FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Boolean)),
+            FunctionRevisionId::from_bytes(id::<96>()),
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Stable,
+        );
+        let catalogue = CatalogueSnapshot::new_with_functions(
+            CatalogueRevisionId::from_bytes(id::<97>()),
+            vec![SchemaDefinition::new(
+                SchemaId::from_bytes(id::<98>()),
+                QualifiedSemanticName::new(["std", "invoke"]).unwrap(),
+            )],
+            vec![],
+            vec![function.clone()],
+        )
+        .unwrap();
+        let declaration = SourceOrigin::new(
+            SourceUnitId::from_bytes(id::<91>()),
+            0,
+            u32::try_from(invoke_source.len()).unwrap(),
+        )
+        .unwrap();
+        let artifact = artifact();
+        let semantic = function_semantic_digest_with_version(
+            FunctionSemanticHashVersion::Version2,
+            &function,
+            "orna.language/1",
+            &artifact,
+            &[],
+            &[],
+        )
+        .unwrap();
+        let revision = FunctionRevisionRecord::new(
+            function.id(),
+            function.current_revision(),
+            1,
+            declaration,
+            digest_bytes(invoke_source.as_bytes()),
+            semantic,
+            "orna.language/1",
+            artifact,
+        )
+        .unwrap()
+        .with_semantic_hash_version(FunctionSemanticHashVersion::Version2);
+        let origins = vec![
+            DefinitionOrigin::new(
+                DefinitionIdentity::Schema(SchemaId::from_bytes(id::<98>())),
+                SourceOrigin::new(SourceUnitId::from_bytes(id::<90>()), 0, 1).unwrap(),
+            ),
+            DefinitionOrigin::new(DefinitionIdentity::Function(function.id()), declaration),
+        ];
+        let provisional = StandardLibrarySnapshot::new_with_executables(
+            StandardLibraryRevisionId::from_bytes(id::<99>()),
+            StandardLibraryDigestVersion::Version2,
+            source.clone(),
+            "orna.language/1",
+            catalogue.clone(),
+            vec![StandardExecutable::new(function.id(), revision, vec![]).unwrap()],
+            origins.clone(),
+            digest_bytes(b"provisional-v2"),
+        )
+        .unwrap();
+        let digest = calculate_standard_library_digest(&provisional).unwrap();
+        StandardLibrarySnapshot::new_with_executables(
+            provisional.revision(),
+            provisional.digest_version(),
+            source,
+            provisional.language_version(),
+            catalogue,
+            provisional.executables().to_vec(),
+            origins,
+            retained_digest.unwrap_or(digest),
+        )
+        .unwrap()
+    }
+
+    fn standard_v2_function_with_revision(
+        base: &FunctionDefinition,
+        id: FunctionId,
+        revision: FunctionRevisionId,
+    ) -> FunctionDefinition {
+        FunctionDefinition::new(
+            id,
+            base.name().clone(),
+            base.domain(),
+            base.parameters().to_vec(),
+            base.return_type().clone(),
+            revision,
+            base.security(),
+            base.transaction(),
+            base.volatility(),
+        )
+    }
+
+    fn standard_v2_revision(
+        function: &FunctionDefinition,
+        id: FunctionRevisionId,
+        base: &FunctionRevisionRecord,
+        artifact: ExecutableArtifact,
+        references: &[DefinitionReference],
+    ) -> FunctionRevisionRecord {
+        let semantic = function_semantic_digest_with_version(
+            FunctionSemanticHashVersion::Version2,
+            function,
+            base.language_version(),
+            &artifact,
+            &[],
+            references,
+        )
+        .unwrap();
+        FunctionRevisionRecord::new(
+            function.id(),
+            id,
+            base.revision_number(),
+            base.declaration_origin(),
+            base.declaration_content_hash(),
+            semantic,
+            base.language_version(),
+            artifact,
+        )
+        .unwrap()
+        .with_semantic_hash_version(FunctionSemanticHashVersion::Version2)
+    }
+
+    fn rebuilt_standard_v2_snapshot(
+        base: &StandardLibrarySnapshot,
+        source: StoredSourceRevision,
+        catalogue: CatalogueSnapshot,
+        executable: StandardExecutable,
+        origins: Vec<DefinitionOrigin>,
+    ) -> StandardLibrarySnapshot {
+        StandardLibrarySnapshot::new_with_executables(
+            base.revision(),
+            StandardLibraryDigestVersion::Version2,
+            source,
+            base.language_version(),
+            catalogue,
+            vec![executable],
+            origins,
+            base.digest(),
+        )
+        .unwrap()
     }
 
     fn catalogue() -> CatalogueSnapshot {
@@ -4128,6 +4414,217 @@ mod tests {
             verified.revision(),
             StandardLibraryRevisionId::from_bytes(id::<28>())
         );
+    }
+
+    #[test]
+    fn executable_standard_library_digest_uses_the_v2_contract() {
+        let standard = standard_v2_snapshot(None);
+        let digest = standard_library_digest(&standard).unwrap();
+
+        assert_eq!(
+            hex(digest),
+            "e7525fa634825d8981b423829d18ce84c59c52783bc6f919dd008979929b35a2"
+        );
+        assert_eq!(
+            verify_standard_library_v2_snapshot(standard.clone())
+                .unwrap()
+                .digest(),
+            digest
+        );
+        assert!(matches!(
+            verify_standard_library_v2_snapshot(standard_snapshot(false, None)),
+            Err(CanonicalHashError::StandardLibraryDigestVersionMismatch {
+                expected: StandardLibraryDigestVersion::Version2,
+                actual: StandardLibraryDigestVersion::Version1,
+                ..
+            })
+        ));
+        assert!(matches!(
+            standard_library_digest(&standard_v2_snapshot(Some(digest_bytes(b"tampered")))),
+            Err(CanonicalHashError::StandardLibraryDigestMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn executable_standard_digest_binds_each_retained_v2_fact() {
+        let base = standard_v2_snapshot(None);
+        let function = base.catalogue().functions()[0].clone();
+        let base_executable = base.executables()[0].clone();
+        let base_revision = base_executable.revision().clone();
+        let schemas = base.catalogue().schemas().to_vec();
+        let catalogue_for = |function| {
+            CatalogueSnapshot::new_with_functions(
+                base.catalogue().revision(),
+                schemas.clone(),
+                vec![],
+                vec![function],
+            )
+            .unwrap()
+        };
+
+        let changed_function = standard_v2_function_with_revision(
+            &function,
+            FunctionId::from_bytes(id::<100>()),
+            FunctionRevisionId::from_bytes(id::<101>()),
+        );
+        let changed_function_revision = standard_v2_revision(
+            &changed_function,
+            changed_function.current_revision(),
+            &base_revision,
+            base_revision.artifact().clone(),
+            &[],
+        );
+        let changed_function_origins = base
+            .origins()
+            .iter()
+            .map(|origin| match origin.identity() {
+                DefinitionIdentity::Function(_) => DefinitionOrigin::new(
+                    DefinitionIdentity::Function(changed_function.id()),
+                    origin.source(),
+                ),
+                _ => origin.clone(),
+            })
+            .collect::<Vec<_>>();
+        let changed_function = rebuilt_standard_v2_snapshot(
+            &base,
+            base.source().clone(),
+            catalogue_for(changed_function.clone()),
+            StandardExecutable::new(changed_function.id(), changed_function_revision, vec![])
+                .unwrap(),
+            changed_function_origins,
+        );
+
+        let changed_current = standard_v2_function_with_revision(
+            &function,
+            function.id(),
+            FunctionRevisionId::from_bytes(id::<102>()),
+        );
+        let changed_current_revision = standard_v2_revision(
+            &changed_current,
+            changed_current.current_revision(),
+            &base_revision,
+            base_revision.artifact().clone(),
+            &[],
+        );
+        let changed_current = rebuilt_standard_v2_snapshot(
+            &base,
+            base.source().clone(),
+            catalogue_for(changed_current.clone()),
+            StandardExecutable::new(changed_current.id(), changed_current_revision, vec![])
+                .unwrap(),
+            base.origins().to_vec(),
+        );
+
+        let payload = b"changed-standard-artifact".to_vec();
+        let changed_artifact = ExecutableArtifact::new(
+            ExecutableArtifactKind::Server,
+            "orna.server-plan",
+            1,
+            payload.clone(),
+            artifact_payload_digest(&payload).unwrap(),
+        )
+        .unwrap();
+        let changed_artifact_revision = standard_v2_revision(
+            &function,
+            base_revision.id(),
+            &base_revision,
+            changed_artifact,
+            &[],
+        );
+        let changed_artifact = rebuilt_standard_v2_snapshot(
+            &base,
+            base.source().clone(),
+            base.catalogue().clone(),
+            StandardExecutable::new(function.id(), changed_artifact_revision, vec![]).unwrap(),
+            base.origins().to_vec(),
+        );
+
+        let changed_reference = DefinitionReference::new(
+            function.id(),
+            base_revision.id(),
+            0,
+            DefinitionReferenceTarget::Function(function.id()),
+            DefinitionReferenceKind::FunctionCall,
+            base_revision.declaration_origin(),
+        );
+        let changed_reference_revision = standard_v2_revision(
+            &function,
+            base_revision.id(),
+            &base_revision,
+            base_revision.artifact().clone(),
+            std::slice::from_ref(&changed_reference),
+        );
+        let changed_reference = rebuilt_standard_v2_snapshot(
+            &base,
+            base.source().clone(),
+            base.catalogue().clone(),
+            StandardExecutable::new(
+                function.id(),
+                changed_reference_revision,
+                vec![changed_reference],
+            )
+            .unwrap(),
+            base.origins().to_vec(),
+        );
+
+        let changed_origin = rebuilt_standard_v2_snapshot(
+            &base,
+            base.source().clone(),
+            base.catalogue().clone(),
+            base_executable,
+            base.origins()
+                .iter()
+                .map(|origin| match origin.identity() {
+                    DefinitionIdentity::Schema(schema) => DefinitionOrigin::new(
+                        DefinitionIdentity::Schema(schema),
+                        SourceOrigin::new(origin.source().source_unit(), 1, 2).unwrap(),
+                    ),
+                    _ => origin.clone(),
+                })
+                .collect(),
+        );
+
+        let source = base.source();
+        let changed_parent = SourceRevisionId::from_bytes(id::<103>());
+        let changed_source = StoredSourceRevision::new(
+            source.bundle(),
+            source.id(),
+            Some(changed_parent),
+            source.units().to_vec(),
+            source.bundle_hash(),
+            source_revision_record_digest(
+                source.bundle(),
+                Some(changed_parent),
+                source.bundle_hash(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let changed_parent = rebuilt_standard_v2_snapshot(
+            &base,
+            changed_source,
+            base.catalogue().clone(),
+            base.executables()[0].clone(),
+            base.origins().to_vec(),
+        );
+
+        for tampered in [
+            changed_function,
+            changed_current,
+            changed_artifact,
+            changed_reference,
+            changed_origin,
+            changed_parent,
+        ] {
+            assert_ne!(
+                calculate_standard_library_digest(&tampered).unwrap(),
+                base.digest()
+            );
+            assert!(matches!(
+                verify_standard_library_v2_snapshot(tampered),
+                Err(CanonicalHashError::StandardLibraryDigestMismatch { .. })
+            ));
+        }
     }
 
     #[test]
