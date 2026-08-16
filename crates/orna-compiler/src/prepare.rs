@@ -540,17 +540,43 @@ pub fn prepare_checked_standard_upgrade(
 /// The public entry point always supplies the reserved-aware random allocator;
 /// compiler tests use this seam to prove that every gate before allocation is
 /// allocation-free and that the final companion identities retry collisions.
+/// Returns whether an installed standard admits the prepared standard as the
+/// exact append-only source child (work ADR 0059).
+///
+/// The append-only upgrade rule admits exactly one base shape: the prepared
+/// standard must be a different revision whose source revision descends
+/// directly from the installed standard's source revision. Every other
+/// installed base — a repeated install of the same revision, a prepared
+/// standard with no parent or a different parent, or any other revision — is
+/// not the append-only child and must close the upgrade.
+fn admits_append_only_standard_child(
+    installed_revision: StandardLibraryRevisionId,
+    installed_source: SourceRevisionId,
+    prepared_revision: StandardLibraryRevisionId,
+    prepared_parent: Option<SourceRevisionId>,
+) -> bool {
+    prepared_revision != installed_revision && prepared_parent == Some(installed_source)
+}
+
 pub(crate) fn prepare_checked_standard_upgrade_with_allocator(
     standard: &crate::CheckedStandardLibrary,
     active: &ActiveDatabaseRevision,
     mut allocations: CandidateAllocator,
 ) -> Result<PreparedStandardUpgrade, PrepareStandardUpgradeError> {
     if let Some(installed) = active.catalogue_hash_context().standard() {
-        return Err(
-            PrepareStandardUpgradeError::StandardLibraryAlreadyInstalled {
-                revision: installed.revision(),
-            },
-        );
+        let prepared = standard.verified_snapshot();
+        if !admits_append_only_standard_child(
+            installed.revision(),
+            installed.source().id(),
+            prepared.revision(),
+            prepared.source().parent(),
+        ) {
+            return Err(
+                PrepareStandardUpgradeError::StandardLibraryAlreadyInstalled {
+                    revision: installed.revision(),
+                },
+            );
+        }
     }
 
     if let Some(name) = active_std_namespace_occupant(active.catalogue()) {
@@ -5030,7 +5056,8 @@ impl CandidateMaterial {
         {
             return Ok(false);
         }
-        Ok(catalogue_digest(
+        Ok(catalogue_digest_with_context(
+            active.catalogue_hash_context(),
             &self.catalogue,
             &self.current_function_revisions,
             &self.expressions,
@@ -7562,6 +7589,101 @@ mod tests {
                 if expected == active.source().id()
                     && actual == Some(SourceRevisionId::from_bytes([0x76; 16]))
         ));
+    }
+
+    #[test]
+    fn standard_upgrade_guard_admits_only_the_exact_append_only_source_child() {
+        // The exact append-only child edge (work ADR 0059): the prepared
+        // revision differs from the installed revision and its source parent
+        // is the installed source revision.
+        let v2_revision = StandardLibraryRevisionId::from_bytes([0x41; 16]);
+        let v2_source = SourceRevisionId::from_bytes([0x42; 16]);
+        let v3_revision = StandardLibraryRevisionId::from_bytes([0x43; 16]);
+        assert!(admits_append_only_standard_child(
+            v2_revision,
+            v2_source,
+            v3_revision,
+            Some(v2_source),
+        ));
+
+        // A repeated install of the same revision is not a child.
+        assert!(!admits_append_only_standard_child(
+            v2_revision,
+            v2_source,
+            v2_revision,
+            Some(v2_source),
+        ));
+
+        // A different revision whose source parent is a different source is
+        // not the append-only child.
+        assert!(!admits_append_only_standard_child(
+            v2_revision,
+            v2_source,
+            v3_revision,
+            Some(SourceRevisionId::from_bytes([0x44; 16])),
+        ));
+
+        // A different revision with no source parent is not a child.
+        assert!(!admits_append_only_standard_child(
+            v2_revision,
+            v2_source,
+            v3_revision,
+            None,
+        ));
+
+        // An installed V3 pin with any prepared revision that is not the V3
+        // child closes (the ADR wrong-base / already-installed matrix).
+        let v3_source = SourceRevisionId::from_bytes([0x45; 16]);
+        let other_revision = StandardLibraryRevisionId::from_bytes([0x46; 16]);
+        assert!(!admits_append_only_standard_child(
+            v3_revision,
+            v3_source,
+            v3_revision,
+            None,
+        ));
+        assert!(!admits_append_only_standard_child(
+            v3_revision,
+            v3_source,
+            other_revision,
+            Some(v2_source),
+        ));
+
+        // The child edge is one-directional: the installed standard is not a
+        // child of its own child.
+        assert!(!admits_append_only_standard_child(
+            v3_revision,
+            SourceRevisionId::from_bytes([0x47; 16]),
+            v2_revision,
+            Some(v2_source),
+        ));
+    }
+
+    #[test]
+    fn standard_upgrade_guard_rejects_the_same_installed_revision_with_the_exact_error() {
+        let prepared_verified = invocation_carrier_standard();
+        let prepared = check_standard_library_source(&prepared_verified).unwrap();
+
+        // An installed pin of the same revision closes with the installed
+        // revision before any further preparation runs.
+        let installed_same = empty_standard_application_active(&prepared_verified);
+        let error = prepare_checked_standard_upgrade_with_allocator(
+            &prepared,
+            &installed_same,
+            CandidateAllocator::standard(&prepared_verified),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            PrepareStandardUpgradeError::StandardLibraryAlreadyInstalled { revision }
+                if revision == prepared_verified.revision()
+        ));
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "standard library {} is already installed",
+                prepared_verified.revision()
+            )
+        );
     }
 
     #[test]
