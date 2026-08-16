@@ -1,0 +1,441 @@
+====================
+procedural body with declarations
+====================
+
+CREATE SERVER FUNCTION tasks.complete (p_task REF tasks.task)
+RETURNS REF tasks.task
+SECURITY INVOKER
+TRANSACTION ATOMIC
+IS
+    LET v_now TIMESTAMP := sys.time.now();
+    CONST v_grace INT := 5;
+    STATE counter INT SCOPE SESSION DEFAULT 0;
+BEGIN
+    v_now := sys.time.now();
+    LET v_later := v_now;
+    CALL tasks.touch(p_task);
+    AWAIT sys.io.flush();
+    IF v_later > v_now THEN
+        RETURN p_task;
+    ELSIF v_now IS NULL THEN
+        RETURN NULL;
+    ELSE
+        v_now := sys.time.now();
+    END IF;
+    WHILE counter < v_grace LOOP
+        counter := counter + 1;
+    END LOOP;
+    FOR t IN tasks.pending() LOOP
+        CALL tasks.touch(t);
+    END LOOP;
+    RETURN p_task;
+END;
+
+---
+
+(source_file
+  (create_server_function_statement
+    (kw_create)
+    (kw_server)
+    (kw_function)
+    name: (qualified_name
+      (qualified_name
+        (identifier))
+      (dot)
+      (identifier))
+    parameters: (parameter_list
+      (lparen)
+      (parameter_definition
+        name: (identifier)
+        type: (type_spec
+          (kw_ref)
+          (type_spec
+            (qualified_name
+              (qualified_name
+                (identifier))
+              (dot)
+              (identifier)))))
+      (rparen))
+    (kw_returns)
+    returns: (return_type_spec
+      (type_spec
+        (kw_ref)
+        (type_spec
+          (qualified_name
+            (qualified_name
+              (identifier))
+            (dot)
+            (identifier)))))
+    (security_clause
+      (kw_security)
+      (kw_invoker))
+    (transaction_clause
+      (kw_transaction)
+      (kw_atomic))
+    body: (function_body
+      (procedural_body
+        (kw_is)
+        (let_declaration
+          (kw_let)
+          name: (identifier)
+          type: (type_spec
+            (scalar_type
+              (kw_timestamp)))
+          (assignment_operator)
+          value: (expression
+            (logical_expression
+              (comparison_expression
+                (additive_expression
+                  (multiplicative_expression
+                    (unary_expression
+                      (postfix_expression
+                        (primary_expression
+                          (qualified_name
+                            (qualified_name
+                              (qualified_name
+                                (identifier))
+                              (dot)
+                              (kw_time))
+                            (dot)
+                            (identifier)))
+                        (lparen)
+                        (rparen))))))))
+          (semicolon))
+        (const_declaration
+          (kw_const)
+          name: (identifier)
+          type: (type_spec
+            (scalar_type
+              (kw_int)))
+          (assignment_operator)
+          value: (expression
+            (logical_expression
+              (comparison_expression
+                (additive_expression
+                  (multiplicative_expression
+                    (unary_expression
+                      (postfix_expression
+                        (primary_expression
+                          (literal
+                            (number))))))))))
+          (semicolon))
+        (state_declaration
+          (kw_state)
+          name: (identifier)
+          type: (type_spec
+            (scalar_type
+              (kw_int)))
+          (kw_scope)
+          (kw_session)
+          (kw_default)
+          default: (expression
+            (logical_expression
+              (comparison_expression
+                (additive_expression
+                  (multiplicative_expression
+                    (unary_expression
+                      (postfix_expression
+                        (primary_expression
+                          (literal
+                            (number))))))))))
+          (semicolon))
+        (kw_begin)
+        (procedural_statement
+          (assignment_statement
+            target: (assignable
+              (qualified_name
+                (identifier)))
+            (assignment_operator)
+            value: (expression
+              (logical_expression
+                (comparison_expression
+                  (additive_expression
+                    (multiplicative_expression
+                      (unary_expression
+                        (postfix_expression
+                          (primary_expression
+                            (qualified_name
+                              (qualified_name
+                                (qualified_name
+                                  (identifier))
+                                (dot)
+                                (kw_time))
+                              (dot)
+                              (identifier)))
+                          (lparen)
+                          (rparen))))))))
+            (semicolon)))
+        (procedural_statement
+          (let_statement
+            (kw_let)
+            name: (identifier)
+            (assignment_operator)
+            value: (expression
+              (logical_expression
+                (comparison_expression
+                  (additive_expression
+                    (multiplicative_expression
+                      (unary_expression
+                        (postfix_expression
+                          (primary_expression
+                            (qualified_name
+                              (identifier))))))))))
+            (semicolon)))
+        (procedural_statement
+          (call_statement
+            (kw_call)
+            callee: (invocation
+              name: (qualified_name
+                (qualified_name
+                  (identifier))
+                (dot)
+                (identifier))
+              (lparen)
+              (argument_list
+                (argument
+                  value: (expression
+                    (logical_expression
+                      (comparison_expression
+                        (additive_expression
+                          (multiplicative_expression
+                            (unary_expression
+                              (postfix_expression
+                                (primary_expression
+                                  (qualified_name
+                                    (identifier))))))))))))
+              (rparen))
+            (semicolon)))
+        (procedural_statement
+          (await_statement
+            (kw_await)
+            (expression
+              (logical_expression
+                (comparison_expression
+                  (additive_expression
+                    (multiplicative_expression
+                      (unary_expression
+                        (postfix_expression
+                          (primary_expression
+                            (qualified_name
+                              (qualified_name
+                                (qualified_name
+                                  (identifier))
+                                (dot)
+                                (identifier))
+                              (dot)
+                              (identifier)))
+                          (lparen)
+                          (rparen))))))))
+            (semicolon)))
+        (procedural_statement
+          (if_statement
+            (kw_if)
+            condition: (expression
+              (logical_expression
+                (comparison_expression
+                  (comparison_expression
+                    (additive_expression
+                      (multiplicative_expression
+                        (unary_expression
+                          (postfix_expression
+                            (primary_expression
+                              (qualified_name
+                                (identifier))))))))
+                  (gt)
+                  (additive_expression
+                    (multiplicative_expression
+                      (unary_expression
+                        (postfix_expression
+                          (primary_expression
+                            (qualified_name
+                              (identifier))))))))))
+            (kw_then)
+            (procedural_statement
+              (return_statement
+                (kw_return)
+                (expression
+                  (logical_expression
+                    (comparison_expression
+                      (additive_expression
+                        (multiplicative_expression
+                          (unary_expression
+                            (postfix_expression
+                              (primary_expression
+                                (qualified_name
+                                  (identifier))))))))))
+                (semicolon)))
+            (kw_elsif)
+            condition: (expression
+              (logical_expression
+                (comparison_expression
+                  (comparison_expression
+                    (additive_expression
+                      (multiplicative_expression
+                        (unary_expression
+                          (postfix_expression
+                            (primary_expression
+                              (qualified_name
+                                (identifier))))))))
+                  (kw_is)
+                  (kw_null))))
+            (kw_then)
+            (procedural_statement
+              (return_statement
+                (kw_return)
+                (expression
+                  (logical_expression
+                    (comparison_expression
+                      (additive_expression
+                        (multiplicative_expression
+                          (unary_expression
+                            (postfix_expression
+                              (primary_expression
+                                (literal
+                                  (null_literal
+                                    (kw_null)))))))))))
+                (semicolon)))
+            (kw_else)
+            (procedural_statement
+              (assignment_statement
+                target: (assignable
+                  (qualified_name
+                    (identifier)))
+                (assignment_operator)
+                value: (expression
+                  (logical_expression
+                    (comparison_expression
+                      (additive_expression
+                        (multiplicative_expression
+                          (unary_expression
+                            (postfix_expression
+                              (primary_expression
+                                (qualified_name
+                                  (qualified_name
+                                    (qualified_name
+                                      (identifier))
+                                    (dot)
+                                    (kw_time))
+                                  (dot)
+                                  (identifier)))
+                              (lparen)
+                              (rparen))))))))
+                (semicolon)))
+            (kw_end)
+            (kw_if)
+            (semicolon)))
+        (procedural_statement
+          (while_statement
+            (kw_while)
+            condition: (expression
+              (logical_expression
+                (comparison_expression
+                  (comparison_expression
+                    (additive_expression
+                      (multiplicative_expression
+                        (unary_expression
+                          (postfix_expression
+                            (primary_expression
+                              (qualified_name
+                                (identifier))))))))
+                  (lt)
+                  (additive_expression
+                    (multiplicative_expression
+                      (unary_expression
+                        (postfix_expression
+                          (primary_expression
+                            (qualified_name
+                              (identifier))))))))))
+            (kw_loop)
+            (procedural_statement
+              (assignment_statement
+                target: (assignable
+                  (qualified_name
+                    (identifier)))
+                (assignment_operator)
+                value: (expression
+                  (logical_expression
+                    (comparison_expression
+                      (additive_expression
+                        (additive_expression
+                          (multiplicative_expression
+                            (unary_expression
+                              (postfix_expression
+                                (primary_expression
+                                  (qualified_name
+                                    (identifier)))))))
+                        (additive_operator)
+                        (multiplicative_expression
+                          (unary_expression
+                            (postfix_expression
+                              (primary_expression
+                                (literal
+                                  (number))))))))))
+                (semicolon)))
+            (kw_end)
+            (kw_loop)
+            (semicolon)))
+        (procedural_statement
+          (for_statement
+            (kw_for)
+            name: (identifier)
+            (kw_in)
+            iterable: (expression
+              (logical_expression
+                (comparison_expression
+                  (additive_expression
+                    (multiplicative_expression
+                      (unary_expression
+                        (postfix_expression
+                          (primary_expression
+                            (qualified_name
+                              (qualified_name
+                                (identifier))
+                              (dot)
+                              (identifier)))
+                          (lparen)
+                          (rparen))))))))
+            (kw_loop)
+            (procedural_statement
+              (call_statement
+                (kw_call)
+                callee: (invocation
+                  name: (qualified_name
+                    (qualified_name
+                      (identifier))
+                    (dot)
+                    (identifier))
+                  (lparen)
+                  (argument_list
+                    (argument
+                      value: (expression
+                        (logical_expression
+                          (comparison_expression
+                            (additive_expression
+                              (multiplicative_expression
+                                (unary_expression
+                                  (postfix_expression
+                                    (primary_expression
+                                      (qualified_name
+                                        (identifier))))))))))))
+                  (rparen))
+                (semicolon)))
+            (kw_end)
+            (kw_loop)
+            (semicolon)))
+        (procedural_statement
+          (return_statement
+            (kw_return)
+            (expression
+              (logical_expression
+                (comparison_expression
+                  (additive_expression
+                    (multiplicative_expression
+                      (unary_expression
+                        (postfix_expression
+                          (primary_expression
+                            (qualified_name
+                              (identifier))))))))))
+            (semicolon)))
+        (kw_end)))
+    (semicolon)))
+

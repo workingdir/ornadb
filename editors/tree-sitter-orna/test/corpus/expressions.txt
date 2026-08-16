@@ -1,0 +1,515 @@
+====================
+expression calls, named arguments, operators
+====================
+
+CREATE CLIENT FUNCTION demo.calc(p_x INT, p_y TEXT)
+RETURNS TEXT
+AS
+    std.strings.concat(
+        p_y,
+        std.strings.to_text(p_x + 2 * 3 - 4 % 2 || ' suffix'),
+        suffix => '!'
+    ) || CASE WHEN p_x > 0 THEN 'pos' ELSE 'neg' END;
+
+---
+
+(source_file
+  (create_client_function_statement
+    (kw_create)
+    (kw_client)
+    (kw_function)
+    name: (qualified_name
+      (qualified_name
+        (identifier))
+      (dot)
+      (identifier))
+    parameters: (parameter_list
+      (lparen)
+      (parameter_definition
+        name: (identifier)
+        type: (type_spec
+          (scalar_type
+            (kw_int))))
+      (comma)
+      (parameter_definition
+        name: (identifier)
+        type: (type_spec
+          (scalar_type
+            (kw_text))))
+      (rparen))
+    (kw_returns)
+    returns: (return_type_spec
+      (type_spec
+        (scalar_type
+          (kw_text))))
+    body: (function_body
+      (kw_as)
+      (expression
+        (logical_expression
+          (comparison_expression
+            (additive_expression
+              (additive_expression
+                (multiplicative_expression
+                  (unary_expression
+                    (postfix_expression
+                      (primary_expression
+                        (qualified_name
+                          (qualified_name
+                            (qualified_name
+                              (identifier))
+                            (dot)
+                            (identifier))
+                          (dot)
+                          (identifier)))
+                      (lparen)
+                      (argument_list
+                        (argument
+                          value: (expression
+                            (logical_expression
+                              (comparison_expression
+                                (additive_expression
+                                  (multiplicative_expression
+                                    (unary_expression
+                                      (postfix_expression
+                                        (primary_expression
+                                          (qualified_name
+                                            (identifier)))))))))))
+                        (comma)
+                        (argument
+                          value: (expression
+                            (logical_expression
+                              (comparison_expression
+                                (additive_expression
+                                  (multiplicative_expression
+                                    (unary_expression
+                                      (postfix_expression
+                                        (primary_expression
+                                          (qualified_name
+                                            (qualified_name
+                                              (qualified_name
+                                                (identifier))
+                                              (dot)
+                                              (identifier))
+                                            (dot)
+                                            (identifier)))
+                                        (lparen)
+                                        (argument_list
+                                          (argument
+                                            value: (expression
+                                              (logical_expression
+                                                (comparison_expression
+                                                  (additive_expression
+                                                    (additive_expression
+                                                      (additive_expression
+                                                        (additive_expression
+                                                          (multiplicative_expression
+                                                            (unary_expression
+                                                              (postfix_expression
+                                                                (primary_expression
+                                                                  (qualified_name
+                                                                    (identifier)))))))
+                                                        (additive_operator)
+                                                        (multiplicative_expression
+                                                          (multiplicative_expression
+                                                            (unary_expression
+                                                              (postfix_expression
+                                                                (primary_expression
+                                                                  (literal
+                                                                    (number))))))
+                                                          (multiplicative_operator)
+                                                          (unary_expression
+                                                            (postfix_expression
+                                                              (primary_expression
+                                                                (literal
+                                                                  (number)))))))
+                                                      (additive_operator)
+                                                      (multiplicative_expression
+                                                        (multiplicative_expression
+                                                          (unary_expression
+                                                            (postfix_expression
+                                                              (primary_expression
+                                                                (literal
+                                                                  (number))))))
+                                                        (multiplicative_operator)
+                                                        (unary_expression
+                                                          (postfix_expression
+                                                            (primary_expression
+                                                              (literal
+                                                                (number)))))))
+                                                    (additive_operator)
+                                                    (multiplicative_expression
+                                                      (unary_expression
+                                                        (postfix_expression
+                                                          (primary_expression
+                                                            (literal
+                                                              (string_literal))))))))))))
+                                        (rparen)))))))))
+                        (comma)
+                        (argument
+                          name: (identifier)
+                          (arrow_operator)
+                          value: (expression
+                            (logical_expression
+                              (comparison_expression
+                                (additive_expression
+                                  (multiplicative_expression
+                                    (unary_expression
+                                      (postfix_expression
+                                        (primary_expression
+                                          (literal
+                                            (string_literal))))))))))))
+                      (rparen)))))
+              (additive_operator)
+              (multiplicative_expression
+                (unary_expression
+                  (postfix_expression
+                    (primary_expression
+                      (case_expression
+                        (kw_case)
+                        (kw_when)
+                        condition: (expression
+                          (logical_expression
+                            (comparison_expression
+                              (comparison_expression
+                                (additive_expression
+                                  (multiplicative_expression
+                                    (unary_expression
+                                      (postfix_expression
+                                        (primary_expression
+                                          (qualified_name
+                                            (identifier))))))))
+                              (gt)
+                              (additive_expression
+                                (multiplicative_expression
+                                  (unary_expression
+                                    (postfix_expression
+                                      (primary_expression
+                                        (literal
+                                          (number))))))))))
+                        (kw_then)
+                        value: (expression
+                          (logical_expression
+                            (comparison_expression
+                              (additive_expression
+                                (multiplicative_expression
+                                  (unary_expression
+                                    (postfix_expression
+                                      (primary_expression
+                                        (literal
+                                          (string_literal))))))))))
+                        (kw_else)
+                        else: (expression
+                          (logical_expression
+                            (comparison_expression
+                              (additive_expression
+                                (multiplicative_expression
+                                  (unary_expression
+                                    (postfix_expression
+                                      (primary_expression
+                                        (literal
+                                          (string_literal))))))))))
+                        (kw_end)))))))))))
+    (semicolon)))
+
+====================
+expression literals and qualified names
+====================
+
+CREATE SERVER FUNCTION demo.lits()
+RETURNS TEXT
+AS
+    SELECT
+        'plain' || 'it''s escaped',
+        DATE '2024-01-15',
+        TIMESTAMP '2024-01-15 10:30:00',
+        BYTES '\x00\x01',
+        a.b.c,
+        TRUE,
+        FALSE,
+        NULL,
+        42,
+        3.14,
+        -1,
+        NOT TRUE,
+        x IS NOT NULL,
+        y IN (1, 2),
+        z LIKE 'a%',
+        w ILIKE 'b%';
+
+---
+
+(source_file
+  (create_server_function_statement
+    (kw_create)
+    (kw_server)
+    (kw_function)
+    name: (qualified_name
+      (qualified_name
+        (identifier))
+      (dot)
+      (identifier))
+    parameters: (parameter_list
+      (lparen)
+      (rparen))
+    (kw_returns)
+    returns: (return_type_spec
+      (type_spec
+        (scalar_type
+          (kw_text))))
+    body: (function_body
+      (kw_as)
+      (sql_body
+        (select_statement
+          (kw_select)
+          (expression
+            (logical_expression
+              (comparison_expression
+                (additive_expression
+                  (additive_expression
+                    (multiplicative_expression
+                      (unary_expression
+                        (postfix_expression
+                          (primary_expression
+                            (literal
+                              (string_literal)))))))
+                  (additive_operator)
+                  (multiplicative_expression
+                    (unary_expression
+                      (postfix_expression
+                        (primary_expression
+                          (literal
+                            (string_literal))))))))))
+          (comma)
+          (expression
+            (logical_expression
+              (comparison_expression
+                (additive_expression
+                  (multiplicative_expression
+                    (unary_expression
+                      (postfix_expression
+                        (primary_expression
+                          (literal
+                            (date_literal
+                              (kw_date)
+                              (string_literal)))))))))))
+          (comma)
+          (expression
+            (logical_expression
+              (comparison_expression
+                (additive_expression
+                  (multiplicative_expression
+                    (unary_expression
+                      (postfix_expression
+                        (primary_expression
+                          (literal
+                            (timestamp_literal
+                              (kw_timestamp)
+                              (string_literal)))))))))))
+          (comma)
+          (expression
+            (logical_expression
+              (comparison_expression
+                (additive_expression
+                  (multiplicative_expression
+                    (unary_expression
+                      (postfix_expression
+                        (primary_expression
+                          (literal
+                            (bytes_literal
+                              (kw_bytes)
+                              (string_literal)))))))))))
+          (comma)
+          (expression
+            (logical_expression
+              (comparison_expression
+                (additive_expression
+                  (multiplicative_expression
+                    (unary_expression
+                      (postfix_expression
+                        (primary_expression
+                          (qualified_name
+                            (qualified_name
+                              (qualified_name
+                                (identifier))
+                              (dot)
+                              (identifier))
+                            (dot)
+                            (identifier))))))))))
+          (comma)
+          (expression
+            (logical_expression
+              (comparison_expression
+                (additive_expression
+                  (multiplicative_expression
+                    (unary_expression
+                      (postfix_expression
+                        (primary_expression
+                          (literal
+                            (boolean_literal
+                              (kw_true)))))))))))
+          (comma)
+          (expression
+            (logical_expression
+              (comparison_expression
+                (additive_expression
+                  (multiplicative_expression
+                    (unary_expression
+                      (postfix_expression
+                        (primary_expression
+                          (literal
+                            (boolean_literal
+                              (kw_false)))))))))))
+          (comma)
+          (expression
+            (logical_expression
+              (comparison_expression
+                (additive_expression
+                  (multiplicative_expression
+                    (unary_expression
+                      (postfix_expression
+                        (primary_expression
+                          (literal
+                            (null_literal
+                              (kw_null)))))))))))
+          (comma)
+          (expression
+            (logical_expression
+              (comparison_expression
+                (additive_expression
+                  (multiplicative_expression
+                    (unary_expression
+                      (postfix_expression
+                        (primary_expression
+                          (literal
+                            (number))))))))))
+          (comma)
+          (expression
+            (logical_expression
+              (comparison_expression
+                (additive_expression
+                  (multiplicative_expression
+                    (unary_expression
+                      (postfix_expression
+                        (primary_expression
+                          (literal
+                            (number))))))))))
+          (comma)
+          (expression
+            (logical_expression
+              (comparison_expression
+                (additive_expression
+                  (multiplicative_expression
+                    (unary_expression
+                      (unary_operator)
+                      (unary_expression
+                        (postfix_expression
+                          (primary_expression
+                            (literal
+                              (number)))))))))))
+          (comma)
+          (expression
+            (logical_expression
+              (comparison_expression
+                (additive_expression
+                  (multiplicative_expression
+                    (unary_expression
+                      (kw_not)
+                      (unary_expression
+                        (postfix_expression
+                          (primary_expression
+                            (literal
+                              (boolean_literal
+                                (kw_true))))))))))))
+          (comma)
+          (expression
+            (logical_expression
+              (comparison_expression
+                (comparison_expression
+                  (additive_expression
+                    (multiplicative_expression
+                      (unary_expression
+                        (postfix_expression
+                          (primary_expression
+                            (qualified_name
+                              (identifier))))))))
+                (kw_is)
+                (kw_not)
+                (kw_null))))
+          (comma)
+          (expression
+            (logical_expression
+              (comparison_expression
+                (comparison_expression
+                  (additive_expression
+                    (multiplicative_expression
+                      (unary_expression
+                        (postfix_expression
+                          (primary_expression
+                            (qualified_name
+                              (identifier))))))))
+                (kw_in)
+                (lparen)
+                (expression
+                  (logical_expression
+                    (comparison_expression
+                      (additive_expression
+                        (multiplicative_expression
+                          (unary_expression
+                            (postfix_expression
+                              (primary_expression
+                                (literal
+                                  (number))))))))))
+                (comma)
+                (expression
+                  (logical_expression
+                    (comparison_expression
+                      (additive_expression
+                        (multiplicative_expression
+                          (unary_expression
+                            (postfix_expression
+                              (primary_expression
+                                (literal
+                                  (number))))))))))
+                (rparen))))
+          (comma)
+          (expression
+            (logical_expression
+              (comparison_expression
+                (comparison_expression
+                  (additive_expression
+                    (multiplicative_expression
+                      (unary_expression
+                        (postfix_expression
+                          (primary_expression
+                            (qualified_name
+                              (identifier))))))))
+                (kw_like)
+                (additive_expression
+                  (multiplicative_expression
+                    (unary_expression
+                      (postfix_expression
+                        (primary_expression
+                          (literal
+                            (string_literal))))))))))
+          (comma)
+          (expression
+            (logical_expression
+              (comparison_expression
+                (comparison_expression
+                  (additive_expression
+                    (multiplicative_expression
+                      (unary_expression
+                        (postfix_expression
+                          (primary_expression
+                            (qualified_name
+                              (identifier))))))))
+                (kw_ilike)
+                (additive_expression
+                  (multiplicative_expression
+                    (unary_expression
+                      (postfix_expression
+                        (primary_expression
+                          (literal
+                            (string_literal)))))))))))))
+    (semicolon)))
+
