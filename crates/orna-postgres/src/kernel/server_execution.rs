@@ -174,7 +174,7 @@ pub enum ServerSelectError {
     /// Authorisation evidence does not cover the recovered active revision.
     AuthorisationMismatch {
         /// The immutable target covered by the authorisation evidence.
-        authorised: InvocationTarget,
+        authorised: Box<InvocationTarget>,
         /// The recovered active revision pair.
         active: RevisionPair,
     },
@@ -699,7 +699,7 @@ pub(crate) async fn execute_authorised_server_select(
     let target = authorisation.target();
     if target.revision() != active.pair() {
         return Err(server_error(ServerSelectError::AuthorisationMismatch {
-            authorised: target,
+            authorised: Box::new(target),
             active: active.pair(),
         }));
     }
