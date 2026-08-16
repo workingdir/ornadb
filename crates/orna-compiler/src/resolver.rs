@@ -20,10 +20,12 @@ pub use model::{
     CheckedStandardApplicationField, CheckedStandardApplicationObjectType,
     CheckedStandardApplicationParameter, CheckedStandardApplicationRecordValueField,
     CheckedStandardApplicationRecordValueType, CheckedStandardApplicationReturnColumn,
-    CheckedStandardApplicationServerFunction, CheckedStandardLibrary, CheckedStandardSchema,
-    CheckedStandardTypeBinding, CheckedStandardTypeReference, CheckedStandardValueType,
-    CheckedTypeUseKind, CheckedValueTypeUse, ConstantValue, SemanticType,
-    StandardApplicationCheckContext, StandardApplicationCheckReport,
+    CheckedStandardApplicationServerFunction, CheckedStandardLibrary, CheckedStandardParameterEcho,
+    CheckedStandardSchema, CheckedStandardTypeBinding, CheckedStandardTypeReference,
+    CheckedStandardValueType, CheckedTypeUseKind, CheckedValueTypeUse, ConstantValue,
+    STD_INVOKE_ECHO_FUNCTION_ID, STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+    STD_INVOKE_ECHO_PARAMETER_ID, STD_INVOKE_ECHO_REVISION_NUMBER, STD_INVOKE_SCHEMA_ID,
+    SemanticType, StandardApplicationCheckContext, StandardApplicationCheckReport,
     StandardApplicationContextError, StandardLibraryCheckError,
 };
 pub(crate) use model::{
@@ -38,8 +40,10 @@ use std::{
     fmt,
 };
 
+use orna_artifact::server_parameter_echo::{self, ServerParameterEcho};
 use orna_core::{
     ExpressionId, TypeId,
+    canonical_hash::artifact_payload_digest,
     catalogue::{
         CatalogueSnapshot, CatalogueSnapshotError, FunctionDomain,
         FunctionSecurity as CatalogueFunctionSecurity,
@@ -49,9 +53,9 @@ use orna_core::{
         ValueTypePersistence,
     },
     revision::{
-        DefinitionIdentity, DefinitionOrigin, DefinitionReferenceKind,
-        EMPTY_APPLICATION_CATALOGUE_REVISION_ID, SourceOrigin, StoredSourceUnit,
-        VerifiedStandardLibrarySnapshot,
+        DefinitionIdentity, DefinitionOrigin, DefinitionReference, DefinitionReferenceKind,
+        DefinitionReferenceTarget, EMPTY_APPLICATION_CATALOGUE_REVISION_ID, ExecutableArtifact,
+        ExecutableArtifactKind, SourceOrigin, StoredSourceUnit, VerifiedStandardLibrarySnapshot,
     },
     source::{SourceBundle, SourceUnit},
     types::StandardScalar,
@@ -366,6 +370,239 @@ pub fn check_standard_library_source(
         value_types: families.value_types,
         type_bindings: families.type_bindings,
     })
+}
+
+/// Checks one parsed declaration against the closed ADR 0055 standard
+/// parameter-echo source shape.
+///
+/// The checker accepts ONLY the exact `std.invoke.echo` shape: a SERVER
+/// function named `std.invoke.echo` with exactly one required non-null
+/// `p_value INTEGER` parameter (no default expression; the grammar has no
+/// nullable parameter spelling, so required non-null is the only form), one
+/// single `INTEGER` result (never `ROWS`), `SECURITY INVOKER`,
+/// `TRANSACTION READ ONLY`, `VOLATILITY STABLE`, zero capability clauses, and
+/// the closed no-input `SELECT p_value` body. It rejects every other name,
+/// parameter count or name, default, type, result shape, security,
+/// transaction, volatility, capability, and body variation before any
+/// artifact is constructed.
+///
+/// The supplied catalogue must contain the fixed identities: the `std.invoke`
+/// schema, the `std.invoke.echo` function, and its `p_value` parameter. Both
+/// written `INTEGER` spellings must resolve through the catalogue to
+/// `integer_type_id`, which therefore must hold a value type at that identity.
+/// The supplied origins must contain the fixed function and parameter
+/// declaration origins; the reference source origins reuse the retained
+/// source unit from the function origin and the exact byte ranges of the
+/// `INTEGER`, `INTEGER`, and `p_value` tokens in the declaration.
+///
+/// Step 6 (`feat(compiler): reconcile executable standard source`) wires this
+/// checker into the standard source checker and consumes the returned facts
+/// to build the `StandardExecutable` record: the fixed function identity, the
+/// version-1 revision identity, the 44-byte `orna.server-parameter-echo`
+/// artifact, and the three ordered durable references.
+pub fn check_standard_parameter_echo(
+    declaration: &ServerFunctionDeclaration,
+    catalogue: &CatalogueSnapshot,
+    origins: &[DefinitionOrigin],
+    integer_type_id: TypeId,
+) -> Result<CheckedStandardParameterEcho, StandardLibraryCheckError> {
+    let expected_name = QualifiedSemanticName::new(["std", "invoke", "echo"])
+        .expect("the fixed standard function name is valid");
+    let name = semantic_name(&declaration.name);
+    if name != expected_name {
+        return Err(StandardLibraryCheckError::UnexpectedName { actual: name });
+    }
+
+    if declaration.parameters.len() != 1 {
+        return Err(StandardLibraryCheckError::UnexpectedParameterCount {
+            actual: declaration.parameters.len(),
+        });
+    }
+    let parameter = &declaration.parameters[0];
+    let parameter_name = semantic_part(&parameter.name);
+    if parameter_name != "p_value" {
+        return Err(StandardLibraryCheckError::UnexpectedParameterName {
+            actual: parameter_name,
+        });
+    }
+    if parameter.default_expression.is_some() {
+        return Err(StandardLibraryCheckError::ParameterDefault);
+    }
+    if resolved_standard_type_id(&parameter.type_specification, catalogue) != Some(integer_type_id)
+    {
+        return Err(StandardLibraryCheckError::UnexpectedParameterType);
+    }
+    let parameter_type_span = parameter.type_specification.span();
+
+    let FunctionReturnType::Single(result_specification) = &declaration.return_type else {
+        return Err(StandardLibraryCheckError::UnexpectedResultShape);
+    };
+    if resolved_standard_type_id(result_specification, catalogue) != Some(integer_type_id) {
+        return Err(StandardLibraryCheckError::UnexpectedResultType);
+    }
+    let result_type_span = result_specification.span();
+
+    let security = declaration
+        .security
+        .ok_or(StandardLibraryCheckError::MissingSecurity)?;
+    if security != SyntaxFunctionSecurity::Invoker {
+        return Err(StandardLibraryCheckError::UnexpectedSecurity { actual: security });
+    }
+    let transaction = declaration
+        .transaction
+        .ok_or(StandardLibraryCheckError::MissingTransaction)?;
+    if transaction != SyntaxFunctionTransaction::ReadOnly {
+        return Err(StandardLibraryCheckError::UnexpectedTransaction {
+            actual: transaction,
+        });
+    }
+    let volatility = declaration
+        .volatility
+        .ok_or(StandardLibraryCheckError::MissingVolatility)?;
+    if volatility != SyntaxFunctionVolatility::Stable {
+        return Err(StandardLibraryCheckError::UnexpectedVolatility { actual: volatility });
+    }
+    if !declaration.capabilities.is_empty() {
+        return Err(StandardLibraryCheckError::CapabilityClause);
+    }
+
+    let body = declaration
+        .body
+        .as_no_input_parameter_select()
+        .ok_or(StandardLibraryCheckError::UnexpectedBody)?;
+    let body_identifier = semantic_part(&body.parameter);
+    if body_identifier != "p_value" {
+        return Err(StandardLibraryCheckError::UnexpectedBodyIdentifier {
+            actual: body_identifier,
+        });
+    }
+    let body_identifier_span = &body.parameter.span;
+
+    let expected_schema_name =
+        QualifiedSemanticName::new(["std", "invoke"]).expect("the fixed standard schema is valid");
+    let schema = catalogue
+        .schema_by_id(STD_INVOKE_SCHEMA_ID)
+        .ok_or(StandardLibraryCheckError::MissingSchema)?;
+    if schema.name() != &expected_schema_name {
+        return Err(StandardLibraryCheckError::SchemaNameMismatch {
+            actual: schema.name().clone(),
+        });
+    }
+    let function = catalogue
+        .function_by_id(STD_INVOKE_ECHO_FUNCTION_ID)
+        .ok_or(StandardLibraryCheckError::MissingFunction)?;
+    if function.name() != &expected_name {
+        return Err(StandardLibraryCheckError::FunctionNameMismatch {
+            actual: function.name().clone(),
+        });
+    }
+    let parameter_definition = function
+        .parameter_by_id(STD_INVOKE_ECHO_PARAMETER_ID)
+        .ok_or(StandardLibraryCheckError::MissingParameter)?;
+    if parameter_definition.name() != "p_value" {
+        return Err(StandardLibraryCheckError::ParameterNameMismatch {
+            actual: parameter_definition.name().to_owned(),
+        });
+    }
+
+    let function_origin = origins
+        .iter()
+        .find(|origin| {
+            origin.identity() == DefinitionIdentity::Function(STD_INVOKE_ECHO_FUNCTION_ID)
+        })
+        .ok_or(StandardLibraryCheckError::MissingFunctionOrigin)?;
+    let parameter_origin = origins
+        .iter()
+        .find(|origin| {
+            origin.identity()
+                == DefinitionIdentity::Parameter {
+                    owner: STD_INVOKE_ECHO_FUNCTION_ID,
+                    parameter: STD_INVOKE_ECHO_PARAMETER_ID,
+                }
+        })
+        .ok_or(StandardLibraryCheckError::MissingParameterOrigin)?;
+    if function_origin.source().source_unit() != parameter_origin.source().source_unit() {
+        return Err(StandardLibraryCheckError::OriginSourceUnitMismatch);
+    }
+    let source_unit = function_origin.source().source_unit();
+
+    let payload = ServerParameterEcho::new(STD_INVOKE_ECHO_PARAMETER_ID, integer_type_id)
+        .map_err(|source| StandardLibraryCheckError::Artifact { source })?
+        .encode()
+        .map_err(|source| StandardLibraryCheckError::Artifact { source })?;
+    let content_hash = artifact_payload_digest(&payload)
+        .map_err(|source| StandardLibraryCheckError::Digest { source })?;
+    let artifact = ExecutableArtifact::new(
+        ExecutableArtifactKind::Server,
+        server_parameter_echo::FORMAT_IDENTITY,
+        server_parameter_echo::FORMAT_VERSION,
+        payload,
+        content_hash,
+    )
+    .map_err(|source| StandardLibraryCheckError::Revision { source })?;
+
+    let reference_origin = |span: &SourceSpan| -> Result<SourceOrigin, StandardLibraryCheckError> {
+        let start =
+            u32::try_from(span.start).map_err(|_| StandardLibraryCheckError::SourceMismatch)?;
+        let end = u32::try_from(span.end).map_err(|_| StandardLibraryCheckError::SourceMismatch)?;
+        SourceOrigin::new(source_unit, start, end)
+            .map_err(|source| StandardLibraryCheckError::Revision { source })
+    };
+    let references = vec![
+        DefinitionReference::new(
+            STD_INVOKE_ECHO_FUNCTION_ID,
+            STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+            0,
+            DefinitionReferenceTarget::ValueType(integer_type_id),
+            DefinitionReferenceKind::NamedType,
+            reference_origin(parameter_type_span)?,
+        ),
+        DefinitionReference::new(
+            STD_INVOKE_ECHO_FUNCTION_ID,
+            STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+            1,
+            DefinitionReferenceTarget::ValueType(integer_type_id),
+            DefinitionReferenceKind::NamedType,
+            reference_origin(result_type_span)?,
+        ),
+        DefinitionReference::new(
+            STD_INVOKE_ECHO_FUNCTION_ID,
+            STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+            2,
+            DefinitionReferenceTarget::Parameter {
+                owner: STD_INVOKE_ECHO_FUNCTION_ID,
+                parameter: STD_INVOKE_ECHO_PARAMETER_ID,
+            },
+            DefinitionReferenceKind::ParameterRead,
+            reference_origin(body_identifier_span)?,
+        ),
+    ];
+
+    Ok(CheckedStandardParameterEcho {
+        function_id: STD_INVOKE_ECHO_FUNCTION_ID,
+        parameter_id: STD_INVOKE_ECHO_PARAMETER_ID,
+        revision_id: STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+        artifact,
+        references,
+    })
+}
+
+/// Resolves one written type specification to its durable type identity in
+/// the supplied catalogue, mirroring the standard prelude and qualified
+/// lookup rules used by application type resolution.
+fn resolved_standard_type_id(
+    specification: &TypeSpecification,
+    catalogue: &CatalogueSnapshot,
+) -> Option<TypeId> {
+    let TypeSpecification::Named(name) = specification else {
+        return None;
+    };
+    if name.parts.len() == 1 && !name.parts[0].text.starts_with('"') {
+        let prelude = PreludeTypeName::new([semantic_part(&name.parts[0])]).ok()?;
+        catalogue.type_id_by_name(&TypeLookupName::prelude(prelude))
+    } else {
+        catalogue.type_id_by_name(&TypeLookupName::qualified(semantic_name(name)))
+    }
 }
 
 #[cfg(test)]
@@ -4777,13 +5014,15 @@ mod tests {
         MutationExpressionKind as ServerMutationExpressionKind, RECORD_INSERT_FORMAT_VERSION,
         RecordFieldExpressionKind as ServerRecordFieldExpressionKind, ServerMutationPlan,
     };
+    use orna_artifact::server_parameter_echo::ServerParameterEcho;
     use orna_core::{
         CatalogueRevisionId, ExpressionId, FieldId, FunctionId, FunctionRevisionId, ParameterId,
         SchemaId, SourceBundleId, SourceRevisionId, SourceUnitId, StandardLibraryRevisionId,
         TypeId,
         canonical_hash::{
-            catalogue_digest_with_context, source_bundle_digest, source_revision_record_digest,
-            source_unit_content_digest, verify_standard_library_snapshot,
+            artifact_payload_digest, catalogue_digest_with_context, source_bundle_digest,
+            source_revision_record_digest, source_unit_content_digest,
+            verify_standard_library_snapshot,
         },
         catalogue::{
             CatalogueSnapshot, CatalogueSnapshotError, EnumTypeDefinition, FieldDefinition,
@@ -4796,25 +5035,34 @@ mod tests {
         revision::{
             ActiveDatabaseRevision, ActiveDatabaseRevisionInput, ActiveRevisionContent,
             CatalogueHashContext, DefinitionIdentity, DefinitionOrigin, DefinitionReferenceKind,
-            DeployableRevision, RevisionPair, Sha256Digest, SourceOrigin,
-            StandardLibraryDigestVersion, StandardLibrarySnapshot, StoredSourceRevision,
-            StoredSourceUnit,
+            DefinitionReferenceTarget, DeployableRevision, ExecutableArtifactKind, RevisionPair,
+            Sha256Digest, SourceOrigin, StandardLibraryDigestVersion, StandardLibrarySnapshot,
+            StoredSourceRevision, StoredSourceUnit,
         },
         source::{SourceBundle, SourceUnit},
         types::{ResolvedType, StandardScalar},
     };
 
     use crate::relational::ExpressionKind;
-    use orna_syntax::{SourceSpan, TypeSpecification, parse};
+    use orna_syntax::{
+        FunctionSecurity as SyntaxFunctionSecurity,
+        FunctionTransaction as SyntaxFunctionTransaction,
+        FunctionVolatility as SyntaxFunctionVolatility, ServerFunctionDeclaration, SourceSpan,
+        TypeSpecification, parse,
+    };
 
     use super::{
         CheckAssignments, CheckedApplicationTypeUse, CheckedDefinitionReferenceTarget,
-        CheckedTypeId, CheckedTypeUseKind, CheckedValueTypeUse, ConstantValue, DiagnosticCode,
-        IdentityAssignments, NewApplicationCheckError, SemanticType,
-        StandardApplicationCheckContext, StandardApplicationContextError, check,
-        check_new_application, check_new_application_with_catalogue, check_standard_application,
-        check_standard_library_source, checked_standard_library_with_contract_overrides_for_test,
-        location, reconcile_standard_source, sort_standard_type_uses, supports_record_value_scalar,
+        CheckedStandardParameterEcho, CheckedTypeId, CheckedTypeUseKind, CheckedValueTypeUse,
+        ConstantValue, DiagnosticCode, IdentityAssignments, NewApplicationCheckError,
+        STD_INVOKE_ECHO_FUNCTION_ID, STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+        STD_INVOKE_ECHO_PARAMETER_ID, STD_INVOKE_SCHEMA_ID, SemanticType,
+        StandardApplicationCheckContext, StandardApplicationContextError,
+        StandardLibraryCheckError, check, check_new_application,
+        check_new_application_with_catalogue, check_standard_application,
+        check_standard_library_source, check_standard_parameter_echo,
+        checked_standard_library_with_contract_overrides_for_test, location,
+        reconcile_standard_source, sort_standard_type_uses, supports_record_value_scalar,
     };
     use crate::mutation::{MutationExpressionKind, MutationRecordFieldExpressionKind};
     use crate::{
@@ -12972,6 +13220,560 @@ mod tests {
             assert_eq!(diagnostic.location().span().start(), start);
             assert_eq!(diagnostic.location().span().end(), start + name.len());
         }
+        assert_no_checked_bundle(&report);
+    }
+
+    const STD_INVOKE_SOURCE: &str = "CREATE SCHEMA std.invoke;\nCREATE SERVER FUNCTION std.invoke.echo(\n    p_value INTEGER\n)\nRETURNS INTEGER\nSECURITY INVOKER\nTRANSACTION READ ONLY\nVOLATILITY STABLE\nAS\n    SELECT p_value;";
+    /// The fixed ADR 0055 INTEGER value-type identity: `...02`.
+    const STD_INTEGER_TYPE_ID: TypeId =
+        TypeId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02]);
+    /// The fixed ADR 0055 `std/invoke.orna` source-unit identity: `...03`.
+    const STD_INVOKE_SOURCE_UNIT_ID: SourceUnitId =
+        SourceUnitId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x03]);
+
+    fn standard_parameter_echo_declaration(source: &str) -> ServerFunctionDeclaration {
+        let report =
+            parse_bundle(&SourceBundle::new([SourceUnit::new("std/invoke.orna", source)]).unwrap());
+        assert!(
+            report.diagnostics().is_empty(),
+            "unexpected parse diagnostics: {:?}",
+            report.diagnostics()
+        );
+        assert_eq!(report.units().len(), 1);
+        assert_eq!(report.units()[0].parsed().server_functions().len(), 1);
+        report.units()[0].parsed().server_functions()[0].clone()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn parameter_echo_catalogue(
+        with_schema: bool,
+        with_integer: bool,
+        with_function: bool,
+        with_parameter: bool,
+    ) -> CatalogueSnapshot {
+        let mut schemas = vec![SchemaDefinition::new(
+            SchemaId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02]),
+            QualifiedSemanticName::new(["std", "types"]).unwrap(),
+        )];
+        if with_schema {
+            schemas.push(SchemaDefinition::new(
+                STD_INVOKE_SCHEMA_ID,
+                QualifiedSemanticName::new(["std", "invoke"]).unwrap(),
+            ));
+        }
+        let value_types = if with_integer {
+            vec![ValueTypeDefinition::primitive(
+                STD_INTEGER_TYPE_ID,
+                QualifiedSemanticName::new(["std", "types", "integer"]).unwrap(),
+                ValueTypeMutability::Immutable,
+                ValueTypePersistence::Persistable,
+                "orna.kernel.value.integer@1",
+            )]
+        } else {
+            Vec::new()
+        };
+        let bindings = if with_integer {
+            vec![
+                TypeBinding::prelude(
+                    PreludeTypeName::new(["integer"]).unwrap(),
+                    STD_INTEGER_TYPE_ID,
+                )
+                .unwrap(),
+            ]
+        } else {
+            Vec::new()
+        };
+        let functions = if with_function {
+            let parameters = if with_parameter {
+                vec![ParameterDefinition::new(
+                    STD_INVOKE_ECHO_PARAMETER_ID,
+                    "p_value",
+                    0,
+                    ResolvedType::scalar(StandardScalar::Integer),
+                    None,
+                )]
+            } else {
+                Vec::new()
+            };
+            vec![FunctionDefinition::new(
+                STD_INVOKE_ECHO_FUNCTION_ID,
+                QualifiedSemanticName::new(["std", "invoke", "echo"]).unwrap(),
+                FunctionDomain::Server,
+                parameters,
+                FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Integer)),
+                STD_INVOKE_ECHO_FUNCTION_REVISION_ID,
+                FunctionSecurity::Invoker,
+                Some(FunctionTransaction::ReadOnly),
+                FunctionVolatility::Stable,
+            )]
+        } else {
+            Vec::new()
+        };
+        CatalogueSnapshot::new_with_functions_and_types(
+            CatalogueRevisionId::from_bytes([0x21; 16]),
+            schemas,
+            vec![],
+            value_types,
+            bindings,
+            functions,
+        )
+        .unwrap()
+    }
+
+    fn standard_parameter_echo_catalogue() -> CatalogueSnapshot {
+        parameter_echo_catalogue(true, true, true, true)
+    }
+
+    fn standard_parameter_echo_origins(source: &str) -> Vec<DefinitionOrigin> {
+        let declaration = standard_parameter_echo_declaration(source);
+        let span = |start: usize, end: usize| {
+            SourceOrigin::new(
+                STD_INVOKE_SOURCE_UNIT_ID,
+                u32::try_from(start).unwrap(),
+                u32::try_from(end).unwrap(),
+            )
+            .unwrap()
+        };
+        let mut origins = vec![DefinitionOrigin::new(
+            DefinitionIdentity::Function(STD_INVOKE_ECHO_FUNCTION_ID),
+            span(declaration.span.start, declaration.span.end),
+        )];
+        if let Some(parameter) = declaration.parameters.first() {
+            origins.push(DefinitionOrigin::new(
+                DefinitionIdentity::Parameter {
+                    owner: STD_INVOKE_ECHO_FUNCTION_ID,
+                    parameter: STD_INVOKE_ECHO_PARAMETER_ID,
+                },
+                span(parameter.span.start, parameter.span.end),
+            ));
+        }
+        origins
+    }
+
+    fn check_echo(source: &str) -> Result<CheckedStandardParameterEcho, StandardLibraryCheckError> {
+        let declaration = standard_parameter_echo_declaration(source);
+        let catalogue = standard_parameter_echo_catalogue();
+        let origins = standard_parameter_echo_origins(source);
+        check_standard_parameter_echo(&declaration, &catalogue, &origins, STD_INTEGER_TYPE_ID)
+    }
+
+    #[test]
+    fn checks_the_exact_standard_parameter_echo_declaration_and_artifact() {
+        let checked = check_echo(STD_INVOKE_SOURCE).unwrap();
+
+        assert_eq!(checked.function_id(), STD_INVOKE_ECHO_FUNCTION_ID);
+        assert_eq!(checked.parameter_id(), STD_INVOKE_ECHO_PARAMETER_ID);
+        assert_eq!(checked.revision_id(), STD_INVOKE_ECHO_FUNCTION_REVISION_ID);
+
+        let artifact = checked.artifact();
+        assert_eq!(artifact.kind(), ExecutableArtifactKind::Server);
+        assert_eq!(artifact.format(), "orna.server-parameter-echo");
+        assert_eq!(artifact.version(), 1);
+        let payload = artifact.payload();
+        assert_eq!(payload.len(), 44);
+        assert_eq!(&payload[0..8], b"ORNAPE\0\0");
+        assert_eq!(&payload[8..12], &[0, 0, 0, 1]);
+        assert_eq!(
+            &payload[12..28],
+            &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10]
+        );
+        assert_eq!(
+            &payload[28..44],
+            &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02]
+        );
+        assert_eq!(
+            artifact.content_hash(),
+            artifact_payload_digest(payload).unwrap()
+        );
+
+        let decoded =
+            ServerParameterEcho::decode(payload, STD_INVOKE_ECHO_PARAMETER_ID, STD_INTEGER_TYPE_ID)
+                .unwrap();
+        assert_eq!(decoded.parameter(), STD_INVOKE_ECHO_PARAMETER_ID);
+        assert_eq!(decoded.value_type(), STD_INTEGER_TYPE_ID);
+
+        let references = checked.references();
+        assert_eq!(references.len(), 3);
+        let parameter_integer_start = STD_INVOKE_SOURCE.find("INTEGER").unwrap();
+        let result_integer_start = STD_INVOKE_SOURCE.rfind("INTEGER").unwrap();
+        let body_p_value_start = STD_INVOKE_SOURCE.rfind("p_value").unwrap();
+        for reference in references {
+            assert_eq!(reference.source_function(), STD_INVOKE_ECHO_FUNCTION_ID);
+            assert_eq!(
+                reference.source_revision(),
+                STD_INVOKE_ECHO_FUNCTION_REVISION_ID
+            );
+            assert_eq!(
+                reference.source_origin().source_unit(),
+                STD_INVOKE_SOURCE_UNIT_ID
+            );
+        }
+        assert_eq!(references[0].ordinal(), 0);
+        assert_eq!(references[0].kind(), DefinitionReferenceKind::NamedType);
+        assert_eq!(
+            references[0].target(),
+            DefinitionReferenceTarget::ValueType(STD_INTEGER_TYPE_ID)
+        );
+        assert_eq!(
+            references[0].source_origin().byte_start(),
+            parameter_integer_start as u32
+        );
+        assert_eq!(
+            references[0].source_origin().byte_end(),
+            parameter_integer_start as u32 + 7
+        );
+        assert_eq!(
+            &STD_INVOKE_SOURCE[parameter_integer_start..parameter_integer_start + 7],
+            "INTEGER"
+        );
+        assert_eq!(references[1].ordinal(), 1);
+        assert_eq!(references[1].kind(), DefinitionReferenceKind::NamedType);
+        assert_eq!(
+            references[1].target(),
+            DefinitionReferenceTarget::ValueType(STD_INTEGER_TYPE_ID)
+        );
+        assert_eq!(
+            references[1].source_origin().byte_start(),
+            result_integer_start as u32
+        );
+        assert_eq!(
+            references[1].source_origin().byte_end(),
+            result_integer_start as u32 + 7
+        );
+        assert_eq!(
+            &STD_INVOKE_SOURCE[result_integer_start..result_integer_start + 7],
+            "INTEGER"
+        );
+        assert_eq!(references[2].ordinal(), 2);
+        assert_eq!(references[2].kind(), DefinitionReferenceKind::ParameterRead);
+        assert_eq!(
+            references[2].target(),
+            DefinitionReferenceTarget::Parameter {
+                owner: STD_INVOKE_ECHO_FUNCTION_ID,
+                parameter: STD_INVOKE_ECHO_PARAMETER_ID,
+            }
+        );
+        assert_eq!(
+            references[2].source_origin().byte_start(),
+            body_p_value_start as u32
+        );
+        assert_eq!(
+            references[2].source_origin().byte_end(),
+            body_p_value_start as u32 + 7
+        );
+        assert_eq!(
+            &STD_INVOKE_SOURCE[body_p_value_start..body_p_value_start + 7],
+            "p_value"
+        );
+    }
+
+    #[test]
+    fn standard_parameter_echo_rejects_every_name_variation() {
+        for source in [
+            STD_INVOKE_SOURCE.replacen("std.invoke.echo", "std.invoke.other", 1),
+            STD_INVOKE_SOURCE.replacen("std.invoke.echo", "std.types.echo", 1),
+            STD_INVOKE_SOURCE.replacen("std.invoke.echo", "app.echo", 1),
+        ] {
+            let error = check_echo(&source).unwrap_err();
+            assert!(
+                matches!(error, StandardLibraryCheckError::UnexpectedName { .. }),
+                "unexpected rejection: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn standard_parameter_echo_rejects_missing_extra_and_different_parameters() {
+        let missing = check_echo(&STD_INVOKE_SOURCE.replacen("(\n    p_value INTEGER\n)", "()", 1))
+            .unwrap_err();
+        assert!(matches!(
+            missing,
+            StandardLibraryCheckError::UnexpectedParameterCount { actual: 0 }
+        ));
+        let extra = check_echo(&STD_INVOKE_SOURCE.replacen(
+            "(\n    p_value INTEGER\n)",
+            "(\n    p_value INTEGER,\n    p_other INTEGER\n)",
+            1,
+        ))
+        .unwrap_err();
+        assert!(matches!(
+            extra,
+            StandardLibraryCheckError::UnexpectedParameterCount { actual: 2 }
+        ));
+        let renamed = check_echo(&STD_INVOKE_SOURCE.replacen("p_value", "p_other", 1)).unwrap_err();
+        assert!(matches!(
+            renamed,
+            StandardLibraryCheckError::UnexpectedParameterName { actual }
+                if actual == "p_other"
+        ));
+    }
+
+    #[test]
+    fn standard_parameter_echo_rejects_parameter_default() {
+        let error = check_echo(&STD_INVOKE_SOURCE.replacen(
+            "p_value INTEGER\n)",
+            "p_value INTEGER DEFAULT 0\n)",
+            1,
+        ))
+        .unwrap_err();
+        assert!(matches!(error, StandardLibraryCheckError::ParameterDefault));
+    }
+
+    #[test]
+    fn standard_parameter_echo_rejects_non_integer_parameter_type() {
+        let error =
+            check_echo(&STD_INVOKE_SOURCE.replacen("p_value INTEGER", "p_value BOOLEAN", 1))
+                .unwrap_err();
+        assert!(matches!(
+            error,
+            StandardLibraryCheckError::UnexpectedParameterType
+        ));
+    }
+
+    #[test]
+    fn standard_parameter_echo_rejects_rows_and_non_integer_results() {
+        let rows = check_echo(&STD_INVOKE_SOURCE.replacen(
+            "RETURNS INTEGER\n",
+            "RETURNS ROWS (value INTEGER)\n",
+            1,
+        ))
+        .unwrap_err();
+        assert!(matches!(
+            rows,
+            StandardLibraryCheckError::UnexpectedResultShape
+        ));
+        let boolean =
+            check_echo(&STD_INVOKE_SOURCE.replacen("RETURNS INTEGER", "RETURNS BOOLEAN", 1))
+                .unwrap_err();
+        assert!(matches!(
+            boolean,
+            StandardLibraryCheckError::UnexpectedResultType
+        ));
+    }
+
+    #[test]
+    fn standard_parameter_echo_rejects_missing_clauses() {
+        let missing_security =
+            check_echo(&STD_INVOKE_SOURCE.replacen("SECURITY INVOKER\n", "", 1)).unwrap_err();
+        assert!(matches!(
+            missing_security,
+            StandardLibraryCheckError::MissingSecurity
+        ));
+        let missing_transaction =
+            check_echo(&STD_INVOKE_SOURCE.replacen("TRANSACTION READ ONLY\n", "", 1)).unwrap_err();
+        assert!(matches!(
+            missing_transaction,
+            StandardLibraryCheckError::MissingTransaction
+        ));
+        let missing_volatility =
+            check_echo(&STD_INVOKE_SOURCE.replacen("VOLATILITY STABLE\n", "", 1)).unwrap_err();
+        assert!(matches!(
+            missing_volatility,
+            StandardLibraryCheckError::MissingVolatility
+        ));
+    }
+
+    #[test]
+    fn standard_parameter_echo_rejects_different_clause_values() {
+        let definer =
+            check_echo(&STD_INVOKE_SOURCE.replacen("SECURITY INVOKER", "SECURITY DEFINER", 1))
+                .unwrap_err();
+        assert!(matches!(
+            definer,
+            StandardLibraryCheckError::UnexpectedSecurity {
+                actual: SyntaxFunctionSecurity::Definer
+            }
+        ));
+        for (spelling, expected) in [
+            ("ATOMIC", SyntaxFunctionTransaction::Atomic),
+            ("MANUAL", SyntaxFunctionTransaction::Manual),
+        ] {
+            let error = check_echo(&STD_INVOKE_SOURCE.replacen(
+                "TRANSACTION READ ONLY",
+                &format!("TRANSACTION {spelling}"),
+                1,
+            ))
+            .unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    StandardLibraryCheckError::UnexpectedTransaction { actual }
+                        if actual == expected
+                ),
+                "unexpected rejection: {error}"
+            );
+        }
+        for (spelling, expected) in [
+            ("IMMUTABLE", SyntaxFunctionVolatility::Immutable),
+            ("VOLATILE", SyntaxFunctionVolatility::Volatile),
+        ] {
+            let error = check_echo(&STD_INVOKE_SOURCE.replacen(
+                "VOLATILITY STABLE",
+                &format!("VOLATILITY {spelling}"),
+                1,
+            ))
+            .unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    StandardLibraryCheckError::UnexpectedVolatility { actual }
+                        if actual == expected
+                ),
+                "unexpected rejection: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn standard_parameter_echo_rejects_capability_clause() {
+        let error = check_echo(&STD_INVOKE_SOURCE.replacen(
+            "AS\n    SELECT",
+            "REQUIRES CAPABILITY std.invoke.audit\nAS\n    SELECT",
+            1,
+        ))
+        .unwrap_err();
+        assert!(matches!(error, StandardLibraryCheckError::CapabilityClause));
+    }
+
+    #[test]
+    fn standard_parameter_echo_rejects_wrong_body_identifier_and_other_bodies() {
+        let wrong_identifier =
+            check_echo(&STD_INVOKE_SOURCE.replacen("SELECT p_value", "SELECT p_other", 1))
+                .unwrap_err();
+        assert!(matches!(
+            wrong_identifier,
+            StandardLibraryCheckError::UnexpectedBodyIdentifier { actual }
+                if actual == "p_other"
+        ));
+        let other_body = check_echo(&STD_INVOKE_SOURCE.replacen(
+            "SELECT p_value;",
+            "SELECT i.value FROM std.items i;",
+            1,
+        ))
+        .unwrap_err();
+        assert!(matches!(
+            other_body,
+            StandardLibraryCheckError::UnexpectedBody
+        ));
+    }
+
+    #[test]
+    fn standard_parameter_echo_rejects_missing_fixed_catalogue_identities() {
+        let declaration = standard_parameter_echo_declaration(STD_INVOKE_SOURCE);
+        let origins = standard_parameter_echo_origins(STD_INVOKE_SOURCE);
+
+        let missing_schema = check_standard_parameter_echo(
+            &declaration,
+            &parameter_echo_catalogue(false, true, false, false),
+            &origins,
+            STD_INTEGER_TYPE_ID,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            missing_schema,
+            StandardLibraryCheckError::MissingSchema
+        ));
+
+        // Without the fixed INTEGER value type, `INTEGER` cannot resolve in
+        // this catalogue, so the closed rejection is the parameter-type error.
+        let missing_integer = check_standard_parameter_echo(
+            &declaration,
+            &parameter_echo_catalogue(true, false, true, true),
+            &origins,
+            STD_INTEGER_TYPE_ID,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            missing_integer,
+            StandardLibraryCheckError::UnexpectedParameterType
+        ));
+
+        let missing_function = check_standard_parameter_echo(
+            &declaration,
+            &parameter_echo_catalogue(true, true, false, false),
+            &origins,
+            STD_INTEGER_TYPE_ID,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            missing_function,
+            StandardLibraryCheckError::MissingFunction
+        ));
+
+        let missing_parameter = check_standard_parameter_echo(
+            &declaration,
+            &parameter_echo_catalogue(true, true, true, false),
+            &origins,
+            STD_INTEGER_TYPE_ID,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            missing_parameter,
+            StandardLibraryCheckError::MissingParameter
+        ));
+    }
+
+    #[test]
+    fn standard_parameter_echo_rejects_missing_origins() {
+        let declaration = standard_parameter_echo_declaration(STD_INVOKE_SOURCE);
+        let catalogue = standard_parameter_echo_catalogue();
+        let origins = standard_parameter_echo_origins(STD_INVOKE_SOURCE);
+
+        let without_function = origins
+            .iter()
+            .filter(|origin| {
+                origin.identity() != DefinitionIdentity::Function(STD_INVOKE_ECHO_FUNCTION_ID)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let error = check_standard_parameter_echo(
+            &declaration,
+            &catalogue,
+            &without_function,
+            STD_INTEGER_TYPE_ID,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            StandardLibraryCheckError::MissingFunctionOrigin
+        ));
+
+        let without_parameter = origins
+            .iter()
+            .filter(|origin| {
+                origin.identity()
+                    != DefinitionIdentity::Parameter {
+                        owner: STD_INVOKE_ECHO_FUNCTION_ID,
+                        parameter: STD_INVOKE_ECHO_PARAMETER_ID,
+                    }
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let error = check_standard_parameter_echo(
+            &declaration,
+            &catalogue,
+            &without_parameter,
+            STD_INTEGER_TYPE_ID,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            StandardLibraryCheckError::MissingParameterOrigin
+        ));
+    }
+
+    #[test]
+    fn application_checker_still_rejects_the_no_input_parameter_select_body() {
+        let source = "CREATE SCHEMA app;\nCREATE SERVER FUNCTION app.echo(\n    p_value INTEGER\n)\nRETURNS INTEGER\nSECURITY INVOKER\nTRANSACTION READ ONLY\nVOLATILITY STABLE\nAS\n    SELECT p_value;";
+        let report = check(&bundle([("app.orna", source)]), &empty_catalogue());
+
+        assert_eq!(report.diagnostics().len(), 1);
+        let diagnostic = &report.diagnostics()[0];
+        assert_eq!(diagnostic.code(), DiagnosticCode::DomainIncompatible);
+        assert_eq!(
+            diagnostic.message(),
+            "SERVER functions do not yet support this body form"
+        );
         assert_no_checked_bundle(&report);
     }
 }
