@@ -1,0 +1,7 @@
+[package]
+name = "orna-runtime-tty"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The OrnaDB tty runtime: renders terminal documents and byte streams"
