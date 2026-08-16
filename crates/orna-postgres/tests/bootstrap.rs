@@ -44,6 +44,8 @@ const EXPECTED_KERNEL_TABLES: &[&str] = &[
     "definition_references",
     "function_artifacts",
     "function_revisions",
+    "invocation_audit_events",
+    "invocation_target_authorities",
     "schema_migrations",
     "security_audit_events",
     "security_execute_grants",
@@ -54,10 +56,16 @@ const EXPECTED_KERNEL_TABLES: &[&str] = &[
     "source_revisions",
     "source_units",
     "standard_catalogue_enum_types",
+    "standard_catalogue_function_parameters",
+    "standard_catalogue_functions",
     "standard_catalogue_schemas",
     "standard_catalogue_type_bindings",
     "standard_catalogue_value_types",
+    "standard_definition_references",
+    "standard_function_artifacts",
+    "standard_function_revisions",
     "standard_library_revisions",
+    "user_state_cells",
 ];
 
 const MIGRATIONS: &[(i64, &str, &str)] = &[
@@ -181,6 +189,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "capability audit decisions",
         include_str!("../migrations/0024_capability_audit.sql"),
     ),
+    (
+        25,
+        "durable user state cells",
+        include_str!("../migrations/0025_user_state_cells.sql"),
+    ),
 ];
 const MIGRATION_DATA_STEP_SEPARATOR: &[u8] = b"\0orna.kernel.migration-step\0";
 const CANONICAL_HASH_V1_EMPTY_SEED_STEP: &[u8] = b"canonical-hash-v1-empty-seed/v1";
@@ -271,6 +284,15 @@ fn is_later_catalogue_relation(relation: &str) -> bool {
         || relation.starts_with("std_cat_enum_types_")
         || relation == "definition_references_enum_type_target_index"
         || relation.starts_with("definition_references_record_")
+        || relation.starts_with("invocation_")
+        || relation.starts_with("standard_function_")
+        || relation.starts_with("standard_catalogue_function")
+        || relation.starts_with("standard_definition_references")
+        || relation.starts_with("std_cat_fn_")
+        || relation.starts_with("std_cat_functions_")
+        || relation.starts_with("std_def_")
+        || relation.starts_with("std_fn_")
+        || relation.starts_with("user_state_cells")
 }
 
 fn without_later_relations(snapshot: &CatalogueSurfaceSnapshot) -> CatalogueSurfaceSnapshot {
@@ -674,6 +696,44 @@ fn standard_enum_record_fields_are_the_registered_version_twenty() -> TestResult
     )
 }
 
+#[test]
+fn durable_user_state_cells_are_the_registered_version_twenty_five() -> TestResult<()> {
+    let Some((version, name, sql)) = MIGRATIONS.get(24).copied() else {
+        return Err(failure(
+            "durable user state cells migration is not registered",
+        ));
+    };
+    require(version == 25, format!("migration is version {version}"))?;
+    require(
+        name == "durable user state cells",
+        format!("migration has unexpected name {name:?}"),
+    )?;
+    require(
+        sql.contains("CREATE TABLE _orna_kernel.user_state_cells")
+            && sql.contains("principal_id bytea NOT NULL")
+            && sql.contains("root_function_id bytea NOT NULL")
+            && sql.contains("root_state_profile text NOT NULL")
+            && sql.contains("function_id bytea NOT NULL")
+            && sql.contains("function_instance_key text NOT NULL")
+            && sql.contains("state_slot_id bytea NOT NULL")
+            && sql.contains("value_bytes bytea NOT NULL")
+            && sql.contains("value_type_id bytea NOT NULL")
+            && sql.contains("revision bigint NOT NULL")
+            && sql.contains("updated_at timestamp with time zone NOT NULL")
+            && sql.contains("DEFAULT transaction_timestamp()")
+            && sql.contains("CONSTRAINT user_state_cells_pkey")
+            && sql.contains("CONSTRAINT user_state_cells_identity_lengths CHECK")
+            && sql.contains("octet_length(principal_id) = 16")
+            && sql.contains("octet_length(value_type_id) = 16")
+            && sql.contains("CONSTRAINT user_state_cells_revision_check CHECK (revision > 0)")
+            && sql.contains(
+                "CREATE INDEX user_state_cells_principal_root_state_profile_idx\n    ON _orna_kernel.user_state_cells (principal_id, root_function_id, root_state_profile)",
+            )
+            && sql.contains("REVOKE ALL ON TABLE _orna_kernel.user_state_cells FROM PUBLIC"),
+        "user state migration does not preserve the complete protected cell contract",
+    )
+}
+
 #[tokio::test]
 #[ignore = "requires the Compose PostgreSQL development service"]
 async fn bootstrap_creates_one_recoverable_empty_revision() -> TestResult<()> {
@@ -777,8 +837,8 @@ async fn bootstrap_upgrades_the_registered_v20_empty_catalogue() -> TestResult<(
 
         let after = snapshot_upgrade_state(&database).await?;
         require(
-            after.migrations.len() == 23 && after.migrations[..20] == before.migrations[..],
-            format!("v21-v23 changed prior migration records: {:?}", after.migrations),
+            after.migrations.len() == 25 && after.migrations[..20] == before.migrations[..],
+            format!("v21-v25 changed prior migration records: {:?}", after.migrations),
         )?;
         require(
             after.migrations[20]
@@ -808,8 +868,26 @@ async fn bootstrap_upgrades_the_registered_v20_empty_catalogue() -> TestResult<(
             format!("v23 migration record is not exact: {:?}", after.migrations[22]),
         )?;
         require(
+            after.migrations[23]
+                == (
+                    24,
+                    "capability audit decisions".to_owned(),
+                    expected_migration_checksum(24, MIGRATIONS[23].2),
+                ),
+            format!("v24 migration record is not exact: {:?}", after.migrations[23]),
+        )?;
+        require(
+            after.migrations[24]
+                == (
+                    25,
+                    "durable user state cells".to_owned(),
+                    expected_migration_checksum(25, MIGRATIONS[24].2),
+                ),
+            format!("v25 migration record is not exact: {:?}", after.migrations[24]),
+        )?;
+        require(
             after.active_pair == before.active_pair,
-            "v21-v23 changed the active revision pair",
+            "v21-v25 changed the active revision pair",
         )?;
 
         let recovered = kernel.recover().await?;
@@ -817,11 +895,223 @@ async fn bootstrap_upgrades_the_registered_v20_empty_catalogue() -> TestResult<(
         require(
             recovered.pair().source().to_bytes().to_vec() == source_revision_id
                 && recovered.pair().catalogue().to_bytes().to_vec() == catalogue_revision_id,
-            "v21-v23 recovery does not preserve the active revision pair",
+            "v21-v25 recovery does not preserve the active revision pair",
         )?;
         Ok(())
     })
     .await
+}
+
+#[tokio::test]
+#[ignore = "requires the Compose PostgreSQL development service"]
+async fn user_state_cells_migration_applies_cleanly_and_relation_is_closed() -> TestResult<()> {
+    with_test_database(|database| async move {
+        let kernel = PostgresKernel::from_str(&database.connection_string())?;
+        kernel.bootstrap().await?;
+        inspect_user_state_cells_storage(&database).await
+    })
+    .await
+}
+
+async fn inspect_user_state_cells_storage(database: &TestDatabase) -> TestResult<()> {
+    let session = database.open().await?;
+    let inspection_result = async {
+        let client = session.client();
+        inspect_columns(
+            client,
+            "user_state_cells",
+            &[
+                ("principal_id", "bytea", "bytea", "NO", Some("")),
+                ("root_function_id", "bytea", "bytea", "NO", Some("")),
+                ("root_state_profile", "text", "text", "NO", Some("")),
+                ("function_id", "bytea", "bytea", "NO", Some("")),
+                ("function_instance_key", "text", "text", "NO", Some("")),
+                ("state_slot_id", "bytea", "bytea", "NO", Some("")),
+                ("value_bytes", "bytea", "bytea", "NO", Some("")),
+                ("value_type_id", "bytea", "bytea", "NO", Some("")),
+                ("revision", "bigint", "int8", "NO", Some("")),
+                (
+                    "updated_at",
+                    "timestamp with time zone",
+                    "timestamptz",
+                    "NO",
+                    Some("transaction_timestamp()"),
+                ),
+            ],
+        )
+        .await?;
+        require_exact_constraint(
+            client,
+            "user_state_cells",
+            "user_state_cells_pkey",
+            "PRIMARY KEY (principal_id, root_function_id, root_state_profile, function_id, function_instance_key, state_slot_id)",
+            false,
+            false,
+        )
+        .await?;
+        require_constraint(
+            client,
+            "user_state_cells",
+            "user_state_cells_identity_lengths",
+            "octet_length(principal_id) = 16",
+        )
+        .await?;
+        require_constraint(
+            client,
+            "user_state_cells",
+            "user_state_cells_revision_check",
+            "revision > 0",
+        )
+        .await?;
+        require_index_shape(
+            client,
+            "user_state_cells_principal_root_state_profile_idx",
+            "user_state_cells",
+            "(principal_id, root_function_id, root_state_profile)",
+            None,
+        )
+        .await?;
+        for privilege in [
+            "SELECT",
+            "INSERT",
+            "UPDATE",
+            "DELETE",
+            "TRUNCATE",
+            "REFERENCES",
+            "TRIGGER",
+            "MAINTAIN",
+        ] {
+            let relation = "_orna_kernel.user_state_cells";
+            let row = client
+                .query_one(
+                    "SELECT has_table_privilege('public', $1, $2)",
+                    &[&relation, &privilege],
+                )
+                .await?;
+            require(
+                !value::<bool>(&row, 0)?,
+                format!("PUBLIC has {privilege} on protected table {relation}"),
+            )?;
+        }
+
+        // The closed domains are enforced, not merely declared: a valid cell
+        // writes with its default timestamp, a duplicate full key is
+        // rejected, a zero revision is rejected, and a short identity is
+        // rejected.
+        client
+            .batch_execute(
+                "INSERT INTO _orna_kernel.user_state_cells
+                     (principal_id, root_function_id, root_state_profile,
+                      function_id, function_instance_key, state_slot_id,
+                      value_bytes, value_type_id, revision)
+                 VALUES
+                     (decode(repeat('a1', 16), 'hex'),
+                      decode(repeat('a2', 16), 'hex'), '',
+                      decode(repeat('a3', 16), 'hex'), '',
+                      decode(repeat('a4', 16), 'hex'),
+                      decode('00aabb', 'hex'),
+                      decode(repeat('a5', 16), 'hex'), 1);",
+            )
+            .await?;
+        let row = client
+            .query_one(
+                "SELECT updated_at IS NOT NULL
+                 FROM _orna_kernel.user_state_cells
+                 WHERE principal_id = decode(repeat('a1', 16), 'hex')",
+                &[],
+            )
+            .await?;
+        let stamped: bool = value(&row, 0)?;
+        require(
+            stamped,
+            "user_state_cells write did not stamp updated_at",
+        )?;
+
+        let duplicate = client
+            .batch_execute(
+                "INSERT INTO _orna_kernel.user_state_cells
+                     (principal_id, root_function_id, root_state_profile,
+                      function_id, function_instance_key, state_slot_id,
+                      value_bytes, value_type_id, revision)
+                 VALUES
+                     (decode(repeat('a1', 16), 'hex'),
+                      decode(repeat('a2', 16), 'hex'), '',
+                      decode(repeat('a3', 16), 'hex'), '',
+                      decode(repeat('a4', 16), 'hex'),
+                      decode('00ccdd', 'hex'),
+                      decode(repeat('a5', 16), 'hex'), 2);",
+            )
+            .await
+            .err();
+        require(
+            duplicate
+                .as_ref()
+                .and_then(|error| error.as_db_error())
+                .and_then(|error| error.constraint())
+                == Some("user_state_cells_pkey"),
+            format!("duplicate user state key failed for the wrong reason: {duplicate:?}"),
+        )?;
+
+        let zero_revision = client
+            .batch_execute(
+                "INSERT INTO _orna_kernel.user_state_cells
+                     (principal_id, root_function_id, root_state_profile,
+                      function_id, function_instance_key, state_slot_id,
+                      value_bytes, value_type_id, revision)
+                 VALUES
+                     (decode(repeat('b1', 16), 'hex'),
+                      decode(repeat('b2', 16), 'hex'), '',
+                      decode(repeat('b3', 16), 'hex'), '',
+                      decode(repeat('b4', 16), 'hex'),
+                      decode('00aabb', 'hex'),
+                      decode(repeat('b5', 16), 'hex'), 0);",
+            )
+            .await
+            .err();
+        require(
+            zero_revision
+                .as_ref()
+                .and_then(|error| error.as_db_error())
+                .and_then(|error| error.constraint())
+                == Some("user_state_cells_revision_check"),
+            format!("zero revision failed for the wrong reason: {zero_revision:?}"),
+        )?;
+
+        let short_identity = client
+            .batch_execute(
+                "INSERT INTO _orna_kernel.user_state_cells
+                     (principal_id, root_function_id, root_state_profile,
+                      function_id, function_instance_key, state_slot_id,
+                      value_bytes, value_type_id, revision)
+                 VALUES
+                     (decode(repeat('c1', 15), 'hex'),
+                      decode(repeat('c2', 16), 'hex'), '',
+                      decode(repeat('c3', 16), 'hex'), '',
+                      decode(repeat('c4', 16), 'hex'),
+                      decode('00aabb', 'hex'),
+                      decode(repeat('c5', 16), 'hex'), 1);",
+            )
+            .await
+            .err();
+        require(
+            short_identity
+                .as_ref()
+                .and_then(|error| error.as_db_error())
+                .and_then(|error| error.constraint())
+                == Some("user_state_cells_identity_lengths"),
+            format!("short principal identity failed for the wrong reason: {short_identity:?}"),
+        )?;
+        Ok(())
+    }
+    .await;
+    let shutdown_result = session.shutdown().await;
+    match (inspection_result, shutdown_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(inspection_error), Err(shutdown_error)) => Err(failure(format!(
+            "user state storage inspection failed: {inspection_error}; shutdown failed: {shutdown_error}"
+        ))),
+    }
 }
 
 #[tokio::test]
@@ -889,8 +1179,8 @@ async fn bootstrap_upgrades_v5_write_reference_evidence_without_mutating_semanti
 
         let after = snapshot_upgrade_state(&database).await?;
         require(
-            after.migrations.len() == 23 && after.migrations[..5] == before.migrations[..],
-            format!("v6-v23 changed prior migration records: {:?}", after.migrations),
+            after.migrations.len() == 25 && after.migrations[..5] == before.migrations[..],
+            format!("v6-v25 changed prior migration records: {:?}", after.migrations),
         )?;
         require(
             after.migrations[5]
@@ -1055,6 +1345,24 @@ async fn bootstrap_upgrades_v5_write_reference_evidence_without_mutating_semanti
             format!("v23 migration record is not exact: {:?}", after.migrations[22]),
         )?;
         require(
+            after.migrations[23]
+                == (
+                    24,
+                    "capability audit decisions".to_owned(),
+                    expected_migration_checksum(24, MIGRATIONS[23].2),
+                ),
+            format!("v24 migration record is not exact: {:?}", after.migrations[23]),
+        )?;
+        require(
+            after.migrations[24]
+                == (
+                    25,
+                    "durable user state cells".to_owned(),
+                    expected_migration_checksum(25, MIGRATIONS[24].2),
+                ),
+            format!("v25 migration record is not exact: {:?}", after.migrations[24]),
+        )?;
+        require(
             after.active_pair == before.active_pair,
             "v6 changed the active revision pair",
         )?;
@@ -1140,7 +1448,7 @@ async fn bootstrap_upgrades_registered_v6_without_standard_rows() -> TestResult<
 
         let after = snapshot_upgrade_state(&database).await?;
         require(
-            after.migrations.len() == 23
+            after.migrations.len() == 25
                 && after.migrations[..6] == before.migrations[..]
                 && after.migrations[6]
                     == (
@@ -1165,6 +1473,18 @@ async fn bootstrap_upgrades_registered_v6_without_standard_rows() -> TestResult<
                         23,
                         "executable standard relations".to_owned(),
                         expected_migration_checksum(23, MIGRATIONS[22].2),
+                    )
+                && after.migrations[23]
+                    == (
+                        24,
+                        "capability audit decisions".to_owned(),
+                        expected_migration_checksum(24, MIGRATIONS[23].2),
+                    )
+                && after.migrations[24]
+                    == (
+                        25,
+                        "durable user state cells".to_owned(),
+                        expected_migration_checksum(25, MIGRATIONS[24].2),
                     ),
             format!("v6 upgrade produced unexpected migrations: {:?}", after.migrations),
         )?;
@@ -1359,7 +1679,7 @@ async fn bootstrap_upgrades_registered_v7_without_resolved_value_rows() -> TestR
         let after_surface = snapshot_catalogue_surface(&database).await?;
         let after_target_fks = snapshot_application_target_foreign_keys(&database).await?;
         require(
-            after.migrations.len() == 23
+            after.migrations.len() == 25
                 && after.migrations[..7] == before.migrations[..]
                 && after.migrations[7]
                     == (
@@ -1456,6 +1776,18 @@ async fn bootstrap_upgrades_registered_v7_without_resolved_value_rows() -> TestR
                         23,
                         "executable standard relations".to_owned(),
                         expected_migration_checksum(23, MIGRATIONS[22].2),
+                    )
+                && after.migrations[23]
+                    == (
+                        24,
+                        "capability audit decisions".to_owned(),
+                        expected_migration_checksum(24, MIGRATIONS[23].2),
+                    )
+                && after.migrations[24]
+                    == (
+                        25,
+                        "durable user state cells".to_owned(),
+                        expected_migration_checksum(25, MIGRATIONS[24].2),
                     ),
             format!("v7 upgrade produced unexpected migrations: {:?}", after.migrations),
         )?;
@@ -1771,7 +2103,7 @@ async fn bootstrap_rejects_tampered_gapped_and_newer_migration_history() -> Test
         Sha256::digest(MIGRATIONS[1].2.as_bytes()).to_vec(),
     )
     .await?;
-    reject_migration_history(25, "future migration", vec![0; 32]).await
+    reject_migration_history(26, "future migration", vec![0; 32]).await
 }
 
 async fn inspect_bootstrap_state(database: &TestDatabase) -> TestResult<()> {
