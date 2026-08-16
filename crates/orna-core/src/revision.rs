@@ -122,6 +122,8 @@ impl TryFrom<u32> for FunctionSemanticHashVersion {
 pub enum StandardLibraryDigestVersion {
     /// The initial standard-library digest.
     Version1,
+    /// The executable standard-library digest.
+    Version2,
 }
 
 impl StandardLibraryDigestVersion {
@@ -129,6 +131,7 @@ impl StandardLibraryDigestVersion {
     pub const fn to_u32(self) -> u32 {
         match self {
             Self::Version1 => 1,
+            Self::Version2 => 2,
         }
     }
 }
@@ -139,6 +142,7 @@ impl TryFrom<u32> for StandardLibraryDigestVersion {
     fn try_from(value: u32) -> Result<Self, Self::Error> {
         match value {
             1 => Ok(Self::Version1),
+            2 => Ok(Self::Version2),
             _ => Err(HashVersionError::UnsupportedStandardLibraryDigest { value }),
         }
     }
@@ -423,6 +427,7 @@ struct StandardLibrarySnapshotData {
     source: StoredSourceRevision,
     language_version: String,
     catalogue: CatalogueSnapshot,
+    executables: Vec<StandardExecutable>,
     origins: Vec<DefinitionOrigin>,
     digest: Sha256Digest,
 }
@@ -438,28 +443,85 @@ impl StandardLibrarySnapshot {
         origins: Vec<DefinitionOrigin>,
         digest: Sha256Digest,
     ) -> Result<Self, RevisionInvariantError> {
+        Self::new_with_executables(
+            revision,
+            digest_version,
+            source,
+            language_version,
+            catalogue,
+            Vec::new(),
+            origins,
+            digest,
+        )
+    }
+
+    /// Creates a standard-library snapshot with complete executable evidence.
+    ///
+    /// Version 1 accepts no executable records. Version 2 records one current
+    /// executable revision for every catalogue function in the same order.
+    /// Canonical verification checks the retained digest and semantic hashes.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_executables(
+        revision: StandardLibraryRevisionId,
+        digest_version: StandardLibraryDigestVersion,
+        source: StoredSourceRevision,
+        language_version: impl Into<String>,
+        catalogue: CatalogueSnapshot,
+        executables: Vec<StandardExecutable>,
+        origins: Vec<DefinitionOrigin>,
+        digest: Sha256Digest,
+    ) -> Result<Self, RevisionInvariantError> {
         reject_offline_check_catalogue_revision(
             catalogue.revision(),
             DurableCatalogueRevisionRole::ActiveOrRecoveredStandard,
         )?;
         reject_reserved_invocation_carrier(&catalogue)?;
-        if source.parent().is_some() {
-            return Err(RevisionInvariantError::StandardLibrarySourceHasParent {
-                source: source.id(),
-                parent: source.parent(),
-            });
-        }
         let language_version = language_version.into();
         if language_version.is_empty() {
             return Err(RevisionInvariantError::EmptyStandardLibraryLanguageVersion { revision });
         }
-        if !catalogue.object_types().is_empty()
-            || !catalogue.record_value_types().is_empty()
-            || !catalogue.functions().is_empty()
-        {
-            return Err(RevisionInvariantError::UnsupportedStandardLibraryDefinition { revision });
+        match digest_version {
+            StandardLibraryDigestVersion::Version1 => {
+                if source.parent().is_some() {
+                    return Err(RevisionInvariantError::StandardLibrarySourceHasParent {
+                        source: source.id(),
+                        parent: source.parent(),
+                    });
+                }
+                if !catalogue.object_types().is_empty()
+                    || !catalogue.record_value_types().is_empty()
+                    || !catalogue.functions().is_empty()
+                {
+                    return Err(
+                        RevisionInvariantError::UnsupportedStandardLibraryDefinition { revision },
+                    );
+                }
+                if !executables.is_empty() {
+                    return Err(
+                        RevisionInvariantError::VersionOneStandardLibraryHasExecutable { revision },
+                    );
+                }
+                validate_origins(&source, &catalogue, &[], &origins)?;
+            }
+            StandardLibraryDigestVersion::Version2 => {
+                if source.parent().is_none() {
+                    return Err(
+                        RevisionInvariantError::VersionTwoStandardLibrarySourceHasNoParent {
+                            source: source.id(),
+                        },
+                    );
+                }
+                if !catalogue.object_types().is_empty()
+                    || !catalogue.record_value_types().is_empty()
+                {
+                    return Err(
+                        RevisionInvariantError::UnsupportedStandardLibraryDefinition { revision },
+                    );
+                }
+                validate_origins(&source, &catalogue, &[], &origins)?;
+                validate_standard_executables(&source, &catalogue, &origins, &executables)?;
+            }
         }
-        validate_origins(&source, &catalogue, &[], &origins)?;
 
         Ok(Self {
             inner: Arc::new(StandardLibrarySnapshotData {
@@ -468,6 +530,7 @@ impl StandardLibrarySnapshot {
                 source,
                 language_version,
                 catalogue,
+                executables,
                 origins,
                 digest,
             }),
@@ -497,6 +560,11 @@ impl StandardLibrarySnapshot {
     /// Returns the standard-library catalogue definitions.
     pub fn catalogue(&self) -> &CatalogueSnapshot {
         &self.inner.catalogue
+    }
+
+    /// Returns complete ordered executable evidence for version 2.
+    pub fn executables(&self) -> &[StandardExecutable] {
+        &self.inner.executables
     }
 
     /// Returns source origins for standard definitions and bindings.
@@ -544,6 +612,11 @@ impl VerifiedStandardLibrarySnapshot {
     /// Returns the verified standard-library catalogue definitions.
     pub fn catalogue(&self) -> &CatalogueSnapshot {
         self.snapshot.catalogue()
+    }
+
+    /// Returns verified executable evidence for the standard functions.
+    pub fn executables(&self) -> &[StandardExecutable] {
+        self.snapshot.executables()
     }
 
     /// Returns the verified source origins for standard definitions and bindings.
@@ -1028,6 +1101,55 @@ impl DefinitionReference {
     /// Returns the source range of this reference.
     pub const fn source_origin(&self) -> SourceOrigin {
         self.source_origin
+    }
+}
+
+/// The immutable executable facts for one version-2 standard function.
+///
+/// This record links one catalogue function to its current immutable revision
+/// and complete ordered reference sequence. It does not duplicate source text,
+/// origins, or the catalogue function definition.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StandardExecutable {
+    function: FunctionId,
+    revision: FunctionRevisionRecord,
+    references: Vec<DefinitionReference>,
+}
+
+impl StandardExecutable {
+    /// Creates one standard executable record.
+    pub fn new(
+        function: FunctionId,
+        revision: FunctionRevisionRecord,
+        references: Vec<DefinitionReference>,
+    ) -> Result<Self, RevisionInvariantError> {
+        if revision.function() != function {
+            return Err(RevisionInvariantError::StandardExecutableFunctionMismatch {
+                function,
+                revision_function: revision.function(),
+                revision: revision.id(),
+            });
+        }
+        Ok(Self {
+            function,
+            revision,
+            references,
+        })
+    }
+
+    /// Returns the linked standard catalogue function identity.
+    pub const fn function(&self) -> FunctionId {
+        self.function
+    }
+
+    /// Returns the complete immutable current function revision.
+    pub fn revision(&self) -> &FunctionRevisionRecord {
+        &self.revision
+    }
+
+    /// Returns complete ordered semantic reference evidence.
+    pub fn references(&self) -> &[DefinitionReference] {
+        &self.references
     }
 }
 
@@ -2878,6 +3000,106 @@ fn validate_references(
     Ok(())
 }
 
+fn validate_standard_executables(
+    source: &StoredSourceRevision,
+    catalogue: &CatalogueSnapshot,
+    origins: &[DefinitionOrigin],
+    executables: &[StandardExecutable],
+) -> Result<(), RevisionInvariantError> {
+    if catalogue.functions().len() != executables.len() {
+        return Err(
+            RevisionInvariantError::StandardExecutableSequenceLengthMismatch {
+                catalogue_functions: catalogue.functions().len(),
+                executables: executables.len(),
+            },
+        );
+    }
+
+    let revisions = executables
+        .iter()
+        .map(|executable| executable.revision().clone())
+        .collect::<Vec<_>>();
+    let mut references = Vec::new();
+    let mut previous_function = None;
+    for (index, (function, executable)) in catalogue
+        .functions()
+        .iter()
+        .zip(executables.iter())
+        .enumerate()
+    {
+        if let Some(previous) = previous_function
+            && previous >= function.id()
+        {
+            return Err(
+                RevisionInvariantError::StandardExecutableCatalogueFunctionOrder {
+                    ordinal: index,
+                    previous,
+                    actual: function.id(),
+                },
+            );
+        }
+        previous_function = Some(function.id());
+        if function.id() != executable.function() {
+            return Err(
+                RevisionInvariantError::StandardExecutableSequenceFunctionMismatch {
+                    ordinal: index,
+                    catalogue_function: function.id(),
+                    executable_function: executable.function(),
+                },
+            );
+        }
+        if executable.revision().semantic_hash_version() != FunctionSemanticHashVersion::Version2 {
+            return Err(
+                RevisionInvariantError::StandardExecutableSemanticHashVersionMismatch {
+                    function: executable.function(),
+                    revision: executable.revision().id(),
+                    version: executable.revision().semantic_hash_version(),
+                },
+            );
+        }
+        for (ordinal, reference) in executable.references().iter().enumerate() {
+            let expected = u32::try_from(ordinal).map_err(|_| {
+                RevisionInvariantError::StandardExecutableReferenceOrdinalOutOfRange {
+                    function: executable.function(),
+                    revision: executable.revision().id(),
+                }
+            })?;
+            if reference.ordinal() != expected {
+                return Err(
+                    RevisionInvariantError::StandardExecutableReferenceOrdinalOutOfSequence {
+                        function: executable.function(),
+                        revision: executable.revision().id(),
+                        expected,
+                        actual: reference.ordinal(),
+                    },
+                );
+            }
+            if reference.source_function() != executable.function()
+                || reference.source_revision() != executable.revision().id()
+            {
+                return Err(
+                    RevisionInvariantError::StandardExecutableReferenceOwnerMismatch {
+                        function: executable.function(),
+                        revision: executable.revision().id(),
+                        reference_function: reference.source_function(),
+                        reference_revision: reference.source_revision(),
+                    },
+                );
+            }
+            references.push(reference.clone());
+        }
+    }
+
+    validate_function_revisions(
+        source,
+        catalogue,
+        origins,
+        &revisions,
+        FunctionRevisionSet::NewCandidate,
+    )?;
+    validate_references(source, catalogue, None, &[], &revisions, &references)
+}
+
 fn validate_source_origin(
     source: &StoredSourceRevision,
     origin: SourceOrigin,
@@ -3135,6 +3357,58 @@ pub enum RevisionInvariantError {
     EmptyStandardLibraryLanguageVersion { revision: StandardLibraryRevisionId },
     /// A standard-library catalogue contains a definition outside its digest model.
     UnsupportedStandardLibraryDefinition { revision: StandardLibraryRevisionId },
+    /// A version-1 standard-library snapshot retained executable evidence.
+    VersionOneStandardLibraryHasExecutable { revision: StandardLibraryRevisionId },
+    /// A version-2 standard-library source revision omitted its parent.
+    VersionTwoStandardLibrarySourceHasNoParent { source: SourceRevisionId },
+    /// An executable record disagrees with its immutable function revision.
+    StandardExecutableFunctionMismatch {
+        function: FunctionId,
+        revision_function: FunctionId,
+        revision: FunctionRevisionId,
+    },
+    /// The executable sequence does not cover the catalogue function sequence.
+    StandardExecutableSequenceLengthMismatch {
+        catalogue_functions: usize,
+        executables: usize,
+    },
+    /// A standard executable occurs at a different function position.
+    StandardExecutableSequenceFunctionMismatch {
+        ordinal: usize,
+        catalogue_function: FunctionId,
+        executable_function: FunctionId,
+    },
+    /// The version-2 standard catalogue function sequence is not canonical.
+    StandardExecutableCatalogueFunctionOrder {
+        ordinal: usize,
+        previous: FunctionId,
+        actual: FunctionId,
+    },
+    /// A standard executable uses a semantic-hash version outside the V2 contract.
+    StandardExecutableSemanticHashVersionMismatch {
+        function: FunctionId,
+        revision: FunctionRevisionId,
+        version: FunctionSemanticHashVersion,
+    },
+    /// A standard executable reference index cannot fit its durable ordinal.
+    StandardExecutableReferenceOrdinalOutOfRange {
+        function: FunctionId,
+        revision: FunctionRevisionId,
+    },
+    /// A standard executable reference ordinal is not contiguous and zero-based.
+    StandardExecutableReferenceOrdinalOutOfSequence {
+        function: FunctionId,
+        revision: FunctionRevisionId,
+        expected: u32,
+        actual: u32,
+    },
+    /// A standard executable reference names a different immutable owner.
+    StandardExecutableReferenceOwnerMismatch {
+        function: FunctionId,
+        revision: FunctionRevisionId,
+        reference_function: FunctionId,
+        reference_revision: FunctionRevisionId,
+    },
     /// An artifact format identifier is empty.
     EmptyArtifactFormat,
     /// An artifact format version is zero.
@@ -3466,6 +3740,32 @@ impl fmt::Display for RevisionInvariantError {
             UnsupportedStandardLibraryDefinition { .. } => {
                 formatter.write_str("standard library catalogue contains an unsupported definition")
             }
+            VersionOneStandardLibraryHasExecutable { .. } => {
+                formatter.write_str("standard library digest version 1 has executable evidence")
+            }
+            VersionTwoStandardLibrarySourceHasNoParent { .. } => {
+                formatter.write_str("standard library digest version 2 source has no parent")
+            }
+            StandardExecutableFunctionMismatch { .. } => {
+                formatter.write_str("standard executable function differs from its revision")
+            }
+            StandardExecutableSequenceLengthMismatch { .. } => {
+                formatter.write_str("standard executable sequence does not cover catalogue functions")
+            }
+            StandardExecutableSequenceFunctionMismatch { .. } => {
+                formatter.write_str("standard executable sequence function differs from catalogue")
+            }
+            StandardExecutableCatalogueFunctionOrder { .. } => {
+                formatter.write_str("standard executable catalogue functions are not in canonical order")
+            }
+            StandardExecutableSemanticHashVersionMismatch { .. } => formatter
+                .write_str("standard executable requires function semantic hash version 2"),
+            StandardExecutableReferenceOrdinalOutOfRange { .. } => formatter
+                .write_str("standard executable reference position exceeds durable ordinal"),
+            StandardExecutableReferenceOrdinalOutOfSequence { .. } => formatter
+                .write_str("standard executable reference ordinals are not contiguous"),
+            StandardExecutableReferenceOwnerMismatch { .. } => formatter
+                .write_str("standard executable reference differs from its immutable owner"),
             EmptyArtifactFormat => formatter.write_str("artifact format is empty"),
             ZeroArtifactVersion { .. } => formatter.write_str("artifact format version is zero"),
             EmptyArtifactPayload { .. } => formatter.write_str("artifact payload is empty"),
@@ -3657,6 +3957,7 @@ mod tests {
         assert_eq!(FunctionSemanticHashVersion::Version1.to_u32(), 1);
         assert_eq!(FunctionSemanticHashVersion::Version2.to_u32(), 2);
         assert_eq!(StandardLibraryDigestVersion::Version1.to_u32(), 1);
+        assert_eq!(StandardLibraryDigestVersion::Version2.to_u32(), 2);
         assert_eq!(
             CatalogueHashVersion::try_from(1),
             Ok(CatalogueHashVersion::Version1)
@@ -3676,6 +3977,10 @@ mod tests {
         assert_eq!(
             StandardLibraryDigestVersion::try_from(1),
             Ok(StandardLibraryDigestVersion::Version1)
+        );
+        assert_eq!(
+            StandardLibraryDigestVersion::try_from(2),
+            Ok(StandardLibraryDigestVersion::Version2)
         );
 
         for unsupported in [0, 3, u32::MAX] {
@@ -4100,6 +4405,7 @@ mod tests {
                 source: source(None),
                 language_version: "orna.language/1".to_owned(),
                 catalogue: CatalogueSnapshot::new(catalogue_revision, vec![], vec![]).unwrap(),
+                executables: vec![],
                 origins: vec![],
                 digest: digest::<75>(),
             }),
@@ -4559,6 +4865,244 @@ mod tests {
                 "standard library catalogue contains an unsupported definition"
             );
         }
+    }
+
+    #[test]
+    fn version_two_standard_snapshot_requires_complete_ordered_executable_evidence() {
+        let function = FunctionId::from_bytes(id::<90>());
+        assert!(matches!(
+            StandardExecutable::new(function, function_revision(), vec![]),
+            Err(RevisionInvariantError::StandardExecutableFunctionMismatch { .. })
+        ));
+        let function_revision = FunctionRevisionId::from_bytes(id::<91>());
+        let schema = SchemaDefinition::new(
+            SchemaId::from_bytes(id::<92>()),
+            QualifiedSemanticName::new(["std", "invoke"]).unwrap(),
+        );
+        let catalogue = CatalogueSnapshot::new_with_functions(
+            CatalogueRevisionId::from_bytes(id::<93>()),
+            vec![schema.clone()],
+            vec![],
+            vec![FunctionDefinition::new(
+                function,
+                QualifiedSemanticName::new(["std", "invoke", "echo"]).unwrap(),
+                FunctionDomain::Server,
+                vec![],
+                FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Integer)),
+                function_revision,
+                FunctionSecurity::Invoker,
+                Some(FunctionTransaction::ReadOnly),
+                FunctionVolatility::Stable,
+            )],
+        )
+        .unwrap();
+        let snapshot_source = source(Some(SourceRevisionId::from_bytes(id::<94>())));
+        let declaration = SourceOrigin::new(SourceUnitId::from_bytes(id::<4>()), 10, 29).unwrap();
+        let revision = FunctionRevisionRecord::new(
+            function,
+            function_revision,
+            1,
+            declaration,
+            digest::<95>(),
+            digest::<96>(),
+            "orna.language/1",
+            artifact(),
+        )
+        .unwrap()
+        .with_semantic_hash_version(FunctionSemanticHashVersion::Version2);
+        let executable = StandardExecutable::new(function, revision.clone(), vec![]).unwrap();
+        let origins = vec![
+            DefinitionOrigin::new(
+                DefinitionIdentity::Schema(schema.id()),
+                SourceOrigin::new(SourceUnitId::from_bytes(id::<3>()), 0, 1).unwrap(),
+            ),
+            DefinitionOrigin::new(DefinitionIdentity::Function(function), declaration),
+        ];
+
+        let snapshot = StandardLibrarySnapshot::new_with_executables(
+            StandardLibraryRevisionId::from_bytes(id::<97>()),
+            StandardLibraryDigestVersion::Version2,
+            snapshot_source.clone(),
+            "orna.language/1",
+            catalogue.clone(),
+            vec![executable.clone()],
+            origins.clone(),
+            digest::<98>(),
+        )
+        .unwrap();
+        assert_eq!(snapshot.executables(), [executable]);
+
+        let lower_function = FunctionId::from_bytes(id::<89>());
+        let lower_revision = FunctionRevisionId::from_bytes(id::<88>());
+        let lower_definition = FunctionDefinition::new(
+            lower_function,
+            QualifiedSemanticName::new(["std", "invoke", "later"]).unwrap(),
+            FunctionDomain::Server,
+            vec![],
+            FunctionReturn::Single(ResolvedType::scalar(StandardScalar::Integer)),
+            lower_revision,
+            FunctionSecurity::Invoker,
+            Some(FunctionTransaction::ReadOnly),
+            FunctionVolatility::Stable,
+        );
+        let reordered_catalogue = CatalogueSnapshot::new_with_functions(
+            CatalogueRevisionId::from_bytes(id::<93>()),
+            vec![schema.clone()],
+            vec![],
+            vec![
+                snapshot.catalogue().functions()[0].clone(),
+                lower_definition,
+            ],
+        )
+        .unwrap();
+        let lower_executable = StandardExecutable::new(
+            lower_function,
+            FunctionRevisionRecord::new(
+                lower_function,
+                lower_revision,
+                1,
+                declaration,
+                digest::<87>(),
+                digest::<86>(),
+                "orna.language/1",
+                artifact(),
+            )
+            .unwrap()
+            .with_semantic_hash_version(FunctionSemanticHashVersion::Version2),
+            vec![],
+        )
+        .unwrap();
+        let mut reordered_origins = snapshot.origins().to_vec();
+        reordered_origins.push(DefinitionOrigin::new(
+            DefinitionIdentity::Function(lower_function),
+            declaration,
+        ));
+        assert!(matches!(
+            StandardLibrarySnapshot::new_with_executables(
+                StandardLibraryRevisionId::from_bytes(id::<97>()),
+                StandardLibraryDigestVersion::Version2,
+                source(Some(SourceRevisionId::from_bytes(id::<94>()))),
+                "orna.language/1",
+                reordered_catalogue,
+                vec![snapshot.executables()[0].clone(), lower_executable],
+                reordered_origins,
+                digest::<98>(),
+            ),
+            Err(
+                RevisionInvariantError::StandardExecutableCatalogueFunctionOrder { ordinal: 1, .. }
+            )
+        ));
+
+        assert!(matches!(
+            StandardLibrarySnapshot::new_with_executables(
+                StandardLibraryRevisionId::from_bytes(id::<97>()),
+                StandardLibraryDigestVersion::Version2,
+                source(None),
+                "orna.language/1",
+                catalogue.clone(),
+                vec![],
+                origins.clone(),
+                digest::<98>(),
+            ),
+            Err(RevisionInvariantError::VersionTwoStandardLibrarySourceHasNoParent { .. })
+        ));
+        assert!(matches!(
+            StandardLibrarySnapshot::new_with_executables(
+                StandardLibraryRevisionId::from_bytes(id::<97>()),
+                StandardLibraryDigestVersion::Version2,
+                snapshot_source,
+                "orna.language/1",
+                catalogue,
+                vec![],
+                origins,
+                digest::<98>(),
+            ),
+            Err(RevisionInvariantError::StandardExecutableSequenceLengthMismatch { .. })
+        ));
+
+        let version_one_executable = StandardExecutable::new(
+            function,
+            FunctionRevisionRecord::new(
+                function,
+                function_revision,
+                1,
+                declaration,
+                digest::<95>(),
+                digest::<96>(),
+                "orna.language/1",
+                artifact(),
+            )
+            .unwrap(),
+            vec![],
+        )
+        .unwrap();
+        assert!(matches!(
+            StandardLibrarySnapshot::new_with_executables(
+                StandardLibraryRevisionId::from_bytes(id::<97>()),
+                StandardLibraryDigestVersion::Version2,
+                source(Some(SourceRevisionId::from_bytes(id::<94>()))),
+                "orna.language/1",
+                snapshot.catalogue().clone(),
+                vec![version_one_executable],
+                snapshot.origins().to_vec(),
+                digest::<98>(),
+            ),
+            Err(RevisionInvariantError::StandardExecutableSemanticHashVersionMismatch { .. })
+        ));
+
+        let out_of_order = StandardExecutable::new(
+            function,
+            revision.clone(),
+            vec![DefinitionReference::new(
+                function,
+                function_revision,
+                1,
+                DefinitionReferenceTarget::Function(function),
+                DefinitionReferenceKind::FunctionCall,
+                declaration,
+            )],
+        )
+        .unwrap();
+        assert!(matches!(
+            StandardLibrarySnapshot::new_with_executables(
+                StandardLibraryRevisionId::from_bytes(id::<97>()),
+                StandardLibraryDigestVersion::Version2,
+                source(Some(SourceRevisionId::from_bytes(id::<94>()))),
+                "orna.language/1",
+                snapshot.catalogue().clone(),
+                vec![out_of_order],
+                snapshot.origins().to_vec(),
+                digest::<98>(),
+            ),
+            Err(RevisionInvariantError::StandardExecutableReferenceOrdinalOutOfSequence { .. })
+        ));
+
+        let crossed_reference = StandardExecutable::new(
+            function,
+            revision,
+            vec![DefinitionReference::new(
+                FunctionId::from_bytes(id::<99>()),
+                function_revision,
+                0,
+                DefinitionReferenceTarget::Function(function),
+                DefinitionReferenceKind::FunctionCall,
+                declaration,
+            )],
+        )
+        .unwrap();
+        assert!(matches!(
+            StandardLibrarySnapshot::new_with_executables(
+                StandardLibraryRevisionId::from_bytes(id::<97>()),
+                StandardLibraryDigestVersion::Version2,
+                source(Some(SourceRevisionId::from_bytes(id::<94>()))),
+                "orna.language/1",
+                snapshot.catalogue().clone(),
+                vec![crossed_reference],
+                snapshot.origins().to_vec(),
+                digest::<98>(),
+            ),
+            Err(RevisionInvariantError::StandardExecutableReferenceOwnerMismatch { .. })
+        ));
     }
 
     fn write_catalogue(function_revision: FunctionRevisionId) -> CatalogueSnapshot {
