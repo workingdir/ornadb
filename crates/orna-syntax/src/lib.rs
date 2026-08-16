@@ -9,7 +9,7 @@ mod highlight;
 mod lexer;
 mod parser;
 
-pub use highlight::{HighlightKind, HighlightToken, highlight};
+pub use highlight::{HighlightKind, HighlightToken, KEYWORDS, SCALAR_TYPES, highlight};
 
 /// A byte range in the input source.
 #[derive(Debug, Clone, PartialEq, Eq)]
