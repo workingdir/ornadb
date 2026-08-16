@@ -20,6 +20,19 @@
 use std::fmt;
 use std::io::Write;
 
+/// The tty runtime family name (spec `docs/15-runtime-architecture.md`).
+///
+/// The client names this family in its `sys.invoke` runtime offer (ADR
+/// 0063) and parses it from the `--runtime <family>` override. The identity
+/// lives here so the family name is not duplicated in the server.
+pub const RUNTIME_NAME: &str = "tty";
+
+/// The installed tty runtime version.
+///
+/// Mirrors the workspace crate version so the client's runtime offer always
+/// names the exact binary it links.
+pub const RUNTIME_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 /// The terminal document frame magic, including the separating space.
 const DOCUMENT_MAGIC: &[u8] = b"ORNA-TERMINAL-DOCUMENT/1 ";
 /// The byte-stream frame magic, including the separating space.
