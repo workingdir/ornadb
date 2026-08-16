@@ -22,6 +22,8 @@ use orna_core::{
 };
 use orna_standard::{RegisteredOpaqueCodecsError, registered_opaque_codecs};
 
+pub mod capability;
+
 /// The active revision and function revision selected for one CLIENT execution.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ClientExecutionContext {
