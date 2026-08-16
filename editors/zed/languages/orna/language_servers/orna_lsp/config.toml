@@ -1,0 +1,13 @@
+# Legacy per-language language server definition for orna-lsp.
+#
+# Note: current Zed versions resolve the language server executable from the
+# extension's src/lib.rs or from the user settings override
+# `lsp.orna-lsp.binary.path` (see README.md) rather than from this file.
+# It is kept as the conventional location for the server definition; if your
+# Zed build does not load it, use the settings override, which is always
+# honored.
+
+name = "orna-lsp"
+language = "Orna"
+command = "orna-lsp"
+args = []
