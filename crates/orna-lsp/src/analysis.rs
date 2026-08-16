@@ -7,14 +7,15 @@
 
 use lsp_types::{
     CompletionItem, CompletionItemKind, Diagnostic, DiagnosticSeverity, DocumentSymbol, Hover,
-    HoverContents, Location, MarkupContent, MarkupKind, NumberOrString, Position, SymbolKind,
+    Location, NumberOrString, Position, SymbolKind,
 };
 use orna_compiler::{CompilerDiagnostic, check_new_application, check_standard_library_source};
 use orna_core::source::{SourceBundle, SourceUnit};
 use orna_standard::{retained_standard_library_snapshot, verify_standard_library_snapshot};
 use orna_syntax::{
-    ClientFunctionDeclaration, HighlightKind, Parse, QualifiedName, ServerFunctionDeclaration,
-    SourceSpan,
+    ClientFunctionDeclaration, EnumTypeDeclaration, HighlightKind, ObjectTypeDeclaration,
+    OpaqueValueTypeDeclaration, Parse, PrimitiveValueTypeDeclaration, QualifiedName,
+    RecordValueTypeDeclaration, SchemaDeclaration, ServerFunctionDeclaration, SourceSpan,
 };
 
 use crate::documents::{Document, PositionMapper};
@@ -306,8 +307,50 @@ fn last_name(name: &QualifiedName) -> String {
         .unwrap_or_default()
 }
 
-/// Returns the identifier-like token at one byte offset.
-fn identifier_at(text: &str, parse: &Parse, byte: usize) -> Option<(String, SourceSpan)> {
+/// One declaration found by a name lookup.
+#[derive(Clone, Copy)]
+pub enum DeclarationRef<'a> {
+    /// A parsed `CREATE SCHEMA` declaration.
+    Schema(&'a SchemaDeclaration),
+    /// A parsed object type declaration.
+    ObjectType(&'a ObjectTypeDeclaration),
+    /// A parsed enum type declaration.
+    EnumType(&'a EnumTypeDeclaration),
+    /// A parsed record value type declaration.
+    RecordValueType(&'a RecordValueTypeDeclaration),
+    /// A parsed primitive value type declaration.
+    PrimitiveValueType(&'a PrimitiveValueTypeDeclaration),
+    /// A parsed opaque value type declaration.
+    OpaqueValueType(&'a OpaqueValueTypeDeclaration),
+    /// A parsed SERVER function declaration.
+    ServerFunction(&'a ServerFunctionDeclaration),
+    /// A parsed CLIENT function declaration.
+    ClientFunction(&'a ClientFunctionDeclaration),
+}
+
+impl DeclarationRef<'_> {
+    /// Returns the declared qualified name.
+    pub fn name(&self) -> &QualifiedName {
+        match self {
+            Self::Schema(declaration) => &declaration.name,
+            Self::ObjectType(declaration) => &declaration.name,
+            Self::EnumType(declaration) => &declaration.name,
+            Self::RecordValueType(declaration) => &declaration.name,
+            Self::PrimitiveValueType(declaration) => &declaration.name,
+            Self::OpaqueValueType(declaration) => &declaration.name,
+            Self::ServerFunction(declaration) => &declaration.name,
+            Self::ClientFunction(declaration) => &declaration.name,
+        }
+    }
+
+    /// Returns the span of the declared name.
+    pub fn name_span(&self) -> &SourceSpan {
+        &self.name().span
+    }
+}
+
+/// Returns the token at one byte offset, including keywords.
+fn token_at(text: &str, parse: &Parse, byte: usize) -> Option<(String, HighlightKind, SourceSpan)> {
     parse
         .highlight()
         .into_iter()
@@ -321,11 +364,13 @@ fn identifier_at(text: &str, parse: &Parse, byte: usize) -> Option<(String, Sour
                     | HighlightKind::NamespaceName
                     | HighlightKind::PropertyName
                     | HighlightKind::QuotedIdentifier
+                    | HighlightKind::Keyword
             )
         })
         .map(|token| {
             (
                 text[token.range.clone()].to_owned(),
+                token.kind,
                 SourceSpan {
                     start: token.range.start,
                     end: token.range.end,
@@ -335,7 +380,7 @@ fn identifier_at(text: &str, parse: &Parse, byte: usize) -> Option<(String, Sour
 }
 
 /// Returns a case-insensitive declaration lookup for one simple name.
-fn declaration_span(parse: &Parse, name: &str) -> Option<(&'static str, SourceSpan)> {
+pub fn declaration_at<'a>(parse: &'a Parse, name: &str) -> Option<DeclarationRef<'a>> {
     let matches = |candidate: &QualifiedName| {
         candidate
             .parts
@@ -347,61 +392,178 @@ fn declaration_span(parse: &Parse, name: &str) -> Option<(&'static str, SourceSp
         .iter()
         .find(|declaration| matches(&declaration.name))
     {
-        return Some(("schema", declaration.name.span.clone()));
+        return Some(DeclarationRef::Schema(declaration));
     }
     if let Some(declaration) = parse
         .object_types()
         .iter()
         .find(|declaration| matches(&declaration.name))
     {
-        return Some(("object type", declaration.name.span.clone()));
+        return Some(DeclarationRef::ObjectType(declaration));
     }
     if let Some(declaration) = parse
         .enum_types()
         .iter()
         .find(|declaration| matches(&declaration.name))
     {
-        return Some(("enum type", declaration.name.span.clone()));
+        return Some(DeclarationRef::EnumType(declaration));
     }
     if let Some(declaration) = parse
         .record_value_types()
         .iter()
         .find(|declaration| matches(&declaration.name))
     {
-        return Some(("record value type", declaration.name.span.clone()));
+        return Some(DeclarationRef::RecordValueType(declaration));
     }
     if let Some(declaration) = parse
         .primitive_value_types()
         .iter()
         .find(|declaration| matches(&declaration.name))
     {
-        return Some(("primitive value type", declaration.name.span.clone()));
+        return Some(DeclarationRef::PrimitiveValueType(declaration));
     }
     if let Some(declaration) = parse
         .opaque_value_types()
         .iter()
         .find(|declaration| matches(&declaration.name))
     {
-        return Some(("opaque value type", declaration.name.span.clone()));
+        return Some(DeclarationRef::OpaqueValueType(declaration));
     }
     if let Some(declaration) = parse
         .server_functions()
         .iter()
         .find(|declaration| matches(&declaration.name))
     {
-        return Some(("server function", declaration.name.span.clone()));
+        return Some(DeclarationRef::ServerFunction(declaration));
     }
     if let Some(declaration) = parse
         .client_functions()
         .iter()
         .find(|declaration| matches(&declaration.name))
     {
-        return Some(("client function", declaration.name.span.clone()));
+        return Some(DeclarationRef::ClientFunction(declaration));
     }
     None
 }
 
-/// Returns the hover content for the identifier at one position.
+/// The data behind a field hover.
+pub struct FieldInfo<'a> {
+    /// The field name as written in source.
+    pub name: &'a orna_syntax::NamePart,
+    /// The declared field type.
+    pub type_specification: &'a orna_syntax::TypeSpecification,
+    /// Whether the field is nullable; absent for record value fields.
+    pub nullable: Option<bool>,
+    /// Whether the field has a uniqueness constraint.
+    pub unique: bool,
+    /// The rendered on-delete policy, when declared.
+    pub on_delete: Option<&'static str>,
+    /// The documentation text, with quotes stripped.
+    pub documentation: Option<&'a str>,
+    /// The default expression source, when declared.
+    pub default_text: Option<&'a str>,
+}
+
+/// The data behind a parameter hover.
+pub struct ParameterInfo<'a> {
+    /// The parameter name as written in source.
+    pub name: &'a orna_syntax::NamePart,
+    /// The declared parameter type.
+    pub type_specification: &'a orna_syntax::TypeSpecification,
+    /// The default expression source, when declared.
+    pub default_text: Option<&'a str>,
+    /// The documentation text, with quotes stripped.
+    pub documentation: Option<&'a str>,
+}
+
+/// Returns the object or record field whose name covers one byte offset.
+pub fn field_at(parse: &Parse, byte: usize) -> Option<FieldInfo<'_>> {
+    for declaration in parse.object_types() {
+        for field in &declaration.fields {
+            if byte >= field.name.span.start && byte < field.name.span.end {
+                return Some(FieldInfo {
+                    name: &field.name,
+                    type_specification: &field.type_specification,
+                    nullable: Some(field.nullable),
+                    unique: field.unique,
+                    on_delete: field.on_delete.map(on_delete_text),
+                    documentation: field.documentation.as_ref().map(strip_quotes),
+                    default_text: field
+                        .default_expression
+                        .as_ref()
+                        .map(|default| default.text.as_str()),
+                });
+            }
+        }
+    }
+    for declaration in parse.record_value_types() {
+        for field in &declaration.fields {
+            if byte >= field.name.span.start && byte < field.name.span.end {
+                return Some(FieldInfo {
+                    name: &field.name,
+                    type_specification: &field.type_specification,
+                    nullable: None,
+                    unique: false,
+                    on_delete: None,
+                    documentation: field.documentation.as_ref().map(strip_quotes),
+                    default_text: None,
+                });
+            }
+        }
+    }
+    None
+}
+
+/// Returns the function parameter whose name covers one byte offset.
+pub fn parameter_at<'a>(parse: &'a Parse, byte: usize) -> Option<ParameterInfo<'a>> {
+    let find =
+        |parameters: &'a [orna_syntax::ServerFunctionParameter]| -> Option<ParameterInfo<'a>> {
+            parameters
+                .iter()
+                .find(|parameter| {
+                    byte >= parameter.name.span.start && byte < parameter.name.span.end
+                })
+                .map(|parameter| ParameterInfo {
+                    name: &parameter.name,
+                    type_specification: &parameter.type_specification,
+                    documentation: parameter.documentation.as_ref().map(strip_quotes),
+                    default_text: parameter
+                        .default_expression
+                        .as_ref()
+                        .map(|default| default.text.as_str()),
+                })
+        };
+    parse
+        .server_functions()
+        .iter()
+        .find_map(|declaration| find(&declaration.parameters))
+        .or_else(|| {
+            parse
+                .client_functions()
+                .iter()
+                .find_map(|declaration| find(&declaration.parameters))
+        })
+}
+
+/// Strips the surrounding apostrophes from a captured string literal.
+fn strip_quotes(slice: &orna_syntax::SourceSlice) -> &str {
+    slice
+        .text
+        .strip_prefix('\'')
+        .and_then(|inner| inner.strip_suffix('\''))
+        .unwrap_or(&slice.text)
+}
+
+/// Renders an on-delete policy as source text.
+fn on_delete_text(policy: orna_syntax::OnDeletePolicy) -> &'static str {
+    match policy {
+        orna_syntax::OnDeletePolicy::Restrict => "RESTRICT",
+        orna_syntax::OnDeletePolicy::SetNull => "SET NULL",
+        orna_syntax::OnDeletePolicy::Cascade => "CASCADE",
+    }
+}
+
+/// Returns the hover content for the token at one position.
 pub fn hover(
     document: &Document,
     parse: &Parse,
@@ -409,25 +571,42 @@ pub fn hover(
     mapper: &PositionMapper<'_>,
 ) -> Option<Hover> {
     let byte = mapper.byte_offset(position);
-    let (name, span) = identifier_at(&document.text, parse, byte)?;
-    let upper = name.to_ascii_uppercase();
-    let value = if let Some((kind, _)) = declaration_span(parse, &name) {
-        format!("**{kind}**\n\n```orna\n{name}\n```")
-    } else if orna_syntax::SCALAR_TYPES
-        .binary_search_by(|candidate| (*candidate).cmp(upper.as_str()))
-        .is_ok()
-    {
-        format!("**standard scalar type**\n\n```orna\n{upper}\n```")
-    } else {
-        return None;
+    let (name, kind, span) = token_at(&document.text, parse, byte)?;
+    let doc_link = crate::hover::spec_doc_link(&document.uri);
+    let mut hover = match kind {
+        HighlightKind::Keyword => crate::reference::keyword_reference(&name)
+            .map(|reference| crate::hover::keyword_hover(reference, doc_link.as_deref())),
+        _ => {
+            if let Some(field) = field_at(parse, byte) {
+                // A field name shadows scalar and declaration names at the
+                // same spelling, for example a field named `text`.
+                Some(crate::hover::field_hover(
+                    &field,
+                    &document.text,
+                    doc_link.as_deref(),
+                ))
+            } else if let Some(parameter) = parameter_at(parse, byte) {
+                Some(crate::hover::parameter_hover(
+                    &parameter,
+                    &document.text,
+                    doc_link.as_deref(),
+                ))
+            } else if let Some(declaration) = declaration_at(parse, &name) {
+                Some(crate::hover::declaration_hover(
+                    declaration,
+                    &document.text,
+                    doc_link.as_deref(),
+                ))
+            } else {
+                crate::reference::scalar_reference(&name)
+                    .map(|reference| crate::hover::scalar_hover(reference, doc_link.as_deref()))
+            }
+        }
     };
-    Some(Hover {
-        contents: HoverContents::Markup(MarkupContent {
-            kind: MarkupKind::Markdown,
-            value,
-        }),
-        range: Some(mapper.range(&span)),
-    })
+    if let Some(hover) = hover.as_mut() {
+        hover.range = Some(mapper.range(&span));
+    }
+    hover
 }
 
 /// Returns the declaration location for the identifier at one position.
@@ -438,10 +617,13 @@ pub fn definition(
     mapper: &PositionMapper<'_>,
 ) -> Option<Location> {
     let byte = mapper.byte_offset(position);
-    let (name, _) = identifier_at(&document.text, parse, byte)?;
-    declaration_span(parse, &name).map(|(_, span)| Location {
+    let (name, kind, _) = token_at(&document.text, parse, byte)?;
+    if kind == HighlightKind::Keyword {
+        return None;
+    }
+    declaration_at(parse, &name).map(|declaration| Location {
         uri: document.uri.clone(),
-        range: mapper.range(&span),
+        range: mapper.range(declaration.name_span()),
     })
 }
 
@@ -453,9 +635,12 @@ pub fn references(
     mapper: &PositionMapper<'_>,
 ) -> Vec<Location> {
     let byte = mapper.byte_offset(position);
-    let Some((name, _)) = identifier_at(&document.text, parse, byte) else {
+    let Some((name, kind, _)) = token_at(&document.text, parse, byte) else {
         return Vec::new();
     };
+    if kind == HighlightKind::Keyword {
+        return Vec::new();
+    }
     parse
         .highlight()
         .into_iter()
