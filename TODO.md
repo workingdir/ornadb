@@ -54,7 +54,9 @@ separate release action.
 ## Product expansion
 
 - [x] Complete the first verified CLIENT Boolean function path.
-- [ ] Add the accepted invocation, authorisation, and public protocol slices.
+- [x] Add the accepted invocation, authorisation, and public protocol slices
+  (sealed `sys.invoke` carriers, protected decisions, invocation audit,
+  `orna.std/2` executable source, live dogfooding proof).
 - [x] Extend catalogue-backed types with accepted enum identity, syntax,
   catalogue, storage, codec, protocol, and first SERVER execution slices.
 - [x] Add a separately accepted record value type.
